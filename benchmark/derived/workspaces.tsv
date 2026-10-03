@@ -1,0 +1,15 @@
+arklib	v4.28.0	673fa440714eb1949b8b50a28f2a4f52b1837e9b	https://github.com/Verified-zkEVM/ArkLib
+arklib	v4.29.0	de71a9dfd2f5a343e8895517b7efe857d9f1ce5c	https://github.com/Verified-zkEVM/ArkLib
+arklib	v4.30.0	e6d77b18ca1334a91faf4d1ccf9f96d854d58ba4	https://github.com/Verified-zkEVM/ArkLib
+arklib	v4.31.0	c1712f6c496d0aef04f09bae42aec13811b3273f	https://github.com/Verified-zkEVM/ArkLib
+cslib	v4.30.0	c7944a9fb44c3298f1a960a5e574ab23a6ab8ed5	https://github.com/leanprover/cslib
+cslib	v4.31.0	8ea71c8df91acd63285515a04da952b23b78d266	https://github.com/leanprover/cslib
+cslib	v4.32.0	197a7be621263b84c67ca4f803f69205b36d06df	https://github.com/leanprover/cslib
+cslib	v4.33.0-rc2	3aa9d4416c185e0b9faeb72bbd65abe85b95dbcc	https://github.com/leanprover/cslib
+physlib	v4.32.0	c48433678e8fb6306ebcd48453300c8e16058a62	https://github.com/leanprover-community/physlib
+putnambench	v4.25.0	1ccd71f89cbbd82ae7d097723ce1722ca7b01c33	
+putnambench	v4.26.0	2df2f0150c275ad53cb3c90f7c98ec15a56a1a67	
+putnambench	v4.27.0	a3a10db0e9d66acbebf76c5e6a135066525ac900	
+strata	v4.26.0	451e5f047bafa010d178856db76c00029bfa4d7f	https://github.com/strata-org/Strata
+strata	v4.27.0	4348c65a93a3b57b1a4541991ed2d2fcdd9fa35d	https://github.com/strata-org/Strata
+strata	v4.29.1	384e22374e0872095ad9c6f74c5998c09cfd93a9	https://github.com/strata-org/Strata
