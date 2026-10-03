@@ -1,6 +1,5 @@
 workspaces/
 runs/
-benchmark/original/
 .pi/mcp.json
 
 # Local evaluation state
