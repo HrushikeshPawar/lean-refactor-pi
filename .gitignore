@@ -1,0 +1,17 @@
+workspaces/
+runs/
+benchmark/original/
+.pi/mcp.json
+
+# Local evaluation state
+runs/
+workspaces/
+
+# Python/runtime
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+
+# Scratch / backups
+*.bak

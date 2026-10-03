@@ -1,0 +1,9 @@
+[submodule "vendor/lean-refactor"]
+	path = vendor/lean-refactor
+	url = https://github.com/delta-lab-ai/lean-refactor.git
+[submodule "vendor/lean4-skills"]
+	path = vendor/lean4-skills
+	url = https://github.com/cameronfreer/lean4-skills.git
+[submodule "vendor/arena-space"]
+	path = vendor/arena-space
+	url = https://huggingface.co/spaces/delta-lab-ai/lean-refactor-arena
