@@ -1,0 +1,12 @@
+{
+  "name": "lean-refactor-arena-pi",
+  "private": true,
+  "version": "0.1.0",
+  "pi": {
+    "extensions": ["./extensions/arena.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  }
+}
