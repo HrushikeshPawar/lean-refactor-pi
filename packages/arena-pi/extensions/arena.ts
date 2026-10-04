@@ -1,10 +1,11 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve, relative, sep } from "node:path";
 import { promisify } from "node:util";
 import { Type } from "typebox";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
+import { BUDGET_PROVIDER, budgetDecision, budgetLimits, isBudgetModel, MODELS, sessionSpend } from "./budget.ts";
 
 const execFileAsync = promisify(execFile);
 const root = resolve(import.meta.dirname, "../../..");
@@ -19,10 +20,82 @@ export default function arenaExtension(pi: ExtensionAPI) {
   // A factory invocation owns one Pi session. No active theorem is module-global.
   let active: string | undefined;
   const seeds: Array<{ proof: string; tokens: number; compat: Record<string, unknown> }> = [];
+  let readEntries: (() => SessionEntry[]) | undefined;
 
-  pi.on("session_start", () => {
+  pi.on("session_start", (_event, ctx) => {
     active = undefined;
     seeds.length = 0;
+    readEntries = () => ctx.sessionManager.getEntries();
+  });
+
+  for (const id of Object.keys(MODELS)) {
+    if (!isBudgetModel(id)) continue;
+    pi.registerVirtualModel({
+      provider: BUDGET_PROVIDER,
+      id,
+      name: `Arena budgeted ${id}`,
+      thinkingLevels: ["low", "medium", "high"],
+      route(request, ctx) {
+        if (!readEntries) throw new Error("Arena budget session has not started");
+        const physical = ctx.modelRegistry.find("opencode-go", id);
+        if (!physical) throw new Error(`OpenCode Go model unavailable: ${id}`);
+        const limits = MODELS[id];
+        if (physical.contextWindow > limits.contextWindow || physical.maxTokens > limits.maxTokens) {
+          throw new Error(`Arena budget reservation is outdated for ${id}`);
+        }
+        if (request.failed && !request.failed.message.usage?.totalTokens) {
+          throw new Error("Arena budget cannot price the failed provider request");
+        }
+        // Failed retries may be absent from the persisted branch. Counting one
+        // twice is conservative; omitting a paid request would violate the cap.
+        const retryCost = request.failed?.message.usage
+          ? sessionSpend([{ type: "message", id: "retry", parentId: null, timestamp: "",
+            message: request.failed.message }], id)
+          : 0;
+        const decision = budgetDecision(sessionSpend(readEntries(), id) + retryCost, id, budgetLimits());
+        if (!decision.allowed) throw new Error(decision.reason);
+        return { model: physical, thinkingLevel: request.thinkingLevel };
+      },
+    });
+  }
+
+  pi.on("before_agent_start", (_event, ctx) => {
+    if (process.env.ARENA_BUDGET_REQUIRED !== "1") return;
+    if (!active || ctx.model?.provider !== BUDGET_PROVIDER || !isBudgetModel(ctx.model.id)) {
+      ctx.abort();
+      if (ctx.hasUI) ctx.ui.notify("Select /arena and an arena-budget model before prompting.", "error");
+    }
+  });
+
+  function budgetStatus(ctx: ExtensionContext) {
+    const model = ctx.model;
+    if (model?.provider !== BUDGET_PROVIDER || !isBudgetModel(model.id)) return undefined;
+    const spent = sessionSpend(ctx.sessionManager.getEntries(), model.id);
+    const limits = budgetLimits();
+    const decision = budgetDecision(spent, model.id, limits);
+    return { spent_usd: spent, remaining_usd: limits.hardCapUsd - spent,
+      next_request_reserve_usd: decision.reserve, can_continue: decision.allowed };
+  }
+
+  pi.on("session_shutdown", async (_event, ctx) => {
+    const reportPath = process.env.ARENA_BUDGET_REPORT_PATH;
+    if (!reportPath) return;
+    const model = ctx.model;
+    let report: Record<string, unknown> = { session_id: ctx.sessionManager.getSessionId(),
+      theorem: active ?? null,
+      price_basis: "OpenCode Go list prices, 2026-10-04; higher context/peak tiers" };
+    try {
+      const limits = budgetLimits();
+      if (model?.provider !== BUDGET_PROVIDER || !isBudgetModel(model.id)) {
+        throw new Error("Budgeted model was not selected");
+      }
+      report = { ...report, hard_cap_usd: limits.hardCapUsd, stop_target_usd: limits.stopUsd,
+        provider: "opencode-go", model: model.id, ...budgetStatus(ctx) };
+    } catch (error) {
+      report = { ...report, error: String(error) };
+    }
+    await mkdir(dirname(reportPath), { recursive: true });
+    await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
   });
 
   pi.registerCommand("arena", {
@@ -110,7 +183,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
       proof: Type.String({ description: "Complete theorem statement and replacement proof" }),
       mode: Type.Optional(Type.Union([Type.Literal("fast"), Type.Literal("full")])),
     }),
-    async execute(_id, params) {
+    async execute(_id, params, _signal, _onUpdate, ctx) {
       if (!active) throw new Error("Select a theorem with /arena first");
       const directory = await mkdtemp(resolve(tmpdir(), "arena-proof-"));
       try {
@@ -124,7 +197,8 @@ export default function arenaExtension(pi: ExtensionAPI) {
         } catch (error) {
           const output = String((error as { stdout?: string }).stdout ?? "").trim();
           const result = output ? JSON.parse(output) : { ok: false, error: String(error) };
-          return { isError: true, content: [{ type: "text" as const, text: JSON.stringify(result) }], details: result };
+          const reported = { ...result, budget: budgetStatus(ctx) };
+          return { isError: true, content: [{ type: "text" as const, text: JSON.stringify(reported) }], details: reported };
         }
         const result = JSON.parse(stdout.trim());
         if (params.mode === "full" && Object.values(result.compat)[0]?.passed) {
@@ -132,7 +206,8 @@ export default function arenaExtension(pi: ExtensionAPI) {
           seeds.sort((a, b) => a.tokens - b.tokens);
           seeds.splice(5);
         }
-        return { content: [{ type: "text", text: JSON.stringify(result) }], details: result };
+        const reported = { ...result, budget: budgetStatus(ctx) };
+        return { content: [{ type: "text", text: JSON.stringify(reported) }], details: reported };
       } finally {
         await rm(directory, { recursive: true, force: true });
       }
