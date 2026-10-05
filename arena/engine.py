@@ -119,9 +119,7 @@ def compile_version(row: dict, proof: str, version: str, commit: str, measure: b
             return {"passed": False, "error": "Lean timed out after 180 seconds"}
     output = (proc.stdout + proc.stderr).replace(str(candidate), row["file_path"]).strip()
     headlines = [line for line in output.splitlines() if ": error:" in line]
-    diagnostics = output[:2400]
-    if len(output) > 2400:
-        diagnostics += "\n[diagnostics truncated]"
+    diagnostics = output
     # Existing warnings elsewhere in a source file are not proof failures.
     match = re.search(r"ARENA_HEARTBEATS (\d+)", output) if measure else None
     passed = proc.returncode == 0 and (not measure or match is not None)

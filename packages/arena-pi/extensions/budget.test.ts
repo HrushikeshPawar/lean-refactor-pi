@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { budgetDecision, budgetLimits, maximumNextRequest, sessionSpend, usageCost } from "./budget.ts";
+import { boundedPayload, budgetDecision, budgetLimits, maximumNextRequest, sessionSpend, usageCost } from "./budget.ts";
 
 const usage = { input: 1_000_000, output: 100_000, cacheRead: 0, cacheWrite: 0 };
 
@@ -45,4 +45,12 @@ test("fails closed on unpriced models or invalid usage", () => {
   assert.throws(() => sessionSpend([{ type: "message", message: { role: "assistant",
     provider: "opencode-go", model: "gpt-6-luna", stopReason: "error",
     usage: { ...usage, totalTokens: 0 } } }] as never, "gpt-6-luna"));
+});
+
+test("a bounded final payload permits a ten-cent experiment", () => {
+  const { payload, reserve } = boundedPayload({ input: "reference proof", max_output_tokens: 128_000 }, "gpt-6-luna");
+  assert.equal(payload.max_output_tokens, 16_000);
+  assert.ok(reserve < 0.1);
+  assert.throws(() => boundedPayload({ input: "x" }, "gpt-6-luna"));
+  assert.throws(() => budgetLimits({ ARENA_HARD_CAP_USD: "0.09" }));
 });

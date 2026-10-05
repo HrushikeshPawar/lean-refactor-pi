@@ -7,9 +7,9 @@ export type BudgetLimits = { hardCapUsd: number; stopUsd: number };
 export function budgetLimits(env: NodeJS.ProcessEnv = process.env): BudgetLimits {
   const hardCapUsd = Number(env.ARENA_HARD_CAP_USD ?? "3");
   const stopUsd = Number(env.ARENA_STOP_USD ?? String(Math.min(2.5, hardCapUsd * 0.85)));
-  if (!Number.isFinite(hardCapUsd) || hardCapUsd <= 0 || hardCapUsd > MAX_HARD_CAP_USD
+  if (!Number.isFinite(hardCapUsd) || hardCapUsd < 0.1 || hardCapUsd > MAX_HARD_CAP_USD
     || !Number.isFinite(stopUsd) || stopUsd <= 0 || stopUsd > hardCapUsd) {
-    throw new Error("Arena budget limits must satisfy 0 < stop <= hard cap <= $3");
+    throw new Error("Arena budget limits must satisfy $0.10 <= hard cap <= $3 and 0 < stop <= hard cap");
   }
   return { hardCapUsd, stopUsd };
 }
@@ -93,4 +93,24 @@ export function budgetDecision(spent: number, model: BudgetModel, limits: Budget
   const reason = allowed ? "within budget"
     : `Arena budget stop: $${spent.toFixed(4)} spent; reserving $${reserve.toFixed(4)} for another request would exceed the $${limits.hardCapUsd.toFixed(2)} cap or $${limits.stopUsd.toFixed(2)} stop target`;
   return { allowed, reserve, reason };
+}
+
+// Responses API max_output_tokens includes reasoning tokens. Use the final
+// serialized provider payload, after Pi has added its system prompt and tools.
+export const MAX_REQUEST_OUTPUT_TOKENS = 16_000;
+
+export function boundedPayload(payload: unknown, model: BudgetModel): { payload: Record<string, unknown>; reserve: number } {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error("Unknown provider payload");
+  const value = { ...payload as Record<string, unknown> };
+  if (typeof value.max_output_tokens !== "number" || !Number.isFinite(value.max_output_tokens)) {
+    throw new Error("Cannot enforce Arena output bound on provider payload");
+  }
+  value.max_output_tokens = Math.min(value.max_output_tokens, MAX_REQUEST_OUTPUT_TOKENS);
+  const bytes = Buffer.byteLength(JSON.stringify(value), "utf8");
+  const inputBound = 2 * bytes + 4096;
+  if (inputBound > MODELS[model].contextWindow) throw new Error("Arena context bound exceeds model window");
+  const price = MODELS[model].price;
+  const reserve = inputBound * Math.max(price.input, price.cacheRead, price.cacheWrite) / 1_000_000
+    + Number(value.max_output_tokens) * price.output / 1_000_000;
+  return { payload: value, reserve };
 }

@@ -1,13 +1,12 @@
-import { execFile } from "node:child_process";
+import { spawn } from "node:child_process";
+import { appendFileSync, closeSync, fsyncSync, mkdirSync, openSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve, relative, sep } from "node:path";
-import { promisify } from "node:util";
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
-import { BUDGET_PROVIDER, budgetDecision, budgetLimits, isBudgetModel, MODELS, sessionSpend } from "./budget.ts";
+import { BUDGET_PROVIDER, boundedPayload, budgetLimits, isBudgetModel, MODELS, sessionSpend } from "./budget.ts";
 
-const execFileAsync = promisify(execFile);
 const root = resolve(import.meta.dirname, "../../..");
 const workspaces = resolve(root, "workspaces");
 
@@ -19,13 +18,68 @@ function inside(path: string, parent: string): boolean {
 export default function arenaExtension(pi: ExtensionAPI) {
   // A factory invocation owns one Pi session. No active theorem is module-global.
   let active: string | undefined;
-  const seeds: Array<{ proof: string; tokens: number; compat: Record<string, unknown> }> = [];
+  const runId = process.env.ARENA_RUN_ID;
+  const runDirectory = runId ? resolve(root, "runs", "pi-budget", runId) : undefined;
+  const costJournal = runDirectory ? resolve(runDirectory, "cost-ledger.jsonl") : undefined;
+  let pendingRequest: string | undefined;
+  let continuations = 0;
+  let plateau = 0;
+  let previousProgress = "";
   let readEntries: (() => SessionEntry[]) | undefined;
+
+  async function campaign(action: string, args: string[] = []): Promise<Record<string, any>> {
+    if (!active || !runId) throw new Error("Arena run is not selected");
+    const command = ["run", "--no-project", "python", "-m", "tools.arena_campaign", action,
+      "--theorem", active, "--run-id", runId, ...args];
+    const output = await new Promise<string>((accept, reject) => {
+      const child = spawn("uv", command, { cwd: root, stdio: ["ignore", "pipe", "pipe"] });
+      const chunks: Buffer[] = [];
+      const errors: Buffer[] = [];
+      child.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
+      child.stderr.on("data", (chunk: Buffer) => errors.push(chunk));
+      child.on("error", reject);
+      child.on("close", code => code === 0 || chunks.length
+        ? accept(Buffer.concat(chunks).toString("utf8"))
+        : reject(new Error(Buffer.concat(errors).toString("utf8"))));
+    });
+    return JSON.parse(output.trim());
+  }
+
+  function costEvents(): Array<Record<string, unknown>> {
+    if (!costJournal) return [];
+    try { return readFileSync(costJournal, "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line)); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
+  }
+  function appendCost(event: Record<string, unknown>) {
+    if (!costJournal) throw new Error("Arena cost journal is unavailable");
+    mkdirSync(dirname(costJournal), { recursive: true });
+    const fd = openSync(costJournal, "a", 0o600);
+    try { appendFileSync(fd, `${JSON.stringify(event)}\n`); fsyncSync(fd); }
+    finally { closeSync(fd); }
+  }
+  function costState() {
+    const reservations = new Map<string, number>();
+    let spent = 0;
+    for (const event of costEvents()) {
+      if (event.kind === "reserve") reservations.set(String(event.id), Number(event.usd));
+      if (event.kind === "settle") {
+        if (!reservations.has(String(event.id))) throw new Error("Unmatched Arena settlement");
+        reservations.delete(String(event.id));
+        spent += Number(event.usd);
+        if (event.bound_violation) throw new Error("Observed provider usage exceeded Arena reservation");
+      }
+    }
+    const unresolved = [...reservations.values()].reduce((sum, amount) => sum + amount, 0);
+    return { spent, unresolved, charged: spent + unresolved };
+  }
 
   pi.on("session_start", (_event, ctx) => {
     active = undefined;
-    seeds.length = 0;
     readEntries = () => ctx.sessionManager.getEntries();
+    const latest = costEvents().filter(item => item.kind === "control").at(-1);
+    continuations = Number(latest?.continuations ?? 0);
+    plateau = Number(latest?.plateau ?? 0);
+    previousProgress = String(latest?.progress ?? "");
   });
 
   for (const id of Object.keys(MODELS)) {
@@ -43,17 +97,6 @@ export default function arenaExtension(pi: ExtensionAPI) {
         if (physical.contextWindow > limits.contextWindow || physical.maxTokens > limits.maxTokens) {
           throw new Error(`Arena budget reservation is outdated for ${id}`);
         }
-        if (request.failed && !request.failed.message.usage?.totalTokens) {
-          throw new Error("Arena budget cannot price the failed provider request");
-        }
-        // Failed retries may be absent from the persisted branch. Counting one
-        // twice is conservative; omitting a paid request would violate the cap.
-        const retryCost = request.failed?.message.usage
-          ? sessionSpend([{ type: "message", id: "retry", parentId: null, timestamp: "",
-            message: request.failed.message }], id)
-          : 0;
-        const decision = budgetDecision(sessionSpend(readEntries(), id) + retryCost, id, budgetLimits());
-        if (!decision.allowed) throw new Error(decision.reason);
         return { model: physical, thinkingLevel: request.thinkingLevel };
       },
     });
@@ -67,14 +110,66 @@ export default function arenaExtension(pi: ExtensionAPI) {
     }
   });
 
+  // Every new evaluation is delivered in full. Older copies remain in the
+  // ledger and can be retrieved without keeping large Lean traces in context.
+  pi.on("context", event => {
+    const latest = event.messages.findLastIndex(message => message.role === "toolResult"
+      && (message as { toolName?: string }).toolName === "arena_evaluate");
+    if (latest < 0) return;
+    return { messages: event.messages.map((message, index) => {
+      if (index >= latest || message.role !== "toolResult"
+        || (message as { toolName?: string }).toolName !== "arena_evaluate") return message;
+      const id = (message as { details?: { candidate_id?: string } }).details?.candidate_id ?? "recorded";
+      return { ...message, content: [{ type: "text" as const,
+        text: `Prior evaluation for candidate ${id} is stored in the Arena ledger. Call arena_candidate to retrieve its exact proof and complete diagnostics.` }] };
+    }) };
+  });
+
+  pi.on("before_provider_request", event => {
+    if (process.env.ARENA_BUDGET_REQUIRED !== "1") return;
+    if (!active || !runDirectory) throw new Error("Arena run has no active theorem or run directory");
+    const model = process.env.ARENA_MODEL;
+    if (!model || !isBudgetModel(model)) throw new Error("Unpriced Arena model");
+    const bounded = boundedPayload(event.payload, model);
+    const limits = budgetLimits();
+    const state = costState();
+    if (state.spent >= limits.stopUsd || state.charged + bounded.reserve > limits.hardCapUsd) {
+      throw new Error(`Arena budget stop: $${state.charged.toFixed(6)} charged, $${bounded.reserve.toFixed(6)} required, $${limits.hardCapUsd.toFixed(2)} cap`);
+    }
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    appendCost({ kind: "reserve", id, usd: bounded.reserve, model, bytes: Buffer.byteLength(JSON.stringify(bounded.payload)) });
+    pendingRequest = id;
+    return bounded.payload;
+  });
+
+  pi.on("message_end", event => {
+    if (!pendingRequest || event.message.role !== "assistant") return;
+    const model = process.env.ARENA_MODEL;
+    if (!model || !isBudgetModel(model)) return;
+    const state = costEvents().findLast(item => item.kind === "reserve" && item.id === pendingRequest);
+    if (!state) throw new Error("Missing Arena reservation");
+    let usd = Number(state.usd);
+    let boundViolation = false;
+    if (event.message.usage?.totalTokens) {
+      const usage = event.message.usage;
+      const price = MODELS[model].price;
+      usd = ((usage.input ?? 0) * price.input + (usage.output ?? 0) * price.output
+        + (usage.cacheRead ?? 0) * price.cacheRead + (usage.cacheWrite ?? 0) * price.cacheWrite) / 1_000_000;
+      boundViolation = usd > Number(state.usd);
+    }
+    appendCost({ kind: "settle", id: pendingRequest, usd, usage_known: Boolean(event.message.usage?.totalTokens),
+      bound_violation: boundViolation });
+    pendingRequest = undefined;
+  });
+
   function budgetStatus(ctx: ExtensionContext) {
     const model = ctx.model;
     if (model?.provider !== BUDGET_PROVIDER || !isBudgetModel(model.id)) return undefined;
-    const spent = sessionSpend(ctx.sessionManager.getEntries(), model.id);
+    const state = costState();
     const limits = budgetLimits();
-    const decision = budgetDecision(spent, model.id, limits);
-    return { spent_usd: spent, remaining_usd: limits.hardCapUsd - spent,
-      next_request_reserve_usd: decision.reserve, can_continue: decision.allowed };
+    return { spent_usd: state.spent, unresolved_usd: state.unresolved,
+      remaining_usd: limits.hardCapUsd - state.charged,
+      can_continue: state.spent < limits.stopUsd && state.charged < limits.hardCapUsd };
   }
 
   pi.on("session_shutdown", async (_event, ctx) => {
@@ -83,14 +178,15 @@ export default function arenaExtension(pi: ExtensionAPI) {
     const model = ctx.model;
     let report: Record<string, unknown> = { session_id: ctx.sessionManager.getSessionId(),
       theorem: active ?? null,
-      price_basis: "OpenCode Go list prices, 2026-10-04; higher context/peak tiers" };
+      price_basis: "OpenCode Go list prices, checked 2026-10-05; higher context/peak tiers" };
     try {
       const limits = budgetLimits();
       if (model?.provider !== BUDGET_PROVIDER || !isBudgetModel(model.id)) {
         throw new Error("Budgeted model was not selected");
       }
       report = { ...report, hard_cap_usd: limits.hardCapUsd, stop_target_usd: limits.stopUsd,
-        provider: "opencode-go", model: model.id, ...budgetStatus(ctx) };
+        provider: "opencode-go", model: model.id, ...budgetStatus(ctx),
+        pi_session_spend_usd: sessionSpend(ctx.sessionManager.getEntries(), model.id) };
     } catch (error) {
       report = { ...report, error: String(error) };
     }
@@ -110,7 +206,6 @@ export default function arenaExtension(pi: ExtensionAPI) {
         return;
       }
       active = wanted;
-      seeds.length = 0;
       const first = Object.entries(row.version_info[0] ?? {})[0];
       if (first) {
         const [version] = first;
@@ -118,7 +213,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
           command: "uvx",
           args: ["--from", "lean-lsp-mcp==0.31.0", "lean-lsp-mcp"],
           env: {
-            LEAN_PROJECT_PATH: resolve(workspaces, `${row.source}-${version}`),
+            LEAN_PROJECT_PATH: runDirectory ? resolve(runDirectory, "scratch", "project") : resolve(workspaces, `${row.source}-${version}`),
             LEAN_LOG_LEVEL: "WARNING",
             LEAN_MCP_DISABLED_TOOLS: "lean_leansearch,lean_leanfinder,lean_loogle,lean_hammer_premise",
           },
@@ -161,14 +256,14 @@ export default function arenaExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "arena_target",
     label: "Arena target",
-    description: "Return the selected theorem and its pinned benchmark metadata.",
+    description: "Return the selected theorem, original proof, and pinned benchmark metadata.",
     parameters: Type.Object({}),
     async execute() {
       if (!active) throw new Error("Select a theorem with /arena first");
       const rows = (await readFile(resolve(root, "benchmark/original/warmup.jsonl"), "utf8"))
         .split("\n").filter(Boolean).map((line) => JSON.parse(line));
       const row = rows.find((item) => item.name === active);
-      const metadata = { name: row.name, statement: row.statement, source: row.source,
+      const metadata = { name: row.name, statement: row.statement, original_proof: row.src, source: row.source,
         file_path: row.file_path, version_info: row.version_info,
         reference_tokens: row.proof_length };
       return { content: [{ type: "text", text: JSON.stringify(metadata) }], details: metadata };
@@ -178,10 +273,12 @@ export default function arenaExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "arena_evaluate",
     label: "Arena evaluate",
-    description: "Compile a complete theorem against pinned source. Fast checks the primary version; full checks every version. Heartbeat scoring is pending worker calibration.",
+    description: "Compile and save a complete theorem; return full Lean diagnostics and the persistent candidate path. Fast checks the primary version; full checks every version.",
     parameters: Type.Object({
       proof: Type.String({ description: "Complete theorem statement and replacement proof" }),
       mode: Type.Optional(Type.Union([Type.Literal("fast"), Type.Literal("full")])),
+      parents: Type.Optional(Type.Array(Type.String())),
+      hypothesis: Type.Optional(Type.String()),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       if (!active) throw new Error("Select a theorem with /arena first");
@@ -189,25 +286,12 @@ export default function arenaExtension(pi: ExtensionAPI) {
       try {
         const file = resolve(directory, "proof.lean");
         await writeFile(file, params.proof, "utf8");
-        let stdout: string;
-        try {
-          ({ stdout } = await execFileAsync("uv", ["run", "--no-project", "python", "-m",
-            "tools.arena_eval", active, file, "--mode", params.mode ?? "fast"],
-          { cwd: root, maxBuffer: 1_000_000, timeout: 700_000 }));
-        } catch (error) {
-          const output = String((error as { stdout?: string }).stdout ?? "").trim();
-          const result = output ? JSON.parse(output) : { ok: false, error: String(error) };
-          const reported = { ...result, budget: budgetStatus(ctx) };
-          return { isError: true, content: [{ type: "text" as const, text: JSON.stringify(reported) }], details: reported };
-        }
-        const result = JSON.parse(stdout.trim());
-        if (params.mode === "full" && Object.values(result.compat)[0]?.passed) {
-          seeds.push({ proof: params.proof, tokens: result.tokens, compat: result.compat });
-          seeds.sort((a, b) => a.tokens - b.tokens);
-          seeds.splice(5);
-        }
+        const argumentsList = ["--proof-file", file, "--mode", params.mode ?? "fast",
+          ...((params.parents ?? []) as string[]).flatMap(parent => ["--parent", parent])];
+        if (params.hypothesis) argumentsList.push("--hypothesis", params.hypothesis);
+        const result = await campaign("evaluate", argumentsList);
         const reported = { ...result, budget: budgetStatus(ctx) };
-        return { content: [{ type: "text", text: JSON.stringify(reported) }], details: reported };
+        return { isError: result.ok === false, content: [{ type: "text", text: JSON.stringify(reported) }], details: reported };
       } finally {
         await rm(directory, { recursive: true, force: true });
       }
@@ -217,12 +301,64 @@ export default function arenaExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "arena_frontier",
     label: "Arena frontier",
-    description: "List session-local full-evaluation mutation seeds, including partial transfers. No incumbent is promoted until server scoring is calibrated.",
+    description: "List this run's persistent verified best and mutation seeds by candidate ID.",
     parameters: Type.Object({}),
     async execute() {
-      const result = { name: active ?? null, seeds, incumbent: null,
-        calibration: "pending official Arena worker comparison" };
+      const result = await campaign("frontier");
       return { content: [{ type: "text", text: JSON.stringify(result) }], details: result };
     },
+  });
+
+  pi.registerTool({
+    name: "arena_candidate", label: "Arena candidate",
+    description: "Restore a candidate into the Lean scratch project and return its exact proof and complete recorded evaluations.",
+    parameters: Type.Object({ candidate_id: Type.String() }),
+    async execute(_id, params) {
+      const result = await campaign("candidate", ["--candidate-id", params.candidate_id]);
+      return { isError: result.ok === false, content: [{ type: "text", text: JSON.stringify(result) }], details: result };
+    },
+  });
+
+  pi.registerTool({
+    name: "arena_source", label: "Pinned Lean source",
+    description: "Read an exact line range from the pinned source commit; maximum 120 lines.",
+    parameters: Type.Object({ path: Type.String(), first: Type.Number(), last: Type.Number() }),
+    async execute(_id, params) {
+      const result = await campaign("source", ["--path", params.path, "--first", String(params.first), "--last", String(params.last)]);
+      return { isError: result.ok === false, content: [{ type: "text", text: JSON.stringify(result) }], details: result };
+    },
+  });
+
+  pi.registerTool({
+    name: "arena_declaration", label: "Pinned declaration",
+    description: "Find a declaration's exact source signature and location in the pinned project.",
+    parameters: Type.Object({ symbol: Type.String() }),
+    async execute(_id, params) {
+      const result = await campaign("declaration", ["--symbol", params.symbol]);
+      return { isError: result.ok === false, content: [{ type: "text", text: JSON.stringify(result) }], details: result };
+    },
+  });
+
+  pi.on("agent_before_settle", async event => {
+    if (process.env.ARENA_AUTOCONTINUE !== "1" || !active || !runId) return;
+    const budget = costState();
+    const limits = budgetLimits();
+    const state = await campaign("frontier");
+    const progress = JSON.stringify({ best: state.verified_best, seeds: state.mutation_seeds });
+    if (progress === previousProgress) plateau += 1;
+    else plateau = 0;
+    previousProgress = progress;
+    const stop = budget.spent >= limits.stopUsd ? "stop_target"
+      : continuations >= 12 ? "continuation_limit"
+      : continuations >= 4 && plateau >= 4 ? "plateau" : null;
+    if (stop) {
+      appendCost({ kind: "control", continuations, plateau, progress, stop });
+      return;
+    }
+    continuations += 1;
+    appendCost({ kind: "control", continuations, plateau, progress, stop: null });
+    const content = `Continue proof optimization. Verified frontier: ${progress}. Remaining API cap: $${(limits.hardCapUsd - budget.charged).toFixed(4)}. Try a distinct structural simplification of the original proof or repair a shorter candidate. Use the current candidate Lean path for goals and diagnostics. Fully validate promising results.`;
+    return { entries: [...event.entries, { type: "custom_message" as const, customType: "arena-continuation",
+      content, display: false }], continue: true };
   });
 }
