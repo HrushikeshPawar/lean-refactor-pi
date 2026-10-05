@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from arena.campaign import init, packet, run_dir
@@ -53,7 +54,8 @@ def main() -> int:
         prompt = packet(args.theorem) + ("\nAdditional instructions:\n" + extra + "\n" if extra else "")
     command = [
         "pi", "--offline", "--approve", "--mode", "json",
-        "--no-builtin-tools", "--no-context-files",
+        "--no-builtin-tools", "--no-context-files", "--no-extensions",
+        "--no-skills", "--no-prompt-templates",
         "--extension", str(ROOT / "packages/arena-pi/extensions/arena.ts"),
         "--model", f"arena-budget/{args.model}",
         "--session-id", args.run_id,
@@ -80,6 +82,24 @@ def main() -> int:
     env["ARENA_HARD_CAP_USD"] = str(args.hard_cap_usd)
     env.pop("ARENA_STOP_USD", None)
     env["ARENA_BUDGET_REPORT_PATH"] = str(directory / "cost.json")
+    worker_command = [sys.executable, "-m", "tools.arena_merge_worker", args.run_id,
+                      "--parent-pid", str(os.getpid())]
+    worker_log = (directory / "merge-worker.log").open("a")
+    worker = subprocess.Popen(worker_command, cwd=ROOT, env=env, stdin=subprocess.DEVNULL,
+                              stdout=worker_log, stderr=subprocess.STDOUT, start_new_session=True)
+    worker_log.close()
+    print(f"Merge worker pid={worker.pid}; log={directory / 'merge-worker.log'}", flush=True)
+    status_path = directory / "merge-worker.json"
+    for _ in range(30):
+        if worker.poll() is not None:
+            print("Merge worker exited before Pi started; inspect merge-worker.log", file=sys.stderr)
+            return 1
+        if status_path.exists() and json.loads(status_path.read_text()).get("pid") == worker.pid:
+            break
+        time.sleep(0.1)
+    else:
+        print("Merge worker did not become ready; inspect merge-worker.log", file=sys.stderr)
+        return 1
     with (directory / "events.jsonl").open("a") as output:
         completed = subprocess.run(command, cwd=shadow, env=env, stdin=subprocess.DEVNULL,
                                    stdout=output, check=False)

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, resolve, relative, sep } from "node:path";
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
-import { BUDGET_PROVIDER, boundedPayload, budgetLimits, isBudgetModel, MODELS, sessionSpend } from "./budget.ts";
+import { BUDGET_PROVIDER, budgetLimits, isBudgetModel, MAX_REQUEST_OUTPUT_TOKENS, MODELS, permitFinalPayload, sessionSpend } from "./budget.ts";
 
 const root = resolve(import.meta.dirname, "../../..");
 const workspaces = resolve(root, "workspaces");
@@ -54,7 +54,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
     if (!costJournal) throw new Error("Arena cost journal is unavailable");
     mkdirSync(dirname(costJournal), { recursive: true });
     const fd = openSync(costJournal, "a", 0o600);
-    try { appendFileSync(fd, `${JSON.stringify(event)}\n`); fsyncSync(fd); }
+    try { appendFileSync(fd, `${JSON.stringify({ ts: Date.now(), ...event })}\n`); fsyncSync(fd); }
     finally { closeSync(fd); }
   }
   function costState() {
@@ -82,6 +82,42 @@ export default function arenaExtension(pi: ExtensionAPI) {
     previousProgress = String(latest?.progress ?? "");
   });
 
+  // The guard provider owns the final transport callback. Extension hook errors
+  // are swallowed by Pi, so a hook cannot enforce a hard dollar limit.
+  pi.registerProvider("arena-guard", {
+    name: "Arena guarded OpenCode Go",
+    api: "openai-responses", baseUrl: "http://127.0.0.1/arena-guard-unused", apiKey: "guard-routing-only",
+    models: Object.entries(MODELS).map(([id, limits]) => ({
+      id, name: `Arena guarded ${id}`, reasoning: true, input: ["text"],
+      cost: limits.price, contextWindow: limits.contextWindow, maxTokens: limits.maxTokens,
+    })),
+    streamSimple(model, context, options) {
+      if (!isBudgetModel(model.id) || !active || !runDirectory) {
+        throw new Error("Unpriced or unselected Arena model");
+      }
+      const physical = pi.modelRegistry.find("opencode-go", model.id);
+      if (!physical) throw new Error(`OpenCode Go model unavailable: ${model.id}`);
+      if (physical.contextWindow > MODELS[model.id].contextWindow ||
+          physical.maxTokens > MODELS[model.id].maxTokens) {
+        throw new Error(`Arena budget reservation is outdated for ${model.id}`);
+      }
+      const { apiKey: _guardKey, headers: _guardHeaders, env: _guardEnv, ...rest } = options ?? {};
+      return pi.modelRegistry.streamSimple(physical, context, {
+        ...rest,
+        maxTokens: Math.min(rest.maxTokens ?? MAX_REQUEST_OUTPUT_TOKENS, MAX_REQUEST_OUTPUT_TOKENS),
+        onPayload: async payload => {
+          const transformed = await options?.onPayload?.(payload, physical) ?? payload;
+          const bounded = permitFinalPayload(transformed, model.id, costState(), budgetLimits());
+          const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+          appendCost({ kind: "reserve", id, usd: bounded.reserve, model: model.id,
+            bytes: Buffer.byteLength(JSON.stringify(bounded.payload)) });
+          pendingRequest = id;
+          return bounded.payload;
+        },
+      });
+    },
+  });
+
   for (const id of Object.keys(MODELS)) {
     if (!isBudgetModel(id)) continue;
     pi.registerVirtualModel({
@@ -92,12 +128,13 @@ export default function arenaExtension(pi: ExtensionAPI) {
       route(request, ctx) {
         if (!readEntries) throw new Error("Arena budget session has not started");
         const physical = ctx.modelRegistry.find("opencode-go", id);
-        if (!physical) throw new Error(`OpenCode Go model unavailable: ${id}`);
+        const guarded = ctx.modelRegistry.find("arena-guard", id);
+        if (!physical || !guarded) throw new Error(`OpenCode Go or Arena guard unavailable: ${id}`);
         const limits = MODELS[id];
         if (physical.contextWindow > limits.contextWindow || physical.maxTokens > limits.maxTokens) {
           throw new Error(`Arena budget reservation is outdated for ${id}`);
         }
-        return { model: physical, thinkingLevel: request.thinkingLevel };
+        return { model: guarded, thinkingLevel: request.thinkingLevel };
       },
     });
   }
@@ -123,23 +160,6 @@ export default function arenaExtension(pi: ExtensionAPI) {
       return { ...message, content: [{ type: "text" as const,
         text: `Prior evaluation for candidate ${id} is stored in the Arena ledger. Call arena_candidate to retrieve its exact proof and complete diagnostics.` }] };
     }) };
-  });
-
-  pi.on("before_provider_request", event => {
-    if (process.env.ARENA_BUDGET_REQUIRED !== "1") return;
-    if (!active || !runDirectory) throw new Error("Arena run has no active theorem or run directory");
-    const model = process.env.ARENA_MODEL;
-    if (!model || !isBudgetModel(model)) throw new Error("Unpriced Arena model");
-    const bounded = boundedPayload(event.payload, model);
-    const limits = budgetLimits();
-    const state = costState();
-    if (state.spent >= limits.stopUsd || state.charged + bounded.reserve > limits.hardCapUsd) {
-      throw new Error(`Arena budget stop: $${state.charged.toFixed(6)} charged, $${bounded.reserve.toFixed(6)} required, $${limits.hardCapUsd.toFixed(2)} cap`);
-    }
-    const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    appendCost({ kind: "reserve", id, usd: bounded.reserve, model, bytes: Buffer.byteLength(JSON.stringify(bounded.payload)) });
-    pendingRequest = id;
-    return bounded.payload;
   });
 
   pi.on("message_end", event => {
@@ -290,7 +310,8 @@ export default function arenaExtension(pi: ExtensionAPI) {
           ...((params.parents ?? []) as string[]).flatMap(parent => ["--parent", parent])];
         if (params.hypothesis) argumentsList.push("--hypothesis", params.hypothesis);
         const result = await campaign("evaluate", argumentsList);
-        const reported = { ...result, budget: budgetStatus(ctx) };
+        const state = await campaign("frontier");
+        const reported = { ...result, budget: budgetStatus(ctx), next_experiment: state.next_experiments?.[0] ?? null };
         return { isError: result.ok === false, content: [{ type: "text", text: JSON.stringify(reported) }], details: reported };
       } finally {
         await rm(directory, { recursive: true, force: true });
@@ -301,11 +322,22 @@ export default function arenaExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "arena_frontier",
     label: "Arena frontier",
-    description: "List this run's persistent verified best and mutation seeds by candidate ID.",
+    description: "Rank this run's open graph nodes for the next experiment; include quality, novelty, lineage saturation and merge opportunities.",
     parameters: Type.Object({}),
     async execute() {
       const result = await campaign("frontier");
       return { content: [{ type: "text", text: JSON.stringify(result) }], details: result };
+    },
+  });
+
+  pi.registerTool({
+    name: "arena_decision", label: "Arena node decision",
+    description: "Record why a candidate remains open or is parked; parked nodes remain retrievable but leave active merge/frontier selection.",
+    parameters: Type.Object({ candidate_id: Type.String(), decision: Type.Union([Type.Literal("pursue"), Type.Literal("park")]), reason: Type.String() }),
+    async execute(_id, params) {
+      const result = await campaign("decision", ["--candidate-id", params.candidate_id,
+        "--decision", params.decision, "--reason", params.reason]);
+      return { isError: result.ok === false, content: [{ type: "text", text: JSON.stringify(result) }], details: result };
     },
   });
 
@@ -344,7 +376,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
     const budget = costState();
     const limits = budgetLimits();
     const state = await campaign("frontier");
-    const progress = JSON.stringify({ best: state.verified_best, seeds: state.mutation_seeds });
+    const progress = JSON.stringify({ best: state.score_best, primary: state.primary_best });
     if (progress === previousProgress) plateau += 1;
     else plateau = 0;
     previousProgress = progress;
@@ -357,7 +389,8 @@ export default function arenaExtension(pi: ExtensionAPI) {
     }
     continuations += 1;
     appendCost({ kind: "control", continuations, plateau, progress, stop: null });
-    const content = `Continue proof optimization. Verified frontier: ${progress}. Remaining API cap: $${(limits.hardCapUsd - budget.charged).toFixed(4)}. Try a distinct structural simplification of the original proof or repair a shorter candidate. Use the current candidate Lean path for goals and diagnostics. Fully validate promising results.`;
+    const next = state.next_experiments?.[0];
+    const content = `Continue proof optimization. Current best: ${progress}. Next graph seed: ${JSON.stringify(next ?? null)}. Remaining API cap: $${(limits.hardCapUsd - budget.charged).toFixed(4)}. Restore the proposed seed with arena_candidate and try a distinct source-grounded proof structure; avoid another local-edit chain when its saturation penalty is high. The automatic merge worker combines disjoint edits. Use Lean goals and complete diagnostics, and fully validate promising results.`;
     return { entries: [...event.entries, { type: "custom_message" as const, customType: "arena-continuation",
       content, display: false }], continue: true };
   });

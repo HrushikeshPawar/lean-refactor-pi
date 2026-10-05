@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { boundedPayload, budgetDecision, budgetLimits, maximumNextRequest, sessionSpend, usageCost } from "./budget.ts";
+import { boundedPayload, budgetDecision, budgetLimits, maximumNextRequest, permitFinalPayload, sessionSpend, usageCost } from "./budget.ts";
 
 const usage = { input: 1_000_000, output: 100_000, cacheRead: 0, cacheWrite: 0 };
 
@@ -53,4 +53,21 @@ test("a bounded final payload permits a ten-cent experiment", () => {
   assert.ok(reserve < 0.1);
   assert.throws(() => boundedPayload({ input: "x" }, "gpt-6-luna"));
   assert.throws(() => budgetLimits({ ARENA_HARD_CAP_USD: "0.09" }));
+});
+
+test("large serialized text fits the model when its byte token upper bound fits", () => {
+  const payload = { max_output_tokens: 16000, input: "x".repeat(600_000) };
+  assert.ok(boundedPayload(payload, "gpt-6-luna").reserve > 0);
+});
+
+test("final transport guard denies a request that would exceed each cap", () => {
+  const payload = { max_output_tokens: 16000, input: "proof" };
+  for (const hardCap of [0.1, 1, 3]) {
+    const limits = budgetLimits({ ARENA_HARD_CAP_USD: String(hardCap) });
+    const reserve = boundedPayload(payload, "gpt-6-luna").reserve;
+    assert.doesNotThrow(() => permitFinalPayload(payload, "gpt-6-luna",
+      { spent: 0, charged: hardCap - reserve - 0.001 }, limits));
+    assert.throws(() => permitFinalPayload(payload, "gpt-6-luna",
+      { spent: 0, charged: hardCap - reserve + 0.001 }, limits), /Arena budget stop/);
+  }
 });

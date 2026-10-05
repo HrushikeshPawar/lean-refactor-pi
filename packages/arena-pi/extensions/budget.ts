@@ -107,10 +107,23 @@ export function boundedPayload(payload: unknown, model: BudgetModel): { payload:
   }
   value.max_output_tokens = Math.min(value.max_output_tokens, MAX_REQUEST_OUTPUT_TOKENS);
   const bytes = Buffer.byteLength(JSON.stringify(value), "utf8");
-  const inputBound = 2 * bytes + 4096;
+  // Text-only Responses payloads cannot tokenize into more tokens than their
+  // UTF-8 bytes; allow a fixed margin for protocol framing outside the JSON.
+  const inputBound = bytes + 4096;
   if (inputBound > MODELS[model].contextWindow) throw new Error("Arena context bound exceeds model window");
   const price = MODELS[model].price;
   const reserve = inputBound * Math.max(price.input, price.cacheRead, price.cacheWrite) / 1_000_000
     + Number(value.max_output_tokens) * price.output / 1_000_000;
   return { payload: value, reserve };
+}
+
+export function permitFinalPayload(payload: unknown, model: BudgetModel,
+  state: { spent: number; charged: number }, limits: BudgetLimits) {
+  const bounded = boundedPayload(payload, model);
+  if (!Number.isFinite(state.spent) || !Number.isFinite(state.charged) ||
+      state.spent < 0 || state.charged < state.spent ||
+      state.spent >= limits.stopUsd || state.charged + bounded.reserve > limits.hardCapUsd) {
+    throw new Error(`Arena budget stop: $${state.charged.toFixed(6)} charged, $${bounded.reserve.toFixed(6)} required, $${limits.hardCapUsd.toFixed(2)} cap`);
+  }
+  return bounded;
 }
