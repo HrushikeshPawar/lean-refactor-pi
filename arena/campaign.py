@@ -590,6 +590,8 @@ def evaluate_request(name: str, run_id: str, proof: str | None = None, mode: str
                      parents: list[str] | None = None, hypothesis: str = "", idea_id: str | None = None,
                      candidate_ref: str | None = None, from_probe: str | None = None) -> dict:
     """Entry for the model: evaluate a proof, an existing `#N`, or a probe by ID."""
+    if proof is not None and not proof.strip():
+        proof = None
     directory = run_dir(run_id)
     history = events(directory)
     if candidate_ref:
@@ -703,6 +705,8 @@ def profile_request(name: str, run_id: str, reference: str | None = None, proof:
     directory = run_dir(run_id)
     history = events(directory)
     label = None
+    if proof is not None and not proof.strip():
+        proof = None  # models often send an empty optional string alongside `candidate`
     if proof is None:
         if reference and re.fullmatch(r"p[0-9]+", reference.strip().lower()):
             proof_id = resolve_probe_ref(history, reference)

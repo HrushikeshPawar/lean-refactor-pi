@@ -364,7 +364,8 @@ export default function arenaExtension(pi: ExtensionAPI) {
 
   // Write the proof to a scratch file so the campaign CLI never sees it on argv.
   async function withProofFile<T>(proof: string | undefined, run: (file?: string) => Promise<T>): Promise<T> {
-    if (proof === undefined) return run(undefined);
+    // Models often fill optional string fields with "" next to `candidate`; that is no proof.
+    if (proof === undefined || !proof.trim()) return run(undefined);
     const directory = await mkdtemp(resolve(tmpdir(), "arena-proof-"));
     try {
       const file = resolve(directory, "proof.lean");

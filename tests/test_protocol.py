@@ -144,6 +144,14 @@ class CampaignCliTests(unittest.TestCase):
         self.assertEqual((campaign.run_dir(self.run_id) / "submission.lean").read_text().split(":=")[0],
                          self.good.split(":=")[0])
 
+    def test_10_blank_proof_next_to_a_candidate_is_ignored(self):
+        empty = self.proof(" ")
+        profiled = cli(self.run_id, "profile", "--candidate", "#2", "--proof-file", empty)
+        self.assertTrue(profiled.get("ok", True), profiled)
+        self.assertEqual(profiled["target"], "#2")
+        evaluated = cli(self.run_id, "evaluate", "--candidate", "#2", "--proof-file", empty)
+        self.assertEqual(evaluated["candidate"], "#2")
+
     def test_08_source_pagination_and_one_line_errors(self):
         row = campaign.problem(NAME)
         path = row["file_path"]
