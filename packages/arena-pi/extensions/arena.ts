@@ -41,9 +41,10 @@ export default function arenaExtension(pi: ExtensionAPI) {
       child.on("error", reject);
       child.on("close", code => code === 0 || chunks.length
         ? accept(Buffer.concat(chunks).toString("utf8"))
-        : reject(new Error(Buffer.concat(errors).toString("utf8"))));
+        : accept(JSON.stringify({ ok: false, error: Buffer.concat(errors).toString("utf8").trim().split("\n").at(-1) ?? "Arena command failed" })));
     });
-    return JSON.parse(output.trim());
+    try { return JSON.parse(output.trim().split("\n").at(-1) ?? ""); }
+    catch { return { ok: false, error: `Arena command returned no result: ${output.trim().slice(0, 200)}` }; }
   }
 
   function costEvents(): Array<Record<string, unknown>> {
@@ -309,12 +310,30 @@ export default function arenaExtension(pi: ExtensionAPI) {
     },
   });
 
+  const reply = (result: Record<string, any>) =>
+    ({ isError: result.ok === false, content: [{ type: "text" as const, text: JSON.stringify(result) }], details: result });
+
+  // Write the proof to a scratch file so the campaign CLI never sees it on argv.
+  async function withProofFile<T>(proof: string | undefined, run: (file?: string) => Promise<T>): Promise<T> {
+    if (proof === undefined) return run(undefined);
+    const directory = await mkdtemp(resolve(tmpdir(), "arena-proof-"));
+    try {
+      const file = resolve(directory, "proof.lean");
+      await writeFile(file, proof, "utf8");
+      return await run(file);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+
   pi.registerTool({
     name: "arena_evaluate",
     label: "Arena evaluate",
-    description: "Compile and save a complete theorem in the scheduled idea lane. Supply idea_id and a parent #N from arena_frontier. Return complete Lean diagnostics and the candidate path. Fast checks primary; full checks all versions.",
+    description: "Score a complete theorem (statement + proof). Give `proof`, or re-check an existing node with `candidate` (\"#N\"), or promote a passing probe with `from_probe` (\"pN\"). `mode` fast checks the primary toolchain, full checks every version. `parents`, `idea_id` and `hypothesis` are optional labels; the current candidate is the default parent. Returns tokens, heartbeats, per-axis contribution, proxy (estimated for fast), deltas, and diagnostics whose file_line matches the candidate file lean_goal reads.",
     parameters: Type.Object({
-      proof: Type.String({ description: "Complete theorem statement and replacement proof" }),
+      proof: Type.Optional(Type.String({ description: "Complete theorem statement and replacement proof" })),
+      candidate: Type.Optional(Type.String({ description: "Existing node such as #4" })),
+      from_probe: Type.Optional(Type.String({ description: "Probe id such as p2" })),
       mode: Type.Optional(Type.Union([Type.Literal("fast"), Type.Literal("full")])),
       parents: Type.Optional(Type.Array(Type.String())),
       hypothesis: Type.Optional(Type.String()),
@@ -322,92 +341,83 @@ export default function arenaExtension(pi: ExtensionAPI) {
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       if (!active) throw new Error("Select a theorem with /arena first");
-      const directory = await mkdtemp(resolve(tmpdir(), "arena-proof-"));
-      try {
-        const file = resolve(directory, "proof.lean");
-        await writeFile(file, params.proof, "utf8");
-        const argumentsList = ["--proof-file", file, "--mode", params.mode ?? "fast",
-          ...((params.parents ?? []) as string[]).flatMap(parent => ["--parent", parent])];
-        if (params.hypothesis) argumentsList.push("--hypothesis", params.hypothesis);
-        if (params.idea_id) argumentsList.push("--idea-id", params.idea_id);
-        const result = await campaign("evaluate", argumentsList);
-        const state = await campaign("frontier");
-        const reported = { ...result, budget: budgetStatus(ctx), next_experiment: state.next_experiments?.[0] ?? null };
-        return { isError: result.ok === false, content: [{ type: "text", text: JSON.stringify(reported) }], details: reported };
-      } finally {
-        await rm(directory, { recursive: true, force: true });
-      }
+      const result = await withProofFile(params.proof, file => {
+        const args = ["--mode", params.mode ?? "fast"];
+        if (file) args.push("--proof-file", file);
+        if (params.candidate) args.push("--candidate", params.candidate);
+        if (params.from_probe) args.push("--from-probe", params.from_probe);
+        for (const parent of params.parents ?? []) args.push("--parent", parent);
+        if (params.hypothesis) args.push("--hypothesis", params.hypothesis);
+        if (params.idea_id) args.push("--idea-id", params.idea_id);
+        return campaign("evaluate", args);
+      });
+      return reply({ ...result, remaining_usd: Number(budgetStatus(ctx)?.remaining_usd?.toFixed(4)) });
     },
   });
 
   pi.registerTool({
-    name: "arena_probe", label: "Arena scratch probe",
-    description: "Compile a complete or unfinished proof draft on the primary Lean version without creating a graph candidate. Return complete diagnostics and a shadow-project path for lean_goal. Use this to repair a structural idea before promotion.",
-    parameters: Type.Object({ proof: Type.String(), idea_id: Type.String(), parent: Type.String() }),
+    name: "arena_probe", label: "Arena probe",
+    description: "Compile a draft on the primary toolchain without scoring it; `sorry` is allowed and the goal at each tactic-position sorry is returned. Returns a short id (p1, p2, ...) you can restore with arena_candidate or promote with arena_evaluate from_probe. Probes never become candidates.",
+    parameters: Type.Object({ proof: Type.String(), idea_id: Type.Optional(Type.String()), parent: Type.Optional(Type.String()) }),
     async execute(_id, params) {
       if (!active) throw new Error("Select a theorem with /arena first");
-      const directory = await mkdtemp(resolve(tmpdir(), "arena-probe-"));
-      try {
-        const file = resolve(directory, "proof.lean");
-        await writeFile(file, params.proof, "utf8");
-        const result = await campaign("probe", ["--proof-file", file, "--idea-id", params.idea_id,
-          "--parent", params.parent]);
-        return { isError: result.ok === false, content: [{ type: "text", text: JSON.stringify(result) }], details: result };
-      } finally { await rm(directory, { recursive: true, force: true }); }
+      return reply(await withProofFile(params.proof, file => {
+        const args = ["--proof-file", file!];
+        if (params.idea_id) args.push("--idea-id", params.idea_id);
+        if (params.parent) args.push("--parent", params.parent);
+        return campaign("probe", args);
+      }));
     },
   });
 
   pi.registerTool({
     name: "arena_frontier",
     label: "Arena frontier",
-    description: "Return the scheduled source-derived idea, an exact #N seed, its next action and alternative idea lanes; use the first idea for the next new fast candidate.",
+    description: "Compact status: best verified and fast-only candidates, your ideas with attempts, best result and last failure, and recent failures.",
     parameters: Type.Object({}),
-    async execute() {
-      const result = await campaign("frontier");
-      return { content: [{ type: "text", text: JSON.stringify(result) }], details: result };
+    async execute() { return reply(await campaign("frontier")); },
+  });
+
+  pi.registerTool({
+    name: "arena_idea", label: "Record or update an idea",
+    description: "Create an idea (title, hypothesis, region as proof lines like \"12-30\", expected_effect per axis) or update one with idea_id: set status active, parked, succeeded or abandoned with a reason. Ideas are yours; the harness only records them.",
+    parameters: Type.Object({
+      idea_id: Type.Optional(Type.String()), title: Type.Optional(Type.String()),
+      hypothesis: Type.Optional(Type.String()), region: Type.Optional(Type.String()),
+      expected_effect: Type.Optional(Type.Object({ tokens: Type.Optional(Type.String()),
+        heartbeats: Type.Optional(Type.String()), compat: Type.Optional(Type.String()) })),
+      status: Type.Optional(Type.Union([Type.Literal("active"), Type.Literal("parked"),
+        Type.Literal("succeeded"), Type.Literal("abandoned")])),
+      reason: Type.Optional(Type.String()),
+    }),
+    async execute(_id, params) {
+      const args: string[] = [];
+      if (params.idea_id) args.push("--idea-id", params.idea_id);
+      if (params.title) args.push("--title", params.title);
+      if (params.hypothesis) args.push("--hypothesis", params.hypothesis);
+      if (params.region) args.push("--region", params.region);
+      if (params.expected_effect) args.push("--expected-effect", JSON.stringify(params.expected_effect));
+      if (params.status) args.push("--status", params.status);
+      if (params.reason) args.push("--reason", params.reason);
+      return reply(await campaign("idea", args));
     },
   });
 
   pi.registerTool({
-    name: "arena_idea", label: "Record a proof idea",
-    description: "Add a distinct structural strategy grounded in 1-20 exact pinned Lean source lines. The idea enters the scheduled portfolio; give an actionable goal, not a known optimized proof.",
-    parameters: Type.Object({ title: Type.String(), goal: Type.String(), path: Type.String(),
-      first: Type.Number(), last: Type.Number() }),
-    async execute(_id, params) {
-      const result = await campaign("idea", ["--title", params.title, "--goal", params.goal,
-        "--path", params.path, "--first", String(params.first), "--last", String(params.last)]);
-      return { isError: result.ok === false, content: [{ type: "text", text: JSON.stringify(result) }], details: result };
-    },
-  });
-
-  pi.registerTool({
-    name: "arena_decision", label: "Arena node decision",
-    description: "Record why a candidate remains open or is parked; parked nodes remain retrievable but leave active merge/frontier selection.",
-    parameters: Type.Object({ candidate_id: Type.String(), decision: Type.Union([Type.Literal("pursue"), Type.Literal("park")]), reason: Type.String() }),
-    async execute(_id, params) {
-      const result = await campaign("decision", ["--candidate-id", params.candidate_id,
-        "--decision", params.decision, "--reason", params.reason]);
-      return { isError: result.ok === false, content: [{ type: "text", text: JSON.stringify(result) }], details: result };
-    },
-  });
-
-  pi.registerTool({
-    name: "arena_candidate", label: "Arena candidate",
-    description: "Restore a candidate into the Lean scratch project and return its exact proof and complete recorded evaluations.",
-    parameters: Type.Object({ candidate_id: Type.String() }),
-    async execute(_id, params) {
-      const result = await campaign("candidate", ["--candidate-id", params.candidate_id]);
-      return { isError: result.ok === false, content: [{ type: "text", text: JSON.stringify(result) }], details: result };
-    },
+    name: "arena_candidate", label: "Restore a candidate or probe",
+    description: "Restore node \"#N\" or probe \"pN\" into the Lean scratch project (so lean_goal reads it) and return its exact proof and recorded results.",
+    parameters: Type.Object({ candidate: Type.String({ description: "#N or pN" }) }),
+    async execute(_id, params) { return reply(await campaign("candidate", ["--candidate", params.candidate])); },
   });
 
   pi.registerTool({
     name: "arena_source", label: "Pinned Lean source",
-    description: "Read an exact line range from the pinned source commit; maximum 120 lines.",
-    parameters: Type.Object({ path: Type.String(), first: Type.Number(), last: Type.Number() }),
+    description: "Read lines from a file of the pinned project (up to 400 per call; `next_first` continues). Errors state the file length.",
+    parameters: Type.Object({ path: Type.String(), first: Type.Number(), last: Type.Optional(Type.Number()) }),
     async execute(_id, params) {
-      const result = await campaign("source", ["--path", params.path, "--first", String(params.first), "--last", String(params.last)]);
-      return { isError: result.ok === false, content: [{ type: "text", text: JSON.stringify(result) }], details: result };
+      const args = ["--path", params.path, "--first", String(params.first)];
+      if (params.last !== undefined) args.push("--last", String(params.last));
+      return reply(await campaign("source", args));
     },
   });
 
@@ -415,10 +425,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
     name: "arena_declaration", label: "Pinned declaration",
     description: "Find a declaration's exact source signature and location in the pinned project.",
     parameters: Type.Object({ symbol: Type.String() }),
-    async execute(_id, params) {
-      const result = await campaign("declaration", ["--symbol", params.symbol]);
-      return { isError: result.ok === false, content: [{ type: "text", text: JSON.stringify(result) }], details: result };
-    },
+    async execute(_id, params) { return reply(await campaign("declaration", ["--symbol", params.symbol])); },
   });
 
   pi.on("agent_before_settle", async event => {
@@ -426,7 +433,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
     const budget = costState();
     const limits = budgetLimits();
     const state = await campaign("frontier");
-    const progress = JSON.stringify({ best: state.score_best, primary: state.primary_best });
+    const progress = JSON.stringify(state.best ?? null);
     if (progress === previousProgress) plateau += 1;
     else plateau = 0;
     previousProgress = progress;
@@ -439,8 +446,9 @@ export default function arenaExtension(pi: ExtensionAPI) {
     }
     continuations += 1;
     appendCost({ kind: "control", continuations, plateau, progress, stop: null });
-    const next = state.next_experiments?.[0];
-    const content = `Continue proof optimization. Current best: ${progress}. Scheduled idea and #N seed: ${JSON.stringify(next ?? null)}. Remaining ledger-priced usage cap: $${Math.max(0, limits.hardCapUsd - budget.spent).toFixed(4)}. Restore the seed with arena_candidate; use arena_probe and Lean goals to repair a structural draft before arena_evaluate. Supply the scheduled idea_id and a parent #N. Full-check promising proofs. The merge worker combines disjoint edits.`;
+    const ideas = (state.ideas ?? []).filter((idea: any) => idea.status === "active")
+      .map((idea: any) => `${idea.id} ${idea.title}`);
+    const content = `Continue proof optimization. Best so far: ${JSON.stringify(state.best ?? null)}. Active ideas: ${ideas.length ? ideas.join("; ") : "none recorded"}. Remaining ledger-priced usage cap: $${Math.max(0, limits.hardCapUsd - budget.spent).toFixed(4)}.`;
     return { entries: [...event.entries, { type: "custom_message" as const, customType: "arena-continuation",
       content, display: false }], continue: true };
   });
