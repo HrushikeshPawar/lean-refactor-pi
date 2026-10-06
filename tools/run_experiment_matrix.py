@@ -27,7 +27,7 @@ from tools.run_pi_budgeted import MODELS, THINKING_LEVELS  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 FACTORS = ("model", "thinking", "skill")
-PER_RUN_GB = 3.0  # Pi, the Lean MCP server and one Lean process at a time
+PER_RUN_GB = 4.5  # Pi, the Lean MCP server, and one Lean process in each of the model and background lanes
 
 
 def parallelism(requested: str, runs: int, available_kb: int, per_run_gb: float = PER_RUN_GB) -> int:

@@ -36,7 +36,9 @@ class PlanTests(unittest.TestCase):
 
     def test_parallelism_follows_free_memory_and_never_exceeds_runs(self):
         gb = 1024 * 1024
-        self.assertEqual(matrix.parallelism("auto", 5, 10 * gb), 3)
+        # 4.5 GB per run: Pi, the Lean server and one Lean process per lane.
+        self.assertEqual(matrix.parallelism("auto", 5, 10 * gb), 2)
+        self.assertEqual(matrix.parallelism("auto", 5, 14 * gb), 3)
         self.assertEqual(matrix.parallelism("auto", 2, 64 * gb), 2)
         self.assertEqual(matrix.parallelism("auto", 4, 1 * gb), 1)
         self.assertEqual(matrix.parallelism("3", 2, 0), 2)
