@@ -156,20 +156,31 @@ class ViewerTests(unittest.TestCase):
                 self.assertIn("window.GRAPH_SNAPSHOT", output.read_text())
                 self.assertEqual(graph_payload("viewer")["run_id"], "viewer")
 
-    def test_spend_chart_uses_settled_cost_not_temporary_reservations(self):
+    def test_spend_chart_has_one_point_per_settled_request_split_by_component(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             (directory / "cost-ledger.jsonl").write_text(
                 '{"kind":"reserve","id":"one","usd":0.4}\n'
-                '{"kind":"settle","id":"one","usd":0.1,"pi_embedded_cost_usd":0.06}\n'
+                '{"kind":"settle","id":"one","usd":0.1,"pi_embedded_cost_usd":0.1,"ts":1791274568395,'
+                '"tokens":{"input":1,"output":10,"cache_read":0,"cache_write":50},'
+                '"ledger_components_usd":{"input":0.01,"output":0.04,"cacheRead":0,"cacheWrite":0.05}}\n'
                 '{"kind":"reserve","id":"two","usd":0.5}\n'
-                '{"kind":"settle","id":"two","usd":0.2,"pi_embedded_cost_usd":0.12}\n')
+                '{"kind":"settle","id":"two","usd":0.2,"pi_embedded_cost_usd":0.2,'
+                '"tokens":{"input":1,"output":20,"cache_read":150,"cache_write":50},'
+                '"ledger_components_usd":{"input":0.01,"output":0.09,"cacheRead":0.08,"cacheWrite":0.02}}\n')
+            (directory / "run-config.json").write_text('{"hard_cap_usd": 0.1}')
             with patch("tools.serve_candidate_graph.graph_state", return_value={}), \
                  patch("tools.serve_candidate_graph.run_dir", return_value=directory):
-                timeline = graph_payload("viewer")["cost_timeline"]
-            self.assertEqual([round(row["spent_usd"], 3) for row in timeline], [0, 0.1, 0.1, 0.3])
-            self.assertEqual([round(row["pi_embedded_usd"], 3) for row in timeline], [0, 0.06, 0.06, 0.18])
-            self.assertEqual([row["outstanding_usd"] for row in timeline], [0.4, 0, 0.5, 0])
+                payload = graph_payload("viewer")
+            timeline = payload["cost_timeline"]
+            self.assertEqual([row["number"] for row in timeline], [1, 2])
+            self.assertEqual([round(row["spent_usd"], 3) for row in timeline], [0.1, 0.3])
+            self.assertEqual({k: round(v, 3) for k, v in timeline[-1]["parts"].items()},
+                             {"input": 0.02, "output": 0.13, "cache_read": 0.08, "cache_write": 0.07})
+            self.assertEqual(timeline[1]["reuse_pct"], 75.0)
+            self.assertAlmostEqual(timeline[0]["ts"], 1791274568.395)
+            self.assertAlmostEqual(payload["cost"]["pi_embedded_usd"], 0.3)
+            self.assertEqual(payload["hard_cap_usd"], 0.1)
 
     def test_failed_and_legacy_unknown_usage_releases_do_not_raise_spend(self):
         with tempfile.TemporaryDirectory() as temporary:

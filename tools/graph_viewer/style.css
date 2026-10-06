@@ -97,4 +97,14 @@
 .idea-row:first-child{border-top:0}.idea-row.scheduled{background:#173146;border-left-color:var(--blue)}
 .idea-row p{margin:5px 0 8px;color:var(--muted)}.idea-row button{margin-right:8px}
 .cost-note{margin:10px 0;padding:8px;border:1px solid var(--line);border-radius:6px;color:var(--muted)}
-.chart .series.embedded,.modal-series.embedded{stroke:#edc475;stroke-dasharray:5 4;opacity:.9}
+.chart svg{height:auto;aspect-ratio:350/96}
+.chart .x-tick,.modal-grid .x-tick{stroke:#5d7489;stroke-width:1}
+.chart .axis-label{font-size:10px}
+.modal-grid .x-grid{stroke:#25394d}
+.axis-title{font-size:12px}
+.chart .area{opacity:.35}
+.modal-area{opacity:.55}
+.cap-line{stroke:#ff8f8f;stroke-width:1.2;stroke-dasharray:5 4;fill:none}
+.cap-label{fill:#ff8f8f}
+.cost-legend{display:flex;gap:14px;flex-wrap:wrap;margin:0 0 8px;font-size:12px;color:var(--muted)}
+.cost-legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}

@@ -21,6 +21,8 @@ def graph_payload(run_id: str) -> dict:
     charged = 0.0
     pi_embedded = 0.0
     unresolved: dict[str, float] = {}
+    parts = {"input": 0.0, "output": 0.0, "cache_read": 0.0, "cache_write": 0.0}
+    names = {"input": "input", "output": "output", "cacheRead": "cache_read", "cacheWrite": "cache_write"}
     costs = []
     journal = directory / "cost-ledger.jsonl"
     if journal.exists():
@@ -30,18 +32,27 @@ def graph_payload(run_id: str) -> dict:
                 unresolved[str(event["id"])] = float(event["usd"])
             elif event.get("kind") in ("settle", "release"):
                 unresolved.pop(str(event["id"]), None)
-                if event["kind"] == "settle" and event.get("usage_known") is not False:
-                    charged += float(event["usd"])
-                    pi_embedded += float(event.get("pi_embedded_cost_usd") or 0)
-            else:
+            if event.get("kind") != "settle" or event.get("usage_known") is False:
                 continue
-            outstanding = sum(unresolved.values())
-            costs.append({"spent_usd": charged, "outstanding_usd": outstanding,
-                          "pi_embedded_usd": pi_embedded,
-                          "committed_usd": charged + outstanding,
-                          "kind": event["kind"], "ts": event.get("ts")})
+            usd = float(event["usd"])
+            charged += usd
+            pi_embedded += float(event.get("pi_embedded_cost_usd") or 0)
+            for key, value in (event.get("ledger_components_usd") or {}).items():
+                if key in names:
+                    parts[names[key]] += float(value)
+            tokens = event.get("tokens") or {}
+            cached = tokens.get("cache_read", 0) + tokens.get("cache_write", 0)
+            ts = event.get("ts")
+            costs.append({"number": len(costs) + 1, "spent_usd": charged, "request_usd": usd,
+                          "parts": dict(parts), "tokens": tokens,
+                          "reuse_pct": 100 * tokens.get("cache_read", 0) / cached if cached else None,
+                          # The cost journal stamps milliseconds; the candidate ledger uses seconds.
+                          "ts": ts / 1000 if ts and ts > 1e11 else ts})
     payload["cost_timeline"] = costs
-    payload["cost"] = {"spent_usd": charged, "unresolved_usd": sum(unresolved.values())}
+    payload["cost"] = {"spent_usd": charged, "unresolved_usd": sum(unresolved.values()),
+                       "pi_embedded_usd": pi_embedded}
+    config = directory / "run-config.json"
+    payload["hard_cap_usd"] = json.loads(config.read_text()).get("hard_cap_usd") if config.exists() else None
     report = directory / "cost.json"
     payload["cost_report"] = json.loads(report.read_text()) if report.exists() else {}
     if "pi_embedded_estimate" not in payload["cost_report"]:

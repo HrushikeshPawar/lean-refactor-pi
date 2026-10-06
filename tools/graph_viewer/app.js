@@ -202,33 +202,84 @@
   $('code-dialog').addEventListener('click',e=>{if(e.target===$('code-dialog'))e.target.close()});
   function select(id) { selected=id; localStorage.setItem('arena-selected',id); if(coords.has(id))focusOn(id); renderGraph(); detail(); renderCharts(); }
 
+  // Stacked bottom to top: cheap cache reads first, the usually dominant output last.
+  const COST_PARTS=[['cache_read','Cache read','#5fd3a5'],['input','Input','#c792ea'],['cache_write','Cache write','#edc475'],['output','Output','#78baff']];
+  const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
+  function niceTicks(min,max,count) {
+    if(!(max>min))return [min];
+    // Smallest 1/2/5 step that keeps at most `count` intervals.
+    const raw=(max-min)/count,mag=10**Math.floor(Math.log10(raw));
+    const step=Math.max(1,[1,2,5,10].map(m=>m*mag).find(s=>s>=raw));
+    const ticks=[];
+    for(let v=Math.ceil(min/step)*step;v<=max+1e-9;v+=step)ticks.push(Math.round(v));
+    return ticks;
+  }
+  // Shared x/y scales so the card and the enlarged view agree.
+  function scales(spec,points,box) {
+    const xs=points.map((p,i)=>p.number ?? i+1),xMin=Math.min(...xs),xMax=Math.max(...xs);
+    const ys=points.map(p=>p[spec.key]);
+    let yMin=spec.zero?0:Math.min(...ys),yMax=Math.max(...ys);
+    if(spec.cap)yMax=Math.max(yMax,spec.cap);
+    const xr=xMax-xMin||1,yr=yMax-yMin||1;
+    return {xs,xMin,xMax,yMin,yMax,xTicks:niceTicks(xMin,xMax,box.ticks),
+      sx:x=>box.x0+(x-xMin)*(box.x1-box.x0)/xr,sy:y=>box.y1-(y-yMin)*(box.y1-box.y0)/yr};
+  }
+  function linePath(points,xs,sx,sy,value) {
+    return points.map((p,i)=>`${i?'L':'M'}${sx(xs[i]).toFixed(1)},${sy(value(p)).toFixed(1)}`).join(' ');
+  }
+  function stackedAreas(points,xs,sx,sy,cls) {
+    let below=points.map(()=>0);
+    return COST_PARTS.map(([key,,color])=>{
+      const above=points.map((p,i)=>below[i]+(p.parts?.[key]||0));
+      const top=points.map((p,i)=>`${i?'L':'M'}${sx(xs[i]).toFixed(1)},${sy(above[i]).toFixed(1)}`).join(' ');
+      const bottom=points.map((p,i)=>`L${sx(xs[i]).toFixed(1)},${sy(below[i]).toFixed(1)}`).reverse().join(' ');
+      below=above;
+      return `<path class="${cls}" fill="${color}" d="${top} ${bottom} Z"/>`;
+    }).join('');
+  }
+  function xAxis(sc,box,labelY,grid) {
+    return sc.xTicks.map(t=>{const x=sc.sx(t).toFixed(1);
+      return `${grid?`<path class="x-grid" d="M${x} ${box.y0}V${box.y1}"/>`:''}<path class="x-tick" d="M${x} ${box.y1}v4"/><text class="axis-label" x="${x}" y="${labelY}" text-anchor="middle">${esc(t)}</text>`;}).join('');
+  }
+  function capLine(spec,sc,box,label) {
+    if(!spec.cap)return '';
+    const y=sc.sy(spec.cap).toFixed(1);
+    return `<path class="cap-line" d="M${box.x0} ${y}H${box.x1}"/>${label?`<text class="axis-label cap-label" x="${box.x0+6}" y="${y-5}">hard cap ${esc(money(spec.cap))}</text>`:''}`;
+  }
+  function headValue(spec,value) {
+    if(spec.unit==='$')return money(value)+(spec.cap?` / ${money(spec.cap)}`:'');
+    return value.toFixed(spec.key==='local_proxy'?2:0);
+  }
+
   function chart(spec,index) {
-    const {title,key,unit}=spec,points=spec.rows.filter(r=>Number.isFinite(r[key]));
+    const {title,key}=spec,points=spec.rows.filter(r=>Number.isFinite(r[key]));
     if(!points.length)return `<button type="button" class="chart"><span class="chart-title">${esc(title)}</span><span class="muted">No data yet</span></button>`;
-    const values=points.map(p=>p[key]),min=Math.min(...values),max=Math.max(...values),range=max-min||1;
-    const xs=points.map((p,i)=>p.number ?? i),xMin=Math.min(...xs),xMax=Math.max(...xs);
-    const xy=points.map((p,i)=>({p,x:20+(xs[i]-xMin)*310/Math.max(1,xMax-xMin),y:78-(p[key]-min)*55/range}));
-    const line=xy.map((v,i)=>`${i?'L':'M'}${v.x.toFixed(1)},${v.y.toFixed(1)}`).join(' ');
-    const last=xy.at(-1);
-    const embedded=unit==='$'&&points.some(p=>p.pi_embedded_usd>0)?`<path class="series embedded" d="${xy.map((v,i)=>`${i?'L':'M'}${v.x.toFixed(1)},${(78-(v.p.pi_embedded_usd-min)*55/range).toFixed(1)}`).join(' ')}"/>`:'';
-    return `<button type="button" class="chart" data-chart="${index}" aria-label="Open enlarged ${esc(title)} chart"><span class="chart-head"><span class="chart-title">${esc(title)}</span><strong>${unit==='$'?'$':''}${esc(last.p[key].toFixed(2))}${unit==='$'?'':esc(unit)}</strong></span><svg viewBox="0 0 350 100" aria-hidden="true"><path class="chart-baseline" d="M20 79H332"/><path class="series" d="${line}"/>${embedded}<circle class="chart-end" cx="${last.x}" cy="${last.y}" r="4"/></svg><span class="chart-foot">${points.length} observations <span>Click to inspect ↗</span></span></button>`;
+    const box={x0:22,x1:332,y0:8,y1:74,ticks:5},sc=scales(spec,points,box);
+    const last=points.at(-1),lx=sc.sx(sc.xs.at(-1)),ly=sc.sy(last[key]);
+    const areas=spec.stack?stackedAreas(points,sc.xs,sc.sx,sc.sy,'area'):'';
+    return `<button type="button" class="chart" data-chart="${index}" aria-label="Open enlarged ${esc(title)} chart"><span class="chart-head"><span class="chart-title">${esc(title)}</span><strong>${esc(headValue(spec,last[key]))}</strong></span><svg viewBox="0 0 350 96" aria-hidden="true">${areas}${capLine(spec,sc,box,false)}<path class="chart-baseline" d="M${box.x0} ${box.y1}H${box.x1}"/>${xAxis(sc,box,90,false)}<path class="series" d="${linePath(points,sc.xs,sc.sx,sc.sy,p=>p[key])}"/><circle class="chart-end" cx="${lx}" cy="${ly}" r="4"/></svg><span class="chart-foot">${points.length} ${esc(spec.xLabel.toLowerCase())}s <span>Click to inspect ↗</span></span></button>`;
+  }
+  function chartTable(spec,points) {
+    if(spec.stack){
+      const rows=points.map(p=>{const t=p.tokens||{};return `<tr><td>${esc(p.number)}</td><td>${esc(money(p.request_usd))}</td><td>${esc(money(p.spent_usd))}</td>${COST_PARTS.map(([k])=>`<td>${esc(t[k] ?? '—')}</td>`).join('')}<td>${p.reuse_pct==null?'—':esc(p.reuse_pct.toFixed(1))+'%'}</td><td>${p.ts?esc(new Date(p.ts*1000).toLocaleTimeString()):'—'}</td></tr>`;}).join('');
+      return `<thead><tr><th>Request</th><th>Request $</th><th>Cumulative $</th>${COST_PARTS.map(([,label])=>`<th>${esc(label)} tok</th>`).join('')}<th>Cache reuse</th><th>Time</th></tr></thead><tbody>${rows}</tbody>`;
+    }
+    const rows=points.map((p,i)=>`<tr ${p.candidate_id?`data-candidate="${esc(p.candidate_id)}"`:''}><td>${esc(p.number ?? i+1)}</td><td>${p.candidate_id?`#${esc(byId.get(p.candidate_id)?.index ?? '?')} ${esc(p.candidate_id.slice(0,8))}`:'—'}</td><td>${esc(p[spec.key].toFixed(spec.key==='local_proxy'?2:0))}</td><td>${esc(p.status ?? p.mode ?? '—')}</td><td>${esc(p.tokens ?? '—')}</td><td>${esc(p.heartbeat ?? '—')}</td><td>${esc(p.local_proxy?.toFixed?.(2) ?? '—')}</td><td>${p.ts?esc(new Date(p.ts*1000).toLocaleString()):'—'}</td></tr>`).join('');
+    return `<thead><tr><th>${esc(spec.xLabel)}</th><th>Candidate</th><th>Value</th><th>Status / mode</th><th>Tokens</th><th>Heartbeats</th><th>Proxy</th><th>Time</th></tr></thead><tbody>${rows}</tbody>`;
   }
   function openChart(index) {
     const spec=chartSpecs[index];if(!spec)return;
     const points=spec.rows.filter(r=>Number.isFinite(r[spec.key]));
-    const values=points.map(p=>p[spec.key]),min=Math.min(...values),max=Math.max(...values),range=max-min||1;
-    const xs=points.map((p,i)=>p.number ?? i),xMin=Math.min(...xs),xMax=Math.max(...xs);
-    const xy=points.map((p,i)=>({p,x:65+(xs[i]-xMin)*800/Math.max(1,xMax-xMin),y:300-(p[spec.key]-min)*260/range}));
-    const path=xy.map((v,i)=>`${i?'L':'M'}${v.x.toFixed(1)},${v.y.toFixed(1)}`).join(' ');
-    const embedded=spec.unit==='$'&&points.some(p=>p.pi_embedded_usd>0)?`<path class="modal-series embedded" d="${xy.map((v,i)=>`${i?'L':'M'}${v.x.toFixed(1)},${(300-(v.p.pi_embedded_usd-min)*260/range).toFixed(1)}`).join(' ')}"/>`:'';
+    if(!points.length)return;
+    const box={x0:70,x1:870,y0:30,y1:290,ticks:12},sc=scales(spec,points,box);
     const grid=Array.from({length:5},(_,i)=>{
-      const y=40+i*65,value=max-i*range/4;
-      return `<path d="M65 ${y}H865"/><text x="57" y="${y+4}" text-anchor="end">${esc(value.toFixed(2))}</text>`;
+      const value=sc.yMax-i*(sc.yMax-sc.yMin)/4,y=sc.sy(value);
+      return `<path d="M${box.x0} ${y}H${box.x1}"/><text x="${box.x0-8}" y="${y+4}" text-anchor="end">${esc(spec.unit==='$'?money(value):value.toFixed(spec.key==='local_proxy'?2:0))}</text>`;
     }).join('');
-    const dots=xy.map(({p,x,y},i)=>`<circle class="modal-dot${p.candidate_id===selected?' selected':''}${p.is_best?' best':''}" cx="${x}" cy="${y}" r="3.5"><title>#${esc(p.number ?? i+1)} · ${esc(p[spec.key])}${esc(spec.unit)}${p.candidate_id?' · '+esc(p.candidate_id.slice(0,8)):''}</title></circle>`).join('');
-    const table=points.map((p,i)=>`<tr ${p.candidate_id?`data-candidate="${esc(p.candidate_id)}"`:''}><td>${esc(p.number ?? i+1)}</td><td>${p.candidate_id?`#${esc(byId.get(p.candidate_id)?.index ?? '?')} ${esc(p.candidate_id.slice(0,8))}`:'cost event'}</td><td>${spec.unit==='$'?'$':''}${esc(p[spec.key].toFixed(4))}${spec.unit==='$'?'':esc(spec.unit)}</td><td>${p.pi_embedded_usd===undefined?'—':'$'+esc(p.pi_embedded_usd.toFixed(4))}</td><td>${esc(p.status ?? p.mode ?? p.kind ?? '—')}</td><td>${esc(p.tokens ?? '—')}</td><td>${esc(p.heartbeat ?? '—')}</td><td>${esc(p.local_proxy?.toFixed?.(2) ?? '—')}</td><td>${p.outstanding_usd===undefined?'—':esc(p.outstanding_usd.toFixed(4))}</td><td>${p.committed_usd===undefined?'—':esc(p.committed_usd.toFixed(4))}</td><td>${p.ts?esc(new Date(p.ts*1000).toLocaleString()):'—'}</td></tr>`).join('');
-    const caption=spec.key==='spent_usd'?'Settled spend rises monotonically. Pending reservations and committed total are listed below.':'Click a candidate row to inspect its proof.';
-    $('chart-dialog-body').innerHTML=`<div class="modal-head"><div><h2>${esc(spec.title)}</h2><p class="muted">${points.length} observations · ${esc(caption)} ${embedded?'· solid: ledger, dashed: Pi embedded estimate':''}</p></div><button id="close-chart" type="button" aria-label="Close chart">✕</button></div><svg class="modal-chart" viewBox="0 0 900 340" role="img" aria-label="${esc(spec.title)} full series"><g class="modal-grid">${grid}</g><path class="modal-series" d="${path}"/>${embedded}${dots}<text class="axis-label" x="65" y="331">${esc(xMin)}</text><text class="axis-label" x="865" y="331" text-anchor="end">${esc(xMax)}</text></svg><div class="chart-table-wrap"><table class="chart-table"><thead><tr><th>Point</th><th>Candidate</th><th>Value</th><th>Pi estimate</th><th>Status / mode</th><th>Tokens</th><th>Heartbeats</th><th>Proxy</th><th>Pending $</th><th>Committed $</th><th>Time</th></tr></thead><tbody>${table}</tbody></table></div>`;
+    const dots=points.map((p,i)=>`<circle class="modal-dot${p.candidate_id&&p.candidate_id===selected?' selected':''}${p.is_best?' best':''}" cx="${sc.sx(sc.xs[i])}" cy="${sc.sy(p[spec.key])}" r="3.5"><title>${esc(spec.xLabel)} ${esc(sc.xs[i])} · ${esc(spec.unit==='$'?money(p[spec.key]):p[spec.key])}${p.candidate_id?' · '+esc(p.candidate_id.slice(0,8)):''}</title></circle>`).join('');
+    const areas=spec.stack?stackedAreas(points,sc.xs,sc.sx,sc.sy,'modal-area'):'';
+    const legend=spec.stack?`<div class="cost-legend">${COST_PARTS.slice().reverse().map(([k,label,color])=>`<span><i style="background:${color}"></i>${esc(label)} ${esc(money(points.at(-1).parts?.[k]||0))}</span>`).join('')}</div>`:'';
+    $('chart-dialog-body').innerHTML=`<div class="modal-head"><div><h2>${esc(spec.title)}</h2><p class="muted">${points.length} ${esc(spec.xLabel.toLowerCase())}s · ${esc(spec.caption)}</p></div><button id="close-chart" type="button" aria-label="Close chart">✕</button></div>${legend}<svg class="modal-chart" viewBox="0 0 900 340" role="img" aria-label="${esc(spec.title)} full series"><g class="modal-grid">${grid}${xAxis(sc,box,307,true)}</g>${areas}${capLine(spec,sc,box,true)}<path class="modal-series" d="${linePath(points,sc.xs,sc.sx,sc.sy,p=>p[spec.key])}"/>${dots}<text class="axis-label axis-title" x="${(box.x0+box.x1)/2}" y="330" text-anchor="middle">${esc(spec.xLabel)}</text></svg><div class="chart-table-wrap"><table class="chart-table">${chartTable(spec,points)}</table></div>`;
     const dialog=$('chart-dialog');$('close-chart').onclick=()=>dialog.close();
     $('chart-dialog-body').querySelectorAll('[data-candidate]').forEach(row=>row.onclick=()=>{dialog.close();select(row.dataset.candidate)});
     dialog.showModal();
@@ -237,11 +288,14 @@
   function renderCharts() {
     const bestIds=new Set(data.milestones.map(m=>m.candidate_id));
     const rows=data.timeline.map(r=>({...r,is_best:bestIds.has(r.candidate_id)}));
+    const pick='Click a candidate row to inspect its proof.';
     chartSpecs=[
-      {title:'Provisional score · 3/3 only',rows:rows.filter(r=>r.status==='full'),key:'local_proxy',unit:''},
-      {title:'Proof tokens',rows:rows.filter(r=>r.status!=='fail'),key:'tokens',unit:''},
-      {title:'Primary heartbeats',rows:rows.filter(r=>r.status!=='fail'),key:'heartbeat',unit:''},
-      {title:'Settled API spend USD',rows:data.cost_timeline||[],key:'spent_usd',unit:'$'},
+      {title:'Provisional score · 3/3 only',rows:rows.filter(r=>r.status==='full'),key:'local_proxy',unit:'',xLabel:'Evaluation',caption:pick},
+      {title:'Proof tokens',rows:rows.filter(r=>r.status!=='fail'),key:'tokens',unit:'',xLabel:'Evaluation',caption:pick},
+      {title:'Primary heartbeats',rows:rows.filter(r=>r.status!=='fail'),key:'heartbeat',unit:'',xLabel:'Evaluation',caption:pick},
+      {title:'API spend by component',rows:data.cost_timeline||[],key:'spent_usd',unit:'$',xLabel:'API request',
+       stack:true,zero:true,cap:data.hard_cap_usd||null,
+       caption:'Cumulative ledger spend, stacked by price component; the dashed line is the hard cap.'},
     ];
     $('charts').innerHTML=chartSpecs.map(chart).join('');
     $('charts').querySelectorAll('[data-chart]').forEach(el=>el.onclick=()=>openChart(Number(el.dataset.chart)));
@@ -258,9 +312,11 @@
         $('frontier').innerHTML=(data.ideas?.length ? data.ideas.map(idea=>`<div class="idea-row"><div><strong>${esc(idea.title)}</strong><span class="muted"> · ${esc(idea.status)} · ${esc(idea.attempts)} nodes · ${esc(idea.probes)} probes</span></div><p>${esc(idea.hypothesis||'')}${idea.reason?` — ${esc(idea.reason)}`:''}</p></div>`).join('') : (data.frontier||[]).slice(0,8).map(r=>`<div class="frontier-row"><button data-go="${r.candidate_id}">${esc(numberForId(r.candidate_id))}</button><span>${esc(r.status)} · priority ${esc(r.priority_total)} · ${esc(r.tokens ?? '?')} tokens</span></div>`).join(''))||'<p class="muted">No eligible seeds yet.</p>';
     $('frontier').querySelectorAll('[data-go]').forEach(el=>el.onclick=()=>select(el.dataset.go));
     $('worker').innerHTML=`<span class="tag">${esc(data.worker?.state ?? 'not running')}</span> <span class="muted">${data.worker?.updated_at ? esc(new Date(data.worker.updated_at*1000).toLocaleTimeString()) : ''}</span>${data.worker?.detail?.candidate_id ? `<span>${esc(numberForId(data.worker.detail.candidate_id))}</span>` : ''}${data.worker?.detail?.error ? `<pre>${esc(data.worker.detail.error)}</pre>` : ''}`;
-    const embedded=data.cost_report?.pi_embedded_estimate;
-    $('cost-note').hidden=!(embedded&&embedded.priced_entries&&!embedded.missing_entries);
-    if(!$('cost-note').hidden) $('cost-note').innerHTML=`Ledger-priced observed tokens <strong>$${esc(data.cost.spent_usd.toFixed(4))}</strong> · Pi embedded estimate <strong>$${esc(embedded.usd.toFixed(4))}</strong>. The two use different configured prices; neither is a provider invoice.`;
+    // Ledger and Pi now price requests identically; only a real disagreement is worth showing.
+    const ledger=data.cost?.spent_usd||0,pi=data.cost?.pi_embedded_usd||0;
+    const drift=pi>0&&Math.abs(ledger-pi)>Math.max(1e-6,0.01*ledger);
+    $('cost-note').hidden=!drift;
+    if(drift) $('cost-note').innerHTML=`<span class="warning">Pricing drift:</span> ledger <strong>${esc(money(ledger))}</strong> vs Pi's own estimate <strong>${esc(money(pi))}</strong>. The two should agree; check the model price table in budget.ts.`;
     $('merge-feed').innerHTML=data.merge_checks.slice(-25).reverse().map(c=>`<div class="feed-row">${c.candidate_id?`<button data-go="${esc(c.candidate_id)}">merge ${esc(numberForId(c.candidate_id))}</button>`:`<span class="muted">skip</span>`}<span>${esc(c.parents?.map(numberForId).join(' + '))}</span><span class="muted">${esc(c.reason || (c.full_passed?'3/3 valid':c.fast_passed?'primary valid':'Lean failed'))}</span></div>`).join('')||'<p class="muted">No pair checks yet.</p>';
     $('merge-feed').querySelectorAll('[data-go]').forEach(el=>el.onclick=()=>select(el.dataset.go));
   }
