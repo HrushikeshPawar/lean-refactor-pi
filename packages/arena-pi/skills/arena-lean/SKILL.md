@@ -70,10 +70,11 @@ top-level commands or auxiliary declarations, and anything outside the one theor
 ## Tool workflow
 
 1. `arena_idea`: record several structurally different ideas (what you will change, expected effect on each
-   axis) before editing. Update an idea's status with a reason when evidence arrives.
+   axis) before editing. You may name an idea yourself with `idea_id` when you create it. Update its status
+   with a reason when evidence arrives.
 2. `arena_probe`: develop a structural rewrite hole by hole. `sorry` is allowed; you get the goal at each
    tactic-position `sorry`. A draft without `sorry` that compiles is recorded and scored as a candidate.
-3. `lean_goal` / `lean_multi_attempt` / `lean_diagnostic_messages` on the candidate file the harness
+3. `lean_goal` / `lean_multi_attempt` / `lean_diagnostic_messages` / `lean_hover_info` on the candidate file the harness
    materializes. Diagnostic `file_line` values refer to exactly that file; `proof_line` counts from the
    statement's first line.
 4. `arena_profile` on a compiling candidate or probe to see where heartbeats go.
@@ -92,6 +93,10 @@ top-level commands or auxiliary declarations, and anything outside the one theor
 - Never discard a compiling candidate: restore it with `arena_candidate` instead of retyping it.
 
 ## References (read on demand with `arena_skill_read`)
+
+The references come from a general Lean skill. Where they mention running `lake build`, `lake env lean`
+or a shell, use `arena_probe` / `arena_evaluate` instead; where they suggest editing a file directly,
+send the whole proof to those tools. `references/lean-lsp-server.md` describes the Lean tools you have.
 
 | File | Use |
 |------|-----|

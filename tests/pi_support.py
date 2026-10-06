@@ -23,14 +23,14 @@ class FakeRun:
     """One scripted run. `steps` are provider responses; see tests/fake_opencode.ts."""
 
     def __init__(self, steps: list[dict], *extra: str, cap: str = "0.1", env: dict | None = None,
-                 run_id: str | None = None, timeout: int = 240):
+                 run_id: str | None = None, timeout: int = 240, model: str = "gpt-6-luna"):
         self.run_id = run_id or f"test-{uuid.uuid4().hex[:10]}"
         self.directory = run_dir(self.run_id)
         self.work = Path(tempfile.mkdtemp())
         self.script = self.work / "script.json"
         self.script.write_text(json.dumps(steps))
         self.log = self.work / "requests.jsonl"
-        self.command = [sys.executable, "tools/run_pi_budgeted.py", "--model", "gpt-6-luna",
+        self.command = [sys.executable, "tools/run_pi_budgeted.py", "--model", model,
                         "--theorem", NAME, "--run-id", self.run_id, "--hard-cap-usd", cap,
                         "--no-mcp", "--test-extension", str(FAKE), *extra]
         self.env = {**os.environ, "ARENA_FAKE_SCRIPT": str(self.script), "ARENA_FAKE_LOG": str(self.log),
@@ -94,3 +94,87 @@ def message_text(message: dict) -> str:
                             for block in content if isinstance(block, dict))
     sections = message.get("sections") or {}
     return "\n".join([str(content)] + [str(value) for value in sections.values()])
+
+
+class AnthropicWire:
+    """A local Anthropic Messages endpoint for Pi's real client.
+
+    It enforces the request rules the real API rejects with HTTP 400 (the class of bug that
+    stopped the first Qwen v5 run), records every payload, and streams scripted replies:
+    each reply is {"text": str} or {"tool": name, "input": dict}. After the script it says "done".
+    """
+
+    def __init__(self, replies: list[dict]):
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        self.replies = list(replies)
+        self.payloads: list[dict] = []
+        self.rejections: list[str] = []
+        wire = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                wire.payloads.append(body)
+                problem = wire.invalid(body)
+                if problem:
+                    wire.rejections.append(problem)
+                    data = json.dumps({"type": "error", "error": {"type": "invalid_request_error", "message": problem}})
+                    self.send_response(400)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(data.encode())
+                    return
+                reply = wire.replies.pop(0) if wire.replies else {"text": "done"}
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                for event in wire.events(body, reply):
+                    self.wfile.write(f"event: {event['type']}\ndata: {json.dumps(event)}\n\n".encode())
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.server.server_port}"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    @staticmethod
+    def invalid(body: dict) -> str | None:
+        limit = body.get("max_tokens")
+        if not isinstance(limit, int) or limit < 1:
+            return "max_tokens: field required"
+        thinking = body.get("thinking") or {}
+        if thinking.get("type") == "enabled":
+            budget = thinking.get("budget_tokens")
+            if not isinstance(budget, int) or budget < 1024:
+                return "thinking.budget_tokens: must be at least 1024"
+            if budget >= limit:
+                return "`max_tokens` must be greater than `thinking.budget_tokens`"
+        return None
+
+    @staticmethod
+    def events(body: dict, reply: dict) -> list[dict]:
+        usage = {"input_tokens": 300, "output_tokens": 1, "cache_read_input_tokens": 4000,
+                 "cache_creation_input_tokens": 100}
+        events = [{"type": "message_start", "message": {"id": "msg_offline", "type": "message", "role": "assistant",
+                   "model": body.get("model"), "content": [], "stop_reason": None, "stop_sequence": None,
+                   "usage": usage}}]
+        if "tool" in reply:
+            events += [{"type": "content_block_start", "index": 0, "content_block": {
+                           "type": "tool_use", "id": f"toolu_{uuid.uuid4().hex[:12]}", "name": reply["tool"], "input": {}}},
+                       {"type": "content_block_delta", "index": 0,
+                        "delta": {"type": "input_json_delta", "partial_json": json.dumps(reply["input"])}}]
+            stop = "tool_use"
+        else:
+            events += [{"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+                       {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": reply["text"]}}]
+            stop = "end_turn"
+        return events + [{"type": "content_block_stop", "index": 0},
+                         {"type": "message_delta", "delta": {"stop_reason": stop, "stop_sequence": None},
+                          "usage": {"output_tokens": 40}},
+                         {"type": "message_stop"}]
+
+    def close(self) -> None:
+        self.server.shutdown()

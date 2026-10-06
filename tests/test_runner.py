@@ -1,10 +1,11 @@
 """Seam B: the budgeted runner end to end against the scripted offline provider."""
 
 import json
+import shutil
 from pathlib import Path
 import unittest
 
-from tests.pi_support import PI_AVAILABLE, FakeRun, message_text
+from tests.pi_support import PI_AVAILABLE, AnthropicWire, FakeRun, message_text
 from tools.arena_skill import SKILL_DIR, skill_hash
 
 STOP = [{"text": "done"}]
@@ -233,10 +234,131 @@ class AutomaticChecksTests(unittest.TestCase):
         self.assertEqual(run.json("submission.json")["candidate"], "#2")
         self.assertEqual(run.json("summary.json")["submission"]["proxy"], 76.72)
 
+    def test_every_arena_tool_succeeds_with_the_arguments_models_actually_send(self):
+        from arena.campaign import problem
+        row = problem("Core.InitsUpdatesComm")
+        good = FIXTURE.read_text()
+        calls = [
+            ("arena_idea", {"idea_id": "structural", "title": "Restructure the induction", "region": "lines 3-9"}),
+            ("arena_source", {"path": row["file_path"], "first": 950, "last": 960}),
+            ("arena_declaration", {"symbol": "InitStatesUpdated"}),
+            ("arena_skill_read", {"path": "references/lean-lsp-server.md"}),
+            ("arena_probe", {"proof": row["statement"] + " := by\n  intros Hup Hinit\n  sorry", "idea_id": "structural"}),
+            ("arena_evaluate", {"proof": good, "idea_id": "structural"}),
+            ("arena_probe", {"proof": good + "\n  -- complete draft"}),
+            ("arena_candidate", {"candidate": "p1"}),
+            ("arena_profile", {"candidate": "#2", "proof": ""}),
+            ("arena_polish", {"candidate": "#2"}),
+            ("arena_idea", {"idea_id": "structural", "status": "succeeded", "reason": "compiles everywhere"}),
+        ]
+        run = FakeRun([cheap_tool(name, args) for name, args in calls] + [{"text": "done"}], timeout=900)
+        self.runs.append(run)
+        run.run()
+        summary = run.json("summary.json")
+        self.assertEqual(summary["tools"]["errors"], {}, run.stdout[-1500:])
+        self.assertEqual(sum(summary["tools"]["calls"].values()), len(calls))
+        self.assertEqual(set(summary["tools"]["calls"]), {name for name, _ in calls})
+        self.assertEqual(run.json("submission.json")["candidate"] is not None, True)
+
     def test_checks_queued_when_the_model_stops_are_finished_before_submitting(self):
         run = self.fake([cheap_tool("arena_evaluate", {"proof": FIXTURE.read_text()}), {"text": "done"}])
         self.assertEqual(run.json("submission.json")["candidate"], "#2", run.stdout)
         self.assertIn("Submission: #2 proxy 76.72", run.stdout)
+
+
+ARENA_TOOLS = {"arena_candidate", "arena_declaration", "arena_evaluate", "arena_idea", "arena_polish",
+               "arena_probe", "arena_profile", "arena_skill_read", "arena_source"}
+LEAN_TOOLS = {f"mcp__arena_lean__{name}" for name in
+              ("lean_goal", "lean_diagnostic_messages", "lean_multi_attempt", "lean_local_search", "lean_hover_info")}
+
+
+def declared_tools(request: dict) -> set[str]:
+    """Tool names declared in a request; Pi carries declarations in the system message sections."""
+    import re
+    return set(re.findall(r'"name": "((?:mcp__|arena_)[A-Za-z0-9_]+|codemode|tool_search)"', json.dumps(request["messages"][0])))
+
+
+class SkillToolNamesTests(unittest.TestCase):
+    """The skill must not send the model to tools it does not have."""
+
+    def test_skill_mentions_only_tools_the_model_has(self):
+        import re
+        available = ARENA_TOOLS | {name.removeprefix("mcp__arena_lean__") for name in LEAN_TOOLS}
+        for path in sorted(SKILL_DIR.rglob("*.md")):
+            if path.name == "PROVENANCE.md":
+                continue
+            named = set(re.findall(r"\b((?:lean|arena)_[a-z_]+)\b", path.read_text()))
+            # Option names such as lean_options are not tools; tool names are what we guard.
+            tools = {name for name in named if name.startswith("arena_") or name in available
+                     or name.removeprefix("lean_") in TOOL_WORDS}
+            self.assertEqual(tools - available, set(), path.name)
+
+
+TOOL_WORDS = {"build", "code_actions", "completions", "declaration_file", "file_outline", "get_widgets",
+              "get_widget_source", "hammer_premise", "leanfinder", "leansearch", "loogle", "minimal_hypotheses",
+              "profile_proof", "references", "run_code", "term_goal", "verify", "state_search", "file_contents",
+              "goal", "diagnostic_messages", "multi_attempt", "local_search", "hover_info"}
+
+
+@unittest.skipUnless(PI_AVAILABLE and FIXTURE.exists() and shutil.which("uvx"), "pi, uvx and the Strata fixture are required")
+class LeanMcpTests(unittest.TestCase):
+    """The real lean-lsp-mcp server, driven through Pi by the scripted provider."""
+
+    def test_only_the_declared_tools_exist_and_each_lean_tool_works_on_the_candidate_file(self):
+        from arena.campaign import problem, run_dir
+        run = FakeRun([], timeout=600)
+        self.addCleanup(run.cleanup)
+        run.command = [item for item in run.command if item != "--no-mcp"]
+        path = str(run_dir(run.run_id) / "scratch" / "project" / problem("Core.InitsUpdatesComm")["file_path"])
+        calls = [("arena_evaluate", {"proof": FIXTURE.read_text()}),
+                 ("mcp__arena_lean__lean_goal", {"file_path": path, "line": 960}),
+                 ("mcp__arena_lean__lean_diagnostic_messages", {"file_path": path, "start_line": 950, "end_line": 976}),
+                 ("mcp__arena_lean__lean_hover_info", {"file_path": path, "line": 953, "column": 3}),
+                 ("mcp__arena_lean__lean_local_search", {"query": "InitStatesUpdated"}),
+                 ("mcp__arena_lean__lean_multi_attempt", {"file_path": path, "line": 960, "snippets": ["skip"]})]
+        run.script.write_text(json.dumps([cheap_tool(name, args) for name, args in calls] + [{"text": "done"}]))
+        run.run()
+        requests = run.requests
+        self.assertGreaterEqual(len(requests), len(calls) + 1, run.stdout + run.result.stderr[-2000:])
+        # The tool list is complete and identical from the first request: nothing appears later
+        # (cache prefix), and Pi's codemode sandbox / tool_search never activate.
+        for request in requests:
+            self.assertEqual(declared_tools(request), ARENA_TOOLS | LEAN_TOOLS)
+        results = {m["toolName"]: m for m in requests[-1]["messages"] if m["role"] == "toolResult"}
+        for name, _ in calls:
+            self.assertFalse(results[name].get("isError"), f"{name}: {message_text(results[name])[:300]}")
+        self.assertIn("Hup", message_text(results["mcp__arena_lean__lean_goal"]))
+        self.assertIn("InitStatesUpdated", message_text(results["mcp__arena_lean__lean_local_search"]))
+        self.assertIn("UpdateStates", message_text(results["mcp__arena_lean__lean_hover_info"]))
+        settings = json.loads((run_dir(run.run_id) / "scratch" / "project" / ".pi" / "settings.json").read_text())
+        self.assertIs(settings["autoEnableCodemode"], False)
+
+
+@unittest.skipUnless(PI_AVAILABLE, "pi and the Strata fixture are required")
+class AnthropicWireTests(unittest.TestCase):
+    """Qwen through Pi's real Anthropic Messages client: what the provider receives is what Pi built."""
+
+    def run_qwen(self, thinking: str, replies: list[dict]) -> tuple[FakeRun, AnthropicWire]:
+        wire = AnthropicWire(replies)
+        self.addCleanup(wire.close)
+        run = FakeRun([], "--thinking", thinking, model="qwen3.8-flash", env={"ARENA_FAKE_WIRE_URL": wire.url})
+        self.addCleanup(run.cleanup)
+        return run.run(), wire
+
+    def test_every_thinking_level_produces_payloads_the_api_accepts(self):
+        for thinking in ("low", "medium", "high"):
+            with self.subTest(thinking=thinking):
+                run, wire = self.run_qwen(thinking, [{"tool": "arena_idea", "input": {"title": "An idea"}},
+                                                     {"text": "done"}])
+                self.assertEqual(wire.rejections, [], run.stdout[-800:])
+                self.assertGreaterEqual(len(wire.payloads), 2)
+                for payload in wire.payloads:
+                    self.assertLessEqual(payload["max_tokens"], 16_000)
+                    if payload.get("thinking", {}).get("type") == "enabled":
+                        self.assertLess(payload["thinking"]["budget_tokens"], payload["max_tokens"])
+                self.assertNotEqual(run.json("summary.json")["stop_reason"], "error_loop")
+                self.assertEqual(run.json("summary.json")["tools"]["error_total"], 0)
+                self.assertEqual(run.result.returncode, 0, run.stdout[-800:])
 
 
 @unittest.skipUnless(PI_AVAILABLE, "pi and the Strata fixture are required")

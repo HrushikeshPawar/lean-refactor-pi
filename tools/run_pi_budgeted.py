@@ -221,7 +221,10 @@ def main() -> int:
     (shadow / ".pi").mkdir(exist_ok=True)
     (shadow / ".pi" / "settings.json").write_text(json.dumps({"compaction": {
         "enabled": True, "keepRecentTokens": args.compact_keep_tokens,
-        "reserveTokens": max(0, MODEL_WINDOWS[args.model] - args.compact_at_tokens)}}, indent=2) + "\n")
+        "reserveTokens": max(0, MODEL_WINDOWS[args.model] - args.compact_at_tokens)},
+        # The model gets only declared tools; Pi's codemode sandbox could call any tool and
+        # non-LLM models outside the Arena budget guard.
+        "autoEnableCodemode": False}, indent=2) + "\n")
     event_log = directory / "events.jsonl"
     event_offset = event_log.stat().st_size if event_log.exists() else 0
     state: dict = {"process": None, "signal": None, "timer": None}

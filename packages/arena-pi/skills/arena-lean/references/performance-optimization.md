@@ -23,32 +23,22 @@ Advanced patterns for preventing elaboration timeouts and type-checking performa
 
 ---
 
-## Fast Path: Profile with LSP (Preferred)
+## Fast Path: Profile with `arena_profile` (Preferred)
 
-Use `lean_profile_proof` to identify slow lines inside a theorem before optimizing.
+Use `arena_profile` to see where a compiling proof's heartbeats go before optimizing. Give
+`candidate: "#N"`, a probe id `"pN"`, or nothing for the current candidate.
 
-```
-lean_profile_proof(file_path="/path/to/file.lean", line=10)
-```
-
-**Example output:**
-```json
-{
-  "total_time_ms": 2450,
-  "lines": [
-    {"line": 12, "tactic": "simp [add_comm, add_assoc]", "time_ms": 1200},
-    {"line": 13, "tactic": "ring", "time_ms": 850}
-  ]
-}
-```
+The result lists heartbeats per proof line or tactic block (inclusive and self cost), each entry's share
+of the total, its nesting, the top self costs with cumulative share, and how the profiled total compares
+with the measured whole-proof heartbeats (the remainder is term elaboration and the kernel check).
 
 ### Fix Workflow
 
-1. **Profile** the slow theorem with `lean_profile_proof`
-2. **Identify** the slowest line(s) from the `lines` array (sort by `time_ms`)
-3. **Inspect tactic** - look at the `tactic` field to understand what's slow
-4. **Apply targeted fix** based on tactic type (see below)
-5. **Re-profile** to verify improvement
+1. **Profile** the candidate with `arena_profile`
+2. **Identify** the lines with the largest self cost
+3. **Inspect** the tactic on those lines and read its goal with `lean_goal`
+4. **Apply a targeted fix** based on the tactic type (see below), try it with `lean_multi_attempt`
+5. **Evaluate and re-profile** to check that the cost was removed, not moved
 
 ### Common Fixes by Tactic Type
 
@@ -518,11 +508,12 @@ def complexFrozen := frozenF (frozenG (frozenH X))
 
 ### Preferred: LSP Profiling
 
-Use `lean_profile_proof(file_path, line)` (line = theorem start, 1-indexed) for fast, per-line timing data. See "Fast Path" section above.
+Use `arena_profile` for per-line heartbeat data. See the "Fast Path" section above.
 
-### Fallback: Trace-Based Debugging
+### Background: Trace-Based Debugging
 
-When LSP isn't available, use Lean's built-in tracing:
+Lean's built-in tracing, for reference (candidates may not contain `set_option`, so these apply only to
+understanding what the profile shows):
 
 **See elaboration heartbeats:**
 ```lean

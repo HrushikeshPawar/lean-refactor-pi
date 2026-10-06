@@ -13,4 +13,8 @@
 - grind-tactic.md
 - calc-patterns.md
 - compilation-errors.md
-- lean-lsp-server.md
+
+Adapted for the Arena (the model has no shell, no `lake build`, and only five Lean tools):
+
+- lean-lsp-server.md: rewritten to describe only the Lean tools the harness exposes.
+- performance-optimization.md: the profiling sections use `arena_profile` instead of `lean_profile_proof`.

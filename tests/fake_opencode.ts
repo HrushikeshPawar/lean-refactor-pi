@@ -5,6 +5,10 @@
  *     error?: string, delay_ms?: number }
  * A step is consumed per provider request; once exhausted the model answers with plain text and stops.
  * ARENA_FAKE_LOG receives one JSON line per request: the full message transcript and thinking level.
+ *
+ * Wire mode: ARENA_FAKE_WIRE_URL points at a local HTTP server (tests/pi_support.py AnthropicWire).
+ * Qwen is then served by Pi's real Anthropic Messages client, so the exact payload Pi and the
+ * budget guard build is what the server validates.
  */
 import { appendFileSync, readFileSync } from "node:fs";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai/compat";
@@ -23,6 +27,17 @@ export default function fakeOpenCode(pi: ExtensionAPI) {
   const script: Step[] = process.env.ARENA_FAKE_SCRIPT
     ? JSON.parse(readFileSync(process.env.ARENA_FAKE_SCRIPT, "utf8")) : [];
   const zeroCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+  if (process.env.ARENA_FAKE_WIRE_URL) {
+    pi.registerProvider("opencode-go", {
+      api: "anthropic-messages", apiKey: "offline-test", baseUrl: process.env.ARENA_FAKE_WIRE_URL,
+      models: [{ id: "qwen3.8-flash", name: "Offline Qwen wire fixture", api: "anthropic-messages",
+        baseUrl: process.env.ARENA_FAKE_WIRE_URL, reasoning: true, input: ["text"],
+        compat: { allowEmptySignature: true },
+        cost: { input: 0.1, output: 0.4, cacheRead: 0.01, cacheWrite: 0.125 },
+        contextWindow: 1_000_000, maxTokens: 131_072 }],
+    });
+    return;
+  }
   pi.registerProvider("opencode-go", {
     api: "openai-responses", apiKey: "offline-test", baseUrl: "http://127.0.0.1:0",
     models: [{ id: "gpt-6-luna", name: "Offline Luna fixture", reasoning: true,
@@ -45,7 +60,8 @@ export default function fakeOpenCode(pi: ExtensionAPI) {
           }
           if (process.env.ARENA_FAKE_LOG) {
             appendFileSync(process.env.ARENA_FAKE_LOG, `${JSON.stringify({ index,
-              thinking: options?.reasoning ?? null, messages: context.messages })}\n`);
+              thinking: options?.reasoning ?? null, tools: (context.tools ?? []).map(tool => tool.name),
+              messages: context.messages })}\n`);
           }
           if (process.env.ARENA_FAKE_CRASH === "1") process.exit(23);
           if (process.env.ARENA_FAKE_ERROR === "1") throw new Error("Offline provider failure with unknown usage");

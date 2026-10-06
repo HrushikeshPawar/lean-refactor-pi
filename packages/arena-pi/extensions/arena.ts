@@ -12,6 +12,12 @@ const root = resolve(import.meta.dirname, "../../..");
 const workspaces = resolve(root, "workspaces");
 const SKILL_READ_LIMIT = 24_000;
 const MAX_ERROR_STREAK = 3;
+export const LEAN_DIRECT_TOOLS = ["lean_goal", "lean_diagnostic_messages", "lean_multi_attempt",
+  "lean_local_search", "lean_hover_info"];
+const LEAN_DISABLED_TOOLS = ["lean_build", "lean_code_actions", "lean_completions", "lean_declaration_file",
+  "lean_file_outline", "lean_get_widgets", "lean_get_widget_source", "lean_hammer_premise", "lean_leanfinder",
+  "lean_leansearch", "lean_loogle", "lean_minimal_hypotheses", "lean_profile_proof", "lean_references",
+  "lean_run_code", "lean_term_goal", "lean_verify"];
 
 function inside(path: string, parent: string): boolean {
   const rel = relative(parent, path);
@@ -311,16 +317,15 @@ export default function arenaExtension(pi: ExtensionAPI) {
           env: {
             LEAN_PROJECT_PATH: runDirectory ? resolve(runDirectory, "scratch", "project") : resolve(workspaces, `${row.source}-${version}`),
             LEAN_LOG_LEVEL: "WARNING",
-            LEAN_MCP_DISABLED_TOOLS: "lean_leansearch,lean_leanfinder,lean_loogle,lean_hammer_premise",
+            // Only the five tools below are served. Everything else is off: network search,
+            // builds and arbitrary code runs would bypass the harness, and scoring already has
+            // arena_evaluate / arena_profile.
+            LEAN_MCP_DISABLED_TOOLS: LEAN_DISABLED_TOOLS.join(","),
           },
-          exposure: "codemode",
-          toolExposure: {
-            lean_diagnostic_messages: "direct",
-            lean_goal: "direct",
-            lean_multi_attempt: "direct",
-            lean_local_search: "direct",
-            "*": "codemode",
-          },
+          // Declared directly so the tool list is fixed from the first request (cache prefix).
+          // "hidden" for everything else keeps Pi's codemode sandbox from activating.
+          exposure: "hidden",
+          toolExposure: Object.fromEntries(LEAN_DIRECT_TOOLS.map(name => [name, "direct"])),
         });
       }
       kickAutocheck();
