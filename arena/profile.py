@@ -106,7 +106,7 @@ def summarize(records: list[dict], source_lines: list[str], measured: int | None
 def _instrumented(row: dict, proof: str, version: str, commit: str, depth: int) -> tuple[list[dict], int | None, dict, str]:
     built = candidate_file(row, proof, version, commit)
     inserted = preamble(depth)
-    text = built["text"][:built["offset"]] + inserted + built["text"][built["offset"]:]
+    text = built["text"][:built["head"]] + inserted + built["text"][built["head"]:]
     ran = run_lean(row, built["path"], text)
     if ran is None:
         raise ValueError("Lean timed out while profiling")

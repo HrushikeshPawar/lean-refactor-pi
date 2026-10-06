@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from arena import campaign
-from arena.engine import (WRAPPER_LINES, ROOT, candidate_file, evaluate,
+from arena.engine import (WRAPPER_LINES, ROOT, candidate_file, declaration_head, evaluate,
                           instrument_sorries, map_measured_line, parse_diagnostics, problem,
                           reconstruct, structure_diagnostics, validate_proof)
 
@@ -103,6 +103,21 @@ class DiagnosticMappingTests(unittest.TestCase):
         self.assertEqual(result["outside_target"]["errors"], 1)
         self.assertEqual(result["outside_target"]["warnings"], 1)
         self.assertEqual(result["error_headlines"], ["line 12 (proof line 3): boom"])
+
+    def test_wrappers_go_before_a_doc_comment_and_attributes(self):
+        # A command inserted between a doc comment and its declaration does not parse
+        # ("unexpected token 'open'; expected 'lemma'"), as on the CSLib and PhysLib rows.
+        text = "def a := 1\n\n/-- doc -/\n@[simp]\ntheorem t : True := trivial\n"
+        self.assertEqual(declaration_head(text, text.index("theorem")), text.index("/--"))
+        plain = "def a := 1\n\ntheorem t : True := trivial\n"
+        self.assertEqual(declaration_head(plain, plain.index("theorem")), plain.index("theorem"))
+        # A binder list ending in `]` and a `@[expose] public section` line are not attributes
+        # of the declaration (PhysLib).
+        physlib = ("@[expose] public section\n\nvariable {Y} [MeasurableSpace Y]\n\n/-- doc -/\n"
+                   "lemma t : True := trivial\n")
+        self.assertEqual(declaration_head(physlib, physlib.index("lemma")), physlib.index("/--"))
+        module_doc = "/-! module notes -/\ntheorem t : True := trivial\n"
+        self.assertEqual(declaration_head(module_doc, module_doc.index("theorem")), module_doc.index("theorem"))
 
     def test_sorry_instrumentation_keeps_line_count(self):
         proof = "theorem t : True := by\n  constructor\n  · sorry\n  sorry\n  exact (by sorry)"

@@ -61,7 +61,7 @@ def lean_context(name: str) -> dict:
     roots = "" if is_standalone(row) else ", ".join(json.dumps(part) for part in sorted({row["file_path"].split("/")[0]}))
     inserted = source.replace("@@ROOTS@@", roots)
     built = candidate_file(row, row["src"], version, commit)
-    text = built["text"][:built["offset"]] + inserted + built["text"][built["offset"]:]
+    text = built["text"][:built["head"]] + inserted + built["text"][built["head"]:]
     ran = run_lean(row, built["path"], text)
     if ran is None:
         return {"error": "Lean timed out while collecting context"}

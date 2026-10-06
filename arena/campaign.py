@@ -108,7 +108,7 @@ def _declaration_in_lean(name: str, symbol: str) -> dict:
     version, commit = versions(row)[0]
     built = candidate_file(row, row["src"], version, commit)
     inserted = (Path(__file__).with_name("lean") / "declaration.lean").read_text() + f"arena_decl {symbol}\n\n"
-    text = built["text"][:built["offset"]] + inserted + built["text"][built["offset"]:]
+    text = built["text"][:built["head"]] + inserted + built["text"][built["head"]:]
     ran = run_lean(row, built["path"], text)
     if ran is None:
         raise ValueError("Lean timed out while resolving the name")

@@ -116,6 +116,31 @@ def measure_version(row: dict) -> tuple[str, str]:
     return listed[0]
 
 
+def declaration_head(text: str, offset: int) -> int:
+    """Start of the declaration at `offset`, including a doc comment and attributes right before it.
+
+    Commands inserted ahead of a declaration (the heartbeat, context and profile wrappers) must
+    go before its doc comment and attributes, which belong to the same command.
+    """
+    head = offset
+    while True:
+        before = text[:head].rstrip()
+        if before.endswith("-/"):
+            start = before.rfind("/--")
+            if start == -1 or "/-" in before[start + 3:-2]:
+                return head
+            head = start
+        elif re.fullmatch(r"@\[[^\n]*\]", (last := before[before.rfind("\n") + 1:]).strip()) \
+                and not re.search(r"\b(section|namespace)\b", last):
+            # Only a whole line that is an attribute list belongs to the declaration; a `]` that
+            # ends a `variable` binder, or `@[expose] public section`, does not.
+            head = before.rfind("\n") + 1
+        elif before.endswith("]"):
+            return head
+        else:
+            return head
+
+
 def candidate_file(row: dict, proof: str, version: str, commit: str, truncate: bool = True) -> dict:
     """Pinned source with only the benchmark lines replaced.
 
@@ -130,7 +155,7 @@ def candidate_file(row: dict, proof: str, version: str, commit: str, truncate: b
         header = row.get("header") or ""
         if not row.get("statement") or not header.strip():
             raise ValueError("A standalone row needs its header and statement")
-        return {"path": path, "text": header + body + "\n", "offset": len(header),
+        return {"path": path, "text": header + body + "\n", "offset": len(header), "head": len(header),
                 "start_line": header.count("\n") + 1, "end_line": header.count("\n") + 1 + body.count("\n")}
     if not row.get("start_line") or not row.get("end_line"):
         raise ValueError("The row does not say where its theorem lives")
@@ -146,7 +171,7 @@ def candidate_file(row: dict, proof: str, version: str, commit: str, truncate: b
     if truncate:
         text = text[:offset + len(body)] + "\n"
     start = source.count("\n", 0, offset) + 1
-    return {"path": path, "text": text, "offset": offset,
+    return {"path": path, "text": text, "offset": offset, "head": declaration_head(text, offset),
             "start_line": start, "end_line": start + body.count("\n")}
 
 
@@ -302,8 +327,8 @@ def compile_version(row: dict, proof: str, version: str, commit: str,
         text = text[:built["offset"]] + instrument_sorries(body) + text[built["offset"] + len(body):]
     wrapper_start = None
     if measure:
-        wrapper_start = text[:built["offset"]].count("\n") + 1
-        text = text[:built["offset"]] + HEARTBEAT_WRAPPER + text[built["offset"]:]
+        wrapper_start = text[:built["head"]].count("\n") + 1
+        text = text[:built["head"]] + HEARTBEAT_WRAPPER + text[built["head"]:]
     output = run_lean(row, built["path"], text)
     if output is None:
         return {"passed": False, "error": "Lean timed out after 180 seconds"}
