@@ -320,8 +320,8 @@ python tools/run_experiment_matrix.py --theorem Core.InitsUpdatesComm --prefix v
 Watch (one terminal each):
 ```bash
 tail -f runs/pi-budget/v5-rep-20261006-r3-matrix/*.log
-PYTHONPATH=. uv run --no-project python tools/serve_candidate_graph.py v5-rep-20261006-r3-model-gpt-6-luna --port 8765
-PYTHONPATH=. uv run --no-project python tools/serve_candidate_graph.py v5-rep-20261006-r3-model-qwen3.8-flash --port 8766
+# one page for every replicate: an overview table plus a live tab per run (new runs appear by themselves)
+PYTHONPATH=. uv run --no-project python tools/serve_candidate_graph.py --match 'v5-*-20261006-*' --port 8765
 ```
 Stop with one Ctrl+C in the matrix terminal (a clean stop that writes `cost.json` and the summary).
 
