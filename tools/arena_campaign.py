@@ -5,18 +5,19 @@ import argparse
 import json
 from pathlib import Path
 
-from arena.campaign import candidate, declaration, frontier, init, record_evaluation, source_range, set_decision
+from arena.campaign import candidate, declaration, frontier, init, probe, record_evaluation, record_idea, source_range, set_decision
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("init", "evaluate", "frontier", "candidate", "decision", "source", "declaration"))
+    parser.add_argument("action", choices=("init", "evaluate", "probe", "idea", "frontier", "candidate", "decision", "source", "declaration"))
     parser.add_argument("--theorem", required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--proof-file", type=Path)
     parser.add_argument("--mode", choices=("fast", "full"), default="fast")
     parser.add_argument("--parent", action="append", default=[])
     parser.add_argument("--hypothesis", default="")
+    parser.add_argument("--idea-id")
     parser.add_argument("--candidate-id")
     parser.add_argument("--path")
     parser.add_argument("--first", type=int)
@@ -24,13 +25,20 @@ def main() -> int:
     parser.add_argument("--symbol")
     parser.add_argument("--decision", choices=("pursue", "park"))
     parser.add_argument("--reason", default="")
+    parser.add_argument("--title")
+    parser.add_argument("--goal")
     args = parser.parse_args()
     try:
         if args.action == "init":
             result = init(args.theorem, args.run_id)
         elif args.action == "evaluate":
             result = record_evaluation(args.theorem, args.run_id, args.proof_file.read_text(),
-                                       args.mode, args.parent, args.hypothesis)
+                                       args.mode, args.parent, args.hypothesis, idea_id=args.idea_id)
+        elif args.action == "probe":
+            result = probe(args.theorem, args.run_id, args.proof_file.read_text(),
+                           args.idea_id, args.parent[0])
+        elif args.action == "idea":
+            result = record_idea(args.run_id, args.title, args.goal, args.path, args.first, args.last)
         elif args.action == "frontier":
             result = frontier(args.run_id)
         elif args.action == "candidate":
