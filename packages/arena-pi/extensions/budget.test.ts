@@ -42,9 +42,17 @@ test("fails closed on unpriced models or invalid usage", () => {
   assert.throws(() => sessionSpend([{ type: "message", message: { role: "assistant",
     provider: "other", model: "gpt-6-luna", usage } }] as never, "gpt-6-luna"));
   assert.throws(() => usageCost({ ...usage, output: Number.NaN }, "gpt-6-luna"));
-  assert.throws(() => sessionSpend([{ type: "message", message: { role: "assistant",
-    provider: "opencode-go", model: "gpt-6-luna", stopReason: "error",
-    usage: { ...usage, totalTokens: 0 } } }] as never, "gpt-6-luna"));
+});
+
+test("undispatched zero-token errors do not poison exact session resume", () => {
+  const entries = [
+    { type: "message", message: { role: "assistant", provider: "arena-guard",
+      model: "gpt-6-luna", stopReason: "error", usage: { input: 0, output: 0,
+        cacheRead: 0, cacheWrite: 0, totalTokens: 0 } } },
+    { type: "message", message: { role: "assistant", provider: "opencode-go",
+      model: "gpt-6-luna", stopReason: "stop", usage } },
+  ];
+  assert.equal(sessionSpend(entries as never, "gpt-6-luna"), 0.275);
 });
 
 test("a bounded final payload permits a ten-cent experiment", () => {

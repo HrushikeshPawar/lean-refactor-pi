@@ -26,6 +26,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
   let plateau = 0;
   let previousProgress = "";
   let readEntries: (() => SessionEntry[]) | undefined;
+  let modelRegistry: ExtensionContext["modelRegistry"] | undefined;
 
   async function campaign(action: string, args: string[] = []): Promise<Record<string, any>> {
     if (!active || !runId) throw new Error("Arena run is not selected");
@@ -76,6 +77,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
   pi.on("session_start", (_event, ctx) => {
     active = undefined;
     readEntries = () => ctx.sessionManager.getEntries();
+    modelRegistry = ctx.modelRegistry;
     const latest = costEvents().filter(item => item.kind === "control").at(-1);
     continuations = Number(latest?.continuations ?? 0);
     plateau = Number(latest?.plateau ?? 0);
@@ -95,14 +97,16 @@ export default function arenaExtension(pi: ExtensionAPI) {
       if (!isBudgetModel(model.id) || !active || !runDirectory) {
         throw new Error("Unpriced or unselected Arena model");
       }
-      const physical = pi.modelRegistry.find("opencode-go", model.id);
+      const runtime = modelRegistry;
+      if (!runtime) throw new Error("Arena model registry is unavailable");
+      const physical = runtime.find("opencode-go", model.id);
       if (!physical) throw new Error(`OpenCode Go model unavailable: ${model.id}`);
       if (physical.contextWindow > MODELS[model.id].contextWindow ||
           physical.maxTokens > MODELS[model.id].maxTokens) {
         throw new Error(`Arena budget reservation is outdated for ${model.id}`);
       }
       const { apiKey: _guardKey, headers: _guardHeaders, env: _guardEnv, ...rest } = options ?? {};
-      return pi.modelRegistry.streamSimple(physical, context, {
+      return runtime.streamSimple(physical, context, {
         ...rest,
         maxTokens: Math.min(rest.maxTokens ?? MAX_REQUEST_OUTPUT_TOKENS, MAX_REQUEST_OUTPUT_TOKENS),
         onPayload: async payload => {

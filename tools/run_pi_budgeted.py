@@ -21,6 +21,19 @@ ROOT = Path(__file__).resolve().parents[1]
 MODELS = ("gpt-6-luna", "deepseek-v4.1-flash")
 
 
+def attempt_has_model_error(event_log: Path, offset: int) -> bool:
+    """Inspect only events emitted by this launch, not earlier failed resume attempts."""
+    with event_log.open("rb") as events:
+        events.seek(offset)
+        for line in events:
+            event = json.loads(line)
+            if event.get("type") == "message_end":
+                message = event.get("message", {})
+                if message.get("role") == "assistant" and message.get("stopReason") in ("error", "aborted"):
+                    return True
+    return False
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True, choices=MODELS)
@@ -56,6 +69,7 @@ def main() -> int:
         "pi", "--offline", "--approve", "--mode", "json",
         "--no-builtin-tools", "--no-context-files", "--no-extensions",
         "--no-skills", "--no-prompt-templates",
+        "--extension", "builtin:mcp",
         "--extension", str(ROOT / "packages/arena-pi/extensions/arena.ts"),
         "--model", f"arena-budget/{args.model}",
         "--session-id", args.run_id,
@@ -100,7 +114,9 @@ def main() -> int:
     else:
         print("Merge worker did not become ready; inspect merge-worker.log", file=sys.stderr)
         return 1
-    with (directory / "events.jsonl").open("a") as output:
+    event_log = directory / "events.jsonl"
+    event_offset = event_log.stat().st_size if event_log.exists() else 0
+    with event_log.open("a") as output:
         completed = subprocess.run(command, cwd=shadow, env=env, stdin=subprocess.DEVNULL,
                                    stdout=output, check=False)
     report_path = directory / "cost.json"
@@ -118,15 +134,9 @@ def main() -> int:
     if report["hard_cap_usd"] != args.hard_cap_usd or report["spent_usd"] + report.get("unresolved_usd", 0) > args.hard_cap_usd:
         print("Arena hard cap exceeded", file=sys.stderr)
         return 1
-    with (directory / "events.jsonl").open() as events:
-        for line in events:
-            event = json.loads(line)
-            if event.get("type") == "message_end":
-                message = event.get("message", {})
-                if message.get("role") == "assistant" and message.get("stopReason") in ("error", "aborted"):
-                    print("Pi ended with a model error or abort; inspect events.jsonl",
-                          file=sys.stderr)
-                    return 1
+    if attempt_has_model_error(event_log, event_offset):
+        print("Pi ended with a model error or abort; inspect events.jsonl", file=sys.stderr)
+        return 1
     return 0
 
 

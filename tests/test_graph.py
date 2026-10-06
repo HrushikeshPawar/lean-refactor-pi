@@ -7,6 +7,7 @@ from arena.graph import common_base, merge_text, ranked_frontier
 from arena import campaign
 from tools.build_candidate_graph import build_snapshot
 from tools.serve_candidate_graph import graph_payload
+from tools.run_pi_budgeted import attempt_has_model_error
 
 
 class MergeTests(unittest.TestCase):
@@ -160,6 +161,19 @@ class ViewerTests(unittest.TestCase):
                 timeline = graph_payload("viewer")["cost_timeline"]
             self.assertEqual([round(row["spent_usd"], 3) for row in timeline], [0, 0.1, 0.1, 0.3])
             self.assertEqual([row["outstanding_usd"] for row in timeline], [0.4, 0, 0.5, 0])
+
+
+class RunnerTests(unittest.TestCase):
+    def test_resume_ignores_old_model_errors_but_catches_new_ones(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "events.jsonl"
+            path.write_text('{"type":"message_end","message":{"role":"assistant","stopReason":"error"}}\n')
+            offset = path.stat().st_size
+            path.write_text(path.read_text() + '{"type":"message_end","message":{"role":"assistant","stopReason":"stop"}}\n')
+            self.assertFalse(attempt_has_model_error(path, offset))
+            offset = path.stat().st_size
+            path.write_text(path.read_text() + '{"type":"message_end","message":{"role":"assistant","stopReason":"aborted"}}\n')
+            self.assertTrue(attempt_has_model_error(path, offset))
 
 
 if __name__ == "__main__":

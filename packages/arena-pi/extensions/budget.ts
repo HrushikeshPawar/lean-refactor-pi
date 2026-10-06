@@ -64,7 +64,9 @@ export function sessionSpend(entries: readonly SessionEntry[], sessionModel: Bud
       if (entry.message.role === "assistant") {
         if ((entry.message.stopReason === "error" || entry.message.stopReason === "aborted")
           && !entry.message.usage?.totalTokens) {
-          throw new Error("Arena budget cannot price a failed or aborted provider request");
+          // A failure before transport has no session usage. Any request that
+          // did reserve funds is charged by the separate durable cost journal.
+          continue;
         }
         spend += usageCost(entry.message.usage,
           pricedModel(entry.message.provider, entry.message.model, sessionModel));
