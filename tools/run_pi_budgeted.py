@@ -16,10 +16,15 @@ from datetime import datetime
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from arena.campaign import init, packet, run_dir
+from tools.arena_skill import SKILL_DIR, skill_hash, skill_prompt
+
+SYSTEM_PROMPT = ("You are optimizing one Lean 4 proof for the Lean Refactor Arena. Only the listed tools are "
+                 "available. Keep replies short; spend effort on proofs, not prose.")
 
 
 ROOT = Path(__file__).resolve().parents[1]
 MODELS = ("gpt-6-luna", "qwen3.8-flash", "deepseek-v4.1-flash")
+THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
 _tool_started: dict[str, tuple[float, dict]] = {}
 
 
@@ -100,6 +105,12 @@ def main() -> int:
     parser.add_argument("--prompt-file", type=Path, help="Optional extra instructions appended after the source packet")
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--hard-cap-usd", type=float, default=1.0)
+    parser.add_argument("--thinking", choices=THINKING_LEVELS, default="high",
+                        help="Reasoning level, recorded in run-config.json (default: high)")
+    parser.add_argument("--no-skill", action="store_true", help="Run without the Arena Lean skill (A/B factor)")
+    parser.add_argument("--no-mcp", action="store_true", help="Do not load the Lean MCP server (offline tests)")
+    parser.add_argument("--test-extension", action="append", default=[], type=Path,
+                        help="Extra Pi extension, used only to load the offline fake provider in tests")
     parser.add_argument("--resume-run", action="store_true", help="Resume the exact Pi session and cost ledger")
     parser.add_argument("--dry-run", action="store_true", help="Validate setup without launching Pi")
     args = parser.parse_args()
@@ -121,6 +132,9 @@ def main() -> int:
         config = json.loads((directory / "run-config.json").read_text())
         if (config["theorem"], config["model"], config["hard_cap_usd"]) != (args.theorem, args.model, args.hard_cap_usd):
             parser.error("resume theorem, model, or cap differs from the original run")
+        if config.get("thinking") not in (None, args.thinking) or (
+                config.get("skill") and config["skill"]["sha256"] != (None if args.no_skill else skill_hash())):
+            parser.error("resume thinking level or skill differs from the original run")
         prompt = "Resume the existing Arena run from its recorded candidate frontier. Continue improving the proof."
     else:
         prompt = packet(args.theorem) + ("\nAdditional instructions:\n" + extra + "\n" if extra else "")
@@ -128,8 +142,12 @@ def main() -> int:
         "pi", "--offline", "--approve", "--mode", "json",
         "--no-builtin-tools", "--no-context-files", "--no-extensions",
         "--no-skills", "--no-prompt-templates",
-        "--extension", "builtin:mcp",
+        *([] if args.no_mcp else ["--extension", "builtin:mcp"]),
+        *[item for path in args.test_extension for item in ("--extension", str(path.resolve()))],
         "--extension", str(ROOT / "packages/arena-pi/extensions/arena.ts"),
+        "--system-prompt", SYSTEM_PROMPT,
+        *([] if args.no_skill else ["--append-system-prompt", skill_prompt()]),
+        "--thinking", args.thinking,
         "--model", f"arena-budget/{args.model}",
         "--session-id", args.run_id,
         "--session-dir", str(directory / "session"),
@@ -145,7 +163,10 @@ def main() -> int:
         init(args.theorem, args.run_id, extra)
         (directory / "run-config.json").write_text(json.dumps({"theorem": args.theorem,
             "model": args.model, "hard_cap_usd": args.hard_cap_usd,
-            "packet_sha256": hashlib.sha256(prompt.encode()).hexdigest()}, indent=2) + "\n")
+            "packet_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
+            "thinking": args.thinking,
+            "skill": None if args.no_skill else {"name": "arena-lean", "sha256": skill_hash()}},
+            indent=2) + "\n")
     shadow = directory / "scratch" / "project"
     env = os.environ.copy()
     env["ARENA_BUDGET_REQUIRED"] = "1"
@@ -153,6 +174,9 @@ def main() -> int:
     env["ARENA_RUN_ID"] = args.run_id
     env["ARENA_MODEL"] = args.model
     env["ARENA_HARD_CAP_USD"] = str(args.hard_cap_usd)
+    env["ARENA_SKILL_DIR"] = "" if args.no_skill else str(SKILL_DIR)
+    if args.no_mcp:
+        env["ARENA_NO_MCP"] = "1"
     env.pop("ARENA_STOP_USD", None)
     env["ARENA_BUDGET_REPORT_PATH"] = str(directory / "cost.json")
     worker_command = [sys.executable, "-m", "tools.arena_merge_worker", args.run_id,

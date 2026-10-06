@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { appendFileSync, closeSync, fsyncSync, mkdirSync, openSync, readFileSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve, relative, sep } from "node:path";
 import { Type } from "typebox";
@@ -9,6 +9,7 @@ import { BUDGET_PROVIDER, budgetLimits, cacheUtilization, isBudgetModel, MAX_REQ
 
 const root = resolve(import.meta.dirname, "../../..");
 const workspaces = resolve(root, "workspaces");
+const SKILL_READ_LIMIT = 24_000;
 
 function inside(path: string, parent: string): boolean {
   const rel = relative(parent, path);
@@ -247,7 +248,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
       }
       active = wanted;
       const first = Object.entries(row.version_info[0] ?? {})[0];
-      if (first) {
+      if (first && process.env.ARENA_NO_MCP !== "1") {
         const [version] = first;
         pi.registerMcpServer("arena-lean", {
           command: "uvx",
@@ -291,23 +292,6 @@ export default function arenaExtension(pi: ExtensionAPI) {
         }
       }
     }
-  });
-
-  pi.registerTool({
-    name: "arena_target",
-    label: "Arena target",
-    description: "Return the selected theorem, original proof, and pinned benchmark metadata.",
-    parameters: Type.Object({}),
-    async execute() {
-      if (!active) throw new Error("Select a theorem with /arena first");
-      const rows = (await readFile(resolve(root, "benchmark/original/warmup.jsonl"), "utf8"))
-        .split("\n").filter(Boolean).map((line) => JSON.parse(line));
-      const row = rows.find((item) => item.name === active);
-      const metadata = { name: row.name, statement: row.statement, original_proof: row.src, source: row.source,
-        file_path: row.file_path, version_info: row.version_info,
-        reference_tokens: row.proof_length };
-      return { content: [{ type: "text", text: JSON.stringify(metadata) }], details: metadata };
-    },
   });
 
   const reply = (result: Record<string, any>) =>
@@ -408,6 +392,34 @@ export default function arenaExtension(pi: ExtensionAPI) {
     description: "Restore node \"#N\" or probe \"pN\" into the Lean scratch project (so lean_goal reads it) and return its exact proof and recorded results.",
     parameters: Type.Object({ candidate: Type.String({ description: "#N or pN" }) }),
     async execute(_id, params) { return reply(await campaign("candidate", ["--candidate", params.candidate])); },
+  });
+
+  pi.registerTool({
+    name: "arena_skill_read", label: "Read Arena skill reference",
+    description: "Read a file from the Arena Lean skill (for example references/proof-golfing.md). Without `path`, list the available files. Read-only and scoped to the skill directory.",
+    parameters: Type.Object({ path: Type.Optional(Type.String()), offset: Type.Optional(Type.Number()) }),
+    async execute(_id, params) {
+      const base = process.env.ARENA_SKILL_DIR;
+      if (!base) return reply({ ok: false, error: "No Arena skill is loaded for this run" });
+      const skillRoot = await realpath(base);
+      if (!params.path) {
+        const files: string[] = [];
+        for (const entry of await readdir(skillRoot, { recursive: true, withFileTypes: true })) {
+          if (entry.isFile()) files.push(relative(skillRoot, resolve(entry.parentPath, entry.name)));
+        }
+        return reply({ ok: true, files: files.sort() });
+      }
+      const target = await realpath(resolve(skillRoot, params.path)).catch(() => undefined);
+      if (!target || !inside(target, skillRoot)) {
+        return reply({ ok: false, error: `${params.path} is not a file of the Arena skill; call without path to list files` });
+      }
+      if (!(await stat(target)).isFile()) return reply({ ok: false, error: `${params.path} is a directory` });
+      const text = await readFile(target, "utf8");
+      const start = Math.max(0, params.offset ?? 0);
+      const slice = text.slice(start, start + SKILL_READ_LIMIT);
+      return reply({ ok: true, path: relative(skillRoot, target), offset: start, total_chars: text.length,
+        next_offset: start + SKILL_READ_LIMIT < text.length ? start + SKILL_READ_LIMIT : null, text: slice });
+    },
   });
 
   pi.registerTool({
