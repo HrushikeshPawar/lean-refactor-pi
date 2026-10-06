@@ -61,7 +61,7 @@ class WorkerTests(unittest.TestCase):
         base = "theorem t := by\n  intro x\n  have h := x\n  exact h\n"
         left = base.replace("have h := x", "have h : _ := x")
         right = base.replace("exact h", "simpa using h")
-        def fake_eval(_name, proof, mode):
+        def fake_eval(_name, proof, mode, known=None):
             compat = {"v1": {"passed": True}}
             if mode == "full":
                 compat.update({"v2": {"passed": True}, "v3": {"passed": True}})
@@ -93,7 +93,7 @@ class WorkerTests(unittest.TestCase):
 
     def test_worker_checks_every_open_good_pair_and_deduplicates_combinations(self):
         base = "theorem t := by\n  a\n  b\n  c\n"
-        def fake_eval(_name, proof, mode):
+        def fake_eval(_name, proof, mode, known=None):
             compat = {"v1": {"passed": True}}
             if mode == "full":
                 compat.update({"v2": {"passed": True}, "v3": {"passed": True}})

@@ -53,7 +53,7 @@ class CampaignCliTests(unittest.TestCase):
         self.assertEqual(result["tokens"], 126)
         self.assertTrue(result["metrics"]["assumes_full_compat"])
         self.assertEqual(result["metrics"]["deltas"]["vs_reference"]["tokens"], -98)
-        self.assertEqual(result["best_so_far"]["fast_only"]["candidate"], "#2")
+        self.assertTrue(result["full_check"].startswith("queued"), result)
         self.assertNotIn("proof", result)
         self.assertNotIn("exchange_rates", result)
 
@@ -70,7 +70,7 @@ class CampaignCliTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["metrics"]["proxy"], 76.72)
         self.assertEqual(result["candidate"], "#2")
-        self.assertEqual(result["best_so_far"]["verified"]["candidate"], "#2")
+        self.assertEqual(result["full_check"], "#2 passes all 3 versions: proxy 76.72")
 
     def test_04_probe_with_sorry_reports_goals_and_cannot_be_promoted(self):
         statement = campaign.problem(NAME)["statement"]
@@ -87,18 +87,17 @@ class CampaignCliTests(unittest.TestCase):
         after = campaign.frontier(self.run_id)
         self.assertEqual((len(after["top"]), after["candidates"]), before)
 
-    def test_05_probe_restore_and_promote_without_resending_the_proof(self):
+    def test_05_complete_probe_becomes_a_candidate_and_sorry_probes_restore(self):
         draft = self.good + "\n  -- promoted"
-        probe = cli(self.run_id, "probe", "--proof-file", self.proof(draft), "--idea-id", "i1")
-        self.assertTrue(probe["compat"]["v4.29.1"]["passed"], probe)
-        self.assertTrue(probe["probe"].startswith("p"))
-        restored = cli(self.run_id, "candidate", "--candidate", probe["probe"])
-        self.assertEqual(restored["proof"], draft)
-        self.assertEqual(Path(restored["candidate_path"]).read_text().count("-- promoted"), 1)
-        promoted = cli(self.run_id, "evaluate", "--from-probe", probe["probe"])
-        self.assertTrue(promoted["ok"], promoted)
-        self.assertEqual(promoted["idea_id"], "i1")
-        self.assertTrue(promoted["candidate"].startswith("#"))
+        result = cli(self.run_id, "probe", "--proof-file", self.proof(draft), "--idea-id", "i1")
+        self.assertTrue(result["candidate"].startswith("#"), result)
+        self.assertEqual(result["idea_id"], "i1")
+        self.assertIsNotNone(result["heartbeat"])
+        self.assertTrue(any("recorded as candidate" in note for note in result["notes"]))
+        self.assertTrue(result["full_check"].startswith("queued"))
+        restored = cli(self.run_id, "candidate", "--candidate", "p1")
+        self.assertIn("sorry", restored["proof"])
+        self.assertEqual(Path(restored["candidate_path"]).read_text().count("sorry"), 1)
 
     def test_06_failed_evaluation_reports_aligned_lines(self):
         broken = self.good.replace("exact updatedStateUpdate (InitStatesSomeMonotone Hold Hinits)", "exact rfl")
@@ -128,6 +127,22 @@ class CampaignCliTests(unittest.TestCase):
         self.assertEqual((idea["status"], idea["reason"]), ("parked", "needs more work"))
         self.assertGreaterEqual(idea["attempts"], 1)
         self.assertIn("recent_failures", state)
+
+    def test_09_background_check_state_and_submission(self):
+        fresh = cli(self.run_id, "evaluate", "--proof-file", self.proof(self.good + "\n  -- checked later"))
+        self.assertIn(fresh["candidate"], cli(self.run_id, "state")["checking"])
+        drained = cli(self.run_id, "autocheck")
+        self.assertIn(fresh["candidate"], drained["checked"])
+        self.assertEqual(drained["remaining"], [])
+        published = json.loads((campaign.run_dir(self.run_id) / "state.json").read_text())
+        self.assertTrue(any(item["text"].startswith(f"{fresh['candidate']} passes all 3 versions")
+                            for item in published["updates"]), published)
+        self.assertEqual(published["checking"], [])
+        self.assertIsNotNone(published["best"]["proxy"])
+        answer = cli(self.run_id, "submission")
+        self.assertEqual(answer["candidate"], published["best"]["candidate"])
+        self.assertEqual((campaign.run_dir(self.run_id) / "submission.lean").read_text().split(":=")[0],
+                         self.good.split(":=")[0])
 
     def test_08_source_pagination_and_one_line_errors(self):
         row = campaign.problem(NAME)
@@ -262,12 +277,16 @@ class ProtocolLogicTests(unittest.TestCase):
                                                origin="reference", materialize_live=False)
         campaign._append(self.directory, {"kind": "current", "candidate_id": reference["candidate_id"]})
 
-    @staticmethod
-    def fake_eval(_name, proof, mode):
+    calls: list = []
+
+    @classmethod
+    def fake_eval(cls, _name, proof, mode, known=None):
+        cls.calls.append((proof, mode, sorted(known or {})))
         tokens = len(proof)
-        compat = {"v1": {"passed": "bad" not in proof}}
+        compat = {"v1": (known or {}).get("v1") or {"passed": "bad" not in proof}}
         if mode == "full":
-            compat["v2"] = {"passed": "bad" not in proof}
+            compat["v2"] = {"passed": "bad" not in proof and "old" not in proof,
+                            "error_headlines": [] if "old" not in proof else ["line 3 (proof line 2): unknown tactic"]}
         score = round(100 - tokens, 2)
         metrics = {"tokens": tokens, "heartbeats": 10, "compiled": "bad" not in proof}
         if metrics["compiled"]:
@@ -300,7 +319,7 @@ class ProtocolLogicTests(unittest.TestCase):
         self.assertEqual(better["metrics"]["deltas"]["vs_parent"]["candidate"], "#2")
         self.assertEqual(better["metrics"]["deltas"]["vs_parent"]["tokens"], -3)
         self.assertEqual(better["metrics"]["deltas"]["vs_best"]["candidate"], "#2")
-        self.assertEqual(better["best_so_far"]["fast_only"]["candidate"], "#3")
+        self.assertEqual(campaign.state("logic")["leading_unverified"]["candidate"], "#3")
 
     def test_advisory_states_facts_when_recent_attempts_share_a_lineage_without_gain(self):
         self.evaluate("theorem t := by\n  a")
@@ -334,6 +353,48 @@ class ProtocolLogicTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "FORBIDDEN"):
                 self.evaluate("theorem t := by\n  sorry")
         self.assertEqual(campaign.frontier("logic")["candidates"], 1)
+
+    def test_autocheck_reuses_the_primary_result_and_checks_best_first(self):
+        self.evaluate("theorem t := by\n  aaaa")
+        self.evaluate("theorem t := by\n  a")
+        self.evaluate("theorem t := by\n  bad")
+        self.calls.clear()
+        self.assertEqual(campaign.state("logic")["checking"], ["#3", "#2"])
+        outcome = campaign.autocheck("T", "logic")
+        self.assertEqual(outcome["checked"], ["#3", "#2"])
+        self.assertEqual([(mode, known) for _, mode, known in self.calls], [("full", ["v1"]), ("full", ["v1"])])
+        state = campaign.state("logic")
+        self.assertEqual(state["best"]["candidate"], "#3")
+        self.assertIsNone(state["leading_unverified"])
+        self.assertEqual([u["text"].split(":")[0] for u in state["updates"]],
+                         ["#3 passes all 2 versions", "#2 passes all 2 versions"])
+        self.assertEqual(campaign.autocheck("T", "logic")["checked"], [])
+
+    def test_failed_transfer_is_reported_with_its_headline_and_not_submitted(self):
+        self.evaluate("theorem t := by\n  old")
+        campaign.autocheck("T", "logic")
+        update = campaign.state("logic")["updates"][-1]["text"]
+        self.assertEqual(update, "#2 fails v2 (1/2 pass): line 3 (proof line 2): unknown tactic")
+        self.assertIsNone(campaign.submission("logic")["candidate"])
+        self.evaluate("theorem t := by\n  ok")
+        campaign.autocheck("T", "logic")
+        self.assertEqual(campaign.submission("logic")["candidate"], "#3")
+        self.assertEqual((self.directory / "submission.lean").read_text(), "theorem t := by\n  ok")
+
+    def test_only_one_checker_runs_per_run(self):
+        import fcntl
+        self.evaluate("theorem t := by\n  a")
+        with (self.directory / "autocheck.lock").open("a") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            self.assertTrue(campaign.autocheck("T", "logic")["running_elsewhere"])
+        self.assertEqual(campaign.autocheck("T", "logic")["checked"], ["#2"])
+
+    def test_a_crashing_check_is_recorded_and_the_queue_moves_on(self):
+        self.evaluate("theorem t := by\n  a")
+        with patch.object(campaign, "record_evaluation", side_effect=RuntimeError("disk full")):
+            outcome = campaign.autocheck("T", "logic")
+        self.assertEqual(outcome["remaining"], [])
+        self.assertIn("could not run: disk full", campaign.state("logic")["updates"][-1]["text"])
 
     def test_evaluation_results_do_not_echo_proof_or_frontier(self):
         result = self.evaluate("theorem t := by\n  a")

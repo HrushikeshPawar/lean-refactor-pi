@@ -51,6 +51,51 @@ export default function arenaExtension(pi: ExtensionAPI) {
     catch { return { ok: false, error: `Arena command returned no result: ${output.trim().slice(0, 200)}` }; }
   }
 
+  // Full checks on the other toolchains run in a background checker the harness starts
+  // itself. One checker at a time; a kick while it runs makes it go round once more.
+  let checker: ReturnType<typeof spawn> | undefined;
+  let kickAgain = false;
+  function kickAutocheck() {
+    if (!active || !runId) return;
+    if (checker) { kickAgain = true; return; }
+    kickAgain = false;
+    checker = spawn("uv", ["run", "--no-project", "python", "-m", "tools.arena_campaign", "autocheck",
+      "--theorem", active, "--run-id", runId], { cwd: root, stdio: "ignore" });
+    const done = () => { checker = undefined; if (kickAgain) kickAutocheck(); };
+    checker.on("close", done);
+    checker.on("error", done);
+  }
+
+  // The model learns about harness results from a short line appended to whichever tool
+  // result comes next. It is added once, when the tool result is created, and only when
+  // something changed, so history stays append-only and the cached prefix is untouched.
+  let deliveredSeq = -1;
+  let deliveredBest = "";
+  function readState(): Record<string, any> | undefined {
+    if (!runDirectory) return undefined;
+    try { return JSON.parse(readFileSync(resolve(runDirectory, "state.json"), "utf8")); }
+    catch { return undefined; }
+  }
+  function briefText(item: Record<string, any> | null | undefined): string {
+    if (!item) return "none";
+    const score = item.proxy !== undefined ? `proxy ${item.proxy}` : `est. ${item.estimated_proxy}`;
+    return `${item.candidate} ${score} (${item.tokens} tok, ${item.heartbeats} HB)`;
+  }
+  function stateLine(state: Record<string, any>, force = false): string | undefined {
+    const updates = (state.updates ?? []).filter((item: any) => item.seq > deliveredSeq);
+    const best = JSON.stringify([state.best ?? null, state.leading_unverified ?? null]);
+    if (!force && !updates.length && best === deliveredBest) return undefined;
+    deliveredSeq = Math.max(deliveredSeq, ...(state.updates ?? []).map((item: any) => item.seq));
+    deliveredBest = best;
+    const parts = updates.map((item: any) => item.text);
+    parts.push(`best verified: ${briefText(state.best)}`);
+    if (state.leading_unverified) {
+      const pending = (state.checking ?? []).includes(state.leading_unverified.candidate) ? "being checked" : "not yet checked";
+      parts.push(`leading unverified: ${briefText(state.leading_unverified)}, ${pending}`);
+    }
+    return `[arena] ${parts.join(" · ")}`;
+  }
+
   function costEvents(): Array<Record<string, unknown>> {
     if (!costJournal) return [];
     try { return readFileSync(costJournal, "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line)); }
@@ -278,6 +323,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
           },
         });
       }
+      kickAutocheck();
       ctx.ui.notify(`Arena target: ${wanted}`, "info");
     },
   });
@@ -304,6 +350,15 @@ export default function arenaExtension(pi: ExtensionAPI) {
     }
   });
 
+  pi.on("tool_result", event => {
+    if (!active) return;
+    const state = readState();
+    const line = state && stateLine(state);
+    if (!line) return;
+    return { content: [...event.content, { type: "text" as const, text: line }],
+      details: event.details, isError: event.isError };
+  });
+
   const reply = (result: Record<string, any>) =>
     ({ isError: result.ok === false, content: [{ type: "text" as const, text: JSON.stringify(result) }], details: result });
 
@@ -323,12 +378,11 @@ export default function arenaExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "arena_evaluate",
     label: "Arena evaluate",
-    description: "Score a complete theorem (statement + proof). Give `proof`, or re-check an existing node with `candidate` (\"#N\"), or promote a passing probe with `from_probe` (\"pN\"). `mode` fast checks the primary toolchain, full checks every version. `parents`, `idea_id` and `hypothesis` are optional labels; the current candidate is the default parent. Returns tokens, heartbeats, per-axis contribution, proxy (estimated for fast), deltas, and diagnostics whose file_line matches the candidate file lean_goal reads.",
+    description: "Score a complete theorem (statement + proof) on the primary toolchain. Give `proof`, or an existing node with `candidate` (\"#N\"), or a probe with `from_probe` (\"pN\"). If it compiles, the harness checks the other toolchains in the background and reports the outcome in a later tool result; you never need to request it. `parents`, `idea_id` and `hypothesis` are optional labels; the current candidate is the default parent. Returns tokens, heartbeats, per-axis contribution, estimated proxy, deltas, and diagnostics whose file_line matches the candidate file lean_goal reads.",
     parameters: Type.Object({
       proof: Type.Optional(Type.String({ description: "Complete theorem statement and replacement proof" })),
       candidate: Type.Optional(Type.String({ description: "Existing node such as #4" })),
       from_probe: Type.Optional(Type.String({ description: "Probe id such as p2" })),
-      mode: Type.Optional(Type.Union([Type.Literal("fast"), Type.Literal("full")])),
       parents: Type.Optional(Type.Array(Type.String())),
       hypothesis: Type.Optional(Type.String()),
       idea_id: Type.Optional(Type.String()),
@@ -336,7 +390,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
     async execute(_id, params, _signal, _onUpdate, ctx) {
       if (!active) throw new Error("Select a theorem with /arena first");
       const result = await withProofFile(params.proof, file => {
-        const args = ["--mode", params.mode ?? "fast"];
+        const args = ["--mode", "fast"];
         if (file) args.push("--proof-file", file);
         if (params.candidate) args.push("--candidate", params.candidate);
         if (params.from_probe) args.push("--from-probe", params.from_probe);
@@ -345,22 +399,25 @@ export default function arenaExtension(pi: ExtensionAPI) {
         if (params.idea_id) args.push("--idea-id", params.idea_id);
         return campaign("evaluate", args);
       });
+      kickAutocheck();
       return reply({ ...result, remaining_usd: Number(budgetStatus(ctx)?.remaining_usd?.toFixed(4)) });
     },
   });
 
   pi.registerTool({
     name: "arena_probe", label: "Arena probe",
-    description: "Compile a draft on the primary toolchain without scoring it; `sorry` is allowed and the goal at each tactic-position sorry is returned. Returns a short id (p1, p2, ...) you can restore with arena_candidate or promote with arena_evaluate from_probe. Probes never become candidates.",
+    description: "Compile a draft on the primary toolchain; `sorry` is allowed and the goal at each tactic-position sorry is returned, with a short id (p1, p2, ...) you can restore with arena_candidate. A draft without sorry that compiles is recorded as a candidate automatically (same result as arena_evaluate, no second call needed).",
     parameters: Type.Object({ proof: Type.String(), idea_id: Type.Optional(Type.String()), parent: Type.Optional(Type.String()) }),
     async execute(_id, params) {
       if (!active) throw new Error("Select a theorem with /arena first");
-      return reply(await withProofFile(params.proof, file => {
+      const result = await withProofFile(params.proof, file => {
         const args = ["--proof-file", file!];
         if (params.idea_id) args.push("--idea-id", params.idea_id);
         if (params.parent) args.push("--parent", params.parent);
         return campaign("probe", args);
-      }));
+      });
+      if (result.candidate) kickAutocheck();
+      return reply(result);
     },
   });
 
@@ -387,14 +444,6 @@ export default function arenaExtension(pi: ExtensionAPI) {
       if (!active) throw new Error("Select a theorem with /arena first");
       return reply(await campaign("polish", params.candidate ? ["--candidate", params.candidate] : []));
     },
-  });
-
-  pi.registerTool({
-    name: "arena_frontier",
-    label: "Arena frontier",
-    description: "Compact status: best verified and fast-only candidates, your ideas with attempts, best result and last failure, and recent failures.",
-    parameters: Type.Object({}),
-    async execute() { return reply(await campaign("frontier")); },
   });
 
   pi.registerTool({
@@ -508,7 +557,9 @@ export default function arenaExtension(pi: ExtensionAPI) {
     }
     const ideas = (state.ideas ?? []).filter((idea: any) => idea.status === "active")
       .map((idea: any) => `${idea.id} ${idea.title}`);
-    const content = `Continue proof optimization. Best so far: ${JSON.stringify(state.best ?? null)}. Active ideas: ${ideas.length ? ideas.join("; ") : "none recorded"}. Remaining ledger-priced usage cap: $${Math.max(0, limits.hardCapUsd - budget.spent).toFixed(4)}.`;
+    const current = readState();
+    const status = current ? stateLine(current, true) : `[arena] best verified: ${briefText(state.best)}`;
+    const content = `Continue proof optimization. ${status}. Active ideas: ${ideas.length ? ideas.join("; ") : "none recorded"}. Remaining ledger-priced usage cap: $${Math.max(0, limits.hardCapUsd - budget.spent).toFixed(4)}.`;
     return { entries: [...event.entries, { type: "custom_message" as const, customType: "arena-continuation",
       content, display: false }], continue: true };
   });

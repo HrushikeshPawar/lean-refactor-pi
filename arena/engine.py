@@ -311,8 +311,12 @@ def compile_version(row: dict, proof: str, version: str, commit: str,
     return result
 
 
-def evaluate(name: str, proof: str, mode: str = "fast") -> dict:
-    """Compile one proof. `probe` allows `sorry`, checks one version, never scores."""
+def evaluate(name: str, proof: str, mode: str = "fast", known: dict | None = None) -> dict:
+    """Compile one proof. `probe` allows `sorry`, checks one version, never scores.
+
+    `known` maps versions to compile results already obtained for this exact
+    proof (e.g. the fast check), so a later full check only compiles the rest.
+    """
     if mode not in ("fast", "full", "probe"):
         raise ValueError("mode must be fast, full or probe")
     from arena.scoring import local_proxy, metrics
@@ -332,6 +336,9 @@ def evaluate(name: str, proof: str, mode: str = "fast") -> dict:
     primary_start = candidate_file(row, proof, *targets[0])["start_line"] if len(checked) > 1 else None
     compat = {}
     for version, commit in checked:
+        if known and version in known:
+            compat[version] = known[version]
+            continue
         compat[version] = compile_version(row, proof, version, commit,
                                           measure=(version, commit) == measured_on and not probe,
                                           probe=probe, report_start_line=primary_start)

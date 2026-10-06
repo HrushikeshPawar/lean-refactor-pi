@@ -161,11 +161,17 @@ def events(directory: Path) -> list[dict]:
 
 
 @contextmanager
-def lean_lock(directory: Path):
-    """One Lean job at a time per run, so evaluations, probes, profiles and polish never compete
-    for CPU (which would distort latency and starve the model's own checks)."""
+def lean_lock(directory: Path, lane: str = "model"):
+    """One Lean job at a time per lane and run.
+
+    The model's own work (evaluate, probe, profile, polish) shares the `model`
+    lane. Harness checks run in the `background` lane, so they never delay the
+    model. Heartbeats count allocations, not time, so two concurrent compiles
+    do not change each other's measurement; the lanes only bound CPU and RAM.
+    """
     directory.mkdir(parents=True, exist_ok=True)
-    with (directory / "lean.lock").open("a") as handle:
+    name = "lean.lock" if lane == "model" else f"lean-{lane}.lock"
+    with (directory / name).open("a") as handle:
         fcntl.flock(handle, fcntl.LOCK_EX)
         yield
 
@@ -440,7 +446,7 @@ def _model_view(result: dict) -> dict:
     """Compact, non-duplicated payload for the model; the ledger keeps the full result."""
     view = {key: result[key] for key in ("ok", "mode", "candidate", "probe", "tokens", "heartbeat",
             "idea_id", "cached", "candidate_path", "start_line", "end_line", "error", "notes",
-            "best_so_far", "advisory", "scored", "contains_sorry", "goals") if result.get(key) not in (None, [], "")}
+            "full_check", "advisory", "scored", "contains_sorry", "goals") if result.get(key) not in (None, [], "")}
     metrics = result.get("metrics")
     if metrics and metrics.get("axes"):
         view["metrics"] = {key: metrics[key] for key in ("proxy", "estimated_proxy", "assumes_full_compat",
@@ -467,10 +473,26 @@ def _model_view(result: dict) -> dict:
     return view
 
 
+def _evaluation_key(candidate_id: str, mode: str, row: dict) -> str:
+    return hashlib.sha256((candidate_id + mode + _evaluator_sha() + json.dumps(versions(row))).encode()).hexdigest()
+
+
+def _compiled_versions(history: list[dict], candidate_id: str, row: dict) -> dict:
+    """Passing per-version results of this evaluator's fast check of a candidate, for reuse."""
+    key = _evaluation_key(candidate_id, "fast", row)
+    fast = next((item for item in history if item.get("kind") == "evaluation" and item.get("key") == key), None)
+    return {version: info for version, info in ((fast or {}).get("result", {}).get("compat") or {}).items()
+            if info.get("passed")}
+
+
 def record_evaluation(name: str, run_id: str, proof: str, mode: str,
                       parents: list[str] | None = None, hypothesis: str = "",
                       origin: str = "model", merge: dict | None = None,
-                      materialize_live: bool = True, idea_id: str | None = None) -> dict:
+                      materialize_live: bool = True, idea_id: str | None = None,
+                      lane: str = "model", trigger: str = "model", precomputed: dict | None = None) -> dict:
+    """Record a candidate and its evaluation. `precomputed` is a result the caller already
+    compiled for this exact proof and mode; `trigger` says whether the model or the
+    harness asked for it."""
     if mode not in ("fast", "full"):
         raise ValueError("mode must be fast or full")
     directory = run_dir(run_id)
@@ -518,20 +540,24 @@ def record_evaluation(name: str, run_id: str, proof: str, mode: str,
             if original.get("parents", []) != explicit:
                 _append(directory, {"kind": "derivation", "candidate_id": candidate_id,
                                     "parents": explicit, "origin": origin, "merge": merge})
-        key = hashlib.sha256((candidate_id + mode + _evaluator_sha() + json.dumps(versions(row))).encode()).hexdigest()
+        key = _evaluation_key(candidate_id, mode, row)
         prior = next((item for item in reversed(history) if item.get("kind") == "evaluation" and item["key"] == key), None)
         if prior:
             result = json.loads(json.dumps(prior["result"]))
+        elif precomputed is not None:
+            result = precomputed
         else:
             try:
-                with lean_lock(directory):
-                    result = evaluate(name, proof, mode)
+                with lean_lock(directory, lane):
+                    result = evaluate(name, proof, mode, known=_compiled_versions(history, candidate_id, row)
+                                      if mode == "full" else None)
             except (ValueError, FileNotFoundError) as error:
                 result = {"ok": False, "name": name, "mode": mode, "error": str(error),
                           "compat": {}, "tokens": None, "heartbeat": None, "local_proxy": None}
+        if not prior:
             _externalize_output(directory, candidate_id, result)
             _append(directory, {"kind": "evaluation", "candidate_id": candidate_id, "key": key,
-                                "mode": mode, "result": result})
+                                "mode": mode, "trigger": trigger, "result": result})
     location = materialize(name, run_id, proof) if materialize_live and result.get("tokens") is not None else {}
     if location:
         _append(directory, {"kind": "current", "candidate_id": candidate_id})
@@ -578,7 +604,21 @@ def evaluate_request(name: str, run_id: str, proof: str | None = None, mode: str
         parents = parents or ([source["parent"]] if source.get("parent") else None)
     if not proof:
         raise ValueError("Supply proof, candidate (#N) or from_probe (pN)")
-    return _model_view(record_evaluation(name, run_id, proof, mode, parents, hypothesis, idea_id=idea_id))
+    result = record_evaluation(name, run_id, proof, mode, parents, hypothesis, idea_id=idea_id)
+    return _model_view({**result, "full_check": _full_check_status(events(directory), result["candidate_id"])})
+
+
+def _full_check_status(history: list[dict], candidate_id: str) -> str | None:
+    """What the model needs to know about the other toolchains, without asking for it."""
+    rows = {r["id"]: r for r in _summaries(history)}
+    row = rows.get(candidate_id)
+    if not row or row["status"] == "fail":
+        return None
+    total = len(history[0].get("versions") or [1])
+    done = next((e for e in reversed(row["evaluations"]) if e["mode"] == "full"), None)
+    if done:
+        return _check_text(row["n"], done["result"], total)
+    return f"queued: the other {total - 1} version(s) are checked in the background"
 
 
 def probe(name: str, run_id: str, proof: str, idea_id: str | None = None, parent: str | None = None) -> dict:
@@ -595,17 +635,29 @@ def probe(name: str, run_id: str, proof: str, idea_id: str | None = None, parent
             notes.append(f"parent {parent} ignored: {error}")
     parent_id = parent_id or _current(history)
     proof_id = hashlib.sha256((name + "\0" + proof).encode()).hexdigest()
+    if proof_id in set(_candidate_ids(history)):
+        return evaluate_request(name, run_id, proof, idea_id=idea_id, parents=[parent] if parent else None)
     earlier = next((item for item in reversed(history)
                     if item.get("kind") == "probe" and item["proof_id"] == proof_id), None)
     if earlier:
         result = earlier["result"]
     else:
         validate_proof(row, proof, allow_sorry=True)
+        complete = not _has_hole(row, proof)
         try:
             with lean_lock(directory):
-                result = evaluate(name, proof, "probe")
+                # A complete draft is compiled exactly as a fast evaluation would be,
+                # so if it passes it becomes a candidate without another compile.
+                result = evaluate(name, proof, "fast" if complete else "probe")
         except (ValueError, FileNotFoundError) as error:
             result = {"ok": False, "mode": "probe", "error": str(error), "compat": {}}
+        if complete and next(iter((result.get("compat") or {}).values()), {}).get("passed"):
+            recorded = record_evaluation(name, run_id, proof, "fast", [parent] if parent else None,
+                                         idea_id=idea_id, precomputed=result)
+            view = _model_view({**recorded, "full_check": _full_check_status(events(directory), recorded["candidate_id"])})
+            view.setdefault("notes", []).append(f"complete draft compiled, recorded as candidate {recorded['candidate']}")
+            return view
+        result = {**result, "mode": "probe", "scored": False}
         _externalize_output(directory, proof_id, result)
         _snapshot(directory, proof_id, proof)
         _append(directory, {"kind": "probe", "proof_id": proof_id, "idea_id": idea_id,
@@ -909,6 +961,118 @@ def merge_batch(run_id: str, max_checks: int = 64) -> dict:
         if outcome.get("candidate_id"):
             break
     return {"checks": checks, "last": last}
+
+
+def _has_hole(row: dict, proof: str) -> bool:
+    try:
+        validate_proof(row, proof)
+    except ValueError as error:
+        if str(error) in ("FORBIDDEN: sorry", "FORBIDDEN: admit"):
+            return True
+        raise
+    return False
+
+
+def _check_text(number: int, result: dict, total: int) -> str:
+    compat = result.get("compat") or {}
+    if result.get("ok") is False or not compat:
+        return f"#{number} full check could not run: {str(result.get('error') or 'unknown error')[:160]}"
+    failing = [version for version, info in compat.items() if not info.get("passed")]
+    if not failing and len(compat) == total:
+        proxy = (result.get("metrics") or {}).get("proxy", result.get("local_proxy"))
+        return f"#{number} passes all {total} versions: proxy {proxy}"
+    first = compat[failing[0]]
+    reason = (first.get("error_headlines") or [first.get("error") or "compile failed"])[0]
+    return f"#{number} fails {', '.join(failing)} ({len(compat) - len(failing)}/{total} pass): {str(reason)[:160]}"
+
+
+def _autocheck_jobs(rows: list[dict]) -> list[dict]:
+    """Candidates that compile on the primary version but were never checked on every version,
+    most promising first."""
+    jobs = [r for r in rows if r["origin"] != "reference" and r["status"] == "primary"
+            and not any(e["mode"] == "full" for e in r["evaluations"])]
+    return sorted(jobs, key=lambda r: (r["score"] if r["score"] is not None else float("-inf"), r["n"]), reverse=True)
+
+
+def autocheck(name: str, run_id: str, max_seconds: float | None = None) -> dict:
+    """Drain the full-check queue in the background lane. Only one checker runs per run;
+    the queue is derived from the ledger, so a killed checker loses nothing."""
+    directory = run_dir(run_id)
+    directory.mkdir(parents=True, exist_ok=True)
+    started = time.monotonic()
+    checked: list[str] = []
+    with (directory / "autocheck.lock").open("a") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return {"ok": True, "checked": [], "running_elsewhere": True}
+        while max_seconds is None or time.monotonic() - started < max_seconds:
+            history = events(directory)
+            jobs = _autocheck_jobs(_summaries(history))
+            if not jobs:
+                break
+            job = jobs[0]
+            try:
+                proof = (directory / "proofs" / f"{job['id']}.lean").read_text()
+                record_evaluation(name, run_id, proof, "full", materialize_live=False,
+                                  lane="background", trigger="auto")
+            except Exception as error:  # record the failure so the queue moves on
+                _append(directory, {"kind": "evaluation", "candidate_id": job["id"], "key": f"auto-error-{job['id']}",
+                                    "mode": "full", "trigger": "auto",
+                                    "result": {"ok": False, "mode": "full", "error": str(error)[:300], "compat": {}}})
+            checked.append(f"#{job['n']}")
+            write_state(run_id)
+    return {"ok": True, "checked": checked,
+            "remaining": [f"#{r['n']}" for r in _autocheck_jobs(_summaries(events(directory)))]}
+
+
+def state(run_id: str) -> dict:
+    """Everything the model should know without asking: the best verified candidate, a
+    better unverified one if any, what is being checked, and the harness's check results."""
+    history = events(run_dir(run_id))
+    if not history:
+        raise ValueError("Run is uninitialized")
+    rows = _summaries(history)
+    total = len(history[0].get("versions") or [1])
+    numbers = {r["id"]: r["n"] for r in rows}
+    verified = _best([r for r in rows if r["verified"]])
+    unverified = _best([r for r in rows if not r["verified"]])
+    leading = unverified if unverified and (not verified or (unverified["score"] or 0) > (verified["score"] or 0)) else None
+    updates = [{"seq": seq, "text": _check_text(numbers[item["candidate_id"]], item["result"], total)}
+               for seq, item in enumerate(history)
+               if item.get("kind") == "evaluation" and item.get("trigger") == "auto" and item["candidate_id"] in numbers]
+    return {"ok": True, "seq": len(history), "versions": total, "best": _brief(verified),
+            "leading_unverified": _brief(leading), "checking": [f"#{r['n']}" for r in _autocheck_jobs(rows)],
+            "updates": updates[-10:]}
+
+
+def write_state(run_id: str) -> None:
+    """Publish `state` atomically for the Pi extension, which reads it on every tool result."""
+    directory = run_dir(run_id)
+    target = directory / "state.json"
+    temporary = target.with_name(f"state.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(state(run_id), ensure_ascii=False))
+    temporary.replace(target)
+
+
+def submission(run_id: str) -> dict:
+    """The run's answer: the best candidate that passes every version. Written by the harness so
+    nothing depends on the model remembering to submit."""
+    directory = run_dir(run_id)
+    history = events(directory)
+    rows = _summaries(history)
+    best = _best([r for r in rows if r["verified"]])
+    if best is None:
+        answer = {"ok": True, "candidate": None,
+                  "reason": "no model candidate passed every version; the original proof stands"}
+    else:
+        proof = (directory / "proofs" / f"{best['id']}.lean").read_text()
+        (directory / "submission.lean").write_text(proof)
+        answer = {"ok": True, "candidate": f"#{best['n']}", "candidate_id": best["id"],
+                  "tokens": best["tokens"], "heartbeats": best["heartbeats"], "proxy": best["score"],
+                  "proof_file": "submission.lean"}
+    (directory / "submission.json").write_text(json.dumps(answer, indent=2) + "\n")
+    return answer
 
 
 def frontier(run_id: str) -> dict:

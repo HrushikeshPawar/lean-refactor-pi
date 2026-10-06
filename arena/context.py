@@ -195,9 +195,12 @@ def render_packet(name: str) -> str:
         "Before editing, propose at least three structurally different ideas with arena_idea, stating the expected "
         "effect on each axis; then pursue them and update each idea's status with a reason as evidence arrives. "
         "arena_probe compiles drafts (sorry allowed, goals reported); arena_profile shows where heartbeats go; "
-        "arena_evaluate scores a complete proof (fast = primary version, full = every version). Parents and idea ids "
-        "are optional labels. The current candidate file is readable by lean_goal and lean_diagnostic_messages at the "
-        "line numbers reported in diagnostics.",
+        "arena_evaluate scores a complete proof on the primary version (a sorry-free probe that compiles is scored the "
+        "same way). The harness checks every compiling candidate on the other versions in the background and appends "
+        "an [arena] line with results and the best verified candidate to a later tool result whenever something "
+        "changes; the best verified candidate is submitted automatically at the end. Parents and idea ids are optional "
+        "labels. The current candidate file is readable by lean_goal and lean_diagnostic_messages at the line numbers "
+        "reported in diagnostics.",
         (f"Pinned source: {row['source']} standalone problem (file = header + statement + proof)\n" if is_standalone(row)
          else f"Pinned source: {row['source']}:{row['file_path']}:{row['start_line']}-{row['end_line']}\n") +
         f"Toolchain commits: {commits}",

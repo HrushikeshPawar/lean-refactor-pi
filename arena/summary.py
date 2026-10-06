@@ -29,6 +29,13 @@ def _jsonl(path: Path) -> list[dict]:
     return rows
 
 
+def _json(path: Path) -> dict | None:
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+
+
 def _result_ok(event: dict) -> bool:
     """False when the harness rejected or failed a tool call."""
     if event.get("isError"):
@@ -216,6 +223,7 @@ def build_summary(directory: Path) -> dict:
         "evaluations": len(evaluations), "probes": len(probes),
         "tools": {"calls": dict(calls), "errors": dict(errors), "error_total": sum(errors.values())},
         "ideas": list(ideas.values()),
+        "submission": _json(directory / "submission.json"),
     }
 
 
@@ -235,6 +243,7 @@ def render_text(summary: dict) -> str:
         f"evaluations {summary['evaluations']}, probes {summary['probes']}, edits "
         f"structural {summary['edits']['structural']} / local {summary['edits']['local']}",
         f"tool errors {summary['tools']['error_total']}: {summary['tools']['errors']}",
+        f"submission: {(summary.get('submission') or {}).get('candidate') or 'none'}",
     ]) + "\n"
 
 

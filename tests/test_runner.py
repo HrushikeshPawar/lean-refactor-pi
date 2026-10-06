@@ -1,6 +1,7 @@
 """Seam B: the budgeted runner end to end against the scripted offline provider."""
 
 import json
+from pathlib import Path
 import unittest
 
 from tests.pi_support import PI_AVAILABLE, FakeRun, message_text
@@ -139,7 +140,7 @@ class CacheDisciplineTests(unittest.TestCase):
     def test_history_is_append_only_and_the_first_payload_has_no_dynamic_values(self):
         run = self.fake([
             cheap_tool("arena_idea", {"title": "First idea", "hypothesis": "h"}),
-            cheap_tool("arena_frontier", {}),
+            cheap_tool("arena_skill_read", {}),
             cheap_tool("arena_source", SOURCE),
             cheap_tool("arena_skill_read", {"path": "references/profiling-workflows.md"}),
             {"text": "done"}])
@@ -155,7 +156,7 @@ class CacheDisciplineTests(unittest.TestCase):
         self.assertIn("1 token = 0.149 pt", first)
 
     def test_tool_results_are_compact(self):
-        run = self.fake([cheap_tool("arena_frontier", {}), cheap_tool("arena_idea", {"title": "An idea"}),
+        run = self.fake([cheap_tool("arena_idea", {"title": "First"}), cheap_tool("arena_idea", {"title": "An idea"}),
                          {"text": "done"}])
         results = [m for m in run.requests[-1]["messages"] if m["role"] == "toolResult"]
         self.assertTrue(results)
@@ -165,12 +166,12 @@ class CacheDisciplineTests(unittest.TestCase):
     def test_cache_alarm_fires_when_a_warm_request_writes_more_than_it_reads(self):
         bad = {"input": 100, "output": 10, "cacheRead": 100, "cacheWrite": 5000}
         good = {"input": 100, "output": 10, "cacheRead": 5000, "cacheWrite": 100}
-        alarmed = self.fake([cheap_tool("arena_frontier", {}, **bad)] * 4 + [{"text": "done", "usage": bad}])
+        alarmed = self.fake([cheap_tool("arena_skill_read", {}, **bad)] * 4 + [{"text": "done", "usage": bad}])
         summary = alarmed.json("summary.json")
         self.assertGreaterEqual(summary["cache"]["alarms"], 1)
         kinds = [e["kind"] for e in alarmed.jsonl("cost-ledger.jsonl")]
         self.assertIn("cache_alarm", kinds)
-        healthy = self.fake([cheap_tool("arena_frontier", {}, **good)] * 4 + [{"text": "done", "usage": good}])
+        healthy = self.fake([cheap_tool("arena_skill_read", {}, **good)] * 4 + [{"text": "done", "usage": good}])
         self.assertEqual(healthy.json("summary.json")["cache"]["alarms"], 0)
         self.assertGreater(healthy.json("summary.json")["cache"]["reuse_pct"], 90)
 
@@ -184,6 +185,58 @@ class CacheDisciplineTests(unittest.TestCase):
         self.assertEqual(kinds["context"]["requests"], 1)
         self.assertEqual(kinds["rejected"]["requests"], 1)
         self.assertEqual(summary["tools"]["errors"], {"arena_evaluate": 1})
+
+
+FIXTURE = Path(__file__).resolve().parents[1] / "runs/baseline/Core_InitsUpdatesComm/arena-candidate-126.txt"
+
+
+def tool_texts(request: dict, name: str | None = None) -> list[str]:
+    return [message_text(m) for m in request["messages"]
+            if m["role"] == "toolResult" and (name is None or m.get("toolName") == name)]
+
+
+@unittest.skipUnless(PI_AVAILABLE and FIXTURE.exists(), "pi and the Strata fixture are required")
+class AutomaticChecksTests(unittest.TestCase):
+    """The harness checks every version and keeps the model informed without being asked."""
+
+    def setUp(self):
+        self.runs = []
+
+    def tearDown(self):
+        for run in self.runs:
+            run.cleanup()
+
+    def fake(self, steps) -> FakeRun:
+        run = FakeRun(steps)
+        self.runs.append(run)
+        return run.run()
+
+    def test_background_result_arrives_on_the_next_tool_result_without_rewriting_history(self):
+        run = self.fake([
+            cheap_tool("arena_evaluate", {"proof": FIXTURE.read_text()}),
+            # The provider waits while the background checker runs the other versions.
+            {**cheap_tool("arena_skill_read", {}), "delay_ms": 25000},
+            cheap_tool("arena_skill_read", {}),
+            {"text": "done"}])
+        requests = run.requests
+        self.assertGreaterEqual(len(requests), 4, run.stdout)
+        evaluated = tool_texts(requests[1], "arena_evaluate")[0]
+        self.assertIn('"full_check":"queued', evaluated)
+        self.assertIn("[arena] best verified: none · leading unverified: #2", evaluated)
+        later = tool_texts(requests[2], "arena_skill_read")[0]
+        self.assertIn("[arena] #2 passes all 3 versions: proxy 76.72 · best verified: #2 proxy 76.72", later)
+        # Nothing changed afterwards, so the next result carries no status line.
+        self.assertNotIn("[arena]", tool_texts(requests[3], "arena_skill_read")[-1])
+        for earlier, after in zip(requests, requests[1:]):
+            before = earlier["messages"]
+            self.assertEqual(json.dumps(after["messages"][:len(before)]), json.dumps(before))
+        self.assertEqual(run.json("submission.json")["candidate"], "#2")
+        self.assertEqual(run.json("summary.json")["submission"]["proxy"], 76.72)
+
+    def test_checks_queued_when_the_model_stops_are_finished_before_submitting(self):
+        run = self.fake([cheap_tool("arena_evaluate", {"proof": FIXTURE.read_text()}), {"text": "done"}])
+        self.assertEqual(run.json("submission.json")["candidate"], "#2", run.stdout)
+        self.assertIn("Submission: #2 proxy 76.72", run.stdout)
 
 
 @unittest.skipUnless(PI_AVAILABLE, "pi and the Strata fixture are required")

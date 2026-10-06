@@ -9,11 +9,12 @@ import json
 import subprocess
 from pathlib import Path
 
-from arena.campaign import (candidate, declaration, evaluate_request, frontier, init, probe,
-                            polish_request, profile_request, record_idea, set_decision, source_range)
+from arena.campaign import (autocheck, candidate, declaration, evaluate_request, frontier, init, probe,
+                            polish_request, profile_request, record_idea, run_dir, set_decision, source_range,
+                            state, submission, write_state)
 
 ACTIONS = ("init", "evaluate", "probe", "idea", "frontier", "candidate", "decision", "source",
-           "declaration", "profile", "polish")
+           "declaration", "profile", "polish", "autocheck", "state", "submission")
 
 
 def run(args: argparse.Namespace) -> dict:
@@ -43,9 +44,24 @@ def run(args: argparse.Namespace) -> dict:
         limits = {key: value for key, value in (("max_deletions", args.max_deletions),
                   ("max_substitutions", args.max_substitutions), ("max_simp", args.max_simp)) if value is not None}
         return polish_request(args.theorem, args.run_id, args.candidate, **limits)
+    if args.action == "autocheck":
+        return autocheck(args.theorem, args.run_id, args.max_seconds)
+    if args.action == "state":
+        return state(args.run_id)
+    if args.action == "submission":
+        return submission(args.run_id)
     if args.action == "source":
         return source_range(args.theorem, args.path, args.first, args.last)
     return declaration(args.theorem, args.symbol)
+
+
+def publish_state(run_id: str) -> None:
+    """Refresh state.json after every action; it is derived data, so failures are ignored."""
+    try:
+        if (run_dir(run_id) / "ledger.jsonl").exists():
+            write_state(run_id)
+    except Exception:
+        pass
 
 
 def main() -> int:
@@ -73,10 +89,12 @@ def main() -> int:
     parser.add_argument("--max-deletions", type=int)
     parser.add_argument("--max-substitutions", type=int)
     parser.add_argument("--max-simp", type=int)
+    parser.add_argument("--max-seconds", type=float)
     args = parser.parse_args()
     try:
         result = run(args)
         print(json.dumps(result, ensure_ascii=False))
+        publish_state(args.run_id)
         return 0
     except (OSError, ValueError, RuntimeError, KeyError, subprocess.SubprocessError) as error:
         message = " ".join(str(error).split()) or type(error).__name__

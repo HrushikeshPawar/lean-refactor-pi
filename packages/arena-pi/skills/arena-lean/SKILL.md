@@ -57,8 +57,8 @@ newer ones accept, and simp normal forms drift between versions. Rules learned t
 - Prefer long-stable names and tactics; avoid relying on auto-generated hypothesis names.
 - A proof that leans on the exact `simp` set may close on one version and leave a different goal on another;
   `simp only [...]` with explicit lemmas is more portable.
-- One lost version costs about as many points as dozens of tokens. Run a full check before treating any
-  candidate as an improvement.
+- One lost version costs about as many points as dozens of tokens. A candidate is only an improvement once
+  the harness reports that it passes every version.
 
 ## Statement immutability
 
@@ -72,14 +72,16 @@ top-level commands or auxiliary declarations, and anything outside the one theor
 1. `arena_idea`: record several structurally different ideas (what you will change, expected effect on each
    axis) before editing. Update an idea's status with a reason when evidence arrives.
 2. `arena_probe`: develop a structural rewrite hole by hole. `sorry` is allowed; you get the goal at each
-   tactic-position `sorry`. Probes are not scored and never become candidates.
+   tactic-position `sorry`. A draft without `sorry` that compiles is recorded and scored as a candidate.
 3. `lean_goal` / `lean_multi_attempt` / `lean_diagnostic_messages` on the candidate file the harness
    materializes. Diagnostic `file_line` values refer to exactly that file; `proof_line` counts from the
    statement's first line.
 4. `arena_profile` on a compiling candidate or probe to see where heartbeats go.
-5. `arena_evaluate` with `mode: fast`, then `mode: full` for anything promising. `candidate: "#N"` re-checks
-   an existing node; `from_probe: "pN"` promotes a passing probe without resending the proof.
-6. `arena_frontier` for the best candidates, your ideas and recent failures.
+5. `arena_evaluate` scores a complete proof on the primary version. `candidate: "#N"` re-reads an existing
+   node; `from_probe: "pN"` promotes a probe without resending the proof.
+6. You never request bookkeeping. The harness checks every compiling candidate on the other versions in the
+   background, appends an `[arena]` line to a later tool result when a check finishes or the best candidate
+   changes, and submits the best verified candidate when the run ends.
 
 ## Working principles
 

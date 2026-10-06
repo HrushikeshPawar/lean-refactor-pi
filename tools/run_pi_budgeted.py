@@ -17,7 +17,7 @@ import time
 from datetime import datetime
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from arena.campaign import init, packet, run_dir
+from arena.campaign import autocheck, init, packet, run_dir, submission, write_state
 from arena.summary import cost_report_from_ledger, render_text, write_summary
 from tools.arena_skill import SKILL_DIR, skill_hash, skill_prompt
 
@@ -28,6 +28,8 @@ SYSTEM_PROMPT = ("You are optimizing one Lean 4 proof for the Lean Refactor Aren
 ROOT = Path(__file__).resolve().parents[1]
 MODELS = ("gpt-6-luna", "qwen3.8-flash", "deepseek-v4.1-flash")
 MODEL_WINDOWS = {"gpt-6-luna": 1_050_000, "qwen3.8-flash": 1_000_000, "deepseek-v4.1-flash": 1_000_000}
+# After Pi exits, pending background full checks get this long before the submission is chosen.
+DRAIN_S = 300
 # How long Pi gets to finish an in-flight evaluation and write cost.json after a stop request.
 STOP_GRACE_S = 45
 THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
@@ -294,6 +296,20 @@ def finish(args, directory: Path, event_log: Path, event_offset: int, exit_code:
         report_path.write_text(json.dumps(cost_report_from_ledger(directory), indent=2) + "\n")
         print("Pi wrote no cost report for this segment; reconstructed it from the cost journal", file=sys.stderr)
     try:
+        # Checks still queued when the model stopped are finished here (no model cost), unless the
+        # run was interrupted, so the submission reflects every candidate the model produced.
+        if interrupted is None:
+            drained = autocheck(args.theorem, args.run_id, DRAIN_S)
+            if drained["checked"] or drained.get("remaining"):
+                print(f"Background checks after Pi exited: {drained['checked']}; still pending {drained.get('remaining', [])}", flush=True)
+        write_state(args.run_id)
+        answer = submission(args.run_id)
+        print(f"Submission: {answer.get('candidate') or 'none'}"
+              + (f" proxy {answer['proxy']} ({answer['tokens']} tok, {answer['heartbeats']} HB)" if answer.get("candidate") else
+                 f" ({answer['reason']})"), flush=True)
+    except Exception as error:
+        print(f"Choosing the submission failed: {error}", file=sys.stderr)
+    try:
         print(render_text(write_summary(directory, "interrupted" if interrupted is not None else None)),
               end="", flush=True)
     except Exception as error:  # a summary failure must never hide the run's own result
@@ -317,8 +333,9 @@ def finish(args, directory: Path, event_log: Path, event_offset: int, exit_code:
         return 1
     print(f"Ledger-priced observed tokens=${report['spent_usd']:.6f}; unresolved exposure=${report.get('unresolved_usd', 0):.6f}; cap=${args.hard_cap_usd:.2f}", flush=True)
     embedded = report.get("pi_embedded_estimate") or {}
-    if embedded.get("priced_entries") and not embedded.get("missing_entries"):
-        print(f"Pi embedded estimate=${embedded['usd']:.6f}; delta=${report['spent_usd'] - embedded['usd']:.6f} (different configured price rates; neither is an invoice)", flush=True)
+    drift = report["spent_usd"] - embedded.get("usd", 0)
+    if embedded.get("priced_entries") and not embedded.get("missing_entries") and abs(drift) > max(1e-6, 0.01 * report["spent_usd"]):
+        print(f"Pricing drift: ledger ${report['spent_usd']:.6f} vs Pi's estimate ${embedded['usd']:.6f}; check the price table in budget.ts", file=sys.stderr, flush=True)
     cache = report.get("cache_utilization", {})
     if cache.get("all", {}).get("reuse_pct") is not None:
         print(f"Cache reuse: all={cache['all']['reuse_pct']:.1f}% recent-10={cache['recent_ten']['reuse_pct']:.1f}%", flush=True)
