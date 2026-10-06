@@ -101,3 +101,18 @@ class PortabilityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ScopeTests(unittest.TestCase):
+    """The packet's scope section is syntactic, so it works for every corpus."""
+
+    def test_open_and_variable_of_closed_scopes_are_dropped(self):
+        from arena.context import scope_lines
+        source = ("import X\n/-! notes\nopen Fake -/\nnamespace A\nopen B\nsection S\nvariable (x : Nat)\n"
+                  "  (y : Nat)\nopen C in\ntheorem t : True := trivial\nend S\nvariable {Y} [Foo Y]\n"
+                  "open D in\n")
+        self.assertEqual(scope_lines(source), ["namespace A", "open B", "variable {Y} [Foo Y]", "open D in"])
+
+    def test_stale_open_in_does_not_leak(self):
+        from arena.context import scope_lines
+        self.assertEqual(scope_lines("open E in\ntheorem u : True := trivial\n\n"), ["(root namespace)"])

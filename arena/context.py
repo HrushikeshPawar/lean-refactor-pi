@@ -23,7 +23,8 @@ LEAN_FILE = Path(__file__).with_name("lean") / "context.lean"
 _RECORD = re.compile(r"^ARENA_CTX (\{.*\})$", re.M)
 MAX_PACKET_CHARS = 30_000
 LIMITS = {"goals": 40, "goal_chars": 700, "used": 50, "used_chars": 320, "earlier": 30,
-          "earlier_chars": 240, "types": 8, "type_chars": 700, "profile_entries": 24}
+          "earlier_chars": 240, "types": 8, "type_chars": 700, "profile_entries": 24,
+          "scope": 25, "scope_chars": 600}
 
 
 def _cache(kind: str, name: str, commit: str, salt: str) -> Path:
@@ -111,12 +112,74 @@ def _rates(name: str, total_versions: int) -> str:
             f"Reference: {rates['reference_tokens']} tokens, {rates['reference_heartbeats']} heartbeats.")
 
 
+_SCOPE = re.compile(r"^(?:@\[[^\]]*\]\s*)?(?:public\s+|private\s+)?(?:noncomputable\s+)?"
+                    r"(namespace|section|end|open|variable|universe|include|omit)\b(.*)$")
+_PRIVATE = re.compile(r"_private\.(?:[^.\s]+\.)*?\d+\.")
+
+
+def _readable(text: str) -> str:
+    """Show `private` declarations by their source name, not Lean's mangled internal name."""
+    return _PRIVATE.sub("", text)
+
+
+def _scope_section(row: dict) -> list[str]:
+    """Namespace, `open`, `variable`, `universe`, `include` and `omit` in effect at the theorem.
+
+    Read from the pinned source before the declaration (the header for standalone rows), tracking
+    `namespace`/`section`/`end` so commands of closed scopes are dropped. Syntactic and generic.
+    """
+    if is_standalone(row):
+        source = row.get("header") or ""
+    else:
+        built = candidate_file(row, row["src"], *versions(row)[0])
+        source = built["text"][:built["head"]]
+    return scope_lines(source)
+
+
+def scope_lines(source: str) -> list[str]:
+    """The scope commands still in effect at the end of `source` (see `_scope_section`)."""
+    source = re.sub(r"/-.*?-/", "", source, flags=re.S)
+    source = re.sub(r"--[^\n]*", "", source)
+    stack: list[tuple[str, str]] = []
+    active: list[tuple[int, str]] = []
+    lines = source.splitlines()
+    index = 0
+    while index < len(lines):
+        found = _SCOPE.match(lines[index])
+        if not found:
+            index += 1
+            continue
+        kind, rest = found[1], found[2].strip()
+        if kind in ("namespace", "section"):
+            stack.append((kind, rest))
+        elif kind == "end":
+            if stack:
+                depth = len(stack)
+                stack.pop()
+                active = [item for item in active if item[0] < depth]
+        elif kind == "open" and rest.endswith(" in"):
+            pass  # `open … in` scopes only the next command; handled below if that is the theorem
+        else:
+            block = [lines[index].rstrip()]
+            while index + 1 < len(lines) and lines[index + 1][:1] in (" ", "\t") and lines[index + 1].strip():
+                index += 1
+                block.append(lines[index].rstrip())
+            active.append((len(stack), "\n".join(block)))
+        index += 1
+    tail = [line for line in lines if line.strip()]
+    if tail and _SCOPE.match(tail[-1]) and tail[-1].rstrip().endswith(" in"):
+        active.append((len(stack), tail[-1].rstrip()))
+    namespace = ".".join(name for kind, name in stack if kind == "namespace" and name)
+    body = [f"namespace {namespace}" if namespace else "(root namespace)"] + [text for _, text in active]
+    return [_clip(line, LIMITS["scope_chars"]) for line in body][:LIMITS["scope"]]
+
+
 def _types_section(context: dict) -> list[str]:
     lines = []
     for item in context.get("type", [])[:LIMITS["types"]]:
         if item["decl"] in ("inductive", "structure"):
             body = "\n".join(f"  | {_clip(c, LIMITS['type_chars'])}" for c in item["ctors"])
-            lines.append(f"{item['decl']} {_clip(item['sig'], LIMITS['type_chars'])}\n{body}")
+            lines.append(f"{item['decl']} {_clip(_readable(item['sig']), LIMITS['type_chars'])}\n{_readable(body)}")
         else:
             lines.append(f"def {_clip(item['sig'], LIMITS['type_chars'])}\n  := {_clip(item.get('value', ''), LIMITS['type_chars'])}")
     return lines
@@ -136,12 +199,12 @@ def _used_section(context: dict) -> list[str]:
         return item["module"] == "this file" or item["module"].split(".")[0] == context.get("root", "")
     items = [i for i in context.get("used", []) if not i["module"].startswith("Init.Prelude")]
     items.sort(key=lambda i: (0 if i["module"] == "this file" else 1 if local(i) else 2, i["proof_line"], i["name"]))
-    return [f"[{i['decl']} · {i['module']}] {_clip(_one_line(i['sig']), LIMITS['used_chars'])}"
+    return [f"[{i['decl']} · {i['module']}] {_clip(_readable(_one_line(i['sig'])), LIMITS['used_chars'])}"
             for i in items[:LIMITS["used"]]]
 
 
 def _earlier_section(context: dict) -> list[str]:
-    return [f"line {i['line']} [{i['decl']}] {_clip(_one_line(i['sig']), LIMITS['earlier_chars'])}"
+    return [f"line {i['line']} [{i['decl']}] {_clip(_readable(_one_line(i['sig'])), LIMITS['earlier_chars'])}"
             for i in context.get("earlier", [])
             if i["decl"] in ("theorem", "def")][:LIMITS["earlier"]]
 
@@ -209,6 +272,8 @@ def render_packet(name: str) -> str:
     parts: list[tuple[str, list[str]]] = [
         ("", task),
         ("Definitions of project types and predicates in the statement", _types_section(context)),
+        ("Scope at the theorem (namespace, open, variable, universe in effect before the statement)",
+         _scope_section(row)),
         (f"Reference proof ({row['proof_length']} tokens)", [f"```lean\n{row['src']}\n```"]),
         ("Heartbeat profile of the reference proof", _profile_section(prof)),
         ("Goal before each top-level tactic of the reference proof", _goal_section(context)),
