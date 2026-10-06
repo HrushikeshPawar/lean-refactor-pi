@@ -100,19 +100,10 @@ def declaration(name: str, symbol: str) -> dict:
 
 
 def packet(name: str) -> str:
-    row = problem(name)
-    original = row["src"]
-    commits = ", ".join(f"{v}:{c}" for v, c in versions(row))
-    parts = [
-        f"Lean Refactor Arena: optimize {name} from its ORIGINAL proof.",
-        "The statement must remain byte-exact. Score = mean of three axes: proof tokens, Lean heartbeats and compatibility across every listed version.",
-        "Before editing, propose at least three structurally different ideas with arena_idea, stating the expected effect on each axis. Then pursue them; update each idea's status and reason as evidence arrives.",
-        "arena_probe compiles drafts (sorry allowed, goals reported); arena_evaluate scores a complete proof (fast = primary version, full = every version). Parents and idea ids are optional labels. The current candidate file is readable by lean_goal and lean_diagnostic_messages at the line numbers reported in diagnostics.",
-        f"Pinned source: {row['source']}:{row['file_path']}:{row['start_line']}-{row['end_line']}",
-        f"Toolchain commits: {commits}",
-        f"Reference proof ({row['proof_length']} tokens):\n```lean\n{original}\n```",
-    ]
-    return "\n\n".join(parts) + "\n"
+    """Kickoff packet: task, exchange rates, source-derived context. Built once per row and cached."""
+    from arena.context import render_packet
+
+    return render_packet(name)
 
 
 def _append(directory: Path, event: dict) -> None:
