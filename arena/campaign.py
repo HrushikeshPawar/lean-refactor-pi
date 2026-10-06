@@ -151,7 +151,13 @@ def events(directory: Path) -> list[dict]:
     with file.open("rb") as handle:
         fcntl.flock(handle, fcntl.LOCK_SH)
         data = handle.read().decode()
-    return [json.loads(line) for line in data.splitlines()]
+    rows = []
+    for line in data.splitlines():
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue  # a torn final line from a killed writer must not make the run unreadable
+    return rows
 
 
 @contextmanager

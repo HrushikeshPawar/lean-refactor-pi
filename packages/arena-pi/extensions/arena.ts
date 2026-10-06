@@ -45,7 +45,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
       child.on("error", reject);
       child.on("close", code => code === 0 || chunks.length
         ? accept(Buffer.concat(chunks).toString("utf8"))
-        : accept(JSON.stringify({ ok: false, error: Buffer.concat(errors).toString("utf8").trim().split("\n").at(-1) ?? "Arena command failed" })));
+        : accept(JSON.stringify({ ok: false, error: (Buffer.concat(errors).toString("utf8").trim().split("\n").at(-1) ?? "Arena command failed").replace(/^\w*(Error|Exception): /, "") })));
     });
     try { return JSON.parse(output.trim().split("\n").at(-1) ?? ""); }
     catch { return { ok: false, error: `Arena command returned no result: ${output.trim().slice(0, 200)}` }; }

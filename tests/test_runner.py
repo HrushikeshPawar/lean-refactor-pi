@@ -3,7 +3,7 @@
 import json
 import unittest
 
-from tests.pi_support import NAME, PI_AVAILABLE, FakeRun, message_text
+from tests.pi_support import PI_AVAILABLE, FakeRun, message_text
 from tools.arena_skill import SKILL_DIR, skill_hash
 
 STOP = [{"text": "done"}]

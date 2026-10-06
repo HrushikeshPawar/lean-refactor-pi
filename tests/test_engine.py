@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from arena import campaign
-from arena.engine import (HEARTBEAT_WRAPPER, WRAPPER_LINES, ROOT, candidate_file, evaluate,
+from arena.engine import (WRAPPER_LINES, ROOT, candidate_file, evaluate,
                           instrument_sorries, map_measured_line, parse_diagnostics, problem,
                           reconstruct, structure_diagnostics, validate_proof)
 

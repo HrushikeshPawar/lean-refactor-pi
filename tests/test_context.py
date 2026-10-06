@@ -1,6 +1,5 @@
 import json
 import unittest
-from pathlib import Path
 
 from arena import context
 from arena.engine import ROOT

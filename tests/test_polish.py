@@ -1,4 +1,3 @@
-import json
 import shutil
 import tempfile
 import threading
@@ -6,11 +5,9 @@ import time
 import unittest
 import uuid
 from pathlib import Path
-from unittest.mock import patch
 
 from arena import campaign, polish
-from arena.engine import ROOT
-from tests.test_protocol import FIXTURE, LEAN, NAME, cli
+from tests.test_protocol import FIXTURE, LEAN, cli
 
 PROOF = """theorem t : A := by
   intro h
