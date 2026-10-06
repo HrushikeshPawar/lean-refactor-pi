@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { boundedPayload, budgetDecision, budgetLimits, cacheUtilization, maximumNextRequest, permitFinalPayload, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
+import { boundedPayload, budgetDecision, cacheAlarm, MIN_REQUEST_OUTPUT_TOKENS, outputBudget, budgetLimits, cacheUtilization, maximumNextRequest, permitFinalPayload, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
 
 const usage = { input: 1_000_000, output: 100_000, cacheRead: 0, cacheWrite: 0 };
 
@@ -123,4 +123,23 @@ test("final transport guard admits requests until observed usage reaches each ca
     assert.throws(() => permitFinalPayload(payload, "gpt-6-luna",
       { spent: hardCap }, limits), /Arena budget stop/);
   }
+});
+
+test("the last allowed request is bounded by what remains of the cap", () => {
+  const payload = { model: "x", input: [], max_output_tokens: 128_000 };
+  const luna = (remaining: number) => (permitFinalPayload(payload, "gpt-6-luna",
+    { spent: 0.1 - remaining }, { hardCapUsd: 0.1, stopUsd: 0.1 }).payload as { max_output_tokens: number }).max_output_tokens;
+  assert.equal(luna(0.1), 16_000);
+  assert.equal(luna(0.003), 4_000);           // $0.003 at $0.75 per million output tokens
+  assert.equal(luna(0.00001), MIN_REQUEST_OUTPUT_TOKENS);
+  assert.equal(outputBudget(5, "qwen3.8-flash"), 16_000);
+  assert.throws(() => luna(0), /Arena budget stop/);
+});
+
+test("cache alarm fires only after warm-up, when a request writes more than it reads", () => {
+  assert.equal(cacheAlarm({ cacheRead: 0, cacheWrite: 9000 }, 1), undefined);
+  assert.equal(cacheAlarm({ cacheRead: 0, cacheWrite: 9000 }, 2), undefined);
+  assert.deepEqual(cacheAlarm({ cacheRead: 1000, cacheWrite: 9000 }, 3), { request: 3, read: 1000, write: 9000 });
+  assert.equal(cacheAlarm({ cacheRead: 9000, cacheWrite: 900 }, 7), undefined);
+  assert.equal(cacheAlarm({}, 7), undefined);
 });

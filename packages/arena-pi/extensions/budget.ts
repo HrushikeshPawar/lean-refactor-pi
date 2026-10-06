@@ -133,6 +133,14 @@ export function cacheUtilization(entries: readonly SessionEntry[], sessionModel:
   return { all: summarize(usages), recent_ten: summarize(usages.slice(-10)) };
 }
 
+// A request that wrote more cache than it read after warm-up means the stable prefix was not reused.
+export const CACHE_WARMUP_REQUESTS = 2;
+export function cacheAlarm(usage: { cacheRead?: number; cacheWrite?: number }, settledRequests: number):
+    { request: number; read: number; write: number } | undefined {
+  const read = usage.cacheRead ?? 0, write = usage.cacheWrite ?? 0;
+  return settledRequests > CACHE_WARMUP_REQUESTS && write > read ? { request: settledRequests, read, write } : undefined;
+}
+
 export function maximumNextRequest(model: BudgetModel): number {
   const { price, contextWindow, maxTokens } = MODELS[model];
   const conservative = model === "gpt-6-luna" ? MODELS[model].highPrice : price;
@@ -153,7 +161,16 @@ export function budgetDecision(spent: number, model: BudgetModel, limits: Budget
 // Both include generated thinking tokens in the output limit.
 export const MAX_REQUEST_OUTPUT_TOKENS = 16_000;
 
-export function boundedPayload(payload: unknown, model: BudgetModel): { payload: Record<string, unknown>; reserve: number } {
+// Output tokens a request may generate without the output alone costing more than what remains.
+// Input cost of the request is unknown before it is sent, so overshoot is bounded, reported, never hidden.
+export const MIN_REQUEST_OUTPUT_TOKENS = 256;
+export function outputBudget(remainingUsd: number, model: BudgetModel): number {
+  const price = model === "gpt-6-luna" ? MODELS[model].highPrice : MODELS[model].price;
+  const affordable = Math.floor(remainingUsd / price.output * 1_000_000);
+  return Math.max(MIN_REQUEST_OUTPUT_TOKENS, Math.min(MAX_REQUEST_OUTPUT_TOKENS, affordable));
+}
+
+export function boundedPayload(payload: unknown, model: BudgetModel, remainingUsd = Infinity): { payload: Record<string, unknown>; reserve: number } {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error("Unknown provider payload");
   const value = { ...payload as Record<string, unknown> };
   const outputField = typeof value.max_output_tokens === "number" ? "max_output_tokens"
@@ -161,7 +178,7 @@ export function boundedPayload(payload: unknown, model: BudgetModel): { payload:
   if (!outputField || !Number.isFinite(value[outputField]) || Number(value[outputField]) <= 0) {
     throw new Error("Cannot enforce Arena output bound on provider payload");
   }
-  value[outputField] = Math.min(Number(value[outputField]), MAX_REQUEST_OUTPUT_TOKENS);
+  value[outputField] = Math.min(Number(value[outputField]), outputBudget(remainingUsd, model));
   const bytes = Buffer.byteLength(JSON.stringify(value), "utf8");
   // Text-only Responses payloads cannot tokenize into more tokens than their
   // UTF-8 bytes; allow a fixed margin for protocol framing outside the JSON.
@@ -175,9 +192,8 @@ export function boundedPayload(payload: unknown, model: BudgetModel): { payload:
 
 export function permitFinalPayload(payload: unknown, model: BudgetModel,
   state: { spent: number }, limits: BudgetLimits) {
-  const bounded = boundedPayload(payload, model);
   if (!Number.isFinite(state.spent) || state.spent < 0 || state.spent >= limits.hardCapUsd) {
     throw new Error(`Arena budget stop: $${state.spent.toFixed(6)} observed usage reached $${limits.hardCapUsd.toFixed(2)} cap`);
   }
-  return bounded;
+  return boundedPayload(payload, model, limits.hardCapUsd - state.spent);
 }

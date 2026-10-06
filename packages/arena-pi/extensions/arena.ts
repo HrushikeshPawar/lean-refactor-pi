@@ -5,11 +5,13 @@ import { tmpdir } from "node:os";
 import { dirname, resolve, relative, sep } from "node:path";
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
-import { BUDGET_PROVIDER, budgetLimits, cacheUtilization, isBudgetModel, MAX_REQUEST_OUTPUT_TOKENS, MODELS, permitFinalPayload, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
+import type { BudgetModel } from "./budget.ts";
+import { BUDGET_PROVIDER, budgetLimits, cacheAlarm, cacheUtilization, isBudgetModel, MAX_REQUEST_OUTPUT_TOKENS, MODELS, permitFinalPayload, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
 
 const root = resolve(import.meta.dirname, "../../..");
 const workspaces = resolve(root, "workspaces");
 const SKILL_READ_LIMIT = 24_000;
+const MAX_ERROR_STREAK = 3;
 
 function inside(path: string, parent: string): boolean {
   const rel = relative(parent, path);
@@ -25,6 +27,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
   let pendingRequest: string | undefined;
   let continuations = 0;
   let plateau = 0;
+  let errorStreak = 0;
   let previousProgress = "";
   let readEntries: (() => SessionEntry[]) | undefined;
   let modelRegistry: ExtensionContext["modelRegistry"] | undefined;
@@ -96,6 +99,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
     const latest = costEvents().filter(item => item.kind === "control").at(-1);
     continuations = Number(latest?.continuations ?? 0);
     plateau = Number(latest?.plateau ?? 0);
+    errorStreak = Number(latest?.error_streak ?? 0);
     previousProgress = String(latest?.progress ?? "");
   });
 
@@ -126,7 +130,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
         maxTokens: Math.min(rest.maxTokens ?? MAX_REQUEST_OUTPUT_TOKENS, MAX_REQUEST_OUTPUT_TOKENS),
         onPayload: async payload => {
           const transformed = await options?.onPayload?.(payload, physical) ?? payload;
-          const bounded = permitFinalPayload(transformed, model.id, costState(), budgetLimits());
+          const bounded = permitFinalPayload(transformed, model.id as BudgetModel, costState(), budgetLimits());
           const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
           appendCost({ kind: "reserve", id, usd: bounded.reserve, model: model.id,
             bytes: Buffer.byteLength(JSON.stringify(bounded.payload)) });
@@ -187,6 +191,11 @@ export default function arenaExtension(pi: ExtensionAPI) {
           cache_read: usage.cacheRead ?? 0, cache_write: usage.cacheWrite ?? 0 },
         ledger_components_usd: usageCostParts(usage, model),
         pi_embedded_cost_usd: usage.cost?.total ?? null });
+      const alarm = cacheAlarm(usage, costEvents().filter(item => item.kind === "settle" && item.usage_known === true).length);
+      if (alarm) {
+        appendCost({ kind: "cache_alarm", id: pendingRequest, ...alarm });
+        console.error(`[arena-cache-alarm] request ${alarm.request}: wrote ${alarm.write} cache tokens but read ${alarm.read}; the stable prefix was not reused`);
+      }
       console.error(`[arena-cost] settled $${usd.toFixed(6)}; cache read ${usage.cacheRead ?? 0}, write ${usage.cacheWrite ?? 0}; total $${(costState().spent).toFixed(6)}`);
     } else {
       appendCost({ kind: "release", id: pendingRequest, reason: event.message.stopReason ?? "no_usage", usage_known: false });
@@ -202,6 +211,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
     const limits = budgetLimits();
     return { spent_usd: state.spent, unresolved_usd: state.unresolved,
       remaining_usd: Math.max(0, limits.hardCapUsd - state.spent),
+      overshoot_usd: Math.max(0, state.spent - limits.hardCapUsd),
       can_continue: state.spent < limits.hardCapUsd,
       cap_is_actual_usage_only: true };
   }
@@ -461,18 +471,31 @@ export default function arenaExtension(pi: ExtensionAPI) {
     const limits = budgetLimits();
     const state = await campaign("frontier");
     const progress = JSON.stringify(state.best ?? null);
-    if (progress === previousProgress) plateau += 1;
-    else plateau = 0;
-    previousProgress = progress;
+    // Only a turn that produced a real model response counts as work. Provider or extension
+    // errors back off and eventually stop the run instead of burning continuations.
+    const failed = event.outcome !== "completed";
+    errorStreak = failed ? errorStreak + 1 : 0;
+    if (!failed) {
+      if (progress === previousProgress) plateau += 1;
+      else plateau = 0;
+      previousProgress = progress;
+    }
     const stop = budget.spent >= limits.hardCapUsd ? "actual_usage_cap"
+      : errorStreak >= MAX_ERROR_STREAK ? "error_loop"
       : continuations >= 12 ? "continuation_limit"
       : continuations >= 4 && plateau >= 4 ? "plateau" : null;
     if (stop) {
-      appendCost({ kind: "control", continuations, plateau, progress, stop });
+      appendCost({ kind: "control", continuations, plateau, error_streak: errorStreak, progress, stop });
       return;
     }
-    continuations += 1;
-    appendCost({ kind: "control", continuations, plateau, progress, stop: null });
+    if (failed) {
+      const delay = Math.min(30_000, Number(process.env.ARENA_BACKOFF_MS ?? 2000) * 2 ** (errorStreak - 1));
+      appendCost({ kind: "control", continuations, plateau, error_streak: errorStreak, progress, stop: null, backoff_ms: delay });
+      await new Promise(done => setTimeout(done, delay));
+    } else {
+      continuations += 1;
+      appendCost({ kind: "control", continuations, plateau, error_streak: errorStreak, progress, stop: null });
+    }
     const ideas = (state.ideas ?? []).filter((idea: any) => idea.status === "active")
       .map((idea: any) => `${idea.id} ${idea.title}`);
     const content = `Continue proof optimization. Best so far: ${JSON.stringify(state.best ?? null)}. Active ideas: ${ideas.length ? ideas.join("; ") : "none recorded"}. Remaining ledger-priced usage cap: $${Math.max(0, limits.hardCapUsd - budget.spent).toFixed(4)}.`;
