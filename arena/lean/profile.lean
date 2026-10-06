@@ -11,19 +11,19 @@ open Lean Elab Command in
 elab "arena_profile_heartbeats " cmd:command : command => do
   let fm ← getFileMap
   let maxDepth := @@MAX_DEPTH@@
-  let rec wrap : Nat → Nat → Syntax → CommandElabM Syntax
+  let rec wrap : Nat → Nat → Lean.Syntax → CommandElabM Lean.Syntax
     | 0, _, stx => pure stx
     | fuel + 1, depth, stx => do
       match stx with
       | .node info kind args =>
         let isSeq := kind == ``Lean.Parser.Tactic.tacticSeq1Indented ||
           kind == ``Lean.Parser.Tactic.tacticSeqBracketed
-        let mut out : Array Syntax := #[]
+        let mut out : Array Lean.Syntax := #[]
         for arg in args do
           match arg with
           | .node ninfo `null items =>
             if isSeq then
-              let mut newItems : Array Syntax := #[]
+              let mut newItems : Array Lean.Syntax := #[]
               let mut i := 0
               for item in items do
                 if i % 2 == 0 then

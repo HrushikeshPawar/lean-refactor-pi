@@ -4,7 +4,7 @@ elab "arena_decl " ids:ident* : command => do
   for id in ids do
     let found ← try liftCoreM (resolveGlobalConst id) catch _ => pure []
     match found with
-    | [] => logInfo m!"ARENA_DECL {(Json.mkObj [("symbol", id.getId.toString), ("found", false)]).compress}"
+    | [] => logInfo m!"ARENA_DECL {(Lean.Json.mkObj [("symbol", id.getId.toString), ("found", false)]).compress}"
     | names =>
       for n in names do
         match env.find? n with
@@ -23,5 +23,5 @@ elab "arena_decl " ids:ident* : command => do
             | .thmInfo _ => "theorem" | .axiomInfo _ => "theorem" | .defnInfo _ => "def"
             | .inductInfo _ => "inductive" | .ctorInfo _ => "constructor" | .opaqueInfo _ => "opaque"
             | .recInfo _ => "recursor" | .quotInfo _ => "quot"
-          logInfo m!"ARENA_DECL {(Json.mkObj [("symbol", id.getId.toString), ("found", true), ("name", n.toString), ("kind", kind), ("module", modName), ("line", match line with | some l => Json.num l | none => Json.null), ("signature", sig)]).compress}"
+          logInfo m!"ARENA_DECL {(Lean.Json.mkObj [("symbol", id.getId.toString), ("found", true), ("name", n.toString), ("kind", kind), ("module", modName), ("line", match line with | some l => Json.num l | none => Json.null), ("signature", sig)]).compress}"
 

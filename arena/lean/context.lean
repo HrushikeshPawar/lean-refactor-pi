@@ -7,23 +7,23 @@ elab "arena_context " cmd:command : command => do
   elabCommand (← `(command| set_option Elab.async false in set_option maxHeartbeats 0 in $(⟨cmd.raw⟩):command))
   let fm ← getFileMap
   let emit (fields : List (String × Json)) : CommandElabM Unit :=
-    logInfo m!"ARENA_CTX {(Json.mkObj fields).compress}"
+    logInfo m!"ARENA_CTX {(Lean.Json.mkObj fields).compress}"
   let clip (s : String) (n : Nat) : String := if s.length > n then String.ofList (s.toList.take n) ++ "…" else s
-  let sigOf (n : Name) : CommandElabM String := do
+  let sigOf (n : Lean.Name) : CommandElabM String := do
     match (← getEnv).find? n with
     | none => pure ""
     | some ci =>
       try
         liftTermElabM (do pure s!"{n} : {← ppExpr ci.type}")
       catch _ => pure ""
-  let isProjectLocal (n : Name) (env : Environment) : Bool :=
+  let isProjectLocal (n : Lean.Name) (env : Lean.Environment) : Bool :=
     match env.getModuleIdxFor? n with
     | none => true
     | some idx =>
       let m := env.header.moduleNames[idx.toNat]!
       projectRoots.contains m.getRoot.toString
   -- top-level tactics of the declaration's `by` block
-  let rec findBy : Nat → Syntax → Option Syntax
+  let rec findBy : Nat → Lean.Syntax → Option Lean.Syntax
     | 0, _ => none
     | fuel + 1, s => if s.getKind == ``Lean.Parser.Term.byTactic then some s
                      else s.getArgs.findSome? (findBy fuel)
@@ -39,7 +39,7 @@ elab "arena_context " cmd:command : command => do
         | _, _ => pure ()
   | none => pure ()
   let seenGoal ← IO.mkRef (#[] : Array (Nat × Nat))
-  let usedRef ← IO.mkRef (#[] : Array (Name × Nat))
+  let usedRef ← IO.mkRef (#[] : Array (Lean.Name × Nat))
   let rec visit : Nat → Option ContextInfo → InfoTree → CommandElabM Unit
     | 0, _, _ => pure ()
     | fuel + 1, ctx?, .context pci t => visit fuel (pci.mergeIntoOuter? ctx?) t
@@ -79,7 +79,7 @@ elab "arena_context " cmd:command : command => do
   let env ← getEnv
   -- definitions of project types appearing in the statement
   let newDecls := env.constants.map₂.toList.filter (fun (n, _) => !envBefore.contains n && !n.isInternal)
-  let mut stmtNames : Array Name := #[]
+  let mut stmtNames : Array Lean.Name := #[]
   for (n, ci) in newDecls do
     match ci with
     | .thmInfo _ =>
@@ -115,7 +115,7 @@ elab "arena_context " cmd:command : command => do
       emit [("kind", "used"), ("name", n.toString), ("line", line), ("decl", decl),
             ("module", modName), ("sig", clip (← sigOf n) 500)]
   -- declarations earlier in this file, nearest first
-  let mut earlier : Array (Nat × Name) := #[]
+  let mut earlier : Array (Nat × Lean.Name) := #[]
   for (n, ci) in envBefore.constants.map₂.toList do
     unless n.isInternal || isPrivateName n || ((toString n).splitOn "rena_").length > 1 do
       match ← findDeclarationRanges? n with
