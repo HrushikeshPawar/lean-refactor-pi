@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Arena runs</title>
+  <link rel="stylesheet" href="hub.css">
+</head>
+<body>
+  <header>
+    <div><h1>Arena runs</h1><div id="hub-sub" class="sub">Connecting…</div></div>
+    <div id="hub-live" class="live">Connecting…</div>
+  </header>
+  <nav id="tabs" class="tabs" role="tablist" aria-label="Runs"></nav>
+  <main id="panels">
+    <section id="panel-overview" class="panel-overview" role="tabpanel" aria-label="Overview">
+      <div class="table-wrap"><table class="overview">
+        <thead><tr><th>Run</th><th>Model</th><th>Thinking</th><th>Best verified</th><th>Tokens</th><th>Heartbeats</th>
+          <th>Leading unverified</th><th>Spend</th><th>Requests</th><th>Status</th><th>Submission</th></tr></thead>
+        <tbody id="overview-rows"><tr><td colspan="11" class="muted">No runs yet.</td></tr></tbody>
+      </table></div>
+      <p class="muted note">Select a row or a tab to open that run's live viewer. Runs started later appear automatically.</p>
+    </section>
+  </main>
+  <script src="hub.js" defer></script>
+</body>
+</html>

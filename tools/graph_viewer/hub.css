@@ -1,0 +1,33 @@
+:root{color-scheme:dark;--bg:#0b1119;--panel:#141d28;--panel2:#1b2836;--line:#33465a;--text:#e6eef7;--muted:#a9b9ca;--good:#6bd6a5;--mid:#edc475;--bad:#ed8795;--blue:#78baff}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;display:flex;flex-direction:column;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,sans-serif}
+header{display:flex;gap:16px;align-items:center;justify-content:space-between;padding:10px 18px;border-bottom:1px solid var(--line);background:var(--panel)}
+h1{font-size:18px;margin:0}
+.sub,.muted{color:var(--muted)}
+.live{color:var(--mid)}.live.ok{color:var(--good)}
+.tabs{display:flex;gap:4px;padding:6px 10px 0;border-bottom:1px solid var(--line);background:var(--panel);overflow-x:auto}
+.tab{display:flex;flex-direction:column;align-items:flex-start;gap:1px;min-width:150px;padding:6px 12px;border:1px solid var(--line);border-bottom:0;border-radius:8px 8px 0 0;background:var(--panel2);color:var(--text);font:inherit;cursor:pointer;white-space:nowrap}
+.tab:hover{border-color:var(--blue)}
+.tab[aria-selected="true"]{background:var(--bg);border-color:var(--blue);box-shadow:inset 0 2px 0 var(--blue)}
+.tab .tab-title{font-weight:700;font-size:13px}
+.tab .tab-meta{font-size:11px;color:var(--muted)}
+.dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px;vertical-align:1px;background:var(--muted)}
+.dot.live{background:var(--good)}.dot.done{background:var(--muted)}
+main{flex:1;min-height:0;position:relative}
+.panel-overview{height:100%;overflow:auto;padding:16px 18px}
+.run-frame{position:absolute;inset:0;width:100%;height:100%;border:0;background:var(--bg)}
+[hidden]{display:none!important}
+.table-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:8px}
+table.overview{width:100%;border-collapse:collapse;font-size:13px}
+.overview th{position:sticky;top:0;background:#24364a;color:#d7e7f8;text-align:left;font-weight:600}
+.overview th,.overview td{padding:7px 10px;border-bottom:1px solid #304258;white-space:nowrap}
+.overview tbody tr{cursor:pointer}
+.overview tbody tr:hover{background:#1d3046}
+.overview .num{text-align:right;font-variant-numeric:tabular-nums}
+.overview .best{color:var(--good);font-weight:700}
+.bar{display:inline-block;width:70px;height:6px;margin-right:8px;vertical-align:middle;border-radius:3px;background:#2a3c50;overflow:hidden}
+.bar span{display:block;height:100%;background:var(--blue)}
+.bar.over span{background:var(--bad)}
+.note{margin-top:10px;font-size:12px}
+@media(max-width:700px){header{padding:10px 16px}.panel-overview{padding:12px 16px}.tab{min-width:120px}}

@@ -1,9 +1,16 @@
-"""Serve static graph assets and live run data on loopback only."""
+"""Serve static graph assets and live run data on loopback only.
+
+One run: the viewer at `/`. Several runs (more than one ID, or `--match` with a glob over run
+IDs that is re-scanned on every request, so new runs appear while a matrix starts them): a hub
+at `/` with one tab per run, each tab showing that run's viewer from `/run/<id>/`.
+"""
 
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
+import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -93,32 +100,128 @@ def baseline_point(payload: dict) -> dict | None:
             "tokens": tokens, "heartbeat": heartbeats, "local_proxy": round(100 / 3, 2), "is_reference": True}
 
 
-def handler_for(run_id: str):
+VIEWER_FILES = {"": ("index.html", "text/html; charset=utf-8"),
+                "index.html": ("index.html", "text/html; charset=utf-8"),
+                "app.js": ("app.js", "text/javascript; charset=utf-8"),
+                "style.css": ("style.css", "text/css; charset=utf-8")}
+HUB_FILES = {"": ("hub.html", "text/html; charset=utf-8"),
+             "index.html": ("hub.html", "text/html; charset=utf-8"),
+             "hub.js": ("hub.js", "text/javascript; charset=utf-8"),
+             "hub.css": ("hub.css", "text/css; charset=utf-8")}
+
+
+class Runs:
+    """The runs a server shows: explicit IDs plus any run directory matching a glob."""
+
+    def __init__(self, run_ids: list[str], pattern: str | None = None):
+        self.explicit = list(dict.fromkeys(run_ids))
+        self.pattern = pattern
+
+    @property
+    def hub(self) -> bool:
+        return self.pattern is not None or len(self.explicit) != 1
+
+    def ids(self) -> list[str]:
+        found = list(self.explicit)
+        if self.pattern:
+            root = run_dir("x").parent
+            for path in sorted(root.iterdir()) if root.is_dir() else []:
+                if (fnmatch.fnmatchcase(path.name, self.pattern) and path.name not in found
+                        and (path / "ledger.jsonl").exists()):
+                    found.append(path.name)
+        return found
+
+
+def run_card(run_id: str) -> dict:
+    """Cheap per-run status for the hub's tabs and overview; read from files the run writes."""
+    directory = run_dir(run_id)
+
+    def read(name: str) -> dict:
+        try:
+            return json.loads((directory / name).read_text())
+        except (OSError, ValueError):
+            return {}
+    config, state, summary, answer = (read("run-config.json"), read("state.json"),
+                                      read("summary.json"), read("submission.json"))
+    spent, requests = 0.0, 0
+    journal = directory / "cost-ledger.jsonl"
+    if journal.exists():
+        for line in journal.read_text().splitlines():
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if event.get("kind") == "settle" and event.get("usage_known") is not False:
+                spent += float(event.get("usd") or 0)
+                requests += 1
+    best = state.get("best") or {}
+    return {"run_id": run_id, "model": config.get("model"), "theorem": config.get("theorem"),
+            "thinking": config.get("thinking"), "cap_usd": config.get("hard_cap_usd"),
+            "spent_usd": round(spent, 6), "requests": requests,
+            "best": {"candidate": best.get("candidate"), "proxy": best.get("proxy"),
+                     "tokens": best.get("tokens"), "heartbeats": best.get("heartbeats")} if best else None,
+            "leading_unverified": state.get("leading_unverified"), "checking": state.get("checking", []),
+            "finished": bool(summary), "stop_reason": summary.get("stop_reason"),
+            "submission": answer.get("candidate")}
+
+
+def handler_for(runs: Runs | str):
+    if isinstance(runs, str):
+        runs = Runs([runs])
+
     class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def send(self, body: bytes, content_type: str) -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; "
+                             "connect-src 'self'; frame-src 'self'; frame-ancestors 'self'")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def viewer(self, run_id: str, rest: str) -> None:
+            if rest == "graph.json":
+                self.send(json.dumps(graph_payload(run_id), ensure_ascii=False).encode(),
+                          "application/json; charset=utf-8")
+            elif rest in VIEWER_FILES:
+                filename, content_type = VIEWER_FILES[rest]
+                self.send((ASSETS / filename).read_bytes(), content_type)
+            else:
+                self.send_error(404)
+
         def do_GET(self):
             path = self.path.split("?", 1)[0]
-            files = {"/": ("index.html", "text/html; charset=utf-8"),
-                     "/index.html": ("index.html", "text/html; charset=utf-8"),
-                     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
-                     "/style.css": ("style.css", "text/css; charset=utf-8")}
             try:
-                if path == "/graph.json":
-                    body = json.dumps(graph_payload(run_id), ensure_ascii=False).encode()
-                    content_type = "application/json; charset=utf-8"
-                elif path in files:
-                    filename, content_type = files[path]
-                    body = (ASSETS / filename).read_bytes()
+                if not runs.hub:
+                    self.viewer(runs.ids()[0], path.lstrip("/"))
+                    return
+                if path == "/runs.json":
+                    self.send(json.dumps([run_card(run_id) for run_id in runs.ids()], ensure_ascii=False).encode(),
+                              "application/json; charset=utf-8")
+                    return
+                match = re.fullmatch(r"/run/([A-Za-z0-9._-]+)(/(.*))?", path)
+                if match:
+                    if match[1] not in runs.ids():
+                        self.send_error(404, "Unknown run")
+                    elif match[2] is None:
+                        # Relative asset URLs need the trailing slash.
+                        self.send_response(301)
+                        self.send_header("Location", f"/run/{match[1]}/")
+                        self.end_headers()
+                    else:
+                        self.viewer(match[1], match[3])
+                    return
+                rest = path.lstrip("/")
+                if rest in HUB_FILES:
+                    filename, content_type = HUB_FILES[rest]
+                    self.send((ASSETS / filename).read_bytes(), content_type)
                 else:
                     self.send_error(404)
-                    return
-                self.send_response(200)
-                self.send_header("Content-Type", content_type)
-                self.send_header("Cache-Control", "no-store")
-                self.send_header("X-Content-Type-Options", "nosniff")
-                self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
             except (OSError, ValueError, KeyError) as error:
                 self.send_error(500, str(error))
 
@@ -127,11 +230,16 @@ def handler_for(run_id: str):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("run_id")
+    parser.add_argument("run_ids", nargs="*", help="One run (single viewer) or several (hub with tabs)")
+    parser.add_argument("--match", help="Glob over run IDs, re-scanned live, e.g. 'v5-rep-20261006-r3-*'")
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), handler_for(args.run_id))
-    print(f"Arena graph: http://127.0.0.1:{server.server_port}/", flush=True)
+    if not args.run_ids and not args.match:
+        parser.error("give at least one run ID or --match")
+    runs = Runs(args.run_ids, args.match)
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), handler_for(runs))
+    kind = "hub" if runs.hub else "viewer"
+    print(f"Arena graph {kind}: http://127.0.0.1:{server.server_port}/ ({len(runs.ids())} run(s) now)", flush=True)
     server.serve_forever()
 
 

@@ -1,3 +1,4 @@
+import json
 import unittest
 import tempfile
 from pathlib import Path
@@ -191,6 +192,63 @@ class ViewerTests(unittest.TestCase):
                          (0, "ref", 224, 33.33))
         self.assertGreater(point["heartbeat"], 0)
         self.assertIsNone(baseline_point({"theorem": "Core.InitsUpdatesComm", "nodes": []}))
+
+    def test_hub_lists_matching_runs_and_serves_each_viewer_under_its_own_path(self):
+        import threading
+        import urllib.error
+        import urllib.request
+        from http.server import ThreadingHTTPServer
+        from tools.serve_candidate_graph import Runs, handler_for
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name, model in (("rep-r3-model-a", "gpt-6-luna"), ("rep-r3-model-b", "qwen3.8-flash"),
+                                ("rep-r3-matrix", None), ("other-run", "gpt-6-luna")):
+                (root / name).mkdir()
+                if model:
+                    (root / name / "ledger.jsonl").write_text('{"kind":"init","theorem":"T"}\n')
+                    (root / name / "run-config.json").write_text(json.dumps({"model": model, "hard_cap_usd": 0.1}))
+            (root / "rep-r3-model-b" / "summary.json").write_text('{"stop_reason": "actual_usage_cap"}')
+            (root / "rep-r3-model-b" / "state.json").write_text('{"best": {"candidate": "#5", "proxy": 81.76}}')
+            (root / "rep-r3-model-b" / "cost-ledger.jsonl").write_text(
+                '{"kind":"settle","usd":0.03}\n{"kind":"settle","usd":0.02}\n')
+            with patch("tools.serve_candidate_graph.run_dir", side_effect=lambda run_id: root / run_id), \
+                 patch("tools.serve_candidate_graph.graph_state", side_effect=lambda run_id: {"run_id": run_id}):
+                server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(Runs([], "rep-r3-*")))
+                threading.Thread(target=server.serve_forever, daemon=True).start()
+                self.addCleanup(server.shutdown)
+                base = f"http://127.0.0.1:{server.server_port}"
+
+                def get(path):
+                    with urllib.request.urlopen(base + path) as response:
+                        return response.read().decode(), response.headers
+
+                hub, headers = get("/")
+                self.assertIn('src="hub.js"', hub)
+                self.assertIn("frame-src 'self'", headers["Content-Security-Policy"])
+                cards = json.loads(get("/runs.json")[0])
+                # The matrix log directory has no ledger and runs outside the glob are not shown.
+                self.assertEqual([c["run_id"] for c in cards], ["rep-r3-model-a", "rep-r3-model-b"])
+                done = cards[1]
+                self.assertEqual((done["finished"], done["best"]["proxy"], done["spent_usd"], done["requests"]),
+                                 (True, 81.76, 0.05, 2))
+                self.assertFalse(cards[0]["finished"])
+                viewer, _ = get("/run/rep-r3-model-a/")
+                self.assertIn('src="app.js"', viewer)
+                self.assertEqual(json.loads(get("/run/rep-r3-model-a/graph.json")[0])["run_id"], "rep-r3-model-a")
+                for bad in ("/run/other-run/", "/run/../secrets/", "/run/rep-r3-model-a/../../x"):
+                    with self.assertRaises(urllib.error.HTTPError, msg=bad):
+                        get(bad)
+                # A run started after the server is found on the next request.
+                (root / "rep-r3-model-c").mkdir()
+                (root / "rep-r3-model-c" / "ledger.jsonl").write_text("")
+                self.assertEqual(len(json.loads(get("/runs.json")[0])), 3)
+
+    def test_a_single_run_still_gets_the_plain_viewer_at_the_root(self):
+        from tools.serve_candidate_graph import Runs
+        self.assertFalse(Runs(["one"]).hub)
+        self.assertTrue(Runs(["one", "two"]).hub)
+        self.assertTrue(Runs([], "x-*").hub)
 
     def test_failed_and_legacy_unknown_usage_releases_do_not_raise_spend(self):
         with tempfile.TemporaryDirectory() as temporary:

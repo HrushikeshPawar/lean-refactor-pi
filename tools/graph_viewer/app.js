@@ -393,7 +393,7 @@
   }
   async function refresh() {
     try {
-      const response=window.GRAPH_SNAPSHOT ? {ok:true,json:async()=>window.GRAPH_SNAPSHOT} : await fetch('/graph.json',{cache:'no-store'});
+      const response=window.GRAPH_SNAPSHOT ? {ok:true,json:async()=>window.GRAPH_SNAPSHOT} : await fetch('graph.json',{cache:'no-store'});
       if(!response.ok)throw new Error(`HTTP ${response.status}`);
       const next=await response.json(),revision=`${next.ledger_events}:${next.cost_timeline?.length}:${next.worker?.updated_at}`;
       $('live').textContent=window.GRAPH_SNAPSHOT?'Saved snapshot':`Live · ${new Date().toLocaleTimeString()}`;$('live').classList.add('ok');
