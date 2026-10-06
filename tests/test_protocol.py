@@ -204,6 +204,43 @@ class ProfileCliTests(unittest.TestCase):
         self.assertIn("without sorry", result["error"])
 
 
+@LEAN
+class DeclarationTests(unittest.TestCase):
+    def test_namespaced_constructor_and_library_names_resolve_where_text_search_cannot(self):
+        found = campaign.declaration(NAME, "Core.UpdateStatesLength")
+        self.assertTrue(found["found"])
+        self.assertIn("ks.length = vs.length", found["signature"])
+        library = campaign.declaration(NAME, "List.unzip_zip")
+        self.assertEqual((library["found"], library["module"]), (True, "Init.Data.List.Zip"))
+        constructor = campaign.declaration(NAME, "Core.UpdateStates.update_some")
+        self.assertEqual(constructor["kind"], "constructor")
+
+    def test_a_name_that_does_not_exist_gets_a_hint_not_a_traceback(self):
+        missing = campaign.declaration(NAME, "Core.NoSuchLemmaAnywhere")
+        self.assertFalse(missing["found"])
+        self.assertIn("hint", missing)
+        self.assertFalse(cli("none", "declaration", "--symbol", "bad name!")["ok"])
+
+
+@LEAN
+class TruncationEquivalenceTests(unittest.TestCase):
+    def test_dropping_later_declarations_does_not_change_the_result(self):
+        from arena.engine import HEARTBEAT_WRAPPER, candidate_file, evaluate, problem, run_lean, versions
+
+        row = problem(NAME)
+        version, commit = versions(row)[0]
+        proof = FIXTURE.read_text()
+        short = candidate_file(row, proof, version, commit, truncate=True)
+        full = candidate_file(row, proof, version, commit, truncate=False)
+        self.assertGreater(len(full["text"]), len(short["text"]))
+        self.assertTrue(full["text"].startswith(short["text"].rstrip("\n")))
+        code, output = run_lean(row, full["path"], full["text"][:full["offset"]] + HEARTBEAT_WRAPPER + full["text"][full["offset"]:])
+        untruncated = int(__import__("re").search(r"ARENA_HEARTBEATS (\d+)", output)[1])
+        result = evaluate(NAME, proof, "fast")
+        self.assertEqual((code, result["compat"][version]["passed"]), (0, True))
+        self.assertAlmostEqual(result["heartbeat"], untruncated, delta=max(5, untruncated * 0.02))
+
+
 class ProtocolLogicTests(unittest.TestCase):
     """Behaviour that needs no Lean: lineage defaults, advisory, idea lifecycle."""
 

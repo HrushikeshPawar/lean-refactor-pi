@@ -97,7 +97,31 @@ def declaration(name: str, symbol: str) -> dict:
         line = source.count("\n", 0, match.start()) + 1
         return {"symbol": symbol, "source": f"{row['source']}@{commit}:{path}:{line}",
                 "signature": signature}
-    return {"symbol": symbol, "found": False}
+    return _declaration_in_lean(name, symbol)
+
+
+def _declaration_in_lean(name: str, symbol: str) -> dict:
+    """Resolve a name the way the theorem's own file does (namespaces, opens, imported libraries)."""
+    from arena.engine import candidate_file, run_lean
+
+    row = problem(name)
+    version, commit = versions(row)[0]
+    built = candidate_file(row, row["src"], version, commit)
+    inserted = (Path(__file__).with_name("lean") / "declaration.lean").read_text() + f"arena_decl {symbol}\n\n"
+    text = built["text"][:built["offset"]] + inserted + built["text"][built["offset"]:]
+    ran = run_lean(row, built["path"], text)
+    if ran is None:
+        raise ValueError("Lean timed out while resolving the name")
+    records = [json.loads(raw) for raw in re.findall(r"^ARENA_DECL (\{.*\})$", ran[1], re.M)]
+    found = [item for item in records if item.get("found")]
+    if not found:
+        return {"symbol": symbol, "found": False,
+                "hint": "No declaration of that name is visible where the theorem is stated; try the full name or a prefix."}
+    best = found[0]
+    return {"symbol": symbol, "found": True, "name": best["name"], "kind": best["kind"], "module": best["module"],
+            "source": f"{best['module']}" + (f":{best['line']}" if best.get("line") else ""),
+            "signature": best["signature"],
+            **({"alternatives": [item["name"] for item in found[1:]]} if len(found) > 1 else {})}
 
 
 def packet(name: str) -> str:
