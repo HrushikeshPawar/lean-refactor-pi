@@ -233,6 +233,21 @@ def extract_goals(output: str, start_line: int) -> tuple[list[dict], str]:
             "\n".join(rest))
 
 
+def run_lean(row: dict, project: Path, text: str, timeout: int = 180) -> tuple[int, str] | None:
+    """Compile `text` as the target's file inside the pinned project; None on timeout."""
+    scratch = ROOT / "runs" / "evaluations"
+    scratch.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="arena-", dir=scratch) as directory:
+        candidate = Path(directory) / Path(row["file_path"]).name
+        candidate.write_text(text, encoding="utf-8")
+        try:
+            proc = subprocess.run(["lake", "env", "lean", str(candidate)], cwd=project,
+                                  text=True, capture_output=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return None
+    return proc.returncode, (proc.stdout + proc.stderr).replace(str(candidate), row["file_path"]).strip()
+
+
 def compile_version(row: dict, proof: str, version: str, commit: str,
                     measure: bool = False, probe: bool = False) -> dict:
     built = candidate_file(row, proof, version, commit)
@@ -244,24 +259,15 @@ def compile_version(row: dict, proof: str, version: str, commit: str,
     if measure:
         wrapper_start = text[:built["offset"]].count("\n") + 1
         text = text[:built["offset"]] + HEARTBEAT_WRAPPER + text[built["offset"]:]
-    scratch = ROOT / "runs" / "evaluations"
-    scratch.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="arena-", dir=scratch) as directory:
-        candidate = Path(directory) / Path(row["file_path"]).name
-        candidate.write_text(text, encoding="utf-8")
-        try:
-            proc = subprocess.run(
-                ["lake", "env", "lean", str(candidate)], cwd=built["path"],
-                text=True, capture_output=True, timeout=180,
-            )
-        except subprocess.TimeoutExpired:
-            return {"passed": False, "error": "Lean timed out after 180 seconds"}
-    output = (proc.stdout + proc.stderr).replace(str(candidate), row["file_path"]).strip()
+    output = run_lean(row, built["path"], text)
+    if output is None:
+        return {"passed": False, "error": "Lean timed out after 180 seconds"}
+    returncode, output = output
     match = re.search(r"ARENA_HEARTBEATS (\d+)", output) if measure else None
-    passed = proc.returncode == 0 and (not measure or match is not None)
+    passed = returncode == 0 and (not measure or match is not None)
     structured = structure_diagnostics(output, built["text"], built["start_line"],
                                        built["end_line"], wrapper_start)
-    result = {"passed": passed, "exit_code": proc.returncode,
+    result = {"passed": passed, "exit_code": returncode,
               "heartbeats": int(match.group(1)) if match else None,
               **structured, "raw_output": output}
     return result
