@@ -110,13 +110,14 @@ class MeasurementVersionTests(unittest.TestCase):
     def test_fast_mode_also_compiles_the_measurement_version_and_records_it(self):
         calls = []
 
-        def compile_stub(row, proof, version, commit, measure=False, probe=False):
+        def compile_stub(row, proof, version, commit, measure=False, probe=False, report_start_line=None):
             calls.append((version, measure))
             return {"passed": True, "heartbeats": 100 if measure else None, "diagnostics": [],
                     "diagnostic_counts": {}, "outside_target": {}, "goals": [], "error_headlines": []}
         row = {**self.ROW, "statement": "theorem R : True", "name": "R", "source": "s", "proof_length": 9}
         with patch.object(engine, "problem", return_value=row), patch.object(engine, "validate_proof", return_value=5), \
                 patch.object(engine, "compile_version", side_effect=compile_stub), \
+                patch.object(engine, "candidate_file", return_value={"start_line": 1}), \
                 patch.object(engine, "measure_version", return_value=("v1", "a")), \
                 patch("arena.scoring.metrics", return_value={"compiled": True}):
             result = engine.evaluate("R", "theorem R : True := by trivial", "fast")

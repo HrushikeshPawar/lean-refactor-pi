@@ -62,6 +62,28 @@ class DiagnosticMappingTests(unittest.TestCase):
         self.assertEqual([item["severity"] for item in found], ["error", "warning", "info"])
         self.assertIn("⊢ False", found[0]["message"])
 
+    def test_unpositioned_info_lines_are_not_glued_to_the_previous_error(self):
+        # Lean's command line prints logInfo output with no position header.
+        output = ("a.lean:2:19: error: Type mismatch\n  rfl\nhas type\n  ?m.8 = ?m.8\n"
+                  "ARENA_HEARTBEATS 7\nTry this:\n  [apply] simp only")
+        found = parse_diagnostics(output)
+        self.assertEqual([item["severity"] for item in found], ["error", "info", "info"])
+        self.assertNotIn("ARENA_HEARTBEATS", found[0]["message"])
+        self.assertNotIn("Try this", found[0]["message"])
+        result = structure_diagnostics(output, "x\ny\nz\n", 1, 3)
+        self.assertEqual(result["error_headlines"], ["line 2 (proof line 2): Type mismatch"])
+
+    def test_other_toolchains_report_lines_in_the_primary_file(self):
+        # The target starts at line 30 in this version's file but at line 10 in
+        # the materialized primary file the model inspects.
+        text = "\n".join(f"line{i}" for i in range(1, 41)) + "\n"
+        result = structure_diagnostics("f.lean:32:2: error: unknown tactic", text, 30, 35,
+                                       report_start_line=10)
+        item = result["diagnostics"][0]
+        self.assertEqual((item["file_line"], item["proof_line"]), (12, 3))
+        self.assertEqual(item["source_line_text"], "line32")
+        self.assertEqual(result["error_headlines"], ["line 12 (proof line 3): unknown tactic"])
+
     def test_only_target_span_becomes_headlines_and_text_matches_file(self):
         text = "\n".join(f"line{i}" for i in range(1, 31)) + "\n"
         # Measured file: wrapper inserted before line 10; an error on text line 12
@@ -132,6 +154,18 @@ class RealLeanTests(unittest.TestCase):
             self.assertEqual(item["file_line"], location["start_line"] + item["proof_line"] - 1)
         self.assertEqual(primary["diagnostics"][0]["severity"], "error")
         self.assertIn("rfl", primary["diagnostics"][0]["source_line_text"])
+
+    def test_every_toolchains_lines_match_the_materialized_primary_file(self):
+        # The target starts on a different line in each version's file.
+        result = evaluate(NAME, self.broken, "full")
+        location = campaign.materialize(NAME, self.run_id, self.broken)
+        materialized = Path(location["candidate_path"]).read_text().splitlines()
+        self.assertEqual(len(result["compat"]), 3)
+        for version, outcome in result["compat"].items():
+            self.assertTrue(outcome["diagnostics"], version)
+            for item in outcome["diagnostics"]:
+                self.assertEqual(materialized[item["file_line"] - 1], item["source_line_text"], version)
+                self.assertNotIn("ARENA_HEARTBEATS", item["message"])
 
     def test_materialized_file_is_the_compiled_file_minus_wrapper_and_truncated(self):
         row = problem(NAME)

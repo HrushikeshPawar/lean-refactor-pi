@@ -150,6 +150,9 @@ def reconstruct(row: dict, proof: str, version: str, commit: str, truncate: bool
 
 
 _HEADER = re.compile(r"^(?P<file>.*?):(?P<line>\d+):(?P<column>\d+): (?P<severity>error|warning|info)(?:: ?|:)?(?P<rest>.*)$")
+# Lean's command line prints informational messages without a position, so
+# these would otherwise read as continuation lines of the previous diagnostic.
+_UNPOSITIONED_INFO = re.compile(r"^(?:ARENA_[A-Z_]+\b|Try this:)")
 _MESSAGE_LIMIT = 800
 _DIAGNOSTIC_LIMIT = 8
 
@@ -162,6 +165,8 @@ def parse_diagnostics(output: str) -> list[dict]:
         if match:
             found.append({"severity": match["severity"], "line": int(match["line"]),
                           "column": int(match["column"]), "message": [match["rest"]]})
+        elif _UNPOSITIONED_INFO.match(line):
+            found.append({"severity": "info", "line": None, "column": None, "message": [line]})
         elif found:
             found[-1]["message"].append(line)
     for item in found:
@@ -183,18 +188,21 @@ def map_measured_line(line: int, wrapper_start: int, wrapper_lines: int = WRAPPE
 
 
 def structure_diagnostics(output: str, text: str, start_line: int, end_line: int,
-                          wrapper_start: int | None = None) -> dict:
+                          wrapper_start: int | None = None, report_start_line: int | None = None) -> dict:
     """Return headlines for the target declaration plus a count of the rest.
 
-    `text` is the candidate file the diagnostics are about, so every
-    `source_line_text` is exactly what `lean_goal` sees at `file_line`.
+    `text` is the candidate file the diagnostics are about. `report_start_line`
+    is where the target starts in the file the model can inspect (the primary
+    version's); `file_line` is always expressed in that file, so a diagnostic
+    from another toolchain still points at the right line for `lean_goal`.
     """
     lines = text.splitlines()
+    shift = (report_start_line or start_line) - start_line
     inside: list[dict] = []
-    goals, output = extract_goals(output, start_line)
+    goals, output = extract_goals(output, start_line + shift)
     outside = {"errors": 0, "warnings": 0, "first_error": None}
     for item in parse_diagnostics(output):
-        if item["severity"] == "info" and item["message"].startswith("ARENA_HEARTBEATS"):
+        if item["severity"] == "info":
             continue
         line, in_wrapper = (map_measured_line(item["line"], wrapper_start) if wrapper_start
                             else (item["line"], False))
@@ -204,7 +212,7 @@ def structure_diagnostics(output: str, text: str, start_line: int, end_line: int
             message = item["message"]
             if len(message) > _MESSAGE_LIMIT:
                 message = message[:_MESSAGE_LIMIT] + "… [truncated]"
-            inside.append({"severity": item["severity"], "file_line": line,
+            inside.append({"severity": item["severity"], "file_line": line + shift,
                            "proof_line": line - start_line + 1, "column": item["column"],
                            "message": message,
                            "source_line_text": lines[line - 1] if 0 < line <= len(lines) else ""})
@@ -278,7 +286,8 @@ def run_lean(row: dict, project: Path, text: str, timeout: int = 180) -> tuple[i
 
 
 def compile_version(row: dict, proof: str, version: str, commit: str,
-                    measure: bool = False, probe: bool = False) -> dict:
+                    measure: bool = False, probe: bool = False,
+                    report_start_line: int | None = None) -> dict:
     built = candidate_file(row, proof, version, commit)
     text = built["text"]
     if probe:
@@ -295,7 +304,7 @@ def compile_version(row: dict, proof: str, version: str, commit: str,
     match = re.search(r"ARENA_HEARTBEATS (\d+)", output) if measure else None
     passed = returncode == 0 and (not measure or match is not None)
     structured = structure_diagnostics(output, built["text"], built["start_line"],
-                                       built["end_line"], wrapper_start)
+                                       built["end_line"], wrapper_start, report_start_line)
     result = {"passed": passed, "exit_code": returncode,
               "heartbeats": int(match.group(1)) if match else None,
               **structured, "raw_output": output}
@@ -318,11 +327,14 @@ def evaluate(name: str, proof: str, mode: str = "fast") -> dict:
     checked = targets if mode == "full" else targets[:1]
     if mode == "fast" and measured_on != targets[0]:
         checked = [targets[0], measured_on]
+    # Only the primary version's file is materialized for `lean_goal`; every
+    # version's diagnostics are reported in that file's line numbers.
+    primary_start = candidate_file(row, proof, *targets[0])["start_line"] if len(checked) > 1 else None
     compat = {}
     for version, commit in checked:
         compat[version] = compile_version(row, proof, version, commit,
                                           measure=(version, commit) == measured_on and not probe,
-                                          probe=probe)
+                                          probe=probe, report_start_line=primary_start)
         if mode != "full" and not compat[version]["passed"]:
             break
     primary = compat[targets[0][0]]
