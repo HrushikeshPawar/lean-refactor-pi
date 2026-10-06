@@ -13,7 +13,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from arena.engine import ROOT, candidate_file, evaluate, problem, validate_proof, versions, workspace
+from arena.engine import ROOT, candidate_file, evaluate, problem, source_path, validate_proof, versions, workspace
 from arena.polish import polish
 from arena.profile import heartbeat_floor, profile
 from arena.graph import common_base, edit_fingerprint, merge_text, ranked_frontier
@@ -187,7 +187,7 @@ def init(name: str, run_id: str, extra: str = "") -> dict:
     materialize(name, run_id, row["src"])
     _append(directory, {"kind": "current", "candidate_id": reference_id})
     return {"packet": str(directory / "packet.txt"), "shadow": str(shadow),
-            "candidate_path": str(shadow / row["file_path"])}
+            "candidate_path": str(shadow / source_path(row))}
 
 
 def _externalize_output(directory: Path, key: str, result: dict) -> dict:
@@ -211,7 +211,7 @@ def materialize(name: str, run_id: str, proof: str) -> dict:
     row = problem(name)
     version, commit = versions(row)[0]
     built = candidate_file(row, proof, version, commit)
-    path = run_dir(run_id) / "scratch" / "project" / row["file_path"]
+    path = run_dir(run_id) / "scratch" / "project" / source_path(row)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(built["text"])
     return {"candidate_path": str(path), "start_line": built["start_line"], "end_line": built["end_line"]}

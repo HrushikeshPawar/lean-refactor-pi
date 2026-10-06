@@ -76,15 +76,37 @@ def validate_proof(row: dict, proof: str, allow_sorry: bool = False) -> int:
 
 
 def workspace(row: dict, version: str, commit: str) -> Path:
-    path = ROOT / "workspaces" / f"{row['source']}-{version}"
-    if not path.is_dir():
-        raise FileNotFoundError(f"Environment is not provisioned: {path}")
-    actual = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=path, text=True, capture_output=True, check=True
-    ).stdout.strip()
-    if actual != commit:
-        raise ValueError(f"Environment commit mismatch for {version}: {actual} != {commit}")
-    return path
+    """Provisioned checkout of the row's source at the pinned commit, found through the registry."""
+    from arena import environments
+
+    return environments.resolve(row["source"], version, commit)
+
+
+def source_path(row: dict) -> str:
+    """Path the candidate file has in the project. Standalone rows get a scratch path."""
+    if row.get("file_path"):
+        return row["file_path"]
+    return "ArenaScratch/" + re.sub(r"[^A-Za-z0-9_.-]", "_", row["name"]) + ".lean"
+
+
+def is_standalone(row: dict) -> bool:
+    return not row.get("file_path")
+
+
+_MEASURE_OVERRIDES = ROOT / "benchmark/derived/measure-versions.json"
+
+
+def measure_version(row: dict) -> tuple[str, str]:
+    """Toolchain on which heartbeats are measured: explicit per row, default the primary listed version."""
+    listed = versions(row)
+    if _MEASURE_OVERRIDES.exists():
+        wanted = json.loads(_MEASURE_OVERRIDES.read_text()).get(row["name"])
+        if wanted:
+            match = next((pair for pair in listed if pair[0] == wanted), None)
+            if match is None:
+                raise ValueError(f"Measurement version {wanted} is not listed for {row['name']}")
+            return match
+    return listed[0]
 
 
 def candidate_file(row: dict, proof: str, version: str, commit: str, truncate: bool = True) -> dict:
@@ -92,11 +114,19 @@ def candidate_file(row: dict, proof: str, version: str, commit: str, truncate: b
 
     With `truncate`, everything after the target declaration is dropped so
     compile time never depends on later declarations. The returned text is the
-    single file every compile and every `lean_goal` lookup uses.
+    single file every compile and every `lean_goal` lookup uses. Standalone rows
+    (no file in the repository) are rebuilt as their header followed by the proof.
     """
-    if not row.get("file_path") or not row.get("start_line") or not row.get("end_line"):
-        raise ValueError("This row needs a standalone environment adapter")
     path = workspace(row, version, commit)
+    body = proof.rstrip("\n")
+    if is_standalone(row):
+        header = row.get("header") or ""
+        if not row.get("statement") or not header.strip():
+            raise ValueError("A standalone row needs its header and statement")
+        return {"path": path, "text": header + body + "\n", "offset": len(header),
+                "start_line": header.count("\n") + 1, "end_line": header.count("\n") + 1 + body.count("\n")}
+    if not row.get("start_line") or not row.get("end_line"):
+        raise ValueError("The row does not say where its theorem lives")
     source = subprocess.run(
         ["git", "show", f"{commit}:{row['file_path']}"],
         cwd=path, text=True, capture_output=True, check=True,
@@ -104,7 +134,6 @@ def candidate_file(row: dict, proof: str, version: str, commit: str, truncate: b
     original = row["src"]
     if source.count(original) != 1:
         raise ValueError(f"FILE_MODIFIED: pinned theorem is absent or ambiguous on {version}")
-    body = proof.rstrip("\n")
     offset = source.index(original)
     text = source[:offset] + body + source[offset + len(original):]
     if truncate:
@@ -238,14 +267,14 @@ def run_lean(row: dict, project: Path, text: str, timeout: int = 180) -> tuple[i
     scratch = ROOT / "runs" / "evaluations"
     scratch.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="arena-", dir=scratch) as directory:
-        candidate = Path(directory) / Path(row["file_path"]).name
+        candidate = Path(directory) / Path(source_path(row)).name
         candidate.write_text(text, encoding="utf-8")
         try:
             proc = subprocess.run(["lake", "env", "lean", str(candidate)], cwd=project,
                                   text=True, capture_output=True, timeout=timeout)
         except subprocess.TimeoutExpired:
             return None
-    return proc.returncode, (proc.stdout + proc.stderr).replace(str(candidate), row["file_path"]).strip()
+    return proc.returncode, (proc.stdout + proc.stderr).replace(str(candidate), source_path(row)).strip()
 
 
 def compile_version(row: dict, proof: str, version: str, commit: str,
@@ -285,23 +314,26 @@ def evaluate(name: str, proof: str, mode: str = "fast") -> dict:
     targets = versions(row)
     if not targets:
         raise ValueError("No toolchain versions listed")
+    measured_on = measure_version(row)
     checked = targets if mode == "full" else targets[:1]
+    if mode == "fast" and measured_on != targets[0]:
+        checked = [targets[0], measured_on]
     compat = {}
     for version, commit in checked:
         compat[version] = compile_version(row, proof, version, commit,
-                                          measure=(version, commit) == targets[0] and not probe,
+                                          measure=(version, commit) == measured_on and not probe,
                                           probe=probe)
         if mode != "full" and not compat[version]["passed"]:
             break
     primary = compat[targets[0][0]]
-    heartbeat = primary.get("heartbeats")
+    heartbeat = compat.get(measured_on[0], {}).get("heartbeats")
     proxy = None
     if mode == "full" and heartbeat is not None:
         proxy = local_proxy(name, length, heartbeat, compat)
     result = {
         "ok": True, "name": name, "mode": mode, "tokens": length,
         "reference_tokens": row["proof_length"], "compat": compat,
-        "heartbeat": heartbeat, "local_proxy": proxy, "score": None,
+        "heartbeat": heartbeat, "measured_on": measured_on[0], "local_proxy": proxy, "score": None,
         "calibration": "pending official Arena worker comparison",
     }
     if probe:

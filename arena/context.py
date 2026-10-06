@@ -15,7 +15,7 @@ import json
 import re
 from pathlib import Path
 
-from arena.engine import ROOT, candidate_file, problem, run_lean, versions
+from arena.engine import ROOT, candidate_file, is_standalone, problem, run_lean, versions
 from arena.profile import MAX_DEPTH, heartbeat_floor, profile
 from arena.scoring import exchange_rates
 
@@ -58,7 +58,7 @@ def lean_context(name: str) -> dict:
     cache = _cache("context", name, commit, source + row["src"])
     if cache.exists():
         return json.loads(cache.read_text())
-    roots = ", ".join(json.dumps(part) for part in sorted({row["file_path"].split("/")[0]}))
+    roots = "" if is_standalone(row) else ", ".join(json.dumps(part) for part in sorted({row["file_path"].split("/")[0]}))
     inserted = source.replace("@@ROOTS@@", roots)
     built = candidate_file(row, row["src"], version, commit)
     text = built["text"][:built["offset"]] + inserted + built["text"][built["offset"]:]
@@ -184,7 +184,7 @@ def render_packet(name: str) -> str:
     row = problem(name)
     targets = versions(row)
     context = lean_context(name)
-    context["root"] = row["file_path"].split("/")[0]
+    context["root"] = "" if is_standalone(row) else row["file_path"].split("/")[0]
     prof = reference_profile(name)
     commits = ", ".join(f"{v}:{c}" for v, c in targets)
     task = [
@@ -198,7 +198,8 @@ def render_packet(name: str) -> str:
         "arena_evaluate scores a complete proof (fast = primary version, full = every version). Parents and idea ids "
         "are optional labels. The current candidate file is readable by lean_goal and lean_diagnostic_messages at the "
         "line numbers reported in diagnostics.",
-        f"Pinned source: {row['source']}:{row['file_path']}:{row['start_line']}-{row['end_line']}\n"
+        (f"Pinned source: {row['source']} standalone problem (file = header + statement + proof)\n" if is_standalone(row)
+         else f"Pinned source: {row['source']}:{row['file_path']}:{row['start_line']}-{row['end_line']}\n") +
         f"Toolchain commits: {commits}",
     ]
     note = "" if not context.get("error") else f"(elaboration context unavailable: {_clip(context['error'], 160)})"
