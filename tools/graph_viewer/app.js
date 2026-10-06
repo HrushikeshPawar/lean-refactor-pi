@@ -251,13 +251,80 @@
     return value.toFixed(spec.key==='local_proxy'?2:0);
   }
 
+  // Legend swatches are SVG, so they render the same in every browser and need no CSS.
+  const swatch=(color,kind='area')=>kind==='line'
+    ?`<svg class="swatch" width="18" height="10" aria-hidden="true"><path d="M1 5H17" stroke="${color}" stroke-width="2.5"/></svg>`
+    :kind==='dash'?`<svg class="swatch" width="18" height="10" aria-hidden="true"><path d="M1 5H17" stroke="${color}" stroke-width="1.5" stroke-dasharray="4 3"/></svg>`
+    :`<svg class="swatch" width="10" height="10" aria-hidden="true"><rect width="10" height="10" rx="2" fill="${color}"/></svg>`;
+  function costLegend(spec,points,withValues) {
+    const last=points.at(-1)||{};
+    const parts=COST_PARTS.slice().reverse().map(([k,label,color])=>`<span>${swatch(color)}${esc(label)}${withValues?' '+esc(money(last.parts?.[k]||0)):''}</span>`);
+    parts.unshift(`<span>${swatch('#78baff','line')}Total${withValues?' '+esc(money(last.spent_usd||0)):''}</span>`);
+    if(spec.cap)parts.push(`<span>${swatch('#ff8f8f','dash')}Hard cap ${esc(money(spec.cap))}</span>`);
+    return `<span class="cost-legend">${parts.join('')}</span>`;
+  }
+
+  // Hover: one tooltip per container (the dialog is in the top layer, so it needs its own).
+  const chartGeometry=new Map();
+  const ideaTitle=id=>(data.ideas||[]).find(i=>i.id===id)?.title;
+  function delta(value,base) {
+    if(value==null||base==null)return '';
+    const d=value-base;return ` <span class="${d<0?'good':d>0?'bad':'muted'}">(${d>0?'+':''}${Number.isInteger(d)?d:d.toFixed(2)} vs original)</span>`;
+  }
+  function tipHtml(spec,points,i,x) {
+    const p=points[i],rows=[];
+    if(spec.stack){
+      const prev=points[i-1]?.parts||{},t=p.tokens||{};
+      const head=`API request ${esc(x)}${p.ts?` · ${esc(new Date(p.ts*1000).toLocaleTimeString())}`:''}`;
+      const parts=COST_PARTS.slice().reverse().map(([k,label,color])=>`<tr><td>${swatch(color)}${esc(label)}</td><td>${esc(t[k]??0)}</td><td>${esc(money((p.parts?.[k]||0)-(prev[k]||0)))}</td><td>${esc(money(p.parts?.[k]||0))}</td></tr>`).join('');
+      const share=spec.cap?` (${Math.round(100*p.spent_usd/spec.cap)}% of cap)`:'';
+      return `<div class="tip-head">${head}</div><div class="tip-row"><span>This request</span><b>${esc(money(p.request_usd))}</b></div><div class="tip-row"><span>Cumulative</span><b>${esc(money(p.spent_usd))}${esc(share)}</b></div><div class="tip-row"><span>Cache reuse</span><b>${p.reuse_pct==null?'—':esc(p.reuse_pct.toFixed(1))+'%'}</b></div><table class="tip-table"><thead><tr><th></th><th>tokens</th><th>request</th><th>total</th></tr></thead><tbody>${parts}</tbody></table>`;
+    }
+    const node=byId.get(p.candidate_id),base=data.baseline||{};
+    const status=p.is_reference?'original proof, every version':p.status==='full'?'passes every version':p.status==='primary'?'primary version only':'failed';
+    const title=p.is_reference?'Original proof':`Evaluation ${esc(x)} · #${esc(node?.index??'?')}`;
+    rows.push(['Status',esc(status)+(p.mode&&!p.is_reference?` · ${esc(p.mode)} check`:'')]);
+    if(p.local_proxy!=null)rows.push(['Score',`${esc(p.local_proxy.toFixed(2))}${p.is_reference?'':delta(p.local_proxy,base.local_proxy)}`]);
+    if(p.tokens!=null)rows.push(['Tokens',`${esc(p.tokens)}${p.is_reference?'':delta(p.tokens,base.tokens)}`]);
+    if(p.heartbeat!=null)rows.push(['Heartbeats',`${esc(p.heartbeat)}${p.is_reference?'':delta(p.heartbeat,base.heartbeat)}`]);
+    const idea=node?.idea_id&&(ideaTitle(node.idea_id)||node.idea_id);
+    if(idea)rows.push(['Idea',esc(idea)]);
+    if(p.ts)rows.push(['Time',esc(new Date(p.ts*1000).toLocaleTimeString())]);
+    const hyp=!p.is_reference&&node?.hypothesis?`<div class="tip-note">${esc(node.hypothesis.slice(0,140))}${node.hypothesis.length>140?'…':''}</div>`:'';
+    return `<div class="tip-head">${title}${p.is_best?' <span class="good">★ best so far</span>':''}</div>${rows.map(([k,v])=>`<div class="tip-row"><span>${k}</span><b>${v}</b></div>`).join('')}${hyp}`;
+  }
+  function attachHover(svg,key,container) {
+    const geometry=chartGeometry.get(key);if(!svg||!geometry)return;
+    let tip=container.querySelector(':scope > .chart-tip');
+    if(!tip){tip=document.createElement('div');tip.className='chart-tip';tip.hidden=true;container.appendChild(tip);}
+    const guide=document.createElementNS('http://www.w3.org/2000/svg','line'),dot=document.createElementNS('http://www.w3.org/2000/svg','circle');
+    guide.setAttribute('class','hover-guide');dot.setAttribute('class','hover-dot');dot.setAttribute('r',geometry.big?5:4);
+    guide.style.display=dot.style.display='none';svg.append(guide,dot);
+    svg.addEventListener('mousemove',event=>{
+      const {spec,points,sc,box}=geometry,ctm=svg.getScreenCTM();if(!ctm)return;
+      const pt=new DOMPoint(event.clientX,event.clientY).matrixTransform(ctm.inverse());
+      let best=0;points.forEach((_,i)=>{if(Math.abs(sc.sx(sc.xs[i])-pt.x)<Math.abs(sc.sx(sc.xs[best])-pt.x))best=i});
+      const x=sc.sx(sc.xs[best]),y=sc.sy(points[best][spec.key]);
+      guide.setAttribute('x1',x);guide.setAttribute('x2',x);guide.setAttribute('y1',box.y0);guide.setAttribute('y2',box.y1);
+      dot.setAttribute('cx',x);dot.setAttribute('cy',y);guide.style.display=dot.style.display='';
+      tip.innerHTML=tipHtml(spec,points,best,sc.xs[best]);tip.hidden=false;
+      const w=tip.offsetWidth,h=tip.offsetHeight;
+      // Below-right of the cursor; flip above when it would overflow; always stay inside the window.
+      const below=event.clientY+16,above=event.clientY-h-12;
+      tip.style.left=`${Math.max(8,Math.min(event.clientX+16,innerWidth-w-8))}px`;
+      tip.style.top=`${Math.max(8,Math.min(below+h>innerHeight?above:below,innerHeight-h-8))}px`;
+    });
+    svg.addEventListener('mouseleave',()=>{tip.hidden=true;guide.style.display=dot.style.display='none';});
+  }
+
   function chart(spec,index) {
     const {title,key}=spec,points=spec.rows.filter(r=>Number.isFinite(r[key]));
     if(!points.length)return `<button type="button" class="chart"><span class="chart-title">${esc(title)}</span><span class="muted">No data yet</span></button>`;
     const box={x0:22,x1:332,y0:8,y1:74,ticks:5},sc=scales(spec,points,box);
     const last=points.at(-1),lx=sc.sx(sc.xs.at(-1)),ly=sc.sy(last[key]);
     const areas=spec.stack?stackedAreas(points,sc.xs,sc.sx,sc.sy,'area'):'';
-    return `<button type="button" class="chart" data-chart="${index}" aria-label="Open enlarged ${esc(title)} chart"><span class="chart-head"><span class="chart-title">${esc(title)}</span><strong>${esc(headValue(spec,last[key]))}</strong></span><svg viewBox="0 0 350 96" aria-hidden="true">${areas}${capLine(spec,sc,box,false)}<path class="chart-baseline" d="M${box.x0} ${box.y1}H${box.x1}"/>${xAxis(sc,box,90,false)}<path class="series" d="${linePath(points,sc.xs,sc.sx,sc.sy,p=>p[key])}"/><circle class="chart-end" cx="${lx}" cy="${ly}" r="4"/></svg><span class="chart-foot">${points.length} ${esc(spec.xLabel.toLowerCase())}s <span>Click to inspect ↗</span></span></button>`;
+    chartGeometry.set(`card-${index}`,{spec,points,sc,box});
+    return `<button type="button" class="chart" data-chart="${index}" aria-label="Open enlarged ${esc(title)} chart"><span class="chart-head"><span class="chart-title">${esc(title)}</span><strong>${esc(headValue(spec,last[key]))}</strong></span><svg viewBox="0 0 350 96" data-geometry="card-${index}" aria-hidden="true">${areas}${capLine(spec,sc,box,false)}<path class="chart-baseline" d="M${box.x0} ${box.y1}H${box.x1}"/>${xAxis(sc,box,90,false)}<path class="series" d="${linePath(points,sc.xs,sc.sx,sc.sy,p=>p[key])}"/><circle class="chart-end" cx="${lx}" cy="${ly}" r="4"/></svg>${spec.stack?`<span class="card-legend">${costLegend(spec,points,false)}</span>`:''}<span class="chart-foot">${points.length} ${esc(spec.xLabel.toLowerCase())}s <span>Click to inspect ↗</span></span></button>`;
   }
   function chartTable(spec,points) {
     if(spec.stack){
@@ -276,11 +343,13 @@
       const value=sc.yMax-i*(sc.yMax-sc.yMin)/4,y=sc.sy(value);
       return `<path d="M${box.x0} ${y}H${box.x1}"/><text x="${box.x0-8}" y="${y+4}" text-anchor="end">${esc(spec.unit==='$'?money(value):value.toFixed(spec.key==='local_proxy'?2:0))}</text>`;
     }).join('');
-    const dots=points.map((p,i)=>`<circle class="modal-dot${p.candidate_id&&p.candidate_id===selected?' selected':''}${p.is_best?' best':''}" cx="${sc.sx(sc.xs[i])}" cy="${sc.sy(p[spec.key])}" r="3.5"><title>${esc(spec.xLabel)} ${esc(sc.xs[i])} · ${esc(spec.unit==='$'?money(p[spec.key]):p[spec.key])}${p.candidate_id?' · '+esc(p.candidate_id.slice(0,8)):''}</title></circle>`).join('');
+    const dots=points.map((p,i)=>`<circle class="modal-dot${p.candidate_id&&p.candidate_id===selected?' selected':''}${p.is_best?' best':''}" cx="${sc.sx(sc.xs[i])}" cy="${sc.sy(p[spec.key])}" r="3.5"/>`).join('');
     const areas=spec.stack?stackedAreas(points,sc.xs,sc.sx,sc.sy,'modal-area'):'';
-    const legend=spec.stack?`<div class="cost-legend">${COST_PARTS.slice().reverse().map(([k,label,color])=>`<span><i style="background:${color}"></i>${esc(label)} ${esc(money(points.at(-1).parts?.[k]||0))}</span>`).join('')}</div>`:'';
-    $('chart-dialog-body').innerHTML=`<div class="modal-head"><div><h2>${esc(spec.title)}</h2><p class="muted">${points.length} ${esc(spec.xLabel.toLowerCase())}s · ${esc(spec.caption)}</p></div><button id="close-chart" type="button" aria-label="Close chart">✕</button></div>${legend}<svg class="modal-chart" viewBox="0 0 900 340" role="img" aria-label="${esc(spec.title)} full series"><g class="modal-grid">${grid}${xAxis(sc,box,307,true)}</g>${areas}${capLine(spec,sc,box,true)}<path class="modal-series" d="${linePath(points,sc.xs,sc.sx,sc.sy,p=>p[spec.key])}"/>${dots}<text class="axis-label axis-title" x="${(box.x0+box.x1)/2}" y="330" text-anchor="middle">${esc(spec.xLabel)}</text></svg><div class="chart-table-wrap"><table class="chart-table">${chartTable(spec,points)}</table></div>`;
+    const legend=spec.stack?`<div class="modal-legend">${costLegend(spec,points,true)}</div>`:'';
+    chartGeometry.set('modal',{spec,points,sc,box,big:true});
+    $('chart-dialog-body').innerHTML=`<div class="modal-head"><div><h2>${esc(spec.title)}</h2><p class="muted">${points.length} ${esc(spec.xLabel.toLowerCase())}s · ${esc(spec.caption)}</p></div><button id="close-chart" type="button" aria-label="Close chart">✕</button></div>${legend}<svg class="modal-chart" data-geometry="modal" viewBox="0 0 900 340" role="img" aria-label="${esc(spec.title)} full series"><g class="modal-grid">${grid}${xAxis(sc,box,307,true)}</g>${areas}${capLine(spec,sc,box,true)}<path class="modal-series" d="${linePath(points,sc.xs,sc.sx,sc.sy,p=>p[spec.key])}"/>${dots}<text class="axis-label axis-title" x="${(box.x0+box.x1)/2}" y="330" text-anchor="middle">${esc(spec.xLabel)}</text></svg><div class="chart-table-wrap"><table class="chart-table">${chartTable(spec,points)}</table></div>`;
     const dialog=$('chart-dialog');$('close-chart').onclick=()=>dialog.close();
+    attachHover($('chart-dialog-body').querySelector('[data-geometry="modal"]'),'modal',$('chart-dialog-body'));
     $('chart-dialog-body').querySelectorAll('[data-candidate]').forEach(row=>row.onclick=()=>{dialog.close();select(row.dataset.candidate)});
     dialog.showModal();
   }
@@ -300,6 +369,7 @@
     ];
     $('charts').innerHTML=chartSpecs.map(chart).join('');
     $('charts').querySelectorAll('[data-chart]').forEach(el=>el.onclick=()=>openChart(Number(el.dataset.chart)));
+    $('charts').querySelectorAll('[data-geometry]').forEach(svg=>attachHover(svg,svg.dataset.geometry,document.body));
   }
   function renderMeta() {
     $('run-label').textContent=`${data.theorem || ''} · ${data.run_id} · ${data.nodes.length} recorded nodes`;
