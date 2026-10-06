@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from arena.engine import ROOT, candidate_file, evaluate, problem, validate_proof, versions, workspace
+from arena.polish import polish
 from arena.profile import heartbeat_floor, profile
 from arena.graph import common_base, edit_fingerprint, merge_text, ranked_frontier
 
@@ -127,6 +128,16 @@ def events(directory: Path) -> list[dict]:
         fcntl.flock(handle, fcntl.LOCK_SH)
         data = handle.read().decode()
     return [json.loads(line) for line in data.splitlines()]
+
+
+@contextmanager
+def lean_lock(directory: Path):
+    """One Lean job at a time per run, so evaluations, probes, profiles and polish never compete
+    for CPU (which would distort latency and starve the model's own checks)."""
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / "lean.lock").open("a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        yield
 
 
 def _snapshot(directory: Path, candidate_id: str, proof: str) -> Path:
@@ -483,7 +494,8 @@ def record_evaluation(name: str, run_id: str, proof: str, mode: str,
             result = json.loads(json.dumps(prior["result"]))
         else:
             try:
-                result = evaluate(name, proof, mode)
+                with lean_lock(directory):
+                    result = evaluate(name, proof, mode)
             except (ValueError, FileNotFoundError) as error:
                 result = {"ok": False, "name": name, "mode": mode, "error": str(error),
                           "compat": {}, "tokens": None, "heartbeat": None, "local_proxy": None}
@@ -560,7 +572,8 @@ def probe(name: str, run_id: str, proof: str, idea_id: str | None = None, parent
     else:
         validate_proof(row, proof, allow_sorry=True)
         try:
-            result = evaluate(name, proof, "probe")
+            with lean_lock(directory):
+                result = evaluate(name, proof, "probe")
         except (ValueError, FileNotFoundError) as error:
             result = {"ok": False, "mode": "probe", "error": str(error), "compat": {}}
         _externalize_output(directory, proof_id, result)
@@ -625,10 +638,43 @@ def profile_request(name: str, run_id: str, reference: str | None = None, proof:
         return {**cached["result"], "target": label, "cached": True}
     measured = next((e["result"].get("heartbeat") for row in _summaries(history) if row["id"] == proof_id
                      for e in row["evaluations"] if e["result"].get("heartbeat") is not None), None)
-    result = profile(name, proof, measured)
-    result["statement_floor_hb"] = heartbeat_floor(name)["heartbeats"]
+    with lean_lock(directory):
+        result = profile(name, proof, measured)
+        result["statement_floor_hb"] = heartbeat_floor(name)["heartbeats"]
     _append(directory, {"kind": "profile", "proof_id": proof_id, "result": result})
     return {**result, "target": label, "cached": False}
+
+
+def polish_request(name: str, run_id: str, reference: str | None = None, **limits) -> dict:
+    """Try mechanical variants of a candidate. Passing, improving variants are stored as probes
+    (`pN`) so the model can promote one with `arena_evaluate from_probe`; nothing becomes a node."""
+    directory = run_dir(run_id)
+    history = events(directory)
+    candidate_id = resolve_candidate_ref(history, reference) if reference else _current(history)
+    if candidate_id is None:
+        raise ValueError("No candidate to polish; give candidate (#N)")
+    proof = (directory / "proofs" / f"{candidate_id}.lean").read_text()
+    measured = next((e["result"].get("heartbeat") for row in _summaries(history) if row["id"] == candidate_id
+                     for e in row["evaluations"] if e["result"].get("heartbeat") is not None), None)
+    with lean_lock(directory):
+        outcome = polish(name, proof, measured, **limits)
+    version = versions(problem(name))[0][0]
+    shown = []
+    for variant in outcome["variants"]:
+        proof_id = hashlib.sha256((name + "\0" + variant["proof"]).encode()).hexdigest()
+        if proof_id not in _probe_numbers(events(directory)):
+            _snapshot(directory, proof_id, variant["proof"])
+            _append(directory, {"kind": "probe", "proof_id": proof_id, "idea_id": None, "parent": candidate_id,
+                                "result": {"ok": True, "mode": "probe", "scored": False, "tokens": variant["tokens"],
+                                           "heartbeat": variant["heartbeats"], "polish": variant["edit"],
+                                           "compat": {version: {"passed": True, "heartbeats": variant["heartbeats"]}}}})
+        shown.append({"probe": _probe_numbers(events(directory))[proof_id], "edit": variant["edit"],
+                      "tokens": variant["tokens"], "heartbeats": variant["heartbeats"],
+                      "estimated_proxy": variant["estimated_proxy"], "delta": variant["delta"]})
+    return {"ok": True, "candidate": _label(history, candidate_id), "base": outcome["base"],
+            "tried": outcome["tried"], "passing": outcome["passing"], "improving": outcome["improving"],
+            "complete": outcome["complete"], "seconds": outcome["seconds"], "variants": shown,
+            "next": "Promote a variant with arena_evaluate from_probe; nothing was recorded as a candidate."}
 
 
 def set_decision(run_id: str, candidate_id: str, decision: str, reason: str) -> dict:

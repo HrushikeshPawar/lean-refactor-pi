@@ -10,10 +10,10 @@ import subprocess
 from pathlib import Path
 
 from arena.campaign import (candidate, declaration, evaluate_request, frontier, init, probe,
-                            profile_request, record_idea, set_decision, source_range)
+                            polish_request, profile_request, record_idea, set_decision, source_range)
 
 ACTIONS = ("init", "evaluate", "probe", "idea", "frontier", "candidate", "decision", "source",
-           "declaration", "profile")
+           "declaration", "profile", "polish")
 
 
 def run(args: argparse.Namespace) -> dict:
@@ -39,6 +39,10 @@ def run(args: argparse.Namespace) -> dict:
     if args.action == "profile":
         return profile_request(args.theorem, args.run_id, args.candidate,
                                args.proof_file.read_text() if args.proof_file else None)
+    if args.action == "polish":
+        limits = {key: value for key, value in (("max_deletions", args.max_deletions),
+                  ("max_substitutions", args.max_substitutions), ("max_simp", args.max_simp)) if value is not None}
+        return polish_request(args.theorem, args.run_id, args.candidate, **limits)
     if args.action == "source":
         return source_range(args.theorem, args.path, args.first, args.last)
     return declaration(args.theorem, args.symbol)
@@ -66,6 +70,9 @@ def main() -> int:
     parser.add_argument("--region")
     parser.add_argument("--expected-effect")
     parser.add_argument("--status")
+    parser.add_argument("--max-deletions", type=int)
+    parser.add_argument("--max-substitutions", type=int)
+    parser.add_argument("--max-simp", type=int)
     args = parser.parse_args()
     try:
         result = run(args)

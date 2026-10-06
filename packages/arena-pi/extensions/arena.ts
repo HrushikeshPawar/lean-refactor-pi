@@ -380,6 +380,16 @@ export default function arenaExtension(pi: ExtensionAPI) {
   });
 
   pi.registerTool({
+    name: "arena_polish", label: "Arena mechanical polish",
+    description: "On demand, try mechanical variants of a compiling candidate (line deletions, simp? rewrites, closing-tactic substitutions) on the primary toolchain, and return the variants that still compile and improve tokens or heartbeats, each with its metrics and a probe id. Takes up to a few minutes. Nothing is adopted: promote one with arena_evaluate from_probe if you want it.",
+    parameters: Type.Object({ candidate: Type.Optional(Type.String({ description: "#N; default the current candidate" })) }),
+    async execute(_id, params) {
+      if (!active) throw new Error("Select a theorem with /arena first");
+      return reply(await campaign("polish", params.candidate ? ["--candidate", params.candidate] : []));
+    },
+  });
+
+  pi.registerTool({
     name: "arena_frontier",
     label: "Arena frontier",
     description: "Compact status: best verified and fast-only candidates, your ideas with attempts, best result and last failure, and recent failures.",
