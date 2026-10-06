@@ -9,6 +9,7 @@ import math
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -16,6 +17,7 @@ from datetime import datetime
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from arena.campaign import init, packet, run_dir
+from arena.summary import cost_report_from_ledger, render_text, write_summary
 from tools.arena_skill import SKILL_DIR, skill_hash, skill_prompt
 
 SYSTEM_PROMPT = ("You are optimizing one Lean 4 proof for the Lean Refactor Arena. Only the listed tools are "
@@ -24,6 +26,7 @@ SYSTEM_PROMPT = ("You are optimizing one Lean 4 proof for the Lean Refactor Aren
 
 ROOT = Path(__file__).resolve().parents[1]
 MODELS = ("gpt-6-luna", "qwen3.8-flash", "deepseek-v4.1-flash")
+MODEL_WINDOWS = {"gpt-6-luna": 1_050_000, "qwen3.8-flash": 1_000_000, "deepseek-v4.1-flash": 1_000_000}
 THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
 _tool_started: dict[str, tuple[float, dict]] = {}
 
@@ -107,6 +110,10 @@ def main() -> int:
     parser.add_argument("--hard-cap-usd", type=float, default=1.0)
     parser.add_argument("--thinking", choices=THINKING_LEVELS, default="high",
                         help="Reasoning level, recorded in run-config.json (default: high)")
+    parser.add_argument("--compact-at-tokens", type=int, default=200_000,
+                        help="Context size above which Pi compacts older turns; below it history is never rewritten")
+    parser.add_argument("--compact-keep-tokens", type=int, default=40_000,
+                        help="Recent tokens kept verbatim when compaction runs")
     parser.add_argument("--no-skill", action="store_true", help="Run without the Arena Lean skill (A/B factor)")
     parser.add_argument("--no-mcp", action="store_true", help="Do not load the Lean MCP server (offline tests)")
     parser.add_argument("--test-extension", action="append", default=[], type=Path,
@@ -164,7 +171,8 @@ def main() -> int:
         (directory / "run-config.json").write_text(json.dumps({"theorem": args.theorem,
             "model": args.model, "hard_cap_usd": args.hard_cap_usd,
             "packet_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
-            "thinking": args.thinking,
+            "thinking": args.thinking, "compact_at_tokens": args.compact_at_tokens,
+            "compact_keep_tokens": args.compact_keep_tokens,
             "skill": None if args.no_skill else {"name": "arena-lean", "sha256": skill_hash()}},
             indent=2) + "\n")
     shadow = directory / "scratch" / "project"
@@ -198,11 +206,29 @@ def main() -> int:
     else:
         print("Merge worker did not become ready; inspect merge-worker.log", file=sys.stderr)
         return 1
+    # Pi reads the project's .pi/settings.json. Compaction is the only thing allowed to rewrite
+    # history, and only once the context passes --compact-at-tokens.
+    (shadow / ".pi").mkdir(exist_ok=True)
+    (shadow / ".pi" / "settings.json").write_text(json.dumps({"compaction": {
+        "enabled": True, "keepRecentTokens": args.compact_keep_tokens,
+        "reserveTokens": max(0, MODEL_WINDOWS[args.model] - args.compact_at_tokens)}}, indent=2) + "\n")
     event_log = directory / "events.jsonl"
     event_offset = event_log.stat().st_size if event_log.exists() else 0
+    state: dict = {"process": None, "signal": None}
+
+    def interrupt(signum, _frame):
+        state["signal"] = signum
+        if state["process"] is not None and state["process"].poll() is None:
+            state["process"].terminate()
+
+    for number in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(number, interrupt)
     with event_log.open("a") as output:
         process = subprocess.Popen(command, cwd=shadow, env=env, stdin=subprocess.DEVNULL,
                                    stdout=subprocess.PIPE, text=True, bufsize=1)
+        state["process"] = process
+        if state["signal"] is not None:
+            process.terminate()
         assert process.stdout is not None
         for line in process.stdout:
             output.write(line)
@@ -211,8 +237,29 @@ def main() -> int:
                 log_event(json.loads(line))
             except (json.JSONDecodeError, TypeError, ValueError):
                 print(f"[{datetime.now().astimezone().strftime('%H:%M:%S')}] non-JSON Pi output recorded", flush=True)
-        exit_code = process.wait()
+        try:
+            exit_code = process.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            exit_code = process.wait()
+    if worker.poll() is None:
+        worker.terminate()
+    return finish(args, directory, event_log, event_offset, exit_code, state["signal"])
+
+
+def finish(args, directory: Path, event_log: Path, event_offset: int, exit_code: int, interrupted: int | None) -> int:
+    """Always leave cost.json and a run summary behind, even for a killed or crashed run."""
     report_path = directory / "cost.json"
+    if not report_path.exists():
+        report_path.write_text(json.dumps(cost_report_from_ledger(directory), indent=2) + "\n")
+        print("Pi wrote no cost report; reconstructed it from the cost journal", file=sys.stderr)
+    try:
+        print(render_text(write_summary(directory)), end="", flush=True)
+    except Exception as error:  # a summary failure must never hide the run's own result
+        print(f"Run summary failed: {error}", file=sys.stderr)
+    if interrupted is not None:
+        print(f"Interrupted by signal {interrupted}; cost.json and summary.json were written", file=sys.stderr)
+        return 128 + interrupted
     print(f"Pi exit={exit_code}; events={directory / 'events.jsonl'}; cost={report_path}")
     if exit_code:
         return exit_code

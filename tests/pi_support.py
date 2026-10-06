@@ -43,6 +43,22 @@ class FakeRun:
                                      capture_output=True, timeout=self.timeout)
         return self
 
+    def start(self, *extra: str) -> subprocess.Popen:
+        """Launch without waiting, for tests that signal the runner."""
+        self.process = subprocess.Popen([*self.command, *extra], cwd=ROOT, env=self.env, text=True,
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return self.process
+
+    def wait_for_requests(self, count: int, timeout: float = 60.0) -> bool:
+        import time
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if len(self.requests) >= count:
+                return True
+            time.sleep(0.2)
+        return False
+
     def cleanup(self) -> None:
         shutil.rmtree(self.directory, ignore_errors=True)
         shutil.rmtree(self.work, ignore_errors=True)
@@ -66,7 +82,10 @@ class FakeRun:
 
 
 def message_text(message: dict) -> str:
-    parts = [message.get("content", "")] if isinstance(message.get("content"), str) else \
-        [json.dumps(message.get("content"), ensure_ascii=False)]
+    """Plain text of a transcript message: content blocks plus any system sections."""
+    content = message.get("content", "")
+    if isinstance(content, list):
+        content = "\n".join(block.get("text") or json.dumps(block, ensure_ascii=False)
+                            for block in content if isinstance(block, dict))
     sections = message.get("sections") or {}
-    return "\n".join(parts + [str(value) for value in sections.values()])
+    return "\n".join([str(content)] + [str(value) for value in sections.values()])

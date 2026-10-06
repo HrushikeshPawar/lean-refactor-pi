@@ -2,7 +2,7 @@
  *
  * Scripted mode: ARENA_FAKE_SCRIPT points at a JSON array of steps. Each step is
  *   { text?, tool_calls?: [{ name, arguments }], usage?: { input, output, cacheRead, cacheWrite },
- *     error?: string }
+ *     error?: string, delay_ms?: number }
  * A step is consumed per provider request; once exhausted the model answers with plain text and stops.
  * ARENA_FAKE_LOG receives one JSON line per request: the full message transcript and thinking level.
  */
@@ -15,6 +15,7 @@ type Step = {
   tool_calls?: Array<{ name: string; arguments: Record<string, unknown> }>;
   usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
   error?: string;
+  delay_ms?: number;
 };
 
 export default function fakeOpenCode(pi: ExtensionAPI) {
@@ -29,13 +30,17 @@ export default function fakeOpenCode(pi: ExtensionAPI) {
       contextWindow: 1_050_000, maxTokens: 128_000 }],
     streamSimple(model, context, options) {
       const stream = createAssistantMessageEventStream();
-      const step: Step | undefined = script[request];
-      const index = request++;
+      // Pi's own summarization requests (compaction) carry no system sections; they are answered
+      // with plain text and do not consume a scripted step.
+      const first = context.messages[0] as unknown as { sections?: Record<string, unknown> } | undefined;
+      const summarizing = !first?.sections || Object.keys(first.sections).length === 0;
+      const step: Step | undefined = summarizing ? { text: "Offline summary of the earlier turns." } : script[request];
+      const index = summarizing ? -1 - request : request++;
       void (async () => {
         try {
           const payload = await options?.onPayload?.({ model: model.id, input: context.messages,
             max_output_tokens: options.maxTokens ?? 128_000 });
-          if (!payload || (payload as { max_output_tokens?: number }).max_output_tokens !== 16_000) {
+          if (!payload || Number((payload as { max_output_tokens?: number }).max_output_tokens) > 16_000) {
             throw new Error("Arena did not enforce the fake provider output ceiling");
           }
           if (process.env.ARENA_FAKE_LOG) {
@@ -44,6 +49,7 @@ export default function fakeOpenCode(pi: ExtensionAPI) {
           }
           if (process.env.ARENA_FAKE_CRASH === "1") process.exit(23);
           if (process.env.ARENA_FAKE_ERROR === "1") throw new Error("Offline provider failure with unknown usage");
+          if (step?.delay_ms) await new Promise(done => setTimeout(done, step.delay_ms));
           if (step?.error) throw new Error(step.error);
           const content: Array<Record<string, unknown>> = [];
           if (step?.text || !step?.tool_calls?.length) {
