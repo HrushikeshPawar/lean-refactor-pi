@@ -14,7 +14,7 @@ from collections import Counter
 from contextlib import contextmanager
 from pathlib import Path
 
-from arena.engine import ROOT, evaluate, problem, reconstruct, versions, workspace
+from arena.engine import ROOT, candidate_file, evaluate, problem, reconstruct, versions, workspace
 from arena.graph import common_base, edit_fingerprint, merge_text, ranked_frontier
 from arena.ideas import idea_shape_issue, scheduled_ideas, source_ideas
 
@@ -208,16 +208,27 @@ def init(name: str, run_id: str, extra: str = "") -> dict:
             "candidate_path": str(shadow / row["file_path"])}
 
 
+def _externalize_output(directory: Path, key: str, result: dict) -> dict:
+    """Keep full Lean output beside the ledger; results carry only a reference."""
+    for version, item in (result.get("compat") or {}).items():
+        raw = item.pop("raw_output", None)
+        if raw:
+            path = directory / "diagnostics" / f"{key[:16]}-{result.get('mode', 'eval')}-{version}.txt"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(raw + "\n")
+            item["full_diagnostics_ref"] = str(path.relative_to(directory))
+    return result
+
+
 def materialize(name: str, run_id: str, proof: str) -> dict:
+    """Write the exact file the evaluator compiles (minus the heartbeat wrapper)."""
     row = problem(name)
     version, commit = versions(row)[0]
-    _, source = reconstruct(row, proof, version, commit)
+    built = candidate_file(row, proof, version, commit)
     path = run_dir(run_id) / "scratch" / "project" / row["file_path"]
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(source)
-    start = source[:source.index(proof.rstrip("\n"))].count("\n") + 1
-    end = start + proof.rstrip("\n").count("\n")
-    return {"candidate_path": str(path), "start_line": start, "end_line": end}
+    path.write_text(built["text"])
+    return {"candidate_path": str(path), "start_line": built["start_line"], "end_line": built["end_line"]}
 
 
 def resolve_candidate_ref(history: list[dict], reference: str) -> str:
@@ -320,6 +331,7 @@ def record_evaluation(name: str, run_id: str, proof: str, mode: str,
             except (ValueError, FileNotFoundError) as error:
                 result = {"ok": False, "name": name, "mode": mode, "error": str(error),
                           "compat": {}, "tokens": None, "heartbeat": None, "local_proxy": None}
+            _externalize_output(directory, candidate_id, result)
             _append(directory, {"kind": "evaluation", "candidate_id": candidate_id, "key": key,
                                 "mode": mode, "result": result})
     location = materialize(name, run_id, proof) if materialize_live and result.get("tokens") is not None else {}
@@ -351,6 +363,7 @@ def probe(name: str, run_id: str, proof: str, idea_id: str, parent: str) -> dict
             result = evaluate(name, proof, "fast")
         except (ValueError, FileNotFoundError) as error:
             result = {"ok": False, "error": str(error), "compat": {}}
+        _externalize_output(directory, proof_id, result)
         _snapshot(directory, proof_id, proof)
         _append(directory, {"kind": "probe", "proof_id": proof_id, "idea_id": idea_id,
                             "parent": parent_id, "result": result})
