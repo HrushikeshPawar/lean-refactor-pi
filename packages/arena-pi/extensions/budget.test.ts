@@ -109,6 +109,23 @@ test("caps Qwen's Anthropic Messages payload before dispatch", () => {
   assert.ok(reserve < 0.1);
 });
 
+test("keeps an Anthropic thinking budget below the bounded max_tokens", () => {
+  // Pi sends high thinking as budget_tokens 16384 with max_tokens 32384; the API rejects
+  // budget_tokens >= max_tokens with a 400, so cutting max_tokens must shrink the budget too.
+  const high = boundedPayload({ messages: [], max_tokens: 32_384,
+    thinking: { type: "enabled", budget_tokens: 16_384 } }, "qwen3.8-flash").payload as any;
+  assert.equal(high.max_tokens, 16_000);
+  assert.equal(high.thinking.budget_tokens, 14_976);
+  const medium = boundedPayload({ messages: [], max_tokens: 24_192,
+    thinking: { type: "enabled", budget_tokens: 8_192 } }, "qwen3.8-flash").payload as any;
+  assert.equal(medium.thinking.budget_tokens, 8_192);
+  // Near the cap the output allowance can fall below the 1024-token thinking minimum.
+  const last = boundedPayload({ messages: [], max_tokens: 24_192,
+    thinking: { type: "enabled", budget_tokens: 8_192 } }, "qwen3.8-flash", 0.0002).payload as any;
+  assert.ok(last.max_tokens < 2048);
+  assert.equal(last.thinking, undefined);
+});
+
 test("large serialized text fits the model when its byte token upper bound fits", () => {
   const payload = { max_output_tokens: 16000, input: "x".repeat(600_000) };
   assert.ok(boundedPayload(payload, "gpt-6-luna").reserve > 0);

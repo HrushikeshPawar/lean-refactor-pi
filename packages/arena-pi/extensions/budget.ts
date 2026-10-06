@@ -170,6 +170,9 @@ export function outputBudget(remainingUsd: number, model: BudgetModel): number {
   return Math.max(MIN_REQUEST_OUTPUT_TOKENS, Math.min(MAX_REQUEST_OUTPUT_TOKENS, affordable));
 }
 
+const MIN_THINKING_BUDGET_TOKENS = 1024;
+const THINKING_ANSWER_TOKENS = 1024;
+
 export function boundedPayload(payload: unknown, model: BudgetModel, remainingUsd = Infinity): { payload: Record<string, unknown>; reserve: number } {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error("Unknown provider payload");
   const value = { ...payload as Record<string, unknown> };
@@ -179,6 +182,15 @@ export function boundedPayload(payload: unknown, model: BudgetModel, remainingUs
     throw new Error("Cannot enforce Arena output bound on provider payload");
   }
   value[outputField] = Math.min(Number(value[outputField]), outputBudget(remainingUsd, model));
+  // Anthropic Messages requires 1024 <= thinking.budget_tokens < max_tokens. Pi sized the budget
+  // for its own, larger max_tokens, so shrink it to leave room for the answer, or drop thinking
+  // when no valid budget fits (a 400 here would otherwise repeat until the error-loop stop).
+  const thinking = value.thinking as { type?: string; budget_tokens?: number } | undefined;
+  if (outputField === "max_tokens" && thinking?.type === "enabled" && typeof thinking.budget_tokens === "number") {
+    const room = Number(value.max_tokens) - THINKING_ANSWER_TOKENS;
+    if (room < MIN_THINKING_BUDGET_TOKENS) delete value.thinking;
+    else if (thinking.budget_tokens > room) value.thinking = { ...thinking, budget_tokens: room };
+  }
   const bytes = Buffer.byteLength(JSON.stringify(value), "utf8");
   // Text-only Responses payloads cannot tokenize into more tokens than their
   // UTF-8 bytes; allow a fixed margin for protocol framing outside the JSON.
