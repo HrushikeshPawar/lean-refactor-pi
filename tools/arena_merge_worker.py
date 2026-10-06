@@ -8,9 +8,10 @@ import fcntl
 import json
 import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
-from arena.campaign import merge_once, run_dir
+from arena.campaign import merge_batch, run_dir
 
 
 def _status(directory: Path, state: str, detail: dict | None = None) -> None:
@@ -19,6 +20,12 @@ def _status(directory: Path, state: str, detail: dict | None = None) -> None:
     temporary.write_text(json.dumps({"state": state, "pid": os.getpid(), "updated_at": time.time(),
                                      "detail": detail}, ensure_ascii=False))
     temporary.replace(path)
+    summary = ""
+    if detail:
+        pair = detail.get("parents") or []
+        label = f"#{detail['node_number']}" if detail.get("node_number") else detail.get("reason", "")
+        summary = f" pair={'+'.join(str(item)[:8] for item in pair)} result={label}"
+    print(f"[{datetime.now(timezone.utc).isoformat(timespec='seconds')}] merge worker {state}{summary}", flush=True)
 
 
 def main() -> int:
@@ -38,7 +45,8 @@ def main() -> int:
         last_state = None
         while True:
             try:
-                result = merge_once(args.run_id)
+                batch = merge_batch(args.run_id)
+                result = batch["last"]
             except Exception as error:
                 _status(directory, "error", {"error": repr(error)})
                 raise
