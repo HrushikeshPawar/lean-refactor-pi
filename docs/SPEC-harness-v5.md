@@ -1,6 +1,6 @@
 # Spec: Arena harness v5 — correct feedback, model-owned ideas, visible costs
 
-Status: ready-for-agent
+Status: implemented and tested offline; acceptance experiment not yet run
 Source: analysis of runs P0, luna-blank, luna-source, luna-v2, luna-v3, luna-v4, qwen38-v4 (2026-10-06)
 
 ## Problem Statement
