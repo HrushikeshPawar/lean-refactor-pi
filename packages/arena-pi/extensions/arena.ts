@@ -355,6 +355,21 @@ export default function arenaExtension(pi: ExtensionAPI) {
   });
 
   pi.registerTool({
+    name: "arena_profile", label: "Arena heartbeat profile",
+    description: "Per-tactic heartbeat profile of a compiling proof: heartbeats per proof line or tactic block (inclusive and self), share of the total, nesting, the top self costs with cumulative share, and how the profiled total relates to the measured whole-proof heartbeats. Give `candidate` (\"#N\" or probe \"pN\"), `proof`, or nothing for the current candidate. Informational only; it makes no recommendation.",
+    parameters: Type.Object({ candidate: Type.Optional(Type.String()), proof: Type.Optional(Type.String()) }),
+    async execute(_id, params) {
+      if (!active) throw new Error("Select a theorem with /arena first");
+      return reply(await withProofFile(params.proof, file => {
+        const args: string[] = [];
+        if (file) args.push("--proof-file", file);
+        if (params.candidate) args.push("--candidate", params.candidate);
+        return campaign("profile", args);
+      }));
+    },
+  });
+
+  pi.registerTool({
     name: "arena_frontier",
     label: "Arena frontier",
     description: "Compact status: best verified and fast-only candidates, your ideas with attempts, best result and last failure, and recent failures.",

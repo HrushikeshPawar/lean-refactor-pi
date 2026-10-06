@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from arena.engine import ROOT, candidate_file, evaluate, problem, validate_proof, versions, workspace
+from arena.profile import heartbeat_floor, profile
 from arena.graph import common_base, edit_fingerprint, merge_text, ranked_frontier
 
 
@@ -606,6 +607,37 @@ def candidate(name: str, run_id: str, reference: str) -> dict:
             "evaluations": [{"mode": e["mode"], "status": e["status"], "tokens": e["result"].get("tokens"),
                              "heartbeats": e["result"].get("heartbeat"), "score": e["score"]}
                             for e in (row["evaluations"] if row else [])], **location}
+
+
+def profile_request(name: str, run_id: str, reference: str | None = None, proof: str | None = None) -> dict:
+    """Per-tactic heartbeat profile of a compiling candidate (`#N`), probe (`pN`) or proof text.
+
+    Defaults to the candidate whose file is currently materialized.
+    """
+    directory = run_dir(run_id)
+    history = events(directory)
+    label = None
+    if proof is None:
+        if reference and re.fullmatch(r"p[0-9]+", reference.strip().lower()):
+            proof_id = resolve_probe_ref(history, reference)
+            label = reference.strip().lower()
+        else:
+            proof_id = resolve_candidate_ref(history, reference) if reference else _current(history)
+            if proof_id is None:
+                raise ValueError("No candidate to profile; give candidate (#N) or probe (pN)")
+            label = _label(history, proof_id)
+        proof = (directory / "proofs" / f"{proof_id}.lean").read_text()
+    proof_id = hashlib.sha256((name + "\0" + proof).encode()).hexdigest()
+    cached = next((item for item in reversed(history)
+                   if item.get("kind") == "profile" and item["proof_id"] == proof_id), None)
+    if cached:
+        return {**cached["result"], "target": label, "cached": True}
+    measured = next((e["result"].get("heartbeat") for row in _summaries(history) if row["id"] == proof_id
+                     for e in row["evaluations"] if e["result"].get("heartbeat") is not None), None)
+    result = profile(name, proof, measured)
+    result["statement_floor_hb"] = heartbeat_floor(name)["heartbeats"]
+    _append(directory, {"kind": "profile", "proof_id": proof_id, "result": result})
+    return {**result, "target": label, "cached": False}
 
 
 def set_decision(run_id: str, candidate_id: str, decision: str, reason: str) -> dict:

@@ -148,6 +148,62 @@ class CampaignCliTests(unittest.TestCase):
         self.assertFalse(cli(self.run_id, "candidate", "--candidate", "#999")["ok"])
 
 
+@LEAN
+class ProfileCliTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.run_id = f"test-{uuid.uuid4().hex[:10]}"
+        cls.work = Path(tempfile.mkdtemp())
+        assert "packet" in cli(cls.run_id, "init")
+        cls.reference = cli(cls.run_id, "profile", "--candidate", "#1")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(campaign.run_dir(cls.run_id), ignore_errors=True)
+        shutil.rmtree(cls.work, ignore_errors=True)
+
+    def test_reference_profile_attributes_cost_close_to_the_measured_total(self):
+        profile = self.reference
+        self.assertTrue(profile["ok"], profile)
+        self.assertEqual(profile["granularity"], "tactic")
+        self.assertTrue(4000 <= profile["measured_total"] <= 4500, profile["measured_total"])
+        self.assertAlmostEqual(profile["profiled_total"], profile["measured_total"], delta=0.1 * profile["measured_total"])
+        self.assertEqual(profile["unattributed"], profile["measured_total"] - profile["profiled_total"])
+        self.assertGreater(len(profile["entries"]), 10)
+        self.assertEqual(profile["entries"][0]["lines"], "10")
+        self.assertGreater(profile["statement_floor_hb"], 0)
+
+    def test_simp_all_lines_carry_nonzero_cost_and_top_costs_are_cumulative(self):
+        costly = [e for e in self.reference["entries"] if "simp_all" in e["text"] and e["depth"] > 0]
+        self.assertTrue(costly)
+        self.assertTrue(all(e["hb"] > 0 for e in costly))
+        top = self.reference["top_self_cost"]
+        self.assertEqual([t["cumulative_share_pct"] for t in top],
+                         sorted(t["cumulative_share_pct"] for t in top))
+        self.assertGreater(top[-1]["cumulative_share_pct"], 50)
+
+    def test_profile_of_a_candidate_and_cached_repeat(self):
+        good = FIXTURE.read_text()
+        path = self.work / "good.lean"
+        path.write_text(good)
+        assert cli(self.run_id, "evaluate", "--proof-file", str(path))["ok"]
+        first = cli(self.run_id, "profile", "--candidate", "#2")
+        self.assertTrue(first["ok"], first)
+        self.assertLess(first["measured_total"], 1000)
+        again = cli(self.run_id, "profile")
+        self.assertTrue(again["cached"])
+        self.assertEqual(again["profiled_total"], first["profiled_total"])
+
+    def test_probe_with_sorry_cannot_be_profiled(self):
+        statement = campaign.problem(NAME)["statement"]
+        path = self.work / "draft.lean"
+        path.write_text(statement + " := by\n  intros Hup Hinit\n  sorry")
+        probe = cli(self.run_id, "probe", "--proof-file", str(path))
+        result = cli(self.run_id, "profile", "--candidate", probe["probe"])
+        self.assertFalse(result["ok"])
+        self.assertIn("without sorry", result["error"])
+
+
 class ProtocolLogicTests(unittest.TestCase):
     """Behaviour that needs no Lean: lineage defaults, advisory, idea lifecycle."""
 

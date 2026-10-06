@@ -10,10 +10,10 @@ import subprocess
 from pathlib import Path
 
 from arena.campaign import (candidate, declaration, evaluate_request, frontier, init, probe,
-                            record_idea, set_decision, source_range)
+                            profile_request, record_idea, set_decision, source_range)
 
 ACTIONS = ("init", "evaluate", "probe", "idea", "frontier", "candidate", "decision", "source",
-           "declaration")
+           "declaration", "profile")
 
 
 def run(args: argparse.Namespace) -> dict:
@@ -36,6 +36,9 @@ def run(args: argparse.Namespace) -> dict:
         return candidate(args.theorem, args.run_id, args.candidate)
     if args.action == "decision":
         return set_decision(args.run_id, args.candidate, args.decision, args.reason)
+    if args.action == "profile":
+        return profile_request(args.theorem, args.run_id, args.candidate,
+                               args.proof_file.read_text() if args.proof_file else None)
     if args.action == "source":
         return source_range(args.theorem, args.path, args.first, args.last)
     return declaration(args.theorem, args.symbol)
