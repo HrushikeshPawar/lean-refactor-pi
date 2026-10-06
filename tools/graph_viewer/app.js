@@ -322,9 +322,12 @@
     if(!points.length)return `<button type="button" class="chart"><span class="chart-title">${esc(title)}</span><span class="muted">No data yet</span></button>`;
     const box={x0:22,x1:332,y0:8,y1:74,ticks:5},sc=scales(spec,points,box);
     const last=points.at(-1),lx=sc.sx(sc.xs.at(-1)),ly=sc.sy(last[key]);
+    // Headline: the best value so far (spend: the running total), matching the submission.
+    const values=points.map(p=>p[key]);
+    const headline=spec.better==='max'?Math.max(...values):spec.better==='min'?Math.min(...values):last[key];
     const areas=spec.stack?stackedAreas(points,sc.xs,sc.sx,sc.sy,'area'):'';
     chartGeometry.set(`card-${index}`,{spec,points,sc,box});
-    return `<button type="button" class="chart" data-chart="${index}" aria-label="Open enlarged ${esc(title)} chart"><span class="chart-head"><span class="chart-title">${esc(title)}</span><strong>${esc(headValue(spec,last[key]))}</strong></span><svg viewBox="0 0 350 96" data-geometry="card-${index}" aria-hidden="true">${areas}${capLine(spec,sc,box,false)}<path class="chart-baseline" d="M${box.x0} ${box.y1}H${box.x1}"/>${xAxis(sc,box,90,false)}<path class="series" d="${linePath(points,sc.xs,sc.sx,sc.sy,p=>p[key])}"/><circle class="chart-end" cx="${lx}" cy="${ly}" r="4"/></svg>${spec.stack?`<span class="card-legend">${costLegend(spec,points,false)}</span>`:''}<span class="chart-foot">${points.length} ${esc(spec.xLabel.toLowerCase())}s <span>Click to inspect ↗</span></span></button>`;
+    return `<button type="button" class="chart" data-chart="${index}" aria-label="Open enlarged ${esc(title)} chart"><span class="chart-head"><span class="chart-title">${esc(title)}</span><strong title="${spec.better?'best so far':'current'}">${esc(headValue(spec,headline))}</strong></span><svg viewBox="0 0 350 96" data-geometry="card-${index}" aria-hidden="true">${areas}${capLine(spec,sc,box,false)}<path class="chart-baseline" d="M${box.x0} ${box.y1}H${box.x1}"/>${xAxis(sc,box,90,false)}<path class="series" d="${linePath(points,sc.xs,sc.sx,sc.sy,p=>p[key])}"/><circle class="chart-end" cx="${lx}" cy="${ly}" r="4"/></svg>${spec.stack?`<span class="card-legend">${costLegend(spec,points,false)}</span>`:''}<span class="chart-foot">${points.length} ${esc(spec.xLabel.toLowerCase())}s <span>Click to inspect ↗</span></span></button>`;
   }
   function chartTable(spec,points) {
     if(spec.stack){
@@ -360,9 +363,9 @@
     const rows=[...(data.baseline?[data.baseline]:[]),...data.timeline].map(r=>({...r,is_best:bestIds.has(r.candidate_id)}));
     const pick='Click a candidate row to inspect its proof.';
     chartSpecs=[
-      {title:'Provisional score · 3/3 only',rows:rows.filter(r=>r.status==='full'),key:'local_proxy',unit:'',xLabel:'Evaluation',caption:pick},
-      {title:'Proof tokens',rows:rows.filter(r=>r.status!=='fail'),key:'tokens',unit:'',xLabel:'Evaluation',caption:pick},
-      {title:'Primary heartbeats',rows:rows.filter(r=>r.status!=='fail'),key:'heartbeat',unit:'',xLabel:'Evaluation',caption:pick},
+      {title:'Provisional score · 3/3 only',rows:rows.filter(r=>r.status==='full'),key:'local_proxy',unit:'',xLabel:'Evaluation',caption:pick,better:'max'},
+      {title:'Proof tokens',rows:rows.filter(r=>r.status!=='fail'),key:'tokens',unit:'',xLabel:'Evaluation',caption:pick,better:'min'},
+      {title:'Primary heartbeats',rows:rows.filter(r=>r.status!=='fail'),key:'heartbeat',unit:'',xLabel:'Evaluation',caption:pick,better:'min'},
       {title:'API spend by component',rows:data.cost_timeline||[],key:'spent_usd',unit:'$',xLabel:'API request',
        stack:true,zero:true,cap:data.hard_cap_usd||null,
        caption:'Cumulative ledger spend, stacked by price component; the dashed line is the hard cap.'},
