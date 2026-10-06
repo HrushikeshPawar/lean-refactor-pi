@@ -155,7 +155,16 @@ def run_card(run_id: str) -> dict:
                 spent += float(event.get("usd") or 0)
                 requests += 1
     best = state.get("best") or {}
+    reference = None
+    if config.get("theorem"):
+        try:
+            from arena.scoring import reference as published
+            tokens, heartbeats = published(config["theorem"])
+            reference = {"tokens": tokens, "heartbeats": heartbeats, "proxy": round(100 / 3, 2)}
+        except (ValueError, ImportError, KeyError):
+            reference = None
     return {"run_id": run_id, "model": config.get("model"), "theorem": config.get("theorem"),
+            "reference": reference,
             "thinking": config.get("thinking"), "cap_usd": config.get("hard_cap_usd"),
             "spent_usd": round(spent, 6), "requests": requests,
             "best": {"candidate": best.get("candidate"), "proxy": best.get("proxy"),

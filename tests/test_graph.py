@@ -207,7 +207,8 @@ class ViewerTests(unittest.TestCase):
                 (root / name).mkdir()
                 if model:
                     (root / name / "ledger.jsonl").write_text('{"kind":"init","theorem":"T"}\n')
-                    (root / name / "run-config.json").write_text(json.dumps({"model": model, "hard_cap_usd": 0.1}))
+                    (root / name / "run-config.json").write_text(json.dumps(
+                        {"model": model, "hard_cap_usd": 0.1, "theorem": "Core.InitsUpdatesComm"}))
             (root / "rep-r3-model-b" / "summary.json").write_text('{"stop_reason": "actual_usage_cap"}')
             (root / "rep-r3-model-b" / "state.json").write_text('{"best": {"candidate": "#5", "proxy": 81.76}}')
             (root / "rep-r3-model-b" / "cost-ledger.jsonl").write_text(
@@ -233,6 +234,8 @@ class ViewerTests(unittest.TestCase):
                 self.assertEqual((done["finished"], done["best"]["proxy"], done["spent_usd"], done["requests"]),
                                  (True, 81.76, 0.05, 2))
                 self.assertFalse(cards[0]["finished"])
+                # The hub shows every change against the theorem's original proof.
+                self.assertEqual(cards[0]["reference"], {"tokens": 224, "heartbeats": 4251, "proxy": 33.33})
                 viewer, _ = get("/run/rep-r3-model-a/")
                 self.assertIn('src="app.js"', viewer)
                 self.assertEqual(json.loads(get("/run/rep-r3-model-a/graph.json")[0])["run_id"], "rep-r3-model-a")

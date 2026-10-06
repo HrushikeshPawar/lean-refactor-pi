@@ -25,27 +25,53 @@
     for (const run of runs) {
       tabs.push(`<button class="tab" role="tab" data-tab="${esc(run.run_id)}" aria-selected="${active === run.run_id}" title="${esc(run.run_id)}">
         <span class="tab-title"><span class="dot ${run.finished ? 'done' : 'live'}"></span>${esc(title(run))}</span>
-        <span class="tab-meta">${esc(bestText(run))} · ${esc(money(run.spent_usd))} / ${esc(money(run.cap_usd))}</span></button>`);
+        <span class="tab-meta">${esc(shortTheorem(run.theorem))} · ${esc(bestText(run))} · ${esc(money(run.spent_usd))}</span></button>`);
     }
     $('tabs').innerHTML = tabs.join('');
     $('tabs').querySelectorAll('[data-tab]').forEach(button => button.onclick = () => open(button.dataset.tab));
   }
 
+  const shortTheorem = name => String(name || '—').split('.').slice(-1)[0];
+  // A value with its change against the original proof; `lower` says whether smaller is better.
+  function delta(value, base, lower) {
+    if (value == null) return '—';
+    if (base == null) return esc(value);
+    const change = value - base, better = lower ? change < 0 : change > 0;
+    if (!change) return `${esc(value)} <span class="muted">= original</span>`;
+    const pct = base ? Math.round(100 * Math.abs(change) / base) : null;
+    const amount = Number.isInteger(change) ? Math.abs(change) : Math.abs(change).toFixed(2);
+    return `${esc(lower ? value : value.toFixed(2))} <span class="${better ? 'up' : 'down'}">${change < 0 ? '↓' : '↑'}${esc(amount)}${pct != null && lower ? ` (${pct}%)` : ''}</span>`;
+  }
+  function leading(run) {
+    const lead = run.leading_unverified;
+    if (lead) return `${esc(lead.candidate)} est. ${esc(lead.estimated_proxy)} · ${run.checking?.includes(lead.candidate) ? 'checking' : 'not checked'}`;
+    return `<span class="muted">${run.best ? 'none · best is verified' : 'none yet'}</span>`;
+  }
+
   function renderOverview() {
-    const best = Math.max(...runs.map(run => run.best?.proxy ?? -Infinity));
-    $('overview-rows').innerHTML = runs.length ? runs.map(run => {
+    // Best score per theorem, so runs on different theorems are not compared with each other.
+    const bestByTheorem = new Map();
+    for (const run of runs) {
+      const score = run.best?.proxy;
+      if (score != null && score > (bestByTheorem.get(run.theorem) ?? -Infinity)) bestByTheorem.set(run.theorem, score);
+    }
+    const ordered = [...runs].sort((a, b) => String(a.theorem).localeCompare(String(b.theorem)));
+    $('overview-rows').innerHTML = ordered.length ? ordered.map(run => {
       const share = run.cap_usd ? Math.min(100, 100 * run.spent_usd / run.cap_usd) : 0;
       const over = run.cap_usd && run.spent_usd > run.cap_usd;
-      const lead = run.leading_unverified;
+      const ref = run.reference || {};
+      const top = run.best?.proxy != null && run.best.proxy === bestByTheorem.get(run.theorem);
       return `<tr data-run="${esc(run.run_id)}">
         <td title="${esc(run.run_id)}"><span class="dot ${run.finished ? 'done' : 'live'}"></span>${esc(title(run))}</td>
+        <td title="${esc(run.theorem)}">${esc(shortTheorem(run.theorem))}</td>
         <td>${esc(run.model || '—')}</td><td>${esc(run.thinking || '—')}</td>
-        <td class="num ${run.best?.proxy === best ? 'best' : ''}">${esc(bestText(run))}${run.best?.candidate ? ` <span class="muted">${esc(run.best.candidate)}</span>` : ''}</td>
-        <td class="num">${esc(run.best?.tokens ?? '—')}</td><td class="num">${esc(run.best?.heartbeats ?? '—')}</td>
-        <td class="num">${lead ? `${esc(lead.candidate)} est. ${esc(lead.estimated_proxy)}` : '—'}</td>
+        <td class="num ${top ? 'best' : ''}">${run.best?.proxy != null ? delta(run.best.proxy, ref.proxy, false) : '—'}${run.best?.candidate ? ` <span class="muted">${esc(run.best.candidate)}</span>` : ''}</td>
+        <td class="num">${delta(run.best?.tokens, ref.tokens, true)}</td>
+        <td class="num">${delta(run.best?.heartbeats, ref.heartbeats, true)}</td>
+        <td>${leading(run)}</td>
         <td class="num"><span class="bar${over ? ' over' : ''}"><span data-width="${share.toFixed(1)}"></span></span>${esc(money(run.spent_usd))} / ${esc(money(run.cap_usd))}</td>
         <td class="num">${esc(run.requests)}</td><td>${esc(status(run))}</td><td>${esc(run.submission || '—')}</td></tr>`;
-    }).join('') : '<tr><td colspan="11" class="muted">No runs yet.</td></tr>';
+    }).join('') : '<tr><td colspan="12" class="muted">No runs yet.</td></tr>';
     // Widths are set through the CSSOM because the page's CSP forbids inline style attributes.
     $('overview-rows').querySelectorAll('[data-width]').forEach(bar => bar.style.width = `${bar.dataset.width}%`);
     $('overview-rows').querySelectorAll('[data-run]').forEach(row => row.onclick = () => open(row.dataset.run));
