@@ -30,6 +30,9 @@ class EvaluatorBoundaryTests(unittest.TestCase):
             validate_proof(self.row, self.row["statement"] + " := by sorry")
         with self.assertRaisesRegex(ValueError, "STATEMENT_MODIFIED"):
             validate_proof(self.row, "theorem Wrong := by trivial")
+        drifted = self.row["statement"].replace("ks' vs' σ₁", "ks vs σ₁", 1) + " := by trivial"
+        with self.assertRaisesRegex(ValueError, r"first difference on statement line \d+: expected"):
+            validate_proof(self.row, drifted)
         with self.assertRaisesRegex(ValueError, "EXTRA_COMMAND"):
             validate_proof(self.row, self.row["src"] + "\ntheorem Extra : True := by trivial")
 

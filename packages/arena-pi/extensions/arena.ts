@@ -449,7 +449,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
 
   pi.registerTool({
     name: "arena_idea", label: "Record or update an idea",
-    description: "Create an idea (title, hypothesis, region as proof lines like \"12-30\", expected_effect per axis) or update one with idea_id: set status active, parked, succeeded or abandoned with a reason. Ideas are yours; the harness only records them.",
+    description: "Create an idea (title, hypothesis, region such as proof lines \"12-30\", expected_effect per axis), optionally naming it yourself with idea_id; or update an existing idea by idea_id: set status active, parked, succeeded or abandoned with a reason. Ideas are yours; the harness only records them.",
     parameters: Type.Object({
       idea_id: Type.Optional(Type.String()), title: Type.Optional(Type.String()),
       hypothesis: Type.Optional(Type.String()), region: Type.Optional(Type.String()),

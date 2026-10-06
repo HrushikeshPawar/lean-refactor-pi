@@ -356,6 +356,25 @@ class ProtocolLogicTests(unittest.TestCase):
         self.assertEqual((listed["status"], listed["attempts"]), ("succeeded", 1))
         self.assertEqual(listed["best"]["candidate"], "#2")
 
+    def test_a_new_idea_may_carry_the_models_own_id(self):
+        # Luna v5 created ideas as {idea_id: "state_algebra", title: ...}; that is a creation.
+        made = campaign.record_idea("logic", "State algebra", "h", idea_id="state_algebra")
+        self.assertEqual(made["id"], "state_algebra")
+        again = campaign.record_idea("logic", idea_id="state_algebra", status="parked", reason="later")
+        self.assertEqual(again["status"], "parked")
+        self.assertEqual(campaign.record_idea("logic", "Next")["id"], "i2")
+        with self.assertRaisesRegex(ValueError, "give a title to create it"):
+            campaign.record_idea("logic", idea_id="nope", status="active")
+        self.assertEqual(campaign.record_idea("logic", "Odd id", idea_id="has space/slash")["id"], "has_space_slash")
+
+    def test_region_accepts_common_spellings_and_never_rejects(self):
+        spans = {"12-30": [12, 30], "12–30": [12, 30], "lines 12-30": [12, 30], "L12-L30": [12, 30],
+                 "12..30": [12, 30], "line 7": [7, 7], "30-12": [12, 30]}
+        for text, span in spans.items():
+            self.assertEqual(campaign.record_idea("logic", f"r {text}", region=text)["region"], span, text)
+        free = campaign.record_idea("logic", "free", region="the induction step")
+        self.assertEqual(free["region"], "the induction step")
+
     def test_forbidden_proofs_are_rejected_before_any_node_is_recorded(self):
         with patch.object(campaign, "validate_proof", side_effect=ValueError("FORBIDDEN: sorry")):
             with self.assertRaisesRegex(ValueError, "FORBIDDEN"):

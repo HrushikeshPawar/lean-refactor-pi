@@ -60,8 +60,15 @@ def versions(row: dict) -> list[tuple[str, str]]:
 
 def validate_proof(row: dict, proof: str, allow_sorry: bool = False) -> int:
     statement = row["statement"]
-    if not proof.startswith(statement) or not re.match(r"\s*:=", proof[len(statement):]):
-        raise ValueError("STATEMENT_MODIFIED: candidate must begin with the exact benchmark statement")
+    if not proof.startswith(statement):
+        at = next((i for i, (a, b) in enumerate(zip(statement, proof)) if a != b), min(len(statement), len(proof)))
+        line = statement.count("\n", 0, at) + 1
+        raise ValueError(f"STATEMENT_MODIFIED: candidate must begin with the exact benchmark statement; first "
+                         f"difference on statement line {line}: expected {statement[at:at + 40]!r}, got "
+                         f"{proof[at:at + 40]!r}. Copy the statement from the packet byte for byte.")
+    if not re.match(r"\s*:=", proof[len(statement):]):
+        raise ValueError("STATEMENT_MODIFIED: the statement must be followed directly by `:=`; got "
+                         f"{proof[len(statement):len(statement) + 30]!r}")
     from tools.arena_check import FORBIDDEN, remove_comments
 
     clean = remove_comments(proof)

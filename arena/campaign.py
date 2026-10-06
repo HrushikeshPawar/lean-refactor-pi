@@ -306,6 +306,14 @@ def resolve_probe_ref(history: list[dict], reference: str) -> str:
 IDEA_STATUSES = ("active", "parked", "succeeded", "abandoned")
 
 
+def _region(text: str) -> list[int] | str:
+    """Proof lines such as "12-30", "lines 12–30", "L12..L30" or "line 7"; anything else is kept as text."""
+    numbers = [int(n) for n in re.findall(r"\d+", text)][:2]
+    if not numbers:
+        return text.strip()[:120]
+    return [min(numbers), max(numbers)]
+
+
 def record_idea(run_id: str, title: str | None = None, hypothesis: str = "", region: str | None = None,
                 expected_effect: dict | None = None, idea_id: str | None = None,
                 status: str | None = None, reason: str = "") -> dict:
@@ -320,16 +328,14 @@ def record_idea(run_id: str, title: str | None = None, hypothesis: str = "", reg
         raise ValueError(f"Give a one-line reason when marking an idea {status}")
     effect = {str(k): str(v)[:80] for k, v in (expected_effect or {}).items()
               if k in ("tokens", "heartbeats", "compat")}
-    span = None
-    if region:
-        found = re.fullmatch(r"\s*(\d+)\s*(?:-\s*(\d+))?\s*", region)
-        if not found:
-            raise ValueError("region must be proof lines such as 12-30")
-        span = [int(found[1]), int(found[2] or found[1])]
+    span = _region(region) if region and region.strip() else None
     known = {item["id"]: item for item in history if item.get("kind") == "idea"}
     if idea_id:
-        if idea_id not in known:
-            raise ValueError(f"Unknown idea {idea_id}; ideas are {', '.join(known) or 'not recorded yet'}")
+        idea_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", idea_id.strip())[:40] or None
+    if idea_id and idea_id not in known and not (title and title.strip()):
+        raise ValueError(f"Unknown idea {idea_id}; give a title to create it "
+                         f"(recorded ideas: {', '.join(known) or 'none yet'})")
+    if idea_id and idea_id in known:
         update = {"kind": "idea_update", "id": idea_id}
         if title: update["title"] = title.strip()[:120]
         if hypothesis: update["hypothesis"] = hypothesis.strip()[:600]
@@ -341,7 +347,8 @@ def record_idea(run_id: str, title: str | None = None, hypothesis: str = "", reg
         return {"ok": True, **{k: v for k, v in update.items() if k != "kind"}}
     if not title or not title.strip():
         raise ValueError("A new idea needs a title")
-    identifier = f"i{len(known) + 1}"
+    # Models often name their own ideas; keep that name so later updates by it work.
+    identifier = idea_id or next(f"i{n}" for n in range(len(known) + 1, len(known) + 1000) if f"i{n}" not in known)
     item = {"kind": "idea", "id": identifier, "title": title.strip()[:120],
             "hypothesis": hypothesis.strip()[:600], "region": span, "expected_effect": effect,
             "status": status or "active", "reason": reason.strip()[:300]}
