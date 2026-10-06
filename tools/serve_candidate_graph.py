@@ -19,6 +19,7 @@ def graph_payload(run_id: str) -> dict:
     status = directory / "merge-worker.json"
     payload["worker"] = json.loads(status.read_text()) if status.exists() else None
     charged = 0.0
+    pi_embedded = 0.0
     unresolved: dict[str, float] = {}
     costs = []
     journal = directory / "cost-ledger.jsonl"
@@ -27,17 +28,41 @@ def graph_payload(run_id: str) -> dict:
             event = json.loads(line)
             if event.get("kind") == "reserve":
                 unresolved[str(event["id"])] = float(event["usd"])
-            elif event.get("kind") == "settle":
+            elif event.get("kind") in ("settle", "release"):
                 unresolved.pop(str(event["id"]), None)
-                charged += float(event["usd"])
+                if event["kind"] == "settle" and event.get("usage_known") is not False:
+                    charged += float(event["usd"])
+                    pi_embedded += float(event.get("pi_embedded_cost_usd") or 0)
             else:
                 continue
             outstanding = sum(unresolved.values())
             costs.append({"spent_usd": charged, "outstanding_usd": outstanding,
+                          "pi_embedded_usd": pi_embedded,
                           "committed_usd": charged + outstanding,
                           "kind": event["kind"], "ts": event.get("ts")})
     payload["cost_timeline"] = costs
     payload["cost"] = {"spent_usd": charged, "unresolved_usd": sum(unresolved.values())}
+    report = directory / "cost.json"
+    payload["cost_report"] = json.loads(report.read_text()) if report.exists() else {}
+    if "pi_embedded_estimate" not in payload["cost_report"]:
+        embedded_total = 0.0
+        priced_entries = 0
+        missing_entries = 0
+        for session_file in (directory / "session").glob("*.jsonl"):
+            for line in session_file.read_text().splitlines():
+                entry = json.loads(line)
+                usage = (entry.get("message") or {}).get("usage") or entry.get("usage") or {}
+                if not usage.get("totalTokens"):
+                    continue
+                cost = (usage.get("cost") or {}).get("total")
+                if isinstance(cost, (int, float)):
+                    embedded_total += cost
+                    priced_entries += 1
+                else:
+                    missing_entries += 1
+        payload["cost_report"]["pi_embedded_estimate"] = {
+            "usd": embedded_total, "priced_entries": priced_entries,
+            "missing_entries": missing_entries}
     return payload
 
 

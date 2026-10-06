@@ -16,12 +16,14 @@
     <section class="overview">
       <div class="section-title"><h2>Progress</h2><span class="sub">Select a point to inspect its candidate</span></div>
       <div id="charts" class="charts"></div>
+      <div id="cost-note" class="cost-note" hidden></div>
     </section>
     <section class="workspace">
       <div class="graph-pane">
         <div class="toolbar">
           <input id="search" type="search" placeholder="Search proof, ID, reasoning…" aria-label="Search candidates">
           <select id="filter" aria-label="Filter candidates"><option value="all">All nodes</option><option value="full">3/3 valid</option><option value="primary">Primary valid</option><option value="fail">Failed</option><option value="auto_merge">Auto merges</option></select>
+          <select id="idea-filter" aria-label="Filter by proof idea"><option value="all">All ideas</option></select>
           <button id="fit">Fit</button><button id="zoom-in" aria-label="Zoom in">+</button><button id="zoom-out" aria-label="Zoom out">−</button>
         </div>
         <div class="legend"><span class="key full"></span> 3/3 compatible <span class="key primary"></span> primary valid, transfer pending or failed <span class="key fail"></span> Lean failed <span class="key pending"></span> unevaluated <span class="key merge"></span> ⊕ automatic merge · bright paths: selected node ancestry · dashed path: alternate derivation</div>
@@ -30,7 +32,7 @@
       <aside id="detail"><p class="empty">Select a graph node, chart point, or frontier item.</p></aside>
     </section>
     <section class="lower">
-      <div class="panel"><h2>Next experiments</h2><div id="frontier"></div></div>
+      <div class="panel"><h2>Idea portfolio and next experiment</h2><div id="frontier"></div></div>
       <div class="panel"><h2>Merge worker</h2><div id="worker"></div><div id="merge-feed"></div></div>
     </section>
   </main>

@@ -87,3 +87,14 @@
 .chart-table tr[data-candidate]{cursor:pointer}
 .chart-table tr[data-candidate]:hover{background:#254564}
 @media(max-width:1100px){.workspace{grid-template-columns:1fr}}
+.workspace{grid-template-rows:minmax(0,1fr);overflow:hidden}
+.graph-pane,#detail{min-height:0;max-height:100%;min-width:0}
+.graph-pane{overflow:hidden}
+.lower{position:relative;z-index:1;background:var(--bg);min-width:0}
+.lower .panel{min-width:0;overflow-wrap:anywhere}
+@media(max-width:1100px){.workspace{height:auto;grid-template-rows:auto;overflow:visible}.graph-pane{height:55vh;max-height:none}#detail{height:auto;max-height:50vh}}
+.idea-row{padding:10px 9px;border-top:1px solid var(--line);border-left:3px solid transparent}
+.idea-row:first-child{border-top:0}.idea-row.scheduled{background:#173146;border-left-color:var(--blue)}
+.idea-row p{margin:5px 0 8px;color:var(--muted)}.idea-row button{margin-right:8px}
+.cost-note{margin:10px 0;padding:8px;border:1px solid var(--line);border-radius:6px;color:var(--muted)}
+.chart .series.embedded,.modal-series.embedded{stroke:#edc475;stroke-dasharray:5 4;opacity:.9}
