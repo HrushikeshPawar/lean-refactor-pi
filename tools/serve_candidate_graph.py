@@ -51,6 +51,7 @@ def graph_payload(run_id: str) -> dict:
     payload["cost_timeline"] = costs
     payload["cost"] = {"spent_usd": charged, "unresolved_usd": sum(unresolved.values()),
                        "pi_embedded_usd": pi_embedded}
+    payload["baseline"] = baseline_point(payload)
     config = directory / "run-config.json"
     payload["hard_cap_usd"] = json.loads(config.read_text()).get("hard_cap_usd") if config.exists() else None
     report = directory / "cost.json"
@@ -75,6 +76,21 @@ def graph_payload(run_id: str) -> dict:
             "usd": embedded_total, "priced_entries": priced_entries,
             "missing_entries": missing_entries}
     return payload
+
+
+def baseline_point(payload: dict) -> dict | None:
+    """The original proof (node #1) as evaluation 0: published tokens and heartbeats, every version
+    passing, so every score chart starts where the run started."""
+    reference = next((node for node in payload.get("nodes", []) if node.get("origin") == "reference"), None)
+    if not reference or not payload.get("theorem"):
+        return None
+    try:
+        from arena.scoring import reference as published
+        tokens, heartbeats = published(payload["theorem"])
+    except (ValueError, ImportError, KeyError):
+        return None
+    return {"number": 0, "candidate_id": reference["id"], "mode": "reference", "status": "full",
+            "tokens": tokens, "heartbeat": heartbeats, "local_proxy": round(100 / 3, 2), "is_reference": True}
 
 
 def handler_for(run_id: str):

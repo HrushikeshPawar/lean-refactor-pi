@@ -264,7 +264,7 @@
       const rows=points.map(p=>{const t=p.tokens||{};return `<tr><td>${esc(p.number)}</td><td>${esc(money(p.request_usd))}</td><td>${esc(money(p.spent_usd))}</td>${COST_PARTS.map(([k])=>`<td>${esc(t[k] ?? '—')}</td>`).join('')}<td>${p.reuse_pct==null?'—':esc(p.reuse_pct.toFixed(1))+'%'}</td><td>${p.ts?esc(new Date(p.ts*1000).toLocaleTimeString()):'—'}</td></tr>`;}).join('');
       return `<thead><tr><th>Request</th><th>Request $</th><th>Cumulative $</th>${COST_PARTS.map(([,label])=>`<th>${esc(label)} tok</th>`).join('')}<th>Cache reuse</th><th>Time</th></tr></thead><tbody>${rows}</tbody>`;
     }
-    const rows=points.map((p,i)=>`<tr ${p.candidate_id?`data-candidate="${esc(p.candidate_id)}"`:''}><td>${esc(p.number ?? i+1)}</td><td>${p.candidate_id?`#${esc(byId.get(p.candidate_id)?.index ?? '?')} ${esc(p.candidate_id.slice(0,8))}`:'—'}</td><td>${esc(p[spec.key].toFixed(spec.key==='local_proxy'?2:0))}</td><td>${esc(p.status ?? p.mode ?? '—')}</td><td>${esc(p.tokens ?? '—')}</td><td>${esc(p.heartbeat ?? '—')}</td><td>${esc(p.local_proxy?.toFixed?.(2) ?? '—')}</td><td>${p.ts?esc(new Date(p.ts*1000).toLocaleString()):'—'}</td></tr>`).join('');
+    const rows=points.map((p,i)=>`<tr ${p.candidate_id?`data-candidate="${esc(p.candidate_id)}"`:''}><td>${p.is_reference?'0 (original)':esc(p.number ?? i+1)}</td><td>${p.candidate_id?`#${esc(byId.get(p.candidate_id)?.index ?? '?')} ${p.is_reference?'original proof':esc(p.candidate_id.slice(0,8))}`:'—'}</td><td>${esc(p[spec.key].toFixed(spec.key==='local_proxy'?2:0))}</td><td>${esc(p.status ?? p.mode ?? '—')}</td><td>${esc(p.tokens ?? '—')}</td><td>${esc(p.heartbeat ?? '—')}</td><td>${esc(p.local_proxy?.toFixed?.(2) ?? '—')}</td><td>${p.ts?esc(new Date(p.ts*1000).toLocaleString()):'—'}</td></tr>`).join('');
     return `<thead><tr><th>${esc(spec.xLabel)}</th><th>Candidate</th><th>Value</th><th>Status / mode</th><th>Tokens</th><th>Heartbeats</th><th>Proxy</th><th>Time</th></tr></thead><tbody>${rows}</tbody>`;
   }
   function openChart(index) {
@@ -287,7 +287,8 @@
   $('chart-dialog').addEventListener('click',e=>{if(e.target===$('chart-dialog'))e.target.close()});
   function renderCharts() {
     const bestIds=new Set(data.milestones.map(m=>m.candidate_id));
-    const rows=data.timeline.map(r=>({...r,is_best:bestIds.has(r.candidate_id)}));
+    // The original proof is evaluation 0, so score charts start from where the run started.
+    const rows=[...(data.baseline?[data.baseline]:[]),...data.timeline].map(r=>({...r,is_best:bestIds.has(r.candidate_id)}));
     const pick='Click a candidate row to inspect its proof.';
     chartSpecs=[
       {title:'Provisional score · 3/3 only',rows:rows.filter(r=>r.status==='full'),key:'local_proxy',unit:'',xLabel:'Evaluation',caption:pick},

@@ -182,6 +182,16 @@ class ViewerTests(unittest.TestCase):
             self.assertAlmostEqual(payload["cost"]["pi_embedded_usd"], 0.3)
             self.assertEqual(payload["hard_cap_usd"], 0.1)
 
+    def test_score_charts_start_from_the_original_proof(self):
+        from tools.serve_candidate_graph import baseline_point
+        payload = {"theorem": "Core.InitsUpdatesComm",
+                   "nodes": [{"id": "ref", "origin": "reference"}, {"id": "a", "origin": "model"}]}
+        point = baseline_point(payload)
+        self.assertEqual((point["number"], point["candidate_id"], point["tokens"], point["local_proxy"]),
+                         (0, "ref", 224, 33.33))
+        self.assertGreater(point["heartbeat"], 0)
+        self.assertIsNone(baseline_point({"theorem": "Core.InitsUpdatesComm", "nodes": []}))
+
     def test_failed_and_legacy_unknown_usage_releases_do_not_raise_spend(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
