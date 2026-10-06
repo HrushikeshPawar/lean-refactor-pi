@@ -6,10 +6,10 @@ export type BudgetLimits = { hardCapUsd: number; stopUsd: number };
 
 export function budgetLimits(env: NodeJS.ProcessEnv = process.env): BudgetLimits {
   const hardCapUsd = Number(env.ARENA_HARD_CAP_USD ?? "3");
-  const stopUsd = Number(env.ARENA_STOP_USD ?? String(Math.min(2.5, hardCapUsd * 0.85)));
+  const stopUsd = Number(env.ARENA_STOP_USD ?? String(hardCapUsd));
   if (!Number.isFinite(hardCapUsd) || hardCapUsd < 0.1 || hardCapUsd > MAX_HARD_CAP_USD
-    || !Number.isFinite(stopUsd) || stopUsd <= 0 || stopUsd > hardCapUsd) {
-    throw new Error("Arena budget limits must satisfy $0.10 <= hard cap <= $3 and 0 < stop <= hard cap");
+    || stopUsd !== hardCapUsd) {
+    throw new Error("Arena actual-usage limit must satisfy $0.10 <= cap <= $3; stop target must equal cap");
   }
   return { hardCapUsd, stopUsd };
 }
@@ -17,13 +17,20 @@ export function budgetLimits(env: NodeJS.ProcessEnv = process.env): BudgetLimits
 type Usage = { input: number; output: number; cacheRead: number; cacheWrite: number };
 type Price = { input: number; output: number; cacheRead: number; cacheWrite: number };
 
-// Published OpenCode Go prices per million tokens, using the most expensive
-// context/time tier so the ledger stays conservative without clock or cache guesses.
+// OpenCode Go prices per million tokens. Luna's higher tier applies only when
+// the billed prompt (new input plus cache read/write) exceeds 272K tokens.
 export const MODELS = {
   "gpt-6-luna": {
-    price: { input: 0.20, output: 0.75, cacheRead: 0.02, cacheWrite: 0.25 },
+    price: { input: 0.10, output: 0.50, cacheRead: 0.01, cacheWrite: 0.125 },
+    highPrice: { input: 0.20, output: 0.75, cacheRead: 0.02, cacheWrite: 0.25 },
+    highContextThreshold: 272_000,
     contextWindow: 1_050_000,
     maxTokens: 128_000,
+  },
+  "qwen3.8-flash": {
+    price: { input: 0.15, output: 0.47, cacheRead: 0.016, cacheWrite: 0.20 },
+    contextWindow: 1_000_000,
+    maxTokens: 131_072,
   },
   "deepseek-v4.1-flash": {
     price: { input: 0.30, output: 1.20, cacheRead: 0.006, cacheWrite: 0 },
@@ -39,7 +46,7 @@ export function isBudgetModel(model: string): model is BudgetModel {
 }
 
 export function usageCost(usage: Usage, model: BudgetModel): number {
-  const price: Price = MODELS[model].price;
+  const price = priceForUsage(usage, model);
   let cost = 0;
   for (const category of ["input", "output", "cacheRead", "cacheWrite"] as const) {
     const tokens = usage[category];
@@ -47,6 +54,21 @@ export function usageCost(usage: Usage, model: BudgetModel): number {
     cost += tokens * price[category] / 1_000_000;
   }
   return cost;
+}
+
+export function usageCostParts(usage: Usage, model: BudgetModel) {
+  const price = priceForUsage(usage, model);
+  return Object.fromEntries((Object.keys(price) as Array<keyof Usage>)
+    .map(category => [category, usage[category] * price[category] / 1_000_000])) as Record<keyof Usage, number>;
+}
+
+export function priceForUsage(usage: Usage, model: BudgetModel): Price {
+  const specification = MODELS[model];
+  if (model === "gpt-6-luna" &&
+      usage.input + usage.cacheRead + usage.cacheWrite > MODELS["gpt-6-luna"].highContextThreshold) {
+    return MODELS["gpt-6-luna"].highPrice;
+  }
+  return specification.price;
 }
 
 function pricedModel(provider: string, model: string, expected: BudgetModel): BudgetModel {
@@ -82,50 +104,80 @@ export function sessionSpend(entries: readonly SessionEntry[], sessionModel: Bud
   return spend;
 }
 
+export function sessionEmbeddedCost(entries: readonly SessionEntry[]): { usd: number; priced_entries: number; missing_entries: number } {
+  let usd = 0, priced_entries = 0, missing_entries = 0;
+  for (const entry of entries) {
+    const usage = entry.type === "message" && (entry.message.role === "assistant" || entry.message.role === "toolResult")
+      ? entry.message.usage : (entry.type === "usage" || entry.type === "compaction" || entry.type === "branch_summary")
+        ? entry.usage : undefined;
+    if (!usage?.totalTokens) continue;
+    const cost = usage.cost?.total;
+    if (typeof cost === "number" && Number.isFinite(cost)) { usd += cost; priced_entries += 1; }
+    else missing_entries += 1;
+  }
+  return { usd, priced_entries, missing_entries };
+}
+
+export function cacheUtilization(entries: readonly SessionEntry[], sessionModel: BudgetModel) {
+  const usages = entries.flatMap(entry => entry.type === "message"
+    && entry.message.role === "assistant"
+    && entry.message.provider === "opencode-go"
+    && entry.message.model === sessionModel
+    && entry.message.usage?.totalTokens ? [entry.message.usage] : []);
+  const summarize = (items: typeof usages) => {
+    const read = items.reduce((sum, usage) => sum + (usage.cacheRead ?? 0), 0);
+    const write = items.reduce((sum, usage) => sum + (usage.cacheWrite ?? 0), 0);
+    return { read_tokens: read, write_tokens: write,
+      reuse_pct: read + write ? 100 * read / (read + write) : null };
+  };
+  return { all: summarize(usages), recent_ten: summarize(usages.slice(-10)) };
+}
+
 export function maximumNextRequest(model: BudgetModel): number {
   const { price, contextWindow, maxTokens } = MODELS[model];
-  return contextWindow * Math.max(price.input, price.cacheRead, price.cacheWrite) / 1_000_000
-    + maxTokens * price.output / 1_000_000;
+  const conservative = model === "gpt-6-luna" ? MODELS[model].highPrice : price;
+  return contextWindow * Math.max(conservative.input, conservative.cacheRead, conservative.cacheWrite) / 1_000_000
+    + maxTokens * conservative.output / 1_000_000;
 }
 
 export function budgetDecision(spent: number, model: BudgetModel, limits: BudgetLimits): { allowed: boolean; reserve: number; reason: string } {
   if (!Number.isFinite(spent) || spent < 0) throw new Error("Invalid Arena spend");
   const reserve = maximumNextRequest(model);
-  const allowed = spent < limits.stopUsd && spent + reserve <= limits.hardCapUsd;
+  const allowed = spent < limits.hardCapUsd;
   const reason = allowed ? "within budget"
-    : `Arena budget stop: $${spent.toFixed(4)} spent; reserving $${reserve.toFixed(4)} for another request would exceed the $${limits.hardCapUsd.toFixed(2)} cap or $${limits.stopUsd.toFixed(2)} stop target`;
+    : `Arena budget stop: $${spent.toFixed(4)} observed usage reached the $${limits.hardCapUsd.toFixed(2)} cap`;
   return { allowed, reserve, reason };
 }
 
-// Responses API max_output_tokens includes reasoning tokens. Use the final
-// serialized provider payload, after Pi has added its system prompt and tools.
+// The Responses API uses max_output_tokens; Anthropic Messages uses max_tokens.
+// Both include generated thinking tokens in the output limit.
 export const MAX_REQUEST_OUTPUT_TOKENS = 16_000;
 
 export function boundedPayload(payload: unknown, model: BudgetModel): { payload: Record<string, unknown>; reserve: number } {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error("Unknown provider payload");
   const value = { ...payload as Record<string, unknown> };
-  if (typeof value.max_output_tokens !== "number" || !Number.isFinite(value.max_output_tokens)) {
+  const outputField = typeof value.max_output_tokens === "number" ? "max_output_tokens"
+    : typeof value.max_tokens === "number" ? "max_tokens" : null;
+  if (!outputField || !Number.isFinite(value[outputField]) || Number(value[outputField]) <= 0) {
     throw new Error("Cannot enforce Arena output bound on provider payload");
   }
-  value.max_output_tokens = Math.min(value.max_output_tokens, MAX_REQUEST_OUTPUT_TOKENS);
+  value[outputField] = Math.min(Number(value[outputField]), MAX_REQUEST_OUTPUT_TOKENS);
   const bytes = Buffer.byteLength(JSON.stringify(value), "utf8");
   // Text-only Responses payloads cannot tokenize into more tokens than their
   // UTF-8 bytes; allow a fixed margin for protocol framing outside the JSON.
   const inputBound = bytes + 4096;
   if (inputBound > MODELS[model].contextWindow) throw new Error("Arena context bound exceeds model window");
-  const price = MODELS[model].price;
+  const price = model === "gpt-6-luna" ? MODELS[model].highPrice : MODELS[model].price;
   const reserve = inputBound * Math.max(price.input, price.cacheRead, price.cacheWrite) / 1_000_000
-    + Number(value.max_output_tokens) * price.output / 1_000_000;
+    + Number(value[outputField]) * price.output / 1_000_000;
   return { payload: value, reserve };
 }
 
 export function permitFinalPayload(payload: unknown, model: BudgetModel,
-  state: { spent: number; charged: number }, limits: BudgetLimits) {
+  state: { spent: number }, limits: BudgetLimits) {
   const bounded = boundedPayload(payload, model);
-  if (!Number.isFinite(state.spent) || !Number.isFinite(state.charged) ||
-      state.spent < 0 || state.charged < state.spent ||
-      state.spent >= limits.stopUsd || state.charged + bounded.reserve > limits.hardCapUsd) {
-    throw new Error(`Arena budget stop: $${state.charged.toFixed(6)} charged, $${bounded.reserve.toFixed(6)} required, $${limits.hardCapUsd.toFixed(2)} cap`);
+  if (!Number.isFinite(state.spent) || state.spent < 0 || state.spent >= limits.hardCapUsd) {
+    throw new Error(`Arena budget stop: $${state.spent.toFixed(6)} observed usage reached $${limits.hardCapUsd.toFixed(2)} cap`);
   }
   return bounded;
 }

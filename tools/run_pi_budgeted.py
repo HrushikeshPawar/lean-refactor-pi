@@ -12,17 +12,20 @@ import re
 import subprocess
 import sys
 import time
+from datetime import datetime
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from arena.campaign import init, packet, run_dir
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MODELS = ("gpt-6-luna", "deepseek-v4.1-flash")
+MODELS = ("gpt-6-luna", "qwen3.8-flash", "deepseek-v4.1-flash")
+_tool_started: dict[str, tuple[float, dict]] = {}
 
 
 def attempt_has_model_error(event_log: Path, offset: int) -> bool:
-    """Inspect only events emitted by this launch, not earlier failed resume attempts."""
+    """Ignore intentional cap stops and errors recovered by Pi's retry loop."""
+    pending_error = False
     with event_log.open("rb") as events:
         events.seek(offset)
         for line in events:
@@ -30,8 +33,64 @@ def attempt_has_model_error(event_log: Path, offset: int) -> bool:
             if event.get("type") == "message_end":
                 message = event.get("message", {})
                 if message.get("role") == "assistant" and message.get("stopReason") in ("error", "aborted"):
-                    return True
-    return False
+                    pending_error = not str(message.get("errorMessage", "")).startswith("Arena budget stop:")
+                elif message.get("role") == "assistant" and message.get("stopReason") in ("stop", "toolUse"):
+                    pending_error = False
+            elif event.get("type") == "auto_retry_end" and event.get("success"):
+                pending_error = False
+    return pending_error
+
+
+def log_event(event: dict) -> None:
+    kind = event.get("type")
+    note = None
+    if kind == "tool_execution_start":
+        name = event.get("toolName", "tool")
+        if name in ("arena_evaluate", "arena_probe"):
+            args = event.get("args") or {}
+            _tool_started[event.get("toolCallId", "")] = (time.monotonic(), args)
+            parent = (args.get("parents") or [args.get("parent", "?")])[0]
+            note = f"{name} started idea={args.get('idea_id', '?')} parent={str(parent)[:12]} mode={args.get('mode', 'fast')}"
+    elif kind == "tool_execution_end":
+        name = event.get("toolName", "tool")
+        started = _tool_started.pop(event.get("toolCallId", ""), None)
+        elapsed = f" in {time.monotonic() - started[0]:.1f}s" if started else ""
+        if name in ("arena_evaluate", "arena_probe"):
+            try:
+                result = json.loads(event["result"]["content"][0]["text"])
+                compat = result.get("compat", {})
+                passed = sum(bool(item.get("passed")) for item in compat.values())
+                if result.get("node_number") or result.get("proof_id"):
+                    label = f"#{result['node_number']}" if result.get("node_number") else f"probe {str(result['proof_id'])[:8]}"
+                    outcome = "Lean pass" if result.get("ok") else "Lean fail"
+                    note = (f"{name} {label} {outcome} idea={result.get('idea_id', '?')} "
+                            f"{result.get('mode', 'fast')} {result.get('tokens', '?')} tokens "
+                            f"{passed}/{len(compat)} versions{elapsed}")
+                elif result.get("ok") is False:
+                    args = started[1] if started else {}
+                    note = (f"{name} rejected idea={args.get('idea_id', '?')} "
+                            f"parent={str((args.get('parents') or [args.get('parent', '?')])[0])[:12]}"
+                            f"{elapsed}; {result.get('error', 'unknown error')[:130]}")
+                else:
+                    note = f"{name} returned without a recorded node{elapsed}"
+            except (KeyError, IndexError, TypeError, ValueError):
+                note = "arena_evaluate returned an unreadable result"
+        elif event.get("isError"):
+            note = f"tool {name} returned an error"
+    elif kind == "message_end":
+        message = event.get("message", {})
+        if message.get("role") == "assistant":
+            usage = message.get("usage") or {}
+            note = (f"model {message.get('stopReason', '?')} "
+                    f"output={usage.get('output', 0)} cache-read={usage.get('cacheRead', 0)} "
+                    f"cache-write={usage.get('cacheWrite', 0)}"
+                    + (f"; {str(message.get('errorMessage'))[:90]}" if message.get("errorMessage") else ""))
+    elif kind == "auto_retry_start":
+        note = f"provider retry {event.get('attempt')}/{event.get('maxAttempts')}: {event.get('errorMessage', '')}"
+    elif kind == "agent_settled":
+        note = "Pi agent settled"
+    if note:
+        print(f"[{datetime.now().astimezone().strftime('%H:%M:%S')}] {note}", flush=True)
 
 
 def main() -> int:
@@ -103,6 +162,7 @@ def main() -> int:
                               stdout=worker_log, stderr=subprocess.STDOUT, start_new_session=True)
     worker_log.close()
     print(f"Merge worker pid={worker.pid}; log={directory / 'merge-worker.log'}", flush=True)
+    print(f"Pi session={args.run_id}; model={args.model}; actual-usage cap=${args.hard_cap_usd:g}; resume={args.resume_run}", flush=True)
     status_path = directory / "merge-worker.json"
     for _ in range(30):
         if worker.poll() is not None:
@@ -117,12 +177,21 @@ def main() -> int:
     event_log = directory / "events.jsonl"
     event_offset = event_log.stat().st_size if event_log.exists() else 0
     with event_log.open("a") as output:
-        completed = subprocess.run(command, cwd=shadow, env=env, stdin=subprocess.DEVNULL,
-                                   stdout=output, check=False)
+        process = subprocess.Popen(command, cwd=shadow, env=env, stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, text=True, bufsize=1)
+        assert process.stdout is not None
+        for line in process.stdout:
+            output.write(line)
+            output.flush()
+            try:
+                log_event(json.loads(line))
+            except (json.JSONDecodeError, TypeError, ValueError):
+                print(f"[{datetime.now().astimezone().strftime('%H:%M:%S')}] non-JSON Pi output recorded", flush=True)
+        exit_code = process.wait()
     report_path = directory / "cost.json"
-    print(f"Pi exit={completed.returncode}; events={directory / 'events.jsonl'}; cost={report_path}")
-    if completed.returncode:
-        return completed.returncode
+    print(f"Pi exit={exit_code}; events={directory / 'events.jsonl'}; cost={report_path}")
+    if exit_code:
+        return exit_code
     if not report_path.exists():
         print("Pi did not produce a cost report", file=sys.stderr)
         return 1
@@ -131,9 +200,18 @@ def main() -> int:
         print(f"Invalid cost report: {report.get('error', 'theorem mismatch')}",
               file=sys.stderr)
         return 1
-    if report["hard_cap_usd"] != args.hard_cap_usd or report["spent_usd"] + report.get("unresolved_usd", 0) > args.hard_cap_usd:
-        print("Arena hard cap exceeded", file=sys.stderr)
+    if report["hard_cap_usd"] != args.hard_cap_usd:
+        print("Arena cap configuration changed", file=sys.stderr)
         return 1
+    print(f"Ledger-priced observed tokens=${report['spent_usd']:.6f}; unresolved exposure=${report.get('unresolved_usd', 0):.6f}; cap=${args.hard_cap_usd:.2f}", flush=True)
+    embedded = report.get("pi_embedded_estimate") or {}
+    if embedded.get("priced_entries") and not embedded.get("missing_entries"):
+        print(f"Pi embedded estimate=${embedded['usd']:.6f}; delta=${report['spent_usd'] - embedded['usd']:.6f} (different configured price rates; neither is an invoice)", flush=True)
+    cache = report.get("cache_utilization", {})
+    if cache.get("all", {}).get("reuse_pct") is not None:
+        print(f"Cache reuse: all={cache['all']['reuse_pct']:.1f}% recent-10={cache['recent_ten']['reuse_pct']:.1f}%", flush=True)
+    if report["spent_usd"] > args.hard_cap_usd:
+        print("Observed usage exceeded the cap on the final in-flight request", file=sys.stderr)
     if attempt_has_model_error(event_log, event_offset):
         print("Pi ended with a model error or abort; inspect events.jsonl", file=sys.stderr)
         return 1

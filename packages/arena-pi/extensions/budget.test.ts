@@ -1,12 +1,36 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { boundedPayload, budgetDecision, budgetLimits, maximumNextRequest, permitFinalPayload, sessionSpend, usageCost } from "./budget.ts";
+import { boundedPayload, budgetDecision, budgetLimits, cacheUtilization, maximumNextRequest, permitFinalPayload, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
 
 const usage = { input: 1_000_000, output: 100_000, cacheRead: 0, cacheWrite: 0 };
 
 test("prices OpenCode Go usage at the expensive tier", () => {
   assert.equal(usageCost(usage, "gpt-6-luna"), 0.275);
   assert.equal(usageCost(usage, "deepseek-v4.1-flash"), 0.42);
+  assert.equal(usageCost({ input: 1_000_000, output: 0, cacheRead: 0, cacheWrite: 0 }, "qwen3.8-flash"), 0.15);
+});
+
+test("uses Luna's low tier until one request crosses 272K prompt tokens", () => {
+  const low = { input: 264, output: 71807, cacheRead: 5780683, cacheWrite: 129347 };
+  assert.equal(usageCost({ input: 0, output: 1000, cacheRead: 200_000, cacheWrite: 0 }, "gpt-6-luna"), 0.0025);
+  assert.ok(Math.abs(usageCost({ input: 0, output: 1000, cacheRead: 273_000, cacheWrite: 0 }, "gpt-6-luna") - 0.00621) < 1e-12);
+  assert.ok(Math.abs((low.input * 0.1 + low.output * 0.5 + low.cacheRead * 0.01
+    + low.cacheWrite * 0.125) / 1_000_000 - 0.109905105) < 1e-10);
+  const entries = [200_000, 273_000].map(cacheRead => ({ type: "message",
+    message: { role: "assistant", provider: "opencode-go", model: "gpt-6-luna",
+      usage: { input: 0, output: 1000, cacheRead, cacheWrite: 0, totalTokens: cacheRead + 1000 } } }));
+  assert.ok(Math.abs(sessionSpend(entries as never, "gpt-6-luna") - 0.00871) < 1e-12);
+});
+
+test("keeps Pi's embedded estimate separate from conservative ledger pricing", () => {
+  const entries = [{ type: "message", message: { role: "assistant", provider: "opencode-go",
+    model: "gpt-6-luna", usage: { ...usage, totalTokens: 1_100_000,
+      cost: { total: 0.15 } } } }];
+  assert.equal(sessionSpend(entries as never, "gpt-6-luna"), 0.275);
+  assert.deepEqual(sessionEmbeddedCost(entries as never),
+    { usd: 0.15, priced_entries: 1, missing_entries: 0 });
+  assert.deepEqual(usageCostParts(usage, "gpt-6-luna"),
+    { input: 0.2, output: 0.075, cacheRead: 0, cacheWrite: 0 });
 });
 
 test("counts all persisted paid usage, including abandoned branches and compaction", () => {
@@ -20,22 +44,37 @@ test("counts all persisted paid usage, including abandoned branches and compacti
   assert.equal(sessionSpend(entries as never, "gpt-6-luna"), 1.1);
 });
 
-test("reserves the full next model response before the hard cap", () => {
+test("reports measured cache reuse, including a recent window", () => {
+  const entries = [
+    { type: "message", message: { role: "assistant", provider: "opencode-go", model: "gpt-6-luna",
+      usage: { input: 0, output: 1, cacheRead: 0, cacheWrite: 100, totalTokens: 101 } } },
+    { type: "message", message: { role: "assistant", provider: "opencode-go", model: "gpt-6-luna",
+      usage: { input: 0, output: 1, cacheRead: 990, cacheWrite: 10, totalTokens: 1001 } } },
+  ];
+  const result = cacheUtilization(entries as never, "gpt-6-luna");
+  assert.equal(result.all.read_tokens, 990);
+  assert.equal(result.all.write_tokens, 110);
+  assert.equal(result.all.reuse_pct, 90);
+});
+
+test("records a next-request exposure estimate without using it as a stop", () => {
   assert.ok(Math.abs(maximumNextRequest("gpt-6-luna") - 0.3585) < 1e-10);
   assert.ok(Math.abs(maximumNextRequest("deepseek-v4.1-flash") - 0.7608) < 1e-10);
-  const limits = budgetLimits({ ARENA_HARD_CAP_USD: "3", ARENA_STOP_USD: "2.5" });
-  assert.equal(budgetDecision(2.5, "gpt-6-luna", limits).allowed, false);
-  assert.equal(budgetDecision(2.4, "deepseek-v4.1-flash", limits).allowed, false);
+  const limits = budgetLimits({ ARENA_HARD_CAP_USD: "3" });
+  assert.equal(budgetDecision(2.5, "gpt-6-luna", limits).allowed, true);
+  assert.equal(budgetDecision(3, "gpt-6-luna", limits).allowed, false);
+  assert.equal(budgetDecision(2.4, "deepseek-v4.1-flash", limits).allowed, true);
   assert.equal(budgetDecision(2, "deepseek-v4.1-flash", limits).allowed, true);
 });
 
-test("a $1 cap is enforced before the next request", () => {
+test("a $1 cap stops after observed usage reaches $1", () => {
   const limits = budgetLimits({ ARENA_HARD_CAP_USD: "1" });
-  assert.equal(limits.stopUsd, 0.85);
+  assert.equal(limits.stopUsd, 1);
   assert.equal(budgetDecision(0.60, "gpt-6-luna", limits).allowed, true);
-  assert.equal(budgetDecision(0.65, "gpt-6-luna", limits).allowed, false);
+  assert.equal(budgetDecision(0.99, "gpt-6-luna", limits).allowed, true);
+  assert.equal(budgetDecision(1, "gpt-6-luna", limits).allowed, false);
   assert.throws(() => budgetLimits({ ARENA_HARD_CAP_USD: "3.01" }));
-  assert.throws(() => budgetLimits({ ARENA_HARD_CAP_USD: "1", ARENA_STOP_USD: "1.01" }));
+  assert.throws(() => budgetLimits({ ARENA_HARD_CAP_USD: "1", ARENA_STOP_USD: "0.85" }));
 });
 
 test("fails closed on unpriced models or invalid usage", () => {
@@ -63,19 +102,25 @@ test("a bounded final payload permits a ten-cent experiment", () => {
   assert.throws(() => budgetLimits({ ARENA_HARD_CAP_USD: "0.09" }));
 });
 
+test("caps Qwen's Anthropic Messages payload before dispatch", () => {
+  const { payload, reserve } = boundedPayload({ messages: [{ role: "user", content: "proof" }],
+    max_tokens: 131_072 }, "qwen3.8-flash");
+  assert.equal(payload.max_tokens, 16_000);
+  assert.ok(reserve < 0.1);
+});
+
 test("large serialized text fits the model when its byte token upper bound fits", () => {
   const payload = { max_output_tokens: 16000, input: "x".repeat(600_000) };
   assert.ok(boundedPayload(payload, "gpt-6-luna").reserve > 0);
 });
 
-test("final transport guard denies a request that would exceed each cap", () => {
+test("final transport guard admits requests until observed usage reaches each cap", () => {
   const payload = { max_output_tokens: 16000, input: "proof" };
   for (const hardCap of [0.1, 1, 3]) {
     const limits = budgetLimits({ ARENA_HARD_CAP_USD: String(hardCap) });
-    const reserve = boundedPayload(payload, "gpt-6-luna").reserve;
     assert.doesNotThrow(() => permitFinalPayload(payload, "gpt-6-luna",
-      { spent: 0, charged: hardCap - reserve - 0.001 }, limits));
+      { spent: hardCap - 0.001 }, limits));
     assert.throws(() => permitFinalPayload(payload, "gpt-6-luna",
-      { spent: 0, charged: hardCap - reserve + 0.001 }, limits), /Arena budget stop/);
+      { spent: hardCap }, limits), /Arena budget stop/);
   }
 });

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, resolve, relative, sep } from "node:path";
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
-import { BUDGET_PROVIDER, budgetLimits, isBudgetModel, MAX_REQUEST_OUTPUT_TOKENS, MODELS, permitFinalPayload, sessionSpend } from "./budget.ts";
+import { BUDGET_PROVIDER, budgetLimits, cacheUtilization, isBudgetModel, MAX_REQUEST_OUTPUT_TOKENS, MODELS, permitFinalPayload, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
 
 const root = resolve(import.meta.dirname, "../../..");
 const workspaces = resolve(root, "workspaces");
@@ -63,21 +63,34 @@ export default function arenaExtension(pi: ExtensionAPI) {
     let spent = 0;
     for (const event of costEvents()) {
       if (event.kind === "reserve") reservations.set(String(event.id), Number(event.usd));
-      if (event.kind === "settle") {
+      if (event.kind === "settle" || event.kind === "release") {
         if (!reservations.has(String(event.id))) throw new Error("Unmatched Arena settlement");
         reservations.delete(String(event.id));
-        spent += Number(event.usd);
-        if (event.bound_violation) throw new Error("Observed provider usage exceeded Arena reservation");
+        // Older journals settled zero-usage transport errors at the reserved
+        // amount. Interpret those as releases without rewriting their history.
+        if (event.kind === "settle" && event.usage_known !== false) spent += Number(event.usd);
+        // Reservations are estimates for audit and crash recovery, not a cap.
       }
     }
     const unresolved = [...reservations.values()].reduce((sum, amount) => sum + amount, 0);
-    return { spent, unresolved, charged: spent + unresolved };
+    const model = process.env.ARENA_MODEL;
+    // Pi can record compaction or direct-call usage outside this provider's
+    // request journal. Its persisted session total is the other audit source.
+    const sessionObserved = readEntries && model && isBudgetModel(model)
+      ? sessionSpend(readEntries(), model) : 0;
+    return { spent: Math.max(spent, sessionObserved), unresolved };
   }
 
   pi.on("session_start", (_event, ctx) => {
     active = undefined;
     readEntries = () => ctx.sessionManager.getEntries();
     modelRegistry = ctx.modelRegistry;
+    const pending = new Set<string>();
+    for (const item of costEvents()) {
+      if (item.kind === "reserve") pending.add(String(item.id));
+      if (item.kind === "settle" || item.kind === "release") pending.delete(String(item.id));
+    }
+    for (const id of pending) appendCost({ kind: "release", id, reason: "unresolved_previous_process", usage_known: false });
     const latest = costEvents().filter(item => item.kind === "control").at(-1);
     continuations = Number(latest?.continuations ?? 0);
     plateau = Number(latest?.plateau ?? 0);
@@ -151,20 +164,8 @@ export default function arenaExtension(pi: ExtensionAPI) {
     }
   });
 
-  // Every new evaluation is delivered in full. Older copies remain in the
-  // ledger and can be retrieved without keeping large Lean traces in context.
-  pi.on("context", event => {
-    const latest = event.messages.findLastIndex(message => message.role === "toolResult"
-      && (message as { toolName?: string }).toolName === "arena_evaluate");
-    if (latest < 0) return;
-    return { messages: event.messages.map((message, index) => {
-      if (index >= latest || message.role !== "toolResult"
-        || (message as { toolName?: string }).toolName !== "arena_evaluate") return message;
-      const id = (message as { details?: { candidate_id?: string } }).details?.candidate_id ?? "recorded";
-      return { ...message, content: [{ type: "text" as const,
-        text: `Prior evaluation for candidate ${id} is stored in the Arena ledger. Call arena_candidate to retrieve its exact proof and complete diagnostics.` }] };
-    }) };
-  });
+  // Preserve earlier tool messages byte-for-byte. Rewriting them when a new
+  // evaluation arrives invalidates the provider's cached prompt prefix.
 
   pi.on("message_end", event => {
     if (!pendingRequest || event.message.role !== "assistant") return;
@@ -172,17 +173,23 @@ export default function arenaExtension(pi: ExtensionAPI) {
     if (!model || !isBudgetModel(model)) return;
     const state = costEvents().findLast(item => item.kind === "reserve" && item.id === pendingRequest);
     if (!state) throw new Error("Missing Arena reservation");
-    let usd = Number(state.usd);
+    let usd = 0;
     let boundViolation = false;
     if (event.message.usage?.totalTokens) {
       const usage = event.message.usage;
-      const price = MODELS[model].price;
-      usd = ((usage.input ?? 0) * price.input + (usage.output ?? 0) * price.output
-        + (usage.cacheRead ?? 0) * price.cacheRead + (usage.cacheWrite ?? 0) * price.cacheWrite) / 1_000_000;
+      usd = usageCost(usage, model);
       boundViolation = usd > Number(state.usd);
+      appendCost({ kind: "settle", id: pendingRequest, usd, usage_known: true,
+        bound_violation: boundViolation,
+        tokens: { input: usage.input ?? 0, output: usage.output ?? 0,
+          cache_read: usage.cacheRead ?? 0, cache_write: usage.cacheWrite ?? 0 },
+        ledger_components_usd: usageCostParts(usage, model),
+        pi_embedded_cost_usd: usage.cost?.total ?? null });
+      console.error(`[arena-cost] settled $${usd.toFixed(6)}; cache read ${usage.cacheRead ?? 0}, write ${usage.cacheWrite ?? 0}; total $${(costState().spent).toFixed(6)}`);
+    } else {
+      appendCost({ kind: "release", id: pendingRequest, reason: event.message.stopReason ?? "no_usage", usage_known: false });
+      console.error(`[arena-cost] released failed request ${pendingRequest}; no usage returned`);
     }
-    appendCost({ kind: "settle", id: pendingRequest, usd, usage_known: Boolean(event.message.usage?.totalTokens),
-      bound_violation: boundViolation });
     pendingRequest = undefined;
   });
 
@@ -192,8 +199,9 @@ export default function arenaExtension(pi: ExtensionAPI) {
     const state = costState();
     const limits = budgetLimits();
     return { spent_usd: state.spent, unresolved_usd: state.unresolved,
-      remaining_usd: limits.hardCapUsd - state.charged,
-      can_continue: state.spent < limits.stopUsd && state.charged < limits.hardCapUsd };
+      remaining_usd: Math.max(0, limits.hardCapUsd - state.spent),
+      can_continue: state.spent < limits.hardCapUsd,
+      cap_is_actual_usage_only: true };
   }
 
   pi.on("session_shutdown", async (_event, ctx) => {
@@ -202,7 +210,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
     const model = ctx.model;
     let report: Record<string, unknown> = { session_id: ctx.sessionManager.getSessionId(),
       theorem: active ?? null,
-      price_basis: "OpenCode Go list prices, checked 2026-10-05; higher context/peak tiers" };
+      price_basis: "OpenCode Go list prices checked 2026-10-06; Luna tier chosen from billed prompt tokens" };
     try {
       const limits = budgetLimits();
       if (model?.provider !== BUDGET_PROVIDER || !isBudgetModel(model.id)) {
@@ -210,7 +218,14 @@ export default function arenaExtension(pi: ExtensionAPI) {
       }
       report = { ...report, hard_cap_usd: limits.hardCapUsd, stop_target_usd: limits.stopUsd,
         provider: "opencode-go", model: model.id, ...budgetStatus(ctx),
-        pi_session_spend_usd: sessionSpend(ctx.sessionManager.getEntries(), model.id) };
+        price_method: "Observed usage priced per request using OpenCode Go list rates; Luna uses the >272K tier only when billed prompt tokens cross that threshold. Neither this nor Pi's embedded estimate is a provider invoice.",
+        configured_usd_per_million_tokens: MODELS[model.id].price,
+        configured_high_tier: model.id === "gpt-6-luna" ? {
+          prompt_tokens_over: MODELS["gpt-6-luna"].highContextThreshold,
+          usd_per_million_tokens: MODELS["gpt-6-luna"].highPrice } : null,
+        pi_embedded_estimate: sessionEmbeddedCost(ctx.sessionManager.getEntries()),
+        pi_session_spend_usd: sessionSpend(ctx.sessionManager.getEntries(), model.id),
+        cache_utilization: cacheUtilization(ctx.sessionManager.getEntries(), model.id) };
     } catch (error) {
       report = { ...report, error: String(error) };
     }
@@ -297,12 +312,13 @@ export default function arenaExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "arena_evaluate",
     label: "Arena evaluate",
-    description: "Compile and save a complete theorem; return full Lean diagnostics and the persistent candidate path. Fast checks the primary version; full checks every version.",
+    description: "Compile and save a complete theorem in the scheduled idea lane. Supply idea_id and a parent #N from arena_frontier. Return complete Lean diagnostics and the candidate path. Fast checks primary; full checks all versions.",
     parameters: Type.Object({
       proof: Type.String({ description: "Complete theorem statement and replacement proof" }),
       mode: Type.Optional(Type.Union([Type.Literal("fast"), Type.Literal("full")])),
       parents: Type.Optional(Type.Array(Type.String())),
       hypothesis: Type.Optional(Type.String()),
+      idea_id: Type.Optional(Type.String()),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       if (!active) throw new Error("Select a theorem with /arena first");
@@ -313,6 +329,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
         const argumentsList = ["--proof-file", file, "--mode", params.mode ?? "fast",
           ...((params.parents ?? []) as string[]).flatMap(parent => ["--parent", parent])];
         if (params.hypothesis) argumentsList.push("--hypothesis", params.hypothesis);
+        if (params.idea_id) argumentsList.push("--idea-id", params.idea_id);
         const result = await campaign("evaluate", argumentsList);
         const state = await campaign("frontier");
         const reported = { ...result, budget: budgetStatus(ctx), next_experiment: state.next_experiments?.[0] ?? null };
@@ -324,13 +341,42 @@ export default function arenaExtension(pi: ExtensionAPI) {
   });
 
   pi.registerTool({
+    name: "arena_probe", label: "Arena scratch probe",
+    description: "Compile a complete or unfinished proof draft on the primary Lean version without creating a graph candidate. Return complete diagnostics and a shadow-project path for lean_goal. Use this to repair a structural idea before promotion.",
+    parameters: Type.Object({ proof: Type.String(), idea_id: Type.String(), parent: Type.String() }),
+    async execute(_id, params) {
+      if (!active) throw new Error("Select a theorem with /arena first");
+      const directory = await mkdtemp(resolve(tmpdir(), "arena-probe-"));
+      try {
+        const file = resolve(directory, "proof.lean");
+        await writeFile(file, params.proof, "utf8");
+        const result = await campaign("probe", ["--proof-file", file, "--idea-id", params.idea_id,
+          "--parent", params.parent]);
+        return { isError: result.ok === false, content: [{ type: "text", text: JSON.stringify(result) }], details: result };
+      } finally { await rm(directory, { recursive: true, force: true }); }
+    },
+  });
+
+  pi.registerTool({
     name: "arena_frontier",
     label: "Arena frontier",
-    description: "Rank this run's open graph nodes for the next experiment; include quality, novelty, lineage saturation and merge opportunities.",
+    description: "Return the scheduled source-derived idea, an exact #N seed, its next action and alternative idea lanes; use the first idea for the next new fast candidate.",
     parameters: Type.Object({}),
     async execute() {
       const result = await campaign("frontier");
       return { content: [{ type: "text", text: JSON.stringify(result) }], details: result };
+    },
+  });
+
+  pi.registerTool({
+    name: "arena_idea", label: "Record a proof idea",
+    description: "Add a distinct structural strategy grounded in 1-20 exact pinned Lean source lines. The idea enters the scheduled portfolio; give an actionable goal, not a known optimized proof.",
+    parameters: Type.Object({ title: Type.String(), goal: Type.String(), path: Type.String(),
+      first: Type.Number(), last: Type.Number() }),
+    async execute(_id, params) {
+      const result = await campaign("idea", ["--title", params.title, "--goal", params.goal,
+        "--path", params.path, "--first", String(params.first), "--last", String(params.last)]);
+      return { isError: result.ok === false, content: [{ type: "text", text: JSON.stringify(result) }], details: result };
     },
   });
 
@@ -384,7 +430,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
     if (progress === previousProgress) plateau += 1;
     else plateau = 0;
     previousProgress = progress;
-    const stop = budget.spent >= limits.stopUsd ? "stop_target"
+    const stop = budget.spent >= limits.hardCapUsd ? "actual_usage_cap"
       : continuations >= 12 ? "continuation_limit"
       : continuations >= 4 && plateau >= 4 ? "plateau" : null;
     if (stop) {
@@ -394,7 +440,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
     continuations += 1;
     appendCost({ kind: "control", continuations, plateau, progress, stop: null });
     const next = state.next_experiments?.[0];
-    const content = `Continue proof optimization. Current best: ${progress}. Next graph seed: ${JSON.stringify(next ?? null)}. Remaining API cap: $${(limits.hardCapUsd - budget.charged).toFixed(4)}. Restore the proposed seed with arena_candidate and try a distinct source-grounded proof structure; avoid another local-edit chain when its saturation penalty is high. The automatic merge worker combines disjoint edits. Use Lean goals and complete diagnostics, and fully validate promising results.`;
+    const content = `Continue proof optimization. Current best: ${progress}. Scheduled idea and #N seed: ${JSON.stringify(next ?? null)}. Remaining ledger-priced usage cap: $${Math.max(0, limits.hardCapUsd - budget.spent).toFixed(4)}. Restore the seed with arena_candidate; use arena_probe and Lean goals to repair a structural draft before arena_evaluate. Supply the scheduled idea_id and a parent #N. Full-check promising proofs. The merge worker combines disjoint edits.`;
     return { entries: [...event.entries, { type: "custom_message" as const, customType: "arena-continuation",
       content, display: false }], continue: true };
   });
