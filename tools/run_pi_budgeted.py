@@ -114,6 +114,8 @@ def main() -> int:
                         help="Context size above which Pi compacts older turns; below it history is never rewritten")
     parser.add_argument("--compact-keep-tokens", type=int, default=40_000,
                         help="Recent tokens kept verbatim when compaction runs")
+    parser.add_argument("--merge-worker", action="store_true",
+                        help="Run the deterministic merge worker beside the model (off by default: it competes for Lean CPU)")
     parser.add_argument("--no-skill", action="store_true", help="Run without the Arena Lean skill (A/B factor)")
     parser.add_argument("--no-mcp", action="store_true", help="Do not load the Lean MCP server (offline tests)")
     parser.add_argument("--test-extension", action="append", default=[], type=Path,
@@ -171,7 +173,7 @@ def main() -> int:
         (directory / "run-config.json").write_text(json.dumps({"theorem": args.theorem,
             "model": args.model, "hard_cap_usd": args.hard_cap_usd,
             "packet_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
-            "thinking": args.thinking, "compact_at_tokens": args.compact_at_tokens,
+            "thinking": args.thinking, "merge_worker": args.merge_worker, "compact_at_tokens": args.compact_at_tokens,
             "compact_keep_tokens": args.compact_keep_tokens,
             "skill": None if args.no_skill else {"name": "arena-lean", "sha256": skill_hash()}},
             indent=2) + "\n")
@@ -187,16 +189,18 @@ def main() -> int:
         env["ARENA_NO_MCP"] = "1"
     env.pop("ARENA_STOP_USD", None)
     env["ARENA_BUDGET_REPORT_PATH"] = str(directory / "cost.json")
-    worker_command = [sys.executable, "-m", "tools.arena_merge_worker", args.run_id,
-                      "--parent-pid", str(os.getpid())]
-    worker_log = (directory / "merge-worker.log").open("a")
-    worker = subprocess.Popen(worker_command, cwd=ROOT, env=env, stdin=subprocess.DEVNULL,
-                              stdout=worker_log, stderr=subprocess.STDOUT, start_new_session=True)
-    worker_log.close()
-    print(f"Merge worker pid={worker.pid}; log={directory / 'merge-worker.log'}", flush=True)
+    worker = None
+    if args.merge_worker:
+        worker_command = [sys.executable, "-m", "tools.arena_merge_worker", args.run_id,
+                          "--parent-pid", str(os.getpid())]
+        worker_log = (directory / "merge-worker.log").open("a")
+        worker = subprocess.Popen(worker_command, cwd=ROOT, env=env, stdin=subprocess.DEVNULL,
+                                  stdout=worker_log, stderr=subprocess.STDOUT, start_new_session=True)
+        worker_log.close()
+        print(f"Merge worker pid={worker.pid}; log={directory / 'merge-worker.log'}", flush=True)
     print(f"Pi session={args.run_id}; model={args.model}; actual-usage cap=${args.hard_cap_usd:g}; resume={args.resume_run}", flush=True)
     status_path = directory / "merge-worker.json"
-    for _ in range(30):
+    for _ in range(30 if worker else 0):
         if worker.poll() is not None:
             print("Merge worker exited before Pi started; inspect merge-worker.log", file=sys.stderr)
             return 1
@@ -204,8 +208,9 @@ def main() -> int:
             break
         time.sleep(0.1)
     else:
-        print("Merge worker did not become ready; inspect merge-worker.log", file=sys.stderr)
-        return 1
+        if worker:
+            print("Merge worker did not become ready; inspect merge-worker.log", file=sys.stderr)
+            return 1
     # Pi reads the project's .pi/settings.json. Compaction is the only thing allowed to rewrite
     # history, and only once the context passes --compact-at-tokens.
     (shadow / ".pi").mkdir(exist_ok=True)
@@ -242,7 +247,7 @@ def main() -> int:
         except subprocess.TimeoutExpired:
             process.kill()
             exit_code = process.wait()
-    if worker.poll() is None:
+    if worker is not None and worker.poll() is None:
         worker.terminate()
     return finish(args, directory, event_log, event_offset, exit_code, state["signal"])
 

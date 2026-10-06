@@ -72,6 +72,14 @@ class LifecycleTests(unittest.TestCase):
         self.assertTrue((run.directory / "summary.txt").read_text().startswith(run.run_id))
         self.assertIn("spent_usd", run.json("cost.json"))
 
+    def test_merge_worker_is_off_unless_requested(self):
+        off = self.fake([{"text": "done"}] * 2).run()
+        self.assertFalse((off.directory / "merge-worker.json").exists())
+        self.assertFalse(off.json("run-config.json")["merge_worker"])
+        on = self.fake([{"text": "done"}] * 2).run("--merge-worker")
+        self.assertTrue(on.json("run-config.json")["merge_worker"])
+        self.assertTrue((on.directory / "merge-worker.json").exists() or (on.directory / "merge-worker.log").exists())
+
     def test_sigterm_mid_request_still_leaves_cost_json_and_summary(self):
         import signal
 
