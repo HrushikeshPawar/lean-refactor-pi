@@ -238,8 +238,11 @@ def render_text(summary: dict) -> str:
     ]) + "\n"
 
 
-def write_summary(directory: Path) -> dict:
+def write_summary(directory: Path, stop_reason: str | None = None) -> dict:
+    """`stop_reason` overrides the ledger's, e.g. when the runner was interrupted."""
     summary = build_summary(directory)
+    if stop_reason:
+        summary["stop_reason"] = stop_reason
     (directory / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
     (directory / "summary.txt").write_text(render_text(summary))
     return summary

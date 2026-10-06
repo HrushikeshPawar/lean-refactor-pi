@@ -43,10 +43,15 @@ class FakeRun:
                                      capture_output=True, timeout=self.timeout)
         return self
 
-    def start(self, *extra: str) -> subprocess.Popen:
-        """Launch without waiting, for tests that signal the runner."""
+    def start(self, *extra: str, own_group: bool = False) -> subprocess.Popen:
+        """Launch without waiting, for tests that signal the runner.
+
+        `own_group` puts the runner in a fresh process group, like a terminal
+        foreground job, so a test can deliver Ctrl+C to the whole group.
+        """
         self.process = subprocess.Popen([*self.command, *extra], cwd=ROOT, env=self.env, text=True,
-                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                        start_new_session=own_group)
         return self.process
 
     def wait_for_requests(self, count: int, timeout: float = 60.0) -> bool:

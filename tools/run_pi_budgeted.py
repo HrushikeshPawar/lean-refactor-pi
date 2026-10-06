@@ -12,6 +12,7 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
 
@@ -27,6 +28,8 @@ SYSTEM_PROMPT = ("You are optimizing one Lean 4 proof for the Lean Refactor Aren
 ROOT = Path(__file__).resolve().parents[1]
 MODELS = ("gpt-6-luna", "qwen3.8-flash", "deepseek-v4.1-flash")
 MODEL_WINDOWS = {"gpt-6-luna": 1_050_000, "qwen3.8-flash": 1_000_000, "deepseek-v4.1-flash": 1_000_000}
+# How long Pi gets to finish an in-flight evaluation and write cost.json after a stop request.
+STOP_GRACE_S = 45
 THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
 _tool_started: dict[str, tuple[float, dict]] = {}
 
@@ -219,18 +222,37 @@ def main() -> int:
         "reserveTokens": max(0, MODEL_WINDOWS[args.model] - args.compact_at_tokens)}}, indent=2) + "\n")
     event_log = directory / "events.jsonl"
     event_offset = event_log.stat().st_size if event_log.exists() else 0
-    state: dict = {"process": None, "signal": None}
+    state: dict = {"process": None, "signal": None, "timer": None}
+    segment_started = time.time()
+
+    def force_stop() -> None:
+        process = state["process"]
+        if process is not None and process.poll() is None:
+            print("Pi did not stop in time; killing it", file=sys.stderr, flush=True)
+            kill_group(process, signal.SIGKILL)
 
     def interrupt(signum, _frame):
+        # Pi runs in its own session, so a terminal Ctrl+C reaches only this
+        # runner. Pi's JSON mode shuts down cleanly (and writes cost.json) on
+        # SIGTERM but not on SIGINT, so every stop request becomes a SIGTERM.
+        if state["signal"] is not None:
+            force_stop()
+            return
         state["signal"] = signum
-        if state["process"] is not None and state["process"].poll() is None:
-            state["process"].terminate()
+        process = state["process"]
+        if process is not None and process.poll() is None:
+            print(f"Stopping Pi cleanly (up to {STOP_GRACE_S}s); press Ctrl+C again to kill it",
+                  file=sys.stderr, flush=True)
+            process.terminate()
+            state["timer"] = threading.Timer(STOP_GRACE_S, force_stop)
+            state["timer"].daemon = True
+            state["timer"].start()
 
-    for number in (signal.SIGINT, signal.SIGTERM):
+    for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(number, interrupt)
     with event_log.open("a") as output:
         process = subprocess.Popen(command, cwd=shadow, env=env, stdin=subprocess.DEVNULL,
-                                   stdout=subprocess.PIPE, text=True, bufsize=1)
+                                   stdout=subprocess.PIPE, text=True, bufsize=1, start_new_session=True)
         state["process"] = process
         if state["signal"] is not None:
             process.terminate()
@@ -243,23 +265,37 @@ def main() -> int:
             except (json.JSONDecodeError, TypeError, ValueError):
                 print(f"[{datetime.now().astimezone().strftime('%H:%M:%S')}] non-JSON Pi output recorded", flush=True)
         try:
-            exit_code = process.wait(timeout=30)
+            exit_code = process.wait(timeout=STOP_GRACE_S)
         except subprocess.TimeoutExpired:
-            process.kill()
+            kill_group(process, signal.SIGKILL)
             exit_code = process.wait()
+    if state["timer"] is not None:
+        state["timer"].cancel()
+    # Lean servers and evaluations Pi started share its process group.
+    kill_group(process, signal.SIGTERM)
     if worker is not None and worker.poll() is None:
         worker.terminate()
-    return finish(args, directory, event_log, event_offset, exit_code, state["signal"])
+    return finish(args, directory, event_log, event_offset, exit_code, state["signal"], segment_started)
 
 
-def finish(args, directory: Path, event_log: Path, event_offset: int, exit_code: int, interrupted: int | None) -> int:
+def kill_group(process: subprocess.Popen, number: int) -> None:
+    try:
+        os.killpg(process.pid, number)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def finish(args, directory: Path, event_log: Path, event_offset: int, exit_code: int, interrupted: int | None,
+           segment_started: float = 0.0) -> int:
     """Always leave cost.json and a run summary behind, even for a killed or crashed run."""
     report_path = directory / "cost.json"
-    if not report_path.exists():
+    # On a resumed run, a cost.json left by an earlier segment is stale.
+    if not report_path.exists() or report_path.stat().st_mtime < segment_started:
         report_path.write_text(json.dumps(cost_report_from_ledger(directory), indent=2) + "\n")
-        print("Pi wrote no cost report; reconstructed it from the cost journal", file=sys.stderr)
+        print("Pi wrote no cost report for this segment; reconstructed it from the cost journal", file=sys.stderr)
     try:
-        print(render_text(write_summary(directory)), end="", flush=True)
+        print(render_text(write_summary(directory, "interrupted" if interrupted is not None else None)),
+              end="", flush=True)
     except Exception as error:  # a summary failure must never hide the run's own result
         print(f"Run summary failed: {error}", file=sys.stderr)
     if interrupted is not None:

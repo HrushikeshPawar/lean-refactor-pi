@@ -97,6 +97,23 @@ class LifecycleTests(unittest.TestCase):
         self.assertTrue((run.directory / "summary.txt").exists())
 
 
+    def test_ctrl_c_to_the_terminal_group_takes_pis_clean_shutdown(self):
+        import os
+        import signal
+
+        steps = [{"text": "first", "usage": {"input": 400, "output": 10}},
+                 {"text": "slow", "delay_ms": 30000}]
+        run = self.fake(steps)
+        process = run.start(own_group=True)
+        self.assertTrue(run.wait_for_requests(2), "the slow request never started")
+        os.killpg(process.pid, signal.SIGINT)
+        _, stderr = process.communicate(timeout=90)
+        self.assertEqual(process.returncode, 128 + signal.SIGINT, stderr)
+        report = run.json("cost.json")
+        self.assertNotEqual(report.get("written_by"), "runner_ledger_reconstruction", stderr)
+        self.assertEqual(run.json("summary.json")["stop_reason"], "interrupted")
+
+
 def cheap_tool(name: str, arguments: dict, **usage) -> dict:
     return {"tool_calls": [{"name": name, "arguments": arguments}],
             "usage": {"input": 300, "output": 40, "cacheRead": 4000, "cacheWrite": 100, **usage}}
