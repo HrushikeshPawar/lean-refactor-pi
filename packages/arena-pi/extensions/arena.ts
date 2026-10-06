@@ -317,6 +317,9 @@ export default function arenaExtension(pi: ExtensionAPI) {
           env: {
             LEAN_PROJECT_PATH: runDirectory ? resolve(runDirectory, "scratch", "project") : resolve(workspaces, `${row.source}-${version}`),
             LEAN_LOG_LEVEL: "WARNING",
+            // Elaborate the candidate file as soon as the server starts, so the model's first
+            // lean_goal does not wait for Mathlib-sized imports and everything above the theorem.
+            ...(row.file_path ? { LEAN_MCP_PREWARM_FILES: row.file_path } : {}),
             // Only the five tools below are served. Everything else is off: network search,
             // builds and arbitrary code runs would bypass the harness, and scoring already has
             // arena_evaluate / arena_profile.
@@ -324,6 +327,8 @@ export default function arenaExtension(pi: ExtensionAPI) {
           },
           // Declared directly so the tool list is fixed from the first request (cache prefix).
           // "hidden" for everything else keeps Pi's codemode sandbox from activating.
+          // A cold first query on a Mathlib project can exceed Pi's 60 s default.
+          timeout: 180,
           exposure: "hidden",
           toolExposure: Object.fromEntries(LEAN_DIRECT_TOOLS.map(name => [name, "direct"])),
         });
