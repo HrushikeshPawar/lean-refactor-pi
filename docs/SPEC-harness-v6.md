@@ -150,7 +150,7 @@ Evaluate the new behavior on multiple pinned theorem rows, then select only loca
 
 ## Delivery
 
-- The tickets live in `.scratch/arena-harness-v6/issues/`. Each is implemented on its own pre-created GitButler branch in one linear stack, based on `hrushikesh/harness-v6`: 01 → 02 → 03 → 04 → 05 → 06 → 07 → 08. The ticket DAG (01 and 03 are independent; 07 needs 02 and 06) is linearized because a GitButler branch has one parent. Each ticket names its branch and the version-control rules its implementer must follow.
+- The tickets live in `.scratch/arena-harness-v6/issues/`. Each is implemented on its own pre-created GitButler branch in one linear stack, based on `hrushikesh/harness-v6`: 01 → 02 → 03 → 04 → 05 → 06 → 06b → 07 → 08. Ticket 06b (persistent Lean session) was added on 2026-10-07 after measuring that about 75% of each 32 s PhysLib compile re-elaborated the unchanged file prefix. The ticket DAG (01 and 03 are independent; 07 needs 02 and 06) is linearized because a GitButler branch has one parent. Each ticket names its branch and the version-control rules its implementer must follow.
 - Implementers may work in another harness, but only one implementer works in this checkout at a time, because GitButler's applied branches share one working tree. Implementers commit only to their own branch. They never pull, push, merge, move, rebase, restack, undo or open pull requests, and they mark a finished ticket `needs-review`. The reviewing session reviews each branch, then integrates the stack.
 - Use the Langfuse skill (`/langfuse`, `langfuse-cli` against the instance above) for Langfuse API and documentation questions during development, preflight and later run analysis, rather than relying on memory of an older SDK.
 
