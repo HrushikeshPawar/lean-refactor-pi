@@ -40,6 +40,10 @@ def source_range(name: str, path: str, first: int, last: int | None = None) -> d
     row = problem(name)
     version, commit = versions(row)[0]
     project = workspace(row, version, commit)
+    if path.startswith("decl:"):
+        path, _ = _resolve_declaration_source(name, path[5:])
+    else:
+        path = _canonical_source_path(row, path)
     try:
         lines = _git_source(project, commit, path).splitlines()
     except subprocess.CalledProcessError:
@@ -50,17 +54,66 @@ def source_range(name: str, path: str, first: int, last: int | None = None) -> d
     end = min(wanted, len(lines), first + MAX_SOURCE_LINES - 1)
     if end < first:
         raise ValueError("last must not precede first")
-    return {"source": f"{row['source']}@{commit}:{path}:{first}-{end}", "file_lines": len(lines),
+    return {"source": f"{row['source']}@{commit}:{path}:{first}-{end}", "pin": commit,
+            "path": path, "file_lines": len(lines),
             "first": first, "last": end, "next_first": end + 1 if end < len(lines) and wanted > end else None,
             "text": "\n".join(f"{i}: {lines[i-1]}" for i in range(first, end + 1))}
 
 
-def declaration(name: str, symbol: str) -> dict:
+def _canonical_source_path(row: dict, path: str) -> str:
+    """Normalize documented project aliases to a path inside the pinned checkout."""
+    path = path.removeprefix("strata:").removeprefix("strata/").removeprefix("physlib:").removeprefix("physlib/")
+    path = path.removeprefix("./")
+    if path.startswith("/") or ".." in Path(path).parts or not path.endswith(".lean"):
+        raise ValueError("Only relative .lean paths inside the pinned project are allowed")
+    return path
+
+
+def _pinned_lean_paths(project: Path, commit: str) -> list[str]:
+    result = subprocess.run(["git", "ls-tree", "-r", "--name-only", commit], cwd=project,
+                            text=True, capture_output=True, check=True)
+    return [path for path in result.stdout.splitlines() if path.endswith(".lean")]
+
+
+def _resolve_declaration_source(name: str, symbol: str) -> tuple[str, int]:
+    """Find an exact source declaration in the benchmark's pinned tree, excluding scratch copies."""
     if not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9'.]*", symbol):
         raise ValueError("Invalid declaration name")
     row = problem(name)
     version, commit = versions(row)[0]
     project = workspace(row, version, commit)
+    pattern = re.compile(r"(?m)^\s*(?:private\s+)?(?:@[[^\n]*\]\s*)*(?:theorem|lemma|def|opaque|example|instance|abbrev|inductive|structure|class)\s+"
+                         + re.escape(symbol) + r"(?![A-Za-z0-9_'.])")
+    for path in _pinned_lean_paths(project, commit):
+        try:
+            source = _git_source(project, commit, path)
+        except subprocess.CalledProcessError:
+            continue
+        match = pattern.search(source)
+        if match:
+            return path, source.count("\n", 0, match.start()) + 1
+    raise ValueError(f"Declaration not found in pinned project: {symbol}")
+
+
+def declaration(name: str, symbol: str) -> dict:
+    if symbol.startswith("decl:"):
+        symbol = symbol[5:]
+    row = problem(name)
+    version, commit = versions(row)[0]
+    project = workspace(row, version, commit)
+    try:
+        path, line = _resolve_declaration_source(name, symbol)
+        source = _git_source(project, commit, path)
+        lines = source.splitlines()
+        start = line - 1
+        end = next((i for i in range(start + 1, len(lines))
+                    if re.match(r"^(?:private\s+)?(?:theorem|lemma|def|opaque|instance|abbrev|inductive|structure|class)\s+", lines[i])),
+                   len(lines))
+        return {"symbol": symbol, "handle": f"decl:{symbol}", "name": symbol, "found": True,
+                "pin": commit, "path": path, "line": line,
+                "source_text": "\n".join(lines[start:end])}
+    except ValueError:
+        pass
     found = subprocess.run(["rg", "-l", "--glob", "*.lean", "-F", symbol, row["source"].capitalize()],
                            cwd=project, text=True, capture_output=True, check=False)
     paths = found.stdout.splitlines()
