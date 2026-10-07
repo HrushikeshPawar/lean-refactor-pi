@@ -155,18 +155,18 @@ class CampaignCliTests(unittest.TestCase):
     def test_08_source_pagination_and_one_line_errors(self):
         row = campaign.problem(NAME)
         path = row["file_path"]
-        big = cli(self.run_id, "source", "--path", path, "--first", "1", "--last", "5000")
+        big = cli(self.run_id, "source", "--handle", path, "--first", "1", "--last", "5000")
         self.assertEqual(len(big["text"].splitlines()), 400)
         self.assertEqual(big["next_first"], 401)
-        beyond = cli(self.run_id, "source", "--path", path, "--first", str(big["file_lines"] + 5), "--last", "9999999")
+        beyond = cli(self.run_id, "source", "--handle", path, "--first", str(big["file_lines"] + 5), "--last", "9999999")
         self.assertFalse(beyond["ok"])
         self.assertIn(f"has {big['file_lines']} lines", beyond["error"])
-        clamped = cli(self.run_id, "source", "--path", path, "--first", str(big["file_lines"] - 2), "--last", "9999999")
+        clamped = cli(self.run_id, "source", "--handle", path, "--first", str(big["file_lines"] - 2), "--last", "9999999")
         self.assertEqual(clamped["last"], big["file_lines"])
-        outside = cli(self.run_id, "source", "--path", "../secrets.lean", "--first", "1", "--last", "2")
+        outside = cli(self.run_id, "source", "--handle", "../secrets.lean", "--first", "1", "--last", "2")
         self.assertFalse(outside["ok"])
         self.assertIn("inside the pinned project", outside["error"])
-        missing = cli(self.run_id, "source", "--path", "No/Such.lean", "--first", "1", "--last", "2")
+        missing = cli(self.run_id, "source", "--handle", "No/Such.lean", "--first", "1", "--last", "2")
         self.assertIn("does not exist", missing["error"])
         self.assertFalse(cli(self.run_id, "candidate", "--candidate", "#999")["ok"])
 

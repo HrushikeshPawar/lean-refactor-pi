@@ -92,6 +92,20 @@ class SourceHandleTests(unittest.TestCase):
             with self.subTest(expected=expected):
                 self.assertEqual(campaign._unavailable_reason(entry, found), expected)
 
+    def test_batched_lookup_types_private_and_generated_index_entries(self):
+        inventory = {"constant": [
+            {"name": "_private.Target.0.secret", "kind": "theorem"},
+            {"name": "Target._proof_1", "kind": "theorem", "tag": "generated"},
+        ], "local": []}
+        with patch("arena.context.lean_context", return_value=inventory), \
+             patch("arena.context.constant_index", side_effect=lambda ctx, **kw:
+                   [item for item in ctx["constant"] if all(item.get(k) == v for k, v in kw.items() if v is not None)]), \
+             patch("arena.campaign.declaration", side_effect=lambda theorem, name:
+                   {"found": True, "name": name, "kind": "theorem", "signature": "theorem ..."}):
+            result = campaign.declarations("Target", [
+                "_private.Target.0.secret", "Target._proof_1"])
+        self.assertEqual([item["reason"] for item in result["items"]], ["private", "generated"])
+
     def test_unqualified_duplicate_name_is_reported_as_ambiguous(self):
         inventory = {"constant": [{"name": "Target.foo", "kind": "theorem"},
                                    {"name": "Other.foo", "kind": "theorem"}], "local": []}
