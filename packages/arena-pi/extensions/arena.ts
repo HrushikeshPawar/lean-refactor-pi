@@ -5,6 +5,8 @@ import { mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from
 import { tmpdir } from "node:os";
 import { dirname, resolve, relative, sep } from "node:path";
 import { Type } from "typebox";
+import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+import type { AssistantMessageEventStream } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { BudgetModel } from "./budget.ts";
 import { assessFinalPayload, BUDGET_PROVIDER, budgetLimits, cacheAlarm, catalogPriceProblem, cacheUtilization, isBudgetModel, MAX_REQUEST_OUTPUT_TOKENS, MODELS, priceForUsage, requestShape, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
@@ -19,6 +21,82 @@ const LEAN_DISABLED_TOOLS = ["lean_build", "lean_code_actions", "lean_completion
   "lean_file_outline", "lean_get_widgets", "lean_get_widget_source", "lean_hammer_premise", "lean_leanfinder",
   "lean_leansearch", "lean_loogle", "lean_minimal_hypotheses", "lean_profile_proof", "lean_references",
   "lean_run_code", "lean_term_goal", "lean_verify"];
+
+const ARENA_TOOL_NAMES = ["arena_candidate", "arena_declarations", "arena_evaluate", "arena_find", "arena_idea",
+  "arena_probe", "arena_profile", "arena_skill_read", "arena_source"];
+
+function nearestToolName(name: string): string | undefined {
+  const distance = (left: string, right: string) => {
+    const row = Array.from({ length: right.length + 1 }, (_, index) => index);
+    for (let i = 1; i <= left.length; i++) {
+      let diagonal = row[0];
+      row[0] = i;
+      for (let j = 1; j <= right.length; j++) {
+        const above = row[j];
+        row[j] = Math.min(row[j] + 1, row[j - 1] + 1, diagonal + (left[i - 1] === right[j - 1] ? 0 : 1));
+        diagonal = above;
+      }
+    }
+    return row[right.length];
+  };
+  const ranked = ARENA_TOOL_NAMES.map(candidate => ({ candidate, score: distance(name, candidate) }))
+    .sort((a, b) => a.score - b.score || a.candidate.localeCompare(b.candidate));
+  return ranked[0]?.score <= Math.max(2, Math.floor(name.length / 4)) ? ranked[0].candidate : undefined;
+}
+
+function validObjectJson(raw: string | undefined): boolean {
+  if (raw === undefined) return false;
+  try {
+    const value: unknown = JSON.parse(raw);
+    return value !== null && typeof value === "object" && !Array.isArray(value);
+  } catch {
+    return false;
+  }
+}
+
+function guardMalformedArenaArguments(source: AssistantMessageEventStream): AssistantMessageEventStream {
+  const guarded = createAssistantMessageEventStream();
+  void (async () => {
+    const rawByIndex = new Map<number, string>();
+    const invalidIds = new Set<string>();
+    try {
+      for await (const event of source) {
+        if (event.type === "start") rawByIndex.clear();
+        if (event.type === "toolcall_start") {
+          const block = event.partial.content[event.contentIndex] as unknown as { partialJson?: string } | undefined;
+          if (block?.partialJson !== undefined) rawByIndex.set(event.contentIndex, block.partialJson);
+        }
+        if (event.type === "toolcall_delta") {
+          rawByIndex.set(event.contentIndex, (rawByIndex.get(event.contentIndex) ?? "") + event.delta);
+        }
+        if (event.type === "toolcall_end" && event.toolCall.name.startsWith("arena_")) {
+          const block = event.partial.content[event.contentIndex] as unknown as { partialJson?: string } | undefined;
+          const raw = rawByIndex.get(event.contentIndex) ?? block?.partialJson;
+          if (!validObjectJson(raw)) {
+            // Pi parses failed JSON as {} before tool validation. `null` is deliberately not an object,
+            // so even argument-free tools fail validation instead of running with invented defaults.
+            (event.toolCall as unknown as { arguments: unknown }).arguments = null;
+            if (block && "arguments" in block) (block as { arguments?: unknown }).arguments = null;
+            invalidIds.add(event.toolCall.id);
+          }
+        }
+        if (event.type === "done" && invalidIds.size) {
+          for (const block of event.message.content) {
+            if (block.type === "toolCall" && invalidIds.has(block.id)) {
+              (block as unknown as { arguments: unknown }).arguments = null;
+            }
+          }
+        }
+        guarded.push(event);
+      }
+      guarded.end(await source.result());
+    } catch {
+      const result = await source.result();
+      guarded.push({ type: "error", reason: result.stopReason === "aborted" ? "aborted" : "error", error: result });
+    }
+  })();
+  return guarded;
+}
 
 function inside(path: string, parent: string): boolean {
   const rel = relative(parent, path);
@@ -257,7 +335,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
       if (priceProblem) throw new Error(priceProblem);
       const { apiKey: _guardKey, headers: _guardHeaders, env: _guardEnv, ...rest } = options ?? {};
       const innerFetch = rest.fetch ?? globalThis.fetch;
-      return runtime.streamSimple(physical, context, {
+      return guardMalformedArenaArguments(runtime.streamSimple(physical, context, {
         ...rest,
         maxTokens: Math.min(rest.maxTokens ?? MAX_REQUEST_OUTPUT_TOKENS, MAX_REQUEST_OUTPUT_TOKENS),
         fetch: async (input, init) => {
@@ -326,7 +404,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
             remaining_allowance_usd: decision.remainingUsd, post_hook: published });
           return published;
         },
-      });
+      }));
     },
   });
 
@@ -557,6 +635,21 @@ export default function arenaExtension(pi: ExtensionAPI) {
       details: event.details, isError: event.isError };
   });
 
+  pi.on("context", event => {
+    let changed = false;
+    const messages = event.messages.map(message => {
+      if (message.role !== "toolResult" || !message.isError) return message;
+      const first = message.content.find(part => part.type === "text") as { text?: string } | undefined;
+      const match = first?.text?.trim().match(/^Tool (arena_[A-Za-z0-9_]+) not found$/);
+      const suggestion = match && nearestToolName(match[1]);
+      if (!suggestion) return message;
+      changed = true;
+      return { ...message, content: [...message.content, { type: "text" as const,
+        text: `Closest registered Arena tool: ${suggestion}.` }] };
+    });
+    return changed ? { messages } : undefined;
+  });
+
   const reply = (result: Record<string, any>) =>
     ({ isError: result.ok === false, content: [{ type: "text" as const, text: JSON.stringify(result) }], details: result });
 
@@ -569,6 +662,20 @@ export default function arenaExtension(pi: ExtensionAPI) {
       const file = resolve(directory, "proof.lean");
       await writeFile(file, proof, "utf8");
       return await run(file);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+
+  async function withProofFiles<T>(proofs: string[], run: (files: string[]) => Promise<T>): Promise<T> {
+    const directory = await mkdtemp(resolve(tmpdir(), "arena-proofs-"));
+    try {
+      const files = await Promise.all(proofs.map(async (proof, index) => {
+        const file = resolve(directory, `draft-${index + 1}.lean`);
+        await writeFile(file, proof, "utf8");
+        return file;
+      }));
+      return await run(files);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
@@ -588,6 +695,11 @@ export default function arenaExtension(pi: ExtensionAPI) {
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       if (!active) throw new Error("Select a theorem with /arena first");
+      const references = [Boolean(params.proof?.trim()), Boolean(params.candidate), Boolean(params.from_probe)];
+      if (references.filter(Boolean).length !== 1) {
+        return reply({ ok: false, error: "usage_error",
+          detail: "Pass exactly one of complete proof text, candidate (#N), or from_probe (pN)." });
+      }
       const result = await withProofFile(params.proof, file => {
         const args = ["--mode", "fast"];
         if (file) args.push("--proof-file", file);
@@ -605,17 +717,33 @@ export default function arenaExtension(pi: ExtensionAPI) {
 
   pi.registerTool({
     name: "arena_probe", label: "Arena probe",
-    description: "Compile a draft on the primary toolchain; `sorry` is allowed and the goal at each tactic-position sorry is returned, with a short id (p1, p2, ...) you can restore with arena_candidate. A draft without sorry that compiles is recorded as a candidate automatically (same result as arena_evaluate, no second call needed).",
-    parameters: Type.Object({ proof: Type.String(), idea_id: Type.Optional(Type.String()), parent: Type.Optional(Type.String()) }),
+    description: "Compile one proof draft or one to four drafts on the primary toolchain. Each may be a complete theorem, a `by` proof body, or a `:=` proof body; the exact benchmark statement is supplied for proof bodies. `sorry` is allowed and each incomplete draft returns its actual hole goals and stable pN ID. A complete compiling draft is automatically promoted to a candidate.",
+    parameters: Type.Object({ proof: Type.Optional(Type.String()),
+      drafts: Type.Optional(Type.Array(Type.String(), { minItems: 1, maxItems: 4 })),
+      idea_id: Type.Optional(Type.String()), parent: Type.Optional(Type.String()) }),
     async execute(_id, params) {
       if (!active) throw new Error("Select a theorem with /arena first");
-      const result = await withProofFile(params.proof, file => {
-        const args = ["--proof-file", file!];
+      if ((params.proof === undefined) === (params.drafts === undefined)) {
+        return reply({ ok: false, error: "usage_error", detail: "Pass exactly one of proof or drafts." });
+      }
+      if (params.proof !== undefined) {
+        const result = await withProofFile(params.proof, file => {
+          const args = ["--proof-file", file!];
+          if (params.idea_id) args.push("--idea-id", params.idea_id);
+          if (params.parent) args.push("--parent", params.parent);
+          return campaign("probe", args);
+        });
+        if (result.candidate) kickAutocheck();
+        return reply(result);
+      }
+      const result = await withProofFiles(params.drafts!, files => {
+        const args: string[] = [];
+        for (const file of files) args.push("--draft-file", file);
         if (params.idea_id) args.push("--idea-id", params.idea_id);
         if (params.parent) args.push("--parent", params.parent);
         return campaign("probe", args);
       });
-      if (result.candidate) kickAutocheck();
+      if (result.drafts?.some((draft: any) => draft.candidate)) kickAutocheck();
       return reply(result);
     },
   });
@@ -632,16 +760,6 @@ export default function arenaExtension(pi: ExtensionAPI) {
         if (params.candidate) args.push("--candidate", params.candidate);
         return campaign("profile", args);
       }));
-    },
-  });
-
-  pi.registerTool({
-    name: "arena_polish", label: "Arena mechanical polish",
-    description: "On demand, try mechanical variants of a compiling candidate (line deletions, simp? rewrites, closing-tactic substitutions) on the primary toolchain, and return the variants that still compile and improve tokens or heartbeats, each with its metrics and a probe id. Takes up to a few minutes. Nothing is adopted: promote one with arena_evaluate from_probe if you want it.",
-    parameters: Type.Object({ candidate: Type.Optional(Type.String({ description: "#N; default the current candidate" })) }),
-    async execute(_id, params) {
-      if (!active) throw new Error("Select a theorem with /arena first");
-      return reply(await campaign("polish", params.candidate ? ["--candidate", params.candidate] : []));
     },
   });
 

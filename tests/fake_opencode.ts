@@ -17,7 +17,7 @@ import { Type } from "typebox";
 
 type Step = {
   text?: string;
-  tool_calls?: Array<{ name: string; arguments: Record<string, unknown> }>;
+  tool_calls?: Array<{ name: string; arguments: Record<string, unknown>; raw_arguments?: string }>;
   usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
   error?: string;
   delay_ms?: number;
@@ -108,6 +108,11 @@ export default function fakeOpenCode(pi: ExtensionAPI) {
               stream.push({ type: "text_end", contentIndex: number, content: String(block.text), partial: message });
             } else {
               stream.push({ type: "toolcall_start", contentIndex: number, partial: message });
+              const call = step?.tool_calls?.[number];
+              if (call?.raw_arguments !== undefined) {
+                stream.push({ type: "toolcall_delta", contentIndex: number, delta: call.raw_arguments,
+                  partial: message as never });
+              }
               stream.push({ type: "toolcall_end", contentIndex: number, toolCall: block as never, partial: message });
             }
           });

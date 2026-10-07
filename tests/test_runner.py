@@ -283,7 +283,6 @@ class AutomaticChecksTests(unittest.TestCase):
             ("arena_probe", {"proof": good + "\n  -- complete draft"}),
             ("arena_candidate", {"candidate": "p1"}),
             ("arena_profile", {"candidate": "#2", "proof": ""}),
-            ("arena_polish", {"candidate": "#2"}),
             ("arena_idea", {"idea_id": "structural", "status": "succeeded", "reason": "compiles everywhere"}),
         ]
         run = FakeRun([cheap_tool(name, args) for name, args in calls] + [{"text": "done"}], timeout=900)
@@ -301,7 +300,7 @@ class AutomaticChecksTests(unittest.TestCase):
         self.assertIn("Submission: #2 proxy 76.72", run.stdout)
 
 
-ARENA_TOOLS = {"arena_candidate", "arena_declarations", "arena_evaluate", "arena_find", "arena_idea", "arena_polish",
+ARENA_TOOLS = {"arena_candidate", "arena_declarations", "arena_evaluate", "arena_find", "arena_idea",
                "arena_probe", "arena_profile", "arena_skill_read", "arena_source"}
 LEAN_TOOLS = {f"mcp__arena_lean__{name}" for name in
               ("lean_goal", "lean_diagnostic_messages", "lean_multi_attempt", "lean_local_search", "lean_hover_info")}
@@ -327,6 +326,33 @@ class SkillToolNamesTests(unittest.TestCase):
             tools = {name for name in named if name.startswith("arena_") or name in available
                      or name.removeprefix("lean_") in TOOL_WORDS}
             self.assertEqual(tools - available, set(), path.name)
+
+
+@unittest.skipUnless(PI_AVAILABLE and FIXTURE.exists(), "pi and the Strata fixture are required")
+class ToolArgumentUxTests(unittest.TestCase):
+    def test_malformed_arena_json_is_rejected_instead_of_running_with_empty_arguments(self):
+        run = FakeRun([{"tool_calls": [{"name": "arena_skill_read", "arguments": {},
+                                        "raw_arguments": "not-json"}]}, {"text": "done"}])
+        self.addCleanup(run.cleanup)
+        run.run()
+        self.assertEqual(run.result.returncode, 0, run.stdout[-1000:])
+        results = [message for message in run.requests[-1]["messages"]
+                   if message.get("role") == "toolResult" and message.get("toolName") == "arena_skill_read"]
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0]["isError"])
+        self.assertIn("object", message_text(results[0]).lower())
+        self.assertNotIn("No Arena skill is loaded", message_text(results[0]))
+
+    def test_misnamed_arena_tool_gets_nearest_name_in_the_next_provider_context(self):
+        run = FakeRun([{"tool_calls": [{"name": "arena_declaraton", "arguments": {"symbol": "Missing"}}]},
+                       {"text": "done"}])
+        self.addCleanup(run.cleanup)
+        run.run()
+        self.assertEqual(run.result.returncode, 0, run.stdout[-1000:])
+        results = [message for message in run.requests[-1]["messages"]
+                   if message.get("role") == "toolResult" and message.get("toolName") == "arena_declaraton"]
+        self.assertEqual(len(results), 1)
+        self.assertIn("Closest registered Arena tool: arena_declarations", message_text(results[0]))
 
 
 TOOL_WORDS = {"build", "code_actions", "completions", "declaration_file", "file_outline", "get_widgets",
