@@ -144,7 +144,7 @@ def lean_context(name: str) -> dict:
     inserted = source.replace("@@ROOTS@@", roots).replace("@@TARGET@@", _lean_name(name))
     built = candidate_file(row, row["src"], version, commit)
     text = built["text"][:built["head"]] + inserted + built["text"][built["head"]:]
-    ran = run_lean(row, built["path"], text)
+    ran = run_lean(row, built["path"], text, prefix_end=built["head"])
     if ran is None:
         return {"error": "Lean timed out while collecting context"}
     returncode, output = ran

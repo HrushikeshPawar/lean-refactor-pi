@@ -259,7 +259,7 @@ def _instrumented(row: dict, proof: str, version: str, commit: str, depth: int) 
     built = candidate_file(row, proof, version, commit)
     inserted = preamble(depth)
     text = built["text"][:built["head"]] + inserted + built["text"][built["head"]:]
-    ran = run_lean(row, built["path"], text)
+    ran = run_lean(row, built["path"], text, prefix_end=built["head"])
     if ran is None:
         raise ValueError("Lean timed out while profiling")
     returncode, output = ran

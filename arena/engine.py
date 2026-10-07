@@ -6,11 +6,17 @@ matches the Arena worker. Compilation and token counts are still useful gates.
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import re
 import subprocess
 import tempfile
+import threading
+import time
+from contextlib import contextmanager
+from contextvars import ContextVar
+from functools import lru_cache
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -302,8 +308,33 @@ def extract_goals(output: str, start_line: int) -> tuple[list[dict], str]:
             "\n".join(rest))
 
 
-def run_lean(row: dict, project: Path, text: str, timeout: int = 180) -> tuple[int, str] | None:
-    """Compile `text` as the target's file inside the pinned project; None on timeout."""
+_FORCE_COLD: ContextVar[bool] = ContextVar("arena_force_cold", default=False)
+_LAST = threading.local()
+
+
+@contextmanager
+def force_cold():
+    """Compile with a fresh `lake env lean` even when a Lean session is configured."""
+    token = _FORCE_COLD.set(True)
+    try:
+        yield
+    finally:
+        _FORCE_COLD.reset(token)
+
+
+def last_lean_run() -> dict:
+    """Which path the most recent `run_lean` on this thread took, and how long it took."""
+    return dict(getattr(_LAST, "info", None) or {"path": "cold"})
+
+
+@lru_cache(maxsize=16)
+def _fingerprint(project: str) -> dict:
+    from arena import lean_session
+
+    return lean_session.fingerprint(Path(project))
+
+
+def _run_cold(row: dict, project: Path, text: str, timeout: int) -> tuple[int, str] | None:
     scratch = ROOT / "runs" / "evaluations"
     scratch.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="arena-", dir=scratch) as directory:
@@ -315,6 +346,36 @@ def run_lean(row: dict, project: Path, text: str, timeout: int = 180) -> tuple[i
         except subprocess.TimeoutExpired:
             return None
     return proc.returncode, (proc.stdout + proc.stderr).replace(str(candidate), source_path(row)).strip()
+
+
+def run_lean(row: dict, project: Path, text: str, timeout: int = 180,
+             prefix_end: int | None = None) -> tuple[int, str] | None:
+    """Compile `text` as the target's file inside the pinned project; None on timeout.
+
+    With a per-run Lean session configured, only the changed part of the file is
+    re-elaborated by the session's server. If the session cannot answer, the file is
+    compiled cold. `last_lean_run()` says which path ran. `prefix_end` is where the target
+    declaration starts: the text before it is pinned, and a session whose prefix differs is stale.
+    """
+    from arena import lean_session
+
+    started = time.monotonic()
+    info: dict = {"path": "cold"}
+    if lean_session.configured() and not _FORCE_COLD.get():
+        reply = lean_session.request({
+            "op": "check", "protocol": lean_session.PROTOCOL, "project": str(project),
+            "fingerprint": _fingerprint(str(project)), "text": text, "display": source_path(row),
+            "timeout": timeout,
+            "prefix_sha": None if prefix_end is None else hashlib.sha256(text[:prefix_end].encode()).hexdigest()[:16],
+            }, 2 * timeout + 60) or {}
+        if reply.get("ok"):
+            _LAST.info = {"path": "session", "seconds": round(time.monotonic() - started, 2),
+                          "new_worker": reply.get("new_worker"), "changed_from_line": reply.get("changed_from_line")}
+            return None if reply.get("timeout") else (reply["returncode"], reply["output"])
+        info = {"path": "cold-fallback", "reason": str(reply.get("reason") or "session unavailable")[:200]}
+    done = _run_cold(row, project, text, timeout)
+    _LAST.info = {**info, "seconds": round(time.monotonic() - started, 2)}
+    return done
 
 
 def compile_version(row: dict, proof: str, version: str, commit: str,
@@ -329,9 +390,10 @@ def compile_version(row: dict, proof: str, version: str, commit: str,
     if measure:
         wrapper_start = text[:built["head"]].count("\n") + 1
         text = text[:built["head"]] + HEARTBEAT_WRAPPER + text[built["head"]:]
-    output = run_lean(row, built["path"], text)
+    output = run_lean(row, built["path"], text, prefix_end=built["head"])
+    lean_run = last_lean_run()
     if output is None:
-        return {"passed": False, "error": "Lean timed out after 180 seconds"}
+        return {"passed": False, "error": "Lean timed out after 180 seconds", "lean": lean_run}
     returncode, output = output
     match = re.search(r"ARENA_HEARTBEATS (\d+)", output) if measure else None
     passed = returncode == 0 and (not measure or match is not None)
@@ -339,7 +401,7 @@ def compile_version(row: dict, proof: str, version: str, commit: str,
                                        built["end_line"], wrapper_start, report_start_line)
     result = {"passed": passed, "exit_code": returncode,
               "heartbeats": int(match.group(1)) if match else None,
-              **structured, "raw_output": output}
+              **structured, "raw_output": output, "lean": lean_run}
     return result
 
 
