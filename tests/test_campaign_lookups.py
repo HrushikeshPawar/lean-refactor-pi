@@ -31,6 +31,29 @@ class SourceHandleTests(unittest.TestCase):
         self.assertEqual(result["file_lines"], 2)
         self.assertEqual(result["text"], "1: line one\n2: line two")
 
+    def test_lookups_and_lean_context_read_the_measurement_commit(self):
+        from arena import context
+        from arena.engine import measure_version
+
+        self.assertIs(campaign.measure_version, measure_version)
+        self.assertIs(context.measure_version, measure_version)
+        with patch("arena.campaign.measure_version", return_value=("4.30.0", "measure1")), \
+             patch("arena.campaign._git_source", return_value="line one\n"), \
+             patch("arena.campaign._source_target", return_value=(Path("project"), "measure1", "Strata/Target.lean")):
+            campaign.source_range("Target", "Strata/Target.lean", 1)
+        campaign.workspace.assert_called_with(self.row, "4.30.0", "measure1")
+        campaign.workspace.reset_mock()
+        with patch("arena.campaign.measure_version", return_value=("4.30.0", "measure1")), \
+             patch("arena.campaign._roots", return_value=[]), \
+             patch("arena.campaign._context", return_value={"error": "x"}), \
+             patch("arena.campaign._declaration_hits", return_value=[]):
+            campaign._find("Target", ["Missing"], 5)
+            with self.assertRaises(Exception):
+                campaign._resolve_declaration_source("Target", "Missing")
+        for call in campaign.workspace.call_args_list:
+            self.assertEqual(call.args[1:], ("4.30.0", "measure1"))
+        self.assertGreaterEqual(campaign.workspace.call_count, 2)
+
     def test_decl_handle_without_first_starts_at_the_declaration(self):
         located = {"root": Path("project"), "pin": "abc123", "path": "Strata/Target.lean", "line": 2,
                    "end": 2, "qualified": "Target.helper", "file_lines": 2}

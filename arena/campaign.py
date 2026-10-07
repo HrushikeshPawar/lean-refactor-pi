@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
 
-from arena.engine import ROOT, candidate_file, evaluate, problem, source_path, validate_proof, versions, workspace
+from arena.engine import ROOT, candidate_file, evaluate, measure_version, problem, source_path, validate_proof, versions, workspace
 from arena.polish import polish
 from arena.profile import heartbeat_floor, profile
 from arena.graph import common_base, edit_fingerprint, merge_text, ranked_frontier
@@ -252,7 +252,7 @@ def source_range(name: str, path: str, first: int | None = None, last: int | Non
 
 def _source_range(name: str, path: str, first: int | None, last: int | None) -> dict:
     row = problem(name)
-    version, commit = versions(row)[0]
+    version, commit = measure_version(row)
     project = workspace(row, version, commit)
     if path.startswith("decl:"):
         source_symbol, module, span = _source_hint(name, path[5:])
@@ -300,7 +300,7 @@ def _find(name: str, queries: list[str], limit: int) -> dict:
     entries = indexed + [{**item, "kind": item.get("decl")} for item in inventory.get("source", [])
                          if not inventory.get("error")]
     row = problem(name)
-    version, commit = versions(row)[0]
+    version, commit = measure_version(row)
     roots = _roots(workspace(row, version, commit), commit)
     needles = [query[5:] if query.startswith("decl:") else query for query in queries]
     named = [bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_'.]*", needle)) for needle in needles]
@@ -616,7 +616,7 @@ def _resolve_declaration_source(name: str, symbol: str, module: str | None = Non
     if not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9'.]*", symbol):
         raise ValueError("Invalid declaration name")
     row = problem(name)
-    version, commit = versions(row)[0]
+    version, commit = measure_version(row)
     project = workspace(row, version, commit)
     roots = _roots(project, commit)
     leaf = symbol.split(".")[-1]
@@ -726,7 +726,7 @@ def _declaration_in_lean(name: str, symbol: str) -> dict:
     from arena.engine import candidate_file, run_lean
 
     row = problem(name)
-    version, commit = versions(row)[0]
+    version, commit = measure_version(row)
     built = candidate_file(row, row["src"], version, commit)
     inserted = (Path(__file__).with_name("lean") / "declaration.lean").read_text() + f"arena_decl {symbol}\n\n"
     text = built["text"][:built["head"]] + inserted + built["text"][built["head"]:]
