@@ -194,6 +194,10 @@ class ProfileCliTests(unittest.TestCase):
         self.assertEqual(profile["unattributed"], profile["measured_total"] - profile["profiled_total"])
         self.assertGreater(len(profile["entries"]), 10)
         self.assertEqual(profile["entries"][0]["lines"], "10")
+        self.assertTrue(profile["line_profile"])
+        self.assertEqual(profile["line_tokens_total"], profile["tokens"])
+        self.assertEqual(profile["line_profile"][0]["proof_line"], 1)
+        self.assertEqual(profile["line_profile"][0]["file_line"], campaign.problem(NAME)["start_line"])
         self.assertGreater(profile["statement_floor_hb"], 0)
 
     def test_simp_all_lines_carry_nonzero_cost_and_top_costs_are_cumulative(self):

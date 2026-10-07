@@ -15,7 +15,7 @@ import json
 import re
 from pathlib import Path
 
-from arena.engine import ROOT, candidate_file, is_standalone, problem, run_lean, versions
+from arena.engine import ROOT, candidate_file, is_standalone, measure_version, problem, run_lean, versions
 from arena.profile import MAX_DEPTH, heartbeat_floor, profile
 from arena.scoring import exchange_rates
 
@@ -135,7 +135,7 @@ def _proof_boundary(source: str, start_line: int) -> tuple[int, int] | None:
 def lean_context(name: str) -> dict:
     """Elaboration data for the reference proof; cached per row, commit and wrapper source."""
     row = problem(name)
-    version, commit = versions(row)[0]
+    version, commit = measure_version(row)
     source = LEAN_FILE.read_text()
     cache = _cache("context", name, commit, source + row["src"])
     if cache.exists():
@@ -162,8 +162,9 @@ def lean_context(name: str) -> dict:
 def reference_profile(name: str) -> dict:
     """Heartbeat profile of the reference proof, cached like the context."""
     row = problem(name)
-    version, commit = versions(row)[0]
-    salt = (Path(__file__).with_name("lean") / "profile.lean").read_text() + row["src"] + str(MAX_DEPTH)
+    version, commit = measure_version(row)
+    salt = ((Path(__file__).with_name("lean") / "profile.lean").read_text() + row["src"] +
+            str(MAX_DEPTH) + "profile-schema-v2-source-lines-tokens-hotspots")
     cache = _cache("profile", name, commit, salt)
     if cache.exists():
         return json.loads(cache.read_text())
@@ -399,16 +400,32 @@ def _earlier_section(context: dict) -> list[str]:
 def _profile_section(prof: dict) -> list[str]:
     if prof.get("error"):
         return [f"(profile unavailable: {_clip(prof['error'], 160)})"]
-    rows = [f"proof lines | heartbeats (incl.) | self | share | tactic"]
+    rows = [f"Profile granularity: {prof['granularity']}",
+            f"proof lines | file lines | heartbeats (incl.) | self | share | tactic"]
     kept = [e for e in prof["entries"] if e["share_pct"] >= 1.5 or e["depth"] == 0]
     for entry in kept[:LIMITS["profile_entries"]]:
-        rows.append(f"{entry['lines']} | {entry['hb']} | {entry['self_hb']} | {entry['share_pct']}% | "
+        file_span = (str(entry["file_line"]) if entry["end_file_line"] == entry["file_line"]
+                     else f"{entry['file_line']}-{entry['end_file_line']}")
+        rows.append(f"{entry['lines']} | {file_span} | {entry['hb']} | {entry['self_hb']} | {entry['share_pct']}% | "
                     f"{'  ' * entry['depth']}{_clip(entry['text'], 60)}")
+    rows.append("Top-ten starting lines by score-equivalent baseline cost (not predicted savings):")
+    if not prof.get("token_attribution_available"):
+        rows.append("(unavailable: proof-line tokens did not reconcile with the competition tokenizer)")
+    else:
+        rows.extend(f"proof {item['proof_line']} / file {item['file_line']}"
+                    f" (tactics through file {item['end_file_line']}): {item['self_hb']} self hb, "
+                    f"{item['tokens']} tokens, {item['baseline_cost_points']} baseline points"
+                    for item in prof["hotspots"])
     top = ", ".join(f"{t['lines']} ({t['self_hb']} hb, cum. {t['cumulative_share_pct']}%)" for t in prof["top_self_cost"])
     rows.append(f"Top self costs: {top}")
-    rows.append(f"Profiled total {prof['profiled_total']} vs measured whole-proof {prof['measured_total']} "
-                f"(unattributed {prof['unattributed']}: term elaboration outside tactics, kernel check). "
-                f"Statement alone elaborates in about {prof.get('statement_floor_hb')} heartbeats.")
+    measured = prof.get("measured_total")
+    profiled = prof.get("profiled_total")
+    coverage = round(100 * profiled / measured, 1) if measured else None
+    rows.append(f"Measured whole-proof heartbeats: {measured}; attributed tactic heartbeats: {profiled} "
+                f"({coverage}% coverage); statement floor: {prof.get('statement_floor_hb')}; "
+                f"unattributed remainder: {prof.get('unattributed')}.")
+    if prof.get("note"):
+        rows.append(_clip(prof["note"], 180))
     return rows
 
 
