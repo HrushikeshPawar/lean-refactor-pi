@@ -64,6 +64,16 @@ class PlanTests(unittest.TestCase):
         self.assertFalse(report["identical_packets"])
         self.assertEqual(report["runs"][0]["best_tokens"], 90)
 
+    def test_matrix_uses_score_tokens_and_heartbeats_from_one_candidate(self):
+        row = {"run_id": "r", "factor": "thinking", "value": "low", "exit_code": 0, "packet_sha256": "aa",
+               "summary": {"cost": {}, "progress": {
+                   "best": {"tokens": {"value": 90}, "heartbeats": {"value": 300}, "proxy": {"value": 62}},
+                   "best_verified_candidate": {"candidate": "#3", "tokens": 70,
+                                               "heartbeats": 800, "proxy": 60.5}}, "evaluations": 4}}
+        result = matrix.compare([row], "aa")["runs"][0]
+        self.assertEqual((result["best_candidate"], result["best_tokens"], result["best_heartbeats"],
+                          result["best_proxy"]), ("#3", 70, 800, 60.5))
+
 
 @unittest.skipUnless(PI_AVAILABLE, "pi and the Strata fixture are required")
 class MatrixRunTests(unittest.TestCase):

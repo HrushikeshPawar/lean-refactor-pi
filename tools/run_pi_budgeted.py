@@ -37,6 +37,9 @@ DRAIN_S = 300
 STOP_GRACE_S = 45
 THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
 _tool_started: dict[str, tuple[float, dict]] = {}
+_request_count = 0
+_tool_result_count = 0
+_retry_count = 0
 
 
 def attempt_has_model_error(event_log: Path, offset: int) -> bool:
@@ -58,6 +61,7 @@ def attempt_has_model_error(event_log: Path, offset: int) -> bool:
 
 
 def log_event(event: dict) -> None:
+    global _request_count, _tool_result_count, _retry_count
     kind = event.get("type")
     note = None
     if kind == "tool_execution_start":
@@ -68,12 +72,13 @@ def log_event(event: dict) -> None:
             parent = (args.get("parents") or [args.get("parent", "?")])[0]
             note = f"{name} started idea={args.get('idea_id', '?')} parent={str(parent)[:12]} mode={args.get('mode', 'fast')}"
     elif kind == "tool_execution_end":
+        _tool_result_count += 1
         name = event.get("toolName", "tool")
         started = _tool_started.pop(event.get("toolCallId", ""), None)
         elapsed = f" in {time.monotonic() - started[0]:.1f}s" if started else ""
         if name in ("arena_evaluate", "arena_probe"):
             try:
-                result = json.loads(event["result"]["content"][0]["text"])
+                result = json.loads(event["result"]["content"][0]["text"].splitlines()[0])
                 compat = result.get("compat", {})
                 passed = sum(bool(item.get("passed")) for item in compat.values())
                 paths = sorted({str(item["lean"]).split(" ")[0] for item in compat.values() if item.get("lean")})
@@ -95,15 +100,20 @@ def log_event(event: dict) -> None:
                 note = "arena_evaluate returned an unreadable result"
         elif event.get("isError"):
             note = f"tool {name} returned an error"
+        elif note is None:
+            note = f"tool result #{_tool_result_count} {name} ok"
     elif kind == "message_end":
         message = event.get("message", {})
         if message.get("role") == "assistant":
             usage = message.get("usage") or {}
-            note = (f"model {message.get('stopReason', '?')} "
+            if usage.get("totalTokens") or message.get("errorMessage"):
+                _request_count += 1
+            note = (f"provider response #{_request_count} model {message.get('stopReason', '?')} "
                     f"output={usage.get('output', 0)} cache-read={usage.get('cacheRead', 0)} "
-                    f"cache-write={usage.get('cacheWrite', 0)}"
+                    f"cache-write={usage.get('cacheWrite', 0)}; tool-results={_tool_result_count}; retries={_retry_count}"
                     + (f"; {str(message.get('errorMessage'))[:90]}" if message.get("errorMessage") else ""))
     elif kind == "auto_retry_start":
+        _retry_count += 1
         note = f"provider retry {event.get('attempt')}/{event.get('maxAttempts')}: {event.get('errorMessage', '')}"
     elif kind == "agent_settled":
         note = "Pi agent settled"
@@ -167,6 +177,9 @@ def main() -> int:
 
 
 def run() -> int:
+    global _request_count, _tool_result_count, _retry_count
+    _tool_started.clear()
+    _request_count = _tool_result_count = _retry_count = 0
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True, choices=MODELS)
     parser.add_argument("--theorem", required=True)

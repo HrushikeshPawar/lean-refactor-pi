@@ -12,7 +12,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 
 COMPILE_TOOLS = {"arena_evaluate", "arena_probe", "arena_profile"}
-BOOKKEEPING_TOOLS = {"arena_idea", "arena_frontier"}
+BOOKKEEPING_TOOLS = {"arena_idea", "arena_frontier", "arena_state", "arena_finish"}
 LOCAL_EDIT_MAX_LINES = 2
 WARMUP_REQUESTS = 2
 
@@ -41,7 +41,7 @@ def _result_ok(event: dict) -> bool:
     if event.get("isError"):
         return False
     try:
-        payload = json.loads(event["result"]["content"][0]["text"])
+        payload = json.loads(event["result"]["content"][0]["text"].splitlines()[0])
     except (KeyError, IndexError, TypeError, ValueError):
         return True
     return not (isinstance(payload, dict) and payload.get("ok") is False)
@@ -138,6 +138,7 @@ def _progress(ledger: list[dict]) -> dict:
         if event.get("kind") == "candidate":
             labels[event["candidate_id"]] = f"#{len(labels) + 1}"
     timeline, best = [], {"tokens": None, "heartbeats": None, "proxy": None, "estimated_proxy": None}
+    best_verified_candidate = None
     for event in ledger:
         if event.get("kind") != "evaluation":
             continue
@@ -150,6 +151,11 @@ def _progress(ledger: list[dict]) -> dict:
         timeline.append(row)
         if not row["compiled"]:
             continue
+        if event["mode"] == "full" and metrics.get("proxy") is not None:
+            candidate = {"candidate": row["candidate"], "tokens": row["tokens"],
+                         "heartbeats": row["heartbeats"], "proxy": metrics["proxy"]}
+            if best_verified_candidate is None or candidate["proxy"] > best_verified_candidate["proxy"]:
+                best_verified_candidate = candidate
         for key, lower in (("tokens", True), ("heartbeats", True), ("proxy", False), ("estimated_proxy", False)):
             value = row[key]
             if value is None:
@@ -157,17 +163,21 @@ def _progress(ledger: list[dict]) -> dict:
             current = best[key]
             if current is None or (value < current["value"] if lower else value > current["value"]):
                 best[key] = {"value": value, "candidate": row["candidate"]}
-    return {"best": best, "timeline": timeline}
+    return {"best": best, "best_verified_candidate": best_verified_candidate, "timeline": timeline}
 
 
 def build_summary(directory: Path) -> dict:
     ledger = _jsonl(directory / "ledger.jsonl")
     events = _jsonl(directory / "events.jsonl")
     cost_events = _jsonl(directory / "cost-ledger.jsonl")
+    trace = _jsonl(directory / "trace-journal.jsonl")
     config = _read_json(directory / "run-config.json")
     report = _read_json(directory / "cost.json") or cost_report_from_ledger(directory)
+    submission_result = _json(directory / "submission.json")
     settles = [e for e in cost_events if e.get("kind") == "settle"]
     turns = _turns(events, settles)
+    request_events = [event for event in trace if event.get("kind") == "request"]
+    retries = sum(event.get("retry_of") is not None for event in request_events)
     spent = report.get("spent_usd") or sum(s["usd"] for s in settles if s.get("usage_known") is not False)
     cap = report.get("hard_cap_usd") or config.get("hard_cap_usd")
     unresolved = float(report.get("unresolved_usd") or 0.0)
@@ -196,15 +206,45 @@ def build_summary(directory: Path) -> dict:
                         errors[block["name"]] += 1
     controls = [e for e in cost_events if e.get("kind") == "control"]
     ideas: dict[str, dict] = {}
+    idea_attempts: dict[str, set[str]] = {}
     for event in ledger:
         if event.get("kind") == "idea":
-            ideas[event["id"]] = {"id": event["id"], "title": event["title"], "status": event["status"], "attempts": 0}
+            ideas[event["id"]] = {"id": event["id"], "title": event["title"], "status": event["status"],
+                                  "attempts": 0, "probes": 0}
+            idea_attempts[event["id"]] = set()
         elif event.get("kind") == "idea_update" and event["id"] in ideas:
             ideas[event["id"]].update({k: event[k] for k in ("status", "title") if k in event})
         elif event.get("kind") == "candidate" and event.get("idea_id") in ideas:
-            ideas[event["idea_id"]]["attempts"] += 1
+            idea_attempts[event["idea_id"]].add(event["candidate_id"])
+        elif event.get("kind") == "probe" and event.get("idea_id") in ideas:
+            idea_attempts[event["idea_id"]].add(event["proof_id"])
+    for idea_id, idea in ideas.items():
+        idea["attempts"] = len(idea_attempts[idea_id])
+        idea["probes"] = sum(1 for event in ledger if event.get("kind") == "probe"
+                             and event.get("idea_id") == idea_id)
     overshoot = max(0.0, spent - cap) if cap else 0.0
     progress = _progress(ledger)
+    if submission_result and submission_result.get("candidate"):
+        progress["best_verified_candidate"] = {
+            "candidate": submission_result["candidate"], "tokens": submission_result.get("tokens"),
+            "heartbeats": submission_result.get("heartbeats"), "proxy": submission_result.get("proxy"),
+        }
+    best_verified = progress.get("best_verified_candidate")
+    best_at = None
+    if best_verified:
+        candidate_ids = [event["candidate_id"] for event in ledger if event.get("kind") == "candidate"]
+        try:
+            best_id = candidate_ids[int(best_verified["candidate"].removeprefix("#")) - 1]
+            best_at = min(event["ts"] for event in ledger if event.get("kind") == "evaluation"
+                          and event.get("candidate_id") == best_id and event.get("mode") == "full"
+                          and (event.get("result", {}).get("metrics") or {}).get("proxy") is not None)
+        except (IndexError, KeyError, ValueError, TypeError):
+            best_at = None
+    later_settles = [event for event in settles if best_at is not None
+                     and float(event.get("ts", 0)) / 1000 > best_at]
+    later_requests = [event for event in request_events if best_at is not None
+                      and float(event.get("ts", 0)) / 1000 > best_at]
+    ideas_without_attempts = [idea["id"] for idea in ideas.values() if idea["attempts"] == 0]
     return {
         "run_id": directory.name, "theorem": config.get("theorem") or report.get("theorem"),
         "model": config.get("model"), "thinking": config.get("thinking"),
@@ -212,7 +252,11 @@ def build_summary(directory: Path) -> dict:
         "stop_reason": (controls[-1].get("stop") if controls else None) or "model_stopped",
         "cost": {"spent_usd": round(spent, 6), "unresolved_usd": round(unresolved, 6),
                  "hard_cap_usd": cap, "remaining_usd": round(remaining, 6), "overshoot_usd": round(overshoot, 6),
-                 "requests": len(turns), "by_turn_type": by_kind,
+                 "requests": len(request_events) if request_events else len(turns),
+                 "priced_responses": len(turns), "retries": retries,
+                 "requests_after_best": len(later_requests),
+                 "spent_after_best_usd": round(sum(float(event["usd"]) for event in later_settles), 6),
+                 "by_turn_type": by_kind,
                  "bookkeeping_and_rejected_pct": round(100 * sum(by_kind.get(k, {"usd": 0})["usd"]
                                                                  for k in ("bookkeeping", "rejected")) / spent, 1) if spent else 0.0,
                  "usd_per_evaluation": round(spent / len(evaluations), 6) if evaluations else None,
@@ -224,9 +268,11 @@ def build_summary(directory: Path) -> dict:
                   "per_request": [[t["cache_read"], t["cache_write"]] for t in turns]},
         "progress": progress, "edits": _edit_classes(ledger, directory),
         "evaluations": len(evaluations), "probes": len(probes),
-        "tools": {"calls": dict(calls), "errors": dict(errors), "error_total": sum(errors.values())},
+        "tools": {"calls": dict(calls), "results": sum(event.get("type") == "tool_execution_end" for event in events),
+                  "errors": dict(errors), "error_total": sum(errors.values())},
         "ideas": list(ideas.values()),
-        "submission": _json(directory / "submission.json"),
+        "ideas_without_attempts": ideas_without_attempts,
+        "submission": submission_result,
     }
 
 
@@ -236,16 +282,24 @@ def render_text(summary: dict) -> str:
         item = best.get(key)
         return f"{item['value']} ({item['candidate']})" if item else "none"
     kinds = ", ".join(f"{k} {v['requests']}×${v['usd']:.4f}" for k, v in sorted(cost["by_turn_type"].items()))
+    verified = summary["progress"].get("best_verified_candidate")
+    verified_line = (f"best verified candidate: {verified['candidate']} proxy {verified['proxy']} "
+                     f"({verified['tokens']} tok, {verified['heartbeats']} HB)" if verified
+                     else "best verified candidate: none (original proof baseline stands)")
     return "\n".join([
         f"{summary['run_id']}: {summary['theorem']} · {summary['model']} · thinking {summary['thinking']} · stop {summary['stop_reason']}",
         (f"cost ${cost['spent_usd']:.4f} settled + ${cost['unresolved_usd']:.4f} unresolved of ${cost['hard_cap_usd']} "
          f"(remaining ${cost['remaining_usd']:.4f}; overshoot ${cost['overshoot_usd']:.4f}) over "
-         f"{cost['requests']} requests; {kinds}; bookkeeping+rejected {cost['bookkeeping_and_rejected_pct']}%"),
+         f"{cost['requests']} requests / {summary['tools']['results']} tool results "
+         f"({cost['retries']} retries); {kinds}; bookkeeping+rejected {cost['bookkeeping_and_rejected_pct']}%"),
         f"cache reuse {cache['reuse_pct']}% (recent {cache['reuse_pct_recent_10']}%), alarms {cache['alarms']}",
-        f"best: tokens {pick('tokens')}, heartbeats {pick('heartbeats')}, proxy {pick('proxy')}, "
+        verified_line,
+        f"per-axis highs: tokens {pick('tokens')}, heartbeats {pick('heartbeats')}, proxy {pick('proxy')}, "
         f"estimated proxy {pick('estimated_proxy')}",
         f"evaluations {summary['evaluations']}, probes {summary['probes']}, edits "
         f"structural {summary['edits']['structural']} / local {summary['edits']['local']}",
+        f"post-best spend ${cost['spent_after_best_usd']:.4f} over {cost['requests_after_best']} requests; "
+        f"ideas without attempts {len(summary['ideas_without_attempts'])}",
         f"tool errors {summary['tools']['error_total']}: {summary['tools']['errors']}",
         f"submission: {(summary.get('submission') or {}).get('candidate') or 'none'}",
     ]) + "\n"

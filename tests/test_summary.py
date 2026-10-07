@@ -77,6 +77,13 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(data["stop_reason"], "plateau")
         self.assertEqual((data["thinking"], data["skill"]), ("high", "abc"))
 
+    def test_rejection_classification_survives_appended_status_text(self):
+        rows = [assistant([("x", "arena_evaluate")], 0, 20),
+                {**result("x", "arena_evaluate", {"ok": False, "error": "invalid"}),
+                 "result": {"content": [{"type": "text", "text": '{"ok":false,"error":"invalid"}\n[arena] best verified: #1'}]}}]
+        turns = summary._turns(rows, [{"usd": 0.01}])
+        self.assertEqual(turns[0]["kind"], "rejected")
+
     def test_cache_kpis_alarms_and_tool_errors(self):
         data = summary.build_summary(self.dir)
         self.assertEqual(data["cache"]["alarms"], 1)
@@ -92,6 +99,49 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(best["proxy"], {"value": 60.5, "candidate": "#3"})
         self.assertEqual(best["estimated_proxy"], {"value": 55.0, "candidate": "#2"})
         self.assertEqual([row["t"] for row in data["progress"]["timeline"]], [10.0, 30.0, 40.0])
+        self.assertEqual(data["progress"]["best_verified_candidate"],
+                         {"candidate": "#3", "tokens": 70, "heartbeats": 800, "proxy": 60.5})
+        self.assertIn("best verified candidate: #3 proxy 60.5 (70 tok, 800 HB)", summary.render_text(data))
+
+    def test_probe_is_a_linked_idea_attempt(self):
+        with (self.dir / "ledger.jsonl").open("a") as handle:
+            handle.write(json.dumps({"kind": "probe", "proof_id": "draft-1", "idea_id": "i1",
+                                     "result": {"ok": False, "error": "failed skeleton"}}) + "\n")
+        ideas = summary.build_summary(self.dir)["ideas"]
+        self.assertEqual(ideas[0]["attempts"], 3)
+        self.assertEqual(ideas[0]["probes"], 1)
+
+    def test_coherent_best_metrics_use_cold_submission_heartbeats(self):
+        (self.dir / "submission.json").write_text(json.dumps(
+            {"candidate": "#3", "tokens": 70, "heartbeats": 801, "proxy": 60.5,
+             "session_heartbeats": 800}))
+        best = summary.build_summary(self.dir)["progress"]["best_verified_candidate"]
+        self.assertEqual(best, {"candidate": "#3", "tokens": 70, "heartbeats": 801, "proxy": 60.5})
+
+    def test_state_and_finish_requests_are_bookkeeping(self):
+        data = summary._turns([
+            assistant([("s", "arena_state")], 0, 20), result("s", "arena_state", {"ok": True}),
+            assistant([("f", "arena_finish")], 20, 20), result("f", "arena_finish", {"ok": True}),
+        ], [{"usd": 0.01}, {"usd": 0.01}])
+        self.assertEqual([turn["kind"] for turn in data], ["bookkeeping", "bookkeeping"])
+
+    def test_trace_accounting_reports_retries_results_idle_ideas_and_post_best_spend(self):
+        with (self.dir / "ledger.jsonl").open("a") as handle:
+            handle.write(json.dumps({"kind": "idea", "id": "unused", "title": "Untried",
+                                     "status": "active"}) + "\n")
+        with (self.dir / "cost-ledger.jsonl").open("a") as handle:
+            handle.write(json.dumps({"kind": "settle", "id": "post-best", "usd": 0.005,
+                                     "usage_known": True, "ts": 131000}) + "\n")
+        write(self.dir / "trace-journal.jsonl", [
+            {"kind": "request", "id": "r1", "retry_of": None, "ts": 131000},
+            {"kind": "request", "id": "r2", "retry_of": "r1", "ts": 132000},
+        ])
+        data = summary.build_summary(self.dir)
+        self.assertEqual((data["cost"]["requests"], data["cost"]["priced_responses"],
+                          data["cost"]["retries"], data["tools"]["results"]), (2, 4, 1, 3))
+        self.assertEqual(data["ideas_without_attempts"], ["unused"])
+        self.assertEqual(data["cost"]["requests_after_best"], 2)
+        self.assertAlmostEqual(data["cost"]["spent_after_best_usd"], 0.005)
 
     def test_edits_split_into_local_and_structural(self):
         edits = summary.build_summary(self.dir)["edits"]
@@ -99,7 +149,7 @@ class SummaryTests(unittest.TestCase):
 
     def test_ideas_attempts_are_counted(self):
         self.assertEqual(summary.build_summary(self.dir)["ideas"],
-                         [{"id": "i1", "title": "Idea", "status": "active", "attempts": 2}])
+                         [{"id": "i1", "title": "Idea", "status": "active", "attempts": 2, "probes": 0}])
 
     def test_cost_report_is_rebuilt_when_pi_never_wrote_one(self):
         report = summary.cost_report_from_ledger(self.dir)
