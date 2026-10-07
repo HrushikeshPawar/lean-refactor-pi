@@ -23,6 +23,7 @@ type Step = {
   delay_ms?: number;
 };
 
+// Fixture prices equal Arena's ledger, as Pi's real opencode-go catalog must.
 export default function fakeOpenCode(pi: ExtensionAPI) {
   let request = 0;
   const script: Step[] = process.env.ARENA_FAKE_SCRIPT
@@ -46,7 +47,7 @@ export default function fakeOpenCode(pi: ExtensionAPI) {
       models: [{ id: "qwen3.8-flash", name: "Offline Qwen wire fixture", api: "anthropic-messages",
         baseUrl: process.env.ARENA_FAKE_WIRE_URL, reasoning: true, input: ["text"],
         compat: { allowEmptySignature: true },
-        cost: { input: 0.1, output: 0.4, cacheRead: 0.01, cacheWrite: 0.125 },
+        cost: { input: 0.15, output: 0.47, cacheRead: 0.016, cacheWrite: 0.20 },
         contextWindow: 1_000_000, maxTokens: 131_072 }],
     });
     return;
@@ -54,7 +55,7 @@ export default function fakeOpenCode(pi: ExtensionAPI) {
   pi.registerProvider("opencode-go", {
     api: "openai-responses", apiKey: "offline-test", baseUrl: "http://127.0.0.1:0",
     models: [{ id: "gpt-6-luna", name: "Offline Luna fixture", reasoning: true,
-      input: ["text"], cost: { input: 0.20, output: 0.75, cacheRead: 0.02, cacheWrite: 0.25 },
+      input: ["text"], cost: { input: 0.10, output: 0.50, cacheRead: 0.01, cacheWrite: 0.125 },
       contextWindow: 1_050_000, maxTokens: 128_000 }],
     streamSimple(model, context, options) {
       const stream = createAssistantMessageEventStream();

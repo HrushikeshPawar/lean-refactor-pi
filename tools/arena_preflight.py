@@ -59,7 +59,10 @@ def main() -> int:
             for item in problems:
                 print(item, file=sys.stderr)
             continue
-        covered[model] = {"session_id": run_id, "trace_ids": trace_ids}
+        # The journal is opened 0600, but a filesystem that ignores chmod (fuseblk) keeps its own
+        # mode; record what the file really has rather than claim owner-only access.
+        covered[model] = {"session_id": run_id, "trace_ids": trace_ids,
+                          "journal_mode": oct(journal_path.stat().st_mode & 0o777)}
     receipt = {"status": "pass" if covered and not failed and set(covered) == set(models) else "fail",
                "patch_sha256": PATCH_SHA256, "models": covered}
     write_receipt(receipt)

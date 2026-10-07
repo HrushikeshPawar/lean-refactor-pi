@@ -199,13 +199,21 @@ def _output_text(observation: dict) -> str:
     if not isinstance(raw, str):
         return "" if raw is None else str(raw)
     parsed = _parsed(raw)
-    if isinstance(parsed, dict) and isinstance(parsed.get("content"), str):
-        return parsed["content"]
+    if isinstance(parsed, dict):
+        # A generation output is {role, content?, tool_calls?}; a tool-call-only turn has no content.
+        return parsed["content"] if isinstance(parsed.get("content"), str) else ""
     # Tool output is a string. The v2 API returns I/O as a JSON string, so a pad of
     # P's comes back quoted; a value that is not JSON is already the text.
     if isinstance(parsed, str):
         return parsed
     return raw
+
+
+def _output_tool_calls(observation: dict) -> list[tuple]:
+    """(id, name) of each tool call in a generation output. The plugin records no arguments there."""
+    parsed = _parsed(observation.get("output"))
+    calls = parsed.get("tool_calls") if isinstance(parsed, dict) else None
+    return [(call.get("id"), call.get("name")) for call in calls or [] if isinstance(call, dict)]
 
 
 def _usage_count(details: dict | None, key: str) -> int:
@@ -218,7 +226,11 @@ def judge(journal: list[dict], observations: list[dict]) -> list[str]:
     """Problems that mean the Langfuse export is missing, clipped, or cannot join the journal.
 
     Generations pair with requests in time order. A retry resends the same payload, so a
-    single generation must not satisfy two requests.
+    single generation must not satisfy two requests. Every request also needs its byte-exact
+    wire row. The ledger's settled cost is authoritative; Pi prices from a catalog that
+    `catalogPriceProblem` holds equal to the ledger, so Langfuse totalCost must match it,
+    except where the ledger applied Luna's conservative high tier. Tool spans join their
+    journal rows by tool call ID.
     """
     problems = [f"truncated observation {item.get('id')}" for item in observations if _truncated(item)]
     for row in journal:
@@ -232,6 +244,17 @@ def judge(journal: list[dict], observations: list[dict]) -> list[str]:
                 problems.append(f"wire {row.get('id')} is not utf-8 json")
 
     requests = sorted((row for row in journal if row.get("kind") == "request"), key=lambda row: row.get("ts") or 0)
+    wires: dict[str, list[int]] = {}
+    for row in journal:
+        if row.get("kind") == "wire":
+            wires.setdefault(row.get("id"), []).append(row.get("retry_index"))
+    for request in requests:
+        indexes = wires.get(request.get("id"))
+        if not indexes:
+            problems.append(f"missing wire body for request {request.get('id')}")
+        elif sorted(indexes) != list(range(len(indexes))):
+            problems.append(f"wire retry indexes {indexes} are not 0..n for request {request.get('id')}")
+
     generations = sorted((row for row in observations
                           if row.get("type") == "GENERATION" and row.get("name") == "LLM Call"),
                          key=lambda row: row.get("startTime") or "")
@@ -247,14 +270,19 @@ def judge(journal: list[dict], observations: list[dict]) -> list[str]:
             continue
         expected = response.get("text") or ""
         seen = _output_text(generation)
-        if expected and len(seen) < len(expected):
+        if len(seen) < len(expected):
             problems.append(f"generation output shorter than journal for {request.get('id')}")
-        elif expected and seen != expected:
+        elif seen != expected:
             problems.append(f"generation output does not match journal text for {request.get('id')}")
+        calls = [(block.get("id"), block.get("name")) for block in response.get("content") or []
+                 if isinstance(block, dict) and block.get("type") == "toolCall"]
+        if calls != _output_tool_calls(generation):
+            problems.append(f"generation tool calls do not match journal for {request.get('id')}")
         usage = response.get("usage")
         if not usage:
             continue
-        if response.get("settled_usd") is None:
+        settled = response.get("settled_usd")
+        if settled is None:
             problems.append(f"settled cost missing for {request.get('id')}")
         details = generation.get("usageDetails") if isinstance(generation.get("usageDetails"), dict) else {}
         # Pi's output count includes reasoning. Langfuse splits that subset into its own bucket.
@@ -267,21 +295,33 @@ def judge(journal: list[dict], observations: list[dict]) -> list[str]:
                           "cache_creation_input_tokens": usage.get("cache_write", 0)}
         if seen != expected_usage:
             problems.append(f"usage does not join attempt {request.get('id')}")
-        pi_cost = response.get("pi_cost_usd")
         total = generation.get("totalCost")
-        if pi_cost:
-            if total is None or abs(float(total) - float(pi_cost)) > 1e-6:
-                problems.append(f"cost does not join attempt {request.get('id')}")
+        if settled is not None and response.get("price_tier") != "high":
+            if total is None or abs(float(total) - float(settled)) > 1e-6:
+                problems.append(f"Langfuse cost {total} does not equal settled ${settled} for {request.get('id')}")
 
+    calls = {row.get("tool_call_id"): row for row in journal if row.get("kind") == "tool_call"}
     tools = [row for row in journal if row.get("kind") == "tool_result"]
-    spans = sorted((row for row in observations if row.get("type") == "TOOL"),
-                   key=lambda row: row.get("startTime") or "")
-    if len(spans) != len(tools):
+    spans = {}
+    for row in observations:
+        if row.get("type") == "TOOL":
+            metadata = _parsed(row.get("metadata")) if row.get("metadata") is not None else {}
+            spans[(metadata or {}).get("tool_id")] = row
+    if len([key for key in spans if key is not None]) != len(tools):
         problems.append(f"unjoinable tools: {len(tools)} results and {len(spans)} Langfuse tool spans")
-    for result, span in zip(tools, spans):
+    for result in tools:
+        span = spans.get(result.get("tool_call_id"))
+        if span is None:
+            problems.append(f"no Langfuse tool span for call {result.get('tool_call_id')}")
+            continue
         if span.get("name") != f"Tool: {result.get('name')}":
             problems.append(f"tool span {span.get('name')} does not match {result.get('name')}")
             continue
+        call = calls.get(result.get("tool_call_id"))
+        if call is None:
+            problems.append(f"missing tool_call row for {result.get('tool_call_id')}")
+        elif redact(call.get("args")) != _parsed(span.get("input")):
+            problems.append(f"tool span input does not match arguments for {result.get('tool_call_id')}")
         expected = result.get("text") or ""
         seen = _output_text(span)
         if len(seen) < len(expected):

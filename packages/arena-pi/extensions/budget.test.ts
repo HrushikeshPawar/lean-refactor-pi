@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { boundedPayload, budgetDecision, cacheAlarm, MIN_REQUEST_OUTPUT_TOKENS, outputBudget, budgetLimits, cacheUtilization, maximumNextRequest, permitFinalPayload, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
+import { boundedPayload, budgetDecision, catalogPriceProblem, cacheAlarm, MIN_REQUEST_OUTPUT_TOKENS, outputBudget, budgetLimits, cacheUtilization, maximumNextRequest, permitFinalPayload, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
 
 const usage = { input: 1_000_000, output: 100_000, cacheRead: 0, cacheWrite: 0 };
 
 test("prices OpenCode Go usage at the expensive tier", () => {
   assert.equal(usageCost(usage, "gpt-6-luna"), 0.275);
-  assert.equal(usageCost(usage, "deepseek-v4.1-flash"), 0.42);
+  assert.equal(usageCost(usage, "deepseek-v4.1-flash"), 0.21);
   assert.equal(usageCost({ input: 1_000_000, output: 0, cacheRead: 0, cacheWrite: 0 }, "qwen3.8-flash"), 0.15);
 });
 
@@ -59,7 +59,7 @@ test("reports measured cache reuse, including a recent window", () => {
 
 test("records a next-request exposure estimate without using it as a stop", () => {
   assert.ok(Math.abs(maximumNextRequest("gpt-6-luna") - 0.3585) < 1e-10);
-  assert.ok(Math.abs(maximumNextRequest("deepseek-v4.1-flash") - 0.7608) < 1e-10);
+  assert.ok(Math.abs(maximumNextRequest("deepseek-v4.1-flash") - 0.3804) < 1e-10);
   const limits = budgetLimits({ ARENA_HARD_CAP_USD: "3" });
   assert.equal(budgetDecision(2.5, "gpt-6-luna", limits).allowed, true);
   assert.equal(budgetDecision(3, "gpt-6-luna", limits).allowed, false);
@@ -159,4 +159,11 @@ test("cache alarm fires only after warm-up, when a request writes more than it r
   assert.deepEqual(cacheAlarm({ cacheRead: 1000, cacheWrite: 9000 }, 3), { request: 3, read: 1000, write: 9000 });
   assert.equal(cacheAlarm({ cacheRead: 9000, cacheWrite: 900 }, 7), undefined);
   assert.equal(cacheAlarm({}, 7), undefined);
+});
+
+test("refuses a ledger price that differs from Pi's catalog", () => {
+  assert.equal(catalogPriceProblem("deepseek-v4.1-flash", { input: 0.15, output: 0.6, cacheRead: 0.003, cacheWrite: 0 }), undefined);
+  const problem = catalogPriceProblem("deepseek-v4.1-flash", { input: 0.30, output: 1.20, cacheRead: 0.006, cacheWrite: 0 });
+  assert.match(problem ?? "", /input 0.3 != 0.15/);
+  assert.match(catalogPriceProblem("qwen3.8-flash", undefined) ?? "", /qwen3.8-flash/);
 });

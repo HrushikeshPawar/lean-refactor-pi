@@ -71,7 +71,7 @@ class MatrixRunTests(unittest.TestCase):
             proc = subprocess.run(
                 [sys.executable, "tools/run_experiment_matrix.py", "--theorem", NAME, "--prefix", prefix,
                  "--factor", "thinking", "--values", "low,high", "--cap", "0.1", "--parallel", "2",
-                 "--", "--no-mcp", "--test-extension", str(FAKE)],
+                 "--", "--no-mcp", "--no-langfuse", "--test-extension", str(FAKE)],
                 cwd=ROOT, env=env, text=True, capture_output=True, timeout=600)
             self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
             report = json.loads((ROOT / "runs/pi-budget" / f"{prefix}-matrix" / "matrix.json").read_text())

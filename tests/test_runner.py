@@ -5,7 +5,7 @@ import shutil
 from pathlib import Path
 import unittest
 
-from tests.pi_support import PI_AVAILABLE, AnthropicWire, FakeRun, message_text
+from tests.pi_support import LIVE_LANGFUSE, PI_AVAILABLE, AnthropicWire, FakeRun, message_text
 from tools.arena_skill import SKILL_DIR, skill_hash
 
 STOP = [{"text": "done"}]
@@ -389,28 +389,16 @@ class AnthropicWireTests(unittest.TestCase):
                               {"text": text, "redacted": "opaque-signature-1"}], fail_first=1)
         self.addCleanup(wire.close)
         started = datetime.now(timezone.utc)
-        run = FakeRun([], "--thinking", "high", model="qwen3.8-flash", timeout=300,
+        run = FakeRun([], "--thinking", "high", model="qwen3.8-flash", timeout=300, langfuse=LIVE_LANGFUSE,
                       env={"ARENA_FAKE_WIRE_URL": wire.url, "ARENA_TRACE_PAD": "20001"})
         self.addCleanup(run.cleanup)
         run.run()
         journal = run.jsonl("trace-journal.jsonl")
-        observations = _wait_for_trace(run.run_id, started, pad, text)
         requests = [row for row in journal if row["kind"] == "request"]
         wires = [row for row in journal if row["kind"] == "wire"]
         responses = [row for row in journal if row["kind"] == "response"]
-        generations = [row for row in observations if row.get("name") == "LLM Call"]
-        request_keys = sorted(requests[0]["post_hook"]) if requests else []
-        generation_keys = []
-        if generations and isinstance(generations[0].get("input"), str):
-            parsed = json.loads(generations[0]["input"])
-            if isinstance(parsed, dict):
-                generation_keys = sorted(parsed)
         detail = (f"session={run.run_id} exit={run.result.returncode} "
                   f"wires={len(wires)} raw={len(wire.raw_bodies)} requests={len(requests)} "
-                  f"generations={len(generations)} tools={sum(row.get('type') == 'TOOL' for row in observations)} "
-                  f"traces={sorted({row.get('traceId') for row in observations})} "
-                  f"key_diff={sorted(set(request_keys) - set(generation_keys))}:"
-                  f"{sorted(set(generation_keys) - set(request_keys))} "
                   f"wire_sha={[hashlib.sha256(body).hexdigest()[:12] for body in wire.raw_bodies]}")
         self.assertEqual(run.result.returncode, 0, detail + "\n" + run.stdout[-500:])
         self.assertEqual([row["body"].encode() for row in wires], wire.raw_bodies, detail)
@@ -430,9 +418,19 @@ class AnthropicWireTests(unittest.TestCase):
         for row in responses:
             if row.get("settled_usd") is not None:
                 self.assertAlmostEqual(row["settled_usd"], settles[row["id"]], msg=detail)
+                # Pi prices from the same catalog the ledger is checked against.
+                self.assertAlmostEqual(row["pi_cost_usd"], row["settled_usd"], places=12, msg=detail)
         journal_text = (run.directory / "trace-journal.jsonl").read_text().lower()
         for marker in ("offline-test", "x-api-key", "authorization"):
             self.assertNotIn(marker, journal_text, f"trace journal contains {marker}; {detail}")
+        if not LIVE_LANGFUSE:
+            return
+
+        observations = _wait_for_trace(run.run_id, started, pad, text)
+        generations = [row for row in observations if row.get("name") == "LLM Call"]
+        detail += (f" generations={len(generations)} tools={sum(row.get('type') == 'TOOL' for row in observations)} "
+                   f"traces={sorted({row.get('traceId') for row in observations})}")
+        for marker in ("offline-test", "x-api-key", "authorization"):
             for generation in generations:
                 self.assertNotIn(marker, str(generation.get("input") or "").lower(),
                                  f"Langfuse input contains {marker}; {detail}")

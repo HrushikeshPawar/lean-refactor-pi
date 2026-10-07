@@ -7,7 +7,7 @@ import { dirname, resolve, relative, sep } from "node:path";
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { BudgetModel } from "./budget.ts";
-import { BUDGET_PROVIDER, budgetLimits, cacheAlarm, cacheUtilization, isBudgetModel, MAX_REQUEST_OUTPUT_TOKENS, MODELS, permitFinalPayload, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
+import { BUDGET_PROVIDER, budgetLimits, cacheAlarm, catalogPriceProblem, cacheUtilization, isBudgetModel, MAX_REQUEST_OUTPUT_TOKENS, MODELS, permitFinalPayload, priceForUsage, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
 
 const root = resolve(import.meta.dirname, "../../..");
 const workspaces = resolve(root, "workspaces");
@@ -42,7 +42,8 @@ async function consumeBody(body: BodyInit): Promise<{ bytes: Uint8Array; replace
     const bytes = Buffer.concat(chunks);
     return { bytes, replacement: bytes };
   }
-  return { bytes: new Uint8Array() };
+  // An unread body would leave the request without its byte-exact journal row.
+  throw new Error(`Arena cannot journal a provider request body of type ${Object.prototype.toString.call(body)}`);
 }
 
 async function readRequestBody(input: RequestInfo | URL, init?: RequestInit): Promise<{ bytes: Uint8Array; input: RequestInfo | URL; init?: RequestInit }> {
@@ -244,6 +245,8 @@ export default function arenaExtension(pi: ExtensionAPI) {
           physical.maxTokens > MODELS[model.id].maxTokens) {
         throw new Error(`Arena budget reservation is outdated for ${model.id}`);
       }
+      const priceProblem = catalogPriceProblem(model.id, physical.cost);
+      if (priceProblem) throw new Error(priceProblem);
       const { apiKey: _guardKey, headers: _guardHeaders, env: _guardEnv, ...rest } = options ?? {};
       const innerFetch = rest.fetch ?? globalThis.fetch;
       return runtime.streamSimple(physical, context, {
@@ -293,6 +296,8 @@ export default function arenaExtension(pi: ExtensionAPI) {
         if (physical.contextWindow > limits.contextWindow || physical.maxTokens > limits.maxTokens) {
           throw new Error(`Arena budget reservation is outdated for ${id}`);
         }
+        const priceProblem = catalogPriceProblem(id, physical.cost);
+        if (priceProblem) throw new Error(priceProblem);
         return { model: guarded, thinkingLevel: request.thinkingLevel };
       },
     });
@@ -333,7 +338,10 @@ export default function arenaExtension(pi: ExtensionAPI) {
           cache_read: usage.cacheRead ?? 0, cache_write: usage.cacheWrite ?? 0 },
         ledger_components_usd: usageCostParts(usage, model),
         pi_embedded_cost_usd: usage.cost?.total ?? null });
-      appendTrace({ ...delivered, settled_usd: usd, pi_cost_usd: usage.cost?.total ?? null,
+      // Pi prices the same usage from its catalog, which `catalogPriceProblem` keeps equal to
+      // the ledger, except Luna's conservative high tier, which only the ledger applies.
+      const priceTier = model === "gpt-6-luna" && priceForUsage(usage, model) === MODELS["gpt-6-luna"].highPrice ? "high" : "base";
+      appendTrace({ ...delivered, settled_usd: usd, price_tier: priceTier, pi_cost_usd: usage.cost?.total ?? null,
         usage: { input: usage.input ?? 0, output: usage.output ?? 0,
           cache_read: usage.cacheRead ?? 0, cache_write: usage.cacheWrite ?? 0 } });
       const alarm = cacheAlarm(usage, costEvents().filter(item => item.kind === "settle" && item.usage_known === true).length);

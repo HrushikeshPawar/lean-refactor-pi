@@ -17,8 +17,10 @@ export function budgetLimits(env: NodeJS.ProcessEnv = process.env): BudgetLimits
 type Usage = { input: number; output: number; cacheRead: number; cacheWrite: number };
 type Price = { input: number; output: number; cacheRead: number; cacheWrite: number };
 
-// OpenCode Go prices per million tokens. Luna's higher tier applies only when
-// the billed prompt (new input plus cache read/write) exceeds 272K tokens.
+// OpenCode Go prices per million tokens, as Pi's opencode-go catalog bills them;
+// `catalogPriceProblem` refuses a session when the two disagree. Luna's higher
+// tier applies only when the billed prompt (new input plus cache read/write)
+// exceeds 272K tokens; Pi's catalog has no tier, so the ledger stays conservative.
 export const MODELS = {
   "gpt-6-luna": {
     price: { input: 0.10, output: 0.50, cacheRead: 0.01, cacheWrite: 0.125 },
@@ -33,7 +35,7 @@ export const MODELS = {
     maxTokens: 131_072,
   },
   "deepseek-v4.1-flash": {
-    price: { input: 0.30, output: 1.20, cacheRead: 0.006, cacheWrite: 0 },
+    price: { input: 0.15, output: 0.60, cacheRead: 0.003, cacheWrite: 0 },
     contextWindow: 1_000_000,
     maxTokens: 384_000,
   },
@@ -43,6 +45,16 @@ export type BudgetModel = keyof typeof MODELS;
 
 export function isBudgetModel(model: string): model is BudgetModel {
   return Object.hasOwn(MODELS, model);
+}
+
+/** Why Pi's catalog price for `model` is not the ledger's base price, or undefined. */
+export function catalogPriceProblem(model: BudgetModel, cost: Partial<Price> | undefined): string | undefined {
+  const price = MODELS[model].price;
+  const differs = (Object.keys(price) as Array<keyof Price>)
+    .filter(key => typeof cost?.[key] !== "number" || Math.abs(cost[key]! - price[key]) > 1e-12);
+  return differs.length
+    ? `Arena price table differs from Pi's catalog for ${model}: ${differs.map(key => `${key} ${cost?.[key]} != ${price[key]}`).join(", ")}`
+    : undefined;
 }
 
 export function usageCost(usage: Usage, model: BudgetModel): number {
