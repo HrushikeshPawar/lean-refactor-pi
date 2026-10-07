@@ -1272,6 +1272,67 @@ def _full_check_status(history: list[dict], candidate_id: str) -> str | None:
     return f"queued: the other {total - 1} version(s) are checked in the background"
 
 
+# Results compiled ahead of time for the current batch, keyed by normalized draft text.
+_PRECOMPILED: ContextVar[dict[str, dict]] = ContextVar("arena_precompiled_probes", default={})
+PROBE_GB = 2.0  # one Lean process compiling a Mathlib-sized file
+PROBE_WORKERS = 4
+
+
+def _probe_workers(count: int) -> int:
+    """Concurrent compiles for a batch: bounded by CPUs, free memory and four; 1 if unmeasurable."""
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemAvailable:"):
+                fit = int(int(line.split()[1]) / 1024 / 1024 // PROBE_GB)
+                return max(1, min(PROBE_WORKERS, count, os.cpu_count() or 1, fit))
+    except (OSError, ValueError):
+        pass
+    return 1
+
+
+def _compile_probe(name: str, row: dict, proof: str) -> dict:
+    """Compile one draft. A complete draft is compiled exactly as a fast evaluation would be,
+    so if it passes it becomes a candidate without another compile."""
+    complete = not _has_hole(row, proof)
+    try:
+        return evaluate(name, proof, "fast" if complete else "probe")
+    except (ValueError, FileNotFoundError) as error:
+        return {"ok": False, "mode": "probe", "error": str(error), "compat": {}}
+
+
+def _compile_probes(name: str, directory: Path, drafts: list[str]) -> dict[str, dict]:
+    """Compile the batch's new, distinct drafts concurrently under one hold of the model Lean lane.
+
+    Nothing is recorded here. `probe` records outcomes in draft order afterwards, so IDs and
+    parents match sequential execution. Drafts that cannot be prepared are left for `probe` to
+    reject with its usual error.
+    """
+    history = events(directory)
+    row = problem(name)
+    known = set(_candidate_ids(history)) | {item["proof_id"] for item in history if item.get("kind") == "probe"}
+    pending: dict[str, str] = {}
+    for draft in drafts:
+        try:
+            proof = normalize_draft(name, draft)
+            validate_proof(row, proof, allow_sorry=True)
+        except ValueError:
+            continue
+        if hashlib.sha256((name + "\0" + proof).encode()).hexdigest() not in known:
+            pending.setdefault(proof, proof)
+    if not pending:
+        return {}
+    compiled: dict[str, dict] = {}
+    with lean_lock(directory):
+        with ThreadPoolExecutor(max_workers=_probe_workers(len(pending))) as pool:
+            futures = {proof: pool.submit(_compile_probe, name, row, proof) for proof in pending}
+            for proof, future in futures.items():
+                try:
+                    compiled[proof] = future.result()
+                except Exception:
+                    continue  # `probe` recompiles this one on its own
+    return compiled
+
+
 def probe(name: str, run_id: str, proof: str, idea_id: str | None = None, parent: str | None = None) -> dict:
     """Compile a draft (sorry allowed) in the shadow project without creating a candidate."""
     proof = normalize_draft(name, proof)
@@ -1296,13 +1357,10 @@ def probe(name: str, run_id: str, proof: str, idea_id: str | None = None, parent
     else:
         validate_proof(row, proof, allow_sorry=True)
         complete = not _has_hole(row, proof)
-        try:
+        result = _PRECOMPILED.get().get(proof)
+        if result is None:
             with lean_lock(directory):
-                # A complete draft is compiled exactly as a fast evaluation would be,
-                # so if it passes it becomes a candidate without another compile.
-                result = evaluate(name, proof, "fast" if complete else "probe")
-        except (ValueError, FileNotFoundError) as error:
-            result = {"ok": False, "mode": "probe", "error": str(error), "compat": {}}
+                result = _compile_probe(name, row, proof)
         if complete and next(iter((result.get("compat") or {}).values()), {}).get("passed"):
             recorded = record_evaluation(name, run_id, proof, "fast", [parent] if parent else None,
                                          idea_id=idea_id, precomputed=result)
@@ -1343,12 +1401,16 @@ def probe_batch(name: str, run_id: str, drafts: list[str], idea_id: str | None =
     history = events(run_dir(run_id))
     fixed_parent = resolve_candidate_ref(history, parent) if parent else _current(history)
     outcomes = []
-    for index, draft in enumerate(drafts, 1):
-        try:
-            outcome = probe(name, run_id, draft, idea_id, fixed_parent)
-        except (OSError, ValueError, RuntimeError) as error:
-            outcome = {"ok": False, "mode": "probe", "error": " ".join(str(error).split())[:400]}
-        outcomes.append({"index": index, **outcome})
+    token = _PRECOMPILED.set(_compile_probes(name, run_dir(run_id), drafts) if len(drafts) > 1 else {})
+    try:
+        for index, draft in enumerate(drafts, 1):
+            try:
+                outcome = probe(name, run_id, draft, idea_id, fixed_parent)
+            except (OSError, ValueError, RuntimeError) as error:
+                outcome = {"ok": False, "mode": "probe", "error": " ".join(str(error).split())[:400]}
+            outcomes.append({"index": index, **outcome})
+    finally:
+        _PRECOMPILED.reset(token)
     return {"ok": True, "drafts": outcomes}
 
 

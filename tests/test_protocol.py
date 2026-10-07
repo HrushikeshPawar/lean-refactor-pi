@@ -171,6 +171,7 @@ class CampaignCliTests(unittest.TestCase):
         with patch("arena.campaign.events", return_value=[{"kind": "candidate", "candidate_id": candidate_id},
                                                             {"kind": "current", "candidate_id": candidate_id}]), \
              patch("arena.campaign.run_dir", return_value=Path("unused")), \
+             patch("arena.campaign._compile_probes", return_value={}), \
              patch("arena.campaign.probe", side_effect=fake_probe):
             result = campaign.probe_batch(NAME, "unused", ["by exact", "by simp", "by assumption", "by aesop"])
 
@@ -178,6 +179,21 @@ class CampaignCliTests(unittest.TestCase):
         self.assertEqual([item["index"] for item in result["drafts"]], [1, 2, 3, 4])
         with self.assertRaisesRegex(ValueError, "one and four"):
             campaign.probe_batch(NAME, "unused", ["by exact"] * 5)
+
+    def test_probe_batch_compiles_distinct_drafts_once_and_records_in_draft_order(self):
+        compiled = []
+
+        def fake_compile(name, row, proof):
+            compiled.append(proof)
+            return {"ok": True, "mode": "probe", "tokens": 1, "compat": {"v": {"passed": False}}}
+
+        with patch("arena.campaign._compile_probe", side_effect=fake_compile), \
+             patch("arena.campaign._probe_workers", return_value=4), \
+             patch("arena.campaign.lean_lock") as lock:
+            results = campaign._compile_probes(NAME, Path("unused"), ["by exact", "by simp", " by exact", "by exact"])
+        self.assertEqual(len(compiled), 2)
+        self.assertEqual(len(results), 2)
+        self.assertEqual(lock.call_count, 1)
 
     def test_evaluate_rejects_conflicting_references_and_directs_holes_to_probe(self):
         with self.assertRaisesRegex(ValueError, "exactly one"):
