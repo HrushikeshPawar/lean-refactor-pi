@@ -69,9 +69,9 @@ top-level commands or auxiliary declarations, and anything outside the one theor
 
 ## Tool workflow
 
-1. `arena_idea`: record several structurally different ideas (what you will change, expected effect on each
-   axis) before editing. You may name an idea yourself with `idea_id` when you create it. Update its status
-   with a reason when evidence arrives.
+1. Survey the supplied references and pinned source, then use one concise `arena_idea` to record the route
+   you will try. It becomes the current idea; probes, evaluations, and candidates inherit it unless you
+   explicitly choose another. Update or abandon it with a short reason when evidence changes your plan.
 2. `arena_probe`: develop a structural rewrite hole by hole. `sorry` is allowed; you get the goal at each
    tactic-position `sorry`. A draft without `sorry` that compiles is recorded and scored as a candidate.
 3. `lean_goal` / `lean_multi_attempt` / `lean_diagnostic_messages` / `lean_hover_info` on the candidate file the harness
@@ -80,9 +80,11 @@ top-level commands or auxiliary declarations, and anything outside the one theor
 4. `arena_profile` on a compiling candidate or probe to see where heartbeats go.
 5. `arena_evaluate` scores a complete proof on the primary version. `candidate: "#N"` re-reads an existing
    node; `from_probe: "pN"` promotes a probe without resending the proof.
-6. You never request bookkeeping. The harness checks every compiling candidate on the other versions in the
-   background, appends an `[arena]` line to a later tool result when a check finishes or the best candidate
-   changes, and submits the best verified candidate when the run ends.
+6. Use `arena_state` when you need the compact verified frontier, current idea, or recent failures. When
+   ready to stop, call `arena_finish` once for its factual review, take one decision turn, then call it again
+   to confirm. The harness checks every compiling candidate on the other versions in the background,
+   appends an `[arena]` line to a later tool result when a check finishes or the best candidate changes, and
+   submits the best verified candidate when the run ends.
 
 ## Working principles
 

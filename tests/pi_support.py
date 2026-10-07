@@ -28,7 +28,7 @@ class FakeRun:
 
     def __init__(self, steps: list[dict], *extra: str, cap: str = "0.1", env: dict | None = None,
                  run_id: str | None = None, timeout: int = 240, model: str = "gpt-6-luna",
-                 langfuse: bool = False, session: bool = False):
+                 langfuse: bool = False, session: bool = False, theorem: str = NAME):
         self.run_id = run_id or f"test-{uuid.uuid4().hex[:10]}"
         self.directory = run_dir(self.run_id)
         self.work = Path(tempfile.mkdtemp())
@@ -36,7 +36,7 @@ class FakeRun:
         self.script.write_text(json.dumps(steps))
         self.log = self.work / "requests.jsonl"
         self.command = [sys.executable, "tools/run_pi_budgeted.py", "--model", model,
-                        "--theorem", NAME, "--run-id", self.run_id, "--hard-cap-usd", cap,
+                        "--theorem", theorem, "--run-id", self.run_id, "--hard-cap-usd", cap,
                         "--no-mcp", "--test-extension", str(FAKE),
                         *([] if langfuse else ["--no-langfuse"]), *([] if session else ["--no-lean-session"]),
                         *extra]

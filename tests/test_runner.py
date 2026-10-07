@@ -5,7 +5,7 @@ import shutil
 from pathlib import Path
 import unittest
 
-from tests.pi_support import LIVE_LANGFUSE, PI_AVAILABLE, AnthropicWire, FakeRun, message_text
+from tests.pi_support import LIVE_LANGFUSE, NAME, PI_AVAILABLE, AnthropicWire, FakeRun, message_text
 from tools.arena_skill import SKILL_DIR, skill_hash
 
 STOP = [{"text": "done"}]
@@ -260,8 +260,8 @@ class AutomaticChecksTests(unittest.TestCase):
         self.assertIn("Submission: #2 proxy 76.72", run.stdout)
 
 
-ARENA_TOOLS = {"arena_candidate", "arena_declarations", "arena_evaluate", "arena_find", "arena_idea",
-               "arena_probe", "arena_profile", "arena_skill_read", "arena_source"}
+ARENA_TOOLS = {"arena_candidate", "arena_declarations", "arena_evaluate", "arena_find", "arena_finish", "arena_idea",
+               "arena_probe", "arena_profile", "arena_skill_read", "arena_source", "arena_state"}
 LEAN_TOOLS = {f"mcp__arena_lean__{name}" for name in
               ("lean_goal", "lean_diagnostic_messages", "lean_multi_attempt", "lean_local_search", "lean_hover_info")}
 
@@ -546,6 +546,130 @@ class ErrorLoopAndContinuationTests(unittest.TestCase):
         self.assertIn("i1 Rewrite from scratch", later)
         for advice in ("seed", "scheduled", "Rotate"):
             self.assertNotIn(advice, later.split("Continue proof optimization")[-1])
+
+    def test_state_finish_review_and_confirmation_stop_provider_continuations(self):
+        run = self.fake([
+            cheap_tool("arena_state", {}),
+            cheap_tool("arena_finish", {}),
+            cheap_tool("arena_finish", {}),
+            {"text": "must not be requested"},
+        ], env={"ARENA_AUTOCONTINUE": "1"})
+        self.assertEqual(len(run.requests), 3, run.stdout)
+        state_text = tool_texts(run.requests[1], "arena_state")[0]
+        self.assertIn('"best_verified"', state_text)
+        self.assertNotIn('"hypothesis"', state_text)
+        review = tool_texts(run.requests[2], "arena_finish")[0]
+        self.assertIn('"phase":"review"', review)
+        self.assertIn('"reminder"', review)
+        confirmation = next(row["text"] for row in run.jsonl("trace-journal.jsonl")
+                            if row.get("kind") == "tool_result" and row.get("name") == "arena_finish"
+                            and '"phase":"confirmed"' in row.get("text", ""))
+        self.assertIn('"phase":"confirmed"', confirmation)
+        self.assertEqual(run.json("summary.json")["stop_reason"], "finished")
+        self.assertEqual(len([row for row in run.jsonl("cost-ledger.jsonl")
+                              if row.get("kind") == "control" and row.get("stop") == "finished"]), 1)
+
+    def test_search_first_discovery_is_not_stalled_and_identical_reads_cannot_extend_run(self):
+        reads = [cheap_tool("arena_source", {"handle": SOURCE["handle"], "first": line, "last": line})
+                 for line in range(950, 969)]
+        repeated = cheap_tool("arena_source", {"handle": SOURCE["handle"], "first": 950, "last": 950})
+        run = self.fake(reads + [{"text": "first final"}, repeated, {"text": "second final"},
+                                 repeated, {"text": "third final"}, {"text": "must not be requested"}],
+                        env={"ARENA_AUTOCONTINUE": "1"})
+        controls = [row for row in run.jsonl("cost-ledger.jsonl") if row.get("kind") == "control"]
+        self.assertEqual(controls[-1]["stop"], "no_work_fallback")
+        self.assertEqual(controls[-1]["no_work_turns"], 2)
+        self.assertFalse(any(row.get("stop") == "no_work_fallback" for row in controls[:-1]))
+        self.assertEqual(len(run.requests), len(reads) + 5)
+
+    def test_qwen_search_first_replay_allows_nineteen_source_requests_before_fallback(self):
+        reads = [{"tool": "arena_source", "input": {"handle": SOURCE["handle"], "first": line, "last": line}}
+                 for line in range(950, 969)]
+        repeated = {"tool": "arena_source", "input": {"handle": SOURCE["handle"], "first": 950, "last": 950}}
+        wire = AnthropicWire(reads + [{"text": "first final"}, repeated, {"text": "second final"},
+                                      repeated, {"text": "third final"}, {"text": "must not be requested"}])
+        self.addCleanup(wire.close)
+        run = FakeRun([], "--thinking", "low", model="qwen3.8-flash",
+                      env={"ARENA_FAKE_WIRE_URL": wire.url})
+        self.runs.append(run)
+        run.run()
+        controls = [row for row in run.jsonl("cost-ledger.jsonl") if row.get("kind") == "control"]
+        self.assertEqual(run.result.returncode, 0, run.stdout + run.result.stderr[-2000:])
+        self.assertEqual(controls[-1]["stop"], "no_work_fallback")
+        self.assertEqual(controls[-1]["no_work_turns"], 2)
+        self.assertFalse(any(row.get("stop") == "no_work_fallback" for row in controls[:-1]))
+        self.assertEqual(len(wire.payloads), len(reads) + 5)
+        self.assertEqual({payload["model"] for payload in wire.payloads}, {"qwen3.8-flash"})
+
+    def test_failed_skeleton_is_an_attempt_and_does_not_remind_or_abandon_idea(self):
+        from arena.campaign import problem
+        row = problem("Core.InitsUpdatesComm")
+        run = self.fake([
+            cheap_tool("arena_idea", {"title": "Restructure the induction"}),
+            cheap_tool("arena_probe", {"proof": row["statement"] + " := by\n  sorry"}),
+            cheap_tool("arena_finish", {}),
+            cheap_tool("arena_finish", {}),
+        ])
+        review = next(json.loads(row["text"]) for row in run.jsonl("trace-journal.jsonl")
+                      if row.get("kind") == "tool_result" and row.get("name") == "arena_finish"
+                      and '"phase":"review"' in row.get("text", ""))
+        self.assertEqual(review["reminder"], None)
+        self.assertEqual(review["current_idea"]["attempts"], 1)
+        self.assertEqual(review["current_idea"]["status"], "active")
+
+    def test_batch_probe_turns_count_as_proof_attempts(self):
+        from arena.campaign import problem
+        statement = problem(NAME)["statement"]
+        turns = []
+        for index in range(3):
+            drafts = [statement + f" := by\n  {'skip; ' * (index * 2 + k)}sorry" for k in range(2)]
+            turns += [cheap_tool("arena_probe", {"drafts": drafts}), {"text": f"final {index}"}]
+        run = self.fake(turns, env={"ARENA_AUTOCONTINUE": "1"})
+        controls = [row for row in run.jsonl("cost-ledger.jsonl") if row.get("kind") == "control"]
+        self.assertTrue(controls, run.stdout)
+        self.assertTrue(all(row["proof_attempt"] for row in controls[:3]), controls)
+        self.assertFalse(any(row.get("stop") == "no_work_fallback" for row in controls[:3]), controls)
+
+
+@unittest.skipUnless(PI_AVAILABLE, "pi and the Strata fixture are required")
+class FinishReplayTests(unittest.TestCase):
+    FIXTURES = Path(__file__).resolve().parent / "fixtures/arena_finish_replays"
+
+    def setUp(self):
+        self.runs = []
+
+    def tearDown(self):
+        for run in self.runs:
+            run.cleanup()
+
+    def test_historical_first_finals_keep_later_verified_candidates(self):
+        replays = [
+            ("Luna r2", "Core.InitsUpdatesComm", "gpt-6-luna", "luna-r2-first.lean",
+             "luna-r2-later.lean", (155, 361, 74.11)),
+            ("Qwen CSLib", "Cslib.CCS.bisimilarity_congr_choice", "gpt-6-luna",
+             "qwen-cslib-first.lean", "qwen-cslib-later.lean", (139, 358, 78.45)),
+        ]
+        for label, theorem, model, first, later, expected in replays:
+            with self.subTest(replay=label):
+                run = FakeRun([
+                    cheap_tool("arena_evaluate", {"proof": (self.FIXTURES / first).read_text()}),
+                    cheap_tool("arena_finish", {}),
+                    cheap_tool("arena_evaluate", {"proof": (self.FIXTURES / later).read_text()}),
+                    cheap_tool("arena_finish", {}),
+                ], theorem=theorem, model=model, session=True, timeout=1200)
+                self.runs.append(run)
+                run.run()
+                self.assertEqual(run.result.returncode, 0, run.stdout + run.result.stderr[-2000:])
+                submission = run.json("submission.json")
+                self.assertEqual(submission["candidate"], "#3", run.stdout)
+                self.assertEqual((submission["tokens"], submission["heartbeats"], submission["proxy"]), expected)
+                phases = [row.get("phase") for row in run.jsonl("cost-ledger.jsonl")
+                          if row.get("kind") == "finish"]
+                self.assertEqual(phases.count("review"), 1)
+                self.assertEqual(phases.count("confirmed"), 1)
+                self.assertEqual(run.json("summary.json")["progress"]["best_verified_candidate"],
+                                 {"candidate": "#3", "tokens": expected[0],
+                                  "heartbeats": expected[1], "proxy": expected[2]})
 
 
 @unittest.skipUnless(PI_AVAILABLE, "pi and the Strata fixture are required")

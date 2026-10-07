@@ -150,6 +150,16 @@ export default function arenaExtension(pi: ExtensionAPI) {
   let plateau = 0;
   let errorStreak = 0;
   let previousProgress = "";
+  let finishReviewIssued = false;
+  let finishReminderIssued = false;
+  let finishConfirmed = false;
+  let finishReviewTurn = false;
+  let noWorkTurns = 0;
+  let turnHadProofAttempt = false;
+  let turnHadNovelContext = false;
+  let turnHadVerifiedImprovement = false;
+  let previousVerified: Record<string, any> | null | undefined;
+  const discoveries = new Set<string>();
   let readEntries: (() => SessionEntry[]) | undefined;
   let modelRegistry: ExtensionContext["modelRegistry"] | undefined;
 
@@ -201,6 +211,44 @@ export default function arenaExtension(pi: ExtensionAPI) {
     if (!item) return "none";
     const score = item.proxy !== undefined ? `proxy ${item.proxy}` : `est. ${item.estimated_proxy}`;
     return `${item.candidate} ${score} (${item.tokens} tok, ${item.heartbeats} HB)`;
+  }
+  function payloadFromToolResult(result: any): Record<string, any> | undefined {
+    // The JSON payload is the first text part; a later `[arena]` status part must not hide it.
+    const text = result?.content?.find((part: any) => part?.type === "text")?.text;
+    if (!text) return undefined;
+    try {
+      const payload = JSON.parse(text);
+      return payload && typeof payload === "object" ? payload : undefined;
+    } catch { return undefined; }
+  }
+  function discoveryKeys(toolName: string, payload: Record<string, any> | undefined): string[] {
+    if (!payload || payload.ok === false) return [];
+    const keys: string[] = [];
+    if (toolName === "arena_declarations") {
+      const rows = payload.items ?? payload.declarations ?? payload.results ?? [];
+      for (const row of rows) if (row && ["declaration", "local"].includes(row.kind) &&
+        (row.name || row.handle || row.input)) {
+        keys.push(`decl:${row.name ?? row.handle ?? row.input}:${row.source ?? row.body ?? row.type ?? ""}`);
+      }
+    } else if (toolName === "arena_find") {
+      for (const row of payload.results ?? []) if (row && (row.name || row.handle)) keys.push(`decl:${row.name ?? row.handle}:${row.signature ?? ""}`);
+    } else if (toolName === "arena_source") {
+      keys.push(`source:${payload.handle ?? payload.path ?? ""}:${payload.first ?? ""}:${payload.last ?? ""}:${payload.text ?? payload.source ?? ""}`);
+    } else if (toolName.endsWith("lean_goal")) {
+      keys.push(`goal:${JSON.stringify(payload.goals ?? payload)}`);
+    }
+    return keys;
+  }
+  function verifiedImproved(current: Record<string, any> | null | undefined,
+                            previous: Record<string, any> | null | undefined): boolean {
+    if (!current) return false;
+    // undefined: nothing observed yet this session; null: no verified candidate before this turn.
+    if (previous === undefined) return false;
+    if (previous === null) return true;
+    const scoreBetter = current.proxy != null && (previous.proxy == null || current.proxy > previous.proxy);
+    const tokensBetter = current.tokens != null && (previous.tokens == null || current.tokens < previous.tokens);
+    const heartbeatsBetter = current.heartbeats != null && (previous.heartbeats == null || current.heartbeats < previous.heartbeats);
+    return scoreBetter || tokensBetter || heartbeatsBetter;
   }
   function stateLine(state: Record<string, any>, force = false): string | undefined {
     const updates = (state.updates ?? []).filter((item: any) => item.seq > deliveredSeq);
@@ -285,6 +333,20 @@ export default function arenaExtension(pi: ExtensionAPI) {
     plateau = Number(latest?.plateau ?? 0);
     errorStreak = Number(latest?.error_streak ?? 0);
     previousProgress = String(latest?.progress ?? "");
+    const finishEvents = costEvents().filter(item => item.kind === "finish");
+    finishReviewIssued = finishEvents.some(item => item.phase === "review" || item.phase === "reminder");
+    finishReminderIssued = finishEvents.some(item => item.phase === "reminder");
+    finishConfirmed = finishEvents.some(item => item.phase === "confirmed");
+    noWorkTurns = Number(latest?.no_work_turns ?? 0);
+    finishReviewTurn = false;
+    turnHadProofAttempt = false;
+    turnHadNovelContext = false;
+    turnHadVerifiedImprovement = false;
+    previousVerified = undefined;
+    discoveries.clear();
+    for (const item of costEvents()) if (item.kind === "discovery" && typeof item.signature === "string") {
+      discoveries.add(item.signature);
+    }
     fixedRequestShape = undefined;
     gateStopReason = undefined;
   });
@@ -312,6 +374,18 @@ export default function arenaExtension(pi: ExtensionAPI) {
       }
       const priceProblem = catalogPriceProblem(model.id, physical.cost);
       if (priceProblem) throw new Error(priceProblem);
+      if (finishConfirmed || (process.env.ARENA_AUTOCONTINUE === "1" && noWorkTurns >= 2)) {
+        const stopped = createAssistantMessageEventStream();
+        const zeroCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+        const message = { role: "assistant" as const, content: [], api: model.api,
+          provider: physical.provider, model: physical.id,
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: zeroCost },
+          stopReason: "stop" as const, timestamp: Date.now() };
+        stopped.push({ type: "start", partial: { ...message, content: [] } });
+        stopped.push({ type: "done", reason: "stop", message });
+        stopped.end();
+        return stopped;
+      }
       const { apiKey: _guardKey, headers: _guardHeaders, env: _guardEnv, ...rest } = options ?? {};
       const innerFetch = rest.fetch ?? globalThis.fetch;
       return guardMalformedToolArguments(runtime.streamSimple(physical, context, {
@@ -596,8 +670,28 @@ export default function arenaExtension(pi: ExtensionAPI) {
   });
 
   pi.on("tool_execution_end", event => {
-    if (!openAttempt) return;
     const result = event.result as { content?: Array<{ type?: string; text?: string }> } | undefined;
+    const payload = payloadFromToolResult(result);
+    if (event.toolName === "arena_probe" || event.toolName === "arena_evaluate") {
+      const attempted = (item: any) => Boolean(item && item.ok !== false &&
+        (item.candidate || item.probe || item.candidate_id || item.compat));
+      turnHadProofAttempt ||= Boolean(payload && payload.ok !== false &&
+        (attempted(payload) || (payload.drafts ?? []).some(attempted)));
+    }
+    const keys = discoveryKeys(event.toolName, payload);
+    if (event.toolName.endsWith("lean_goal") && !payload) {
+      const goalText = (result?.content ?? []).filter(part => part?.type === "text")
+        .map(part => part.text ?? "").join("\n").trim();
+      if (goalText) keys.push(`goal:${goalText}`);
+    }
+    for (const key of keys) {
+      const signature = createHash("sha256").update(key).digest("hex");
+      if (discoveries.has(signature)) continue;
+      turnHadNovelContext = true;
+      discoveries.add(signature);
+      appendCost({ kind: "discovery", signature, tool: event.toolName });
+    }
+    if (!openAttempt) return;
     const text = Array.isArray(result?.content)
       ? result.content.filter(part => part?.type === "text" && part.text).map(part => part.text).join("\n")
       : "";
@@ -768,6 +862,62 @@ export default function arenaExtension(pi: ExtensionAPI) {
   });
 
   pi.registerTool({
+    name: "arena_state", label: "Arena run state",
+    description: "Show the best verified candidate, pinned original baseline, leading unchecked result, active idea with attempt count, and recent failures. Read-only and concise; no title or hypothesis is needed.",
+    parameters: Type.Object({}),
+    async execute() {
+      const [checks, portfolio] = await Promise.all([campaign("state"), campaign("frontier")]);
+      if (checks.ok === false) return reply(checks);
+      if (portfolio.ok === false) return reply(portfolio);
+      return reply({ ok: true, best_verified: checks.best, baseline: checks.baseline,
+        leading_unverified: checks.leading_unverified, checking: checks.checking,
+        current_idea: portfolio.current_idea, recent_failures: portfolio.recent_failures });
+    },
+  });
+
+  pi.registerTool({
+    name: "arena_finish", label: "Review and finish the Arena run",
+    description: "First call returns one factual review of the best verified result and current idea, with at most one reminder if that idea has no proof attempt. Call again after the decision turn to confirm stop; finishing is final for this run.",
+    parameters: Type.Object({}),
+    async execute() {
+      if (finishConfirmed) return reply({ ok: true, phase: "confirmed", stop: true });
+      const [checks, portfolio, answer] = await Promise.all([
+        campaign("state"), campaign("frontier"), campaign("submission"),
+      ]);
+      if (checks.ok === false) return reply(checks);
+      if (portfolio.ok === false) return reply(portfolio);
+      if (!finishReviewIssued) {
+        finishReviewIssued = true;
+        finishReviewTurn = true;
+        const idea = portfolio.current_idea ?? null;
+        const reminder = Boolean(idea && idea.attempts === 0 && !finishReminderIssued);
+        if (reminder) finishReminderIssued = true;
+        appendCost({ kind: "finish", phase: "review", current_idea_id: idea?.id ?? null,
+          reminder_issued: reminder });
+        if (reminder) appendCost({ kind: "finish", phase: "reminder", current_idea_id: idea.id });
+        const bestVerified = answer.candidate ? { candidate: answer.candidate, tokens: answer.tokens,
+          heartbeats: answer.heartbeats, proxy: answer.proxy, status: "cold verified" } : checks.best;
+        return reply({ ok: true, phase: "review", best_verified: bestVerified,
+          baseline: checks.baseline, current_idea: idea,
+          reminder: reminder ? `Idea ${idea.id} has no linked proof attempt; probe it or abandon it before finishing.` : null,
+          next: "Make the decision turn, then call arena_finish again to confirm stop." });
+      }
+      finishConfirmed = true;
+      appendCost({ kind: "finish", phase: "confirmed" });
+      const budget = costState();
+      const stop = gateStopReason ? "estimated_request_unaffordable"
+        : budget.spent >= budgetLimits().hardCapUsd ? "actual_usage_cap" : "finished";
+      appendCost({ kind: "control", continuations, plateau, no_work_turns: noWorkTurns,
+        error_streak: errorStreak, progress: previousProgress, stop,
+        ...(gateStopReason ? { gate_stop_reason: gateStopReason } : {}) });
+      const bestVerified = answer.candidate ? { candidate: answer.candidate, tokens: answer.tokens,
+        heartbeats: answer.heartbeats, proxy: answer.proxy, status: "cold verified" } : checks.best;
+      return reply({ ok: true, phase: "confirmed", stop: true, best_verified: bestVerified,
+        baseline: checks.baseline });
+    },
+  });
+
+  pi.registerTool({
     name: "arena_candidate", label: "Restore a candidate or probe",
     description: "Restore node \"#N\" or probe \"pN\" into the Lean scratch project (so lean_goal reads it) and return its exact proof and recorded results.",
     parameters: Type.Object({ candidate: Type.String({ description: "#N or pN" }) }),
@@ -852,28 +1002,50 @@ export default function arenaExtension(pi: ExtensionAPI) {
     // errors back off and eventually stop the run instead of burning continuations.
     const failed = event.outcome !== "completed";
     errorStreak = failed ? errorStreak + 1 : 0;
+    let activity = { proof_attempt: turnHadProofAttempt, novel_context: turnHadNovelContext,
+      verified_improvement: turnHadVerifiedImprovement, finish_review: finishReviewTurn };
     if (!failed) {
       if (progress === previousProgress) plateau += 1;
       else plateau = 0;
       previousProgress = progress;
+      const reviewTurn = finishReviewTurn;
+      finishReviewTurn = false;
+      turnHadVerifiedImprovement ||= verifiedImproved(state.best, previousVerified);
+      activity = { proof_attempt: turnHadProofAttempt, novel_context: turnHadNovelContext,
+        verified_improvement: turnHadVerifiedImprovement, finish_review: reviewTurn };
+      previousVerified = state.best ?? null;
+      if (reviewTurn) noWorkTurns = 0;
+      else if (turnHadProofAttempt || turnHadNovelContext || turnHadVerifiedImprovement) noWorkTurns = 0;
+      else noWorkTurns += 1;
     }
     const stop = gateStopReason ? "estimated_request_unaffordable"
       : budget.spent >= limits.hardCapUsd ? "actual_usage_cap"
+      : finishConfirmed ? "finished"
       : errorStreak >= MAX_ERROR_STREAK ? "error_loop"
       : continuations >= 12 ? "continuation_limit"
+      : noWorkTurns >= 2 ? "no_work_fallback"
       : continuations >= 4 && plateau >= 4 ? "plateau" : null;
+    turnHadProofAttempt = false;
+    turnHadNovelContext = false;
+    turnHadVerifiedImprovement = false;
     if (stop) {
-      appendCost({ kind: "control", continuations, plateau, error_streak: errorStreak, progress, stop,
-        ...(gateStopReason ? { gate_stop_reason: gateStopReason } : {}) });
-      return;
+      const latestControl = costEvents().filter(item => item.kind === "control").at(-1);
+      if (latestControl?.stop !== stop) {
+        appendCost({ kind: "control", continuations, plateau, no_work_turns: noWorkTurns,
+          error_streak: errorStreak, progress, ...activity, stop,
+          ...(gateStopReason ? { gate_stop_reason: gateStopReason } : {}) });
+      }
+      return { continue: false };
     }
     if (failed) {
       const delay = Math.min(30_000, Number(process.env.ARENA_BACKOFF_MS ?? 2000) * 2 ** (errorStreak - 1));
-      appendCost({ kind: "control", continuations, plateau, error_streak: errorStreak, progress, stop: null, backoff_ms: delay });
+      appendCost({ kind: "control", continuations, plateau, no_work_turns: noWorkTurns,
+        error_streak: errorStreak, progress, ...activity, stop: null, backoff_ms: delay });
       await new Promise(done => setTimeout(done, delay));
     } else {
       continuations += 1;
-      appendCost({ kind: "control", continuations, plateau, error_streak: errorStreak, progress, stop: null });
+      appendCost({ kind: "control", continuations, plateau, no_work_turns: noWorkTurns,
+        error_streak: errorStreak, progress, ...activity, stop: null });
     }
     const ideas = (state.ideas ?? []).filter((idea: any) => idea.status === "active")
       .map((idea: any) => `${idea.id} ${idea.title}`);
