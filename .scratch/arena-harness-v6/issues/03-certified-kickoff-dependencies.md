@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** needs-review
 
 **Branch:** `hrushikesh/v6-03-kickoff` (stacked on `hrushikesh/v6-02-spend-gate`)
 
