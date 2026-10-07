@@ -1,6 +1,7 @@
 open Lean Elab Command Meta in
 elab "arena_context " cmd:command : command => do
   let projectRoots : List String := [@@ROOTS@@]
+  let targetName := @@TARGET@@
   let envBefore ← getEnv
   modify fun s => { s with infoState := { s.infoState with enabled := true } }
   let before := (← get).infoState.trees.size
@@ -39,7 +40,7 @@ elab "arena_context " cmd:command : command => do
         | _, _ => pure ()
   | none => pure ()
   let seenGoal ← IO.mkRef (#[] : Array (Nat × Nat))
-  let usedRef ← IO.mkRef (#[] : Array (Lean.Name × Nat))
+  let sourceRefs ← IO.mkRef (#[] : Array (Lean.Name × Nat × Nat))
   let rec visit : Nat → Option ContextInfo → InfoTree → CommandElabM Unit
     | 0, _, _ => pure ()
     | fuel + 1, ctx?, .context pci t => visit fuel (pci.mergeIntoOuter? ctx?) t
@@ -65,11 +66,20 @@ elab "arena_context " cmd:command : command => do
                 emit [("kind", "goal"), ("line", line), ("endLine", endLine), ("text", text)]
           | _, _ => pure ()
         | .ofTermInfo ti =>
-          if ti.stx.isIdent && !ti.isBinder then
+          let sourceAuthored := match ti.stx.getHeadInfo with
+            | .original .. => true
+            | _ => false
+          if ti.stx.isIdent && !ti.isBinder && sourceAuthored then
+            let pos := fm.toPosition (ti.stx.getPos?.getD 0)
             match ti.expr.getAppFn with
-            | .const n _ =>
-              unless (← usedRef.get).any (·.1 == n) do
-                usedRef.modify (·.push (n, (fm.toPosition (ti.stx.getPos?.getD 0)).line))
+            | .const n _ => sourceRefs.modify (·.push (n, pos.line, pos.column))
+            | .fvar id =>
+              match ti.lctx.find? id with
+              | some decl =>
+                let ty ← ctx.runMetaM {} (withLCtx ti.lctx {} do pure (← ppExpr decl.type).pretty)
+                emit [("kind", "local"), ("name", decl.userName.toString), ("line", pos.line),
+                      ("column", pos.column), ("scope", "theorem proof context"), ("type", clip ty 500)]
+              | none => pure ()
             | _ => pure ()
         | _ => pure ()
       for c in cs do visit fuel ctx? c
@@ -99,8 +109,8 @@ elab "arena_context " cmd:command : command => do
         emit [("kind", "type"), ("name", n.toString), ("decl", "def"),
               ("sig", clip (← sigOf n) 400), ("value", clip body 600)]
       | _ => pure ()
-  -- constants the declaration's source mentions
-  for (n, line) in (← usedRef.get) do
+  -- Every resolvable identifier occurrence in the declaration's source.
+  for (n, line, column) in (← sourceRefs.get) do
     let ci? := env.find? n
     match ci? with
     | none => pure ()
@@ -112,8 +122,38 @@ elab "arena_context " cmd:command : command => do
       let modName := match env.getModuleIdxFor? n with
         | none => "this file"
         | some idx => (env.header.moduleNames[idx.toNat]!).toString
-      emit [("kind", "used"), ("name", n.toString), ("line", line), ("decl", decl),
-            ("module", modName), ("sig", clip (← sigOf n) 500)]
+      emit [("kind", "source"), ("name", n.toString), ("line", line), ("column", column),
+            ("decl", decl), ("module", modName), ("sig", clip (← sigOf n) 500)]
+  -- Direct theorem and lemma constants in the elaborated proof term. Keep the full
+  -- constant index available to the cache, but classify generated constants by kind.
+  match env.find? targetName with
+    | some (.thmInfo info) =>
+      for n in info.value.getUsedConstants do
+        let constantDecl := match env.find? n with
+          | some (.thmInfo _) => "theorem" | some (.axiomInfo _) => "theorem"
+          | some (.defnInfo _) => "def" | some (.inductInfo _) => "inductive"
+          | some (.ctorInfo _) => "constructor" | some (.opaqueInfo _) => "opaque"
+          | some (.recInfo _) => "recursor" | _ => "generated/other"
+        let constantModule := match env.getModuleIdxFor? n with
+          | none => "this file"
+          | some idx => (env.header.moduleNames[idx.toNat]!).toString
+        emit [("kind", "constant"), ("name", n.toString), ("decl", constantDecl),
+              ("origin", "elaborated-proof"), ("module", constantModule),
+              ("sig", clip (← sigOf n) 500)]
+        unless n == targetName do
+          match env.find? n with
+          | some (.thmInfo _) => emit [("kind", "dependency"), ("name", n.toString),
+                                        ("decl", "theorem"), ("module", match env.getModuleIdxFor? n with
+                                          | none => "this file"
+                                          | some idx => (env.header.moduleNames[idx.toNat]!).toString),
+                                        ("sig", clip (← sigOf n) 500)]
+          | some (.axiomInfo _) => emit [("kind", "dependency"), ("name", n.toString),
+                                          ("decl", "theorem"), ("module", match env.getModuleIdxFor? n with
+                                            | none => "this file"
+                                            | some idx => (env.header.moduleNames[idx.toNat]!).toString),
+                                          ("sig", clip (← sigOf n) 500)]
+          | _ => pure ()
+    | _ => emit [("kind", "failure"), ("message", s!"Pinned theorem {targetName} did not elaborate as a theorem")]
   -- declarations earlier in this file, nearest first
   let mut earlier : Array (Nat × Lean.Name) := #[]
   for (n, ci) in envBefore.constants.map₂.toList do

@@ -32,9 +32,19 @@ def _cache(kind: str, name: str, commit: str, salt: str) -> Path:
     return ROOT / "runs" / "cache" / kind / f"{re.sub(r'[^A-Za-z0-9_.-]', '_', name)}-{commit[:12]}-{digest}.json"
 
 
-def parse_context(output: str, shift: int, start_line: int) -> dict:
+def _lean_name(name: str) -> str:
+    """Render a qualified Lean name as a syntax-safe Lean expression."""
+    result = "Lean.Name.anonymous"
+    for part in name.split("."):
+        result = f"Lean.Name.str ({result}) {json.dumps(part)}"
+    return result
+
+
+def parse_context(output: str, shift: int, start_line: int, proof_boundary: tuple[int, int] | None = None) -> dict:
     """Group the wrapper's JSON records. `shift` is the instrumentation's line count."""
-    groups: dict[str, list[dict]] = {"goal": [], "used": [], "type": [], "earlier": []}
+    groups: dict[str, list[dict]] = {"goal": [], "used": [], "source": [], "dependency": [], "constant": [],
+                                    "local": [], "failure": [],
+                                    "type": [], "earlier": []}
     complete = False
     for raw in _RECORD.findall(output):
         record = json.loads(raw)
@@ -48,7 +58,73 @@ def parse_context(output: str, shift: int, start_line: int) -> dict:
         item["end_proof_line"] = item["endLine"] - shift - start_line + 1
     for item in groups["used"]:
         item["proof_line"] = item["line"] - shift - start_line + 1
-    return {"complete": complete, **groups}
+    for item in groups["source"]:
+        item["proof_line"] = item["line"] - shift - start_line + 1
+        if proof_boundary is not None:
+            item["origin"] = ("proof" if (item["proof_line"], item.get("column", 0)) >= proof_boundary else "statement")
+    for item in groups["dependency"]:
+        item["origin"] = "elaborated-proof"
+    for item in groups["constant"]:
+        item["kind"] = item.pop("decl", "generated/other")
+    for item in groups["local"]:
+        item["proof_line"] = item["line"] - shift - start_line + 1
+    return {"complete": complete and not groups["failure"], **groups}
+
+
+def constant_index(context: dict, name: str | None = None, kind: str | None = None,
+                   origin: str | None = None) -> list[dict]:
+    """Query the full elaborated constant inventory by qualified name, kind and origin."""
+    items = context.get("constant", [])
+    return [item for item in items if (name is None or item["name"] == name)
+            and (kind is None or item["kind"] == kind)
+            and (origin is None or item["origin"] == origin)]
+
+
+def _proof_boundary(source: str, start_line: int) -> tuple[int, int] | None:
+    """Find the first top-level-looking `:=` in a theorem source, ignoring comments/strings."""
+    i = 0
+    depth = 0
+    block = 0
+    in_string = False
+    while i < len(source) - 1:
+        if block:
+            if source.startswith("/-", i):
+                block += 1
+                i += 2
+            elif source.startswith("-/", i):
+                block -= 1
+                i += 2
+            else:
+                i += 1
+            continue
+        if in_string:
+            if source[i] == "\\":
+                i += 2
+            elif source[i] == '"':
+                in_string = False
+                i += 1
+            else:
+                i += 1
+            continue
+        if source.startswith("/-", i):
+            block, i = 1, i + 2
+        elif source.startswith("--", i):
+            end = source.find("\n", i)
+            i = len(source) if end < 0 else end + 1
+        elif source[i] == '"':
+            in_string, i = True, i + 1
+        elif source[i] in "([{":
+            depth += 1
+            i += 1
+        elif source[i] in ")]}":
+            depth = max(0, depth - 1)
+            i += 1
+        elif depth == 0 and source.startswith(":=", i):
+            prefix = source[:i]
+            return (start_line + prefix.count("\n"), len(prefix.rsplit("\n", 1)[-1]))
+        else:
+            i += 1
+    return None
 
 
 def lean_context(name: str) -> dict:
@@ -60,16 +136,18 @@ def lean_context(name: str) -> dict:
     if cache.exists():
         return json.loads(cache.read_text())
     roots = "" if is_standalone(row) else ", ".join(json.dumps(part) for part in sorted({row["file_path"].split("/")[0]}))
-    inserted = source.replace("@@ROOTS@@", roots)
+    inserted = source.replace("@@ROOTS@@", roots).replace("@@TARGET@@", _lean_name(name))
     built = candidate_file(row, row["src"], version, commit)
     text = built["text"][:built["head"]] + inserted + built["text"][built["head"]:]
     ran = run_lean(row, built["path"], text)
     if ran is None:
         return {"error": "Lean timed out while collecting context"}
     returncode, output = ran
-    parsed = parse_context(output, inserted.count("\n"), built["start_line"])
+    parsed = parse_context(output, inserted.count("\n"), built["start_line"],
+                           _proof_boundary(row["src"], 1))
     if not parsed["complete"]:
-        reason = next((line for line in output.splitlines() if "error" in line), "no context records")
+        reason = (parsed["failure"][0].get("message") if parsed["failure"] else
+                  next((line for line in output.splitlines() if "error" in line), "no context records"))
         return {"error": reason[:200]}
     cache.parent.mkdir(parents=True, exist_ok=True)
     cache.write_text(json.dumps(parsed, ensure_ascii=False, indent=1))

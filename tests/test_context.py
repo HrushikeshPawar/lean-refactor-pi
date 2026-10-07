@@ -24,6 +24,48 @@ class ParseTests(unittest.TestCase):
         self.assertEqual((parsed["goal"][0]["proof_line"], parsed["goal"][0]["end_proof_line"]), (11, 12))
         self.assertEqual(parsed["used"][0]["proof_line"], 13)
 
+    def test_occurrences_keep_position_and_origin_and_dependencies_stay_separate(self):
+        output = "\n".join([
+            'ARENA_CTX ' + json.dumps({"kind": "source", "name": "A.foo", "line": 4, "origin": "statement", "decl": "theorem", "module": "A", "sig": "A.foo : True"}),
+            'ARENA_CTX ' + json.dumps({"kind": "source", "name": "A.foo", "line": 8, "origin": "proof", "decl": "theorem", "module": "A", "sig": "A.foo : True"}),
+            'ARENA_CTX ' + json.dumps({"kind": "dependency", "name": "B.helper", "decl": "theorem", "module": "B", "sig": "B.helper : True"}),
+            'ARENA_CTX ' + json.dumps({"kind": "end"}),
+        ])
+        parsed = context.parse_context(output, 0, 1)
+        self.assertEqual([item["origin"] for item in parsed["source"]], ["statement", "proof"])
+        self.assertEqual([item["proof_line"] for item in parsed["source"]], [4, 8])
+        self.assertEqual(parsed["dependency"][0]["name"], "B.helper")
+
+    def test_source_occurrence_origin_uses_the_boundary_even_on_one_line(self):
+        output = "\n".join([
+            'ARENA_CTX ' + json.dumps({"kind": "source", "name": "A.foo", "line": 1, "column": 12}),
+            'ARENA_CTX ' + json.dumps({"kind": "source", "name": "A.bar", "line": 1, "column": 28}),
+            'ARENA_CTX ' + json.dumps({"kind": "end"}),
+        ])
+        parsed = context.parse_context(output, 0, 1, (1, 20))
+        self.assertEqual([item["origin"] for item in parsed["source"]], ["statement", "proof"])
+
+    def test_constant_index_filters_all_dimensions(self):
+        inventory = {"constant": [
+            {"name": "A.foo", "kind": "theorem", "origin": "elaborated-proof"},
+            {"name": "A.Bar.mk", "kind": "constructor", "origin": "elaborated-proof"},
+        ]}
+        self.assertEqual(context.constant_index(inventory, kind="theorem")[0]["name"], "A.foo")
+        self.assertEqual(context.constant_index(inventory, name="A.foo", origin="elaborated-proof")[0]["kind"],
+                         "theorem")
+
+    def test_proof_boundary_ignores_comments_and_nested_type_syntax(self):
+        self.assertEqual(context._proof_boundary("theorem x : (let y := 1; y = 1) := by trivial", 1), (1, 32))
+
+    def test_manifest_reports_required_sections_and_certification_fails_closed(self):
+        inventory = {"source": [], "dependency": [], "complete": True}
+        rendered = context.packet_manifest([("Pinned environment and candidate", ["Lean x"]),
+                                            ("Source-named declarations", [])], inventory)
+        self.assertEqual(rendered["sections"]["Pinned environment and candidate"],
+                         {"expected": True, "present": True})
+        self.assertFalse(context.certify_manifest(rendered, ["Pinned environment and candidate",
+                                                              "Elaborated proof dependencies"])["certified"])
+
     def test_incomplete_output_is_not_trusted(self):
         self.assertFalse(context.parse_context("ARENA_CTX " + json.dumps({"kind": "goal", "line": 1, "endLine": 1, "text": ""}), 0, 1)["complete"])
 
@@ -57,8 +99,16 @@ class FixturePacketTests(unittest.TestCase):
     def test_earlier_lemmas_and_used_constants_include_namespaced_and_library_names(self):
         self.assertIn("Core.InitStatesSomeMonotone", self.text)
         self.assertIn("List.unzip_zip", self.text)
-        self.assertIn("Exists.intro", self.text)
-        self.assertIn("[theorem · this file] Core.updatedStatesInit", self.text)
+        self.assertIn("Core.updatedStatesInit [theorem]", self.text)
+
+    def test_pinned_constant_index_keeps_elaborated_constructor_queryable(self):
+        indexed = context.constant_index(context.lean_context(NAME), name="Exists.intro",
+                                         kind="constructor", origin="elaborated-proof")
+        self.assertEqual(len(indexed), 1)
+
+    def test_source_occurrences_can_appear_in_both_statement_and_proof(self):
+        items = [item for item in context.lean_context(NAME)["source"] if item["name"] == "Core.updatedStates"]
+        self.assertEqual({item["origin"] for item in items}, {"statement", "proof"})
 
     def test_goal_trace_profile_and_exchange_rates_are_present(self):
         self.assertIn("-- before proof line 11", self.text)
@@ -88,7 +138,8 @@ class PortabilityTests(unittest.TestCase):
             if not (ROOT / "workspaces" / f"strata-{version}").is_dir():
                 continue
             built = candidate_file(row, row["src"], version, commit)
-            sources = {"context": context.LEAN_FILE.read_text().replace("@@ROOTS@@", '"Strata"'),
+            sources = {"context": context.LEAN_FILE.read_text().replace("@@ROOTS@@", '"Strata"')
+                       .replace("@@TARGET@@", context._lean_name(NAME)),
                        "profile": profiler.preamble(profiler.MAX_DEPTH)}
             for label, inserted in sources.items():
                 text = built["text"][:built["offset"]] + inserted + built["text"][built["offset"]:]
