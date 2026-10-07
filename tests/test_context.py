@@ -150,6 +150,32 @@ class PortabilityTests(unittest.TestCase):
         self.assertGreaterEqual(ran, 1)
 
 
+@unittest.skipUnless((ROOT / "workspaces/physlib-v4.32.0").is_dir(), "PhysLib fixture environment is not provisioned")
+class PhyslibInventoryTests(unittest.TestCase):
+    name = "fundamental_theorem_of_variational_calculus'"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.context = context.lean_context(cls.name)
+        cls.packet = context.render_packet(cls.name)
+
+    def test_every_source_and_additional_proof_name_survives_bounded_packet_fitting(self):
+        source_names = {item["name"] for item in self.context["source"]}
+        dependency_names = {item["name"] for item in self.context["dependency"]}
+        for name in source_names | dependency_names:
+            self.assertIn(name, self.packet, name)
+        self.assertLessEqual(len(self.packet), context.MAX_PACKET_CHARS + 1)
+        self.assertIn("Source names:", self.packet)
+        self.assertIn("Extra direct theorem/lemma dependencies:", self.packet)
+
+    def test_constant_index_and_packet_are_stable_for_the_same_pin(self):
+        all_constants = context.constant_index(self.context)
+        self.assertTrue(all_constants)
+        self.assertTrue(all(item["origin"] == "elaborated-proof" and item.get("kind")
+                            for item in all_constants))
+        self.assertEqual(self.packet, context.render_packet(self.name))
+
+
 if __name__ == "__main__":
     unittest.main()
 

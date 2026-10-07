@@ -22,9 +22,11 @@ from arena.scoring import exchange_rates
 LEAN_FILE = Path(__file__).with_name("lean") / "context.lean"
 _RECORD = re.compile(r"^ARENA_CTX (\{.*\})$", re.M)
 MAX_PACKET_CHARS = 30_000
-LIMITS = {"goals": 40, "goal_chars": 700, "used": 50, "used_chars": 320, "earlier": 30,
+LIMITS = {"goals": 40, "goal_chars": 700, "used": 5, "used_chars": 320, "earlier": 30,
           "earlier_chars": 240, "types": 8, "type_chars": 700, "profile_entries": 24,
           "scope": 25, "scope_chars": 600}
+REQUIRED_SECTIONS = ("Pinned environment and candidate", "Source-named declarations",
+                     "Elaborated proof dependencies", "Reference proof")
 
 
 def _cache(kind: str, name: str, commit: str, salt: str) -> Path:
@@ -273,12 +275,81 @@ def _goal_section(context: dict) -> list[str]:
 
 
 def _used_section(context: dict) -> list[str]:
-    def local(item: dict) -> bool:
-        return item["module"] == "this file" or item["module"].split(".")[0] == context.get("root", "")
-    items = [i for i in context.get("used", []) if not i["module"].startswith("Init.Prelude")]
-    items.sort(key=lambda i: (0 if i["module"] == "this file" else 1 if local(i) else 2, i["proof_line"], i["name"]))
-    return [f"[{i['decl']} · {i['module']}] {_clip(_readable(_one_line(i['sig'])), LIMITS['used_chars'])}"
-            for i in items[:LIMITS["used"]]]
+    occurrences: dict[str, list[dict]] = {}
+    for item in context.get("source", []):
+        occurrences.setdefault(item["name"], []).append(item)
+    ordered = sorted(occurrences.items())
+    lines = ["Qualified name [kind] S:statement lines P:proof lines; use `decl:<name>` as its source handle."]
+    for name, items in ordered:
+        statement_lines = ",".join(str(i["proof_line"]) for i in items if i.get("origin") == "statement")
+        proof_lines = ",".join(str(i["proof_line"]) for i in items if i.get("origin") == "proof")
+        lines.append(f"{name} [{items[0]['decl']}] S:{statement_lines or '-'} P:{proof_lines or '-'}")
+    preview = [items[0] for _, items in ordered[:LIMITS["used"]]]
+    lines.extend(["", f"Signature preview: {sum(bool(i.get('sig')) for i in preview)} shown of {len(ordered)} distinct source names; "
+                  f"{sum(not bool(items[0].get('sig')) for _, items in ordered)} unavailable."])
+    lines.extend(f"[{i['decl']} · {i['module']}] {_clip(_readable(_one_line(i['sig'])), LIMITS['used_chars'])}"
+                 for i in preview if i.get("sig"))
+    return lines
+
+
+def _dependency_section(context: dict) -> list[str]:
+    source_names = {item["name"] for item in context.get("source", [])}
+    unique = {item["name"]: item for item in context.get("dependency", [])}
+    ordered = [unique[name] for name in sorted(unique) if name not in source_names]
+    lines = ["Qualified theorem name; origin: direct elaborated-proof use; source handle: `decl:<name>`."]
+    lines.extend(i["name"] for i in ordered)
+    preview = ordered[:LIMITS["used"]]
+    lines += ["", f"Signature preview: {sum(bool(i.get('sig')) for i in preview)} shown of {len(ordered)} dependencies; "
+              f"{sum(not bool(i.get('sig')) for i in ordered)} unavailable."]
+    lines.extend(f"[{i['decl']} · {i['module']}] {_clip(_readable(_one_line(i['sig'])), LIMITS['used_chars'])}"
+                 for i in preview if i.get("sig"))
+    return lines
+
+
+def _local_section(context: dict) -> list[str]:
+    scopes: dict[tuple[str, str, str], set[int]] = {}
+    for item in context.get("local", []):
+        scopes.setdefault((item["name"], item["type"], item["scope"]), set()).add(item["proof_line"])
+    if not scopes:
+        return []
+    lines = ["Local variable name : type; lines are where the Lean local context exposes the variable."]
+    lines.extend(f"{name} : {_clip(_one_line(ty), 320)} [scope: {scope}; lines: {','.join(map(str, sorted(locations)))}]"
+                 for (name, ty, scope), locations in sorted(scopes.items()))
+    return lines
+
+
+def _signature_counts(items: list[dict]) -> tuple[int, int]:
+    unique = {item["name"]: item for item in items}
+    preview = [unique[name] for name in sorted(unique)[:LIMITS["used"]]]
+    return sum(bool(item.get("sig")) for item in preview), sum(not bool(item.get("sig")) for item in unique.values())
+
+
+def _imports(row: dict) -> list[str]:
+    if is_standalone(row):
+        source = row.get("header") or ""
+    else:
+        built = candidate_file(row, row["src"], *versions(row)[0])
+        source = built["text"][:built["head"]]
+    return [match.group(0).strip() for match in re.finditer(r"(?m)^\s*import\s+[^\n]+", source)]
+
+
+def packet_manifest(parts: list[tuple[str, list[str]]], inventory: dict) -> dict:
+    present = {title for title, body in parts if body}
+    sections = {title: {"expected": True, "present": any(p.startswith(title) for p in present)}
+                for title in REQUIRED_SECTIONS}
+    return {"schema": "arena-kickoff-manifest/v1", "sections": sections,
+            "source_inventory": len(inventory.get("source", [])),
+            "dependency_inventory": len(inventory.get("dependency", [])),
+            "complete": bool(inventory.get("complete"))}
+
+
+def certify_manifest(manifest: dict, expected: list[str] | None = None) -> dict:
+    required = expected or list(REQUIRED_SECTIONS)
+    missing = [name for name in required if not manifest.get("sections", {}).get(name, {}).get("present")]
+    reasons = (["context extraction incomplete"] if not manifest.get("complete") else [])
+    if missing:
+        reasons.append("required sections absent: " + ", ".join(missing))
+    return {"certified": not reasons, "reasons": reasons}
 
 
 def _earlier_section(context: dict) -> list[str]:
@@ -308,16 +379,17 @@ def _fit(parts: list[tuple[str, list[str]]], limit: int) -> str:
     sections = [(title, list(body)) for title, body in parts]
     def render() -> str:
         return "\n\n".join((f"{title}\n" if title else "") + "\n".join(body) for title, body in sections if body)
-    order = ["Lemmas declared earlier in this file", "Signatures of constants the reference proof mentions",
-             "Goal before each top-level tactic of the reference proof"]
+    order = ["Lemmas declared earlier in this file", "Goal before each top-level tactic of the reference proof"]
     while len(render()) > limit:
         for title in order:
             target = next((body for t, body in sections if t.startswith(title)), None)
-            if target and len(target) > 3:
+            if target and (len(target) > 1 or not title.startswith("Goal before")):
                 target.pop()
                 break
         else:
             break
+    if len(render()) > limit:
+        raise ValueError("Required kickoff inventory exceeds packet budget; certification failed")
     return render()
 
 
@@ -327,14 +399,14 @@ def render_packet(name: str) -> str:
     context = lean_context(name)
     context["root"] = "" if is_standalone(row) else row["file_path"].split("/")[0]
     prof = reference_profile(name)
-    commits = ", ".join(f"{v}:{c}" for v, c in targets)
+    pins = "; ".join(f"Lean {version} / source revision {commit}" for version, commit in targets)
     task = [
-        f"Lean Refactor Arena: optimize {name} from its ORIGINAL proof.",
+        f"Lean Refactor Arena: optimize {name}. The original proof is candidate #1.",
         "The statement must stay byte-exact. The score is the mean of three percentages: proof tokens saved, "
         "Lean heartbeats saved, and the share of listed toolchain versions the proof compiles on.",
         _rates(name, len(targets)),
-        "Before editing, propose at least three structurally different ideas with arena_idea, stating the expected "
-        "effect on each axis; then pursue them and update each idea's status with a reason as evidence arrives. "
+        "Survey the supplied references and pinned source before recording a route with arena_idea. "
+        "Then pursue the route and update its status with a reason as evidence arrives. "
         "arena_probe compiles drafts (sorry allowed, goals reported); arena_profile shows where heartbeats go; "
         "arena_evaluate scores a complete proof on the primary version (a sorry-free probe that compiles is scored the "
         "same way). The harness checks every compiling candidate on the other versions in the background and appends "
@@ -344,20 +416,40 @@ def render_packet(name: str) -> str:
         "reported in diagnostics.",
         (f"Pinned source: {row['source']} standalone problem (file = header + statement + proof)\n" if is_standalone(row)
          else f"Pinned source: {row['source']}:{row['file_path']}:{row['start_line']}-{row['end_line']}\n") +
-        f"Toolchain commits: {commits}",
+        f"Pinned Lean and source revisions: {pins}\nAvailable imports (including tactic libraries): "
+        f"{', '.join(_imports(row)) or '(none reported)'}",
     ]
     note = "" if not context.get("error") else f"(elaboration context unavailable: {_clip(context['error'], 160)})"
     parts: list[tuple[str, list[str]]] = [
         ("", task),
+        ("Pinned environment and candidate", [f"Source revision: {row['source']}",
+                                               f"Lean toolchain and source revisions: {pins}",
+                                               f"Original proof: candidate #1",
+                                               f"Available imports: {', '.join(_imports(row)) or '(none reported)'}"]),
         ("Definitions of project types and predicates in the statement", _types_section(context)),
         ("Scope at the theorem (namespace, open, variable, universe in effect before the statement)",
          _scope_section(row)),
         (f"Reference proof ({row['proof_length']} tokens)", [f"```lean\n{row['src']}\n```"]),
         ("Heartbeat profile of the reference proof", _profile_section(prof)),
         ("Goal before each top-level tactic of the reference proof", _goal_section(context)),
-        ("Signatures of constants the reference proof mentions", _used_section(context)),
+        ("Source-named declarations", _used_section(context)),
+        ("Elaborated proof dependencies", _dependency_section(context)),
+        ("Local variables", _local_section(context)),
         ("Lemmas declared earlier in this file", _earlier_section(context)),
     ]
     if note:
         parts.append(("", [note]))
+    manifest = packet_manifest(parts, context)
+    result = certify_manifest(manifest)
+    if not result["certified"]:
+        raise ValueError("Kickoff packet is not certifiable: " + "; ".join(result["reasons"]))
+    parts.append(("Kickoff inventory manifest", [
+        f"Source names: {len(context.get('source', []))} occurrences; "
+        f"{len({i['name'] for i in context.get('source', [])})} distinct; signature preview "
+        f"{_signature_counts(context.get('source', []))[0]}; unavailable {_signature_counts(context.get('source', []))[1]}.",
+        f"Extra direct theorem/lemma dependencies: {len({i['name'] for i in context.get('dependency', [])})}; "
+        f"signature preview {_signature_counts(context.get('dependency', []))[0]}; "
+        f"unavailable {_signature_counts(context.get('dependency', []))[1]}.",
+        "Required sections: " + ", ".join(name for name, state in manifest["sections"].items() if state["present"]) + "."
+    ]))
     return _fit(parts, MAX_PACKET_CHARS) + "\n"

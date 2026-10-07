@@ -127,7 +127,8 @@ class PacketTests(unittest.TestCase):
     def test_packet_has_statement_and_protocol_but_no_strategy(self):
         text = campaign.packet("Core.InitsUpdatesComm")
         self.assertIn("theorem InitsUpdatesComm", text)
-        self.assertIn("at least three structurally different ideas", text)
+        self.assertIn("Survey the supplied references", text)
+        self.assertNotIn("at least three", text)
         self.assertNotIn("witness before versus after induction", text)
         self.assertNotIn("arena-candidate-126", text)
 
