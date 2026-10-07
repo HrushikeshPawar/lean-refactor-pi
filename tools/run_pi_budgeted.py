@@ -9,6 +9,7 @@ import math
 import os
 from pathlib import Path
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -17,6 +18,7 @@ import time
 from datetime import datetime
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from arena import lean_session
 from arena.campaign import autocheck, init, packet, run_dir, submission, write_state
 from arena.summary import cost_report_from_ledger, render_text, write_summary
 from arena.traces import langfuse_environment, langfuse_extension, plugin_problems
@@ -74,12 +76,14 @@ def log_event(event: dict) -> None:
                 result = json.loads(event["result"]["content"][0]["text"])
                 compat = result.get("compat", {})
                 passed = sum(bool(item.get("passed")) for item in compat.values())
+                paths = sorted({str(item["lean"]).split(" ")[0] for item in compat.values() if item.get("lean")})
+                via = f" lean={'+'.join(paths)}" if paths else ""
                 if result.get("node_number") or result.get("proof_id"):
                     label = f"#{result['node_number']}" if result.get("node_number") else f"probe {str(result['proof_id'])[:8]}"
                     outcome = "Lean pass" if result.get("ok") else "Lean fail"
                     note = (f"{name} {label} {outcome} idea={result.get('idea_id', '?')} "
                             f"{result.get('mode', 'fast')} {result.get('tokens', '?')} tokens "
-                            f"{passed}/{len(compat)} versions{elapsed}")
+                            f"{passed}/{len(compat)} versions{via}{elapsed}")
                 elif result.get("ok") is False:
                     args = started[1] if started else {}
                     note = (f"{name} rejected idea={args.get('idea_id', '?')} "
@@ -107,7 +111,62 @@ def log_event(event: dict) -> None:
         print(f"[{datetime.now().astimezone().strftime('%H:%M:%S')}] {note}", flush=True)
 
 
+_LEAN: dict = {"process": None, "directory": None}
+
+
+def start_lean_session(directory: Path, parent_pid: int) -> None:
+    """Start the run's Lean session daemon. Failing to start it only costs speed: calls run cold."""
+    try:
+        _LEAN["directory"] = directory
+        _LEAN["process"] = lean_session.start_daemon(directory, parent_pid)
+        os.environ[lean_session.ENV] = str(lean_session.socket_path(directory))
+        print(f"Lean session pid={_LEAN['process'].pid}; socket={os.environ[lean_session.ENV]}", flush=True)
+    except (lean_session.SessionError, OSError) as error:
+        os.environ.pop(lean_session.ENV, None)
+        print(f"Lean session unavailable ({error}); Lean calls will compile cold", file=sys.stderr, flush=True)
+
+
+def warm_lean_session(theorem: str) -> None:
+    """Elaborate the pinned file once in the background so the model's first probe is incremental."""
+    from arena.engine import candidate_file, measure_version, problem, run_lean
+
+    def work() -> None:
+        try:
+            row = problem(theorem)
+            version, commit = measure_version(row)
+            built = candidate_file(row, row["src"], version, commit)
+            run_lean(row, built["path"], built["text"])
+        except Exception:  # warming is best effort; the first real call then pays for it
+            pass
+
+    threading.Thread(target=work, daemon=True, name="lean-warm").start()
+
+
+def stop_lean_session() -> None:
+    """Stop the daemon and every Lean process it started; runs on every way out of `main`."""
+    directory, _LEAN["directory"] = _LEAN["directory"], None
+    process, _LEAN["process"] = _LEAN["process"], None
+    os.environ.pop(lean_session.ENV, None)
+    if directory is None:
+        return
+    lean_session.stop_daemon(directory, process)
+    # A run that never got as far as `init` leaves nothing but the session's own files.
+    try:
+        if directory.is_dir() and all(item.name in lean_session.SESSION_FILES or item.name == "lean-session.log"
+                                      for item in directory.iterdir()):
+            shutil.rmtree(directory)
+    except OSError:
+        pass
+
+
 def main() -> int:
+    try:
+        return run()
+    finally:
+        stop_lean_session()
+
+
+def run() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True, choices=MODELS)
     parser.add_argument("--theorem", required=True)
@@ -122,6 +181,8 @@ def main() -> int:
                         help="Recent tokens kept verbatim when compaction runs")
     parser.add_argument("--merge-worker", action="store_true",
                         help="Run the deterministic merge worker beside the model (off by default: it competes for Lean CPU)")
+    parser.add_argument("--no-lean-session", action="store_true",
+                        help="Compile every Lean call cold instead of through the run's persistent Lean session")
     parser.add_argument("--no-skill", action="store_true", help="Run without the Arena Lean skill (A/B factor)")
     parser.add_argument("--no-mcp", action="store_true", help="Do not load the Lean MCP server (offline tests)")
     parser.add_argument("--preflight", action="store_true",
@@ -147,6 +208,8 @@ def main() -> int:
     directory = run_dir(args.run_id)
     if directory.exists() != args.resume_run:
         parser.error("--resume-run must be used exactly when the run ID already exists")
+    if not args.dry_run and not args.no_lean_session:
+        start_lean_session(directory, os.getpid())
     if args.resume_run:
         config = json.loads((directory / "run-config.json").read_text())
         if (config["theorem"], config["model"], config["hard_cap_usd"]) != (args.theorem, args.model, args.hard_cap_usd):
@@ -201,6 +264,8 @@ def main() -> int:
             "compact_keep_tokens": args.compact_keep_tokens,
             "skill": None if args.no_skill else {"name": "arena-lean", "sha256": skill_hash()}},
             indent=2) + "\n")
+    if _LEAN["process"] is not None:
+        warm_lean_session(args.theorem)
     shadow = directory / "scratch" / "project"
     env = os.environ.copy()
     env["ARENA_BUDGET_REQUIRED"] = "1"

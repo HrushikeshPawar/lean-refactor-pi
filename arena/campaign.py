@@ -16,7 +16,9 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
 
-from arena.engine import ROOT, candidate_file, evaluate, measure_version, problem, source_path, validate_proof, versions, workspace
+from arena import lean_session
+from arena.engine import (ROOT, candidate_file, evaluate, force_cold, measure_version, problem, source_path,
+                          validate_proof, versions, workspace)
 from arena.polish import polish
 from arena.profile import heartbeat_floor, profile
 from arena.graph import common_base, edit_fingerprint, merge_text, ranked_frontier
@@ -742,7 +744,7 @@ def _declaration_in_lean(name: str, symbol: str) -> dict:
     built = candidate_file(row, row["src"], version, commit)
     inserted = (Path(__file__).with_name("lean") / "declaration.lean").read_text() + f"arena_decl {symbol}\n\n"
     text = built["text"][:built["head"]] + inserted + built["text"][built["head"]:]
-    ran = run_lean(row, built["path"], text)
+    ran = run_lean(row, built["path"], text, prefix_end=built["head"])
     if ran is None:
         raise ValueError("Lean timed out while resolving the name")
     records = [json.loads(raw) for raw in re.findall(r"^ARENA_DECL (\{.*\})$", ran[1], re.M)]
@@ -833,12 +835,14 @@ def _candidate_lock(directory: Path, candidate_id: str):
 
 def init(name: str, run_id: str, extra: str = "") -> dict:
     directory = run_dir(run_id)
-    if directory.exists():
+    # The runner may already have started the run's Lean session here; nothing else counts as a run.
+    if directory.exists() and any(item.name not in lean_session.SESSION_FILES and item.name != "lean-session.log"
+                                  for item in directory.iterdir()):
         raise ValueError(f"Run ID already exists: {directory}")
     row = problem(name)
     version, commit = versions(row)[0]
     project = workspace(row, version, commit)
-    directory.mkdir(parents=True)
+    directory.mkdir(parents=True, exist_ok=True)
     text = packet(name) + ("\nAdditional instructions:\n" + extra + "\n" if extra else "")
     (directory / "packet.txt").write_text(text)
     shadow = directory / "scratch" / "project"
@@ -1101,6 +1105,11 @@ def _model_view(result: dict) -> dict:
         for key in ("heartbeats", "diagnostics", "full_diagnostics_ref", "error"):
             if info.get(key) not in (None, [], ""):
                 item[key] = info[key]
+        lean = info.get("lean") or {}
+        if lean.get("path") == "session":
+            item["lean"] = "session"
+        elif lean.get("path") == "cold-fallback":
+            item["lean"] = f"cold (session unavailable: {lean.get('reason')})"
         counts = info.get("diagnostic_counts") or {}
         if counts.get("omitted"):
             item["omitted_diagnostics"] = counts["omitted"]
@@ -1279,7 +1288,13 @@ PROBE_WORKERS = 4
 
 
 def _probe_workers(count: int) -> int:
-    """Concurrent compiles for a batch: bounded by CPUs, free memory and four; 1 if unmeasurable."""
+    """Concurrent compiles for a batch: bounded by CPUs, free memory and four; 1 if unmeasurable.
+
+    With a Lean session the daemon owns that bound (its workers stay resident, so free memory no
+    longer measures what a new one would cost); requests beyond its slots wait for a free one.
+    """
+    if lean_session.configured():
+        return max(1, min(PROBE_WORKERS, count))
     try:
         for line in Path("/proc/meminfo").read_text().splitlines():
             if line.startswith("MemAvailable:"):
@@ -1803,22 +1818,89 @@ def write_state(run_id: str) -> None:
     temporary.replace(target)
 
 
+COLD_TOLERANCE = 0.05  # same drift tolerance as tools/arena_certify.py
+
+
+def _used_session(row: dict) -> bool:
+    """Whether the evaluation that made this candidate verified relied on a Lean session."""
+    full = [e for e in row["evaluations"] if e["status"] == "full"]
+    chosen = max(full, key=lambda e: e["score"] or -1, default=None)
+    return chosen is not None and any((info.get("lean") or {}).get("path") == "session"
+                                      for info in (chosen["result"].get("compat") or {}).values())
+
+
+def cold_verify(run_id: str, row: dict) -> dict:
+    """Clean cold compile of a candidate on every toolchain; recorded so it runs once.
+
+    A session result is only a fast estimate. A candidate chosen as the answer must also pass
+    a fresh `lake env lean` on every version, with heartbeats within tolerance of what was recorded.
+    """
+    directory = run_dir(run_id)
+    history = events(directory)
+    done = next((item for item in reversed(history) if item.get("kind") == "cold_verification"
+                 and item["candidate_id"] == row["id"]), None)
+    if done:
+        return done
+    name = history[0]["theorem"]
+    proof = (directory / "proofs" / f"{row['id']}.lean").read_text()
+    try:
+        with lean_lock(directory, "background"), force_cold():
+            cold = evaluate(name, proof, "full")
+        compat = cold["compat"]
+        passed = {version: bool(info.get("passed")) for version, info in compat.items()}
+        total = len(history[0].get("versions") or [1])
+        recorded, measured = row["heartbeats"], cold.get("heartbeat")
+        close = (recorded is not None and measured is not None
+                 and abs(measured - recorded) <= COLD_TOLERANCE * max(recorded, 1))
+        confirmed = len(passed) == total and all(passed.values()) and close
+        event = {"kind": "cold_verification", "candidate_id": row["id"], "confirmed": confirmed,
+                 "passed": passed, "recorded_heartbeats": recorded, "cold_heartbeats": measured}
+    except Exception as error:  # an unverifiable candidate must not be submitted
+        event = {"kind": "cold_verification", "candidate_id": row["id"], "confirmed": False,
+                 "error": str(error)[:300], "recorded_heartbeats": row["heartbeats"]}
+    _append(directory, event)
+    return event
+
+
 def submission(run_id: str) -> dict:
     """The run's answer: the best candidate that passes every version. Written by the harness so
-    nothing depends on the model remembering to submit."""
+    nothing depends on the model remembering to submit.
+
+    A candidate whose checks ran in a Lean session is re-verified by a clean cold compile first; one
+    that fails it is skipped and listed under `rejected_on_cold`."""
     directory = run_dir(run_id)
     history = events(directory)
     rows = _summaries(history)
-    best = _best([r for r in rows if r["verified"]])
+    pool = sorted((r for r in rows if r["verified"] and r["score"] is not None and r["status"] == "full"
+                   and r["origin"] != "reference"), key=lambda r: (r["score"], -r["n"]), reverse=True)
+    best, rejected, cold = None, [], None
+    for row in pool:
+        if not _used_session(row):
+            best = row
+            break
+        cold = cold_verify(run_id, row)
+        if cold["confirmed"]:
+            best = row
+            break
+        rejected.append({"candidate": f"#{row['n']}", "recorded_heartbeats": cold.get("recorded_heartbeats"),
+                         "cold_heartbeats": cold.get("cold_heartbeats"), "passed": cold.get("passed"),
+                         "error": cold.get("error")})
     if best is None:
         answer = {"ok": True, "candidate": None,
                   "reason": "no model candidate passed every version; the original proof stands"}
+        if rejected:
+            answer["reason"] = "no candidate that passed in the Lean session also passed a clean cold compile"
     else:
         proof = (directory / "proofs" / f"{best['id']}.lean").read_text()
         (directory / "submission.lean").write_text(proof)
         answer = {"ok": True, "candidate": f"#{best['n']}", "candidate_id": best["id"],
                   "tokens": best["tokens"], "heartbeats": best["heartbeats"], "proxy": best["score"],
-                  "proof_file": "submission.lean"}
+                  "proof_file": "submission.lean",
+                  "verified_by": "cold compile" if cold and cold["confirmed"] else "cold compile (no session used)"}
+        if cold and cold["confirmed"]:
+            answer["cold_heartbeats"] = cold["cold_heartbeats"]
+    if rejected:
+        answer["rejected_on_cold"] = rejected
     (directory / "submission.json").write_text(json.dumps(answer, indent=2) + "\n")
     return answer
 
