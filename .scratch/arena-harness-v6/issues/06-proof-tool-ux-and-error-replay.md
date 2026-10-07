@@ -4,7 +4,7 @@
 
 **Blocked by:** 04: Declarations, search and source lookup; 05: Hotspots and live profiles.
 
-**Status:** ready-for-agent
+**Status:** needs-review
 
 **Branch:** `hrushikesh/v6-06-proof-tools` (stacked on `hrushikesh/v6-05-hotspots`)
 
