@@ -122,13 +122,13 @@ def main() -> int:
     parser.add_argument("--values", required=True, help="Comma-separated values of the factor")
     parser.add_argument("--model", default="gpt-6-luna", choices=MODELS, help="Fixed model unless it is the factor")
     parser.add_argument("--thinking", default="high", choices=THINKING_LEVELS)
-    parser.add_argument("--cap", type=float, default=0.1, help="Hard cap per run in USD (0.10-0.20)")
+    parser.add_argument("--cap", type=float, default=3.0, help="Hard cap per run in USD (0.10-3.00)")
     parser.add_argument("--parallel", default="1", help="Runs at once: an integer or 'auto' (by free RAM)")
     parser.add_argument("--dry-run", action="store_true")
     args, passthrough = parser.parse_known_args()
     passthrough = [item for item in passthrough if item != "--"]
-    if not 0.1 <= args.cap <= 0.2:
-        parser.error("--cap must be between 0.10 and 0.20 for a matrix; validate cheaply first")
+    if not 0.1 <= args.cap <= 3:
+        parser.error("--cap must be between 0.10 and 3.00")
     try:
         specs = plan(args.factor, args.values.split(","), args.model, args.thinking, args.prefix)
         workers = parallelism(args.parallel, len(specs), available_memory_kb())

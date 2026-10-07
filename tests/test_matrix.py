@@ -35,6 +35,15 @@ class PlanTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "factor must be"):
             matrix.plan("cap", ["1", "2"], "gpt-6-luna", "high", "x")
 
+    def test_matrix_defaults_to_the_three_dollar_per_problem_allowance(self):
+        prefix = f"test-default-{uuid.uuid4().hex[:8]}"
+        proc = subprocess.run(
+            [sys.executable, "tools/run_experiment_matrix.py", "--theorem", NAME, "--prefix", prefix,
+             "--factor", "thinking", "--values", "low,high", "--dry-run"],
+            cwd=ROOT, text=True, capture_output=True, check=False)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("cap $3 each", proc.stdout)
+
     def test_parallelism_follows_free_memory_and_never_exceeds_runs(self):
         gb = 1024 * 1024
         # 4.5 GB per run: Pi, the Lean server and one Lean process per lane.

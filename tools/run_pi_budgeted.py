@@ -113,7 +113,7 @@ def main() -> int:
     parser.add_argument("--theorem", required=True)
     parser.add_argument("--prompt-file", type=Path, help="Optional extra instructions appended after the source packet")
     parser.add_argument("--run-id", required=True)
-    parser.add_argument("--hard-cap-usd", type=float, default=1.0)
+    parser.add_argument("--hard-cap-usd", type=float, default=3.0)
     parser.add_argument("--thinking", choices=THINKING_LEVELS, default="high",
                         help="Reasoning level, recorded in run-config.json (default: high)")
     parser.add_argument("--compact-at-tokens", type=int, default=200_000,
