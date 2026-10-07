@@ -138,6 +138,17 @@ class SourceHandleTests(unittest.TestCase):
         self.assertEqual(source_result["path"], "A.lean")
         self.assertIn("namespace A", source_result["text"])
 
+    def test_source_declaration_scanner_tracks_nested_namespaces(self):
+        source = "\n".join((
+            "namespace Outer", "namespace Inner", "theorem alpha : True := by trivial",
+            "end Inner", "theorem beta : True := by trivial", "end Outer",
+            "theorem Outside.gamma : True := by trivial", ""))
+        self.assertEqual(campaign._source_declarations(source.splitlines()), [
+            (3, "Outer.Inner.alpha"),
+            (5, "Outer.beta"),
+            (7, "Outside.gamma"),
+        ])
+
 
 @unittest.skipUnless((ROOT / "workspaces/strata-v4.29.1").is_dir()
                      and (ROOT / "workspaces/physlib-v4.32.0").is_dir(),

@@ -199,30 +199,8 @@ def find(name: str, queries: list[str], limit: int = 20) -> dict:
                                    for path in _matching_pinned_paths(source_root, source_pin, needle))
     for source_root, source_pin, path in sorted(candidate_paths, key=lambda item: (str(item[0]), item[2])):
         content = _git_source(source_root, source_pin, path)
-        namespace: list[str] = []
         lines = content.splitlines()
-        starts: list[tuple[int, str]] = []
-        for line_number, line in enumerate(lines, 1):
-            ns = re.match(r"^\s*namespace\s+([A-Za-z_][A-Za-z0-9_.']*)", line)
-            if ns:
-                namespace.append(ns.group(1))
-                continue
-            close = re.match(r"^\s*end(?:\s+([A-Za-z_][A-Za-z0-9_'.]*))?\s*$", line)
-            if close:
-                if close.group(1):
-                    closing = close.group(1)
-                    while namespace and namespace[-1] != closing:
-                        namespace.pop()
-                    if namespace:
-                        namespace.pop()
-                elif namespace:
-                    namespace.pop()
-                continue
-            match = re.match(r"^\s*(?:private\s+|protected\s+)?(?:@\[[^\]]*\]\s*)*(?:theorem|lemma|def|opaque|instance|abbrev|inductive|structure|class|axiom)\s+([A-Za-z_][A-Za-z0-9_'.]*)", line)
-            if match:
-                local = match.group(1)
-                qualified = local if "." in local or not namespace else ".".join(namespace + [local])
-                starts.append((line_number, qualified))
+        starts = _source_declarations(lines)
         for index, (line_number, qualified) in enumerate(starts):
             end = starts[index + 1][0] - 1 if index + 1 < len(starts) else len(lines)
             source_rows.append({"name": qualified, "handle": f"decl:{qualified}", "path": path,
@@ -338,6 +316,37 @@ def _matching_pinned_paths(project: Path, commit: str, query: str) -> list[str]:
     return [line.split(":", 1)[1] if ":" in line else line for line in result.stdout.splitlines()]
 
 
+def _source_declarations(lines: list[str]) -> list[tuple[int, str]]:
+    """Return named Lean declarations with names qualified by their namespace blocks."""
+    namespace: list[str] = []
+    declarations = []
+    declaration_pattern = re.compile(
+        r"^\s*(?:private\s+|protected\s+)?(?:@\[[^\]]*\]\s*)*"
+        r"(?:theorem|lemma|def|opaque|example|instance|abbrev|inductive|structure|class|axiom)\s+"
+        r"([A-Za-z_][A-Za-z0-9_'.]*)")
+    for line_number, line in enumerate(lines, 1):
+        opened = re.match(r"^\s*namespace\s+([A-Za-z_][A-Za-z0-9_.']*)", line)
+        if opened:
+            namespace.append(opened.group(1))
+            continue
+        closed = re.match(r"^\s*end(?:\s+([A-Za-z_][A-Za-z0-9_'.]*))?\s*$", line)
+        if closed:
+            if closed.group(1):
+                while namespace and namespace[-1] != closed.group(1):
+                    namespace.pop()
+                if namespace:
+                    namespace.pop()
+            elif namespace:
+                namespace.pop()
+            continue
+        match = declaration_pattern.match(line)
+        if match:
+            local = match.group(1)
+            qualified = local if "." in local or not namespace else ".".join(namespace + [local])
+            declarations.append((line_number, qualified))
+    return declarations
+
+
 def _resolve_declaration_source(name: str, symbol: str, module: str | None = None) -> tuple[str, int]:
     """Find an exact source declaration in the benchmark's pinned tree, excluding scratch copies."""
     if not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9'.]*", symbol):
@@ -353,29 +362,10 @@ def _resolve_declaration_source(name: str, symbol: str, module: str | None = Non
                 source = _git_source(source_root, source_pin, path)
             except subprocess.CalledProcessError:
                 continue
-            namespace: list[str] = []
-            for line_number, line in enumerate(source.splitlines(), 1):
-                ns = re.match(r"^\s*namespace\s+([A-Za-z_][A-Za-z0-9_.']*)", line)
-                if ns:
-                    namespace.append(ns.group(1))
-                    continue
-                close = re.match(r"^\s*end(?:\s+([A-Za-z_][A-Za-z0-9_'.]*))?\s*$", line)
-                if close:
-                    if close.group(1):
-                        closing = close.group(1)
-                        while namespace and namespace[-1] != closing:
-                            namespace.pop()
-                        if namespace:
-                            namespace.pop()
-                    elif namespace:
-                        namespace.pop()
-                    continue
-                decl = re.match(r"^\s*(?:private\s+|protected\s+)?(?:@\[[^\]]*\]\s*)*(?:theorem|lemma|def|opaque|example|instance|abbrev|inductive|structure|class|axiom)\s+([A-Za-z_][A-Za-z0-9_'.]*)", line)
-                if decl:
-                    local = decl.group(1)
-                    qualified = local if "." in local or not namespace else ".".join(namespace + [local])
-                    if qualified == symbol or local == symbol:
-                        return path, line_number
+            for line_number, qualified in _source_declarations(source.splitlines()):
+                local = qualified.rsplit(".", 1)[-1]
+                if qualified == symbol or local == symbol:
+                    return path, line_number
     raise ValueError(f"Declaration not found in pinned project: {symbol}")
 
 
