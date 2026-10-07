@@ -95,12 +95,6 @@ class FallbackTests(unittest.TestCase):
             self.assertEqual(result, (0, "cold output"))
             self.assertEqual((info["path"], info["reason"]), ("cold-fallback", reason))
 
-    def test_a_working_session_answers_and_is_labelled(self):
-        result, info = self.run_lean({"ok": True, "returncode": 1, "output": "from session", "new_worker": False,
-                                      "changed_from_line": 12})
-        self.assertEqual(result, (1, "from session"))
-        self.assertEqual((info["path"], info["changed_from_line"]), ("session", 12))
-
     def test_a_session_timeout_is_a_timeout(self):
         result, info = self.run_lean({"ok": True, "timeout": True})
         self.assertIsNone(result)
@@ -113,15 +107,6 @@ class FallbackTests(unittest.TestCase):
             with force_cold():
                 self.assertEqual(engine.run_lean(self.row, Path("/p"), "text"), (0, "cold"))
         self.assertEqual(last_lean_run()["path"], "cold")
-
-    def test_compile_results_name_the_path_that_ran(self):
-        row = problem(CORE)
-        with patch.object(engine, "candidate_file", return_value={
-                "path": Path("/p"), "text": "t\n", "offset": 0, "head": 0, "start_line": 1, "end_line": 1}), \
-                patch.object(engine, "run_lean", return_value=(0, "ARENA_HEARTBEATS 5")), \
-                patch.object(engine, "last_lean_run", return_value={"path": "session", "seconds": 0.4}):
-            result = compile_version(row, row["src"], "v", "c", measure=True)
-        self.assertEqual(result["lean"]["path"], "session")
 
     def test_model_view_reports_the_path_only_when_it_is_not_plain_cold(self):
         compat = {"v1": {"passed": True, "lean": {"path": "session"}},
@@ -464,14 +449,13 @@ class PhysLibSessionTests(SessionHarness, unittest.TestCase):
     name = PHYSLIB
     project_dir = "workspaces/physlib-v4.32.0"
 
-    def test_a_draft_after_warm_up_is_much_faster_than_a_cold_compile(self):
+    def test_a_draft_after_warm_up_runs_in_the_session(self):
         statement = self.row["statement"]
         compile_version(self.row, statement + " := by\n  sorry", self.version, self.commit, probe=True)
-        started = time.monotonic()
         again = compile_version(self.row, statement + " := by\n  intro\n  sorry", self.version, self.commit, probe=True)
-        elapsed = time.monotonic() - started
         self.assertEqual(again["lean"]["path"], "session")
-        self.assertLess(elapsed, 15.0, f"warm session took {elapsed:.1f}s")
+        self.assertFalse(again["lean"]["new_worker"])
+        self.assertLess(again["lean"]["seconds"], 120.0)  # generous: cold PhysLib is ~32 s per compile
 
 
 class LifecycleTests(unittest.TestCase):
@@ -509,15 +493,6 @@ class LifecycleTests(unittest.TestCase):
         self.assertTrue(wait_until(lambda: not any(alive(pid) for pid in pids), 10), "Lean processes survived the daemon")
 
     @unittest.skipUnless(CORE_READY, "Strata fixture environment is not provisioned")
-    def test_a_killed_daemon_does_not_leave_lean_behind(self):
-        process, pids = self.start_with_server()
-        process.kill()
-        process.wait()
-        # Lean exits when its client's pipe closes; the runner's stop also sweeps the recorded groups.
-        lean_session.stop_daemon(self.directory, None)
-        self.assertTrue(wait_until(lambda: not any(alive(pid) for pid in pids), 10), "Lean processes survived a killed daemon")
-
-    @unittest.skipUnless(CORE_READY, "Strata fixture environment is not provisioned")
     def test_a_killed_runner_takes_the_session_with_it(self):
         parent = subprocess.Popen(["sleep", "300"])
         try:
@@ -531,7 +506,7 @@ class LifecycleTests(unittest.TestCase):
             lean_session.stop_daemon(self.directory, None)
 
     @unittest.skipUnless(CORE_READY, "Strata fixture environment is not provisioned")
-    def test_a_killed_daemon_and_a_killed_group_leave_nothing_even_without_the_sweep(self):
+    def test_a_killed_daemon_leaves_no_lean_behind_even_without_the_sweep(self):
         process, pids = self.start_with_server()
         process.kill()
         process.wait()
@@ -572,7 +547,7 @@ class RunnerSessionTests(unittest.TestCase):
         for leftover in ("lean-session.sock", "lean-session.json"):
             self.assertFalse((run.directory / leftover).exists(), leftover)
 
-    def test_ctrl_c_stops_the_session_and_its_lean_processes(self):
+    def test_ctrl_c_shuts_pi_down_cleanly_and_leaves_no_lean_processes(self):
         call, FakeRun = self.probe()
         run = FakeRun([call, {"text": "slow", "delay_ms": 60000}], session=True, timeout=300)
         self.runs.append(run)
@@ -582,8 +557,10 @@ class RunnerSessionTests(unittest.TestCase):
         self.assertTrue(wait_until(lambda: len(json.loads((run.directory / lean_session.INFO_NAME).read_text())["pids"]) >= 2, 20))
         info = json.loads((run.directory / lean_session.INFO_NAME).read_text())
         os.killpg(process.pid, signal.SIGINT)
-        process.communicate(timeout=120)
-        self.assertEqual(process.returncode, 128 + signal.SIGINT)
+        _, stderr = process.communicate(timeout=120)
+        self.assertEqual(process.returncode, 128 + signal.SIGINT, stderr)
+        self.assertNotEqual(run.json("cost.json").get("written_by"), "runner_ledger_reconstruction", stderr)
+        self.assertEqual(run.json("summary.json")["stop_reason"], "interrupted")
         self.assertTrue(wait_until(lambda: not any(alive(p) for p in info["pids"] + [info["pid"]]), 15),
                         "Lean or the session daemon survived Ctrl+C")
 

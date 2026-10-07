@@ -67,13 +67,6 @@ class CampaignCliTests(unittest.TestCase):
         self.assertTrue(any("parent #99 ignored" in note for note in result["notes"]))
         self.assertTrue(any("idea_id whatever" in note for note in result["notes"]))
 
-    def test_03_full_recheck_of_existing_candidate_by_number(self):
-        result = cli(self.run_id, "evaluate", "--candidate", "#2", "--mode", "full")
-        self.assertTrue(result["ok"], result)
-        self.assertEqual(result["metrics"]["proxy"], 76.72)
-        self.assertEqual(result["candidate"], "#2")
-        self.assertEqual(result["full_check"], "#2 passes all 3 versions: proxy 76.72")
-
     def test_04_probe_with_sorry_reports_goals_and_cannot_be_promoted(self):
         statement = campaign.problem(NAME)["statement"]
         before = len(campaign.frontier(self.run_id)["top"]), campaign.frontier(self.run_id)["candidates"]
@@ -82,6 +75,8 @@ class CampaignCliTests(unittest.TestCase):
         self.assertEqual(probe["probe"], "p1")
         self.assertEqual(len(probe["goals"]), 1)
         self.assertIn("Hup", probe["goals"][0]["goals"])
+        self.assertEqual(probe["goals"][0]["proof_line"], 11)
+        self.assertEqual(probe["goals"][0]["file_line"], 960)
         self.assertIs(probe["scored"], False)
         promoted = cli(self.run_id, "evaluate", "--from-probe", "p1")
         self.assertFalse(promoted["ok"])
@@ -113,23 +108,6 @@ class CampaignCliTests(unittest.TestCase):
         self.assertTrue((campaign.run_dir(self.run_id) / info["full_diagnostics_ref"]).exists())
         self.assertEqual(result["metrics"], {"compiled": False})
 
-    def test_07_ideas_are_model_owned_and_summarised_in_the_frontier(self):
-        made = cli(self.run_id, "idea", "--title", "Rewrite the induction", "--hypothesis",
-                   "tail IH gives witness", "--region", "10-20",
-                   "--expected-effect", json.dumps({"tokens": "-40", "heartbeats": "-2000"}))
-        self.assertEqual(made["id"], "i1")
-        self.assertEqual(made["status"], "active")
-        cli(self.run_id, "evaluate", "--proof-file", self.proof(self.good + "\n  -- tagged"), "--idea-id", "i1")
-        bad = cli(self.run_id, "idea", "--idea-id", "i1", "--status", "abandoned")
-        self.assertFalse(bad["ok"])
-        self.assertIn("reason", bad["error"])
-        cli(self.run_id, "idea", "--idea-id", "i1", "--status", "parked", "--reason", "needs more work")
-        state = cli(self.run_id, "frontier")
-        idea = next(item for item in state["ideas"] if item["id"] == "i1")
-        self.assertEqual((idea["status"], idea["reason"]), ("parked", "needs more work"))
-        self.assertGreaterEqual(idea["attempts"], 1)
-        self.assertIn("recent_failures", state)
-
     def test_09_background_check_state_and_submission(self):
         fresh = cli(self.run_id, "evaluate", "--proof-file", self.proof(self.good + "\n  -- checked later"))
         self.assertIn(fresh["candidate"], cli(self.run_id, "state")["checking"])
@@ -151,8 +129,11 @@ class CampaignCliTests(unittest.TestCase):
         profiled = cli(self.run_id, "profile", "--candidate", "#2", "--proof-file", empty)
         self.assertTrue(profiled.get("ok", True), profiled)
         self.assertEqual(profiled["target"], "#2")
-        evaluated = cli(self.run_id, "evaluate", "--candidate", "#2", "--proof-file", empty)
+        evaluated = cli(self.run_id, "evaluate", "--candidate", "#2", "--proof-file", empty, "--mode", "full")
+        self.assertTrue(evaluated["ok"], evaluated)
         self.assertEqual(evaluated["candidate"], "#2")
+        self.assertEqual(evaluated["metrics"]["proxy"], 76.72)
+        self.assertEqual(evaluated["full_check"], "#2 passes all 3 versions: proxy 76.72")
 
     def test_probe_accepts_body_only_and_assignment_bodies_with_exact_statement(self):
         statement = campaign.problem(NAME)["statement"]
@@ -413,6 +394,7 @@ class ProtocolLogicTests(unittest.TestCase):
         listed = campaign.frontier("logic")["ideas"][0]
         self.assertEqual((listed["status"], listed["attempts"]), ("succeeded", 1))
         self.assertEqual(listed["best"]["candidate"], "#2")
+        self.assertIn("recent_failures", campaign.frontier("logic"))
 
     def test_a_new_idea_may_carry_the_models_own_id(self):
         # Luna v5 created ideas as {idea_id: "state_algebra", title: ...}; that is a creation.

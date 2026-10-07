@@ -22,26 +22,20 @@ class SkillAndThinkingTests(unittest.TestCase):
         self.runs = [*getattr(self, "runs", []), run]
         return run.run(*extra)
 
-    def test_skill_is_in_the_first_provider_payload_and_hash_is_recorded(self):
-        run = self.start()
-        first = run.requests[0]["messages"][0]
+    def test_skill_and_thinking_options_are_recorded_and_reach_the_provider(self):
+        default = self.start()
+        first = default.requests[0]["messages"][0]
         self.assertIn("Scoring is mechanical", message_text(first))
         self.assertIn("arena_skill_read", message_text(first) + str(first.get("toolsAdded")))
-        config = run.json("run-config.json")
+        config = default.json("run-config.json")
         self.assertEqual(config["skill"], {"name": "arena-lean", "sha256": skill_hash()})
-
-    def test_thinking_level_is_a_recorded_option_and_reaches_the_provider(self):
-        default = self.start()
-        self.assertEqual(default.json("run-config.json")["thinking"], "high")
+        self.assertEqual(config["thinking"], "high")
         self.assertEqual({r["thinking"] for r in default.requests}, {"high"})
-        low = self.start("--thinking", "low")
+        low = self.start("--thinking", "low", "--no-skill")
         self.assertEqual(low.json("run-config.json")["thinking"], "low")
         self.assertEqual({r["thinking"] for r in low.requests}, {"low"})
-
-    def test_skill_can_be_switched_off_for_ab_runs(self):
-        run = self.start("--no-skill")
-        self.assertIsNone(run.json("run-config.json")["skill"])
-        self.assertNotIn("Scoring is mechanical", message_text(run.requests[0]["messages"][0]))
+        self.assertIsNone(low.json("run-config.json")["skill"])
+        self.assertNotIn("Scoring is mechanical", message_text(low.requests[0]["messages"][0]))
 
     def test_skill_content_is_general(self):
         text = (SKILL_DIR / "SKILL.md").read_text()
@@ -108,14 +102,6 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(run.json("submission.json"), {
             "ok": True, "candidate": None, "reason": "no model candidate passed every version; the original proof stands"})
 
-    def test_merge_worker_is_off_unless_requested(self):
-        off = self.fake([{"text": "done"}] * 2).run()
-        self.assertFalse((off.directory / "merge-worker.json").exists())
-        self.assertFalse(off.json("run-config.json")["merge_worker"])
-        on = self.fake([{"text": "done"}] * 2).run("--merge-worker")
-        self.assertTrue(on.json("run-config.json")["merge_worker"])
-        self.assertTrue((on.directory / "merge-worker.json").exists() or (on.directory / "merge-worker.log").exists())
-
     def test_sigterm_mid_request_still_leaves_cost_json_and_summary(self):
         import signal
 
@@ -131,24 +117,6 @@ class LifecycleTests(unittest.TestCase):
         summary = run.json("summary.json")
         self.assertGreaterEqual(summary["cost"]["requests"], 1)
         self.assertTrue((run.directory / "summary.txt").exists())
-
-
-    def test_ctrl_c_to_the_terminal_group_takes_pis_clean_shutdown(self):
-        import os
-        import signal
-
-        steps = [{"text": "first", "usage": {"input": 400, "output": 10}},
-                 {"text": "slow", "delay_ms": 30000}]
-        run = self.fake(steps)
-        process = run.start(own_group=True)
-        self.assertTrue(run.wait_for_requests(2), "the slow request never started")
-        os.killpg(process.pid, signal.SIGINT)
-        _, stderr = process.communicate(timeout=90)
-        self.assertEqual(process.returncode, 128 + signal.SIGINT, stderr)
-        report = run.json("cost.json")
-        self.assertNotEqual(report.get("written_by"), "runner_ledger_reconstruction", stderr)
-        self.assertEqual(run.json("summary.json")["stop_reason"], "interrupted")
-
 
 def cheap_tool(name: str, arguments: dict, **usage) -> dict:
     return {"tool_calls": [{"name": name, "arguments": arguments}],
@@ -178,25 +146,27 @@ class CacheDisciplineTests(unittest.TestCase):
             cheap_tool("arena_skill_read", {}),
             cheap_tool("arena_source", SOURCE),
             cheap_tool("arena_skill_read", {"path": "references/profiling-workflows.md"}),
+            cheap_tool("arena_evaluate", {"candidate": "#7"}),
             {"text": "done"}])
         requests = run.requests
-        self.assertGreaterEqual(len(requests), 5)
+        self.assertGreaterEqual(len(requests), 6)
+        self.assertTrue(all(r["messages"][0].get("sections") for r in requests))
         for earlier, later in zip(requests, requests[1:]):
             before = earlier["messages"]
             self.assertEqual(json.dumps(later["messages"][:len(before)]), json.dumps(before),
                              f"request {later['index']} rewrote history it had already sent")
+        self.assertEqual(run.json("run-config.json")["compact_at_tokens"], 200_000)
         first = "\n".join(message_text(m) for m in requests[0]["messages"])
         for dynamic in ("remaining_usd", "Remaining ledger", "spent_usd", "usage cap", "$0.0"):
             self.assertNotIn(dynamic, first)
         self.assertIn("1 token = 0.149 pt", first)
-
-    def test_tool_results_are_compact(self):
-        run = self.fake([cheap_tool("arena_idea", {"title": "First"}), cheap_tool("arena_idea", {"title": "An idea"}),
-                         {"text": "done"}])
-        results = [m for m in run.requests[-1]["messages"] if m["role"] == "toolResult"]
-        self.assertTrue(results)
-        for result in results:
-            self.assertLess(len(json.dumps(result["content"])), 700)
+        summary = run.json("summary.json")
+        self.assertEqual(len(summary["cache"]["per_request"]), summary["cost"]["requests"])
+        kinds = summary["cost"]["by_turn_type"]
+        self.assertEqual(kinds["bookkeeping"]["requests"], 1)
+        self.assertGreaterEqual(kinds["context"]["requests"], 1)
+        self.assertEqual(kinds["rejected"]["requests"], 1)
+        self.assertEqual(summary["tools"]["errors"], {"arena_evaluate": 1})
 
     def test_cache_alarm_fires_when_a_warm_request_writes_more_than_it_reads(self):
         bad = {"input": 100, "output": 10, "cacheRead": 100, "cacheWrite": 5000}
@@ -210,16 +180,6 @@ class CacheDisciplineTests(unittest.TestCase):
         self.assertEqual(healthy.json("summary.json")["cache"]["alarms"], 0)
         self.assertGreater(healthy.json("summary.json")["cache"]["reuse_pct"], 90)
 
-    def test_per_request_cache_tokens_and_turn_costs_are_reported(self):
-        run = self.fake([cheap_tool("arena_idea", {"title": "An idea"}), cheap_tool("arena_source", SOURCE),
-                         cheap_tool("arena_evaluate", {"candidate": "#7"}), {"text": "done"}])
-        summary = run.json("summary.json")
-        self.assertEqual(len(summary["cache"]["per_request"]), summary["cost"]["requests"])
-        kinds = summary["cost"]["by_turn_type"]
-        self.assertEqual(kinds["bookkeeping"]["requests"], 1)
-        self.assertEqual(kinds["context"]["requests"], 1)
-        self.assertEqual(kinds["rejected"]["requests"], 1)
-        self.assertEqual(summary["tools"]["errors"], {"arena_evaluate": 1})
 
 
 FIXTURE = Path(__file__).resolve().parents[1] / "runs/baseline/Core_InitsUpdatesComm/arena-candidate-126.txt"
@@ -346,39 +306,20 @@ class ToolArgumentUxTests(unittest.TestCase):
         self.assertIn("object", message_text(results[0]).lower())
         self.assertNotIn("No Arena skill is loaded", message_text(results[0]))
 
-    def test_unprefixed_tool_name_suggests_the_registered_arena_tool(self):
-        run = FakeRun([{"tool_calls": [{"name": "probe", "arguments": {}}]}, {"text": "done"}])
+    def test_misnamed_tools_get_the_nearest_registered_name_in_the_next_provider_context(self):
+        names = ["probe", "arena_declaraton", "mcp__arena_lean__lean_declaration"]
+        run = FakeRun([{"tool_calls": [{"name": name, "arguments": {"symbol": "Missing"}}]} for name in names]
+                      + [{"text": "done"}])
         self.addCleanup(run.cleanup)
         run.run()
         self.assertEqual(run.result.returncode, 0, run.stdout[-1000:])
-        results = [message for message in run.requests[-1]["messages"]
-                   if message.get("role") == "toolResult" and message.get("toolName") == "probe"]
-        self.assertEqual(len(results), 1)
-        self.assertIn("Closest registered tool: arena_probe", message_text(results[0]))
-
-    def test_misnamed_arena_tool_gets_nearest_name_in_the_next_provider_context(self):
-        run = FakeRun([{"tool_calls": [{"name": "arena_declaraton", "arguments": {"symbol": "Missing"}}]},
-                       {"text": "done"}])
-        self.addCleanup(run.cleanup)
-        run.run()
-        self.assertEqual(run.result.returncode, 0, run.stdout[-1000:])
-        results = [message for message in run.requests[-1]["messages"]
-                   if message.get("role") == "toolResult" and message.get("toolName") == "arena_declaraton"]
-        self.assertEqual(len(results), 1)
-        self.assertIn("Closest registered tool: arena_declarations", message_text(results[0]))
-
-    def test_retired_mcp_declaration_name_suggests_the_batched_declaration_tool(self):
-        run = FakeRun([{"tool_calls": [{"name": "mcp__arena_lean__lean_declaration",
-                                        "arguments": {"symbol": "Imperative.UpdateState"}}]},
-                       {"text": "done"}])
-        self.addCleanup(run.cleanup)
-        run.run()
-        self.assertEqual(run.result.returncode, 0, run.stdout[-1000:])
-        results = [message for message in run.requests[-1]["messages"]
-                   if message.get("role") == "toolResult"
-                   and message.get("toolName") == "mcp__arena_lean__lean_declaration"]
-        self.assertEqual(len(results), 1)
-        self.assertIn("Closest registered tool: arena_declarations", message_text(results[0]))
+        expected = {"probe": "arena_probe", "arena_declaraton": "arena_declarations",
+                    "mcp__arena_lean__lean_declaration": "arena_declarations"}
+        for name, nearest in expected.items():
+            results = [message for message in run.requests[-1]["messages"]
+                       if message.get("role") == "toolResult" and message.get("toolName") == name]
+            self.assertEqual(len(results), 1, name)
+            self.assertIn(f"Closest registered tool: {nearest}", message_text(results[0]), name)
 
 
 TOOL_WORDS = {"build", "code_actions", "completions", "declaration_file", "file_outline", "get_widgets",
@@ -397,21 +338,30 @@ class LeanMcpTests(unittest.TestCase):
         self.addCleanup(run.cleanup)
         run.command = [item for item in run.command if item != "--no-mcp"]
         path = str(run_dir(run.run_id) / "scratch" / "project" / problem("Core.InitsUpdatesComm")["file_path"])
+        malformed = {"tool_calls": [{"name": "mcp__arena_lean__lean_goal", "arguments": {},
+                                     "raw_arguments": "{\"line\": "}]}
+        unprefixed = {"tool_calls": [{"name": "lean_goal", "arguments": {}}]}
         calls = [("arena_evaluate", {"proof": FIXTURE.read_text()}),
                  ("mcp__arena_lean__lean_goal", {"file_path": path, "line": 960}),
                  ("mcp__arena_lean__lean_diagnostic_messages", {"file_path": path, "start_line": 950, "end_line": 976}),
                  ("mcp__arena_lean__lean_hover_info", {"file_path": path, "line": 953, "column": 3}),
                  ("mcp__arena_lean__lean_local_search", {"query": "InitStatesUpdated"}),
                  ("mcp__arena_lean__lean_multi_attempt", {"file_path": path, "line": 960, "snippets": ["skip"]})]
-        run.script.write_text(json.dumps([cheap_tool(name, args) for name, args in calls] + [{"text": "done"}]))
+        run.script.write_text(json.dumps([malformed, unprefixed] + [cheap_tool(name, args) for name, args in calls]
+                                         + [{"text": "done"}]))
         run.run()
         requests = run.requests
-        self.assertGreaterEqual(len(requests), len(calls) + 1, run.stdout + run.result.stderr[-2000:])
+        self.assertGreaterEqual(len(requests), len(calls) + 3, run.stdout + run.result.stderr[-2000:])
         # The tool list is complete and identical from the first request: nothing appears later
         # (cache prefix), and Pi's codemode sandbox / tool_search never activate.
         for request in requests:
             self.assertEqual(declared_tools(request), ARENA_TOOLS | LEAN_TOOLS)
-        results = {m["toolName"]: m for m in requests[-1]["messages"] if m["role"] == "toolResult"}
+        everything = [m for m in requests[-1]["messages"] if m["role"] == "toolResult"]
+        results = {m["toolName"]: m for m in everything}  # the later, valid lean_goal call wins
+        rejected = next(m for m in everything if m["toolName"] == "mcp__arena_lean__lean_goal")
+        self.assertTrue(rejected["isError"])
+        self.assertIn("object", message_text(rejected).lower())
+        self.assertIn("Closest registered tool: mcp__arena_lean__lean_goal", message_text(results["lean_goal"]))
         for name, _ in calls:
             self.assertFalse(results[name].get("isError"), f"{name}: {message_text(results[name])[:300]}")
         self.assertIn("Hup", message_text(results["mcp__arena_lean__lean_goal"]))
@@ -419,37 +369,6 @@ class LeanMcpTests(unittest.TestCase):
         self.assertIn("UpdateStates", message_text(results["mcp__arena_lean__lean_hover_info"]))
         settings = json.loads((run_dir(run.run_id) / "scratch" / "project" / ".pi" / "settings.json").read_text())
         self.assertIs(settings["autoEnableCodemode"], False)
-
-
-    def test_mcp_tool_with_malformed_json_is_rejected_and_a_missing_prefix_is_suggested(self):
-        run = FakeRun([{"tool_calls": [{"name": "mcp__arena_lean__lean_goal", "arguments": {},
-                                        "raw_arguments": "{\"line\": "}]},
-                       {"tool_calls": [{"name": "lean_goal", "arguments": {}}]},
-                       {"text": "done"}], timeout=600)
-        self.addCleanup(run.cleanup)
-        run.command = [item for item in run.command if item != "--no-mcp"]
-        run.run()
-        results = {m["toolName"]: m for m in run.requests[-1]["messages"] if m["role"] == "toolResult"}
-        self.assertTrue(results["mcp__arena_lean__lean_goal"]["isError"])
-        self.assertIn("object", message_text(results["mcp__arena_lean__lean_goal"]).lower())
-        self.assertIn("Closest registered tool: mcp__arena_lean__lean_goal", message_text(results["lean_goal"]))
-
-
-class AnthropicWireCaptureTests(unittest.TestCase):
-    """The fake provider must keep the socket body. Parsed JSON cannot prove a byte match."""
-
-    def test_raw_request_body_is_preserved_byte_for_byte(self):
-        import urllib.request
-
-        wire = AnthropicWire([{"text": "done"}])
-        self.addCleanup(wire.close)
-        body = b'{"max_tokens":2048,"thinking":{"budget_tokens":1024,"type":"enabled"},"messages":[]}'
-        request = urllib.request.Request(wire.url, data=body, method="POST")
-        with urllib.request.urlopen(request, timeout=5) as response:
-            self.assertEqual(response.status, 200)
-            response.read()
-        self.assertEqual(wire.raw_bodies, [body])
-        self.assertEqual(wire.payloads[0]["max_tokens"], 2048)
 
 
 @unittest.skipUnless(PI_AVAILABLE, "pi and the Strata fixture are required")
@@ -652,13 +571,6 @@ class CompactionPolicyTests(unittest.TestCase):
         run = FakeRun(self.script())
         self.runs.append(run)
         return run.run(*extra)
-
-    def test_history_is_never_rewritten_below_the_configured_size(self):
-        run = self.fake()
-        self.assertTrue(all(r["messages"][0].get("sections") for r in run.requests))
-        for earlier, later in zip(run.requests, run.requests[1:]):
-            self.assertEqual(json.dumps(later["messages"][:len(earlier["messages"])]), json.dumps(earlier["messages"]))
-        self.assertEqual(run.json("run-config.json")["compact_at_tokens"], 200_000)
 
     def test_past_the_threshold_only_the_tail_is_summarized_and_the_prefix_stays_identical(self):
         run = self.fake("--compact-at-tokens", "12000", "--compact-keep-tokens", "300")

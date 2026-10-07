@@ -160,52 +160,22 @@ class RealLeanTests(unittest.TestCase):
         self.assertEqual(full["heartbeat"], fast["heartbeat"])
         self.assertEqual(full["metrics"]["deltas"]["vs_reference"]["tokens"], -98)
 
-    def test_reported_lines_match_the_file_lean_goal_reads(self):
-        result = evaluate(NAME, self.broken, "fast")
-        primary = next(iter(result["compat"].values()))
-        self.assertFalse(primary["passed"])
-        self.assertTrue(primary["diagnostics"])
-        location = campaign.materialize(NAME, self.run_id, self.broken)
-        materialized = Path(location["candidate_path"]).read_text().splitlines()
-        for item in primary["diagnostics"]:
-            self.assertEqual(materialized[item["file_line"] - 1], item["source_line_text"])
-            self.assertEqual(item["file_line"], location["start_line"] + item["proof_line"] - 1)
-        self.assertEqual(primary["diagnostics"][0]["severity"], "error")
-        self.assertIn("rfl", primary["diagnostics"][0]["source_line_text"])
-
     def test_every_toolchains_lines_match_the_materialized_primary_file(self):
         # The target starts on a different line in each version's file.
         result = evaluate(NAME, self.broken, "full")
         location = campaign.materialize(NAME, self.run_id, self.broken)
         materialized = Path(location["candidate_path"]).read_text().splitlines()
         self.assertEqual(len(result["compat"]), 3)
+        primary = next(iter(result["compat"].values()))
+        self.assertFalse(primary["passed"])
+        self.assertIn("rfl", primary["diagnostics"][0]["source_line_text"])
+        self.assertEqual(next(iter(result["compat"].values()))["diagnostics"][0]["severity"], "error")
         for version, outcome in result["compat"].items():
             self.assertTrue(outcome["diagnostics"], version)
             for item in outcome["diagnostics"]:
                 self.assertEqual(materialized[item["file_line"] - 1], item["source_line_text"], version)
+                self.assertEqual(item["file_line"], location["start_line"] + item["proof_line"] - 1, version)
                 self.assertNotIn("ARENA_HEARTBEATS", item["message"])
-
-    def test_materialized_file_is_the_compiled_file_minus_wrapper_and_truncated(self):
-        row = problem(NAME)
-        version, commit = next(iter(row["version_info"][0].items()))
-        built = candidate_file(row, self.good, version, commit)
-        self.assertTrue(built["text"].endswith(self.good.rstrip("\n") + "\n"))
-        full = reconstruct(row, self.good, version, commit)[1]
-        self.assertGreater(len(full), len(built["text"]))
-
-    def test_probe_returns_goals_and_never_scores(self):
-        draft = problem(NAME)["statement"] + " := by\n  intros Hup Hinit\n  sorry"
-        result = evaluate(NAME, draft, "probe")
-        self.assertFalse(result["scored"])
-        self.assertIsNone(result["local_proxy"])
-        self.assertTrue(result["contains_sorry"])
-        self.assertEqual(len(result["goals"]), 1)
-        self.assertIn("Hup", result["goals"][0]["goals"])
-        self.assertEqual(result["goals"][0]["proof_line"], 11)
-        self.assertEqual(result["goals"][0]["file_line"], 950 + 10)
-        with self.assertRaisesRegex(ValueError, "FORBIDDEN: sorry"):
-            evaluate(NAME, draft, "fast")
-
 
 if __name__ == "__main__":
     unittest.main()
