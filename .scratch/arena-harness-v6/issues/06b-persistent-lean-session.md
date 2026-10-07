@@ -4,7 +4,7 @@
 
 **Blocked by:** 06: Proof-tool UX and error replay.
 
-**Status:** ready-for-agent
+**Status:** needs-review
 
 **Branch:** `hrushikesh/v6-06b-fast-lean` (stacked on `hrushikesh/v6-06-proof-tools`)
 
@@ -32,3 +32,31 @@ Your branch is **`hrushikesh/v6-06b-fast-lean`**, already created and stacked di
 - If you need to change code a lower ticket introduced, do it in a commit on your own branch and call it out in the hand-back; do not edit lower branches' commits. If `but commit` reports a dependency or conflict error, stop and report rather than moving branches.
 - Do not edit other tickets or `docs/SPEC-harness-v6.md`; put proposed spec changes in the hand-back.
 - **Hand-back:** every change is committed on `hrushikesh/v6-06b-fast-lean`, with nothing uncommitted. Set this ticket's `**Status:**` to `needs-review` in that final commit. Report your commit IDs, the tests you ran and their results, the timing table, deviations from the criteria and open questions. Do not mark the ticket done.
+
+## Hand-back
+
+**Design.** `arena/lean_session.py`: a per-run daemon, started by `tools/run_pi_budgeted.py` before the kickoff packet, owns one `lean --server` per toolchain with one open LSP document per concurrent draft (up to 4, bounded by memory). A draft is a `didChange`, so Lean re-elaborates from the first changed line. The socket is `lean-session.sock` in the run dir (short-path fallback). `engine.run_lean` uses it when `ARENA_LEAN_SESSION` is set and otherwise, or on any failure, compiles cold; each compat entry records `lean.path` (`session`, `cold`, `cold-fallback` plus reason). Stale detection: toolchain, pin, manifest, evaluator code hash, file prefix. `--no-lean-session` opts out; FakeRun defaults to it. Submission re-verifies session-vouched candidates with a clean cold compile (heartbeats within 5%).
+
+**Spike.** LSP works; no REPL needed. The server must run without `lake setup-file` (`LAKE` pointed at nothing): the lakefile options otherwise turned the `sorry` warning into an error. Heartbeats differ by at most 0.25%. A worker costs about 0.6 GB (PhysLib) or 0.26 GB (Core) PSS; 4 workers plus server: 3.2 GB / 1.3 GB.
+
+**Timing (s, before cold -> after session; noisy machine).**
+
+| Path | Core | PhysLib |
+|---|---|---|
+| first Lean call (session start-up) | 4.1 -> 5.8 | 30 -> 54 |
+| single probe | 4.1 -> 0.5 | 31 -> 0.4 |
+| 4-draft batch | 10.6 -> 0.8 warm | 65-72 -> 0.6 warm |
+| evaluate | 5.2 -> 1.2 | 45 -> 2.8 |
+| profile (uncached floor) | 10.3 -> 2.9 | 92 -> 3.7 |
+| kickoff context + profile (uncached) | 25 -> 17.5 | 162 -> 64 |
+| declaration lookup fallback | 5.3 -> 1.1-2.3 | 33 -> 3 |
+| autocheck, other toolchains | 8.7 -> 17.9 first, 8.5 -> 1.3 next | n/a |
+| polish | 126 -> 118 (two intrinsically slow variants) | not run |
+| `workspace()` per call | 100-130 ms -> 9 ms | same |
+| daemon start / run init | 0.05-0.1 / 1.3-2 (unchanged) | same |
+
+A batch sent right after the first probe waits for the other workers to open: 11 s (Core); 96 s (PhysLib, measured with the earlier sequential warm-up). Warm-up is now parallel; all 4 PhysLib workers were warm 154 s after the first call.
+
+**Verification.** `tests/test_lean_session.py` (37 tests): session vs cold on Core and PhysLib for a compiling, failing and hole draft; stale, crashed, timeout, concurrent documents; daemon, Ctrl+C, killed runner and killed daemon leave no Lean processes. Full suite: 255 tests OK, 1 known skip. Node tests: 20 pass.
+
+**Deviations / questions.** Other toolchains also use the session, so the first autocheck costs more. Cold re-verification adds about 13 s (Core) or 45 s (PhysLib) at run end. Suggested spec note: `lean.path` and `ARENA_LEAN_SESSION` are evaluation provenance. Workspace lookup fast path (`arena/environments.py`) is an unrelated survey fix.
