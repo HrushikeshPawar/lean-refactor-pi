@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from arena import profile as profiler
+from arena.engine import _proof_length
 
 OUTPUT = """ARENA_PROFILE 120 2 0 120 10
 ARENA_PROFILE 121 4 1 121 30
@@ -22,6 +23,7 @@ class AggregationTests(unittest.TestCase):
         self.assertEqual(self.total, 80)
         first = self.records[0]
         self.assertEqual((first["file_line"], first["proof_line"], first["depth"]), (20, 11, 0))
+        self.assertEqual((first["end_file_line"], first["end_proof_line"]), (20, 11))
 
     def test_repeated_calls_on_one_line_are_summed(self):
         repeated = next(r for r in self.records if r["file_line"] == 23)
@@ -45,6 +47,32 @@ class AggregationTests(unittest.TestCase):
         self.assertEqual(nested["share_pct"], 30.0)
         self.assertNotIn("recommend", str(summary).lower())
 
+    def test_hotspots_rank_full_self_costs_and_include_both_line_coordinates(self):
+        tokens = {11: 4, 12: 7, 13: 2}
+        summary = profiler.summarize(self.records, [f"line {i}" for i in range(1, 40)],
+                                     measured=100, instrumented=80, line_tokens=tokens,
+                                     reference_tokens=13, reference_heartbeats=100)
+        self.assertTrue(summary["token_attribution_available"])
+        self.assertEqual(summary["line_tokens_total"], 13)
+        hotspot = summary["hotspots"][0]
+        self.assertEqual((hotspot["proof_line"], hotspot["file_line"], hotspot["end_file_line"]), (12, 21, 22))
+        self.assertEqual(hotspot["self_hb"], 35)
+        self.assertIn("not predicted savings", summary["hotspot_label"])
+        self.assertEqual(summary["line_profile"], [])
+
+    def test_token_attribution_is_unavailable_when_counts_do_not_reconcile(self):
+        summary = profiler.summarize(self.records, [f"line {i}" for i in range(1, 40)],
+                                     measured=100, instrumented=80, line_tokens={11: 3})
+        self.assertFalse(summary["token_attribution_available"])
+        self.assertIsNone(summary["line_tokens_total"])
+        self.assertEqual(summary["hotspots"], [])
+
+    def test_competition_tokenizer_attribution_reconciles_on_source_lines(self):
+        proof = "theorem sample : True := by\n  exact True.intro\n"
+        counts = profiler._line_token_counts(proof, _proof_length(proof))
+        self.assertEqual(counts, {1: 1, 2: 2})
+        self.assertEqual(sum(counts.values()), _proof_length(proof))
+
 
 class DegradationTests(unittest.TestCase):
     row = {"name": "T", "statement": "theorem t : True", "file_path": "T.lean"}
@@ -53,11 +81,14 @@ class DegradationTests(unittest.TestCase):
         if depth:
             raise ValueError("instrumented compile failed: boom")
         records, total = profiler.parse_profile("ARENA_PROFILE 5 2 0 5 7\nARENA_PROFILE_TOTAL 7", 0, 1)
-        return records, total, {"text": "a\nb\nc\nd\ne\n"}, ""
+        return records, total, {"text": "a\nb\nc\nd\ne\n", "start_line": 1}, ""
 
     def test_failed_instrumentation_degrades_to_the_outermost_tactics(self):
         with patch.object(profiler, "problem", return_value=self.row), \
+             patch.object(profiler, "measure_version", return_value=("v1", "c")), \
              patch.object(profiler, "versions", return_value=[("v1", "c")]), \
+             patch.object(profiler, "exchange_rates", return_value={"reference_tokens": 2,
+                                                                      "reference_heartbeats": 9}), \
              patch.object(profiler, "_instrumented", side_effect=self.fake_instrumented):
             result = profiler.profile("T", "theorem t : True := by\n  trivial", measured=9)
         self.assertEqual(result["granularity"], "top_level")
@@ -66,6 +97,7 @@ class DegradationTests(unittest.TestCase):
 
     def test_non_compiling_and_sorry_proofs_get_one_line_actionable_errors(self):
         with patch.object(profiler, "problem", return_value=self.row), \
+             patch.object(profiler, "measure_version", return_value=("v1", "c")), \
              patch.object(profiler, "versions", return_value=[("v1", "c")]), \
              patch.object(profiler, "_instrumented", side_effect=ValueError("instrumented compile failed: x")), \
              patch.object(profiler, "compile_version", return_value={"passed": False,
