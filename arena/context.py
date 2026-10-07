@@ -62,7 +62,9 @@ def parse_context(output: str, shift: int, start_line: int, proof_boundary: tupl
         item["proof_line"] = item["line"] - shift - start_line + 1
     for item in groups["source"]:
         item["proof_line"] = item["line"] - shift - start_line + 1
-        if proof_boundary is not None:
+        if proof_boundary is None:
+            item.setdefault("origin", "unknown")  # no top-level `:=` (e.g. equation-compiler proofs): do not guess
+        else:
             item["origin"] = ("proof" if (item["proof_line"], item.get("column", 0)) >= proof_boundary else "statement")
     for item in groups["dependency"]:
         item["origin"] = "elaborated-proof"
@@ -74,12 +76,13 @@ def parse_context(output: str, shift: int, start_line: int, proof_boundary: tupl
 
 
 def constant_index(context: dict, name: str | None = None, kind: str | None = None,
-                   origin: str | None = None) -> list[dict]:
-    """Query the full elaborated constant inventory by qualified name, kind and origin."""
+                   origin: str | None = None, tag: str | None = None) -> list[dict]:
+    """Query the full elaborated constant inventory by qualified name, kind, origin and tag."""
     items = context.get("constant", [])
     return [item for item in items if (name is None or item["name"] == name)
             and (kind is None or item["kind"] == kind)
-            and (origin is None or item["origin"] == origin)]
+            and (origin is None or item["origin"] == origin)
+            and (tag is None or item.get("tag") == tag)]
 
 
 def _proof_boundary(source: str, start_line: int) -> tuple[int, int] | None:
@@ -274,17 +277,50 @@ def _goal_section(context: dict) -> list[str]:
     return lines
 
 
+TAGS = ("generated", "instance", "axiom", "tactic", "core")
+
+
+def _rank(item: dict, root: str) -> tuple[int, str]:
+    """Project and this-file declarations first, then other helper libraries."""
+    module = item.get("module", "")
+    return (0 if module == "this file" else 1 if root and module.split(".")[0] == root else 2, item["name"])
+
+
+def _source_names(context: dict) -> dict[str, dict]:
+    return {item["name"]: item for item in context.get("source", [])}
+
+
+def _extra_dependencies(context: dict) -> tuple[list[dict], dict[str, int], int]:
+    """Direct theorem/lemma dependencies beyond the source names: (helpers in display order,
+    per-tag counts of the rest, how many were already source-named)."""
+    source = _source_names(context)
+    unique = {item["name"]: item for item in context.get("dependency", [])}
+    extra = [unique[name] for name in unique if name not in source]
+    root = context.get("root", "")
+    helpers = sorted((i for i in extra if i.get("tag", "helper") == "helper"), key=lambda i: _rank(i, root))
+    counts = {tag: sum(i.get("tag") == tag for i in extra) for tag in TAGS}
+    return helpers, counts, len(unique) - len(extra)
+
+
+def _preview(items: list[dict], root: str) -> list[dict]:
+    """Up to LIMITS['used'] helper declarations in display order; never generated, instance, axiom, tactic or core glue."""
+    return sorted((i for i in items if i.get("tag", "helper") == "helper"), key=lambda i: _rank(i, root))[:LIMITS["used"]]
+
+
 def _used_section(context: dict) -> list[str]:
     occurrences: dict[str, list[dict]] = {}
     for item in context.get("source", []):
         occurrences.setdefault(item["name"], []).append(item)
     ordered = sorted(occurrences.items())
-    lines = ["Qualified name [kind] S:statement lines P:proof lines; use `decl:<name>` as its source handle."]
+    lines = ["Qualified name [kind] S:statement lines P:proof lines U:lines whose position could not be placed "
+             "(no top-level `:=` found); use `decl:<name>` as its source handle."]
     for name, items in ordered:
-        statement_lines = ",".join(str(i["proof_line"]) for i in items if i.get("origin") == "statement")
-        proof_lines = ",".join(str(i["proof_line"]) for i in items if i.get("origin") == "proof")
-        lines.append(f"{name} [{items[0]['decl']}] S:{statement_lines or '-'} P:{proof_lines or '-'}")
-    preview = [items[0] for _, items in ordered[:LIMITS["used"]]]
+        def at(origin: str) -> str:
+            return ",".join(str(i["proof_line"]) for i in items if i.get("origin") == origin)
+        unknown = at("unknown")
+        lines.append(f"{name} [{items[0]['decl']}] S:{at('statement') or '-'} P:{at('proof') or '-'}"
+                     + (f" U:{unknown}" if unknown else ""))
+    preview = _preview([items[0] for _, items in ordered], context.get("root", ""))
     lines.extend(["", f"Signature preview: {sum(bool(i.get('sig')) for i in preview)} shown of {len(ordered)} distinct source names; "
                   f"{sum(not bool(items[0].get('sig')) for _, items in ordered)} unavailable."])
     lines.extend(f"[{i['decl']} · {i['module']}] {_clip(_readable(_one_line(i['sig'])), LIMITS['used_chars'])}"
@@ -293,14 +329,15 @@ def _used_section(context: dict) -> list[str]:
 
 
 def _dependency_section(context: dict) -> list[str]:
-    source_names = {item["name"] for item in context.get("source", [])}
-    unique = {item["name"]: item for item in context.get("dependency", [])}
-    ordered = [unique[name] for name in sorted(unique) if name not in source_names]
-    lines = ["Qualified theorem name; origin: direct elaborated-proof use; source handle: `decl:<name>`."]
-    lines.extend(i["name"] for i in ordered)
-    preview = ordered[:LIMITS["used"]]
-    lines += ["", f"Signature preview: {sum(bool(i.get('sig')) for i in preview)} shown of {len(ordered)} dependencies; "
-              f"{sum(not bool(i.get('sig')) for i in ordered)} unavailable."]
+    helpers, counts, named = _extra_dependencies(context)
+    lines = ["Qualified helper theorem name (project/this file first); origin: direct elaborated-proof use; "
+             "source handle: `decl:<name>`."]
+    lines.extend(i["name"] for i in helpers)
+    lines += ["", f"Tagged, not listed: {', '.join(f'{tag} {n}' for tag, n in counts.items())}; also source-named: {named}. "
+              "Query the constant index or declaration lookup for these."]
+    preview = _preview(helpers, context.get("root", ""))
+    lines += [f"Signature preview: {sum(bool(i.get('sig')) for i in preview)} shown of {len(helpers)} helpers; "
+              f"{sum(not bool(i.get('sig')) for i in helpers)} unavailable."]
     lines.extend(f"[{i['decl']} · {i['module']}] {_clip(_readable(_one_line(i['sig'])), LIMITS['used_chars'])}"
                  for i in preview if i.get("sig"))
     return lines
@@ -318,10 +355,10 @@ def _local_section(context: dict) -> list[str]:
     return lines
 
 
-def _signature_counts(items: list[dict]) -> tuple[int, int]:
-    unique = {item["name"]: item for item in items}
-    preview = [unique[name] for name in sorted(unique)[:LIMITS["used"]]]
-    return sum(bool(item.get("sig")) for item in preview), sum(not bool(item.get("sig")) for item in unique.values())
+def _signature_counts(items: list[dict], root: str) -> tuple[int, int]:
+    """(previewed signatures shown, signatures unavailable) over distinct names, as the sections report."""
+    unique = list({item["name"]: item for item in items}.values())
+    return sum(bool(i.get("sig")) for i in _preview(unique, root)), sum(not bool(i.get("sig")) for i in unique)
 
 
 def _imports(row: dict) -> list[str]:
@@ -339,7 +376,8 @@ def packet_manifest(parts: list[tuple[str, list[str]]], inventory: dict) -> dict
                 for title in REQUIRED_SECTIONS}
     return {"schema": "arena-kickoff-manifest/v1", "sections": sections,
             "source_inventory": len(inventory.get("source", [])),
-            "dependency_inventory": len(inventory.get("dependency", [])),
+            "dependency_helpers": len(_extra_dependencies(inventory)[0]),
+            "dependency_tags": _extra_dependencies(inventory)[1],
             "complete": bool(inventory.get("complete"))}
 
 
@@ -414,15 +452,12 @@ def render_packet(name: str) -> str:
         "changes; the best verified candidate is submitted automatically at the end. Parents and idea ids are optional "
         "labels. The current candidate file is readable by lean_goal and lean_diagnostic_messages at the line numbers "
         "reported in diagnostics.",
-        (f"Pinned source: {row['source']} standalone problem (file = header + statement + proof)\n" if is_standalone(row)
-         else f"Pinned source: {row['source']}:{row['file_path']}:{row['start_line']}-{row['end_line']}\n") +
-        f"Pinned Lean and source revisions: {pins}\nAvailable imports (including tactic libraries): "
-        f"{', '.join(_imports(row)) or '(none reported)'}",
     ]
     note = "" if not context.get("error") else f"(elaboration context unavailable: {_clip(context['error'], 160)})"
     parts: list[tuple[str, list[str]]] = [
         ("", task),
-        ("Pinned environment and candidate", [f"Source revision: {row['source']}",
+        ("Pinned environment and candidate", [f"Source: {row['source']} standalone problem (file = header + statement + proof)" if is_standalone(row)
+                                               else f"Source: {row['source']}:{row['file_path']}:{row['start_line']}-{row['end_line']}",
                                                f"Lean toolchain and source revisions: {pins}",
                                                f"Original proof: candidate #1",
                                                f"Available imports: {', '.join(_imports(row)) or '(none reported)'}"]),
@@ -443,13 +478,16 @@ def render_packet(name: str) -> str:
     result = certify_manifest(manifest)
     if not result["certified"]:
         raise ValueError("Kickoff packet is not certifiable: " + "; ".join(result["reasons"]))
+    root = context.get("root", "")
+    helpers, tags, named = _extra_dependencies(context)
     parts.append(("Kickoff inventory manifest", [
         f"Source names: {len(context.get('source', []))} occurrences; "
-        f"{len({i['name'] for i in context.get('source', [])})} distinct; signature preview "
-        f"{_signature_counts(context.get('source', []))[0]}; unavailable {_signature_counts(context.get('source', []))[1]}.",
-        f"Extra direct theorem/lemma dependencies: {len({i['name'] for i in context.get('dependency', [])})}; "
-        f"signature preview {_signature_counts(context.get('dependency', []))[0]}; "
-        f"unavailable {_signature_counts(context.get('dependency', []))[1]}.",
+        f"{len(_source_names(context))} distinct; signature preview "
+        f"{_signature_counts(list(_source_names(context).values()), root)[0]}; "
+        f"unavailable {_signature_counts(list(_source_names(context).values()), root)[1]}.",
+        f"Extra direct theorem/lemma dependencies: {len(helpers)} helpers shown; tagged and not listed: "
+        f"{', '.join(f'{tag} {n}' for tag, n in tags.items())}; already source-named: {named}; "
+        f"signature preview {_signature_counts(helpers, root)[0]}; unavailable {_signature_counts(helpers, root)[1]}.",
         "Required sections: " + ", ".join(name for name, state in manifest["sections"].items() if state["present"]) + "."
     ]))
     return _fit(parts, MAX_PACKET_CHARS) + "\n"

@@ -23,6 +23,34 @@ elab "arena_context " cmd:command : command => do
     | some idx =>
       let m := env.header.moduleNames[idx.toNat]!
       projectRoots.contains m.getRoot.toString
+  -- Modules compiled with the module system expose imported theorems as `axiomInfo` stubs,
+  -- so only the kernel's axioms and axioms declared in this file count as axioms.
+  let isAxiomC := fun (n : Lean.Name) (env : Lean.Environment) =>
+    match env.find? n with
+    | some (.axiomInfo _) =>
+      (env.getModuleIdxFor? n).isNone ||
+        [``propext, ``Classical.choice, ``Quot.sound, ``sorryAx, ``Lean.ofReduceBool, ``Lean.trustCompiler].contains n
+    | _ => false
+  -- How a constant should be presented: generated and instance glue, axioms and core
+  -- logic are tagged so only source-style helpers are offered as dependencies.
+  let tagOf (n : Lean.Name) (env : Lean.Environment) : String :=
+    let user := (privateToUserName? n).getD n
+    let last := match user with | .str _ s => s | _ => ""
+    let numbered := fun (pre : String) => last.startsWith pre && (last.drop pre.length).all Char.isDigit
+                    && last.length > pre.length
+    let root := match env.getModuleIdxFor? n with
+      | none => ""
+      | some idx => (env.header.moduleNames[idx.toNat]!).getRoot.toString
+    if user.isInternal || user.isInternalDetail || numbered "match_" || numbered "eq_" then "generated"
+    else if Lean.Meta.isInstanceCore env n then "instance"
+    else if isAxiomC n env then "axiom"
+    else if (n.components.any (fun c => c.toString == "Tactic" || c.toString == "Meta")) ||
+        (match env.getModuleIdxFor? n with
+          | none => false
+          | some idx => (env.header.moduleNames[idx.toNat]!).components.any
+              (fun c => c.toString == "Tactic" || c.toString == "Meta")) then "tactic"
+    else if root == "Init" || root == "Lean" then "core"
+    else "helper"
   -- top-level tactics of the declaration's `by` block
   let rec findBy : Nat → Lean.Syntax → Option Lean.Syntax
     | 0, _ => none
@@ -117,41 +145,36 @@ elab "arena_context " cmd:command : command => do
     | some ci =>
       let decl := match ci with
         | .thmInfo _ => "theorem" | .defnInfo _ => "def" | .inductInfo _ => "inductive"
-        | .ctorInfo _ => "constructor" | .axiomInfo _ => "theorem" | .opaqueInfo _ => "opaque"
+        | .ctorInfo _ => "constructor" | .axiomInfo _ => if isAxiomC n env then "axiom" else "theorem" | .opaqueInfo _ => "opaque"
         | .recInfo _ => "recursor" | .quotInfo _ => "quot"
       let modName := match env.getModuleIdxFor? n with
         | none => "this file"
         | some idx => (env.header.moduleNames[idx.toNat]!).toString
       emit [("kind", "source"), ("name", n.toString), ("line", line), ("column", column),
-            ("decl", decl), ("module", modName), ("sig", clip (← sigOf n) 500)]
+            ("decl", decl), ("module", modName), ("tag", tagOf n env), ("sig", clip (← sigOf n) 500)]
   -- Direct theorem and lemma constants in the elaborated proof term. Keep the full
   -- constant index available to the cache, but classify generated constants by kind.
   match env.find? targetName with
     | some (.thmInfo info) =>
       for n in info.value.getUsedConstants do
         let constantDecl := match env.find? n with
-          | some (.thmInfo _) => "theorem" | some (.axiomInfo _) => "theorem"
+          | some (.thmInfo _) => "theorem"
+          | some (.axiomInfo _) => if isAxiomC n env then "axiom" else "theorem"
           | some (.defnInfo _) => "def" | some (.inductInfo _) => "inductive"
           | some (.ctorInfo _) => "constructor" | some (.opaqueInfo _) => "opaque"
           | some (.recInfo _) => "recursor" | _ => "generated/other"
         let constantModule := match env.getModuleIdxFor? n with
           | none => "this file"
           | some idx => (env.header.moduleNames[idx.toNat]!).toString
-        emit [("kind", "constant"), ("name", n.toString), ("decl", constantDecl),
+        let tag := tagOf n env
+        emit [("kind", "constant"), ("name", n.toString), ("decl", constantDecl), ("tag", tag),
               ("origin", "elaborated-proof"), ("module", constantModule),
               ("sig", clip (← sigOf n) 500)]
         unless n == targetName do
           match env.find? n with
-          | some (.thmInfo _) => emit [("kind", "dependency"), ("name", n.toString),
-                                        ("decl", "theorem"), ("module", match env.getModuleIdxFor? n with
-                                          | none => "this file"
-                                          | some idx => (env.header.moduleNames[idx.toNat]!).toString),
-                                        ("sig", clip (← sigOf n) 500)]
-          | some (.axiomInfo _) => emit [("kind", "dependency"), ("name", n.toString),
-                                          ("decl", "theorem"), ("module", match env.getModuleIdxFor? n with
-                                            | none => "this file"
-                                            | some idx => (env.header.moduleNames[idx.toNat]!).toString),
-                                          ("sig", clip (← sigOf n) 500)]
+          | some (.thmInfo _) | some (.axiomInfo _) =>
+            emit [("kind", "dependency"), ("name", n.toString), ("decl", constantDecl), ("tag", tag),
+                  ("module", constantModule), ("sig", clip (← sigOf n) 500)]
           | _ => pure ()
     | _ => emit [("kind", "failure"), ("message", s!"Pinned theorem {targetName} did not elaborate as a theorem")]
   -- declarations earlier in this file, nearest first

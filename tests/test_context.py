@@ -45,6 +45,57 @@ class ParseTests(unittest.TestCase):
         parsed = context.parse_context(output, 0, 1, (1, 20))
         self.assertEqual([item["origin"] for item in parsed["source"]], ["statement", "proof"])
 
+    def test_missing_proof_boundary_marks_origin_unknown_and_renders_it(self):
+        output = "\n".join([
+            'ARENA_CTX ' + json.dumps({"kind": "source", "name": "A.foo", "line": 4, "column": 2, "decl": "theorem",
+                                       "module": "A", "tag": "helper", "sig": "A.foo : True"}),
+            'ARENA_CTX ' + json.dumps({"kind": "end"}),
+        ])
+        parsed = context.parse_context(output, 0, 1, None)
+        self.assertEqual(parsed["source"][0]["origin"], "unknown")
+        text = "\n".join(context._used_section(parsed))
+        self.assertIn("A.foo [theorem] S:- P:- U:4", text)
+
+    def test_dependency_tags_split_helpers_from_glue_and_counts_agree(self):
+        def dep(name, tag, module="Other"):
+            return {"name": name, "decl": "theorem", "module": module, "tag": tag, "sig": f"{name} : True"}
+        inventory = {"source": [{"name": "Src.named", "decl": "theorem", "module": "Lib", "tag": "helper",
+                                 "origin": "proof", "proof_line": 1, "sig": "Src.named : True"}],
+                     "dependency": [dep("Src.named", "helper", "Lib"), dep("Lib.zeta", "helper", "Lib"),
+                                    dep("Proj.alpha", "helper", "Proj.Basic"), dep("Here.beta", "helper", "this file"),
+                                    dep("List.mem_cons._simp_1", "generated", "Init"),
+                                    dep("IsOrdered.toPosMulMono", "instance"), dep("of_eq_true", "core", "Init"),
+                                    dep("propext", "axiom", "Init"), dep("Mathlib.Tactic.Ring.add_congr", "tactic", "Mathlib.Tactic.Ring")],
+                     "root": "Proj"}
+        helpers, counts, named = context._extra_dependencies(inventory)
+        self.assertEqual([i["name"] for i in helpers], ["Here.beta", "Proj.alpha", "Lib.zeta"])
+        self.assertEqual(counts, {"generated": 1, "instance": 1, "axiom": 1, "tactic": 1, "core": 1})
+        self.assertEqual(named, 1)
+        section = "\n".join(context._dependency_section(inventory))
+        self.assertNotIn("_simp_1\n", section)
+        self.assertNotIn("of_eq_true", section)
+        self.assertIn("generated 1, instance 1, axiom 1, tactic 1, core 1", section)
+        self.assertIn("3 shown of 3 helpers", section)
+        # the section's helper list and the manifest line agree on the same numbers
+        self.assertEqual(len(helpers), 3)
+        self.assertEqual([i["name"] for i in context._preview(helpers, "Proj")], ["Here.beta", "Proj.alpha", "Lib.zeta"])
+
+    def test_previews_put_project_first_and_never_show_glue(self):
+        items = [{"name": n, "tag": t, "module": m, "decl": "theorem", "sig": f"{n} : True"}
+                 for n, t, m in [("And.right", "core", "Init"), ("Eq.symm", "core", "Init"),
+                                 ("Zed.lib", "helper", "Mathlib.X"), ("Abe.lib", "helper", "Mathlib.Y"),
+                                 ("Proj.lemma", "helper", "Proj.A"), ("Local.l", "helper", "this file"),
+                                 ("x._simp_1", "generated", "Init"), ("inst", "instance", "Mathlib.Z")]]
+        self.assertEqual([i["name"] for i in context._preview(items, "Proj")],
+                         ["Local.l", "Proj.lemma", "Abe.lib", "Zed.lib"])
+
+    def test_constant_index_tags_are_queryable(self):
+        inventory = {"constant": [
+            {"name": "A._simp_1", "kind": "theorem", "origin": "elaborated-proof", "tag": "generated"},
+            {"name": "A.foo", "kind": "theorem", "origin": "elaborated-proof", "tag": "helper"},
+        ]}
+        self.assertEqual([i["name"] for i in context.constant_index(inventory, tag="generated")], ["A._simp_1"])
+
     def test_constant_index_filters_all_dimensions(self):
         inventory = {"constant": [
             {"name": "A.foo", "kind": "theorem", "origin": "elaborated-proof"},
@@ -106,6 +157,17 @@ class FixturePacketTests(unittest.TestCase):
                                          kind="constructor", origin="elaborated-proof")
         self.assertEqual(len(indexed), 1)
 
+    def test_tags_classify_generated_instance_core_and_project_constants(self):
+        tags = {item["name"]: item["tag"] for item in context.lean_context(NAME)["constant"]}
+        self.assertTrue(all(tag == "generated" for name, tag in tags.items() if "_simp_" in name))
+        self.assertEqual(tags.get("Eq.symm", "core"), "core")
+        self.assertEqual(tags.get("Core.updatedStatesInit"), "helper")
+        self.assertNotIn("of_eq_true\n", self.text)
+
+    def test_pins_and_imports_are_stated_once(self):
+        self.assertEqual(self.text.count("Available imports"), 1)
+        self.assertEqual(self.text.count("Lean toolchain and source revisions"), 1)
+
     def test_source_occurrences_can_appear_in_both_statement_and_proof(self):
         items = [item for item in context.lean_context(NAME)["source"] if item["name"] == "Core.updatedStates"]
         self.assertEqual({item["origin"] for item in items}, {"statement", "proof"})
@@ -159,11 +221,13 @@ class PhyslibInventoryTests(unittest.TestCase):
         cls.context = context.lean_context(cls.name)
         cls.packet = context.render_packet(cls.name)
 
-    def test_every_source_and_additional_proof_name_survives_bounded_packet_fitting(self):
+    def test_every_source_and_helper_name_survives_bounded_packet_fitting(self):
         source_names = {item["name"] for item in self.context["source"]}
-        dependency_names = {item["name"] for item in self.context["dependency"]}
-        for name in source_names | dependency_names:
+        helpers = context._extra_dependencies(self.context)[0]
+        for name in source_names | {item["name"] for item in helpers}:
             self.assertIn(name, self.packet, name)
+        self.assertLess(len(helpers), len({item["name"] for item in self.context["dependency"]}) / 2)
+        self.assertIn(f"{len(helpers)} helpers shown", self.packet)
         self.assertLessEqual(len(self.packet), context.MAX_PACKET_CHARS + 1)
         self.assertIn("Source names:", self.packet)
         self.assertIn("Extra direct theorem/lemma dependencies:", self.packet)
