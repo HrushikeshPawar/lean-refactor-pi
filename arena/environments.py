@@ -50,6 +50,10 @@ def resolve(source: str, version: str, commit: str, root: Path | None = None) ->
         mapped = json.loads(registry_path.read_text()).get(key(source, version, commit))
         if mapped and (root / mapped).is_dir():
             return root / mapped
+    # The conventional directory almost always is the one: one `git rev-parse` instead of one per workspace.
+    named = root / f"{source}-{version}"
+    if named.is_dir() and _head(named) == commit:
+        return named
     candidates = discover(root).get(commit, [])
     if candidates:
         preferred = [path for path in candidates if path.name == f"{source}-{version}"]
