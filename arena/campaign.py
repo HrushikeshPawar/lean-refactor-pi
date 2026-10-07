@@ -1898,7 +1898,9 @@ def submission(run_id: str) -> dict:
                   "proof_file": "submission.lean",
                   "verified_by": "cold compile" if cold and cold["confirmed"] else "cold compile (no session used)"}
         if cold and cold["confirmed"]:
-            answer["cold_heartbeats"] = cold["cold_heartbeats"]
+            # The clean compile is the certified measurement; the session figure is kept for audit.
+            answer["session_heartbeats"] = best["heartbeats"]
+            answer["heartbeats"] = cold["cold_heartbeats"]
     if rejected:
         answer["rejected_on_cold"] = rejected
     (directory / "submission.json").write_text(json.dumps(answer, indent=2) + "\n")

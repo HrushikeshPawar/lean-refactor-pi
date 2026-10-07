@@ -248,10 +248,12 @@ class SubmissionColdVerificationTests(unittest.TestCase):
 
     def test_a_session_verified_candidate_is_confirmed_cold_once(self):
         self.verified("theorem t := by\n  a")
+        self.cold_heartbeats = 10.3  # within tolerance, but distinguishable from the session's 10
         answer = campaign.submission("cold")
         self.assertEqual(answer["candidate"], "#2")
         self.assertEqual(answer["verified_by"], "cold compile")
-        self.assertEqual(answer["cold_heartbeats"], 10)
+        self.assertEqual(answer["heartbeats"], 10.3, "the clean compile is the reported measurement")
+        self.assertEqual(answer["session_heartbeats"], 10)
         self.assertEqual(self.cold_calls, 1)
         campaign.submission("cold")
         self.assertEqual(self.cold_calls, 1, "the cold verification is recorded and not repeated")
