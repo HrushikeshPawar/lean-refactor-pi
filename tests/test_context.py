@@ -258,10 +258,6 @@ class PhyslibInventoryTests(unittest.TestCase):
         self.assertEqual(self.packet, context.render_packet(self.name))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class ScopeTests(unittest.TestCase):
     """The packet's scope section is syntactic, so it works for every corpus."""
 
@@ -275,3 +271,7 @@ class ScopeTests(unittest.TestCase):
     def test_stale_open_in_does_not_leak(self):
         from arena.context import scope_lines
         self.assertEqual(scope_lines("open E in\ntheorem u : True := trivial\n\n"), ["(root namespace)"])
+
+
+if __name__ == "__main__":
+    unittest.main()
