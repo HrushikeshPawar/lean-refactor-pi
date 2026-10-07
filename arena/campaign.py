@@ -1325,9 +1325,9 @@ def normalize_draft(name: str, draft: str) -> str:
     if not isinstance(draft, str) or not draft.strip():
         raise ValueError("Draft must be nonempty proof text")
     statement = problem(name)["statement"]
-    if draft.startswith(statement):
-        return draft
     body = draft.lstrip()
+    if body.startswith(statement):
+        return body
     if body.startswith(":="):
         return statement + " " + body
     if re.match(r"by\b", body):
