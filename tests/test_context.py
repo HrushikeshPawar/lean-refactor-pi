@@ -193,6 +193,8 @@ class FixturePacketTests(unittest.TestCase):
         self.assertIn("⊢ ∃ σ₁", self.text)
         self.assertIn("Heartbeat profile of the reference proof", self.text)
         self.assertIn("Top self costs", self.text)
+        self.assertIn("Top-ten starting lines by score-equivalent baseline cost", self.text)
+        self.assertIn("tactic spans: proof", self.text)
         self.assertIn("1 token = 0.149 pt", self.text)
         self.assertIn("100 heartbeats = 0.784 pt", self.text)
         self.assertIn("one lost toolchain version = 11.11 pt", self.text)

@@ -152,7 +152,8 @@ def _line_token_counts(proof: str, whole_tokens: int) -> dict[int, int] | None:
 def summarize(records: list[dict], source_lines: list[str], measured: int | None,
               instrumented: int | None, line_tokens: dict[int, int] | None = None,
               reference_tokens: int | None = None, reference_heartbeats: int | None = None,
-              proof_lines: list[str] | None = None, file_start_line: int | None = None) -> dict:
+              proof_lines: list[str] | None = None, file_start_line: int | None = None,
+              proof_tokens: int | None = None) -> dict:
     """Shape a profile for the model: totals, source-ordered entries and the top self costs."""
     attribute(records)
     top_level = [r for r in records if r["depth"] == 0]
@@ -189,7 +190,7 @@ def summarize(records: list[dict], source_lines: list[str], measured: int | None
                              if 0 < record["file_line"] <= len(source_lines) else ""),
                     "cumulative_share_pct": round(running, 1)})
     token_total = sum(line_tokens.values()) if line_tokens is not None else None
-    token_ok = (line_tokens is not None and reference_tokens is not None and token_total == reference_tokens)
+    token_ok = (line_tokens is not None and proof_tokens is not None and token_total == proof_tokens)
     hotspots: list[dict] = []
     attributed_by_line: dict[int, int] = {}
     spans_by_line: dict[int, list[dict]] = {}
@@ -219,7 +220,7 @@ def summarize(records: list[dict], source_lines: list[str], measured: int | None
             item["end_file_line"] = max(item["end_file_line"], record["end_file_line"])
             item["tactic_spans"].append({"file_line": record["file_line"], "end_file_line": record["end_file_line"],
                                          "proof_line": record["proof_line"], "end_proof_line": record["end_proof_line"],
-                                         "depth": record["depth"]})
+                                         "depth": record["depth"], "column": record["column"]})
         for proof_line, item in by_line.items():
             token_count = line_tokens.get(proof_line, 0)
             item["tokens"] = token_count
@@ -284,7 +285,7 @@ def profile(name: str, proof: str, measured: int | None = None) -> dict:
     rates = exchange_rates(name, len(versions(row)))
     summary = summarize(records, built["text"].splitlines(), measured, instrumented, token_lines,
                         rates["reference_tokens"], rates["reference_heartbeats"], proof.splitlines(),
-                        built["start_line"])
+                        built["start_line"], whole_tokens)
     summary["tokens"] = whole_tokens if whole_tokens < 10**9 else None
     return {"ok": True, "granularity": granularity, "version": version, **summary,
             "note": ("Profile degraded to the outermost tactics: " + failures[0]) if failures else None}

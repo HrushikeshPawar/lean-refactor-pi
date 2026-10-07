@@ -51,13 +51,14 @@ class AggregationTests(unittest.TestCase):
         tokens = {11: 4, 12: 7, 13: 2}
         summary = profiler.summarize(self.records, [f"line {i}" for i in range(1, 40)],
                                      measured=100, instrumented=80, line_tokens=tokens,
-                                     reference_tokens=13, reference_heartbeats=100)
+                                     reference_tokens=130, reference_heartbeats=100, proof_tokens=13)
         self.assertTrue(summary["token_attribution_available"])
         self.assertEqual(summary["line_tokens_total"], 13)
         hotspot = summary["hotspots"][0]
         self.assertEqual((hotspot["proof_line"], hotspot["file_line"], hotspot["end_file_line"]), (12, 21, 22))
         self.assertEqual(hotspot["self_hb"], 35)
         self.assertIn("not predicted savings", summary["hotspot_label"])
+        self.assertEqual({span["column"] for span in hotspot["tactic_spans"]}, {2, 4})
         self.assertEqual(summary["line_profile"], [])
 
     def test_token_attribution_is_unavailable_when_counts_do_not_reconcile(self):

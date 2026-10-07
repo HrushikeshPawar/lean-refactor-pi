@@ -412,10 +412,13 @@ def _profile_section(prof: dict) -> list[str]:
     if not prof.get("token_attribution_available"):
         rows.append("(unavailable: proof-line tokens did not reconcile with the competition tokenizer)")
     else:
-        rows.extend(f"proof {item['proof_line']} / file {item['file_line']}"
-                    f" (tactics through file {item['end_file_line']}): {item['self_hb']} self hb, "
-                    f"{item['tokens']} tokens, {item['baseline_cost_points']} baseline points"
-                    for item in prof["hotspots"])
+        for item in prof["hotspots"]:
+            spans = ", ".join(f"proof {span['proof_line']}-{span['end_proof_line']} / "
+                               f"file {span['file_line']}-{span['end_file_line']} (depth {span['depth']})"
+                               for span in item["tactic_spans"])
+            rows.append(f"proof {item['proof_line']} / file {item['file_line']}"
+                        f" (tactic spans: {_clip(spans, 180)}): {item['self_hb']} self hb, "
+                        f"{item['tokens']} tokens, {item['baseline_cost_points']} baseline points")
     top = ", ".join(f"{t['lines']} ({t['self_hb']} hb, cum. {t['cumulative_share_pct']}%)" for t in prof["top_self_cost"])
     rows.append(f"Top self costs: {top}")
     measured = prof.get("measured_total")
