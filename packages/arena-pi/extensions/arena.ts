@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import { appendFileSync, closeSync, fsyncSync, mkdirSync, openSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { appendFileSync, chmodSync, closeSync, fsyncSync, mkdirSync, openSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve, relative, sep } from "node:path";
@@ -24,13 +25,67 @@ function inside(path: string, parent: string): boolean {
   return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`));
 }
 
+async function consumeBody(body: BodyInit): Promise<{ bytes: Uint8Array; replacement?: BodyInit }> {
+  if (typeof body === "string") return { bytes: Buffer.from(body) };
+  if (body instanceof URLSearchParams) return { bytes: Buffer.from(body.toString()) };
+  if (body instanceof Uint8Array) return { bytes: body };
+  if (body instanceof ArrayBuffer) return { bytes: new Uint8Array(body) };
+  if (typeof Blob !== "undefined" && body instanceof Blob) {
+    const bytes = new Uint8Array(await body.arrayBuffer());
+    return { bytes, replacement: bytes };
+  }
+  if (typeof body === "object" && Symbol.asyncIterator in body) {
+    const chunks: Uint8Array[] = [];
+    for await (const chunk of body as AsyncIterable<Uint8Array>) {
+      chunks.push(chunk instanceof Uint8Array ? chunk : Buffer.from(chunk));
+    }
+    const bytes = Buffer.concat(chunks);
+    return { bytes, replacement: bytes };
+  }
+  return { bytes: new Uint8Array() };
+}
+
+async function readRequestBody(input: RequestInfo | URL, init?: RequestInit): Promise<{ bytes: Uint8Array; input: RequestInfo | URL; init?: RequestInit }> {
+  if (init?.body != null) {
+    const read = await consumeBody(init.body);
+    return read.replacement === undefined
+      ? { bytes: read.bytes, input, init }
+      : { bytes: read.bytes, input, init: { ...init, body: read.replacement } };
+  }
+  if (typeof Request !== "undefined" && input instanceof Request) {
+    return { bytes: new Uint8Array(await input.clone().arrayBuffer()), input, init };
+  }
+  return { bytes: new Uint8Array(), input, init };
+}
+
+function deliveredBlocks(content: unknown): Array<Record<string, unknown>> {
+  if (!Array.isArray(content)) return [];
+  return content.map(block => {
+    if (!block || typeof block !== "object") return { type: "unknown" };
+    const item = block as Record<string, unknown>;
+    if (item.type === "text") return { type: "text", text: item.text ?? "" };
+    if (item.type === "toolCall") return { type: "toolCall", id: item.id, name: item.name, arguments: item.arguments };
+    if (item.type === "thinking") {
+      const delivered: Record<string, unknown> = { type: "thinking", thinking: item.thinking,
+        thinkingSignature: item.thinkingSignature };
+      if (item.redacted) delivered.redacted = true;
+      return delivered;
+    }
+    return { type: item.type };
+  });
+}
+
 export default function arenaExtension(pi: ExtensionAPI) {
   // A factory invocation owns one Pi session. No active theorem is module-global.
   let active: string | undefined;
   const runId = process.env.ARENA_RUN_ID;
   const runDirectory = runId ? resolve(root, "runs", "pi-budget", runId) : undefined;
   const costJournal = runDirectory ? resolve(runDirectory, "cost-ledger.jsonl") : undefined;
+  const traceJournal = runDirectory ? resolve(runDirectory, "trace-journal.jsonl") : undefined;
   let pendingRequest: string | undefined;
+  let openAttempt: string | undefined;
+  let previousFailed: string | undefined;
+  let wireIndex = 0;
   let continuations = 0;
   let plateau = 0;
   let errorStreak = 0;
@@ -114,6 +169,20 @@ export default function arenaExtension(pi: ExtensionAPI) {
     try { appendFileSync(fd, `${JSON.stringify({ ts: Date.now(), ...event })}\n`); fsyncSync(fd); }
     finally { closeSync(fd); }
   }
+  function appendTrace(event: Record<string, unknown>) {
+    if (!traceJournal) throw new Error("Arena trace journal is unavailable");
+    mkdirSync(dirname(traceJournal), { recursive: true });
+    const fd = openSync(traceJournal, "a", 0o600);
+    try { appendFileSync(fd, `${JSON.stringify({ ts: Date.now(), ...event })}\n`); fsyncSync(fd); }
+    finally { closeSync(fd); }
+    chmodSync(traceJournal, 0o600);
+  }
+  function recordWire(bytes: Uint8Array) {
+    if (!pendingRequest || !bytes.byteLength) return;
+    appendTrace({ kind: "wire", id: pendingRequest, retry_index: wireIndex,
+      body: Buffer.from(bytes).toString("utf8"), sha256: createHash("sha256").update(bytes).digest("hex") });
+    wireIndex += 1;
+  }
   function costState() {
     const reservations = new Map<string, number>();
     let spent = 0;
@@ -176,17 +245,33 @@ export default function arenaExtension(pi: ExtensionAPI) {
         throw new Error(`Arena budget reservation is outdated for ${model.id}`);
       }
       const { apiKey: _guardKey, headers: _guardHeaders, env: _guardEnv, ...rest } = options ?? {};
+      const innerFetch = rest.fetch ?? globalThis.fetch;
       return runtime.streamSimple(physical, context, {
         ...rest,
         maxTokens: Math.min(rest.maxTokens ?? MAX_REQUEST_OUTPUT_TOKENS, MAX_REQUEST_OUTPUT_TOKENS),
+        fetch: async (input, init) => {
+          // Headers stay on the request. Only the body is journaled, after the SDK
+          // has added stream flags the hook never saw.
+          const captured = await readRequestBody(input, init);
+          recordWire(captured.bytes);
+          return innerFetch(captured.input, captured.init);
+        },
         onPayload: async payload => {
-          const transformed = await options?.onPayload?.(payload, physical) ?? payload;
-          const bounded = permitFinalPayload(transformed, model.id as BudgetModel, costState(), budgetLimits());
+          // Bound before the extension chain so the Langfuse plugin, loaded after
+          // this file, records the post-hook request rather than the raw one.
+          const bounded = permitFinalPayload(payload, model.id as BudgetModel, costState(), budgetLimits());
           const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+          const retryOf = previousFailed ?? null;
+          previousFailed = undefined;
           appendCost({ kind: "reserve", id, usd: bounded.reserve, model: model.id,
             bytes: Buffer.byteLength(JSON.stringify(bounded.payload)) });
           pendingRequest = id;
-          return bounded.payload;
+          openAttempt = id;
+          wireIndex = 0;
+          const published = await options?.onPayload?.(bounded.payload, physical) ?? bounded.payload;
+          appendTrace({ kind: "request", id, run_id: runId, retry_of: retryOf, model: model.id,
+            post_hook: published });
+          return published;
         },
       });
     },
@@ -230,6 +315,12 @@ export default function arenaExtension(pi: ExtensionAPI) {
     if (!model || !isBudgetModel(model)) return;
     const state = costEvents().findLast(item => item.kind === "reserve" && item.id === pendingRequest);
     if (!state) throw new Error("Missing Arena reservation");
+    const blocks = deliveredBlocks(event.message.content);
+    const text = blocks.filter(block => block.type === "text").map(block => String(block.text ?? "")).join("");
+    const delivered = { kind: "response", id: pendingRequest, content: blocks, text,
+      stop_reason: event.message.stopReason, response_id: event.message.responseId ?? null,
+      response_model: event.message.responseModel ?? event.message.model,
+      error_message: event.message.errorMessage ?? null };
     let usd = 0;
     let boundViolation = false;
     if (event.message.usage?.totalTokens) {
@@ -242,6 +333,9 @@ export default function arenaExtension(pi: ExtensionAPI) {
           cache_read: usage.cacheRead ?? 0, cache_write: usage.cacheWrite ?? 0 },
         ledger_components_usd: usageCostParts(usage, model),
         pi_embedded_cost_usd: usage.cost?.total ?? null });
+      appendTrace({ ...delivered, settled_usd: usd, pi_cost_usd: usage.cost?.total ?? null,
+        usage: { input: usage.input ?? 0, output: usage.output ?? 0,
+          cache_read: usage.cacheRead ?? 0, cache_write: usage.cacheWrite ?? 0 } });
       const alarm = cacheAlarm(usage, costEvents().filter(item => item.kind === "settle" && item.usage_known === true).length);
       if (alarm) {
         appendCost({ kind: "cache_alarm", id: pendingRequest, ...alarm });
@@ -250,6 +344,8 @@ export default function arenaExtension(pi: ExtensionAPI) {
       console.error(`[arena-cost] settled $${usd.toFixed(6)}; cache read ${usage.cacheRead ?? 0}, write ${usage.cacheWrite ?? 0}; total $${(costState().spent).toFixed(6)}`);
     } else {
       appendCost({ kind: "release", id: pendingRequest, reason: event.message.stopReason ?? "no_usage", usage_known: false });
+      appendTrace({ ...delivered, settled_usd: null, pi_cost_usd: null });
+      previousFailed = pendingRequest;
       console.error(`[arena-cost] released failed request ${pendingRequest}; no usage returned`);
     }
     pendingRequest = undefined;
@@ -358,6 +454,22 @@ export default function arenaExtension(pi: ExtensionAPI) {
         }
       }
     }
+  });
+
+  pi.on("tool_execution_start", event => {
+    if (!openAttempt) return;
+    appendTrace({ kind: "tool_call", id: openAttempt, tool_call_id: event.toolCallId,
+      name: event.toolName, args: event.args });
+  });
+
+  pi.on("tool_execution_end", event => {
+    if (!openAttempt) return;
+    const result = event.result as { content?: Array<{ type?: string; text?: string }> } | undefined;
+    const text = Array.isArray(result?.content)
+      ? result.content.filter(part => part?.type === "text" && part.text).map(part => part.text).join("\n")
+      : "";
+    appendTrace({ kind: "tool_result", id: openAttempt, tool_call_id: event.toolCallId,
+      name: event.toolName, result: event.result, text, is_error: event.isError });
   });
 
   pi.on("tool_result", event => {
