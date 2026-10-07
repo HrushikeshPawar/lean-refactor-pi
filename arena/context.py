@@ -164,7 +164,7 @@ def reference_profile(name: str) -> dict:
     row = problem(name)
     version, commit = measure_version(row)
     salt = ((Path(__file__).with_name("lean") / "profile.lean").read_text() + row["src"] +
-            str(MAX_DEPTH) + "profile-schema-v2-source-lines-tokens-hotspots")
+            str(MAX_DEPTH) + "profile-schema-v3-innermost-span-token-hotspots")
     cache = _cache("profile", name, commit, salt)
     if cache.exists():
         return json.loads(cache.read_text())
@@ -215,7 +215,7 @@ def _scope_section(row: dict) -> list[str]:
     if is_standalone(row):
         source = row.get("header") or ""
     else:
-        built = candidate_file(row, row["src"], *versions(row)[0])
+        built = candidate_file(row, row["src"], *measure_version(row))
         source = built["text"][:built["head"]]
     return scope_lines(source)
 
@@ -366,7 +366,7 @@ def _imports(row: dict) -> list[str]:
     if is_standalone(row):
         source = row.get("header") or ""
     else:
-        built = candidate_file(row, row["src"], *versions(row)[0])
+        built = candidate_file(row, row["src"], *measure_version(row))
         source = built["text"][:built["head"]]
     return [match.group(0).strip() for match in re.finditer(r"(?m)^\s*import\s+[^\n]+", source)]
 
@@ -416,7 +416,7 @@ def _profile_section(prof: dict) -> list[str]:
             spans = ", ".join(f"proof {span['proof_line']}-{span['end_proof_line']} / "
                                f"file {span['file_line']}-{span['end_file_line']} (depth {span['depth']})"
                                for span in item["tactic_spans"])
-            rows.append(f"proof {item['proof_line']} / file {item['file_line']}"
+            rows.append(f"proof {item['proof_line']}-{item['end_proof_line']} / file {item['file_line']}-{item['end_file_line']}"
                         f" (tactic spans: {_clip(spans, 180)}): {item['self_hb']} self hb, "
                         f"{item['tokens']} tokens, {item['baseline_cost_points']} baseline points")
     top = ", ".join(f"{t['lines']} ({t['self_hb']} hb, cum. {t['cumulative_share_pct']}%)" for t in prof["top_self_cost"])

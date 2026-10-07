@@ -215,15 +215,31 @@ def summarize(records: list[dict], source_lines: list[str], measured: int | None
         for record in records:
             item = by_line.setdefault(record["proof_line"], {
                 "proof_line": record["proof_line"], "file_line": record["file_line"],
-                "end_file_line": record["end_file_line"], "self_hb": 0, "tactic_spans": []})
+                "end_proof_line": record["end_proof_line"], "end_file_line": record["end_file_line"],
+                "self_hb": 0, "tokens": 0, "tactic_spans": []})
             item["self_hb"] += record["self_hb"]
+            item["end_proof_line"] = max(item["end_proof_line"], record["end_proof_line"])
             item["end_file_line"] = max(item["end_file_line"], record["end_file_line"])
             item["tactic_spans"].append({"file_line": record["file_line"], "end_file_line": record["end_file_line"],
                                          "proof_line": record["proof_line"], "end_proof_line": record["end_proof_line"],
                                          "depth": record["depth"], "column": record["column"]})
+        # Each token line goes to the innermost tactic span covering it, aggregated at that span's start line.
+        offset = (file_start_line - 1) if file_start_line is not None else None
+        for proof_line, count in line_tokens.items():
+            covering = [r for r in records if r["proof_line"] <= proof_line <= r["end_proof_line"]]
+            owner = max(covering, key=lambda r: (r["depth"], -(r["end_proof_line"] - r["proof_line"]),
+                                                 r["proof_line"]), default=None)
+            start = owner["proof_line"] if owner else proof_line
+            item = by_line.setdefault(start, {
+                "proof_line": start, "file_line": None if offset is None else start + offset,
+                "end_proof_line": start, "end_file_line": None if offset is None else start + offset,
+                "self_hb": 0, "tokens": 0, "tactic_spans": []})
+            item["tokens"] += count
+            if proof_line > item["end_proof_line"]:
+                item["end_proof_line"] = proof_line
+                item["end_file_line"] = None if offset is None else proof_line + offset
         for proof_line, item in by_line.items():
-            token_count = line_tokens.get(proof_line, 0)
-            item["tokens"] = token_count
+            token_count = item["tokens"]
             item["baseline_cost_points"] = round(token_count * 100 / reference_tokens / 3 +
                                                   item["self_hb"] * 100 / reference_heartbeats / 3, 4)
             hotspots.append(item)

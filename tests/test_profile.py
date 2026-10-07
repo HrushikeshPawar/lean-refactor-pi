@@ -61,6 +61,41 @@ class AggregationTests(unittest.TestCase):
         self.assertEqual({span["column"] for span in hotspot["tactic_spans"]}, {2, 4})
         self.assertEqual(summary["line_profile"], [])
 
+    @staticmethod
+    def _record(proof_line, end_proof_line, depth, self_hb):
+        return {"file_line": proof_line + 9, "end_file_line": end_proof_line + 9, "proof_line": proof_line,
+                "end_proof_line": end_proof_line, "depth": depth, "column": 2 + 2 * depth, "hb": self_hb,
+                "self_hb": self_hb, "calls": 1}
+
+    def _hotspots(self, records, tokens):
+        with patch.object(profiler, "attribute"):
+            return profiler.summarize(records, [f"line {i}" for i in range(1, 40)], measured=100, instrumented=80,
+                                      line_tokens=tokens, reference_tokens=100, reference_heartbeats=100,
+                                      proof_tokens=sum(tokens.values()), file_start_line=10)["hotspots"]
+
+    def test_ranked_candidates_carry_every_proof_token(self):
+        tokens = {1: 5, 2: 6, 3: 7, 4: 1, 5: 9, 7: 2}
+        records = [self._record(2, 4, 0, 10), self._record(3, 3, 1, 5)]
+        hotspots = self._hotspots(records, tokens)
+        self.assertEqual(sum(item["tokens"] for item in hotspots), sum(tokens.values()))
+
+    def test_multi_line_tactic_collects_its_continuation_lines(self):
+        hotspots = self._hotspots([self._record(2, 4, 0, 10), self._record(3, 3, 1, 5)],
+                                  {1: 5, 2: 6, 3: 7, 4: 1})
+        outer = next(item for item in hotspots if item["proof_line"] == 2)
+        inner = next(item for item in hotspots if item["proof_line"] == 3)
+        self.assertEqual((outer["tokens"], outer["self_hb"], outer["end_proof_line"], outer["end_file_line"]),
+                         (7, 10, 4, 13))
+        self.assertEqual(inner["tokens"], 7)  # the innermost span owns its own line
+        self.assertEqual((inner["end_proof_line"], inner["self_hb"]), (3, 5))
+
+    def test_uncovered_line_is_a_token_only_entry(self):
+        hotspots = self._hotspots([self._record(2, 4, 0, 10)], {1: 5, 2: 6, 7: 2})
+        loose = next(item for item in hotspots if item["proof_line"] == 7)
+        self.assertEqual((loose["self_hb"], loose["tokens"], loose["file_line"], loose["tactic_spans"]),
+                         (0, 2, 16, []))
+        self.assertEqual(next(item for item in hotspots if item["proof_line"] == 1)["tokens"], 5)
+
     def test_token_attribution_is_unavailable_when_counts_do_not_reconcile(self):
         summary = profiler.summarize(self.records, [f"line {i}" for i in range(1, 40)],
                                      measured=100, instrumented=80, line_tokens={11: 3})
