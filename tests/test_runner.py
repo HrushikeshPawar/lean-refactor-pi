@@ -377,6 +377,94 @@ class AnthropicWireTests(unittest.TestCase):
                 self.assertEqual(run.json("summary.json")["tools"]["error_total"], 0)
                 self.assertEqual(run.result.returncode, 0, run.stdout[-800:])
 
+    def test_wire_bytes_retries_and_langfuse_keep_the_post_hook_request(self):
+        import hashlib
+        from datetime import datetime, timezone
+
+        from arena.traces import judge
+
+        pad = "P" * 20001
+        text = "Z" * 20001
+        wire = AnthropicWire([{"tool": "arena_trace_pad", "input": {}},
+                              {"text": text, "redacted": "opaque-signature-1"}], fail_first=1)
+        self.addCleanup(wire.close)
+        started = datetime.now(timezone.utc)
+        run = FakeRun([], "--thinking", "high", model="qwen3.8-flash", timeout=300,
+                      env={"ARENA_FAKE_WIRE_URL": wire.url, "ARENA_TRACE_PAD": "20001"})
+        self.addCleanup(run.cleanup)
+        run.run()
+        journal = run.jsonl("trace-journal.jsonl")
+        observations = _wait_for_trace(run.run_id, started, pad, text)
+        requests = [row for row in journal if row["kind"] == "request"]
+        wires = [row for row in journal if row["kind"] == "wire"]
+        responses = [row for row in journal if row["kind"] == "response"]
+        generations = [row for row in observations if row.get("name") == "LLM Call"]
+        request_keys = sorted(requests[0]["post_hook"]) if requests else []
+        generation_keys = []
+        if generations and isinstance(generations[0].get("input"), str):
+            parsed = json.loads(generations[0]["input"])
+            if isinstance(parsed, dict):
+                generation_keys = sorted(parsed)
+        detail = (f"session={run.run_id} exit={run.result.returncode} "
+                  f"wires={len(wires)} raw={len(wire.raw_bodies)} requests={len(requests)} "
+                  f"generations={len(generations)} tools={sum(row.get('type') == 'TOOL' for row in observations)} "
+                  f"traces={sorted({row.get('traceId') for row in observations})} "
+                  f"key_diff={sorted(set(request_keys) - set(generation_keys))}:"
+                  f"{sorted(set(generation_keys) - set(request_keys))} "
+                  f"wire_sha={[hashlib.sha256(body).hexdigest()[:12] for body in wire.raw_bodies]}")
+        self.assertEqual(run.result.returncode, 0, detail + "\n" + run.stdout[-500:])
+        self.assertEqual([row["body"].encode() for row in wires], wire.raw_bodies, detail)
+        self.assertEqual(wire.raw_bodies[0], wire.raw_bodies[1], detail)
+        self.assertIsNone(requests[0]["retry_of"], detail)
+        self.assertEqual(requests[1]["retry_of"], requests[0]["id"], detail)
+        probe = run.directory / ".mode-probe"
+        probe.write_bytes(b"x")
+        probe.chmod(0o600)
+        if (probe.stat().st_mode & 0o777) == 0o600:
+            self.assertEqual((run.directory / "trace-journal.jsonl").stat().st_mode & 0o777, 0o600, detail)
+        probe.unlink()
+        self.assertTrue(any(block.get("thinkingSignature") == "opaque-signature-1" and block.get("redacted") is True
+                            for row in responses for block in row.get("content") or []
+                            if isinstance(block, dict)), detail)
+        settles = {row["id"]: row["usd"] for row in run.jsonl("cost-ledger.jsonl") if row["kind"] == "settle"}
+        for row in responses:
+            if row.get("settled_usd") is not None:
+                self.assertAlmostEqual(row["settled_usd"], settles[row["id"]], msg=detail)
+        journal_text = (run.directory / "trace-journal.jsonl").read_text().lower()
+        for marker in ("offline-test", "x-api-key", "authorization"):
+            self.assertNotIn(marker, journal_text, f"trace journal contains {marker}; {detail}")
+            for generation in generations:
+                self.assertNotIn(marker, str(generation.get("input") or "").lower(),
+                                 f"Langfuse input contains {marker}; {detail}")
+        for generation in generations:
+            output = generation.get("output")
+            self.assertNotIn("opaque-signature-1", str(output), detail)
+            parsed = json.loads(output) if isinstance(output, str) else output
+            if isinstance(parsed, dict):
+                self.assertTrue(set(parsed) <= {"role", "content", "tool_calls"}, detail)
+        self.assertIn(pad, "".join(str(row.get("output") or "") for row in observations if row.get("type") == "TOOL"), detail)
+        self.assertIn(text, "".join(str(row.get("output") or "") for row in generations), detail)
+        self.assertEqual(judge(journal, observations), [], detail)
+
+
+def _wait_for_trace(session_id: str, started, pad: str, text: str) -> list[dict]:
+    import time
+    from arena.traces import list_observations
+
+    deadline = time.monotonic() + 30
+    rows: list[dict] = []
+    while time.monotonic() < deadline:
+        try:
+            rows = list_observations(session_id, started)
+        except RuntimeError:
+            time.sleep(2)
+            continue
+        outputs = "".join(str(row.get("output") or "") for row in rows)
+        if pad in outputs and text in outputs:
+            return rows
+        time.sleep(2)
+    return rows
+
 
 @unittest.skipUnless(PI_AVAILABLE, "pi and the Strata fixture are required")
 class ErrorLoopAndContinuationTests(unittest.TestCase):

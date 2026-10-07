@@ -13,6 +13,7 @@
 import { appendFileSync, readFileSync } from "node:fs";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai/compat";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 
 type Step = {
   text?: string;
@@ -27,6 +28,18 @@ export default function fakeOpenCode(pi: ExtensionAPI) {
   const script: Step[] = process.env.ARENA_FAKE_SCRIPT
     ? JSON.parse(readFileSync(process.env.ARENA_FAKE_SCRIPT, "utf8")) : [];
   const zeroCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+  const pad = Number(process.env.ARENA_TRACE_PAD ?? "0");
+  if (pad > 0) {
+    pi.registerTool({
+      name: "arena_trace_pad",
+      label: "Arena trace pad",
+      description: "Test-only pad used to prove a tool result longer than 20,000 characters is kept. Not an Arena product tool.",
+      parameters: Type.Object({}),
+      async execute() {
+        return { content: [{ type: "text" as const, text: "P".repeat(pad) }], details: {} };
+      },
+    });
+  }
   if (process.env.ARENA_FAKE_WIRE_URL) {
     pi.registerProvider("opencode-go", {
       api: "anthropic-messages", apiKey: "offline-test", baseUrl: process.env.ARENA_FAKE_WIRE_URL,

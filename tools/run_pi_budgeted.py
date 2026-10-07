@@ -19,6 +19,7 @@ from datetime import datetime
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from arena.campaign import autocheck, init, packet, run_dir, submission, write_state
 from arena.summary import cost_report_from_ledger, render_text, write_summary
+from arena.traces import langfuse_environment, langfuse_extension, plugin_problems
 from tools.arena_skill import SKILL_DIR, skill_hash, skill_prompt
 
 SYSTEM_PROMPT = ("You are optimizing one Lean 4 proof for the Lean Refactor Arena. Only the listed tools are "
@@ -123,6 +124,8 @@ def main() -> int:
                         help="Run the deterministic merge worker beside the model (off by default: it competes for Lean CPU)")
     parser.add_argument("--no-skill", action="store_true", help="Run without the Arena Lean skill (A/B factor)")
     parser.add_argument("--no-mcp", action="store_true", help="Do not load the Lean MCP server (offline tests)")
+    parser.add_argument("--preflight", action="store_true",
+                        help="Send a short skill-read prompt instead of the theorem packet (cheap trace check)")
     parser.add_argument("--test-extension", action="append", default=[], type=Path,
                         help="Extra Pi extension, used only to load the offline fake provider in tests")
     parser.add_argument("--resume-run", action="store_true", help="Resume the exact Pi session and cost ledger")
@@ -151,7 +154,10 @@ def main() -> int:
             parser.error("resume thinking level or skill differs from the original run")
         prompt = "Resume the existing Arena run from its recorded candidate frontier. Continue improving the proof."
     else:
-        prompt = packet(args.theorem) + ("\nAdditional instructions:\n" + extra + "\n" if extra else "")
+        prompt = ("Call the arena_skill_read tool once with no arguments, then stop. "
+                  "Do not evaluate, edit, or search." if args.preflight else
+                  packet(args.theorem) + ("\nAdditional instructions:\n" + extra + "\n" if extra else ""))
+    plugin = langfuse_extension()
     command = [
         "pi", "--offline", "--approve", "--mode", "json",
         "--no-builtin-tools", "--no-context-files", "--no-extensions",
@@ -159,6 +165,7 @@ def main() -> int:
         *([] if args.no_mcp else ["--extension", "builtin:mcp"]),
         *[item for path in args.test_extension for item in ("--extension", str(path.resolve()))],
         "--extension", str(ROOT / "packages/arena-pi/extensions/arena.ts"),
+        "--extension", str(plugin),
         "--system-prompt", SYSTEM_PROMPT,
         *([] if args.no_skill else ["--append-system-prompt", skill_prompt()]),
         "--thinking", args.thinking,
@@ -172,6 +179,13 @@ def main() -> int:
         print(f"Validated {args.theorem} with {args.model}; session {args.run_id}; cap ${args.hard_cap_usd:g}")
         print("Pi will write packet, candidate ledger, events, cost, and session under", directory)
         return 0
+    if not plugin.is_file():
+        print(f"Langfuse plugin is not installed at {plugin}", file=sys.stderr)
+        return 1
+    problems = plugin_problems()
+    if problems:
+        print("\n".join(problems), file=sys.stderr)
+        return 1
 
     if not args.resume_run:
         init(args.theorem, args.run_id, extra)
@@ -185,7 +199,7 @@ def main() -> int:
     shadow = directory / "scratch" / "project"
     env = os.environ.copy()
     env["ARENA_BUDGET_REQUIRED"] = "1"
-    env["ARENA_AUTOCONTINUE"] = "1"
+    env["ARENA_AUTOCONTINUE"] = "0" if args.preflight else "1"
     env["ARENA_RUN_ID"] = args.run_id
     env["ARENA_MODEL"] = args.model
     env["ARENA_HARD_CAP_USD"] = str(args.hard_cap_usd)
@@ -194,6 +208,11 @@ def main() -> int:
         env["ARENA_NO_MCP"] = "1"
     env.pop("ARENA_STOP_USD", None)
     env["ARENA_BUDGET_REPORT_PATH"] = str(directory / "cost.json")
+    try:
+        env.update(langfuse_environment())
+    except RuntimeError as error:
+        print(error, file=sys.stderr)
+        return 1
     worker = None
     if args.merge_worker:
         worker_command = [sys.executable, "-m", "tools.arena_merge_worker", args.run_id,

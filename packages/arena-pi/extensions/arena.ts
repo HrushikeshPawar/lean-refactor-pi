@@ -283,7 +283,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
       provider: BUDGET_PROVIDER,
       id,
       name: `Arena budgeted ${id}`,
-      thinkingLevels: ["low", "medium", "high"],
+      thinkingLevels: ["off", "low", "medium", "high"],
       route(request, ctx) {
         if (!readEntries) throw new Error("Arena budget session has not started");
         const physical = ctx.modelRegistry.find("opencode-go", id);
