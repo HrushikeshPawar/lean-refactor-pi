@@ -93,6 +93,7 @@ def compare(rows: list[dict], expected_packet: str) -> dict:
         pick = lambda key: (best.get(key) or {}).get("value")  # noqa: E731
         table.append({"run_id": row["run_id"], row["factor"]: row["value"], "exit_code": row["exit_code"],
                       "stop_reason": summary.get("stop_reason"), "spent_usd": cost.get("spent_usd"),
+                      "unresolved_usd": cost.get("unresolved_usd"), "remaining_usd": cost.get("remaining_usd"),
                       "requests": cost.get("requests"), "evaluations": summary.get("evaluations"),
                       "best_tokens": pick("tokens"), "best_heartbeats": pick("heartbeats"),
                       "best_proxy": pick("proxy"), "best_estimated_proxy": pick("estimated_proxy"),
