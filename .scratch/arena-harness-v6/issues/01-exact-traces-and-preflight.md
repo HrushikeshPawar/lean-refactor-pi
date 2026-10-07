@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** needs-review
 
 **Branch:** `hrushikesh/v6-01-traces` (stacked on `hrushikesh/harness-v6`)
 
