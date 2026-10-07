@@ -173,19 +173,24 @@ export function budgetDecision(spent: number, model: BudgetModel, limits: Budget
 // Both include generated thinking tokens in the output limit.
 export const MAX_REQUEST_OUTPUT_TOKENS = 16_000;
 
-// Output tokens a request may generate without the output alone costing more than what remains.
-// Input cost of the request is unknown before it is sent, so overshoot is bounded, reported, never hidden.
-export const MIN_REQUEST_OUTPUT_TOKENS = 256;
-export function outputBudget(remainingUsd: number, model: BudgetModel): number {
-  const price = model === "gpt-6-luna" ? MODELS[model].highPrice : MODELS[model].price;
-  const affordable = Math.floor(remainingUsd / price.output * 1_000_000);
-  return Math.max(MIN_REQUEST_OUTPUT_TOKENS, Math.min(MAX_REQUEST_OUTPUT_TOKENS, affordable));
+export function requestShape(payload: Record<string, unknown>): string {
+  const hasThinking = Object.hasOwn(payload, "thinking");
+  const hasReasoning = Object.hasOwn(payload, "reasoning");
+  return JSON.stringify({
+    output_field: typeof payload.max_output_tokens === "number" ? "max_output_tokens" : "max_tokens",
+    output_limit: payload.max_output_tokens ?? payload.max_tokens,
+    thinking_present: hasThinking,
+    thinking: hasThinking ? payload.thinking : null,
+    reasoning_present: hasReasoning,
+    reasoning: hasReasoning ? payload.reasoning : null,
+  });
 }
 
+// This limit is selected once for all requests in a run and is independent of allowance remaining.
 const MIN_THINKING_BUDGET_TOKENS = 1024;
 const THINKING_ANSWER_TOKENS = 1024;
 
-export function boundedPayload(payload: unknown, model: BudgetModel, remainingUsd = Infinity): { payload: Record<string, unknown>; reserve: number } {
+export function boundedPayload(payload: unknown, model: BudgetModel): { payload: Record<string, unknown>; reserve: number } {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error("Unknown provider payload");
   const value = { ...payload as Record<string, unknown> };
   const outputField = typeof value.max_output_tokens === "number" ? "max_output_tokens"
@@ -193,15 +198,14 @@ export function boundedPayload(payload: unknown, model: BudgetModel, remainingUs
   if (!outputField || !Number.isFinite(value[outputField]) || Number(value[outputField]) <= 0) {
     throw new Error("Cannot enforce Arena output bound on provider payload");
   }
-  value[outputField] = Math.min(Number(value[outputField]), outputBudget(remainingUsd, model));
-  // Anthropic Messages requires 1024 <= thinking.budget_tokens < max_tokens. Pi sized the budget
-  // for its own, larger max_tokens, so shrink it to leave room for the answer, or drop thinking
-  // when no valid budget fits (a 400 here would otherwise repeat until the error-loop stop).
+  value[outputField] = Math.min(Number(value[outputField]), MAX_REQUEST_OUTPUT_TOKENS);
+  // Anthropic Messages requires budget_tokens < max_tokens. Normalize a too-large initial budget
+  // once to leave room for an answer; this does not depend on remaining allowance.
   const thinking = value.thinking as { type?: string; budget_tokens?: number } | undefined;
   if (outputField === "max_tokens" && thinking?.type === "enabled" && typeof thinking.budget_tokens === "number") {
     const room = Number(value.max_tokens) - THINKING_ANSWER_TOKENS;
-    if (room < MIN_THINKING_BUDGET_TOKENS) delete value.thinking;
-    else if (thinking.budget_tokens > room) value.thinking = { ...thinking, budget_tokens: room };
+    if (room < MIN_THINKING_BUDGET_TOKENS) throw new Error("Fixed Arena output limit cannot fit the requested thinking budget");
+    if (thinking.budget_tokens > room) value.thinking = { ...thinking, budget_tokens: room };
   }
   const bytes = Buffer.byteLength(JSON.stringify(value), "utf8");
   // Text-only Responses payloads cannot tokenize into more tokens than their
@@ -214,10 +218,19 @@ export function boundedPayload(payload: unknown, model: BudgetModel, remainingUs
   return { payload: value, reserve };
 }
 
-export function permitFinalPayload(payload: unknown, model: BudgetModel,
-  state: { spent: number }, limits: BudgetLimits) {
-  if (!Number.isFinite(state.spent) || state.spent < 0 || state.spent >= limits.hardCapUsd) {
-    throw new Error(`Arena budget stop: $${state.spent.toFixed(6)} observed usage reached $${limits.hardCapUsd.toFixed(2)} cap`);
-  }
-  return boundedPayload(payload, model, limits.hardCapUsd - state.spent);
+export function assessFinalPayload(payload: unknown, model: BudgetModel,
+  state: { spent: number; unresolved?: number }, limits: BudgetLimits) {
+  const bounded = boundedPayload(payload, model);
+  const gate = budgetGate(bounded.reserve, state.spent, state.unresolved ?? 0, limits);
+  return { ...bounded, ...gate };
+}
+
+export function budgetGate(estimateUsd: number, spentUsd: number, unresolvedUsd: number, limits: BudgetLimits) {
+  if (![estimateUsd, spentUsd, unresolvedUsd].every(Number.isFinite)
+    || estimateUsd < 0 || spentUsd < 0 || unresolvedUsd < 0) throw new Error("Invalid Arena budget estimate");
+  const remainingUsd = Math.max(0, limits.hardCapUsd - spentUsd - unresolvedUsd);
+  const allowed = estimateUsd <= remainingUsd;
+  return { allowed, estimateUsd, remainingUsd,
+    overshootUsd: Math.max(0, estimateUsd - remainingUsd),
+    reason: allowed ? "estimate fits remaining allowance" : "estimated request exceeds remaining allowance" };
 }

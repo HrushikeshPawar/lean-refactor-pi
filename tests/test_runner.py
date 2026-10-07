@@ -74,6 +74,40 @@ class LifecycleTests(unittest.TestCase):
         self.assertTrue((run.directory / "summary.txt").read_text().startswith(run.run_id))
         self.assertIn("spent_usd", run.json("cost.json"))
 
+    def test_near_cap_refusal_keeps_request_shape_fixed_and_does_not_send(self):
+        from arena.engine import ROOT
+
+        good = (ROOT / "runs/baseline/Core_InitsUpdatesComm/arena-candidate-126.txt").read_text()
+        run = self.fake([
+            cheap_tool("arena_evaluate", {"proof": good}, input=100, output=10),
+            {"text": "near-cap response", "usage": {"input": 490_000, "output": 10}},
+            {"text": "this response must not be requested"},
+        ]).run()
+        requests = run.requests
+        gates = [row for row in run.jsonl("cost-ledger.jsonl") if row.get("kind") == "gate"]
+        self.assertGreaterEqual(len(gates), 2, run.result.stderr)
+        self.assertEqual(gates[0]["decision"], "allow")
+        self.assertEqual(gates[-1]["decision"], "refuse")
+        self.assertLessEqual(len(requests), len(gates) - 1, "a refused request reached the provider")
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(len({json.dumps(row["request_shape"], sort_keys=True) for row in requests}), 1)
+        self.assertTrue(all(row["request_shape"]["max_output_tokens"] == 16_000 for row in requests))
+        self.assertEqual(run.json("summary.json")["stop_reason"], "estimated_request_unaffordable")
+        self.assertTrue(any(row.get("kind") == "gate_refusal" for row in run.jsonl("trace-journal.jsonl")))
+        submission = run.json("submission.json")
+        self.assertEqual(submission["candidate"], "#2", "refusal must preserve the best verified candidate")
+
+    def test_first_unaffordable_request_is_refused_before_transport(self):
+        run = self.fake([{"text": "must not reach provider"}], cap="0.1",
+                        env={"ARENA_FAKE_PAD_INPUT": "600000"}).run()
+        gates = [row for row in run.jsonl("cost-ledger.jsonl") if row.get("kind") == "gate"]
+        self.assertEqual(len(run.requests), 0)
+        self.assertTrue(gates, run.result.stderr + run.result.stdout[-2000:])
+        self.assertEqual(gates[0]["decision"], "refuse")
+        self.assertEqual(run.json("summary.json")["stop_reason"], "estimated_request_unaffordable")
+        self.assertEqual(run.json("submission.json"), {
+            "ok": True, "candidate": None, "reason": "no model candidate passed every version; the original proof stands"})
+
     def test_merge_worker_is_off_unless_requested(self):
         off = self.fake([{"text": "done"}] * 2).run()
         self.assertFalse((off.directory / "merge-worker.json").exists())
@@ -397,12 +431,19 @@ class AnthropicWireTests(unittest.TestCase):
         requests = [row for row in journal if row["kind"] == "request"]
         wires = [row for row in journal if row["kind"] == "wire"]
         responses = [row for row in journal if row["kind"] == "response"]
+        ledger = run.jsonl("cost-ledger.jsonl")
         detail = (f"session={run.run_id} exit={run.result.returncode} "
                   f"wires={len(wires)} raw={len(wire.raw_bodies)} requests={len(requests)} "
                   f"wire_sha={[hashlib.sha256(body).hexdigest()[:12] for body in wire.raw_bodies]}")
         self.assertEqual(run.result.returncode, 0, detail + "\n" + run.stdout[-500:])
         self.assertEqual([row["body"].encode() for row in wires], wire.raw_bodies, detail)
         self.assertEqual(wire.raw_bodies[0], wire.raw_bodies[1], detail)
+        gates = {row["id"]: row for row in ledger if row.get("kind") == "gate"}
+        reservations = {row["id"] for row in ledger if row.get("kind") == "reserve"}
+        for request in requests:
+            self.assertEqual(gates[request["id"]]["decision"], "allow", detail)
+            self.assertIn(request["id"], reservations, detail)
+        self.assertGreater(sum(row.get("retry_of") is not None for row in requests), 0, detail)
         self.assertIsNone(requests[0]["retry_of"], detail)
         self.assertEqual(requests[1]["retry_of"], requests[0]["id"], detail)
         probe = run.directory / ".mode-probe"

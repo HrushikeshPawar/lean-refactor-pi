@@ -7,7 +7,7 @@ import { dirname, resolve, relative, sep } from "node:path";
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { BudgetModel } from "./budget.ts";
-import { BUDGET_PROVIDER, budgetLimits, cacheAlarm, catalogPriceProblem, cacheUtilization, isBudgetModel, MAX_REQUEST_OUTPUT_TOKENS, MODELS, permitFinalPayload, priceForUsage, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
+import { assessFinalPayload, BUDGET_PROVIDER, budgetLimits, cacheAlarm, catalogPriceProblem, cacheUtilization, isBudgetModel, MAX_REQUEST_OUTPUT_TOKENS, MODELS, priceForUsage, requestShape, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
 
 const root = resolve(import.meta.dirname, "../../..");
 const workspaces = resolve(root, "workspaces");
@@ -86,6 +86,8 @@ export default function arenaExtension(pi: ExtensionAPI) {
   let pendingRequest: string | undefined;
   let openAttempt: string | undefined;
   let previousFailed: string | undefined;
+  let fixedRequestShape: string | undefined;
+  let gateStopReason: string | undefined;
   let wireIndex = 0;
   let continuations = 0;
   let plateau = 0;
@@ -216,12 +218,18 @@ export default function arenaExtension(pi: ExtensionAPI) {
       if (item.kind === "reserve") pending.add(String(item.id));
       if (item.kind === "settle" || item.kind === "release") pending.delete(String(item.id));
     }
-    for (const id of pending) appendCost({ kind: "release", id, reason: "unresolved_previous_process", usage_known: false });
+    for (const id of pending) {
+      if (!costEvents().some(item => item.kind === "unknown" && String(item.id) === id)) {
+        appendCost({ kind: "unknown", id, reason: "previous_process_ended_before_settlement", usage_known: false });
+      }
+    }
     const latest = costEvents().filter(item => item.kind === "control").at(-1);
     continuations = Number(latest?.continuations ?? 0);
     plateau = Number(latest?.plateau ?? 0);
     errorStreak = Number(latest?.error_streak ?? 0);
     previousProgress = String(latest?.progress ?? "");
+    fixedRequestShape = undefined;
+    gateStopReason = undefined;
   });
 
   // The guard provider owns the final transport callback. Extension hook errors
@@ -253,6 +261,9 @@ export default function arenaExtension(pi: ExtensionAPI) {
         ...rest,
         maxTokens: Math.min(rest.maxTokens ?? MAX_REQUEST_OUTPUT_TOKENS, MAX_REQUEST_OUTPUT_TOKENS),
         fetch: async (input, init) => {
+          if (gateStopReason) {
+            throw new Error(`Arena budget stop: ${gateStopReason}`);
+          }
           // Headers stay on the request. Only the body is journaled, after the SDK
           // has added stream flags the hook never saw.
           const captured = await readRequestBody(input, init);
@@ -260,20 +271,59 @@ export default function arenaExtension(pi: ExtensionAPI) {
           return innerFetch(captured.input, captured.init);
         },
         onPayload: async payload => {
-          // Bound before the extension chain so the Langfuse plugin, loaded after
-          // this file, records the post-hook request rather than the raw one.
-          const bounded = permitFinalPayload(payload, model.id as BudgetModel, costState(), budgetLimits());
+          if (gateStopReason) throw new Error(`Arena budget stop: ${gateStopReason}`);
+          // Normalize at a fixed run-wide output limit; never use the remaining
+          // dollars to rewrite the provider request.
+          const bounded = assessFinalPayload(payload, model.id as BudgetModel, costState(), budgetLimits());
           const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
           const retryOf = previousFailed ?? null;
+          const shape = requestShape(bounded.payload);
+          if (fixedRequestShape === undefined) fixedRequestShape = shape;
+          const shapeChanged = shape !== fixedRequestShape;
+          const decision = shapeChanged ? {
+            allowed: false, estimateUsd: bounded.reserve, remainingUsd: bounded.remainingUsd,
+            overshootUsd: Math.max(0, bounded.reserve - bounded.remainingUsd),
+            reason: "provider request shape changed during run",
+          } : bounded;
+          const attempt = { kind: "gate", id, model: model.id, estimate_usd: decision.estimateUsd,
+            decision: decision.allowed ? "allow" : "refuse", reason: decision.reason,
+            spent_usd: costState().spent, reserved_usd: costState().unresolved,
+            remaining_usd: decision.remainingUsd, overshoot_usd: decision.overshootUsd,
+            bytes: Buffer.byteLength(JSON.stringify(bounded.payload)) };
+          if (!decision.allowed) {
+            appendCost(attempt);
+            gateStopReason = decision.reason;
+            appendTrace({ kind: "gate_refusal", id, run_id: runId, model: model.id,
+              estimate_usd: decision.estimateUsd, reason: decision.reason,
+              remaining_usd: decision.remainingUsd, overshoot_usd: decision.overshootUsd,
+              request_shape: shape });
+            throw new Error(`Arena budget stop: ${decision.reason}; estimated $${decision.estimateUsd.toFixed(6)}, `
+              + `$${decision.remainingUsd.toFixed(6)} remains`);
+          }
+
+          const published = await options?.onPayload?.(bounded.payload, physical) ?? bounded.payload;
+          const publishedShape = requestShape(published as Record<string, unknown>);
+          if (publishedShape !== fixedRequestShape) {
+            gateStopReason = "provider hook changed the fixed request shape";
+            appendCost({ ...attempt, decision: "refuse", reason: gateStopReason });
+            appendTrace({ kind: "gate_refusal", id, run_id: runId, model: model.id,
+              estimate_usd: decision.estimateUsd, reason: gateStopReason,
+              remaining_usd: decision.remainingUsd, overshoot_usd: decision.overshootUsd,
+              request_shape: publishedShape });
+            throw new Error(`Arena budget stop: ${gateStopReason}`);
+          }
+          appendCost(attempt);
           previousFailed = undefined;
-          appendCost({ kind: "reserve", id, usd: bounded.reserve, model: model.id,
-            bytes: Buffer.byteLength(JSON.stringify(bounded.payload)) });
+          appendCost({ kind: "reserve", id, usd: bounded.reserve, estimate_usd: decision.estimateUsd,
+            gate: "allow", reason: decision.reason, remaining_usd: decision.remainingUsd,
+            overshoot_usd: decision.overshootUsd, model: model.id,
+            bytes: Buffer.byteLength(JSON.stringify(published)) });
           pendingRequest = id;
           openAttempt = id;
           wireIndex = 0;
-          const published = await options?.onPayload?.(bounded.payload, physical) ?? bounded.payload;
           appendTrace({ kind: "request", id, run_id: runId, retry_of: retryOf, model: model.id,
-            post_hook: published });
+            estimate_usd: decision.estimateUsd, gate_decision: "allow",
+            remaining_allowance_usd: decision.remainingUsd, post_hook: published });
           return published;
         },
       });
@@ -332,8 +382,17 @@ export default function arenaExtension(pi: ExtensionAPI) {
       const usage = event.message.usage;
       usd = usageCost(usage, model);
       boundViolation = usd > Number(state.usd);
+      const limits = budgetLimits();
+          const ledgerSettled = costEvents().filter(item => item.kind === "settle" && item.usage_known !== false)
+        .reduce((sum, item) => sum + Number(item.usd), 0) + usd;
+      const settledSpend = Math.max(costState().spent, ledgerSettled);
+      const unresolvedAfter = Math.max(0, costState().unresolved - Number(state.usd));
+      const remainingAllowanceUsd = Math.max(0, limits.hardCapUsd - settledSpend - unresolvedAfter);
+      const overshootUsd = Math.max(0, settledSpend - limits.hardCapUsd);
       appendCost({ kind: "settle", id: pendingRequest, usd, usage_known: true,
         bound_violation: boundViolation,
+        estimate_usd: Number(state.usd), remaining_usd: remainingAllowanceUsd,
+        overshoot_usd: overshootUsd,
         tokens: { input: usage.input ?? 0, output: usage.output ?? 0,
           cache_read: usage.cacheRead ?? 0, cache_write: usage.cacheWrite ?? 0 },
         ledger_components_usd: usageCostParts(usage, model),
@@ -342,6 +401,8 @@ export default function arenaExtension(pi: ExtensionAPI) {
       // the ledger, except Luna's conservative high tier, which only the ledger applies.
       const priceTier = model === "gpt-6-luna" && priceForUsage(usage, model) === MODELS["gpt-6-luna"].highPrice ? "high" : "base";
       appendTrace({ ...delivered, settled_usd: usd, price_tier: priceTier, pi_cost_usd: usage.cost?.total ?? null,
+        estimate_usd: Number(state.usd), remaining_allowance_usd: remainingAllowanceUsd,
+        overshoot_usd: overshootUsd,
         usage: { input: usage.input ?? 0, output: usage.output ?? 0,
           cache_read: usage.cacheRead ?? 0, cache_write: usage.cacheWrite ?? 0 } });
       const alarm = cacheAlarm(usage, costEvents().filter(item => item.kind === "settle" && item.usage_known === true).length);
@@ -351,7 +412,14 @@ export default function arenaExtension(pi: ExtensionAPI) {
       }
       console.error(`[arena-cost] settled $${usd.toFixed(6)}; cache read ${usage.cacheRead ?? 0}, write ${usage.cacheWrite ?? 0}; total $${(costState().spent).toFixed(6)}`);
     } else {
-      appendCost({ kind: "release", id: pendingRequest, reason: event.message.stopReason ?? "no_usage", usage_known: false });
+      const limits = budgetLimits();
+      const spent = costState().spent;
+      const sent = wireIndex > 0;
+      const unresolvedAfter = Math.max(0, costState().unresolved - (sent ? 0 : Number(state.usd)));
+      appendCost({ kind: sent ? "unknown" : "release", id: pendingRequest,
+        reason: sent ? "provider_attempt_without_settled_usage" : event.message.stopReason ?? "not_sent",
+        usage_known: false, estimate_usd: Number(state.usd), remaining_usd: Math.max(0, limits.hardCapUsd - spent - unresolvedAfter),
+        overshoot_usd: Math.max(0, spent - limits.hardCapUsd), cache_read_tokens: 0, cache_write_tokens: 0 });
       appendTrace({ ...delivered, settled_usd: null, pi_cost_usd: null });
       previousFailed = pendingRequest;
       console.error(`[arena-cost] released failed request ${pendingRequest}; no usage returned`);
@@ -365,9 +433,9 @@ export default function arenaExtension(pi: ExtensionAPI) {
     const state = costState();
     const limits = budgetLimits();
     return { spent_usd: state.spent, unresolved_usd: state.unresolved,
-      remaining_usd: Math.max(0, limits.hardCapUsd - state.spent),
+      remaining_usd: Math.max(0, limits.hardCapUsd - state.spent - state.unresolved),
       overshoot_usd: Math.max(0, state.spent - limits.hardCapUsd),
-      can_continue: state.spent < limits.hardCapUsd,
+      can_continue: state.spent + state.unresolved < limits.hardCapUsd,
       cap_is_actual_usage_only: true };
   }
 
@@ -670,12 +738,14 @@ export default function arenaExtension(pi: ExtensionAPI) {
       else plateau = 0;
       previousProgress = progress;
     }
-    const stop = budget.spent >= limits.hardCapUsd ? "actual_usage_cap"
+    const stop = gateStopReason ? "estimated_request_unaffordable"
+      : budget.spent >= limits.hardCapUsd ? "actual_usage_cap"
       : errorStreak >= MAX_ERROR_STREAK ? "error_loop"
       : continuations >= 12 ? "continuation_limit"
       : continuations >= 4 && plateau >= 4 ? "plateau" : null;
     if (stop) {
-      appendCost({ kind: "control", continuations, plateau, error_streak: errorStreak, progress, stop });
+      appendCost({ kind: "control", continuations, plateau, error_streak: errorStreak, progress, stop,
+        ...(gateStopReason ? { gate_stop_reason: gateStopReason } : {}) });
       return;
     }
     if (failed) {
@@ -690,7 +760,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
       .map((idea: any) => `${idea.id} ${idea.title}`);
     const current = readState();
     const status = current ? stateLine(current, true) : `[arena] best verified: ${briefText(state.best)}`;
-    const content = `Continue proof optimization. ${status}. Active ideas: ${ideas.length ? ideas.join("; ") : "none recorded"}. Remaining ledger-priced usage cap: $${Math.max(0, limits.hardCapUsd - budget.spent).toFixed(4)}.`;
+    const content = `Continue proof optimization. ${status}. Active ideas: ${ideas.length ? ideas.join("; ") : "none recorded"}. Remaining estimated allowance after outstanding requests: $${Math.max(0, limits.hardCapUsd - budget.spent - budget.unresolved).toFixed(4)}.`;
     return { entries: [...event.entries, { type: "custom_message" as const, customType: "arena-continuation",
       content, display: false }], continue: true };
   });

@@ -67,15 +67,22 @@ export default function fakeOpenCode(pi: ExtensionAPI) {
       const index = summarizing ? -1 - request : request++;
       void (async () => {
         try {
-          const payload = await options?.onPayload?.({ model: model.id, input: context.messages,
+          const input = [...context.messages];
+          const padInput = Number(process.env.ARENA_FAKE_PAD_INPUT ?? "0");
+          if (padInput > 0) input.push({ role: "user", content: "x".repeat(padInput) } as never);
+          const payload = await options?.onPayload?.({ model: model.id, input,
             max_output_tokens: options.maxTokens ?? 128_000 });
           if (!payload || Number((payload as { max_output_tokens?: number }).max_output_tokens) > 16_000) {
             throw new Error("Arena did not enforce the fake provider output ceiling");
           }
           if (process.env.ARENA_FAKE_LOG) {
+            const requestShape = { max_output_tokens: (payload as any)?.max_output_tokens ?? null,
+              max_tokens: (payload as any)?.max_tokens ?? null,
+              thinking: (payload as any)?.thinking ?? null,
+              reasoning: (payload as any)?.reasoning ?? null };
             appendFileSync(process.env.ARENA_FAKE_LOG, `${JSON.stringify({ index,
               thinking: options?.reasoning ?? null, tools: (context.tools ?? []).map(tool => tool.name),
-              messages: context.messages })}\n`);
+              request_shape: requestShape, messages: context.messages })}\n`);
           }
           if (process.env.ARENA_FAKE_CRASH === "1") process.exit(23);
           if (process.env.ARENA_FAKE_ERROR === "1") throw new Error("Offline provider failure with unknown usage");

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { boundedPayload, budgetDecision, catalogPriceProblem, cacheAlarm, MIN_REQUEST_OUTPUT_TOKENS, outputBudget, budgetLimits, cacheUtilization, maximumNextRequest, permitFinalPayload, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
+import { assessFinalPayload, boundedPayload, budgetDecision, budgetGate, catalogPriceProblem, cacheAlarm, budgetLimits, cacheUtilization, maximumNextRequest, requestShape, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
 
 const usage = { input: 1_000_000, output: 100_000, cacheRead: 0, cacheWrite: 0 };
 
@@ -109,21 +109,25 @@ test("caps Qwen's Anthropic Messages payload before dispatch", () => {
   assert.ok(reserve < 0.1);
 });
 
-test("keeps an Anthropic thinking budget below the bounded max_tokens", () => {
-  // Pi sends high thinking as budget_tokens 16384 with max_tokens 32384; the API rejects
-  // budget_tokens >= max_tokens with a 400, so cutting max_tokens must shrink the budget too.
+test("fixes the Anthropic output and thinking shape independently of remaining allowance", () => {
+  // Normalize Pi's initial provider shape once; a smaller balance must not create a new cache key.
   const high = boundedPayload({ messages: [], max_tokens: 32_384,
     thinking: { type: "enabled", budget_tokens: 16_384 } }, "qwen3.8-flash").payload as any;
   assert.equal(high.max_tokens, 16_000);
   assert.equal(high.thinking.budget_tokens, 14_976);
-  const medium = boundedPayload({ messages: [], max_tokens: 24_192,
+  const nearCap = boundedPayload({ messages: [], max_tokens: 32_384,
+    thinking: { type: "enabled", budget_tokens: 16_384 } }, "qwen3.8-flash").payload as any;
+  assert.deepEqual(nearCap, high);
+  const low = boundedPayload({ messages: [], max_tokens: 24_192,
     thinking: { type: "enabled", budget_tokens: 8_192 } }, "qwen3.8-flash").payload as any;
-  assert.equal(medium.thinking.budget_tokens, 8_192);
-  // Near the cap the output allowance can fall below the 1024-token thinking minimum.
-  const last = boundedPayload({ messages: [], max_tokens: 24_192,
-    thinking: { type: "enabled", budget_tokens: 8_192 } }, "qwen3.8-flash", 0.0002).payload as any;
-  assert.ok(last.max_tokens < 2048);
-  assert.equal(last.thinking, undefined);
+  assert.equal(low.max_tokens, 16_000);
+  assert.equal(low.thinking.budget_tokens, 8_192);
+});
+
+test("fixed request shape distinguishes absent thinking from explicit null", () => {
+  const base = { max_tokens: 16000 };
+  assert.notEqual(requestShape(base), requestShape({ ...base, thinking: null }));
+  assert.notEqual(requestShape(base), requestShape({ ...base, reasoning: null }));
 });
 
 test("large serialized text fits the model when its byte token upper bound fits", () => {
@@ -131,26 +135,35 @@ test("large serialized text fits the model when its byte token upper bound fits"
   assert.ok(boundedPayload(payload, "gpt-6-luna").reserve > 0);
 });
 
-test("final transport guard admits requests until observed usage reaches each cap", () => {
+test("final transport guard compares the conservative request estimate to aggregate allowance", () => {
   const payload = { max_output_tokens: 16000, input: "proof" };
   for (const hardCap of [0.1, 1, 3]) {
     const limits = budgetLimits({ ARENA_HARD_CAP_USD: String(hardCap) });
-    assert.doesNotThrow(() => permitFinalPayload(payload, "gpt-6-luna",
-      { spent: hardCap - 0.001 }, limits));
-    assert.throws(() => permitFinalPayload(payload, "gpt-6-luna",
-      { spent: hardCap }, limits), /Arena budget stop/);
+    const estimate = assessFinalPayload(payload, "gpt-6-luna", { spent: 0, unresolved: 0 }, limits).estimateUsd;
+    assert.equal(assessFinalPayload(payload, "gpt-6-luna",
+      { spent: hardCap - estimate - 1e-10, unresolved: 0 }, limits).allowed, true);
+    assert.equal(assessFinalPayload(payload, "gpt-6-luna",
+      { spent: hardCap - estimate / 2, unresolved: 0 }, limits).allowed, false);
   }
 });
 
-test("the last allowed request is bounded by what remains of the cap", () => {
+test("gate includes outstanding reservations and never reshapes a request to fit", () => {
+  const limits = { hardCapUsd: 0.1, stopUsd: 0.1 };
+  const affordable = budgetGate(0.03, 0.04, 0.02, limits);
+  assert.equal(affordable.allowed, true);
+  assert.ok(Math.abs(affordable.remainingUsd - 0.04) < 1e-12);
+  assert.equal(affordable.reason, "estimate fits remaining allowance");
+  const unaffordable = budgetGate(0.05, 0.04, 0.02, limits);
+  assert.equal(unaffordable.allowed, false);
+  assert.ok(Math.abs(unaffordable.remainingUsd - 0.04) < 1e-12);
+  assert.ok(Math.abs(unaffordable.overshootUsd - 0.01) < 1e-12);
+  assert.equal(unaffordable.reason, "estimated request exceeds remaining allowance");
   const payload = { model: "x", input: [], max_output_tokens: 128_000 };
-  const luna = (remaining: number) => (permitFinalPayload(payload, "gpt-6-luna",
-    { spent: 0.1 - remaining }, { hardCapUsd: 0.1, stopUsd: 0.1 }).payload as { max_output_tokens: number }).max_output_tokens;
-  assert.equal(luna(0.1), 16_000);
-  assert.equal(luna(0.003), 4_000);           // $0.003 at $0.75 per million output tokens
-  assert.equal(luna(0.00001), MIN_REQUEST_OUTPUT_TOKENS);
-  assert.equal(outputBudget(5, "qwen3.8-flash"), 16_000);
-  assert.throws(() => luna(0), /Arena budget stop/);
+  const first = assessFinalPayload(payload, "gpt-6-luna", { spent: 0, unresolved: 0 }, limits);
+  const last = assessFinalPayload(payload, "gpt-6-luna", { spent: 0.099, unresolved: 0 }, limits);
+  assert.deepEqual(first.payload, last.payload);
+  assert.equal(last.allowed, false);
+  assert.equal(first.payload.max_output_tokens, 16_000);
 });
 
 test("cache alarm fires only after warm-up, when a request writes more than it reads", () => {
