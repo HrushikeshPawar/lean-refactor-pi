@@ -153,22 +153,6 @@ export function cacheAlarm(usage: { cacheRead?: number; cacheWrite?: number }, s
   return settledRequests > CACHE_WARMUP_REQUESTS && write > read ? { request: settledRequests, read, write } : undefined;
 }
 
-export function maximumNextRequest(model: BudgetModel): number {
-  const { price, contextWindow, maxTokens } = MODELS[model];
-  const conservative = model === "gpt-6-luna" ? MODELS[model].highPrice : price;
-  return contextWindow * Math.max(conservative.input, conservative.cacheRead, conservative.cacheWrite) / 1_000_000
-    + maxTokens * conservative.output / 1_000_000;
-}
-
-export function budgetDecision(spent: number, model: BudgetModel, limits: BudgetLimits): { allowed: boolean; reserve: number; reason: string } {
-  if (!Number.isFinite(spent) || spent < 0) throw new Error("Invalid Arena spend");
-  const reserve = maximumNextRequest(model);
-  const allowed = spent < limits.hardCapUsd;
-  const reason = allowed ? "within budget"
-    : `Arena budget stop: $${spent.toFixed(4)} observed usage reached the $${limits.hardCapUsd.toFixed(2)} cap`;
-  return { allowed, reserve, reason };
-}
-
 // The Responses API uses max_output_tokens; Anthropic Messages uses max_tokens.
 // Both include generated thinking tokens in the output limit.
 export const MAX_REQUEST_OUTPUT_TOKENS = 16_000;

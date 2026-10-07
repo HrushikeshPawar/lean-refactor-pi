@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assessFinalPayload, boundedPayload, budgetDecision, budgetGate, catalogPriceProblem, cacheAlarm, budgetLimits, cacheUtilization, maximumNextRequest, requestShape, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
+import { assessFinalPayload, boundedPayload, budgetGate, catalogPriceProblem, cacheAlarm, budgetLimits, cacheUtilization, requestShape, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
 
 const usage = { input: 1_000_000, output: 100_000, cacheRead: 0, cacheWrite: 0 };
 
@@ -57,27 +57,10 @@ test("reports measured cache reuse, including a recent window", () => {
   assert.equal(result.all.reuse_pct, 90);
 });
 
-test("records a next-request exposure estimate without using it as a stop", () => {
-  assert.ok(Math.abs(maximumNextRequest("gpt-6-luna") - 0.3585) < 1e-10);
-  assert.ok(Math.abs(maximumNextRequest("deepseek-v4.1-flash") - 0.3804) < 1e-10);
-  const limits = budgetLimits({ ARENA_HARD_CAP_USD: "3" });
-  assert.equal(budgetDecision(2.5, "gpt-6-luna", limits).allowed, true);
-  assert.equal(budgetDecision(3, "gpt-6-luna", limits).allowed, false);
-  assert.equal(budgetDecision(2.4, "deepseek-v4.1-flash", limits).allowed, true);
-  assert.equal(budgetDecision(2, "deepseek-v4.1-flash", limits).allowed, true);
-});
-
-test("a $1 cap stops after observed usage reaches $1", () => {
-  const limits = budgetLimits({ ARENA_HARD_CAP_USD: "1" });
-  assert.equal(limits.stopUsd, 1);
-  assert.equal(budgetDecision(0.60, "gpt-6-luna", limits).allowed, true);
-  assert.equal(budgetDecision(0.99, "gpt-6-luna", limits).allowed, true);
-  assert.equal(budgetDecision(1, "gpt-6-luna", limits).allowed, false);
+test("fails closed on unpriced models or invalid usage", () => {
+  assert.equal(budgetLimits({ ARENA_HARD_CAP_USD: "1" }).stopUsd, 1);
   assert.throws(() => budgetLimits({ ARENA_HARD_CAP_USD: "3.01" }));
   assert.throws(() => budgetLimits({ ARENA_HARD_CAP_USD: "1", ARENA_STOP_USD: "0.85" }));
-});
-
-test("fails closed on unpriced models or invalid usage", () => {
   assert.throws(() => sessionSpend([{ type: "message", message: { role: "assistant",
     provider: "other", model: "gpt-6-luna", usage } }] as never, "gpt-6-luna"));
   assert.throws(() => usageCost({ ...usage, output: Number.NaN }, "gpt-6-luna"));

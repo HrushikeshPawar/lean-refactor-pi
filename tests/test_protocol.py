@@ -5,6 +5,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 import uuid
 from pathlib import Path
@@ -483,6 +485,26 @@ class ProtocolLogicTests(unittest.TestCase):
         result = self.evaluate("theorem t := by\n  a")
         self.assertNotIn("next_experiment", result)
         self.assertNotIn("proof", json.dumps(result).replace("proof_line", ""))
+
+
+class LockTests(unittest.TestCase):
+    def test_lean_jobs_for_one_run_never_overlap(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            active, peak, lock = [0], [0], threading.Lock()
+
+            def job():
+                with campaign.lean_lock(directory):
+                    with lock:
+                        active[0] += 1
+                        peak[0] = max(peak[0], active[0])
+                    time.sleep(0.05)
+                    with lock:
+                        active[0] -= 1
+            threads = [threading.Thread(target=job) for _ in range(4)]
+            [t.start() for t in threads]
+            [t.join() for t in threads]
+            self.assertEqual(peak[0], 1)
 
 
 if __name__ == "__main__":

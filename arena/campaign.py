@@ -19,7 +19,6 @@ from pathlib import Path
 from arena import lean_session
 from arena.engine import (ROOT, candidate_file, evaluate, force_cold, measure_version, problem, source_path,
                           validate_proof, versions, workspace)
-from arena.polish import polish
 from arena.profile import heartbeat_floor, profile
 from arena.graph import common_base, edit_fingerprint, merge_text, ranked_frontier
 
@@ -799,7 +798,7 @@ def events(directory: Path) -> list[dict]:
 def lean_lock(directory: Path, lane: str = "model"):
     """One Lean job at a time per lane and run.
 
-    The model's own work (evaluate, probe, profile, polish) shares the `model`
+    The model's own work (evaluate, probe, profile) shares the `model`
     lane. Harness checks run in the `background` lane, so they never delay the
     model. Heartbeats count allocations, not time, so two concurrent compiles
     do not change each other's measurement; the lanes only bound CPU and RAM.
@@ -1488,38 +1487,6 @@ def profile_request(name: str, run_id: str, reference: str | None = None, proof:
         result["statement_floor_hb"] = heartbeat_floor(name)["heartbeats"]
     _append(directory, {"kind": "profile", "proof_id": proof_id, "result": result})
     return {**result, "target": label, "cached": False}
-
-
-def polish_request(name: str, run_id: str, reference: str | None = None, **limits) -> dict:
-    """Try mechanical variants of a candidate. Passing, improving variants are stored as probes
-    (`pN`) so the model can promote one with `arena_evaluate from_probe`; nothing becomes a node."""
-    directory = run_dir(run_id)
-    history = events(directory)
-    candidate_id = resolve_candidate_ref(history, reference) if reference else _current(history)
-    if candidate_id is None:
-        raise ValueError("No candidate to polish; give candidate (#N)")
-    proof = (directory / "proofs" / f"{candidate_id}.lean").read_text()
-    measured = next((e["result"].get("heartbeat") for row in _summaries(history) if row["id"] == candidate_id
-                     for e in row["evaluations"] if e["result"].get("heartbeat") is not None), None)
-    with lean_lock(directory):
-        outcome = polish(name, proof, measured, **limits)
-    version = versions(problem(name))[0][0]
-    shown = []
-    for variant in outcome["variants"]:
-        proof_id = hashlib.sha256((name + "\0" + variant["proof"]).encode()).hexdigest()
-        if proof_id not in _probe_numbers(events(directory)):
-            _snapshot(directory, proof_id, variant["proof"])
-            _append(directory, {"kind": "probe", "proof_id": proof_id, "idea_id": None, "parent": candidate_id,
-                                "result": {"ok": True, "mode": "probe", "scored": False, "tokens": variant["tokens"],
-                                           "heartbeat": variant["heartbeats"], "polish": variant["edit"],
-                                           "compat": {version: {"passed": True, "heartbeats": variant["heartbeats"]}}}})
-        shown.append({"probe": _probe_numbers(events(directory))[proof_id], "edit": variant["edit"],
-                      "tokens": variant["tokens"], "heartbeats": variant["heartbeats"],
-                      "estimated_proxy": variant["estimated_proxy"], "delta": variant["delta"]})
-    return {"ok": True, "candidate": _label(history, candidate_id), "base": outcome["base"],
-            "tried": outcome["tried"], "passing": outcome["passing"], "improving": outcome["improving"],
-            "complete": outcome["complete"], "seconds": outcome["seconds"], "variants": shown,
-            "next": "Promote a variant with arena_evaluate from_probe; nothing was recorded as a candidate."}
 
 
 def set_decision(run_id: str, candidate_id: str, decision: str, reason: str) -> dict:
