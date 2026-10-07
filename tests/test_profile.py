@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from arena import profile as profiler
-from arena.engine import _proof_length
+from arena.engine import ROOT, _proof_length, problem
 
 OUTPUT = """ARENA_PROFILE 120 2 0 120 10
 ARENA_PROFILE 121 4 1 121 30
@@ -107,6 +107,26 @@ class DegradationTests(unittest.TestCase):
                 profiler.profile("T", "theorem t : True := by\n  skip")
             with self.assertRaisesRegex(ValueError, "without sorry"):
                 profiler.profile("T", "theorem t : True := by\n  sorry")
+
+
+@unittest.skipUnless((ROOT / "workspaces/physlib-v4.32.0").is_dir(), "PhysLib fixture is not provisioned")
+class PinnedPhyslibProfileTests(unittest.TestCase):
+    def test_profile_lines_reconcile_and_keep_source_coordinates(self):
+        name = "fundamental_theorem_of_variational_calculus'"
+        row = problem(name)
+        result = profiler.profile(name, row["src"])
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["token_attribution_available"])
+        self.assertEqual(result["line_tokens_total"], result["tokens"])
+        self.assertEqual(result["line_profile"][0]["file_line"], row["start_line"])
+        self.assertEqual([item["proof_line"] for item in result["line_profile"]],
+                         sorted(item["proof_line"] for item in result["line_profile"]))
+        self.assertLessEqual(len(result["hotspots"]), 10)
+        costs = [item["baseline_cost_points"] for item in result["hotspots"]]
+        self.assertEqual(costs, sorted(costs, reverse=True))
+        spans = [span for line in result["line_profile"] for span in line["tactic_spans"]]
+        self.assertTrue(any(span["depth"] > 0 for span in spans))
+        self.assertTrue(any(span["end_file_line"] > span["file_line"] for span in spans))
 
 
 if __name__ == "__main__":
