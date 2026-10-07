@@ -396,6 +396,27 @@ class ProtocolLogicTests(unittest.TestCase):
         self.assertEqual(listed["best"]["candidate"], "#2")
         self.assertIn("recent_failures", campaign.frontier("logic"))
 
+    def test_latest_active_idea_is_inherited_by_probes_and_evaluations(self):
+        campaign.record_idea("logic", "Factor repeated cases")
+        first = self.evaluate("theorem t := by\n  a")
+        self.assertEqual(first["idea_id"], "i1")
+
+        with patch.object(campaign, "normalize_draft", return_value="theorem t := by\n  sorry"), \
+                patch.object(campaign, "validate_proof"), \
+                patch.object(campaign, "_compile_probe", return_value={"ok": False, "compat": {"v1": {"passed": False}}}):
+            draft = campaign.probe("T", "logic", "by\n  sorry")
+        self.assertEqual(draft["idea_id"], "i1")
+
+        campaign.record_idea("logic", "Try a helper", idea_id="helper")
+        second = self.evaluate("theorem t := by\n  b")
+        self.assertEqual(second["idea_id"], "helper")
+
+        campaign.record_idea("logic", idea_id="helper", status="abandoned", reason="not useful")
+        third = self.evaluate("theorem t := by\n  c")
+        self.assertEqual(third["idea_id"], "i1")
+        current = campaign.frontier("logic")["current_idea"]
+        self.assertEqual((current["id"], current["attempts"], current["probes"]), ("i1", 3, 1))
+
     def test_a_new_idea_may_carry_the_models_own_id(self):
         # Luna v5 created ideas as {idea_id: "state_algebra", title: ...}; that is a creation.
         made = campaign.record_idea("logic", "State algebra", "h", idea_id="state_algebra")

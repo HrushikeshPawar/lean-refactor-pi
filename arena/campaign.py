@@ -942,6 +942,17 @@ def resolve_probe_ref(history: list[dict], reference: str) -> str:
 IDEA_STATUSES = ("active", "parked", "succeeded", "abandoned")
 
 
+def _current_active_idea(history: list[dict]) -> str | None:
+    """The latest idea still marked active, derived from append-only idea events."""
+    statuses: dict[str, str] = {}
+    for item in history:
+        if item.get("kind") == "idea":
+            statuses[item["id"]] = item.get("status", "active")
+        elif item.get("kind") == "idea_update" and item.get("id") in statuses:
+            statuses[item["id"]] = item.get("status", statuses[item["id"]])
+    return next((idea_id for idea_id, status in reversed(list(statuses.items())) if status == "active"), None)
+
+
 def _region(text: str) -> list[int] | str:
     """Proof lines such as "12-30", "lines 12–30", "L12..L30" or "line 7"; anything else is kept as text."""
     numbers = [int(n) for n in re.findall(r"\d+", text)][:2]
@@ -1157,6 +1168,8 @@ def record_evaluation(name: str, run_id: str, proof: str, mode: str,
         if history[0].get("versions") and history[0]["versions"] != [list(pair) for pair in versions(row)]:
             raise ValueError("Pinned source versions changed since run initialization")
         known = set(_candidate_ids(history))
+        if candidate_id not in known and idea_id is None:
+            idea_id = _current_active_idea(history)
         explicit: list[str] = []
         for reference in parents or []:
             try:
@@ -1366,6 +1379,7 @@ def probe(name: str, run_id: str, proof: str, idea_id: str | None = None, parent
         return evaluate_request(name, run_id, proof, idea_id=idea_id, parents=[parent] if parent else None)
     earlier = next((item for item in reversed(history)
                     if item.get("kind") == "probe" and item["proof_id"] == proof_id), None)
+    idea_id = idea_id or (earlier or {}).get("idea_id") or _current_active_idea(history)
     if earlier:
         result = earlier["result"]
     else:
@@ -1771,7 +1785,20 @@ def state(run_id: str) -> dict:
     updates = [{"seq": seq, "text": _check_text(numbers[item["candidate_id"]], item["result"], total)}
                for seq, item in enumerate(history)
                if item.get("kind") == "evaluation" and item.get("trigger") == "auto" and item["candidate_id"] in numbers]
+    reference_row = next((r for r in rows if r["origin"] == "reference"), None)
+    baseline = None
+    if reference_row:
+        from arena.scoring import reference
+        try:
+            tokens, heartbeats = reference(history[0]["theorem"])
+        except ValueError:
+            # Synthetic protocol tests and imported legacy runs may have no published denominator.
+            pass
+        else:
+            baseline = {"candidate": "#1", "tokens": tokens, "heartbeats": heartbeats,
+                        "proxy": round(100 / 3, 2), "status": "pinned original baseline"}
     return {"ok": True, "seq": len(history), "versions": total, "best": _brief(verified),
+            "baseline": baseline,
             "leading_unverified": _brief(leading), "checking": [f"#{r['n']}" for r in _autocheck_jobs(rows)],
             "updates": updates[-10:]}
 
@@ -1892,7 +1919,7 @@ def frontier(run_id: str) -> dict:
     for idea in ideas.values():
         mine = [r for r in rows if r["idea_id"] == idea["id"] and r["origin"] == "model"]
         drafts = [item for item in history if item.get("kind") == "probe" and item.get("idea_id") == idea["id"]]
-        idea["attempts"] = len(mine)
+        idea["attempts"] = len({r["id"] for r in mine} | {d["proof_id"] for d in drafts})
         idea["probes"] = len({d["proof_id"] for d in drafts})
         idea["best"] = _brief(_best(mine))
         failed = [r for r in mine if r["status"] == "fail" and r["evaluations"]]
@@ -1909,8 +1936,11 @@ def frontier(run_id: str) -> dict:
     top = sorted((r for r in rows if r["status"] in ("full", "primary") and r["origin"] != "reference"),
                  key=lambda r: (r["verified"], r["score"] or -1), reverse=True)[:5]
     evaluations = sum(len(r["evaluations"]) for r in rows)
+    current_id = _current_active_idea(history)
+    current_idea = next((idea for idea in ideas.values() if idea["id"] == current_id), None)
     return {"best": _brief(_best(rows)), "top": [_brief(r) | {"idea_id": r["idea_id"]} for r in top],
             "ideas": list(ideas.values()), "recent_failures": failures[-3:],
+            "current_idea": current_idea,
             "candidates": len(rows), "evaluations": evaluations,
             "probes": len(probe_numbers), "advisory": _advisory(rows)}
 
