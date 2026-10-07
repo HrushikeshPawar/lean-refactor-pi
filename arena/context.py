@@ -21,7 +21,7 @@ from arena.scoring import exchange_rates
 
 LEAN_FILE = Path(__file__).with_name("lean") / "context.lean"
 _RECORD = re.compile(r"^ARENA_CTX (\{.*\})$", re.M)
-MAX_PACKET_CHARS = 30_000
+MAX_PACKET_CHARS = 40_000
 LIMITS = {"goals": 40, "goal_chars": 700, "used": 5, "used_chars": 320, "earlier": 30,
           "earlier_chars": 240, "types": 8, "type_chars": 700, "profile_entries": 24,
           "scope": 25, "scope_chars": 600}
