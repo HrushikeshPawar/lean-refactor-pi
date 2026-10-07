@@ -710,7 +710,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
     description: "Read pinned source by a decl:<qualified-name> handle or a project/dependency path alias (up to 400 lines per call; next_first continues). Reports the pin, canonical path and file length.",
     parameters: Type.Object({ handle: Type.String(), first: Type.Optional(Type.Number()), last: Type.Optional(Type.Number()) }),
     async execute(_id, params) {
-      const args = ["--path", params.handle];
+      const args = ["--handle", params.handle];
       if (params.first !== undefined) args.push("--first", String(params.first));
       if (params.last !== undefined) args.push("--last", String(params.last));
       return reply(await campaign("source", args));

@@ -78,17 +78,31 @@ def declarations(name: str, items: list[str] | None = None, cursor: str | None =
                 result = {"input": original, "kind": "ambiguous",
                           "suggestions": [item["name"] for item in matches[:12]]}
             elif not matches:
-                result = {"input": original, "kind": "error", "error": "not_found",
-                          "suggestions": _declaration_suggestions(query, constants)}
+                found = declaration(name, query)
+                if not found.get("found"):
+                    result = {"input": original, "kind": "error", "error": "not_found",
+                              "hint": found.get("hint"),
+                              "suggestions": _declaration_suggestions(query, constants)}
+                elif found.get("alternatives"):
+                    result = {"input": original, "kind": "ambiguous",
+                              "suggestions": [found["name"], *found["alternatives"]]}
+                elif found.get("source_text"):
+                    result = {"input": original, "kind": "declaration", **found}
+                else:
+                    entry = {"name": found.get("name", query), "kind": found.get("kind", "generated")}
+                    result = {"input": original, **found, "kind": "unavailable",
+                              "reason": _unavailable_reason(entry, found),
+                              "handle": f"decl:{entry['name']}"}
             else:
                 entry = matches[0]
                 found = declaration(name, entry["name"])
                 if found.get("source_text"):
-                    result = {"input": original, **found, "index": entry}
+                    result = {"input": original, "kind": "declaration", **found, "index": entry}
                 else:
                     result = {"input": original, "kind": "unavailable",
                               "reason": _unavailable_reason(entry, found), "name": entry["name"],
                               "handle": f"decl:{entry['name']}", "index": entry,
+                              "module": found.get("module") or entry.get("module"),
                               "signature": found.get("signature") or entry.get("sig"),
                               "location": found.get("source")}
         encoded_size = len(json.dumps(result, ensure_ascii=False))
@@ -135,12 +149,13 @@ def source_range(name: str, path: str, first: int, last: int | None = None) -> d
     project = workspace(row, version, commit)
     if path.startswith("decl:"):
         symbol = path[5:]
+        source_symbol = _source_decl_symbol(name, symbol)
         try:
-            path, _ = _resolve_declaration_source(name, symbol)
+            path, _ = _resolve_declaration_source(name, source_symbol)
             module = None
         except ValueError:
-            module = _indexed_module(name, symbol)
-            path, _ = _resolve_declaration_source(name, symbol, module)
+            module = _indexed_module(name, source_symbol)
+            path, _ = _resolve_declaration_source(name, source_symbol, module)
         project, commit, path = _source_target(project, commit, path, module)
     else:
         project, commit, path = _source_target(project, commit, _canonical_source_path(row, path))
@@ -184,21 +199,29 @@ def find(name: str, queries: list[str], limit: int = 20) -> dict:
                                    for path in _matching_pinned_paths(source_root, source_pin, needle))
     for source_root, source_pin, path in sorted(candidate_paths, key=lambda item: (str(item[0]), item[2])):
         content = _git_source(source_root, source_pin, path)
-        namespace = ""
+        namespace: list[str] = []
         lines = content.splitlines()
         starts: list[tuple[int, str]] = []
         for line_number, line in enumerate(lines, 1):
             ns = re.match(r"^\s*namespace\s+([A-Za-z_][A-Za-z0-9_.']*)", line)
             if ns:
-                namespace = ns.group(1)
+                namespace.append(ns.group(1))
                 continue
-            if re.match(r"^\s*end(?:\s|$)", line):
-                namespace = ""
+            close = re.match(r"^\s*end(?:\s+([A-Za-z_][A-Za-z0-9_'.]*))?\s*$", line)
+            if close:
+                if close.group(1):
+                    closing = close.group(1)
+                    while namespace and namespace[-1] != closing:
+                        namespace.pop()
+                    if namespace:
+                        namespace.pop()
+                elif namespace:
+                    namespace.pop()
                 continue
             match = re.match(r"^\s*(?:private\s+|protected\s+)?(?:@\[[^\]]*\]\s*)*(?:theorem|lemma|def|opaque|instance|abbrev|inductive|structure|class|axiom)\s+([A-Za-z_][A-Za-z0-9_'.]*)", line)
             if match:
                 local = match.group(1)
-                qualified = local if "." in local or not namespace else namespace + "." + local
+                qualified = local if "." in local or not namespace else ".".join(namespace + [local])
                 starts.append((line_number, qualified))
         for index, (line_number, qualified) in enumerate(starts):
             end = starts[index + 1][0] - 1 if index + 1 < len(starts) else len(lines)
@@ -213,11 +236,6 @@ def find(name: str, queries: list[str], limit: int = 20) -> dict:
                    if (item["name"] == needle if query.startswith("decl:") else
                        q in item["name"].casefold() or q in item["source_text"].casefold())]
         by_name = {item["name"]: item for item in matches}
-        for item in indexed:
-            searchable = (item["name"] + " " + str(item.get("sig", ""))).casefold()
-            if (item["name"] == needle if query.startswith("decl:") else q in searchable):
-                by_name.setdefault(item["name"], {"name": item["name"], "handle": f"decl:{item['name']}",
-                                                   "index": item, "pin": commit})
         if not by_name:
             suggestions = _declaration_suggestions(needle, indexed)
             per_query.append({"query": query, "matches": [], "error": "not_found",
@@ -243,14 +261,25 @@ def _canonical_source_path(row: dict, path: str) -> str:
 
 def _package_roots(project: Path) -> list[tuple[Path, str, str]]:
     roots = []
+    manifest = project / "lake-manifest.json"
+    try:
+        locked = json.loads(manifest.read_text()).get("packages", [])
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return roots
     packages = project / ".lake" / "packages"
-    for package in sorted(packages.iterdir()) if packages.is_dir() else []:
+    for entry in locked:
+        if not isinstance(entry, dict) or entry.get("type", "git") != "git":
+            continue
+        package_name, revision = entry.get("name"), entry.get("rev")
+        if not isinstance(package_name, str) or not isinstance(revision, str) or not revision:
+            continue
+        package = packages / package_name
         if not package.is_dir():
             continue
         head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=package, text=True,
                               capture_output=True, check=False)
-        if head.returncode == 0:
-            roots.append((package, head.stdout.strip(), package.name))
+        if head.returncode == 0 and head.stdout.strip() == revision:
+            roots.append((package, revision, package_name))
     return roots
 
 
@@ -278,6 +307,19 @@ def _indexed_module(name: str, symbol: str) -> str | None:
         return None
     matches = constant_index(inventory, name=symbol)
     return matches[0].get("module") if len(matches) == 1 else None
+
+
+def _source_decl_symbol(name: str, symbol: str) -> str:
+    """Lean constructors are written inside their inductive's pinned source block."""
+    from arena.context import constant_index, lean_context
+
+    inventory = lean_context(name)
+    if inventory.get("error"):
+        return symbol
+    matches = constant_index(inventory, name=symbol)
+    if len(matches) == 1 and matches[0].get("kind") == "constructor" and "." in symbol:
+        return symbol.rsplit(".", 1)[0]
+    return symbol
 
 
 def _pinned_lean_paths(project: Path, commit: str) -> list[str]:
@@ -345,13 +387,14 @@ def declaration(name: str, symbol: str) -> dict:
     row = problem(name)
     version, commit = versions(row)[0]
     project = workspace(row, version, commit)
+    source_symbol = _source_decl_symbol(name, symbol)
     try:
         try:
-            path, line = _resolve_declaration_source(name, symbol)
+            path, line = _resolve_declaration_source(name, source_symbol)
             module = None
         except ValueError:
-            module = _indexed_module(name, symbol)
-            path, line = _resolve_declaration_source(name, symbol, module)
+            module = _indexed_module(name, source_symbol)
+            path, line = _resolve_declaration_source(name, source_symbol, module)
         source_project, pin, path = _source_target(project, commit, path, module)
         source = _git_source(source_project, pin, path)
         lines = source.splitlines()

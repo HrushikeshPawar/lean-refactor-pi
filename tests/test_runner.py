@@ -155,7 +155,7 @@ def cheap_tool(name: str, arguments: dict, **usage) -> dict:
             "usage": {"input": 300, "output": 40, "cacheRead": 4000, "cacheWrite": 100, **usage}}
 
 
-SOURCE = {"path": "Strata/Languages/Core/StatementSemanticsProps.lean", "first": 950, "last": 960}
+SOURCE = {"handle": "Strata/Languages/Core/StatementSemanticsProps.lean", "first": 950, "last": 960}
 
 
 @unittest.skipUnless(PI_AVAILABLE, "pi and the Strata fixture are required")

@@ -135,14 +135,14 @@ class PacketTests(unittest.TestCase):
     def test_primed_lean_declaration_is_source_verified(self):
         for symbol in ("UpdateStateNotDefMonotone'", "UpdateStates", "isDefined"):
             with self.subTest(symbol=symbol):
-                found = campaign.declaration("Core.InitsUpdatesComm", symbol)
-                self.assertIn("signature", found)
-                self.assertIn(symbol, found["signature"])
+                found = campaign.declarations("Core.InitsUpdatesComm", [symbol])["items"][0]
+                self.assertEqual(found["kind"], "declaration")
+                self.assertIn(symbol, found["source_text"])
 
     def test_declaration_keeps_named_argument_inside_type(self):
-        signature = campaign.declaration("Core.InitsUpdatesComm", "UpdateStatesLength")["signature"]
-        self.assertIn("UpdateStates (P:=P)", signature)
-        self.assertIn("List.length ks = List.length vs", signature)
+        declaration = campaign.declarations("Core.InitsUpdatesComm", ["UpdateStatesLength"])["items"][0]
+        self.assertIn("UpdateStates (P:=P)", declaration["source_text"])
+        self.assertIn("List.length ks = List.length vs", declaration["source_text"])
 
 
 class ViewerTests(unittest.TestCase):

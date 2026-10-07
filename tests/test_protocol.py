@@ -230,19 +230,21 @@ class ProfileCliTests(unittest.TestCase):
 @LEAN
 class DeclarationTests(unittest.TestCase):
     def test_namespaced_constructor_and_library_names_resolve_where_text_search_cannot(self):
-        found = campaign.declaration(NAME, "Core.UpdateStatesLength")
-        self.assertTrue(found["found"])
-        self.assertIn("ks.length = vs.length", found["signature"])
-        library = campaign.declaration(NAME, "List.unzip_zip")
-        self.assertEqual((library["found"], library["module"]), (True, "Init.Data.List.Zip"))
-        constructor = campaign.declaration(NAME, "Core.UpdateStates.update_some")
-        self.assertEqual(constructor["kind"], "constructor")
+        found = campaign.declarations(NAME, ["Core.UpdateStatesLength"])["items"][0]
+        self.assertEqual(found["kind"], "declaration")
+        self.assertIn("List.length ks = List.length vs", found["source_text"])
+        library = campaign.declarations(NAME, ["List.unzip_zip"])["items"][0]
+        self.assertEqual((library["kind"], library["reason"], library["module"]),
+                         ("unavailable", "external", "Init.Data.List.Zip"))
+        constructor = campaign.declarations(NAME, ["Core.UpdateStates.update_some"])["items"][0]
+        self.assertEqual(constructor["kind"], "declaration")
+        self.assertIn("update_some", constructor["source_text"])
 
     def test_a_name_that_does_not_exist_gets_a_hint_not_a_traceback(self):
-        missing = campaign.declaration(NAME, "Core.NoSuchLemmaAnywhere")
-        self.assertFalse(missing["found"])
+        missing = campaign.declarations(NAME, ["Core.NoSuchLemmaAnywhere"])["items"][0]
+        self.assertEqual(missing["error"], "not_found")
         self.assertIn("hint", missing)
-        self.assertFalse(cli("none", "declaration", "--symbol", "bad name!")["ok"])
+        self.assertFalse(cli("none", "declarations", "--items", json.dumps(["bad name!"]))["ok"])
 
 
 @LEAN

@@ -51,7 +51,7 @@ def run(args: argparse.Namespace) -> dict:
     if args.action == "submission":
         return submission(args.run_id)
     if args.action == "source":
-        return source_range(args.theorem, args.path, args.first or 1, args.last)
+        return source_range(args.theorem, args.handle, args.first or 1, args.last)
     if args.action == "declarations":
         return declarations(args.theorem, json.loads(args.items) if args.items else None, args.cursor)
     if args.action == "find":
@@ -80,10 +80,9 @@ def main() -> int:
     parser.add_argument("--idea-id")
     parser.add_argument("--candidate", help="#N (or probe pN for the candidate action)")
     parser.add_argument("--from-probe")
-    parser.add_argument("--path")
+    parser.add_argument("--handle")
     parser.add_argument("--first", type=int)
     parser.add_argument("--last", type=int)
-    parser.add_argument("--symbol")
     parser.add_argument("--items")
     parser.add_argument("--queries")
     parser.add_argument("--cursor")

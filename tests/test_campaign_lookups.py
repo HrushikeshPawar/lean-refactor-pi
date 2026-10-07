@@ -22,6 +22,7 @@ class SourceHandleTests(unittest.TestCase):
 
     def test_source_accepts_decl_handle_and_reports_canonical_file_metadata(self):
         with patch("arena.campaign._resolve_declaration_source", return_value=("Strata/Target.lean", 2)), \
+             patch("arena.campaign._source_decl_symbol", side_effect=lambda name, symbol: symbol), \
              patch("arena.campaign._source_target", return_value=(Path("project"), "abc123", "Strata/Target.lean")):
             result = campaign.source_range("Target", "decl:Target.helper", 1, 2)
         self.assertEqual(result["path"], "Strata/Target.lean")
@@ -56,8 +57,10 @@ class SourceHandleTests(unittest.TestCase):
         with patch("arena.context.lean_context", return_value=inventory), \
              patch("arena.context.constant_index", side_effect=lambda ctx, **kw:
                    [item for item in ctx["constant"] if all(item.get(k) == v for k, v in kw.items() if v is not None)]), \
-             patch("arena.campaign.declaration", return_value={"found": True, "name": "Target.helper",
-                                                                "handle": "decl:Target.helper", "source_text": "theorem helper : True := by trivial"}):
+             patch("arena.campaign.declaration", side_effect=lambda theorem, name:
+                   {"found": False} if name == "missing" else
+                   {"found": True, "name": "Target.helper", "handle": "decl:Target.helper",
+                    "source_text": "theorem helper : True := by trivial"}):
             result = campaign.declarations("Target", ["decl:Target.helper", "x", "missing"])
         self.assertEqual(result["items"][0]["handle"], "decl:Target.helper")
         self.assertEqual(result["items"][1], {"input": "x", "kind": "local", "name": "x",
@@ -115,7 +118,8 @@ class SourceHandleTests(unittest.TestCase):
              patch("arena.campaign._package_roots", return_value=[]), \
              patch("arena.campaign._source_target", side_effect=lambda project, pin, path, module=None:
                    (Path("project"), pin, path)), \
-             patch("arena.campaign._indexed_module", return_value=None):
+             patch("arena.campaign._indexed_module", return_value=None), \
+             patch("arena.campaign._source_decl_symbol", side_effect=lambda name, symbol: symbol):
             source_result = campaign.source_range("Target", matches[0]["handle"], 1, 1)
         self.assertEqual(source_result["path"], "A.lean")
         self.assertIn("namespace A", source_result["text"])
@@ -130,7 +134,8 @@ class PinnedFamilyRoundTripTests(unittest.TestCase):
                                 ("fundamental_theorem_of_variational_calculus'",
                                  "fundamental_theorem_of_variational_calculus'")):
             with self.subTest(theorem=theorem):
-                result = campaign.declaration(theorem, symbol)
+                result = campaign.declarations(theorem, [f"decl:{symbol}"])["items"][0]
+                self.assertEqual(result["kind"], "declaration")
                 self.assertTrue(result["source_text"].strip())
                 source = campaign.source_range(theorem, result["handle"], result["line"], result["line"])
                 self.assertEqual(source["path"], result["path"])
