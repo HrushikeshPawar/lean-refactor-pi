@@ -14,6 +14,14 @@
 - [ ] Every handle emitted by kickoff, search or declaration lookup round-trips through `arena_source`. Known project aliases and dependency roots resolve; results state pin, canonical path, file length and one-based file lines.
 - [ ] Tests cover local, imported, private, generated, long and unavailable declarations, ambiguous names, bad ranges and returned-handle round trips on at least two theorem families. Genuine not-found results remain explicit errors.
 
+## Hand-back
+
+- Commits on `hrushikesh/v6-04-declarations`: `tpk`, `zlu`, `wlw`, `yky`, `knw`, `wvw`, `omv`, and this hand-back commit.
+- Offline full suite: 183 tests passed, 1 live Langfuse test skipped (`ARENA_LIVE_LANGFUSE=1` required). This run preceded the final shared-parser refactor.
+- After the shared-parser refactor: 16 focused lookup, declaration protocol, and kickoff packet tests passed.
+- No Langfuse traces or session IDs were used. TypeScript typechecking was unavailable because the package has no local dependency installation or TypeScript project configuration.
+- Standards feedback addressed by sharing namespace/declaration parsing between search and exact source lookup.
+
 ## Version control (GitButler)
 
 Your branch is **`hrushikesh/v6-04-declarations`**, already created and stacked directly above `hrushikesh/v6-03-kickoff`. The whole v6 stack is applied in this checkout's `gitbutler/workspace`. The reviewing session reviews, restacks and merges; you must leave the stack exactly as you found it apart from new commits on your branch.
