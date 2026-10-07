@@ -9,12 +9,12 @@ import json
 import subprocess
 from pathlib import Path
 
-from arena.campaign import (autocheck, candidate, declaration, evaluate_request, frontier, init, probe,
+from arena.campaign import (autocheck, candidate, declarations, evaluate_request, find, frontier, init, probe,
                             polish_request, profile_request, record_idea, run_dir, set_decision, source_range,
                             state, submission, write_state)
 
 ACTIONS = ("init", "evaluate", "probe", "idea", "frontier", "candidate", "decision", "source",
-           "declaration", "profile", "polish", "autocheck", "state", "submission")
+           "declarations", "find", "profile", "polish", "autocheck", "state", "submission")
 
 
 def run(args: argparse.Namespace) -> dict:
@@ -51,8 +51,12 @@ def run(args: argparse.Namespace) -> dict:
     if args.action == "submission":
         return submission(args.run_id)
     if args.action == "source":
-        return source_range(args.theorem, args.path, args.first, args.last)
-    return declaration(args.theorem, args.symbol)
+        return source_range(args.theorem, args.path, args.first or 1, args.last)
+    if args.action == "declarations":
+        return declarations(args.theorem, json.loads(args.items) if args.items else None, args.cursor)
+    if args.action == "find":
+        return find(args.theorem, json.loads(args.queries), args.limit)
+    raise ValueError(f"Unsupported action: {args.action}")
 
 
 def publish_state(run_id: str) -> None:
@@ -80,6 +84,10 @@ def main() -> int:
     parser.add_argument("--first", type=int)
     parser.add_argument("--last", type=int)
     parser.add_argument("--symbol")
+    parser.add_argument("--items")
+    parser.add_argument("--queries")
+    parser.add_argument("--cursor")
+    parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--decision", choices=("pursue", "park"))
     parser.add_argument("--reason", default="")
     parser.add_argument("--title")

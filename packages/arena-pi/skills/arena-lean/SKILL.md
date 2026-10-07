@@ -86,7 +86,7 @@ top-level commands or auxiliary declarations, and anything outside the one theor
 
 ## Working principles
 
-- Search before proving: `lean_local_search` and `arena_declaration` show real signatures. Do not guess names.
+- Search before proving: use `arena_find` for batched name or text searches, then `arena_declarations` for full pinned source. Follow every `decl:<qualified-name>` handle with `arena_source` when you need a line range. Do not guess names.
 - Build incrementally and read the exact goal (`lean_goal`) before changing a failing step.
 - Judge ideas by the per-axis numbers they produce. Local polish is cheap to try once a proof's overall
   structure is settled, so spend early effort on the structure.

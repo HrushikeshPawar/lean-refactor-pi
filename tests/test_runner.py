@@ -274,8 +274,9 @@ class AutomaticChecksTests(unittest.TestCase):
         good = FIXTURE.read_text()
         calls = [
             ("arena_idea", {"idea_id": "structural", "title": "Restructure the induction", "region": "lines 3-9"}),
-            ("arena_source", {"path": row["file_path"], "first": 950, "last": 960}),
-            ("arena_declaration", {"symbol": "InitStatesUpdated"}),
+            ("arena_source", {"handle": row["file_path"], "first": 950, "last": 960}),
+            ("arena_declarations", {"items": ["decl:InitStatesUpdated", "missing_helper"]}),
+            ("arena_find", {"queries": ["InitStatesUpdated", "missing_helper"], "limit": 5}),
             ("arena_skill_read", {"path": "references/lean-lsp-server.md"}),
             ("arena_probe", {"proof": row["statement"] + " := by\n  intros Hup Hinit\n  sorry", "idea_id": "structural"}),
             ("arena_evaluate", {"proof": good, "idea_id": "structural"}),
@@ -300,7 +301,7 @@ class AutomaticChecksTests(unittest.TestCase):
         self.assertIn("Submission: #2 proxy 76.72", run.stdout)
 
 
-ARENA_TOOLS = {"arena_candidate", "arena_declaration", "arena_evaluate", "arena_idea", "arena_polish",
+ARENA_TOOLS = {"arena_candidate", "arena_declarations", "arena_evaluate", "arena_find", "arena_idea", "arena_polish",
                "arena_probe", "arena_profile", "arena_skill_read", "arena_source"}
 LEAN_TOOLS = {f"mcp__arena_lean__{name}" for name in
               ("lean_goal", "lean_diagnostic_messages", "lean_multi_attempt", "lean_local_search", "lean_hover_info")}

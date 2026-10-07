@@ -707,20 +707,40 @@ export default function arenaExtension(pi: ExtensionAPI) {
 
   pi.registerTool({
     name: "arena_source", label: "Pinned Lean source",
-    description: "Read lines from a file of the pinned project (up to 400 per call; `next_first` continues). Errors state the file length.",
-    parameters: Type.Object({ path: Type.String(), first: Type.Number(), last: Type.Optional(Type.Number()) }),
+    description: "Read pinned source by a decl:<qualified-name> handle or a project/dependency path alias (up to 400 lines per call; next_first continues). Reports the pin, canonical path and file length.",
+    parameters: Type.Object({ handle: Type.String(), first: Type.Optional(Type.Number()), last: Type.Optional(Type.Number()) }),
     async execute(_id, params) {
-      const args = ["--path", params.path, "--first", String(params.first)];
+      const args = ["--path", params.handle];
+      if (params.first !== undefined) args.push("--first", String(params.first));
       if (params.last !== undefined) args.push("--last", String(params.last));
       return reply(await campaign("source", args));
     },
   });
 
   pi.registerTool({
-    name: "arena_declaration", label: "Pinned declaration",
-    description: "Find a declaration's exact source signature and location in the pinned project.",
-    parameters: Type.Object({ symbol: Type.String() }),
-    async execute(_id, params) { return reply(await campaign("declaration", ["--symbol", params.symbol])); },
+    name: "arena_declarations", label: "Pinned declarations",
+    description: "Read several declarations by qualified name or decl: handle. Returns full pinned source bodies, typed unavailable reasons, local scope/type, or per-name misses. Use next_cursor to continue a long batch.",
+    parameters: Type.Union([
+      Type.Object({ items: Type.Array(Type.String()) }),
+      Type.Object({ cursor: Type.String() }),
+    ]),
+    async execute(_id, params) {
+      const args = [];
+      if ("items" in params) args.push("--items", JSON.stringify(params.items));
+      if ("cursor" in params) args.push("--cursor", params.cursor);
+      return reply(await campaign("declarations", args));
+    },
+  });
+
+  pi.registerTool({
+    name: "arena_find", label: "Search pinned declarations",
+    description: "Search pinned source by several names or text queries. Results are distinct qualified declarations with decl: handles that arena_source and arena_declarations accept; misses include qualified-name suggestions.",
+    parameters: Type.Object({ queries: Type.Array(Type.String()), limit: Type.Optional(Type.Number()) }),
+    async execute(_id, params) {
+      const args = ["--queries", JSON.stringify(params.queries)];
+      if (params.limit !== undefined) args.push("--limit", String(params.limit));
+      return reply(await campaign("find", args));
+    },
   });
 
   pi.on("agent_before_settle", async event => {

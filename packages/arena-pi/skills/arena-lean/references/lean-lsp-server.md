@@ -17,8 +17,9 @@ compile with `arena_probe` / `arena_evaluate`, profile with `arena_profile`.
 | `lean_hover_info` | Type and docstring of the identifier at a position | `file_path`, `line`, `column` (start of the identifier) |
 | `lean_local_search` | Declarations in the project and its dependencies by name or prefix | `query`, optional `limit` |
 
-`arena_declaration` returns a declaration's exact source signature, including constructors and
-library lemmas. `arena_source` reads pinned project files by line range.
+`arena_declarations` returns batched declarations with pinned source bodies or typed availability
+reasons. `arena_find` searches by several names or text queries. Their `decl:<qualified-name>`
+handles work with `arena_source`, which reads pinned project or dependency files by line range.
 
 ## Workflow
 
@@ -36,6 +37,6 @@ library lemmas. `arena_source` reads pinned project files by line range.
 - After you restore another candidate or probe, the file changes and the server re-elaborates it, so
   the first query can take a few seconds.
 - If `lean_local_search` finds nothing, try a shorter prefix or the namespace (`List.foldl` rather
-  than `List.foldl_cons_eq`). Then use `arena_declaration` with the exact name.
+  than `List.foldl_cons_eq`). Then use `arena_declarations` with the exact name.
 - An "unknown identifier" error usually means a missing namespace prefix. `lean_hover_info` on a
   working use of the name shows its full name.
