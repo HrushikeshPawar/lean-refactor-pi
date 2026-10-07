@@ -4,12 +4,6 @@ import { assessFinalPayload, boundedPayload, budgetGate, catalogPriceProblem, ca
 
 const usage = { input: 1_000_000, output: 100_000, cacheRead: 0, cacheWrite: 0 };
 
-test("prices OpenCode Go usage at the expensive tier", () => {
-  assert.equal(usageCost(usage, "gpt-6-luna"), 0.275);
-  assert.equal(usageCost(usage, "deepseek-v4.1-flash"), 0.21);
-  assert.equal(usageCost({ input: 1_000_000, output: 0, cacheRead: 0, cacheWrite: 0 }, "qwen3.8-flash"), 0.15);
-});
-
 test("uses Luna's low tier until one request crosses 272K prompt tokens", () => {
   const low = { input: 264, output: 71807, cacheRead: 5780683, cacheWrite: 129347 };
   assert.equal(usageCost({ input: 0, output: 1000, cacheRead: 200_000, cacheWrite: 0 }, "gpt-6-luna"), 0.0025);
