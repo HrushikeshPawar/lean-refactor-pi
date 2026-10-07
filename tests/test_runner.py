@@ -412,6 +412,19 @@ class AnthropicWireTests(unittest.TestCase):
                 self.assertEqual(run.json("summary.json")["tools"]["error_total"], 0)
                 self.assertEqual(run.result.returncode, 0, run.stdout[-800:])
 
+    def test_every_arena_tool_schema_is_a_top_level_object(self):
+        run, wire = self.run_qwen("low", [{"text": "done"}])
+        self.assertEqual(wire.rejections, [], run.stdout[-800:])
+        tools = {tool["name"]: tool["input_schema"] for tool in wire.payloads[0]["tools"]
+                 if tool["name"].startswith("arena_")}
+        self.assertTrue(ARENA_TOOLS <= set(tools), set(tools))
+        for name, schema in tools.items():
+            with self.subTest(tool=name):
+                self.assertEqual(schema["type"], "object")
+                self.assertFalse({"anyOf", "oneOf", "allOf"} & set(schema))
+        self.assertEqual(set(tools["arena_declarations"]["properties"]), {"items", "cursor"})
+        self.assertFalse(tools["arena_declarations"].get("required"))
+
     def test_wire_bytes_retries_and_langfuse_keep_the_post_hook_request(self):
         import hashlib
         from datetime import datetime, timezone

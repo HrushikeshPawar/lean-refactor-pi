@@ -172,6 +172,10 @@ class AnthropicWire:
                 return "thinking.budget_tokens: must be at least 1024"
             if budget >= limit:
                 return "`max_tokens` must be greater than `thinking.budget_tokens`"
+        for tool in body.get("tools") or []:
+            schema = tool.get("input_schema") or {}
+            if schema.get("type") != "object" or {"anyOf", "oneOf", "allOf"} & set(schema):
+                return f"tools.{tool.get('name')}.input_schema: must be a top-level object schema"
         return None
 
     @staticmethod

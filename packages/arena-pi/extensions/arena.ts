@@ -707,7 +707,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
 
   pi.registerTool({
     name: "arena_source", label: "Pinned Lean source",
-    description: "Read pinned source by a decl:<qualified-name> handle or a project/dependency path alias (up to 400 lines per call; next_first continues). Reports the pin, canonical path and file length.",
+    description: "Read pinned source by a decl:<qualified-name> handle or a project/dependency path alias (up to 400 lines per call; next_first continues; a decl: handle without first starts at its declaration). Reports the pin, canonical path and file length.",
     parameters: Type.Object({ handle: Type.String(), first: Type.Optional(Type.Number()), last: Type.Optional(Type.Number()) }),
     async execute(_id, params) {
       const args = ["--handle", params.handle];
@@ -720,21 +720,23 @@ export default function arenaExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "arena_declarations", label: "Pinned declarations",
     description: "Read several declarations by qualified name or decl: handle. Returns full pinned source bodies, typed unavailable reasons, local scope/type, or per-name misses. Use next_cursor to continue a long batch.",
-    parameters: Type.Union([
-      Type.Object({ items: Type.Array(Type.String()) }),
-      Type.Object({ cursor: Type.String() }),
-    ]),
+    // One object schema: providers reject a top-level anyOf. Exactly one of the two fields is used.
+    parameters: Type.Object({ items: Type.Optional(Type.Array(Type.String())), cursor: Type.Optional(Type.String()) }),
     async execute(_id, params) {
+      if ((params.items === undefined) === (params.cursor === undefined)) {
+        return reply({ ok: false, error: "usage_error",
+          detail: "Pass exactly one of items (a nonempty list of names or decl: handles) or cursor (next_cursor from a previous page)." });
+      }
       const args = [];
-      if ("items" in params) args.push("--items", JSON.stringify(params.items));
-      if ("cursor" in params) args.push("--cursor", params.cursor);
+      if (params.items !== undefined) args.push("--items", JSON.stringify(params.items));
+      if (params.cursor !== undefined) args.push("--cursor", params.cursor);
       return reply(await campaign("declarations", args));
     },
   });
 
   pi.registerTool({
     name: "arena_find", label: "Search pinned declarations",
-    description: "Search pinned source by several names or text queries. Results are distinct qualified declarations with decl: handles that arena_source and arena_declarations accept; misses include qualified-name suggestions.",
+    description: "Search pinned source by several names or text queries. Results are distinct qualified declarations with name, decl: handle, path, line and signature (not the body; read bodies with arena_declarations), counted toward limit; at most 30 files are scanned per query and files_truncated reports more. Misses include qualified-name suggestions.",
     parameters: Type.Object({ queries: Type.Array(Type.String()), limit: Type.Optional(Type.Number()) }),
     async execute(_id, params) {
       const args = ["--queries", JSON.stringify(params.queries)];
