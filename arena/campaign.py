@@ -175,7 +175,10 @@ def _declarations(name: str, items: list[str] | None, cursor: str | None) -> dic
                 result = {"input": original, "kind": "ambiguous",
                           "suggestions": [item["name"] for item in matches[:12]]}
             elif not matches:
-                found = declaration(name, query)
+                found = _source_declaration(name, query)
+                if not found.get("found") and re.search(r"(?:^|\.)_[A-Za-z0-9_']", query):
+                    # Generated elaborator names can be absent from source indexes and still resolve in Lean.
+                    found = declaration(name, query)
                 if found.get("ambiguous"):
                     result = {"input": original, "kind": "ambiguous", "suggestions": found["ambiguous"]}
                 elif not found.get("found"):
@@ -695,6 +698,14 @@ def declaration(name: str, symbol: str) -> dict:
 
 
 def _declaration(name: str, symbol: str) -> dict:
+    found = _source_declaration(name, symbol)
+    if found.get("found"):
+        return found
+    return _declaration_in_lean(name, symbol.removeprefix("decl:"))
+
+
+def _source_declaration(name: str, symbol: str) -> dict:
+    """Resolve a source-backed declaration without invoking Lean for a missing name."""
     if symbol.startswith("decl:"):
         symbol = symbol[5:]
     if not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9'.]*", symbol):
@@ -718,7 +729,8 @@ def _declaration(name: str, symbol: str) -> dict:
         # Indexed, but no pinned source root holds its module (for example the Lean toolchain).
         return {"symbol": symbol, "found": True, "name": symbol, "kind": entry.get("kind"),
                 "module": module, "signature": entry.get("sig")}
-    return _declaration_in_lean(name, symbol)
+    return {"symbol": symbol, "found": False,
+            "hint": "No pinned source declaration matched this name."}
 
 
 def _declaration_in_lean(name: str, symbol: str) -> dict:
@@ -1220,6 +1232,10 @@ def evaluate_request(name: str, run_id: str, proof: str | None = None, mode: str
     """Entry for the model: evaluate a proof, an existing `#N`, or a probe by ID."""
     if proof is not None and not proof.strip():
         proof = None
+    candidate_ref = candidate_ref or None
+    from_probe = from_probe or None
+    if sum(value is not None for value in (proof, candidate_ref, from_probe)) != 1:
+        raise ValueError("Pass exactly one of proof, candidate, or from_probe")
     directory = run_dir(run_id)
     history = events(directory)
     if candidate_ref:
@@ -1234,7 +1250,12 @@ def evaluate_request(name: str, run_id: str, proof: str | None = None, mode: str
         parents = parents or ([source["parent"]] if source.get("parent") else None)
     if not proof:
         raise ValueError("Supply proof, candidate (#N) or from_probe (pN)")
-    result = record_evaluation(name, run_id, proof, mode, parents, hypothesis, idea_id=idea_id)
+    try:
+        result = record_evaluation(name, run_id, proof, mode, parents, hypothesis, idea_id=idea_id)
+    except ValueError as error:
+        if str(error) in ("FORBIDDEN: sorry", "FORBIDDEN: admit"):
+            raise ValueError(f"{error}; use arena_probe to inspect a draft with holes") from None
+        raise
     return _model_view({**result, "full_check": _full_check_status(events(directory), result["candidate_id"])})
 
 
@@ -1253,6 +1274,7 @@ def _full_check_status(history: list[dict], candidate_id: str) -> str | None:
 
 def probe(name: str, run_id: str, proof: str, idea_id: str | None = None, parent: str | None = None) -> dict:
     """Compile a draft (sorry allowed) in the shadow project without creating a candidate."""
+    proof = normalize_draft(name, proof)
     directory = run_dir(run_id)
     history = events(directory)
     row = problem(name)
@@ -1296,6 +1318,38 @@ def probe(name: str, run_id: str, proof: str, idea_id: str | None = None, parent
     label = _probe_numbers(events(directory))[proof_id]
     return _model_view({**result, "probe": label, "idea_id": idea_id or (earlier or {}).get("idea_id"),
                         "cached": earlier is not None, "notes": notes, **location})
+
+
+def normalize_draft(name: str, draft: str) -> str:
+    """Add the exact benchmark declaration to a proof body without altering complete proofs."""
+    if not isinstance(draft, str) or not draft.strip():
+        raise ValueError("Draft must be nonempty proof text")
+    statement = problem(name)["statement"]
+    if draft.startswith(statement):
+        return draft
+    body = draft.lstrip()
+    if body.startswith(":="):
+        return statement + " " + body
+    if re.match(r"by\b", body):
+        return statement + " := " + body
+    raise ValueError("Draft must be a complete theorem or a proof body beginning with `by` or `:=`")
+
+
+def probe_batch(name: str, run_id: str, drafts: list[str], idea_id: str | None = None,
+                parent: str | None = None) -> dict:
+    """Probe one to four drafts in order, keeping their parent fixed across promotions."""
+    if not isinstance(drafts, list) or not 1 <= len(drafts) <= 4:
+        raise ValueError("Pass between one and four drafts")
+    history = events(run_dir(run_id))
+    fixed_parent = resolve_candidate_ref(history, parent) if parent else _current(history)
+    outcomes = []
+    for index, draft in enumerate(drafts, 1):
+        try:
+            outcome = probe(name, run_id, draft, idea_id, fixed_parent)
+        except (OSError, ValueError, RuntimeError) as error:
+            outcome = {"ok": False, "mode": "probe", "error": " ".join(str(error).split())[:400]}
+        outcomes.append({"index": index, **outcome})
+    return {"ok": True, "drafts": outcomes}
 
 
 def candidate(name: str, run_id: str, reference: str) -> dict:

@@ -89,6 +89,7 @@ class SourceHandleTests(unittest.TestCase):
         with patch("arena.context.lean_context", return_value=inventory), \
              patch("arena.context.constant_index", side_effect=lambda ctx, **kw:
                    [item for item in ctx["constant"] if all(item.get(k) == v for k, v in kw.items() if v is not None)]), \
+             patch("arena.campaign._source_declaration", return_value={"found": False}), \
              patch("arena.campaign.declaration", side_effect=lambda theorem, name:
                    {"found": False} if name == "missing" else
                    {"found": True, "name": "Target.helper", "handle": "decl:Target.helper",
@@ -137,6 +138,18 @@ class SourceHandleTests(unittest.TestCase):
             result = campaign.declarations("Target", [
                 "_private.Target.0.secret", "Target._proof_1"])
         self.assertEqual([item["reason"] for item in result["items"]], ["private", "generated"])
+
+    def test_missing_declaration_skips_lean_fallback_when_source_has_no_declaration_line(self):
+        inventory = {"constant": [], "local": []}
+        with patch("arena.campaign._context", return_value=inventory), \
+             patch("arena.context.constant_index", return_value=[]), \
+             patch("arena.campaign._declaration_hits", return_value=[]), \
+             patch("arena.campaign.declaration", return_value={"found": False}) as lean_fallback:
+            result = campaign.declarations("Target", ["missing_helper"])
+        self.assertEqual(result["items"][0]["error"], "not_found")
+        self.assertEqual(result["items"][0]["suggestions"], [])
+        lean_fallback.assert_not_called()
+
 
     def test_unqualified_duplicate_name_is_reported_as_ambiguous(self):
         inventory = {"constant": [{"name": "Target.foo", "kind": "theorem"},

@@ -152,6 +152,39 @@ class CampaignCliTests(unittest.TestCase):
         evaluated = cli(self.run_id, "evaluate", "--candidate", "#2", "--proof-file", empty)
         self.assertEqual(evaluated["candidate"], "#2")
 
+    def test_probe_accepts_body_only_and_assignment_bodies_with_exact_statement(self):
+        statement = campaign.problem(NAME)["statement"]
+        self.assertEqual(campaign.normalize_draft(NAME, "by\n  trivial"), statement + " := by\n  trivial")
+        self.assertEqual(campaign.normalize_draft(NAME, ":= by\n  trivial"), statement + " := by\n  trivial")
+        complete = statement + " := by\n  trivial"
+        self.assertEqual(campaign.normalize_draft(NAME, complete), complete)
+
+    def test_probe_batch_keeps_the_initial_parent_for_every_draft(self):
+        candidate_id = "a" * 64
+        seen = []
+
+        def fake_probe(name, run_id, proof, idea_id, parent):
+            seen.append((proof, parent))
+            return {"ok": True, "candidate": f"#{len(seen) + 1}"}
+
+        with patch("arena.campaign.events", return_value=[{"kind": "candidate", "candidate_id": candidate_id},
+                                                            {"kind": "current", "candidate_id": candidate_id}]), \
+             patch("arena.campaign.run_dir", return_value=Path("unused")), \
+             patch("arena.campaign.probe", side_effect=fake_probe):
+            result = campaign.probe_batch(NAME, "unused", ["by exact", "by simp", "by assumption", "by aesop"])
+
+        self.assertEqual([item[1] for item in seen], [candidate_id] * 4)
+        self.assertEqual([item["index"] for item in result["drafts"]], [1, 2, 3, 4])
+        with self.assertRaisesRegex(ValueError, "one and four"):
+            campaign.probe_batch(NAME, "unused", ["by exact"] * 5)
+
+    def test_evaluate_rejects_conflicting_references_and_directs_holes_to_probe(self):
+        with self.assertRaisesRegex(ValueError, "exactly one"):
+            campaign.evaluate_request(NAME, "unused", "complete", candidate_ref="#2")
+        with patch("arena.campaign.record_evaluation", side_effect=ValueError("FORBIDDEN: sorry")):
+            with self.assertRaisesRegex(ValueError, "use arena_probe"):
+                campaign.evaluate_request(NAME, "unused", campaign.problem(NAME)["statement"] + " := by sorry")
+
     def test_08_source_pagination_and_one_line_errors(self):
         row = campaign.problem(NAME)
         path = row["file_path"]
