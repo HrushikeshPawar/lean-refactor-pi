@@ -10,6 +10,7 @@ from pathlib import Path
 
 from arena.campaign import run_dir
 from arena.engine import ROOT
+from arena.traces import PATCH_SHA256
 from tests.pi_support import FAKE, NAME, PI_AVAILABLE
 from tools import run_experiment_matrix as matrix
 
@@ -62,7 +63,10 @@ class MatrixRunTests(unittest.TestCase):
         work = Path(tempfile.mkdtemp())
         script = work / "script.json"
         script.write_text(json.dumps([{"text": "done"}] * 8))
-        env = {**os.environ, "ARENA_FAKE_SCRIPT": str(script)}
+        receipt = work / "preflight.json"
+        receipt.write_text(json.dumps({"status": "pass", "patch_sha256": PATCH_SHA256,
+                                       "models": {"gpt-6-luna": {"session_id": "s", "trace_ids": ["t"]}}}))
+        env = {**os.environ, "ARENA_FAKE_SCRIPT": str(script), "ARENA_PREFLIGHT_RECEIPT": str(receipt)}
         try:
             proc = subprocess.run(
                 [sys.executable, "tools/run_experiment_matrix.py", "--theorem", NAME, "--prefix", prefix,

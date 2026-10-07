@@ -23,6 +23,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from arena.campaign import packet, run_dir  # noqa: E402
 from arena.summary import build_summary  # noqa: E402
+from arena.traces import preflight_block  # noqa: E402
 from tools.run_pi_budgeted import MODELS, THINKING_LEVELS  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -141,6 +142,10 @@ def main() -> int:
         print(" ", " ".join(command(spec, args.theorem, args.cap, passthrough)[1:]))
     if args.dry_run:
         return 0
+    blocked = preflight_block([spec["model"] for spec in specs])
+    if blocked:
+        print(blocked, file=sys.stderr)
+        return 1
     out = ROOT / "runs" / "pi-budget" / f"{args.prefix}-matrix"
     out.mkdir(parents=True)
     with ThreadPoolExecutor(max_workers=workers) as pool:
