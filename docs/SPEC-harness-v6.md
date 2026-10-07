@@ -337,8 +337,10 @@ tool except invented names for existing ones, and the best result came from sear
    $0.097.
 2. **Does Luna ever probe the commutation idea?** Never: 0 of 94 probes were induction-free. It abandoned the
    idea by argument twice, both times with factually wrong reasons, and once never saw the lemmas.
-3. **Is the final-request cache miss tied to the guard shrinking `max_tokens`?** Refuted: 26 of 27 reshaped
-   requests kept their cache, and the r2 miss is the only one in 337 requests. Treat it as a provider event.
+3. **Is the final-request cache miss tied to the guard shrinking `max_tokens`?** *Revised after the cross-theorem
+   runs:* yes for the Anthropic-path model. All three Qwen requests cut below ~4.5K output tokens lost the whole cache
+   (max_tokens 4,520 / 1,486 / 3,738; $0.022–0.031 each); every cut at or above 5,472 kept it. Luna's OpenAI path kept
+   its cache down to 387 tokens. Consistent with a provider-side threshold near 4,096 thinking tokens (hypothesis).
 4. **Run-to-run spread?** Qwen 81.76 / 84.58 / 73.79 (spread ~11, bimodal by route); Luna 74.72 / 74.00 /
    76.51 (spread ~2.5). Size v6 replicates for Qwen-like variance: at least three per configuration.
 5. **Does `arena_polish` ever gain?** Once in 15 calls (+0.29, superseded at once). Remove it.
@@ -488,3 +490,28 @@ Harness findings across the six runs:
 6. **Decided:** remove `arena_polish` (38).
 7. **Experiment order for Phase 2:** discovery as relay context (73) before episodes (53), then tool profiles
    (72).
+
+
+### Cross-theorem runs (2026-10-07; full report: docs/RESULTS-v5-generalization.md)
+
+Four more theorems on the unchanged v5 harness (two Strata, one CSLib, one PhysLib), one Luna/Qwen pair each.
+
+| Theorem | Luna | Qwen | Verified hybrid |
+|---|---|---|---|
+| extractedOldExprInVars | **72.29** | 53.86 | 82.42 |
+| substOldPostSubset | **52.45** | none | 82.86 |
+| bisimilarity_congr_choice (3 versions) | **78.55** | 78.45 | 84.52 |
+| fundamental_theorem_of_variational_calculus' | 45.91 | **83.35** | not built |
+
+Priority revisions:
+1. **P0 discovery** must cover *imported* project lemmas (decisive on extract and CSLib), not only the theorem's file.
+2. **P0 cap** (story 17 restored): for Anthropic-path models never cut the output limit below ~5.5K; stop when the
+   remaining budget cannot cover a full-context cache write; never continue a run after the model declares it is done.
+3. **New P1:** constructors of local inductives in the packet; the tactic libraries available (no Mathlib → no `tauto`);
+   goal trace before normalising `simp`; invalid tool JSON surfaced instead of Pi's silent `{}`; readable private names
+   in `arena_declaration`; `arena_source` accepts the paths `lean_local_search` returns.
+4. **Skill:** literal token counting, positional goal handling and shared closers held everywhere; `grind` and `<;>`
+   chains are theorem-dependent trade-offs; new traps (`any_goals exact` is not a filter; positional or-patterns on
+   multi-constructor families; `use` vs `exists` elaboration).
+5. **Experiments:** a Qwen-style explorer followed by a Luna-style golfer remains the most promising factor: in every
+   hybrid the remaining points were scaffolding golf after the route was found.
