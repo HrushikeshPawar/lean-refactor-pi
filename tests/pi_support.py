@@ -104,12 +104,14 @@ class AnthropicWire:
     each reply is {"text": str} or {"tool": name, "input": dict}. After the script it says "done".
     """
 
-    def __init__(self, replies: list[dict]):
+    def __init__(self, replies: list[dict], fail_first: int = 0):
         import threading
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
         self.replies = list(replies)
+        self.fail_first = fail_first
         self.payloads: list[dict] = []
+        self.raw_bodies: list[bytes] = []
         self.rejections: list[str] = []
         wire = self
 
@@ -118,8 +120,20 @@ class AnthropicWire:
                 pass
 
             def do_POST(self):
-                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                raw = self.rfile.read(int(self.headers["Content-Length"]))
+                wire.raw_bodies.append(raw)
+                body = json.loads(raw)
                 wire.payloads.append(body)
+                if wire.fail_first:
+                    wire.fail_first -= 1
+                    data = json.dumps({"type": "error", "error": {"type": "api_error",
+                                                                 "message": "internal server error 500"}})
+                    self.send_response(500)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data.encode())
+                    return
                 problem = wire.invalid(body)
                 if problem:
                     wire.rejections.append(problem)
@@ -161,17 +175,23 @@ class AnthropicWire:
         events = [{"type": "message_start", "message": {"id": "msg_offline", "type": "message", "role": "assistant",
                    "model": body.get("model"), "content": [], "stop_reason": None, "stop_sequence": None,
                    "usage": usage}}]
+        index = 0
+        if reply.get("redacted"):
+            events += [{"type": "content_block_start", "index": index, "content_block": {
+                           "type": "redacted_thinking", "data": reply["redacted"]}},
+                       {"type": "content_block_stop", "index": index}]
+            index += 1
         if "tool" in reply:
-            events += [{"type": "content_block_start", "index": 0, "content_block": {
+            events += [{"type": "content_block_start", "index": index, "content_block": {
                            "type": "tool_use", "id": f"toolu_{uuid.uuid4().hex[:12]}", "name": reply["tool"], "input": {}}},
-                       {"type": "content_block_delta", "index": 0,
+                       {"type": "content_block_delta", "index": index,
                         "delta": {"type": "input_json_delta", "partial_json": json.dumps(reply["input"])}}]
             stop = "tool_use"
         else:
-            events += [{"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
-                       {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": reply["text"]}}]
+            events += [{"type": "content_block_start", "index": index, "content_block": {"type": "text", "text": ""}},
+                       {"type": "content_block_delta", "index": index, "delta": {"type": "text_delta", "text": reply["text"]}}]
             stop = "end_turn"
-        return events + [{"type": "content_block_stop", "index": 0},
+        return events + [{"type": "content_block_stop", "index": index},
                          {"type": "message_delta", "delta": {"stop_reason": stop, "stop_sequence": None},
                           "usage": {"output_tokens": 40}},
                          {"type": "message_stop"}]

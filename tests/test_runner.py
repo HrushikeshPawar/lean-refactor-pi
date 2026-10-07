@@ -334,6 +334,23 @@ class LeanMcpTests(unittest.TestCase):
         self.assertIs(settings["autoEnableCodemode"], False)
 
 
+class AnthropicWireCaptureTests(unittest.TestCase):
+    """The fake provider must keep the socket body. Parsed JSON cannot prove a byte match."""
+
+    def test_raw_request_body_is_preserved_byte_for_byte(self):
+        import urllib.request
+
+        wire = AnthropicWire([{"text": "done"}])
+        self.addCleanup(wire.close)
+        body = b'{"max_tokens":2048,"thinking":{"budget_tokens":1024,"type":"enabled"},"messages":[]}'
+        request = urllib.request.Request(wire.url, data=body, method="POST")
+        with urllib.request.urlopen(request, timeout=5) as response:
+            self.assertEqual(response.status, 200)
+            response.read()
+        self.assertEqual(wire.raw_bodies, [body])
+        self.assertEqual(wire.payloads[0]["max_tokens"], 2048)
+
+
 @unittest.skipUnless(PI_AVAILABLE, "pi and the Strata fixture are required")
 class AnthropicWireTests(unittest.TestCase):
     """Qwen through Pi's real Anthropic Messages client: what the provider receives is what Pi built."""
