@@ -4,7 +4,7 @@
 
 **Blocked by:** 01: Exact traces and live preflight.
 
-**Status:** ready-for-agent
+**Status:** needs-review
 
 **Branch:** `hrushikesh/v6-02-spend-gate` (stacked on `hrushikesh/v6-01-traces`)
 
