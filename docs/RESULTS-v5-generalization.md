@@ -48,20 +48,32 @@ uniform finisher on subst but useless on CSLib), "Qwen wins".
 
 ## 3. Harness findings (all theorems)
 
-### Cap and cache — the Qwen deep-cut cache miss is systematic (P0)
-Every Qwen final request whose output limit the budget guard cut below ~4.5K tokens lost the provider's whole prompt
-cache; every larger cut kept it (Luna's OpenAI path kept its cache down to 387 tokens).
+### Cap and cache — Qwen deep cuts correlate with cache misses (P0)
+In these v5 runs, all three Qwen final requests whose reconstructed output cap fell below ~4.5K lost the
+provider's whole prompt cache; eight larger cuts kept it (Luna used a different OpenAI path).
 
-| Run | max_tokens after cut | Cache |
+| Run | Reconstructed `max_tokens` cap after cut | Cache |
 |---|---|---|
 | InitsUpdatesComm r2 | 4,520 | **miss** ($0.028) |
 | subst | 1,486 (thinking dropped) | **miss** ($0.031) |
 | CSLib | 3,738 | **miss** ($0.022) |
 | all other Qwen cuts (8 requests) | 5,472 – 13,807 | hit |
 
-Thinking budgets at the misses were 3,496 / none / 2,714, at hits ≥4,448: consistent with a provider-side threshold
-near 4,096 (hypothesis). Phase 0's "refuted, provider event" verdict is withdrawn. Fix for v6: never cut an Anthropic-
-path request below ~5.5K; stop instead when the remaining budget cannot cover a full-context cache write.
+Thinking budgets at the misses were 3,496 / none / 2,714, at hits ≥4,448. Pi's high setting starts at
+16,384 thinking tokens, and the harness's `boundedPayload` changes that budget on **all 11** cut Qwen requests,
+including the eight cache hits. A thinking-budget change alone therefore does not distinguish hit from miss.
+Actual generated output on the three misses was 2,095 / 1,486 / 242 tokens; the table values are request caps,
+reconstructed from the guard and cost ledger because v5 did not retain the final outgoing payload.
+Anthropic documents that such changes can invalidate cached prefixes, but this is an Anthropic-compatible Qwen
+host; its exact cache rule is unverified. Two misses followed the prior request by under 20 seconds, so ordinary
+cache expiry is unlikely. The logs lack outgoing wire payloads. A direct Pi experiment with identical synthetic
+prefixes at ~35K and ~122K cached tokens **hit** at the historical 4,520/3,496 and 3,738/2,714
+output/thinking settings. At 1,486, removing thinking selected a separate reusable cache entry. Thus output
+cap or thinking-budget changes while thinking stays enabled do not suffice to reproduce the r2/CSLib misses;
+removing thinking plausibly explains subst. An exact historical replay is unavailable because the v5 session
+projection omits the old system prompt, tool schema, cache marker placement and final wire payload. V6 must
+capture these before assigning provider-internal causes.
+For production, refuse a request before send if the unchanged request risks breaching the cap.
 Related: the harness sent continuations after Qwen declared it was done (CSLib: 3 more turns, the last one the miss).
 
 ### Context and tools
@@ -99,17 +111,18 @@ New traps:
 - Or-patterns on a multi-constructor indexed family bind names by position across all constructors.
 - `use` elaborates arguments separately (implicits and `_` fail); `exists`/`refine ⟨…⟩` unify jointly.
 
-## 5. Implications for v6 (delta to docs/SPEC-harness-v6.md)
+## 5. Implications for v6 (see docs/WORKING-harness-v6-decisions.md)
 
 1. **P0 discovery** extends to imported project lemmas, with signatures, ranked by shared head symbols; search results
    de-duplicated and counted in distinct names; `arena_source` accepts the paths search returns.
-2. **P0 cap gate** for Anthropic-path models: no deep output cuts; stop when remaining < full-cache-write cost; respect
-   the model's own stop.
+2. **P0 request stability:** do not reshape `max_tokens` or `thinking.budget_tokens` at the cap edge; gate the
+   unchanged request against the competition's $3/problem allowance and respect the model's own stop.
 3. **New P1:** packet lists local inductive constructors and available tactic libraries; goal trace before normalising
    simp; Pi's silent `{}` for invalid tool JSON surfaced as an error; readable names in `arena_declaration`.
 4. **Skill:** the §4 rules, with grind and `<;>` as explicit trade-offs.
-5. **Experiment priority:** relay with discovery-as-context remains first; the hybrids show that most remaining value is
-   scaffolding golf after the route is found, which favours a Luna-style golfer after a Qwen-style explorer.
+5. **Experiment priority:** exact Langfuse traces, original-proof reference inventory, batched complete-body
+   lookup and source/tool repairs precede any relay trial. The hybrids are analyst-built; they establish
+   headroom in proof scaffolding, not a measured benefit from switching models.
 
 ## 6. PhysLib
 

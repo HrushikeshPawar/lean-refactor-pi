@@ -1,517 +1,156 @@
-# Spec: Arena harness v6 — context that finds structure, a cap that holds, measurements we can trust
+# Arena harness v6: traceable proof search and first official submission
 
-Status: planned. Phase 0 (v5 replicates r3, r4) is done; its evidence and the revised priorities are below.
-Open design questions to settle before Phase 1 are listed under "Ideas under discussion".
-Source: v5 acceptance runs `v5-accept-20261006` (aborted) and `v5-accept-20261006-r2` (Luna and Qwen on
-`Core.InitsUpdatesComm` at $0.10 each), three parallel run analyses, and a harness audit (2026-10-06).
-Predecessor: `docs/SPEC-harness-v5.md`.
+Status: local implementation spec, 2026-10-07. This document selects the v6 work. The longer evidence record and the full earlier story inventory remain in [WORKING-harness-v6-decisions.md](WORKING-harness-v6-decisions.md). Historical proposals there do not override the decisions here.
 
 ## Problem Statement
 
-v5 worked. At $0.10 a run, Qwen3.8-flash reached a proxy of **81.76** (110 tokens, 238 heartbeats, all three
-toolchains), above the naive unharnessed baseline of 76.72 and every earlier run. GPT-6 Luna reached 74.72
-(153 tokens, 320 HB), up from 60.37 under v4. Background full checks, the `[arena]` status line, probe
-auto-promotion, the submission, diagnostic line alignment and the locked-down tool surface all behaved
-as designed.
+I need an agent to find and improve Lean proofs across unfamiliar theorem families, understand exactly why it succeeded or failed, and prepare our first official submission from proofs it actually produced. The v5 harness found strong proofs, but its kickoff packet hid most of the original proof's named dependencies, search and source tools rejected inputs that the harness itself suggested, and idea bookkeeping consumed requests without reliable attempt linkage. Its unconditional continuation sometimes spent after a useful final answer, while stopping at the first final would have missed later better proofs. The budget hook changed the shape of some Qwen requests at the cap edge, and v5 did not save final provider requests or Langfuse traces that could establish the precise cache cause. Submission artifacts do not yet exist because I chose to wait for verified v6 proofs.
 
-Three of the five v5 acceptance criteria still fail, and the runs exposed problems that will matter more as
-budgets and benchmark rows grow:
-
-- **The cap does not hold at its edge.** Qwen ended at $0.1262 on a $0.10 cap. Its last request missed the
-  provider's prompt cache (0 read, 136,764 written, $0.028). It was the only request whose payload the budget
-  guard had changed: `max_tokens` cut from 16,000 to 4,520 and the thinking budget with it. Luna's last
-  continuation was sent with $0.0010 left, less than one cached read of its context.
-- **Money is spent after the best result.** Qwen spent 41% of its budget after its best candidate, inside one
-  agent turn where plateau detection never runs. Luna spent 26.5% on a plateau.
-- **The structure-finding information was not in the context.** Qwen's induction-free proof uses four lemmas
-  from the same file. The kickoff packet listed only one of them, because the "earlier lemmas" list is ordered
-  by distance and cut off. Qwen spent 31% of its budget searching to find the other three. Luna recorded the
-  same idea, then abandoned it twice by argument alone, without a single probe.
-- **Reasonable model inputs are refused or misread.** Five rejections and three misaligned goal lookups, every
-  one an input the harness could have understood: a `strata:` path prefix, a probe body starting with `by`,
-  probe ids or `#0` given as parents, and proof-relative lines from `arena_profile` used as file lines.
-- **Bookkeeping is too verbose.** Luna made 36 `arena_idea` calls, each re-sending the full title and
-  hypothesis and getting the full record back.
-- **Our measurements are wrong in places.** The overhead classifier reported Luna at 25.2% when about 11.6% is
-  fair. The cache metric penalises long outputs. The runner log says "returned without a recorded node" for
-  probes that created candidates. `matrix.json` cannot check the acceptance criteria.
-- **Generality is untested and already broken.** On the second provisioned Strata row
-  (`CallElimCorrect.extractedOldExprInVars`) the generic packet silently lacks its definitions, goal trace,
-  signatures and earlier-lemma sections (3.8K characters vs 21.5K). Every result so far comes from one theorem.
-- **Results depend on luck in discovery.** Three replicates per model (Phase 0) show the score is decided by
-  proof structure: runs that found three in-file lemmas 600 lines above the theorem reached 81.8–84.6; the four
-  runs that did not stayed between 73.8 and 76.5, below the naive baseline. Qwen found them in 2 of 3 runs,
-  Luna in none. A proof built from the runs' own ingredients reaches 87.10, so the headroom is real.
-
-We keep small budgets ($0.10–$0.20 per run) until the harness is validated, so every wasted turn and every wrong
-measurement matters.
+Across 14 v5 runs, 800 model requests cost $1.48805 at ledger prices. The logs show 32 error-returning tool calls. Bookkeeping-class and rejected-class requests together cost $0.216967, or 14.6% of observed spend. Those are separate measures: 32 is a tool-result count, while the spend classes count model requests. The five theorem families show that the decisive proof route and helper locations vary; a single theorem's successful shortcut is insufficient evidence for a universal ranking or proof recipe.
 
 ## Solution
 
-A v6 harness, built after a Phase 0 of replicate v5 runs, where:
+Give each run a deterministic, certified kickoff packet that inventories every source-named declaration in the original theorem declaration and the additional theorem or lemma dependencies directly present in its elaborated proof. Keep signatures in a bounded preview and make full pinned source statements and bodies available through exact batched lookup. Give the agent a small tool surface that accepts the names, handles, proof forms and line coordinates it is shown, while the harness compiles drafts, records candidates and links their outcomes to the current structural idea. The agent chooses strategies, drafts, repairs and whether to finish; the harness owns source resolution, verification, lineage, cost, traces and packaging.
 
-1. The kickoff context ranks in-file lemmas by relevance to the statement, so structural routes are visible from
-   the first request; it is complete (or loudly incomplete) on every provisioned row.
-2. Trying a structural idea is cheap: several drafts compile in one call, and an idea abandoned without any
-   probe is visible as such.
-3. The cap holds: requests are gated by expected cost, never reshaped, and the remaining budget and money spent
-   since the last improvement are visible to the model as facts.
-4. Every input a model reasonably sends is understood, and every line number the model sees can be used directly
-   with the Lean tools.
-5. Bookkeeping is cheap: short acknowledgements, compact updates, nothing re-sent.
-6. Measurements are right and comparable: fair turn classes, prefix-cache reuse, overshoot, acceptance criteria
-   and replicate statistics computed per run and per matrix.
-7. Runs are tested on more than one theorem, and certification fails loudly when a row's context is degraded.
-8. Experiments the data now motivates — session episodes, model relays, adaptive thinking — can be run through
-   the matrix as declared factors.
+Show the ten highest-cost starting points in the original proof at kickoff: proof lines with attributed tactic self heartbeats and competition-counted proof tokens, ranked by their combined score-equivalent baseline cost. State the measured whole-proof total, profiling coverage and unattributed heartbeats so this is a guide to investigation, not a promise of savings. The agent can request the complete heartbeat and token profile of any compiling candidate during the run.
+
+Keep the model request shape fixed during a run and decline a request before sending it when a conservative estimate exceeds the per-problem allowance. Capture every final post-guard provider request, delivered response, tool call/result, retry and settled cost in a lossless local journal joined to complete Langfuse observations. A cheap live preflight must prove that the traces are queryable before paid evaluation. Replace unconditional continuation with an explicit finish review, at most one reminder for a genuinely unattempted current idea, confirmation that ends the run, and a bounded no-proof-progress fallback.
+
+Evaluate the new behavior on multiple pinned theorem rows, then select only locally verified, model-produced v6 candidates for a closed-track warm-up JSONL. Produce its per-problem provenance ledger, reproducible code archive and official-template report for the user's manual upload. The closed-track ceiling is $3 per problem, counting retries and discarded calls; the former $0.10 diagnostic cap is not a v6 optimization goal.
 
 ## User Stories
 
-### Context that reveals structure (P0)
-
-1. As the model, I want the in-file lemmas that share constants with the statement listed first in the packet, so that I see lemmas such as commutation and update rules before reading any source.
-2. As the model, I want each listed lemma to show its full signature and where it sits in the file, so that I can apply it without a declaration lookup.
-3. As the model, I want the packet to state how many earlier lemmas exist and how many are shown, so that I know when to search for more.
-4. As the model, I want an on-demand "related lemmas" request that ranks project lemmas by shared constants with a goal or term I give, so that I can find lemmas relevant to a subgoal mid-run.
-5. As a harness developer, I want lemma ranking to use only the statement's constants and the environment, never theorem-specific text, so that the packet stays generic.
-6. As a harness developer, I want the packet's lemma section to be deterministic and size-bounded, so that the cached prefix stays stable.
-7. As a harness developer, I want packet generation to report which sections it produced and fail certification when a section that should exist is missing, so that degraded context never reaches a run unnoticed.
-8. As a harness developer, I want the packet to state that the original proof is candidate #1, so that the model never refers to `#0`.
-60. As the model, I want the packet's lemma section to cover the whole file before the theorem, not only a window near it, so that lemmas far up the file (the three that decided the route sat 600 lines above the theorem) are visible.
-61. As the model, I want `lean_local_search` to count its limit in distinct declarations, so that a query is not filled by four copies of the same name.
-62. As the model, I want the packet to ask me to survey the related lemmas before recording ideas, so that my first ideas are built on what the file already proves; v5's "propose ideas before editing" made three of six runs commit to a route at turn 0, before reading anything.
-63. As a harness developer, I want the packet to include the results of a harness-run discovery pass (declarations whose signatures mention the statement's head symbols, with their signatures), so that discovery no longer depends on which query a model happens to try.
-64. As the model, I want the skill to teach generic proof-transformation rules learned from the runs (literal token counting, `cases` on an equation instead of `rw`, `refine L ?_ ▸ t` instead of `rw` then `exact`, no bullets, `simp [lemma, *]` for conditional lemmas, `rw`/`exists`/`simp_all`/`grind` as heartbeat traps), so that every model golfs like the best hybrid.
-
-### Cheap structural exploration
-
-9. As the model, I want to compile several drafts in one probe call and get one compact table (tokens, heartbeats, pass/fail, first error, probe id), so that comparing alternatives costs one turn, not several.
-10. As a harness developer, I want batched drafts to run in the model's Lean lane with a bounded count, so that they cannot starve the background checks or the machine.
-11. As the model, I want complete drafts in a batch to become candidates like single probes, so that a batch is never a dead end.
-12. As the model, I want the idea summary to show how many probes and candidates each idea had when it was abandoned, so that I notice ideas dropped without evidence.
-13. As the model, I want a token profile alongside the heartbeat profile (tokens per proof line with cumulative share), so that I see where tokens go as clearly as where heartbeats go.
-14. As the model, I want profile entries to carry both the proof line and the file line, so that I can pass them straight to `lean_goal`.
-
-### A cap that holds (P0)
-
-15. As a harness developer, I want a request refused when the remaining budget is below k times the largest of the last five request costs (k ≈ 1–1.5; k = 2 lost up to 0.18 points and 14% of budget in replicates), so that the final request cannot overshoot materially.
-16. As a harness developer, I want the same gate applied before sending a continuation, so that no continuation is sent with less money than one request needs.
-17. (Demoted: replicates refuted the cause.) As a harness developer, I want the option to keep the output limit and thinking budget constant for a run, so that if deep budget cuts ever prove to break a provider's cache we can turn reshaping off; 26 of 27 reshaped requests kept their cache.
-18. As a harness developer, I want the guard's decision and the estimate behind it recorded in the cost ledger, so that every stop can be audited.
-19. As the model, I want the remaining budget in the status line once it falls below a quarter of the cap, so that I can finish the most valuable work.
-20. (Demoted: would rarely have changed anything in r3/r4.) As the model, I want the status line to state the requests and money spent since my last improvement, counted from my first candidate, once that crosses a threshold, so that I can judge whether to change approach; the harness gives no advice.
-21. As a harness developer, I want the plateau facts computed per request rather than per agent turn, so that one long turn cannot hide a plateau.
-65. As a harness developer, I want an optional miss-aware term in the gate (last prompt size × cache-write price) for providers known to drop caches, so that a full cache rewrite on the last request cannot overshoot; off by default, because it would have cost Luna its last four improvements.
-66. As a harness developer, I want no continuation sent when the remaining budget is below the last request's cost, so that we never pay for a reply that is cut off at the limit (seen in r2 and r4 Luna).
-22. As a harness developer, I want an optional budget-preserving stop (no improvement for a set amount of money) that ends the run and reports the unspent budget, so that experiments can reuse it.
-
-### Inputs the harness understands (P1)
-
-23. As the model, I want `arena_source` to accept a path with or without the source prefix (`strata:` or `strata/`), so that copying the packet's path works.
-24. As the model, I want the packet to print plain project-relative paths, so that the prefix question never arises.
-25. As the model, I want a probe whose text starts with `by` or `:=` to be completed with the exact statement, so that I do not lose a turn resending it.
-26. As the model, I want probe ids accepted as parents and recorded as lineage, so that the graph reflects how I worked.
-27. As the model, I want `#0` and "original" accepted as the original proof, so that natural references resolve.
-28. As the model, I want `arena_declaration` to return the constructors of an inductive type and the fields of a structure, so that one lookup is enough.
-29. As the model, I want a not-found declaration to suggest real names that end with what I asked for (e.g. `Imperative.UpdateState` for `Core.UpdateState`), so that I recover in one turn.
-30. As the model, I want `lean_local_search` results free of the harness's own scratch copies of the file, so that the result limit is spent on real declarations.
-31. As the model, I want a tool-not-found error for a misnamed tool (e.g. an MCP-prefixed `lean_declaration`) to name the tool I probably meant, so that I recover in one turn.
-67. As the model, I want `arena_evaluate` given both `candidate` and `from_probe` to use the probe (or reject the pair), and an empty `from_probe` ignored, so that a probe is never silently replaced by a cached candidate.
-68. As the model, I want `arena_evaluate` given a draft with `sorry` to tell me to use `arena_probe`, and `arena_source` given a skill reference path to point me to `arena_skill_read`, so that each mistake costs one turn.
-69. As the model, I want `arena_idea` with no arguments to answer with its usage, so that an empty call is not a silent error.
-32. As the model, I want probe results to say "complete and compiles", "compiles with holes" or "fails" in one field, so that a `sorry` draft is never read as passing.
-
-### Cheap bookkeeping (P1)
-
-33. As the model, I want `arena_idea` updates to need only id, status and reason and to return a one-line acknowledgement, so that keeping ideas current is cheap.
-34. As the model, I want the skill to say exactly that, so that I do not re-send titles and hypotheses.
-35. As the model, I want the status line's first appearance to name the original proof as the verified baseline, not "none", so that it is accurate from the start.
-36. As the model, I want the status line not to repeat what the same tool result already says, so that it carries only new facts.
-37. As the model, I want the continuation message to say "all ideas closed" rather than "none recorded" when every idea is closed, so that it is truthful.
-38. As a harness developer, I want `arena_polish` either removed or rebuilt around transformations that have produced gains in real runs, and never to tell the model to promote a variant that does not exist; across six runs it made 15 calls (12–89 s each) for one gain of 0.29 points that was superseded one candidate later. Decision: remove.
-
-### Measurements we can trust (P2)
-
-39. As a harness developer, I want turns classified by the most substantive tool they contain (compile over context over bookkeeping), with every Lean-running tool counted as compile, so that overhead is not inflated.
-40. As a harness developer, I want cache reuse reported as prefix reuse (this request's cache read against the previous request's prompt) alongside the old ratio, so that models with long outputs are not penalised.
-41. As a harness developer, I want the runner's live log to report each probe's outcome (candidate number, probe id, pass/fail), so that the log is readable during a run.
-42. As a harness developer, I want the summary to count probe calls, promoted probes and failed probes separately, so that probe numbers are unambiguous.
-43. As a harness developer, I want each run's summary to compute the acceptance criteria (rejections, misaligned goal lookups, overhead, prefix reuse, best heartbeats, overshoot), so that acceptance is checked by code.
-44. As a harness developer, I want a misaligned goal lookup defined and detected (a `lean_goal` line outside the target's span, or one whose source text does not match any line the model was shown), so that criterion 2 is measurable.
-45. As a harness developer, I want raw diagnostic files written in the candidate file's line numbers, so that humans and the viewer see what the model saw.
-46. As a harness developer, I want `matrix.json` to include overshoot, prefix reuse, acceptance results and, for replicate groups, mean and spread of the score, so that a matrix answers "is this better" by itself.
-47. As a harness developer, I want the matrix to accept a replicate count per configuration, so that variance is measured routinely.
-70. As a harness developer, I want the summary and matrix to report tokens and heartbeats of the same candidate as the best proxy, so that the rows describe one proof (r3 and r4 Qwen mixed two candidates).
-71. As a harness developer, I want replicate runs of one configuration started sequentially by the matrix (or their concurrency recorded), so that background-check latency does not differ between replicates (r3 and r4 ran at the same time).
-48. As a harness developer, I want a preflight smoke mode that sends one real request per model and checks it settles, so that provider or wire problems are caught for cents before a matrix starts.
-
-### Generality
-
-49. As a harness developer, I want the generic packet complete on every provisioned Strata row, with a test per row, so that results transfer beyond one theorem.
-50. As a harness developer, I want certification to report packet completeness, reference profile coverage and exchange rates per row, so that a row is trusted before use.
-51. As a harness developer, I want every acceptance experiment run on at least two theorems, so that the harness is not tuned to one proof.
-52. As a harness developer, I want rows with a single toolchain version handled explicitly (a lost version is worth a third of the score), so that compatibility messages and exchange rates stay correct.
-
-### Experiments the data motivates (v6 factors)
-
-53. As a harness developer, I want an "episodes" mode that ends a session when its context passes a threshold or it plateaus, and starts a fresh one with a compact handoff (best proof, ideas with outcomes, recent failures), so that cache-read cost (51% of Luna's spend) stops growing with history.
-54. As a harness developer, I want a relay mode where one model explores structure and a second model golfs its best candidate, so that we can test whether combining Qwen-like structure finding and Luna-like golfing beats either alone.
-55. As a harness developer, I want the thinking level adjustable per episode (e.g. high while exploring, lower while golfing), so that long, low-yield reasoning turns late in a run can be measured and avoided.
-56. As a harness developer, I want each of these declared as a matrix factor with replicates, so that adoption is decided by measurement, not anecdote.
-72. As a harness developer, I want the model's tool surface declared as a matrix factor (strict = v5; batched = strict plus multi-draft probes; extended = batched plus `lean_code_actions` for Lean's own "Try this" suggestions), so that any widening of tools is decided by measurement; Pi's codemode stays off in every profile (see the decision record).
-73. As a harness developer, I want a relay variant where the first model's discovery (lemmas found, structure chosen) is handed to a second model as context rather than a proof, so that we can separate "finding the route" from "golfing it".
-57. As a harness developer, I want cross-run memory for the same theorem to stay off by default and be its own factor, so that results stay independent unless we choose otherwise.
-
-### Viewer
-
-58. As a harness developer, I want to compare two runs side by side (score, tokens, heartbeats and spend on shared axes), so that replicate and A/B results are visible at a glance.
-74. As a harness developer, I want each score card's headline to show the best value, not the latest, so that the card agrees with the submission (Qwen r2 showed 81.62 while its best was 81.76).
-75. As a harness developer, I want the run hub exportable as one static snapshot, so that a replicate comparison can be shared without a server.
-59. As a harness developer, I want the viewer to mark episodes, relays and plateaus on the timeline, so that experiment structure is visible.
+1. As a proof agent, I want the kickoff packet to identify the target statement and pinned Lean environment, so that I know precisely what must compile.
+2. As a proof agent, I want the original proof identified as candidate #1, so that references to the baseline are unambiguous.
+3. As a proof agent, I want every resolvable source-named declaration in the original theorem declaration listed at kickoff, so that I can inspect the proof's existing ingredients.
+4. As a proof agent, I want source-reference occurrences distinguished by statement and proof position, so that a statement name is not falsely presented as proof-only evidence.
+5. As a proof agent, I want additional theorem and lemma constants directly used by the elaborated original proof identified separately, so that elaboration does not hide useful helpers.
+6. As a proof agent, I want each kickoff name qualified and tagged with kind, origin and a usable source handle, so that I can retrieve the correct declaration.
+7. As a proof agent, I want local variables shown with their scope and type, so that I do not search for a nonexistent global body.
+8. As a proof agent, I want constructors of local inductives and fields of relevant structures discoverable, so that I can form Lean terms without guessing their APIs.
+9. As a proof agent, I want the available tactic libraries and import context stated accurately, so that I do not spend requests on unavailable tactics.
+10. As a proof agent, I want a bounded signature preview with total and shown counts, so that I can tell when lookup is needed.
+11. As a proof agent, I want the full elaborated constant index queryable without flooding the kickoff packet, so that generated and typeclass machinery remains available when relevant.
+12. As a proof agent, I want an instruction to survey supplied dependencies before recording a strategy, so that my first idea uses what the project already proves.
+13. As a harness developer, I want the packet generated deterministically for the same pin, so that repeated requests can reuse a stable prefix.
+14. As a harness developer, I want packet generation to report an inventory and section manifest, so that missing context is visible.
+15. As a harness developer, I want certification to reject a row whose expected packet section is absent, so that a degraded run never starts silently.
+16. As a proof agent, I want one search request to accept several exact names or search strings, so that related declarations can be found in one turn.
+17. As a proof agent, I want search limits applied to distinct qualified declarations, so that duplicates do not crowd out useful results.
+18. As a proof agent, I want search results to include only handles that source lookup accepts, so that I can follow every returned result.
+19. As a proof agent, I want scratch copies excluded from source search, so that the result limit is spent on real project declarations.
+20. As a proof agent, I want a missing name to return likely qualified matches, so that a namespace mistake is cheap to repair.
+21. As a proof agent, I want exact batched declaration lookup by names or returned handles, so that I can follow a lemma chain without repeated single-name calls.
+22. As a proof agent, I want lookup to return each declaration's complete pinned source statement and available body or proof, so that I can understand and reuse the actual source proof.
+23. As a proof agent, I want long declaration bodies paginated without loss, so that output limits do not silently truncate a proof.
+24. As a proof agent, I want unavailable, opaque, external, private and generated bodies reported with a typed reason, so that I do not mistake missing source for an empty proof.
+25. As a proof agent, I want source lookup to accept every packet, search, declaration and profile handle, so that the tools share one source vocabulary.
+26. As a proof agent, I want known project path aliases accepted and canonical file lines shown as one-based coordinates, so that copying a path or line from a result works.
+27. As a proof agent, I want source results to state revision, file length and line span, so that I can distinguish a wrong line from a wrong checkout.
+28. As a proof agent, I want a source request with an invalid line range to return a useful range, so that I can correct it in one turn.
+29. As a proof agent, I want to probe one to four Lean drafts in one call, so that I can compare bounded structural alternatives without extra model turns.
+30. As a proof agent, I want a draft beginning with `by` or `:=` normalized against the exact target statement, so that a natural proof body compiles without resending the declaration.
+31. As a proof agent, I want one status per draft saying failed, compiles with holes and goals, or complete and compiling, so that I cannot confuse a partial proof with a candidate.
+32. As a proof agent, I want every complete compiling draft in a batch promoted to a stable candidate, so that batching never loses a successful proof.
+33. As a proof agent, I want partial drafts to include the actual remaining goals even when I used `sorry`, so that a failed skeleton guides the next edit.
+34. As a proof agent, I want probe identifiers usable as parents in later evaluation, so that the candidate graph reflects the proof I repaired.
+35. As a proof agent, I want conflicting candidate and probe references rejected or resolved explicitly, so that the harness never silently scores the wrong proof.
+36. As a proof agent, I want evaluation to direct incomplete drafts back to probing, so that I do not waste a scoring call on `sorry`.
+37. As a proof agent, I want scoring and profiling to accept complete proof text or stable candidate references, so that I can improve a known result without copying it again.
+38. As a proof agent, I want diagnostics and profiles to label both proof-relative and file-relative lines, so that a goal lookup points to the intended source line.
+39. As a proof agent, I want token and heartbeat profiles for the same candidate, so that I can choose the next useful edit using consistent evidence.
+40. As a proof agent, I want the baseline and best verified candidate visible in a concise state view, so that I know whether a draft improved the run.
+41. As a proof agent, I want to record one concise idea when I choose a structural strategy, so that my route is traceable without speculative kickoff bookkeeping.
+42. As a proof agent, I want later probes, evaluations and candidates linked to my current idea automatically, so that I do not repeatedly supply idea identifiers.
+43. As a proof agent, I want to revise or abandon an idea with a short reason, so that I can explain a changed route without resending its full description.
+44. As a proof agent, I want a failed first skeleton to leave its idea open for repair, so that one compile failure does not falsely end a strategy.
+45. As a proof agent, I want the idea state to show linked attempts, candidates and outcomes, so that I can see which routes remain untested.
+46. As a harness developer, I want an idea counted as attempted when it has a linked probe, evaluation or candidate, so that directly promoted complete probes are not mislabeled untried.
+47. As a harness developer, I want the status line to avoid repeating facts already returned by the same tool, so that bookkeeping consumes less context.
+48. As a proof agent, I want a tool with malformed arguments to return a clear schema or usage error, so that the failure is visible and recoverable.
+49. As a proof agent, I want a misnamed tool to suggest the nearest registered tool, so that I can recover from an MCP prefix or spelling error.
+50. As a harness developer, I want real invalid data and provider failures kept as distinct typed outcomes, so that a zero-preventable-error target does not conceal failures.
+51. As a proof agent, I want to request finish with no arguments, so that ending a run is as easy as continuing one.
+52. As a proof agent, I want my first finish request to receive the best verified result and the factual unfinished-strategy state, so that I can decide whether one more attempt is worthwhile.
+53. As a proof agent, I want at most one reminder when my current idea has no linked proof attempt, so that a promising untried route is noticed without forcing me to compile it.
+54. As a proof agent, I want to abandon an untried idea after that reminder with a short reason, so that I retain control over whether it is worth testing.
+55. As a proof agent, I want a later finish confirmation honored after the bounded review, so that the harness does not spend the remaining allowance against my decision.
+56. As a harness developer, I want repeated completed turns without proof attempts or verified improvement to stop under a small fallback limit, so that an agent that forgets finish does not loop to the cap.
+57. As a harness developer, I want only proof attempts and verified improvements to reset the no-work counter, so that idea and source bookkeeping cannot prolong a stalled run.
+58. As a harness developer, I want plateau and post-best spend counted by model request, so that a long turn cannot hide wasted cost.
+59. As a harness developer, I want output limit and thinking presence and budget fixed for an entire run, so that the harness does not reshape requests at the budget edge.
+60. As a harness developer, I want a conservative spend estimate checked before every model request and continuation, so that the per-problem allowance holds without changing request shape.
+61. As a harness developer, I want retries and discarded attempts counted in the same problem ledger, so that reported spending matches the competition accounting.
+62. As a harness developer, I want the gate decision and its estimate recorded, so that a stopped run can be audited.
+63. As a proof agent, I want the remaining allowance shown when it becomes relevant, so that I can use it on the most valuable next step.
+64. As a harness developer, I want one stable run identity connecting the Pi session, Langfuse session, local events and cost ledger, so that a proof has an inspectable causal history.
+65. As a harness developer, I want each provider attempt and retry to record its final post-guard request and delivered response losslessly, so that cache and behavior claims can be checked against what was sent.
+66. As a harness developer, I want request records to include model version, full system and message content, tool schemas, output and thinking settings, cache markers and timestamps, so that request shape is reconstructible.
+67. As a harness developer, I want response records to include content, tool calls, provider usage, cache counters, response identity, retry lineage and timing, so that costs and decisions can be reconciled.
+68. As a harness developer, I want complete tool arguments and results linked to their Langfuse observations, so that I can inspect why an agent took a particular action.
+69. As a harness developer, I want a restricted local journal and lossless Langfuse-linked payload access without credentials, so that exact traces are usable without exposing secrets.
+70. As a harness developer, I want preflight to fail when any request, response, tool span, retry or settled cost cannot be joined or is clipped, so that paid runs never begin with unusable traces.
+71. As a harness developer, I want a cheap real preflight for each chosen model and one tool round trip, so that provider and Langfuse behavior is verified before a matrix.
+72. As a harness developer, I want the live log, run summary and matrix to distinguish probe calls, failed probes, promoted candidates, tool errors, retries, cache prefix reuse and overshoot, so that acceptance can be checked from artifacts.
+73. As a harness developer, I want each score row to use one candidate for proxy, tokens and heartbeats, so that it does not combine incompatible bests.
+74. As a harness developer, I want replicate groups to report score distribution and concurrency, so that a gain is not inferred from one run or a shared-machine slowdown.
+75. As a competitor, I want the warm-up proof JSONL built only from locally verified v6 model candidates with exact benchmark identifiers and full declarations, so that my first manual upload tests real agent output.
+76. As a competitor, I want each selected proof joined to its run, candidate, hash, model, pinned environment, checks, trace identities and all call costs, so that its provenance and $3 ceiling are defensible.
+77. As a competitor, I want the JSONL validated against the official manifest and prohibited constructs before packaging, so that an avoidable format or proof violation is caught locally.
+78. As a competitor, I want a code archive with pinned dependencies and top-level reproduction instructions, so that the organizers can regenerate the selected proofs.
+79. As a competitor, I want the technical report in the official template with Approach, Models, Budget accounting and Reproduction, so that it matches the actual runs and artifacts.
+80. As a competitor, I want the completed artifacts staged for my manual upload, so that no automated submission acts in my name.
+81. As a proof agent, I want the ten highest-cost proof-line starting points shown at kickoff with heartbeat and token costs, so that I can begin optimizing without rediscovering the reference proof's hotspots.
+82. As a proof agent, I want the full heartbeat and token profile on demand for any compiling candidate, so that I can see whether an edit removed a cost or merely moved it.
+83. As a harness developer, I want hotspot entries to distinguish attributed tactic cost from whole-proof and unattributed cost, so that an agent does not mistake profiler coverage for exact per-line accounting.
 
 ## Implementation Decisions
 
-### Phase plan
-- **Phase 0 (now):** two or three replicate runs of the unchanged v5 harness (see the handoff below). Their
-  analysis is appended to this document and may reorder the P0–P2 lists. No v5.x patches.
-- **Phase 1:** P0 items, in the order set by Phase 0: context discovery (60–63, 1–3, 7), survey-first kickoff
-  (62), the cap gate (15, 16, 66) and generic proof-transformation rules (64); then P1 items (inputs,
-  bookkeeping, removing `arena_polish`). P2 measurement fixes land first so Phase 1 is measured correctly.
-- **Phase 2:** the experiment factors (episodes, relay, adaptive thinking), each through the matrix with
-  replicates and on two theorems.
-
-### Context packet
-- Earlier-lemma ranking: score each earlier declaration by the number of distinct constants it shares with the
-  statement (from the existing elaboration metaprogram), break ties by distance, show the top N with full
-  signatures and file lines, and state "N of M shown". No text matching on names.
-- No distance window: every declaration before the theorem is a ranking candidate; the cut is by rank and size
-  only.
-- Discovery pass: at packet build time the harness collects declarations whose signatures contain the
-  statement's head symbols (taken from elaboration data, not names) and includes their signatures in the ranked
-  section. The kickoff text asks the model to read that section and record ideas afterwards.
-- `lean_local_search` results are de-duplicated by declaration and scratch copies are kept out of the index.
-- On-demand related lemmas: the same ranking, seeded by constants of a term or goal the model supplies, served
-  by the existing campaign CLI as a new action behind a new Arena tool.
-- Completeness: the packet builder returns a section manifest. Certification asserts every section expected for
-  the row is present and non-empty. A missing section is a certification failure and a warning in the run
-  config, never silent. The `CallElimCorrect` degradation is the first test case.
-- The packet names the original proof `#1` and prints plain paths.
-
-### Probing and profiles
-- `arena_probe` accepts either one proof or a list of drafts (bounded, e.g. at most 4) and returns a table. Each
-  draft follows the single-probe rules (holes → probe with goals; complete and compiling → candidate).
-- Profile entries carry `proof_line` and `file_line`; a token profile (pinned token counter applied per line)
-  is added to the same result.
-- Idea summaries include probe and candidate counts at abandonment; facts only.
-
-### Cap and plateau
-- The guard keeps the request payload unchanged. It refuses a request when
-  `remaining < k × max(cost of the last 5 settled requests)` with `k = 1.5` by default, and records the
-  estimate. An optional miss-aware term covers providers that drop caches.
-  The continuation gate uses the same rule. Before five requests have settled, the guard falls back to the
-  current behaviour.
-- Reshaping the final request's output limit stays allowed (replicates showed no cache effect); a flag keeps it
-  constant if a provider ever proves otherwise.
-- The status line gains two optional facts: remaining budget (below 25% of the cap) and "N requests / $X since
-  the last improvement" (beyond a threshold), computed per request from the cost and candidate ledgers.
-- The optional budget-preserving stop is a runner flag, off by default.
-
-### Input handling
-- Path normalisation for the source prefix; statement completion for drafts starting with `by` or `:=`; parent
-  references accept `#N`, `pN`, `#0`, "original"; declaration lookups return constructors and fields and suggest
-  suffix matches; misnamed-tool errors suggest the closest real tool; probe results carry one status field.
-- Scratch copies used for compatibility and measurement compiles live outside the project tree the Lean server
-  indexes.
-
-### Bookkeeping
-- `arena_idea` returns a one-line acknowledgement on update. The skill documents minimal updates.
-- `arena_polish` is removed unless Phase 0 shows a gain. If it stays, its message is conditional on variants.
-
-### Measurements
-- Turn classes are ordered compile > context > bookkeeping > reasoning, and every tool that runs Lean counts as
-  compile. Old and new overhead are both reported for one release so they can be compared.
-- Prefix reuse = cache read of request i / (input + cache read + cache write of request i−1), reported overall
-  and excluding the final request.
-- Acceptance criteria are computed in the summary and aggregated in `matrix.json`, which also reports
-  replicate mean and spread.
-- The runner log uses the current result fields.
-- A smoke preflight sends one request per model at a fixed tiny cost and checks it settles.
-
-### Experiments
-- Episodes: the runner, not Pi, ends and starts sessions. The handoff text is generated from the ledger
-  (deterministic, size-bounded), and each episode has its own cached prefix.
-- Relay: a matrix factor naming the explorer model, the golfer model and the split of the budget.
-- Adaptive thinking: a per-episode thinking level.
-- Tool profiles: strict, batched, extended (as User Story 72), selected per run and recorded in the run config.
+- **Ownership:** The agent chooses structural strategies, references to inspect, Lean drafts and repairs, and whether to finish. The harness owns pinned context, source resolution, normalization, compilation, scoring, lineage, accounting, tracing and artifact assembly. The harness does not infer intent from inaccessible reasoning or combine separate model runs into a submitted proof.
+- **Context inventory:** Preserve source-reference occurrences and distinguish theorem statement from proof position. Add only direct theorem or lemma dependencies from the elaborated original proof to the kickoff inventory; retain the complete elaborated constant index for lookup. Generated, tactic and typeclass constants remain tagged rather than presented as source-authored helpers. Report inventory and preview counts; never silently fit a required name out of the packet.
+- **Reference hotspots:** Use the existing pinned reference profiler and official proof-token counter to produce a compact top-ten kickoff table, rather than requiring the agent to call the profiler to find its first target. Compute the ranking from all raw profile records before limiting the detailed tool output. Aggregate tactic **self** heartbeats at each tactic's starting proof line; this assigns a multi-line tactic to an entry point without pretending to measure every physical line separately. Attribute tokens to proof lines using the competition's tokenization and a source map through comment and blank-line removal; the line counts must reconcile exactly to the official proof-token total or be marked unavailable. Rank lines by the sum of their token and heartbeat costs converted to this row's score-point exchange rates. Show both raw costs, proof and file coordinates, tactic/span text, measured whole-proof heartbeats, attributed coverage and unattributed cost. Describe the rank as baseline cost, not predicted score improvement. Keep the full source-ordered profile retrievable on demand.
+- **Pinned source retrieval:** Resolve names against the pinned Lean environment and read human-readable source where it exists. A pretty-printed elaborated term is not a substitute for a source proof. Return typed unavailable results for bodies that cannot be retrieved, and scope/type for local variables. Long results are page-addressable.
+- **Discovery:** Exact batched lookup and distinct-result search are required. A chosen related-lemma ranking formula is not required until an imported-declaration fixture measures useful-helper recall and false positives beyond one theorem family. Returned handles must round-trip through source lookup.
+- **Model tools:** Keep a bounded surface for find, declarations, source, probe, evaluate, profile, idea/state and finish. Probe accepts at most four drafts per call in the model's Lean lane. All tools share stable source, probe and candidate references, explicit line bases, truthful typed outcomes and schemas whose required fields match runtime behavior. Invalid JSON is never silently converted to an empty object.
+- **On-demand cost inspection:** `arena_evaluate` reports whole-proof tokens and measured heartbeats for a complete compiling candidate; `arena_profile` reports attributed tactic self/inclusive heartbeats and exact proof-line tokens for the original or any complete compiling candidate. It may reuse a cached profile of identical proof text. A proof with holes, `sorry` or failed compilation receives a typed reason to finish/probe first. If fine-grained instrumentation fails, return a clearly labeled coarser top-level profile rather than silent zeros.
+- **Measurement machinery:** Compile an instrumented scratch copy of the pinned theorem; never ask the agent to add instrumentation to the submitted proof. Insert the command wrapper before the target declaration's doc comment and attributes, using fully qualified Lean names so the target namespace and open scopes cannot change its meaning. Read the current-thread heartbeat counter before and after elaborating the theorem with asynchronous elaboration disabled and the heartbeat limit disabled, then divide the raw delta by 1,000 to match the local Arena scoring unit. Use the same row-selected toolchain for measured totals and profile comparisons. Tactic instrumentation is a separate diagnostic compile and must report its coverage against the uninstrumented whole-proof measurement; it is not itself the competition score.
+- **Ideas:** One explicit creation records a structural strategy. A current-idea default links subsequent proof events, and append-only events derive attempts and outcomes. A new strategy changes the default without erasing older lineage. A short revise or abandon action is optional. No three-ideas-at-kickoff quota remains.
+- **Finish protocol:** The first finish request returns one factual review without setting a stop flag. One reminder may be issued for a current idea with no linked proof attempt, with probe, evaluation and candidate all counting as attempts. The next finish after available review/reminder confirms stop; new ideas cannot reset these limits. Two consecutive completed turns without proof attempt or verified improvement trigger the fallback stop. The spend gate always has priority.
+- **Request and budget:** Keep `max_tokens`, thinking presence and thinking budget constant for each run. Use a conservative stop-before-send cost estimate for the aggregate $3/problem ceiling, including retries and discarded requests. Record estimate, actual settled cost, cache read/write and remaining allowance. Do not encode an unproven Qwen output-cap cache threshold.
+- **Trace contract:** Explicitly load Langfuse with the deterministic Pi extension allowlist. Use one run identity across Pi, Langfuse, local journal and ledger, with individual trace/attempt identities. Capture the final provider-bound payload after Arena hooks and the actual delivered response. Complete payloads must be queryable through Langfuse observations or lossless linked artifacts; a hash or local-only log is insufficient. Preserve encrypted or redacted reasoning only as delivered. Exclude authentication data.
+- **Preflight:** A model request and harmless model-visible tool call must be observed end to end in Langfuse for every selected provider before a paid matrix. Missing, clipped or unjoinable observations fail closed.
+- **Submission:** Wait for v6 proofs. Package only complete locally verified model candidates in the official warm-up schema. Produce a per-problem call provenance ledger, reproducible pinned code archive and report in the official template. The user performs the uploads manually.
+- **Measurements:** Count model requests separately from tool results and distinguish bookkeeping spend from tool-error count. A complete probe that directly creates a candidate is an idea attempt even if no separate probe event appears. Report the same candidate's score, tokens and heartbeats, as well as cache prefix reuse, tool failures, line-coordinate errors, overshoot and post-best spend. Label historical v5 classifications known to be defective.
 
 ## Testing Decisions
 
-- Good tests assert externally observable behaviour at the existing seams: JSON from campaign actions (Seam A,
-  real Lean on the Strata fixtures) and files and payloads from runner runs against the scripted provider
-  (Seam B, including the Anthropic wire endpoint). No new seams are introduced.
-- **Seam A:**
-  - The ranked lemma section for `Core.InitsUpdatesComm` contains the four lemmas of the best known proof within
-    the shown set.
-  - The packet section manifest is complete for all three provisioned Strata rows.
-  - A batched probe returns one row per draft and promotes complete drafts.
-  - Profile entries carry file lines that match the materialized file.
-  - Every input normalisation in User Stories 23–31 succeeds where v5 failed, replayed from the recorded inputs
-    of the r2 runs.
-  - `arena_idea` updates return a one-line acknowledgement.
-- **Seam B:**
-  - With a scripted cost sequence, the guard refuses the request that would exceed the cap and the continuation
-    gate refuses a continuation with too little budget.
-  - The payload's output limit and thinking budget are identical across all requests of a run, on both wire
-    formats.
-  - The status line shows remaining budget and plateau facts at the thresholds.
-  - The summary's acceptance fields and prefix reuse match hand-computed values for a scripted run.
-  - The live log reports probe outcomes.
-- **Regression replays:** the r2 runs' tool inputs, replayed through the campaign CLI, must produce zero
-  rejections.
-- **Prior art:** the campaign CLI and protocol tests, the runner tests with the fake provider, the Lean MCP
-  end-to-end test, and the Anthropic wire test.
-- **Acceptance experiment** (not a unit test): the v6 harness on two theorems, Luna and Qwen, three replicates
-  each, at $0.10. Success:
-  - zero rejections and zero misaligned goal lookups;
-  - corrected overhead below 5%;
-  - prefix reuse above 95% (excluding a final miss);
-  - overshoot below 5% of the cap;
-  - mean score on `Core.InitsUpdatesComm` above the naive baseline (76.72) for at least one model;
-  - every run below the reference heartbeats on both theorems.
+- Test external behavior through the highest existing seams: the campaign CLI against pinned Lean rows for packet, source, declaration, probe, profile and idea behavior; the budgeted Pi runner with a fake provider for request shape, retries, finish, cost and trace linkage; and a cheap live provider/Langfuse preflight for actual export and query. Existing context and runner tests provide prior art. Avoid unit tests that merely restate internal helper code.
+- Replay valid-intent tool inputs from all 14 v5 runs through the new contracts. The acceptance target is zero preventable tool errors, not zero reported failures. Classify all 32 original error results and verify that genuine invalid inputs still return typed errors. Check source-handle round trips, path aliases, `by`/`:=` normalization, malformed JSON visibility, missing-name suggestions, line bases and hole goals.
+- Use at least Core and PhysLib pinned Lean fixtures for context coverage. Assert every source-named item and extra theorem/lemma dependency is accounted for, identical pins yield identical packet bytes, long bodies page without loss, and local, imported, private, generated and unavailable cases return honest results. Certify expected sections for every provisioned row. Test imported-helper search recall before adopting any ranking formula.
+- On Core and PhysLib, assert the kickoff hotspot table contains at most ten distinct proof-line anchors in descending score-equivalent baseline cost, includes both axes and correct source coordinates, and is stable for the same pin. Include nested and multi-line tactics and a declaration with a preceding doc comment or attribute. Verify self-heartbeat attribution does not double-count nested work, explicit coverage/unattributed figures reconcile with the separately measured whole-proof total, and proof-line token counts sum to the competition counter's total. A failed profile must be visibly degraded or fail certification, never present a fabricated zero-cost table.
+- Compile the untouched reference and a candidate with the scratch heartbeat wrapper on each row's selected measurement toolchain. Verify the wrapper is placed before attached comments/attributes, emits a counter delta without changing the submitted proof, maps diagnostics back to the candidate file, and stays close to the published reference denominator with any pin-dependent drift reported. Compare the same candidate's measured total against its on-demand profile; do not require every heartbeat to be attributable to a tactic.
+- Exercise one-to-four draft batches and verify one outcome per draft, complete-probe promotion, partial-goal output and stable parent lineage. Compare scoring/profile lines with the source the agent actually saw.
+- Through the model-facing profile tool, compare the original and a changed compiling candidate: whole-proof totals must match evaluation, token-line counts must reconcile with the official counter, heartbeat hotspots must reflect the changed proof, and a repeat request must reuse the same proof's cached result. Verify an incomplete proof receives an actionable typed result.
+- At the fake-provider seam, compare the captured final request byte-for-byte with the received transport payload, including a transient retry and payloads exceeding the stock Langfuse 20K-character clipping limit. Query and reconstruct all linked Langfuse artifacts, verify hashes, response/tool/cost joins, credential exclusion and restricted local journal permissions. Assert request shape remains fixed and the gate refuses rather than reshapes an unaffordable request.
+- Replay the early-final sequences from Luna r2 and Qwen CSLib. Their later better candidates must remain reachable after the first review. Assert a direct candidate counts as an idea attempt, only one untried-idea reminder occurs, an agent may abandon without compiling, idea-only turns cannot evade the fallback, and no provider request follows confirmed finish.
+- Require the live preflight to read back complete input, output, one tool call/result, usage and cost from Langfuse for each selected model, and match the final request to the local journal and provider-bound payload. A local session log alone cannot pass.
+- Evaluate on at least two theorem rows, with three replicates per configuration before claiming a model or harness score gain. Report score spread, helper discovery, genuinely unattempted ideas, cache results, preventable tool errors with a target of zero, and combined bookkeeping plus rejected spend with a target below 5%. Replicate concurrency must be fixed or recorded.
+- Validate every staged JSONL entry against the official warm-up manifest and the local pinned Lean checks, recompute provenance hashes and all-call per-problem costs, then verify archive contents and report sections. The official worker's result remains the final competition calibration after the user's manual upload.
 
 ## Out of Scope
 
-- Increasing per-run budgets beyond $0.20.
-- Opening Pi's codemode or the full Lean MCP to the model. Capabilities stay harness-mediated (see Further
-  Notes).
-- Provisioning PhysLib, CSLib, ArkLib and PutnamBench workspaces. v6 generality uses the provisioned Strata rows.
-- Official server submission and calibration against the Arena worker.
-- A Lean REPL-based sub-second compiler.
-- Cross-run memory as a default (it is only an experiment factor).
+- Relay or multi-model handoff, including discovery-as-context relay, until single-model baselines and exact model eligibility make a direct test meaningful.
+- Session episodes, adaptive thinking, dynamic output-cap cuts and a provider-specific cache threshold. Thinking changes during a run are excluded by the stable-request decision.
+- General codemode, unrestricted Lean tool exposure, automatic proof scaffolding, unvalidated related-lemma ranking and broad viewer expansion. Bounded model tools address the observed failures first.
+- Restoring `arena_polish` without a measured gain, treating analyst-built hybrids as model-produced outputs, or selecting v5 proofs for the first warm-up upload.
+- Automatic Hugging Face or OpenReview submission; the user uploads manually.
+- Optimizing around the old $0.10 diagnostic cap while the official $3/problem ceiling is comfortably available.
 
 ## Further Notes
 
-### Evidence summary (r2, $0.10 cap each)
-
-| | Luna (gpt-6-luna) | Qwen (qwen3.8-flash) |
-|---|---|---|
-| Best | #21: 153 tokens / 320 HB / 74.72 | #5: 110 tokens / 238 HB / 81.76 |
-| Strategy | Golfed the original induction, guided by profiles | Replaced the induction with four in-file lemmas found by search |
-| Requests / evaluations | 74 / 40 | 31 / 12 |
-| Spend / overshoot | $0.1006 / $0.0006 | $0.1262 / $0.0262 |
-| Overhead (reported / corrected) | 25.2% / ~11.6% | 3.9% / 4.0% |
-| Cache reuse (ratio / prefix) | 97.6% / ~100% | 86.6% / 100% until the final miss |
-| Spent after best | 5% | 41% |
-| Tool errors | 4 (3 path prefix, 1 `by` body) | 1 (invented tool name) |
-| Misaligned `lean_goal` | 3 (profile lines used as file lines) | 0 |
-
-### What worked and must be kept
-- Background full checks (26 of 26, 4–5 s), accurate `[arena]` lines delivered exactly once, auto-promotion of
-  complete probes (Luna made zero `arena_evaluate` calls), correct submissions.
-- Diagnostic line alignment (`file_line − proof_line` constant everywhere).
-- The restricted tool surface (five direct Lean tools, no codemode).
-- Generic context: the packet's in-file lemma gave Qwen its first idea before any tool call.
-
-### Decision record: restricted tools (codemode)
-Pi's codemode is a JavaScript sandbox that can call every tool and Pi's non-LLM `models` with the session's
-credentials, outside the Arena budget guard. `lean_run_code` and `lean_verify` can run IO through `#eval`,
-`lean_build` costs minutes of CPU, network search is non-deterministic, and every extra tool is a new way to
-fail (one tool's arguments caused most of Luna's early errors). The model already has the capabilities that
-matter: a complete probe is scored with heartbeats, `arena_profile` gives per-line heartbeats, and
-`lean_multi_attempt` tries tactics without editing.
-
-What codemode would add is batching: several calls in one turn, with only a summary returned. That is worth
-having because cost is dominated by re-reading context per turn, and it is delivered safely by multi-draft
-probes (User Story 9). The rule: the harness exposes capabilities, not mechanisms. Capabilities it can price,
-lock and log; mechanisms such as "run any script against any tool" void every guarantee.
-
-How this gets revisited: the tool profile is a matrix factor (User Story 72). Evidence that would justify more:
-tool errors or thinking that show the model reaching for a capability it lacks, or runs of consecutive
-single-draft probes that batching would collapse. In Phase 0 neither appeared: no run tried to call a missing
-tool except invented names for existing ones, and the best result came from search plus single probes.
-
-### Phase 0 answers (see the evidence section for the data)
-1. **Does Qwen find the induction-free route every time?** No: 2 of 3 runs. The deciding factor was discovery
-   of three lemmas 600 lines above the theorem, outside the packet's window. Winning runs had all three by
-   $0.017; the losing run found one at $0.06, dismissed it, and rejected the route as "too speculative" at
-   $0.097.
-2. **Does Luna ever probe the commutation idea?** Never: 0 of 94 probes were induction-free. It abandoned the
-   idea by argument twice, both times with factually wrong reasons, and once never saw the lemmas.
-3. **Is the final-request cache miss tied to the guard shrinking `max_tokens`?** *Revised after the cross-theorem
-   runs:* yes for the Anthropic-path model. All three Qwen requests cut below ~4.5K output tokens lost the whole cache
-   (max_tokens 4,520 / 1,486 / 3,738; $0.022–0.031 each); every cut at or above 5,472 kept it. Luna's OpenAI path kept
-   its cache down to 387 tokens. Consistent with a provider-side threshold near 4,096 thinking tokens (hypothesis).
-4. **Run-to-run spread?** Qwen 81.76 / 84.58 / 73.79 (spread ~11, bimodal by route); Luna 74.72 / 74.00 /
-   76.51 (spread ~2.5). Size v6 replicates for Qwen-like variance: at least three per configuration.
-5. **Does `arena_polish` ever gain?** Once in 15 calls (+0.29, superseded at once). Remove it.
-
-### Known best proof (analysis reference, never shown to models)
-Combining tricks from the six runs gives **76 tokens / 203 HB / proxy 87.10** on all three versions (verified
-independently; kept at `runs/analysis/Core_InitsUpdatesComm-hybrid-87.10.lean`, outside version control). It
-uses the induction-free route of Qwen r2/r3 plus generic golfs (User Story 64). Estimated ceiling from these
-ingredients: about 88. The gap between the best run (84.58) and this proof is a measure of what generic
-transformation rules could still recover.
-
-### Why Qwen usually beat Luna (cross-run analysis)
-The runs split on proof structure, not golfing skill: all four induction runs ended between 73.8 and 76.5 and
-none beat the naive baseline; both induction-free runs ended at 81.8–84.6.
-- **Search before committing** decided the route. Qwen's winning runs searched and read for 16–19 turns before
-  recording ideas; Luna and Qwen r4 recorded ideas at turn 0, as the v5 kickoff asked.
-- **Discovery depended on luck.** The packet's lemma window started 450 lines too late, and
-  `lean_local_search` filled its limit with four copies of each name, so a singular query missed the key lemma.
-- **Ideas were dropped by argument, not by probe.** Luna's stated reasons were wrong; a single skeleton probe
-  would have shown it.
-- **Turn style.** Qwen spends on deep thinking (7–11 turns over 3K output tokens); Luna takes 2.4× more,
-  shorter turns, and re-reading context is half its spend. Luna compiles 7–10× sooner and improves on almost
-  every candidate, but at about 0.5 points a step under a structural ceiling of about 76.
-Implication: make discovery deterministic (User Stories 60–63) and the route choice follows for any model.
-
-## Ideas under discussion (not yet decided)
-
-Each needs a decision before Phase 1 or Phase 2 implements it.
-
-1. **Episodes (fresh session with a handoff).**
-   - What triggers a reset: context size, a plateau, or both?
-   - What the handoff carries: best proof and ideas only, or also failed approaches and lemmas found?
-   - Does losing the reasoning history cost more than the cache-read savings (51% of Luna's spend)?
-   - Proposal: trigger on context size only, carry lemmas found plus ideas with outcomes, and measure.
-2. **Relay (one model explores, another golfs).**
-   - Direction: the data favours Qwen for structure and Luna for fast local steps, but Luna's golfing never
-     beat Qwen's own polish.
-   - Budget split and handover: a proof, or discovered context (User Story 73)?
-   - Proposal: first test "discovery as context" against "proof as start", same budget.
-3. **Adaptive thinking.** What signal switches the level (first candidate? plateau?), and can it be changed
-   without breaking the cache? Since reshaping did not break caches (Phase 0 answer 3), a per-episode level is
-   safe; within a session it is unproven.
-4. **Lemma ranking details.** Shared-constant counts may rank ubiquitous helpers first. Alternatives: weight by
-   the statement's head symbols, by the lemma's conclusion matching a goal's head predicate, or by inverse
-   frequency across the file. Proposal: head symbols with inverse-frequency weights, tested against the three
-   provisioned Strata rows.
-5. **Idea evidence.** Surfacing "abandoned with 0 probes" may push models to probe every idea, which costs
-   money. Options: a facts-only line; a skill rule "one skeleton probe per structural idea before abandoning
-   it"; or harness-run skeleton checks. Proposal: facts-only line plus the skill rule; measure probe spend.
-6. **Harness-run discovery pass (User Story 63).** How large may it be before it bloats the cached prefix, and
-   should it run per goal (on demand) as well as at kickoff? Proposal: kickoff only, bounded to the top 15
-   signatures; on-demand through the related-lemmas tool.
-7. **Re-surfacing parked ideas.** When a newly seen lemma concludes the goal's head predicate, should the status
-   line mention parked ideas? It is factual but edges toward advice. Proposal: defer until after 60–63 land.
-8. **Extended tool profile.** Is `lean_code_actions` worth a schema slot? It surfaces Lean's `Try this`
-   suggestions at no CPU cost. Proposal: include only in the extended profile and let the matrix decide.
-9. **Generic proof-transformation rules (User Story 64).** Several came from one theorem. Proposal: keep only
-   rules that hold for Lean in general (token counting, `rw` vs `▸` costs) and verify each on the second
-   Strata row before adding it to the skill.
-
----
-
-## Handoff: Phase 0 replicate runs (v5, unchanged)
-
-Purpose: measure variance and answer the open questions above before building v6. The harness is frozen at the
-current `hrushikesh/harness-v5` head; do not change code between replicates.
-
-### Runs
-Two replicate pairs on the same configuration as r2 (a third if the first two disagree on the open questions):
-
-```bash
-cd /mnt/SharedDrive/ActiveProjects/lean-refactor-pi
-python tools/run_experiment_matrix.py --theorem Core.InitsUpdatesComm --prefix v5-rep-20261006-r3 \
-  --factor model --values gpt-6-luna,qwen3.8-flash --cap 0.1 --parallel 2
-# after r3 finishes:
-python tools/run_experiment_matrix.py --theorem Core.InitsUpdatesComm --prefix v5-rep-20261006-r4 \
-  --factor model --values gpt-6-luna,qwen3.8-flash --cap 0.1 --parallel 2
-# optional third replicate, same command with --prefix v5-rep-20261006-r5
-```
-
-Watch (one terminal each):
-```bash
-tail -f runs/pi-budget/v5-rep-20261006-r3-matrix/*.log
-# one page for every replicate: an overview table plus a live tab per run (new runs appear by themselves)
-PYTHONPATH=. uv run --no-project python tools/serve_candidate_graph.py --match 'v5-*-20261006-*' --port 8765
-```
-Stop with one Ctrl+C in the matrix terminal (a clean stop that writes `cost.json` and the summary).
-
-Do not use `CallElimCorrect` rows for Phase 0: their packet is currently degraded (User Story 7), so results
-would measure missing context, not the harness.
-
-### Analysis protocol (per replicate pair)
-Run the same three read-only analyses used for r2, in parallel:
-1. **Per-model narrative.** Ideas, structures tried, the candidates where the score jumped and what changed, the
-   final proof vs the original, where each lemma in the best proof was learned (packet, search or declaration),
-   tool calls and errors with messages, spend after the last improvement.
-2. **Harness audit.** Background check latency and coverage, accuracy of the `[arena]` lines, continuations and
-   stop reasons, the corrected overhead breakdown, overshoot and the request that caused it (including whether
-   `max_tokens` had been reduced), prefix-cache reuse, misaligned `lean_goal` lines, the probe-parent notes.
-3. **Cross-replicate comparison** (from the second pair on). Score mean and spread per model, how often the
-   induction-free route is found, overshoot frequency, `arena_polish` gains.
-
-Remember that `summary.txt` overhead and cache figures carry the v5 measurement defects (P2). Report the
-corrected values from the analysis, not the raw ones.
-
-### Where to record results
-Append one block per pair to "Phase 0 evidence" below, using the same table shape as the r2 evidence summary,
-plus answers to the open questions. Then revise the Phase 1 priority order at the end of that section if the
-evidence calls for it.
-
-## Phase 0 evidence
-
-### r2 (2026-10-06) — baseline for the replicates
-See "Evidence summary (r2)" above.
-
-### r3 and r4 (2026-10-06, replicates; r3 and r4 ran concurrently)
-
-| Run | Best (proxy) | Tokens / HB | Route | Requests | Spend / overshoot | Overhead reported / corrected | Spent after best |
-|---|---|---|---|---|---|---|---|
-| r2 Luna | 74.72 | 153 / 320 | induction | 74 | $0.1006 / $0.0006 | 25.2 / 11.6% | 5% |
-| r2 Qwen | 81.76 | 110 / 238 | **no induction** | 31 | $0.1262 / $0.0262 | 3.9 / 3.3% | 41% |
-| r3 Luna | 74.00 | 157 / 336 | induction | 86 | $0.1006 / $0.0006 | 23.4 / 23.4% | 13% |
-| r3 Qwen | **84.58** | 90 / 258 | **no induction** | 35 | $0.1009 / $0.0009 | 10.6 / 2.9% | 8% |
-| r4 Luna | 76.51 | 143 / 282 | induction | 79 | $0.1009 / $0.0009 | 10.5 / 10.5% | 10% |
-| r4 Qwen | 73.79 | 162 / 268 | induction | 32 | $0.1017 / $0.0017 | 13.6 / 8.8% | 0% |
-
-Harness findings across the six runs:
-- Background checks: 100% coverage; latency 4–15 s (higher in r3/r4 because they ran concurrently). All six
-  submissions correct. `[arena]` lines accurate; "best verified: none" at start in 6/6 runs.
-- Tool errors recur: `strata/` path prefix 3/6 runs, `by`-only probe body 3/6 (every Luna run), invented
-  `mcp__` tool names 1/6, `evaluate` with `sorry` 1/6, skill path given to `arena_source` 1/6, empty or
-  reasonless `arena_idea` 1/6. New silent defect: `candidate` plus `from_probe` returned the cached candidate.
-- Misaligned `lean_goal`: 2/6 runs (Luna only), always right after `arena_profile`.
-- Bookkeeping is real for Luna (16–36 `arena_idea` calls; 22% in r3 even after correction).
-- All runs stopped on the usage cap; plateau stops never came near firing; the largest dry stretch is Qwen's
-  search before its first candidate (24–48% of budget), which context ranking addresses.
-
-### Priority revisions after Phase 0
-1. **Promoted to the top of P0:** context discovery (60–63, then 1–3, 7). It decided the route in 6/6 runs.
-2. **New P0:** survey-first kickoff (62) and generic transformation rules (64, verified on a second row).
-3. **Kept P0 but retuned:** cap gate with k ≈ 1–1.5 (15), continuation gate (16, 66); the miss-aware term
-   (65) is optional.
-4. **Demoted:** constant payload (17) and plateau facts (20, 21); neither would have changed Phase 0
-   outcomes.
-5. **Raised within P1:** compact `arena_idea` (33, 34); path prefix and `by` bodies (23–25), which recur in
-   every Luna run.
-6. **Decided:** remove `arena_polish` (38).
-7. **Experiment order for Phase 2:** discovery as relay context (73) before episodes (53), then tool profiles
-   (72).
-
-
-### Cross-theorem runs (2026-10-07; full report: docs/RESULTS-v5-generalization.md)
-
-Four more theorems on the unchanged v5 harness (two Strata, one CSLib, one PhysLib), one Luna/Qwen pair each.
-
-| Theorem | Luna | Qwen | Verified hybrid |
-|---|---|---|---|
-| extractedOldExprInVars | **72.29** | 53.86 | 82.42 |
-| substOldPostSubset | **52.45** | none | 82.86 |
-| bisimilarity_congr_choice (3 versions) | **78.55** | 78.45 | 84.52 |
-| fundamental_theorem_of_variational_calculus' | 45.91 | **83.35** | not built |
-
-Priority revisions:
-1. **P0 discovery** must cover *imported* project lemmas (decisive on extract and CSLib), not only the theorem's file.
-2. **P0 cap** (story 17 restored): for Anthropic-path models never cut the output limit below ~5.5K; stop when the
-   remaining budget cannot cover a full-context cache write; never continue a run after the model declares it is done.
-3. **New P1:** constructors of local inductives in the packet; the tactic libraries available (no Mathlib → no `tauto`);
-   goal trace before normalising `simp`; invalid tool JSON surfaced instead of Pi's silent `{}`; readable private names
-   in `arena_declaration`; `arena_source` accepts the paths `lean_local_search` returns.
-4. **Skill:** literal token counting, positional goal handling and shared closers held everywhere; `grind` and `<;>`
-   chains are theorem-dependent trade-offs; new traps (`any_goals exact` is not a filter; positional or-patterns on
-   multi-constructor families; `use` vs `exists` elaboration).
-5. **Experiments:** a Qwen-style explorer followed by a Luna-style golfer remains the most promising factor: in every
-   hybrid the remaining points were scaffolding golf after the route was found.
+- v5's older Langfuse exports contain useful session histories, but the v5 runner disabled the plugin. A direct fake-provider check of the installed plugin found missing or clipped generation inputs; loading the plugin alone cannot meet the exact-trace contract. The final post-guard request was not saved for historical Qwen misses.
+- A direct Pi Qwen trial reused cache with stable synthetic prefixes at the historical 4,520/3,496 and 3,738/2,714 output/thinking settings. Removing thinking at 1,486 selected a different reusable cache partition. This plausibly explains the historical subst miss, but does not establish the cause of r2 or CSLib misses. Exact post-guard tracing is the next causal instrument, not a guessed threshold.
+- The PhysLib source collector found 84 declaration-level names, yet its saved kickoff showed only three signatures. Its elaborated proof term had 438 constants, many generated by tactics and typeclasses. The selected packet policy is all source-named declarations plus extra theorem/lemma proof dependencies, with full-index lookup.
+- v5 already inserted a cached reference heartbeat profile into kickoff and exposed `arena_profile` for a compiling proof, but kickoff showed source-ordered entries and only five top self costs; the on-demand tool had no token-line profile. The new top ten summarizes existing measurement more clearly. The profiler's tactic spans are an attribution, and proof-token counts use the competition's lexer; neither predicts the savings from changing a proof.
+- All 14 v5 runs ended at the usage cap. A turn-boundary replay showed that first-final stopping would have lost later best candidates in Luna r2 and Qwen CSLib. Review plus one chance for a newly recorded, unattempted route preserved those gains in the replay; the explicit finish protocol makes this behavior testable without reading prose as a stop signal.
+- The official Arena rules and manual staging requirements are recorded in [submission/README.md](../submission/README.md). The v5 evidence and corrections are in [RESULTS-v5-generalization.md](RESULTS-v5-generalization.md). The working record preserves the 82 earlier user stories and the decisions that selected this implementation scope.
