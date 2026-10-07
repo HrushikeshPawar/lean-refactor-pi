@@ -1,0 +1,43 @@
+--- a/src/index.ts	2026-10-07 11:59:18.201073385 +0530
++++ b/src/index.ts	2026-10-07 11:59:18.216025691 +0530
+@@ -655,6 +655,7 @@
+   });
+ 
+   pi.on("before_provider_request", (_event, ctx) => {
++    const fullPayload = (_event as { payload?: unknown }).payload;
+     if (!state) return;
+     // A new provider request while one is open means the previous HTTP
+     // attempt was retried/superseded — close it instead of leaking it.
+@@ -664,12 +665,14 @@
+       gen.obs.end();
+     }
+     const index = ++state.generationCount;
+-    const generationInput =
++    const arenaDelta =
+       index === 1
+         ? { role: "user", content: lastPromptText }
+         : state.pendingToolResults.length
+           ? { role: "tool", tool_results: state.pendingToolResults }
+           : undefined;
++    // Patch: full provider-native request (system, messages, tools, params) as input, untruncated.
++    const generationInput = fullPayload !== undefined ? redactLangfuseKeys(fullPayload) : arenaDelta;
+ 
+     const obs = state.root.startObservation(
+       GENERATION_PREFIX,
+@@ -678,6 +681,7 @@
+         model: ctx.model?.id,
+         metadata: {
+           assistant_index: index - 1,
++          ...(fullPayload !== undefined ? { arena_delta: arenaDelta } : {}),
+           ...(ctx.model ? { provider: ctx.model.provider } : {}),
+         },
+       },
+@@ -839,7 +843,7 @@
+     state.pendingToolResults.push({
+       tool_call_id: event.toolCallId,
+       name: open.name,
+-      content: outText.slice(0, 4000),
++      content: outText,
+     });
+   });
+ 
