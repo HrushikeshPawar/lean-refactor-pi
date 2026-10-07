@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import base64
 import json
 import os
 import re
@@ -33,6 +34,98 @@ def _git_source(project: Path, commit: str, path: str) -> str:
 
 
 MAX_SOURCE_LINES = 400
+MAX_DECLARATION_PAGE_CHARS = 16_000
+
+
+def declarations(name: str, items: list[str] | None = None, cursor: str | None = None) -> dict:
+    """Resolve a batch of declaration handles against the kickoff's tagged constant index."""
+    from arena.context import constant_index, lean_context
+
+    if cursor:
+        try:
+            state = json.loads(base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)))
+            if state.get("version") != 1 or state.get("theorem") != name:
+                raise ValueError
+            items, offset = state["items"], state["offset"]
+        except (ValueError, KeyError, TypeError, json.JSONDecodeError):
+            raise ValueError("Invalid declaration cursor") from None
+    else:
+        offset = 0
+    if not isinstance(items, list) or not items or not all(isinstance(item, str) and item for item in items):
+        raise ValueError("items must be a nonempty list of declaration names or handles")
+
+    inventory = lean_context(name)
+    if inventory.get("error"):
+        return {"items": [{"input": item, "kind": "unavailable", "reason": "unavailable",
+                           "detail": inventory["error"]} for item in items[offset:]], "next_cursor": None}
+    constants = constant_index(inventory)
+    locals_by_name = {item["name"]: item for item in inventory.get("local", [])}
+    results: list[dict] = []
+    size = 0
+    index = offset
+    while index < len(items):
+        original = items[index]
+        query = original[5:] if original.startswith("decl:") else original
+        if query in locals_by_name:
+            local = locals_by_name[query]
+            result = {"input": original, "kind": "local", "name": query,
+                      "type": local["type"], "scope": local["scope"]}
+        else:
+            matches = constant_index(inventory, name=query)
+            if not matches and "." not in query:
+                matches = [item for item in constants if item["name"].split(".")[-1] == query]
+            if len(matches) > 1:
+                result = {"input": original, "kind": "ambiguous",
+                          "suggestions": [item["name"] for item in matches[:12]]}
+            elif not matches:
+                result = {"input": original, "kind": "error", "error": "not_found",
+                          "suggestions": _declaration_suggestions(query, constants)}
+            else:
+                entry = matches[0]
+                found = declaration(name, entry["name"])
+                if found.get("source_text"):
+                    result = {"input": original, **found, "index": entry}
+                else:
+                    result = {"input": original, "kind": "unavailable",
+                              "reason": _unavailable_reason(entry, found), "name": entry["name"],
+                              "handle": f"decl:{entry['name']}", "index": entry,
+                              "signature": found.get("signature") or entry.get("sig"),
+                              "location": found.get("source")}
+        encoded_size = len(json.dumps(result, ensure_ascii=False))
+        if results and size + encoded_size > MAX_DECLARATION_PAGE_CHARS:
+            break
+        results.append(result)
+        size += encoded_size
+        index += 1
+    next_cursor = None
+    if index < len(items):
+        raw = json.dumps({"version": 1, "theorem": name, "items": items, "offset": index}).encode()
+        next_cursor = base64.urlsafe_b64encode(raw).decode().rstrip("=")
+    return {"items": results, "next_cursor": next_cursor}
+
+
+def _declaration_suggestions(query: str, constants: list[dict]) -> list[str]:
+    """Offer qualified-name suggestions using name overlap, without claiming lemma relevance."""
+    parts = {part.lower() for part in query.split(".") if part}
+    ranked = []
+    for item in constants:
+        name = item["name"]
+        overlap = len(parts & {part.lower() for part in name.split(".")})
+        if overlap:
+            ranked.append((-overlap, name))
+    return [name for _, name in sorted(ranked)[:8]]
+
+
+def _unavailable_reason(entry: dict, found: dict) -> str:
+    if entry.get("tag") == "generated" or "._" in entry["name"]:
+        return "generated"
+    if entry["name"].startswith("_private."):
+        return "private"
+    if found.get("kind") == "opaque" or entry.get("kind") == "opaque":
+        return "opaque"
+    if found.get("module") not in (None, "this file"):
+        return "external"
+    return "unavailable"
 
 
 def source_range(name: str, path: str, first: int, last: int | None = None) -> dict:
@@ -41,9 +134,16 @@ def source_range(name: str, path: str, first: int, last: int | None = None) -> d
     version, commit = versions(row)[0]
     project = workspace(row, version, commit)
     if path.startswith("decl:"):
-        path, _ = _resolve_declaration_source(name, path[5:])
+        symbol = path[5:]
+        try:
+            path, _ = _resolve_declaration_source(name, symbol)
+            module = None
+        except ValueError:
+            module = _indexed_module(name, symbol)
+            path, _ = _resolve_declaration_source(name, symbol, module)
+        project, commit, path = _source_target(project, commit, path, module)
     else:
-        path = _canonical_source_path(row, path)
+        project, commit, path = _source_target(project, commit, _canonical_source_path(row, path))
     try:
         lines = _git_source(project, commit, path).splitlines()
     except subprocess.CalledProcessError:
@@ -60,13 +160,124 @@ def source_range(name: str, path: str, first: int, last: int | None = None) -> d
             "text": "\n".join(f"{i}: {lines[i-1]}" for i in range(first, end + 1))}
 
 
+def find(name: str, queries: list[str], limit: int = 20) -> dict:
+    """Search pinned source text and the kickoff index, counting each qualified declaration once."""
+    from arena.context import constant_index, lean_context
+
+    if not queries or not all(isinstance(query, str) and query.strip() for query in queries):
+        raise ValueError("queries must be a nonempty list of names or search strings")
+    if limit < 1:
+        raise ValueError("limit must be positive")
+    limit = min(limit, 100)
+    inventory = lean_context(name)
+    indexed = constant_index(inventory) if not inventory.get("error") else []
+    row = problem(name)
+    version, commit = versions(row)[0]
+    project = workspace(row, version, commit)
+    source_rows: list[dict] = []
+    source_roots = [(project, commit)] + [(root, pin) for root, pin, _ in _package_roots(project)]
+    candidate_paths: set[tuple[Path, str, str]] = set()
+    for query in queries:
+        needle = query[5:] if query.startswith("decl:") else query
+        for source_root, source_pin in source_roots:
+            candidate_paths.update((source_root, source_pin, path)
+                                   for path in _matching_pinned_paths(source_root, source_pin, needle))
+    for source_root, source_pin, path in sorted(candidate_paths, key=lambda item: (str(item[0]), item[2])):
+        content = _git_source(source_root, source_pin, path)
+        namespace = ""
+        lines = content.splitlines()
+        starts: list[tuple[int, str]] = []
+        for line_number, line in enumerate(lines, 1):
+            ns = re.match(r"^\s*namespace\s+([A-Za-z_][A-Za-z0-9_.']*)", line)
+            if ns:
+                namespace = ns.group(1)
+                continue
+            if re.match(r"^\s*end(?:\s|$)", line):
+                namespace = ""
+                continue
+            match = re.match(r"^\s*(?:private\s+|protected\s+)?(?:@\[[^\]]*\]\s*)*(?:theorem|lemma|def|opaque|instance|abbrev|inductive|structure|class|axiom)\s+([A-Za-z_][A-Za-z0-9_'.]*)", line)
+            if match:
+                local = match.group(1)
+                qualified = local if "." in local or not namespace else namespace + "." + local
+                starts.append((line_number, qualified))
+        for index, (line_number, qualified) in enumerate(starts):
+            end = starts[index + 1][0] - 1 if index + 1 < len(starts) else len(lines)
+            source_rows.append({"name": qualified, "handle": f"decl:{qualified}", "path": path,
+                                "line": line_number, "pin": source_pin,
+                                "source_text": "\n".join(lines[line_number - 1:end])})
+    per_query = []
+    for query in queries:
+        needle = query[5:] if query.startswith("decl:") else query
+        q = needle.casefold()
+        matches = [item for item in source_rows
+                   if (item["name"] == needle if query.startswith("decl:") else
+                       q in item["name"].casefold() or q in item["source_text"].casefold())]
+        by_name = {item["name"]: item for item in matches}
+        for item in indexed:
+            searchable = (item["name"] + " " + str(item.get("sig", ""))).casefold()
+            if (item["name"] == needle if query.startswith("decl:") else q in searchable):
+                by_name.setdefault(item["name"], {"name": item["name"], "handle": f"decl:{item['name']}",
+                                                   "index": item, "pin": commit})
+        if not by_name:
+            suggestions = _declaration_suggestions(needle, indexed)
+            per_query.append({"query": query, "matches": [], "error": "not_found",
+                              "suggestions": suggestions})
+            continue
+        selected = sorted(by_name.values(), key=lambda item: item["name"])[:limit]
+        per_query.append({"query": query, "matches": selected,
+                          "distinct_count": len(by_name), "truncated": len(by_name) > len(selected)})
+    return {"queries": per_query, "pin": commit, "limit": limit}
+
+
 def _canonical_source_path(row: dict, path: str) -> str:
     """Normalize documented project aliases to a path inside the pinned checkout."""
-    path = path.removeprefix("strata:").removeprefix("strata/").removeprefix("physlib:").removeprefix("physlib/")
+    for alias in ("strata", "physlib", "mathlib", "cslib", "arklib"):
+        if path.startswith(alias + ":") or path.startswith(alias + "/"):
+            path = path[len(alias) + 1:]
+            break
     path = path.removeprefix("./")
     if path.startswith("/") or ".." in Path(path).parts or not path.endswith(".lean"):
         raise ValueError("Only relative .lean paths inside the pinned project are allowed")
     return path
+
+
+def _package_roots(project: Path) -> list[tuple[Path, str, str]]:
+    roots = []
+    packages = project / ".lake" / "packages"
+    for package in sorted(packages.iterdir()) if packages.is_dir() else []:
+        if not package.is_dir():
+            continue
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=package, text=True,
+                              capture_output=True, check=False)
+        if head.returncode == 0:
+            roots.append((package, head.stdout.strip(), package.name))
+    return roots
+
+
+def _source_target(project: Path, commit: str, path: str,
+                   module: str | None = None) -> tuple[Path, str, str]:
+    """Resolve a canonical project or dependency path to its pinned Git root."""
+    if isinstance(project, Path) and (project / path).is_file():
+        exists = subprocess.run(["git", "cat-file", "-e", f"{commit}:{path}"], cwd=project,
+                                capture_output=True, check=False).returncode == 0
+        if exists:
+            return project, commit, path
+    module_path = module.replace(".", "/") + ".lean" if module else None
+    for root, pin, package in _package_roots(project):
+        for candidate in (module_path, path):
+            if candidate and (root / candidate).is_file():
+                return root, pin, candidate
+    raise ValueError(f"{path} does not exist in the pinned project or its dependency roots")
+
+
+def _indexed_module(name: str, symbol: str) -> str | None:
+    from arena.context import constant_index, lean_context
+
+    inventory = lean_context(name)
+    if inventory.get("error"):
+        return None
+    matches = constant_index(inventory, name=symbol)
+    return matches[0].get("module") if len(matches) == 1 else None
 
 
 def _pinned_lean_paths(project: Path, commit: str) -> list[str]:
@@ -75,53 +286,85 @@ def _pinned_lean_paths(project: Path, commit: str) -> list[str]:
     return [path for path in result.stdout.splitlines() if path.endswith(".lean")]
 
 
-def _resolve_declaration_source(name: str, symbol: str) -> tuple[str, int]:
+def _matching_pinned_paths(project: Path, commit: str, query: str) -> list[str]:
+    """Use Git's pinned tree search so working copies and scratch files cannot enter results."""
+    leaf = query.split(".")[-1] if query.startswith("decl:") or "." in query else query
+    result = subprocess.run(["git", "grep", "-I", "-l", "-i", "-F", leaf, commit, "--", "*.lean"],
+                            cwd=project, text=True, capture_output=True, check=False)
+    if result.returncode not in (0, 1):
+        raise RuntimeError(result.stderr.strip() or "Pinned source search failed")
+    return [line.split(":", 1)[1] if ":" in line else line for line in result.stdout.splitlines()]
+
+
+def _resolve_declaration_source(name: str, symbol: str, module: str | None = None) -> tuple[str, int]:
     """Find an exact source declaration in the benchmark's pinned tree, excluding scratch copies."""
     if not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9'.]*", symbol):
         raise ValueError("Invalid declaration name")
     row = problem(name)
     version, commit = versions(row)[0]
     project = workspace(row, version, commit)
-    pattern = re.compile(r"(?m)^\s*(?:private\s+)?(?:@[[^\n]*\]\s*)*(?:theorem|lemma|def|opaque|example|instance|abbrev|inductive|structure|class)\s+"
-                         + re.escape(symbol) + r"(?![A-Za-z0-9_'.])")
-    for path in _pinned_lean_paths(project, commit):
-        try:
-            source = _git_source(project, commit, path)
-        except subprocess.CalledProcessError:
-            continue
-        match = pattern.search(source)
-        if match:
-            return path, source.count("\n", 0, match.start()) + 1
+    roots = [(project, commit)] + [(root, pin) for root, pin, _ in _package_roots(project)]
+    leaf = symbol.split(".")[-1]
+    for source_root, source_pin in roots:
+        for path in _matching_pinned_paths(source_root, source_pin, leaf):
+            try:
+                source = _git_source(source_root, source_pin, path)
+            except subprocess.CalledProcessError:
+                continue
+            namespace: list[str] = []
+            for line_number, line in enumerate(source.splitlines(), 1):
+                ns = re.match(r"^\s*namespace\s+([A-Za-z_][A-Za-z0-9_.']*)", line)
+                if ns:
+                    namespace.append(ns.group(1))
+                    continue
+                close = re.match(r"^\s*end(?:\s+([A-Za-z_][A-Za-z0-9_'.]*))?\s*$", line)
+                if close:
+                    if close.group(1):
+                        closing = close.group(1)
+                        while namespace and namespace[-1] != closing:
+                            namespace.pop()
+                        if namespace:
+                            namespace.pop()
+                    elif namespace:
+                        namespace.pop()
+                    continue
+                decl = re.match(r"^\s*(?:private\s+|protected\s+)?(?:@\[[^\]]*\]\s*)*(?:theorem|lemma|def|opaque|example|instance|abbrev|inductive|structure|class|axiom)\s+([A-Za-z_][A-Za-z0-9_'.]*)", line)
+                if decl:
+                    local = decl.group(1)
+                    qualified = local if "." in local or not namespace else ".".join(namespace + [local])
+                    if qualified == symbol or local == symbol:
+                        return path, line_number
     raise ValueError(f"Declaration not found in pinned project: {symbol}")
 
 
 def declaration(name: str, symbol: str) -> dict:
     if symbol.startswith("decl:"):
         symbol = symbol[5:]
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9'.]*", symbol):
+        raise ValueError("Invalid declaration name")
     row = problem(name)
     version, commit = versions(row)[0]
     project = workspace(row, version, commit)
     try:
-        path, line = _resolve_declaration_source(name, symbol)
-        source = _git_source(project, commit, path)
+        try:
+            path, line = _resolve_declaration_source(name, symbol)
+            module = None
+        except ValueError:
+            module = _indexed_module(name, symbol)
+            path, line = _resolve_declaration_source(name, symbol, module)
+        source_project, pin, path = _source_target(project, commit, path, module)
+        source = _git_source(source_project, pin, path)
         lines = source.splitlines()
         start = line - 1
         end = next((i for i in range(start + 1, len(lines))
                     if re.match(r"^(?:private\s+)?(?:theorem|lemma|def|opaque|instance|abbrev|inductive|structure|class)\s+", lines[i])),
                    len(lines))
         return {"symbol": symbol, "handle": f"decl:{symbol}", "name": symbol, "found": True,
-                "pin": commit, "path": path, "line": line,
+                "pin": pin, "path": path, "line": line,
                 "source_text": "\n".join(lines[start:end])}
     except ValueError:
         pass
-    found = subprocess.run(["rg", "-l", "--glob", "*.lean", "-F", symbol, row["source"].capitalize()],
-                           cwd=project, text=True, capture_output=True, check=False)
-    paths = found.stdout.splitlines()
-    # Some corpora use directory names unrelated to the benchmark source.
-    if not paths:
-        found = subprocess.run(["rg", "-l", "--glob", "*.lean", "-F", symbol, "."],
-                               cwd=project, text=True, capture_output=True, check=False)
-        paths = found.stdout.splitlines()
+    paths = _pinned_lean_paths(project, commit)
     pattern = re.compile(r"(?m)^\s*(?:@\[[^\n]*\]\s*)*(?:theorem|lemma|def|instance|abbrev|inductive|structure|class)\s+"
                          + re.escape(symbol) + r"(?![A-Za-z0-9_'.])")
     for path in paths[:80]:
