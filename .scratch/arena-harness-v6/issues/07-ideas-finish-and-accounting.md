@@ -4,7 +4,7 @@
 
 **Blocked by:** 02: Fixed request shape and spend gate; 06: Proof-tool UX and error replay.
 
-**Status:** ready-for-agent
+**Status:** needs-review
 
 **Branch:** `hrushikesh/v6-07-ideas-finish` (stacked on `hrushikesh/v6-06-proof-tools`)
 
