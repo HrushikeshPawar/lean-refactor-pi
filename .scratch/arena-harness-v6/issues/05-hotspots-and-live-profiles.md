@@ -4,7 +4,7 @@
 
 **Blocked by:** 03: Certified kickoff dependencies.
 
-**Status:** ready-for-agent
+**Status:** needs-review
 
 **Branch:** `hrushikesh/v6-05-hotspots` (stacked on `hrushikesh/v6-04-declarations`)
 
