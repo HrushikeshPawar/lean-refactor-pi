@@ -1,7 +1,7 @@
 """Offline end-to-end smoke test per theorem: real Pi, real Lean and the Lean MCP server, scripted provider.
 
-Costs nothing and uses no model. Per theorem it calls arena_evaluate on the reference, lean_goal on the
-materialized candidate file, a sorry probe and arena_profile, and fails on any tool error.
+Costs nothing and uses no model. Per theorem it calls arena_declarations and arena_source, probes a batch
+of complete drafts, evaluates and profiles the reference, and inspects its goal through Lean MCP.
 
     PYTHONPATH=. uv run --no-project python tools/smoke_theorems.py Core.InitsUpdatesComm CallElimCorrect.substOldPostSubset
 """
@@ -22,10 +22,13 @@ for name in sys.argv[1:]:
     run.command[run.command.index("--theorem") + 1] = name
     built = candidate_file(row, row["src"], *versions(row)[0])
     path = str(run_dir(run.run_id) / "scratch" / "project" / (row.get("file_path") or ""))
-    calls = [("arena_evaluate", {"proof": row["src"]}),
+    calls = [("arena_declarations", {"items": [name]}),
+             ("arena_source", {"handle": f"decl:{name}"}),
+             ("arena_probe", {"drafts": [row["src"] + "\n-- route smoke draft 1",
+                                         row["src"] + "\n-- route smoke draft 2"]}),
+             ("arena_evaluate", {"proof": row["src"]}),
              ("mcp__arena_lean__lean_goal", {"file_path": path, "line": built["start_line"] + 1}),
-             ("arena_probe", {"proof": row["statement"] + " := by\n  sorry"}),
-             ("arena_profile", {})]
+             ("arena_profile", {"proof": row["src"]})]
     run.script.write_text(json.dumps([tool(n, a) for n, a in calls] + [{"text": "done"}]))
     try:
         run.run()

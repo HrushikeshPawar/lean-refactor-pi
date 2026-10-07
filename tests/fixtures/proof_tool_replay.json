@@ -1,0 +1,533 @@
+{
+  "source": "sanitized from local Pi events for the 14 v5 model runs",
+  "run_count": 14,
+  "error_call_count": 32,
+  "calls": [
+    {
+      "run": "v5-accept-20261006-r2-model-gpt-6-luna",
+      "call": 1,
+      "old_tool": "arena_source",
+      "preventable": true,
+      "class": "retired_strata_path_prefix",
+      "tool": "arena_source",
+      "request": {
+        "handle": "strata/Strata/Languages/Core/StatementSemanticsProps.lean",
+        "first": 790,
+        "last": 840
+      },
+      "replay": "resolve_pinned_path_alias",
+      "theorem": "Core.InitsUpdatesComm",
+      "old_request": {
+        "path": "strata/Strata/Languages/Core/StatementSemanticsProps.lean",
+        "first": 790,
+        "last": 840
+      }
+    },
+    {
+      "run": "v5-accept-20261006-r2-model-gpt-6-luna",
+      "call": 2,
+      "old_tool": "arena_source",
+      "preventable": true,
+      "class": "retired_strata_path_prefix",
+      "tool": "arena_source",
+      "request": {
+        "handle": "strata/Strata/Languages/Core/StatementSemanticsProps.lean",
+        "first": 480,
+        "last": 550
+      },
+      "replay": "resolve_pinned_path_alias",
+      "theorem": "Core.InitsUpdatesComm",
+      "old_request": {
+        "path": "strata/Strata/Languages/Core/StatementSemanticsProps.lean",
+        "first": 480,
+        "last": 550
+      }
+    },
+    {
+      "run": "v5-accept-20261006-r2-model-gpt-6-luna",
+      "call": 3,
+      "old_tool": "arena_source",
+      "preventable": true,
+      "class": "retired_strata_path_prefix",
+      "tool": "arena_source",
+      "request": {
+        "handle": "strata/Strata/Languages/Core/StatementSemanticsProps.lean",
+        "first": 950,
+        "last": 1004
+      },
+      "replay": "resolve_pinned_path_alias",
+      "theorem": "Core.InitsUpdatesComm",
+      "old_request": {
+        "path": "strata/Strata/Languages/Core/StatementSemanticsProps.lean",
+        "first": 950,
+        "last": 1004
+      }
+    },
+    {
+      "run": "v5-accept-20261006-r2-model-gpt-6-luna",
+      "call": 4,
+      "old_tool": "arena_probe",
+      "preventable": true,
+      "class": "draft_shape_rejected",
+      "tool": "arena_probe",
+      "request": {
+        "draft_form": "by_body"
+      },
+      "replay": "normalize_proof_body",
+      "theorem": "Core.InitsUpdatesComm"
+    },
+    {
+      "run": "v5-accept-20261006-r2-model-qwen3.8-flash",
+      "call": 1,
+      "old_tool": "mcp__arena_lean__lean_declaration",
+      "preventable": true,
+      "class": "retired_mcp_declaration_name",
+      "tool": "arena_declarations",
+      "request": {
+        "items": [
+          "Imperative.UpdateState"
+        ]
+      },
+      "replay": "map_symbol_to_items",
+      "theorem": "Core.InitsUpdatesComm",
+      "legacy_tool": "arena_declaration",
+      "old_request": {
+        "symbol": "Imperative.UpdateState"
+      }
+    },
+    {
+      "run": "v5-gen-20261007-cslib-model-gpt-6-luna",
+      "call": 1,
+      "old_tool": "arena_probe",
+      "preventable": true,
+      "class": "draft_shape_rejected",
+      "tool": "arena_probe",
+      "request": {
+        "draft_form": "by_body"
+      },
+      "replay": "normalize_proof_body",
+      "theorem": "Cslib.CCS.bisimilarity_congr_choice"
+    },
+    {
+      "run": "v5-gen-20261007-cslib-model-qwen3.8-flash",
+      "call": 1,
+      "old_tool": "arena_idea",
+      "preventable": false,
+      "class": "missing_idea_title",
+      "tool": "arena_idea",
+      "request": {
+        "fields": [
+          "idea_id",
+          "status"
+        ],
+        "status": "succeeded"
+      },
+      "replay": "preserve_expected_error",
+      "theorem": "Cslib.CCS.bisimilarity_congr_choice"
+    },
+    {
+      "run": "v5-gen-20261007-extract-model-gpt-6-luna",
+      "call": 1,
+      "old_tool": "arena_source",
+      "preventable": true,
+      "class": "retired_strata_path_prefix",
+      "tool": "arena_source",
+      "request": {
+        "handle": "strata/Strata/Transform/CallElimCorrect.lean",
+        "first": 2725,
+        "last": 2850
+      },
+      "replay": "resolve_pinned_path_alias",
+      "theorem": "CallElimCorrect.extractedOldExprInVars",
+      "old_request": {
+        "path": "strata/Strata/Transform/CallElimCorrect.lean",
+        "first": 2725,
+        "last": 2850
+      }
+    },
+    {
+      "run": "v5-gen-20261007-extract-model-gpt-6-luna",
+      "call": 2,
+      "old_tool": "arena_probe",
+      "preventable": true,
+      "class": "draft_shape_rejected",
+      "tool": "arena_probe",
+      "request": {
+        "draft_form": "by_body"
+      },
+      "replay": "normalize_proof_body",
+      "theorem": "CallElimCorrect.extractedOldExprInVars"
+    },
+    {
+      "run": "v5-gen-20261007-extract-model-qwen3.8-flash",
+      "call": 1,
+      "old_tool": "arena_source",
+      "preventable": false,
+      "class": "source_not_in_pinned_roots",
+      "tool": "arena_source",
+      "request": {
+        "handle": ".lean-stdlib/lean/Init/Data/List/Sublist.lean",
+        "first": 1,
+        "last": 60
+      },
+      "replay": "preserve_expected_error",
+      "theorem": "CallElimCorrect.extractedOldExprInVars",
+      "old_request": {
+        "path": ".lean-stdlib/lean/Init/Data/List/Sublist.lean",
+        "first": 1,
+        "last": 60
+      }
+    },
+    {
+      "run": "v5-gen-20261007-extract-model-qwen3.8-flash",
+      "call": 2,
+      "old_tool": "arena_source",
+      "preventable": false,
+      "class": "source_not_in_pinned_roots",
+      "tool": "arena_source",
+      "request": {
+        "handle": ".lean-stdlib/lean/Init/Data/List/Sublist.lean",
+        "first": 1,
+        "last": 80
+      },
+      "replay": "preserve_expected_error",
+      "theorem": "CallElimCorrect.extractedOldExprInVars",
+      "old_request": {
+        "path": ".lean-stdlib/lean/Init/Data/List/Sublist.lean",
+        "first": 1,
+        "last": 80
+      }
+    },
+    {
+      "run": "v5-gen-20261007-extract-model-qwen3.8-flash",
+      "call": 3,
+      "old_tool": "arena_source",
+      "preventable": false,
+      "class": "invalid_source_range",
+      "tool": "arena_source",
+      "request": {
+        "handle": "Strata/Languages/Core/Expressions.lean",
+        "first": 2800,
+        "last": 2830
+      },
+      "replay": "preserve_expected_error",
+      "theorem": "CallElimCorrect.extractedOldExprInVars",
+      "old_request": {
+        "path": "Strata/Languages/Core/Expressions.lean",
+        "first": 2800,
+        "last": 2830
+      }
+    },
+    {
+      "run": "v5-gen-20261007-extract-model-qwen3.8-flash",
+      "call": 4,
+      "old_tool": "arena_probe",
+      "preventable": true,
+      "class": "draft_shape_rejected",
+      "tool": "arena_probe",
+      "request": {
+        "draft_form": "complete_with_leading_whitespace"
+      },
+      "replay": "normalize_proof_body",
+      "theorem": "CallElimCorrect.extractedOldExprInVars"
+    },
+    {
+      "run": "v5-gen-20261007-physlib-model-gpt-6-luna",
+      "call": 1,
+      "old_tool": "arena_evaluate",
+      "preventable": true,
+      "class": "draft_shape_rejected",
+      "tool": "arena_probe",
+      "request": {
+        "draft_form": "by_body"
+      },
+      "replay": "route_draft_to_probe",
+      "theorem": "fundamental_theorem_of_variational_calculus'"
+    },
+    {
+      "run": "v5-gen-20261007-physlib-model-qwen3.8-flash",
+      "call": 1,
+      "old_tool": "arena_idea",
+      "preventable": false,
+      "class": "missing_idea_reason",
+      "tool": "arena_idea",
+      "request": {
+        "fields": [
+          "expected_effect",
+          "hypothesis",
+          "idea_id",
+          "status",
+          "title"
+        ],
+        "status": "succeeded"
+      },
+      "replay": "preserve_expected_error",
+      "theorem": "fundamental_theorem_of_variational_calculus'"
+    },
+    {
+      "run": "v5-gen-20261007-subst-model-gpt-6-luna",
+      "call": 1,
+      "old_tool": "arena_probe",
+      "preventable": true,
+      "class": "draft_shape_rejected",
+      "tool": "arena_probe",
+      "request": {
+        "draft_form": "by_body"
+      },
+      "replay": "normalize_proof_body",
+      "theorem": "CallElimCorrect.substOldPostSubset"
+    },
+    {
+      "run": "v5-gen-20261007-subst-model-qwen3.8-flash",
+      "call": 1,
+      "old_tool": "arena_idea",
+      "preventable": false,
+      "class": "missing_idea_title",
+      "tool": "arena_idea",
+      "request": {
+        "fields": [],
+        "status": null
+      },
+      "replay": "preserve_expected_error",
+      "theorem": "CallElimCorrect.substOldPostSubset"
+    },
+    {
+      "run": "v5-gen-20261007-subst-model-qwen3.8-flash",
+      "call": 2,
+      "old_tool": "arena_idea",
+      "preventable": false,
+      "class": "missing_idea_title",
+      "tool": "arena_idea",
+      "request": {
+        "fields": [],
+        "status": null
+      },
+      "replay": "preserve_expected_error",
+      "theorem": "CallElimCorrect.substOldPostSubset"
+    },
+    {
+      "run": "v5-gen-20261007-subst-model-qwen3.8-flash",
+      "call": 3,
+      "old_tool": "arena_idea",
+      "preventable": false,
+      "class": "missing_idea_title",
+      "tool": "arena_idea",
+      "request": {
+        "fields": [],
+        "status": null
+      },
+      "replay": "preserve_expected_error",
+      "theorem": "CallElimCorrect.substOldPostSubset"
+    },
+    {
+      "run": "v5-gen-20261007-subst-model-qwen3.8-flash",
+      "call": 4,
+      "old_tool": "arena_idea",
+      "preventable": false,
+      "class": "missing_idea_title",
+      "tool": "arena_idea",
+      "request": {
+        "fields": [],
+        "status": null
+      },
+      "replay": "preserve_expected_error",
+      "theorem": "CallElimCorrect.substOldPostSubset"
+    },
+    {
+      "run": "v5-gen-20261007-subst-model-qwen3.8-flash",
+      "call": 5,
+      "old_tool": "arena_source",
+      "preventable": false,
+      "class": "source_not_in_pinned_roots",
+      "tool": "arena_source",
+      "request": {
+        "handle": ".lean-stdlib/lean/Init/Data/List/Sublist.lean",
+        "first": 100,
+        "last": 150
+      },
+      "replay": "preserve_expected_error",
+      "theorem": "CallElimCorrect.substOldPostSubset",
+      "old_request": {
+        "path": ".lean-stdlib/lean/Init/Data/List/Sublist.lean",
+        "first": 100,
+        "last": 150
+      }
+    },
+    {
+      "run": "v5-gen-20261007-subst-model-qwen3.8-flash",
+      "call": 6,
+      "old_tool": "mcp__arena_lean__lean_goal",
+      "preventable": false,
+      "class": "invalid_goal_line",
+      "tool": "mcp__arena_lean__lean_goal",
+      "request": {
+        "line": 3095,
+        "path_kind": "candidate"
+      },
+      "replay": "preserve_expected_error",
+      "theorem": "CallElimCorrect.substOldPostSubset"
+    },
+    {
+      "run": "v5-rep-20261006-r3-model-gpt-6-luna",
+      "call": 1,
+      "old_tool": "arena_source",
+      "preventable": true,
+      "class": "retired_strata_path_prefix",
+      "tool": "arena_source",
+      "request": {
+        "handle": "strata/Strata/Languages/Core/StatementSemanticsProps.lean",
+        "first": 950,
+        "last": 1004
+      },
+      "replay": "resolve_pinned_path_alias",
+      "theorem": "Core.InitsUpdatesComm",
+      "old_request": {
+        "path": "strata/Strata/Languages/Core/StatementSemanticsProps.lean",
+        "first": 950,
+        "last": 1004
+      }
+    },
+    {
+      "run": "v5-rep-20261006-r3-model-gpt-6-luna",
+      "call": 2,
+      "old_tool": "arena_probe",
+      "preventable": true,
+      "class": "draft_shape_rejected",
+      "tool": "arena_probe",
+      "request": {
+        "draft_form": "by_body"
+      },
+      "replay": "normalize_proof_body",
+      "theorem": "Core.InitsUpdatesComm"
+    },
+    {
+      "run": "v5-rep-20261006-r3-model-qwen3.8-flash",
+      "call": 1,
+      "old_tool": "arena_evaluate",
+      "preventable": true,
+      "class": "draft_shape_rejected",
+      "tool": "arena_probe",
+      "request": {
+        "draft_form": "complete_or_other"
+      },
+      "replay": "route_draft_to_probe",
+      "theorem": "Core.InitsUpdatesComm"
+    },
+    {
+      "run": "v5-rep-20261006-r3-model-qwen3.8-flash",
+      "call": 2,
+      "old_tool": "arena_source",
+      "preventable": false,
+      "class": "unsupported_non_lean_source",
+      "tool": "arena_source",
+      "request": {
+        "handle": "references/proof-golfing.md",
+        "first": 1,
+        "last": 80
+      },
+      "replay": "preserve_expected_error",
+      "theorem": "Core.InitsUpdatesComm",
+      "old_request": {
+        "path": "references/proof-golfing.md",
+        "first": 1,
+        "last": 80
+      }
+    },
+    {
+      "run": "v5-rep-20261006-r3-model-qwen3.8-flash",
+      "call": 3,
+      "old_tool": "arena_idea",
+      "preventable": false,
+      "class": "missing_idea_reason",
+      "tool": "arena_idea",
+      "request": {
+        "fields": [
+          "expected_effect",
+          "hypothesis",
+          "idea_id",
+          "region",
+          "status",
+          "title"
+        ],
+        "status": "parked"
+      },
+      "replay": "preserve_expected_error",
+      "theorem": "Core.InitsUpdatesComm"
+    },
+    {
+      "run": "v5-rep-20261006-r3-model-qwen3.8-flash",
+      "call": 4,
+      "old_tool": "arena_idea",
+      "preventable": false,
+      "class": "missing_idea_title",
+      "tool": "arena_idea",
+      "request": {
+        "fields": [],
+        "status": null
+      },
+      "replay": "preserve_expected_error",
+      "theorem": "Core.InitsUpdatesComm"
+    },
+    {
+      "run": "v5-rep-20261006-r4-model-gpt-6-luna",
+      "call": 1,
+      "old_tool": "arena_source",
+      "preventable": true,
+      "class": "retired_strata_path_prefix",
+      "tool": "arena_source",
+      "request": {
+        "handle": "strata/Strata/Languages/Core/StatementSemanticsProps.lean",
+        "first": 480,
+        "last": 555
+      },
+      "replay": "resolve_pinned_path_alias",
+      "theorem": "Core.InitsUpdatesComm",
+      "old_request": {
+        "path": "strata/Strata/Languages/Core/StatementSemanticsProps.lean",
+        "first": 480,
+        "last": 555
+      }
+    },
+    {
+      "run": "v5-rep-20261006-r4-model-gpt-6-luna",
+      "call": 2,
+      "old_tool": "arena_probe",
+      "preventable": true,
+      "class": "draft_shape_rejected",
+      "tool": "arena_probe",
+      "request": {
+        "draft_form": "by_body"
+      },
+      "replay": "normalize_proof_body",
+      "theorem": "Core.InitsUpdatesComm"
+    },
+    {
+      "run": "v5-rep-20261006-r4-model-qwen3.8-flash",
+      "call": 1,
+      "old_tool": "mcp__arena_lean__lean_hover_info",
+      "preventable": false,
+      "class": "invalid_hover_location",
+      "tool": "mcp__arena_lean__lean_hover_info",
+      "request": {
+        "line": 1,
+        "column": 1
+      },
+      "replay": "preserve_expected_error",
+      "theorem": "Core.InitsUpdatesComm"
+    },
+    {
+      "run": "v5-rep-20261006-r4-model-qwen3.8-flash",
+      "call": 2,
+      "old_tool": "mcp__arena_lean__lean_hover_info",
+      "preventable": false,
+      "class": "invalid_hover_location",
+      "tool": "mcp__arena_lean__lean_hover_info",
+      "request": {
+        "line": 200,
+        "column": 1
+      },
+      "replay": "preserve_expected_error",
+      "theorem": "Core.InitsUpdatesComm"
+    }
+  ]
+}
