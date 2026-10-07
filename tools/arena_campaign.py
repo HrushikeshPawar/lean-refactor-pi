@@ -51,7 +51,7 @@ def run(args: argparse.Namespace) -> dict:
     if args.action == "submission":
         return submission(args.run_id)
     if args.action == "source":
-        return source_range(args.theorem, args.handle, args.first or 1, args.last)
+        return source_range(args.theorem, args.handle, args.first, args.last)
     if args.action == "declarations":
         return declarations(args.theorem, json.loads(args.items) if args.items else None, args.cursor)
     if args.action == "find":

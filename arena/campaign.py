@@ -11,7 +11,9 @@ import shutil
 import subprocess
 import fcntl
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 
 from arena.engine import ROOT, candidate_file, evaluate, problem, source_path, validate_proof, versions, workspace
@@ -26,11 +28,98 @@ def run_dir(run_id: str) -> Path:
     return ROOT / "runs" / "pi-budget" / run_id
 
 
+class AmbiguousDeclaration(ValueError):
+    """More than one distinct qualified declaration matches an unqualified or partial name."""
+
+    def __init__(self, symbol: str, candidates: list[str]):
+        super().__init__(f"{symbol} is ambiguous: {', '.join(candidates[:12])}")
+        self.candidates = candidates
+
+
+_SESSION: ContextVar["_Session | None"] = ContextVar("arena_source_session", default=None)
+
+
+class _Session:
+    """Per-call pinned-source reader: one `git cat-file --batch` per root, with cached blobs."""
+
+    def __init__(self) -> None:
+        self.processes: dict[str, subprocess.Popen] = {}
+        self.blobs: dict[tuple[str, str, str], str | None] = {}
+        self.contexts: dict[str, dict] = {}
+        self.roots: dict[str, list[tuple[Path, str, str]]] = {}
+        self.scans: dict[tuple[str, str, str], tuple[list[str], list[tuple[int, str]]]] = {}
+
+    def read(self, root: Path, pin: str, path: str) -> str:
+        key = (str(root), pin, path)
+        if key not in self.blobs:
+            self.blobs[key] = self._fetch(root, f"{pin}:{path}")
+        text = self.blobs[key]
+        if text is None:
+            raise subprocess.CalledProcessError(128, ["git", "cat-file", f"{pin}:{path}"])
+        return text
+
+    def _fetch(self, root: Path, spec: str) -> str | None:
+        process = self.processes.get(str(root))
+        if process is None:
+            process = self.processes[str(root)] = subprocess.Popen(
+                ["git", "cat-file", "--batch"], cwd=root, stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        process.stdin.write(spec.encode() + b"\n")
+        process.stdin.flush()
+        header = process.stdout.readline().split()
+        if len(header) != 3 or header[1] != b"blob":
+            return None
+        data = process.stdout.read(int(header[2]))
+        process.stdout.read(1)
+        return data.decode("utf-8", errors="replace")
+
+    def close(self) -> None:
+        for process in self.processes.values():
+            try:
+                process.stdin.close()
+                process.wait(timeout=5)
+            except (OSError, subprocess.TimeoutExpired):
+                process.kill()
+                process.wait()
+            process.stdout.close()
+
+
+@contextmanager
+def _session():
+    """Share one reader and context cache across a lookup call; nested calls reuse it."""
+    current = _SESSION.get()
+    if current is not None:
+        yield current
+        return
+    session = _Session()
+    token = _SESSION.set(session)
+    try:
+        yield session
+    finally:
+        _SESSION.reset(token)
+        session.close()
+
+
 def _git_source(project: Path, commit: str, path: str) -> str:
     if not path.endswith(".lean") or Path(path).is_absolute() or ".." in Path(path).parts:
         raise ValueError("Only relative .lean paths inside the pinned project are allowed")
+    session = _SESSION.get()
+    if session is not None:
+        return session.read(project, commit, path)
     return subprocess.run(["git", "show", f"{commit}:{path}"], cwd=project,
                           text=True, capture_output=True, check=True).stdout
+
+
+def _context(name: str) -> dict:
+    """The kickoff inventory, read once per lookup call."""
+    from arena.context import lean_context
+
+    session = _SESSION.get()
+    if session is None:
+        return lean_context(name)
+    if name not in session.contexts:
+        session.contexts[name] = lean_context(name)
+    return session.contexts[name]
 
 
 MAX_SOURCE_LINES = 400
@@ -39,7 +128,15 @@ MAX_DECLARATION_PAGE_CHARS = 16_000
 
 def declarations(name: str, items: list[str] | None = None, cursor: str | None = None) -> dict:
     """Resolve a batch of declaration handles against the kickoff's tagged constant index."""
-    from arena.context import constant_index, lean_context
+    if bool(items) == bool(cursor):
+        raise ValueError("Pass exactly one of items (a nonempty list of declaration names or handles) "
+                         "or cursor (next_cursor from a previous page)")
+    with _session():
+        return _declarations(name, items, cursor)
+
+
+def _declarations(name: str, items: list[str] | None, cursor: str | None) -> dict:
+    from arena.context import constant_index
 
     if cursor:
         try:
@@ -54,7 +151,7 @@ def declarations(name: str, items: list[str] | None = None, cursor: str | None =
     if not isinstance(items, list) or not items or not all(isinstance(item, str) and item for item in items):
         raise ValueError("items must be a nonempty list of declaration names or handles")
 
-    inventory = lean_context(name)
+    inventory = _context(name)
     if inventory.get("error"):
         return {"items": [{"input": item, "kind": "unavailable", "reason": "unavailable",
                            "detail": inventory["error"]} for item in items[offset:]], "next_cursor": None}
@@ -79,7 +176,9 @@ def declarations(name: str, items: list[str] | None = None, cursor: str | None =
                           "suggestions": [item["name"] for item in matches[:12]]}
             elif not matches:
                 found = declaration(name, query)
-                if not found.get("found"):
+                if found.get("ambiguous"):
+                    result = {"input": original, "kind": "ambiguous", "suggestions": found["ambiguous"]}
+                elif not found.get("found"):
                     result = {"input": original, "kind": "error", "error": "not_found",
                               "hint": found.get("hint"),
                               "suggestions": _declaration_suggestions(query, constants)}
@@ -142,27 +241,34 @@ def _unavailable_reason(entry: dict, found: dict) -> str:
     return "unavailable"
 
 
-def source_range(name: str, path: str, first: int, last: int | None = None) -> dict:
-    """Read pinned source; `next_first` continues a range cut at the limit."""
+def source_range(name: str, path: str, first: int | None = None, last: int | None = None) -> dict:
+    """Read pinned source; `next_first` continues a range cut at the limit.
+
+    Without `first`, a `decl:` handle starts at its declaration and a path at the top of the file.
+    """
+    with _session():
+        return _source_range(name, path, first, last)
+
+
+def _source_range(name: str, path: str, first: int | None, last: int | None) -> dict:
     row = problem(name)
     version, commit = versions(row)[0]
     project = workspace(row, version, commit)
     if path.startswith("decl:"):
-        symbol = path[5:]
-        source_symbol = _source_decl_symbol(name, symbol)
+        source_symbol, module, span = _source_hint(name, path[5:])
         try:
-            path, _ = _resolve_declaration_source(name, source_symbol)
-            module = None
-        except ValueError:
-            module = _indexed_module(name, source_symbol)
-            path, _ = _resolve_declaration_source(name, source_symbol, module)
-        project, commit, path = _source_target(project, commit, path, module)
+            located = _resolve_declaration_source(name, source_symbol, module, span)
+        except AmbiguousDeclaration as error:
+            return {"kind": "ambiguous", "handle": path, "candidates": error.candidates}
+        project, commit, path = located["root"], located["pin"], located["path"]
+        first = located["line"] if first is None else first
     else:
         project, commit, path = _source_target(project, commit, _canonical_source_path(row, path))
     try:
         lines = _git_source(project, commit, path).splitlines()
     except subprocess.CalledProcessError:
         raise ValueError(f"{path} does not exist in the pinned project at {commit[:8]}") from None
+    first = 1 if first is None else first
     if first < 1 or first > len(lines):
         raise ValueError(f"{path} has {len(lines)} lines; first={first} is out of range")
     wanted = last if last is not None else first + 199
@@ -176,53 +282,119 @@ def source_range(name: str, path: str, first: int, last: int | None = None) -> d
 
 
 def find(name: str, queries: list[str], limit: int = 20) -> dict:
-    """Search pinned source text and the kickoff index, counting each qualified declaration once."""
-    from arena.context import constant_index, lean_context
-
+    """Search declaration lines of the pinned trees and the kickoff index, counting each qualified declaration once."""
     if not queries or not all(isinstance(query, str) and query.strip() for query in queries):
         raise ValueError("queries must be a nonempty list of names or search strings")
     if limit < 1:
         raise ValueError("limit must be positive")
     limit = min(limit, 100)
-    inventory = lean_context(name)
+    with _session():
+        return _find(name, queries, limit)
+
+
+def _find(name: str, queries: list[str], limit: int) -> dict:
+    from arena.context import constant_index
+
+    inventory = _context(name)
     indexed = constant_index(inventory) if not inventory.get("error") else []
+    entries = indexed + [{**item, "kind": item.get("decl")} for item in inventory.get("source", [])
+                         if not inventory.get("error")]
     row = problem(name)
     version, commit = versions(row)[0]
-    project = workspace(row, version, commit)
-    source_rows: list[dict] = []
-    source_roots = [(project, commit)] + [(root, pin) for root, pin, _ in _package_roots(project)]
-    candidate_paths: set[tuple[Path, str, str]] = set()
-    for query in queries:
-        needle = query[5:] if query.startswith("decl:") else query
-        for source_root, source_pin in source_roots:
-            candidate_paths.update((source_root, source_pin, path)
-                                   for path in _matching_pinned_paths(source_root, source_pin, needle))
-    for source_root, source_pin, path in sorted(candidate_paths, key=lambda item: (str(item[0]), item[2])):
-        content = _git_source(source_root, source_pin, path)
-        lines = content.splitlines()
-        starts = _source_declarations(lines)
-        for index, (line_number, qualified) in enumerate(starts):
-            end = starts[index + 1][0] - 1 if index + 1 < len(starts) else len(lines)
-            source_rows.append({"name": qualified, "handle": f"decl:{qualified}", "path": path,
-                                "line": line_number, "pin": source_pin,
-                                "source_text": "\n".join(lines[line_number - 1:end])})
+    roots = _roots(workspace(row, version, commit), commit)
+    needles = [query[5:] if query.startswith("decl:") else query for query in queries]
+    named = [bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_'.]*", needle)) for needle in needles]
+    # A name the kickoff index holds exactly resolves without searching the source trees.
+    pending = [needle for needle, is_name in zip(needles, named)
+               if not (is_name and any(item["name"] == needle for item in entries))]
+    hits = _declaration_hits(roots, list(dict.fromkeys(pending))) if pending else []
     per_query = []
-    for query in queries:
-        needle = query[5:] if query.startswith("decl:") else query
-        q = needle.casefold()
-        matches = [item for item in source_rows
-                   if (item["name"] == needle if query.startswith("decl:") else
-                       q in item["name"].casefold() or q in item["source_text"].casefold())]
-        by_name = {item["name"]: item for item in matches}
-        if not by_name:
-            suggestions = _declaration_suggestions(needle, indexed)
+    for query, needle, is_name in zip(queries, needles, named):
+        exact_only = query.startswith("decl:")
+        folded = needle.casefold()
+        found: dict[str, dict] = {}
+        if is_name:
+            for item in entries:
+                module = item.get("module")
+                if (item["name"] == needle if exact_only else folded in item["name"].casefold()) \
+                        and item["name"] not in found and module not in (None, "this file") \
+                        and "start_line" in item and item.get("tag") != "generated":
+                    located = _module_file(roots, module)
+                    if located is None:
+                        continue
+                    root, pin, path = located
+                    lines = _git_source(root, pin, path).splitlines()
+                    found[item["name"]] = _declaration_row(pin, path, lines, item["name"],
+                                                           item["start_line"], item["end_line"])
+        files_truncated = False
+        scanned = 0
+        if needle in pending:
+            candidates = _candidate_files(hits, needle, is_name, exact_only)
+            files_truncated = len(candidates) > MAX_SCAN_FILES
+            for index, pin, path in candidates[:MAX_SCAN_FILES]:
+                read = _scan(roots[index][0], pin, path)
+                if read is None:
+                    continue
+                scanned += 1
+                lines, starts = read
+                for number, (line_number, qualified) in enumerate(starts):
+                    if qualified in found:
+                        continue
+                    end = _declaration_end(lines, starts, number)
+                    if exact_only:
+                        matched = qualified == needle
+                    elif is_name:
+                        matched = folded in qualified.casefold()
+                    else:
+                        matched = folded in "\n".join(lines[line_number - 1:end]).casefold()
+                    if matched:
+                        found[qualified] = _declaration_row(pin, path, lines, qualified,
+                                                            _declaration_start(lines, line_number), end)
+        if not found:
             per_query.append({"query": query, "matches": [], "error": "not_found",
-                              "suggestions": suggestions})
+                              "suggestions": _declaration_suggestions(needle, indexed),
+                              "files_scanned": scanned, "files_truncated": files_truncated})
             continue
-        selected = sorted(by_name.values(), key=lambda item: item["name"])[:limit]
-        per_query.append({"query": query, "matches": selected,
-                          "distinct_count": len(by_name), "truncated": len(by_name) > len(selected)})
+        selected = sorted(found.values(), key=lambda item: (
+            0 if item["name"].casefold() == folded else 1 if item["name"].casefold().endswith("." + folded) else 2,
+            item["name"]))[:limit]
+        per_query.append({"query": query, "matches": selected, "distinct_count": len(found),
+                          "truncated": len(found) > len(selected), "files_scanned": scanned,
+                          "files_truncated": files_truncated})
     return {"queries": per_query, "pin": commit, "limit": limit}
+
+
+def _declaration_row(pin: str, path: str, lines: list[str], qualified: str, start: int, end: int) -> dict:
+    return {"name": qualified, "handle": f"decl:{qualified}", "path": path, "line": start,
+            "end_line": end, "pin": pin, "signature": _signature(lines, start, end)}
+
+
+def _candidate_files(hits: list[tuple[int, str, str, int, str]], needle: str, is_name: bool,
+                     exact_only: bool) -> list[tuple[int, str, str]]:
+    """Files worth reading for one query, best first: exact leaf names, then prefixes, then substrings."""
+    folded = needle.casefold()
+    parts = needle.split(".")
+    leaf = parts[-1].casefold()
+    namespaced = {(index, path) for index, _, path, _, text in hits
+                  if len(parts) > 1 and re.match(r"^\s*namespace\s", text, re.I)
+                  and parts[-2].casefold() in text.casefold()}
+    ranked: dict[tuple[int, str, str], int] = {}
+    for index, pin, path, _, text in hits:
+        declared = _DECLARATION_PATTERN.match(text)
+        if is_name:
+            if not declared:
+                continue
+            local = declared.group(1).casefold()
+            if leaf not in local or (len(parts) > 1 and folded not in local and (index, path) not in namespaced):
+                continue
+            tier = 0 if local.split(".")[-1] == leaf else 1 if local.split(".")[-1].startswith(leaf) else 2
+        elif folded in text.casefold():
+            tier = 2
+        else:
+            continue
+        key = (index, pin, path)
+        ranked[key] = min(ranked.get(key, tier), tier)
+    return [key for key, _ in sorted(ranked.items(), key=lambda item: (item[1], item[0][0], item[0][2]))]
 
 
 def _canonical_source_path(row: dict, path: str) -> str:
@@ -277,155 +449,275 @@ def _source_target(project: Path, commit: str, path: str,
     raise ValueError(f"{path} does not exist in the pinned project or its dependency roots")
 
 
-def _indexed_module(name: str, symbol: str) -> str | None:
-    from arena.context import constant_index, lean_context
-
-    inventory = lean_context(name)
-    if inventory.get("error"):
-        return None
-    matches = constant_index(inventory, name=symbol)
-    return matches[0].get("module") if len(matches) == 1 else None
-
-
-def _source_decl_symbol(name: str, symbol: str) -> str:
-    """Lean constructors are written inside their inductive's pinned source block."""
-    from arena.context import constant_index, lean_context
-
-    inventory = lean_context(name)
-    if inventory.get("error"):
-        return symbol
-    matches = constant_index(inventory, name=symbol)
-    if len(matches) == 1 and matches[0].get("kind") == "constructor" and "." in symbol:
-        return symbol.rsplit(".", 1)[0]
-    return symbol
-
-
-def _pinned_lean_paths(project: Path, commit: str) -> list[str]:
-    result = subprocess.run(["git", "ls-tree", "-r", "--name-only", commit], cwd=project,
-                            text=True, capture_output=True, check=True)
-    return [path for path in result.stdout.splitlines() if path.endswith(".lean")]
-
-
-def _matching_pinned_paths(project: Path, commit: str, query: str) -> list[str]:
-    """Use Git's pinned tree search so working copies and scratch files cannot enter results."""
-    leaf = query.split(".")[-1] if query.startswith("decl:") or "." in query else query
-    result = subprocess.run(["git", "grep", "-I", "-l", "-i", "-F", leaf, commit, "--", "*.lean"],
-                            cwd=project, text=True, capture_output=True, check=False)
-    if result.returncode not in (0, 1):
-        raise RuntimeError(result.stderr.strip() or "Pinned source search failed")
-    return [line.split(":", 1)[1] if ":" in line else line for line in result.stdout.splitlines()]
+_DECLARATION_PATTERN = re.compile(
+    r"^\s*(?:@\[[^\]]*\]\s*)*(?:(?:private|protected|noncomputable|nonrec|unsafe|partial)\s+)*"
+    r"(?:theorem|lemma|def|opaque|example|instance|abbrev|inductive|structure|class|axiom)\s+"
+    r"([A-Za-z_][A-Za-z0-9_'.]*)")
+_SCOPE_PATTERN = re.compile(
+    r"^\s*(?:@\[[^\]]*\]\s*)*(?:(?:public|noncomputable|meta)\s+)*(namespace|section)\b(?:\s+([A-Za-z_][A-Za-z0-9_'.]*))?\s*$")
+_END_PATTERN = re.compile(r"^\s*end(?:\s+([A-Za-z_][A-Za-z0-9_'.]*))?\s*$")
+# The same shape for `git grep -E`, which only needs declaration lines and never body text.
+_DECLARATION_GREP = (r"^[[:space:]]*(@\[[^]]*\][[:space:]]*)*((private|protected|noncomputable|nonrec|unsafe|partial)"
+                     r"[[:space:]]+)*(theorem|lemma|def|opaque|instance|abbrev|inductive|structure|class|axiom)[[:space:]]+")
+MAX_SCAN_FILES = 30
 
 
 def _source_declarations(lines: list[str]) -> list[tuple[int, str]]:
-    """Return named Lean declarations with names qualified by their namespace blocks."""
-    namespace: list[str] = []
+    """Return named Lean declarations with names qualified by their namespace and section blocks."""
+    scopes: list[tuple[str | None, str]] = []  # (label, namespace prefix it adds); sections add none
     declarations = []
-    declaration_pattern = re.compile(
-        r"^\s*(?:private\s+|protected\s+)?(?:@\[[^\]]*\]\s*)*"
-        r"(?:theorem|lemma|def|opaque|example|instance|abbrev|inductive|structure|class|axiom)\s+"
-        r"([A-Za-z_][A-Za-z0-9_'.]*)")
     for line_number, line in enumerate(lines, 1):
-        opened = re.match(r"^\s*namespace\s+([A-Za-z_][A-Za-z0-9_.']*)", line)
-        if opened:
-            namespace.append(opened.group(1))
+        code = line.split("--", 1)[0]
+        scope = _SCOPE_PATTERN.match(code)
+        if scope:
+            scopes.append((scope.group(2), scope.group(2) or "") if scope.group(1) == "namespace"
+                          else (scope.group(2) or "", ""))
             continue
-        closed = re.match(r"^\s*end(?:\s+([A-Za-z_][A-Za-z0-9_'.]*))?\s*$", line)
+        closed = _END_PATTERN.match(code)
         if closed:
-            if closed.group(1):
-                while namespace and namespace[-1] != closed.group(1):
-                    namespace.pop()
-                if namespace:
-                    namespace.pop()
-            elif namespace:
-                namespace.pop()
+            label = closed.group(1)
+            index = next((i for i in range(len(scopes) - 1, -1, -1) if label is not None and
+                          (scopes[i][0] == label or (scopes[i][0] or "").endswith("." + label))), None)
+            if label is None or index is None:
+                index = len(scopes) - 1
+            del scopes[max(index, 0):]
             continue
-        match = declaration_pattern.match(line)
+        match = _DECLARATION_PATTERN.match(line)
         if match:
             local = match.group(1)
-            qualified = local if "." in local or not namespace else ".".join(namespace + [local])
+            if local.startswith("_root_."):
+                qualified = local[len("_root_."):]
+            else:
+                qualified = ".".join([prefix for _, prefix in scopes if prefix] + [local])
             declarations.append((line_number, qualified))
     return declarations
 
 
-def _resolve_declaration_source(name: str, symbol: str, module: str | None = None) -> tuple[str, int]:
-    """Find an exact source declaration in the benchmark's pinned tree, excluding scratch copies."""
+def _declaration_start(lines: list[str], line: int) -> int:
+    """Include the attribute lines and doc comment that belong to a declaration."""
+    start = line
+    while start > 1 and lines[start - 2].lstrip().startswith("@["):
+        start -= 1
+    if start > 1 and lines[start - 2].rstrip().endswith("-/"):
+        opener = next((i for i in range(start - 2, max(start - 80, -1), -1)
+                       if lines[i].lstrip().startswith("/--")), None)
+        if opener is not None:
+            start = opener + 1
+    return start
+
+
+def _declaration_end(lines: list[str], starts: list[tuple[int, str]], index: int) -> int:
+    """The last line of a declaration: before the next one's docs and attributes, ignoring blank lines."""
+    following = starts[index + 1][0] if index + 1 < len(starts) else len(lines) + 1
+    end = _declaration_start(lines, following) - 1 if following <= len(lines) else len(lines)
+    while end > starts[index][0] and (not lines[end - 1].strip() or lines[end - 1].lstrip().startswith("--")
+                                      or _SCOPE_PATTERN.match(lines[end - 1]) or _END_PATTERN.match(lines[end - 1])):
+        end -= 1
+    return end
+
+
+def _signature(lines: list[str], start: int, end: int) -> str:
+    """The first declaration lines after any doc comment and attributes, up to the line that opens the body."""
+    shown = []
+    keyword = next((i for i in range(start, end + 1) if _DECLARATION_PATTERN.match(lines[i - 1])), start)
+    for text in lines[keyword - 1:min(end, keyword + 5)]:
+        shown.append(text.rstrip())
+        if ":=" in text or text.rstrip().endswith("where") or text.strip().startswith("|"):
+            break
+    return "\n".join(shown)
+
+
+def _roots(project: Path, commit: str) -> list[tuple[Path, str, str]]:
+    session = _SESSION.get()
+    key = str(project)
+    if session is not None and key in session.roots:
+        return session.roots[key]
+    roots = [(project, commit, "")] + _package_roots(project)
+    if session is not None:
+        session.roots[key] = roots
+    return roots
+
+
+def _module_file(roots: list[tuple[Path, str, str]], module: str) -> tuple[Path, str, str] | None:
+    """The pinned root that holds module `A.B.C` as `A/B/C.lean`; its own package is tried first."""
+    path = module.replace(".", "/") + ".lean"
+    head = module.split(".")[0].casefold()
+    for root, pin, package in sorted(roots, key=lambda item: item[2].casefold() != head):
+        try:
+            _git_source(root, pin, path)
+        except subprocess.CalledProcessError:
+            continue
+        return root, pin, path
+    return None
+
+
+def _alternation(needle: str) -> str:
+    return re.sub(r"([.^$*+?()\[\]{}|\\])", r"\\\1", needle)
+
+
+def _declaration_hits(roots: list[tuple[Path, str, str]], needles: list[str]) -> list[tuple[int, str, str, int, str]]:
+    """Declaration lines naming any needle, plus namespace lines for dotted needles, from pinned trees only.
+
+    One `git grep` per root; hits are (root index, pin, path, line, text).
+    """
+    alternatives = []
+    for needle in needles:
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_'.]*", needle):
+            parts = needle.split(".")
+            alternatives.append(_DECLARATION_GREP + r"[^[:space:]]*" + _alternation(parts[-1]))
+            if len(parts) > 1:
+                alternatives.append(r"^[[:space:]]*namespace[[:space:]]+[^[:space:]]*" + _alternation(parts[-2]))
+        else:
+            alternatives.append(_alternation(needle))
+    if not alternatives:
+        return []
+    pattern = "|".join(f"({item})" for item in alternatives)
+
+    def grep(entry: tuple[int, tuple[Path, str, str]]) -> list[tuple[int, str, str, int, str]]:
+        index, (root, pin, _) = entry
+        result = subprocess.run(["git", "grep", "-n", "-I", "-i", "-E", "-e", pattern, pin, "--", "*.lean"],
+                                cwd=root, text=True, errors="replace", capture_output=True, check=False)
+        if result.returncode not in (0, 1):
+            raise RuntimeError(result.stderr.strip() or "Pinned source search failed")
+        hits = []
+        for raw in result.stdout.splitlines():
+            parts = raw[len(pin) + 1:].split(":", 2)
+            if len(parts) == 3 and parts[1].isdigit():
+                hits.append((index, pin, parts[0], int(parts[1]), parts[2]))
+        return hits
+
+    with ThreadPoolExecutor(max_workers=min(len(roots), 8)) as pool:
+        return [hit for hits in pool.map(grep, enumerate(roots)) for hit in hits]
+
+
+def _scan(root: Path, pin: str, path: str) -> tuple[list[str], list[tuple[int, str]]] | None:
+    session = _SESSION.get()
+    key = (str(root), pin, path)
+    if session is not None and key in session.scans:
+        return session.scans[key]
+    try:
+        lines = _git_source(root, pin, path).splitlines()
+    except subprocess.CalledProcessError:
+        return None
+    scanned = lines, _source_declarations(lines)
+    if session is not None:
+        session.scans[key] = scanned
+    return scanned
+
+
+def _resolve_declaration_source(name: str, symbol: str, module: str | None = None,
+                                span: tuple[int, int] | None = None) -> dict:
+    """Find one declaration's pinned file and lines, excluding scratch copies.
+
+    `module` and `span` come from the kickoff index and resolve the declaration exactly with no
+    search; otherwise only declaration lines mentioning the name are searched. An exact qualified
+    match wins; several distinct qualified matches raise AmbiguousDeclaration.
+    """
     if not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9'.]*", symbol):
         raise ValueError("Invalid declaration name")
     row = problem(name)
     version, commit = versions(row)[0]
     project = workspace(row, version, commit)
-    roots = [(project, commit)] + [(root, pin) for root, pin, _ in _package_roots(project)]
+    roots = _roots(project, commit)
     leaf = symbol.split(".")[-1]
-    for source_root, source_pin in roots:
-        for path in _matching_pinned_paths(source_root, source_pin, leaf):
-            try:
-                source = _git_source(source_root, source_pin, path)
-            except subprocess.CalledProcessError:
-                continue
-            for line_number, qualified in _source_declarations(source.splitlines()):
-                local = qualified.rsplit(".", 1)[-1]
-                if qualified == symbol or local == symbol:
-                    return path, line_number
+    if module == "this file":
+        files = [(project, commit, row["file_path"])]
+        span = None
+    elif module:
+        located = _module_file(roots, module)
+        if located is None:
+            raise ValueError(f"{symbol} is defined in {module}, which is not in the pinned project or its dependency roots")
+        files = [located]
+    else:
+        hits = _declaration_hits(roots, [symbol])
+        files = []
+        for index, pin, path, _, text in hits:
+            declared = _DECLARATION_PATTERN.match(text)
+            if declared and leaf.casefold() in declared.group(1).casefold() and (roots[index][0], pin, path) not in files:
+                files.append((roots[index][0], pin, path))
+    scanned = 0
+    found: dict[str, dict] = {}
+    for root, pin, path in files:
+        if scanned >= MAX_SCAN_FILES:
+            break
+        scanned += 1
+        read = _scan(root, pin, path)
+        if read is None:
+            continue
+        lines, starts = read
+        if span is not None and 1 <= span[0] <= span[1] <= len(lines) and leaf in "\n".join(lines[span[0] - 1:span[1]]):
+            return {"root": root, "pin": pin, "path": path, "line": span[0], "end": span[1],
+                    "qualified": symbol, "file_lines": len(lines)}
+        for index, (line_number, qualified) in enumerate(starts):
+            if qualified == symbol or qualified.endswith("." + symbol):
+                start = _declaration_start(lines, line_number)
+                found.setdefault(qualified, {"root": root, "pin": pin, "path": path, "line": start,
+                                             "end": _declaration_end(lines, starts, index),
+                                             "qualified": qualified, "file_lines": len(lines)})
+    if symbol in found:
+        return found[symbol]
+    if len(found) > 1:
+        raise AmbiguousDeclaration(symbol, sorted(found))
+    if found:
+        return next(iter(found.values()))
     raise ValueError(f"Declaration not found in pinned project: {symbol}")
 
 
+def _indexed_entry(name: str, symbol: str) -> dict | None:
+    """The kickoff index entry for an exact qualified name, with its module and line span when known."""
+    from arena.context import constant_index
+
+    inventory = _context(name)
+    if inventory.get("error"):
+        return None
+    matches = constant_index(inventory, name=symbol)
+    if len(matches) == 1:
+        return matches[0]
+    sources = [item for item in inventory.get("source", []) if item.get("name") == symbol]
+    return {**sources[0], "kind": sources[0].get("decl")} if sources else None
+
+
+def _source_hint(name: str, symbol: str) -> tuple[str, str | None, tuple[int, int] | None]:
+    """Source symbol, module and exact line span for a name; constructors live in their inductive's block."""
+    entry = _indexed_entry(name, symbol)
+    if entry is None:
+        return symbol, None, None
+    module = entry.get("module")
+    if entry.get("kind") == "constructor" and "." in symbol:
+        return symbol.rsplit(".", 1)[0], module, None
+    span = (entry["start_line"], entry["end_line"]) if "start_line" in entry and "end_line" in entry else None
+    return symbol, module, span
+
+
 def declaration(name: str, symbol: str) -> dict:
+    with _session():
+        return _declaration(name, symbol)
+
+
+def _declaration(name: str, symbol: str) -> dict:
     if symbol.startswith("decl:"):
         symbol = symbol[5:]
     if not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9'.]*", symbol):
         raise ValueError("Invalid declaration name")
-    row = problem(name)
-    version, commit = versions(row)[0]
-    project = workspace(row, version, commit)
-    source_symbol = _source_decl_symbol(name, symbol)
+    source_symbol, module, span = _source_hint(name, symbol)
     try:
-        try:
-            path, line = _resolve_declaration_source(name, source_symbol)
-            module = None
-        except ValueError:
-            module = _indexed_module(name, source_symbol)
-            path, line = _resolve_declaration_source(name, source_symbol, module)
-        source_project, pin, path = _source_target(project, commit, path, module)
-        source = _git_source(source_project, pin, path)
-        lines = source.splitlines()
-        start = line - 1
-        end = next((i for i in range(start + 1, len(lines))
-                    if re.match(r"^(?:private\s+)?(?:theorem|lemma|def|opaque|instance|abbrev|inductive|structure|class)\s+", lines[i])),
-                   len(lines))
-        return {"symbol": symbol, "handle": f"decl:{symbol}", "name": symbol, "found": True,
-                "pin": pin, "path": path, "line": line,
-                "source_text": "\n".join(lines[start:end])}
+        located = _resolve_declaration_source(name, source_symbol, module, span)
+    except AmbiguousDeclaration as error:
+        return {"symbol": symbol, "found": True, "ambiguous": error.candidates}
     except ValueError:
-        pass
-    paths = _pinned_lean_paths(project, commit)
-    pattern = re.compile(r"(?m)^\s*(?:@\[[^\n]*\]\s*)*(?:theorem|lemma|def|instance|abbrev|inductive|structure|class)\s+"
-                         + re.escape(symbol) + r"(?![A-Za-z0-9_'.])")
-    for path in paths[:80]:
-        path = path.removeprefix("./")
-        try:
-            source = _git_source(project, commit, path)
-        except subprocess.CalledProcessError:
-            continue
-        match = pattern.search(source)
-        if not match:
-            continue
-        suffix = source[match.start():match.start() + 3000]
-        # A named argument such as (P:=P) occurs inside some theorem types.
-        # Only the assignment at top level starts the proof body.
-        depth = 0
-        end = None
-        for index, char in enumerate(suffix):
-            if char in "([{":
-                depth += 1
-            elif char in ")]}":
-                depth -= 1
-            elif char == ":" and suffix[index:index + 2] == ":=" and depth == 0:
-                end = index
-                break
-        signature = suffix[:end].rstrip() if end is not None else suffix.splitlines()[0]
-        line = source.count("\n", 0, match.start()) + 1
-        return {"symbol": symbol, "source": f"{row['source']}@{commit}:{path}:{line}",
-                "signature": signature}
+        located = None
+    if located is not None:
+        lines = _git_source(located["root"], located["pin"], located["path"]).splitlines()
+        qualified = located["qualified"] if module is None else symbol
+        return {"symbol": symbol, "handle": f"decl:{qualified}", "name": qualified, "found": True,
+                "pin": located["pin"], "path": located["path"], "line": located["line"],
+                "end_line": located["end"], "file_lines": located["file_lines"],
+                "source_text": "\n".join(lines[located["line"] - 1:located["end"]])}
+    entry = _indexed_entry(name, symbol)
+    if entry is not None and module not in (None, "this file"):
+        # Indexed, but no pinned source root holds its module (for example the Lean toolchain).
+        return {"symbol": symbol, "found": True, "name": symbol, "kind": entry.get("kind"),
+                "module": module, "signature": entry.get("sig")}
     return _declaration_in_lean(name, symbol)
 
 

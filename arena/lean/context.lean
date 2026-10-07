@@ -1,3 +1,14 @@
+-- Declaration ranges of an imported module, read from its server olean part. Modules compiled
+-- with the module system do not expose them through the environment.
+meta unsafe def arena_moduleRanges (m : Lean.Name) : IO (Array (Lean.Name × Lean.DeclarationRanges)) := do
+  let fname ← Lean.findOLean m
+  let parts ← Lean.readModuleDataParts #[fname, Lean.OLeanLevel.server.adjustFileName fname]
+  for (data, _) in parts do
+    for (ext, entries) in data.entries do
+      if ext == Lean.declRangeExt.name then
+        return unsafeCast entries
+  return #[]
+
 open Lean Elab Command Meta in
 elab "arena_context " cmd:command : command => do
   let projectRoots : List String := [@@ROOTS@@]
@@ -17,6 +28,28 @@ elab "arena_context " cmd:command : command => do
       try
         liftTermElabM (do pure s!"{n} : {← ppExpr ci.type}")
       catch _ => pure ""
+  -- Source line span of an imported declaration, so lookups read exact pinned lines without searching.
+  let moduleRanges ← IO.mkRef (({} : Std.HashMap Lean.Name (Array (Lean.Name × Lean.DeclarationRanges))))
+  let rangeOf (n : Lean.Name) : CommandElabM (List (String × Json)) := do
+    let fields := fun (r : DeclarationRanges) =>
+      [("start_line", (r.range.pos.line : Json)), ("end_line", (r.range.endPos.line : Json))]
+    match (← getEnv).getModuleIdxFor? n with
+    | none => pure []
+    | some idx =>
+      match ← findDeclarationRanges? n with
+      | some r => pure (fields r)
+      | none =>
+        let m := (← getEnv).header.moduleNames[idx.toNat]!
+        if ["Init", "Std", "Lean"].contains m.getRoot.toString then pure [] else
+        let known ← match (← moduleRanges.get)[m]? with
+          | some rs => pure rs
+          | none => do
+            let rs ← try unsafe arena_moduleRanges m catch _ => pure #[]
+            moduleRanges.modify (·.insert m rs)
+            pure rs
+        match known.find? (·.1 == n) with
+        | some (_, r) => pure (fields r)
+        | none => pure []
   let isProjectLocal (n : Lean.Name) (env : Lean.Environment) : Bool :=
     match env.getModuleIdxFor? n with
     | none => true
@@ -150,8 +183,9 @@ elab "arena_context " cmd:command : command => do
       let modName := match env.getModuleIdxFor? n with
         | none => "this file"
         | some idx => (env.header.moduleNames[idx.toNat]!).toString
-      emit [("kind", "source"), ("name", n.toString), ("line", line), ("column", column),
-            ("decl", decl), ("module", modName), ("tag", tagOf n env), ("sig", clip (← sigOf n) 500)]
+      emit (([("kind", "source"), ("name", n.toString), ("line", line), ("column", column),
+            ("decl", decl), ("module", modName), ("tag", tagOf n env), ("sig", clip (← sigOf n) 500)] : List (String × Json)) ++
+            (← rangeOf n))
   -- Direct theorem and lemma constants in the elaborated proof term. Keep the full
   -- constant index available to the cache, but classify generated constants by kind.
   match env.find? targetName with
@@ -167,9 +201,9 @@ elab "arena_context " cmd:command : command => do
           | none => "this file"
           | some idx => (env.header.moduleNames[idx.toNat]!).toString
         let tag := tagOf n env
-        emit [("kind", "constant"), ("name", n.toString), ("decl", constantDecl), ("tag", tag),
+        emit (([("kind", "constant"), ("name", n.toString), ("decl", constantDecl), ("tag", tag),
               ("origin", "elaborated-proof"), ("module", constantModule),
-              ("sig", clip (← sigOf n) 500)]
+              ("sig", clip (← sigOf n) 500)] : List (String × Json)) ++ (← rangeOf n))
         unless n == targetName do
           match env.find? n with
           | some (.thmInfo _) | some (.axiomInfo _) =>
