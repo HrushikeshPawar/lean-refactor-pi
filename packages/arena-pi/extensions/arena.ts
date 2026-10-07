@@ -640,8 +640,9 @@ export default function arenaExtension(pi: ExtensionAPI) {
     const messages = event.messages.map(message => {
       if (message.role !== "toolResult" || !message.isError) return message;
       const first = message.content.find(part => part.type === "text") as { text?: string } | undefined;
-      const match = first?.text?.trim().match(/^Tool (arena_[A-Za-z0-9_]+) not found$/);
-      const suggestion = match && nearestToolName(match[1]);
+      const match = first?.text?.trim().match(/^Tool ((?:arena_|mcp__arena_lean__)[A-Za-z0-9_]+) not found$/);
+      const name = match?.[1]?.replace(/^mcp__arena_lean__lean_/, "arena_");
+      const suggestion = name && nearestToolName(name);
       if (!suggestion) return message;
       changed = true;
       return { ...message, content: [...message.content, { type: "text" as const,

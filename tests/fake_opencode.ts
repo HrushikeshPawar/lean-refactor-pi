@@ -109,10 +109,9 @@ export default function fakeOpenCode(pi: ExtensionAPI) {
             } else {
               stream.push({ type: "toolcall_start", contentIndex: number, partial: message });
               const call = step?.tool_calls?.[number];
-              if (call?.raw_arguments !== undefined) {
-                stream.push({ type: "toolcall_delta", contentIndex: number, delta: call.raw_arguments,
-                  partial: message as never });
-              }
+              const rawArguments = call?.raw_arguments ?? JSON.stringify(call?.arguments ?? {});
+              stream.push({ type: "toolcall_delta", contentIndex: number, delta: rawArguments,
+                partial: message as never });
               stream.push({ type: "toolcall_end", contentIndex: number, toolCall: block as never, partial: message });
             }
           });

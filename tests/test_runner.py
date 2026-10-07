@@ -307,9 +307,12 @@ LEAN_TOOLS = {f"mcp__arena_lean__{name}" for name in
 
 
 def declared_tools(request: dict) -> set[str]:
-    """Tool names declared in a request; Pi carries declarations in the system message sections."""
+    """Tool names exposed by Pi, plus names declared in any system-message sections."""
     import re
-    return set(re.findall(r'"name": "((?:mcp__|arena_)[A-Za-z0-9_]+|codemode|tool_search)"', json.dumps(request["messages"][0])))
+    prompt_names = set(re.findall(r'"name": "((?:mcp__|arena_)[A-Za-z0-9_]+|codemode|tool_search)"',
+                                  json.dumps(request["messages"][0])))
+    exposed_names = set(request.get("tools", []))
+    return prompt_names | exposed_names
 
 
 class SkillToolNamesTests(unittest.TestCase):
@@ -351,6 +354,19 @@ class ToolArgumentUxTests(unittest.TestCase):
         self.assertEqual(run.result.returncode, 0, run.stdout[-1000:])
         results = [message for message in run.requests[-1]["messages"]
                    if message.get("role") == "toolResult" and message.get("toolName") == "arena_declaraton"]
+        self.assertEqual(len(results), 1)
+        self.assertIn("Closest registered Arena tool: arena_declarations", message_text(results[0]))
+
+    def test_retired_mcp_declaration_name_suggests_the_batched_declaration_tool(self):
+        run = FakeRun([{"tool_calls": [{"name": "mcp__arena_lean__lean_declaration",
+                                        "arguments": {"symbol": "Imperative.UpdateState"}}]},
+                       {"text": "done"}])
+        self.addCleanup(run.cleanup)
+        run.run()
+        self.assertEqual(run.result.returncode, 0, run.stdout[-1000:])
+        results = [message for message in run.requests[-1]["messages"]
+                   if message.get("role") == "toolResult"
+                   and message.get("toolName") == "mcp__arena_lean__lean_declaration"]
         self.assertEqual(len(results), 1)
         self.assertIn("Closest registered Arena tool: arena_declarations", message_text(results[0]))
 
