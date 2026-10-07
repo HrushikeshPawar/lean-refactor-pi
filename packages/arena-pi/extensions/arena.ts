@@ -9,6 +9,7 @@ import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import type { AssistantMessageEventStream } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { BudgetModel } from "./budget.ts";
+import { nearestToolName } from "./toolnames.ts";
 import { assessFinalPayload, BUDGET_PROVIDER, budgetLimits, cacheAlarm, catalogPriceProblem, cacheUtilization, isBudgetModel, MAX_REQUEST_OUTPUT_TOKENS, MODELS, priceForUsage, requestShape, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
 
 const root = resolve(import.meta.dirname, "../../..");
@@ -22,28 +23,6 @@ const LEAN_DISABLED_TOOLS = ["lean_build", "lean_code_actions", "lean_completion
   "lean_leansearch", "lean_loogle", "lean_minimal_hypotheses", "lean_profile_proof", "lean_references",
   "lean_run_code", "lean_term_goal", "lean_verify"];
 
-const ARENA_TOOL_NAMES = ["arena_candidate", "arena_declarations", "arena_evaluate", "arena_find", "arena_idea",
-  "arena_probe", "arena_profile", "arena_skill_read", "arena_source"];
-
-function nearestToolName(name: string): string | undefined {
-  const distance = (left: string, right: string) => {
-    const row = Array.from({ length: right.length + 1 }, (_, index) => index);
-    for (let i = 1; i <= left.length; i++) {
-      let diagonal = row[0];
-      row[0] = i;
-      for (let j = 1; j <= right.length; j++) {
-        const above = row[j];
-        row[j] = Math.min(row[j] + 1, row[j - 1] + 1, diagonal + (left[i - 1] === right[j - 1] ? 0 : 1));
-        diagonal = above;
-      }
-    }
-    return row[right.length];
-  };
-  const ranked = ARENA_TOOL_NAMES.map(candidate => ({ candidate, score: distance(name, candidate) }))
-    .sort((a, b) => a.score - b.score || a.candidate.localeCompare(b.candidate));
-  return ranked[0]?.score <= Math.max(2, Math.floor(name.length / 4)) ? ranked[0].candidate : undefined;
-}
-
 function validObjectJson(raw: string | undefined): boolean {
   if (raw === undefined) return false;
   try {
@@ -54,7 +33,7 @@ function validObjectJson(raw: string | undefined): boolean {
   }
 }
 
-function guardMalformedArenaArguments(source: AssistantMessageEventStream): AssistantMessageEventStream {
+function guardMalformedToolArguments(source: AssistantMessageEventStream): AssistantMessageEventStream {
   const guarded = createAssistantMessageEventStream();
   void (async () => {
     const rawByIndex = new Map<number, string>();
@@ -69,7 +48,7 @@ function guardMalformedArenaArguments(source: AssistantMessageEventStream): Assi
         if (event.type === "toolcall_delta") {
           rawByIndex.set(event.contentIndex, (rawByIndex.get(event.contentIndex) ?? "") + event.delta);
         }
-        if (event.type === "toolcall_end" && event.toolCall.name.startsWith("arena_")) {
+        if (event.type === "toolcall_end") {
           const block = event.partial.content[event.contentIndex] as unknown as { partialJson?: string } | undefined;
           const raw = rawByIndex.get(event.contentIndex) ?? block?.partialJson;
           if (!validObjectJson(raw)) {
@@ -335,7 +314,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
       if (priceProblem) throw new Error(priceProblem);
       const { apiKey: _guardKey, headers: _guardHeaders, env: _guardEnv, ...rest } = options ?? {};
       const innerFetch = rest.fetch ?? globalThis.fetch;
-      return guardMalformedArenaArguments(runtime.streamSimple(physical, context, {
+      return guardMalformedToolArguments(runtime.streamSimple(physical, context, {
         ...rest,
         maxTokens: Math.min(rest.maxTokens ?? MAX_REQUEST_OUTPUT_TOKENS, MAX_REQUEST_OUTPUT_TOKENS),
         fetch: async (input, init) => {
@@ -640,13 +619,12 @@ export default function arenaExtension(pi: ExtensionAPI) {
     const messages = event.messages.map(message => {
       if (message.role !== "toolResult" || !message.isError) return message;
       const first = message.content.find(part => part.type === "text") as { text?: string } | undefined;
-      const match = first?.text?.trim().match(/^Tool ((?:arena_|mcp__arena_lean__)[A-Za-z0-9_]+) not found$/);
-      const name = match?.[1]?.replace(/^mcp__arena_lean__lean_/, "arena_");
-      const suggestion = name && nearestToolName(name);
+      const name = first?.text?.trim().match(/^Tool (\S+) not found$/)?.[1];
+      const suggestion = name && nearestToolName(name, pi.getActiveTools());
       if (!suggestion) return message;
       changed = true;
       return { ...message, content: [...message.content, { type: "text" as const,
-        text: `Closest registered Arena tool: ${suggestion}.` }] };
+        text: `Closest registered tool: ${suggestion}.` }] };
     });
     return changed ? { messages } : undefined;
   });

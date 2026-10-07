@@ -346,6 +346,16 @@ class ToolArgumentUxTests(unittest.TestCase):
         self.assertIn("object", message_text(results[0]).lower())
         self.assertNotIn("No Arena skill is loaded", message_text(results[0]))
 
+    def test_unprefixed_tool_name_suggests_the_registered_arena_tool(self):
+        run = FakeRun([{"tool_calls": [{"name": "probe", "arguments": {}}]}, {"text": "done"}])
+        self.addCleanup(run.cleanup)
+        run.run()
+        self.assertEqual(run.result.returncode, 0, run.stdout[-1000:])
+        results = [message for message in run.requests[-1]["messages"]
+                   if message.get("role") == "toolResult" and message.get("toolName") == "probe"]
+        self.assertEqual(len(results), 1)
+        self.assertIn("Closest registered tool: arena_probe", message_text(results[0]))
+
     def test_misnamed_arena_tool_gets_nearest_name_in_the_next_provider_context(self):
         run = FakeRun([{"tool_calls": [{"name": "arena_declaraton", "arguments": {"symbol": "Missing"}}]},
                        {"text": "done"}])
@@ -355,7 +365,7 @@ class ToolArgumentUxTests(unittest.TestCase):
         results = [message for message in run.requests[-1]["messages"]
                    if message.get("role") == "toolResult" and message.get("toolName") == "arena_declaraton"]
         self.assertEqual(len(results), 1)
-        self.assertIn("Closest registered Arena tool: arena_declarations", message_text(results[0]))
+        self.assertIn("Closest registered tool: arena_declarations", message_text(results[0]))
 
     def test_retired_mcp_declaration_name_suggests_the_batched_declaration_tool(self):
         run = FakeRun([{"tool_calls": [{"name": "mcp__arena_lean__lean_declaration",
@@ -368,7 +378,7 @@ class ToolArgumentUxTests(unittest.TestCase):
                    if message.get("role") == "toolResult"
                    and message.get("toolName") == "mcp__arena_lean__lean_declaration"]
         self.assertEqual(len(results), 1)
-        self.assertIn("Closest registered Arena tool: arena_declarations", message_text(results[0]))
+        self.assertIn("Closest registered tool: arena_declarations", message_text(results[0]))
 
 
 TOOL_WORDS = {"build", "code_actions", "completions", "declaration_file", "file_outline", "get_widgets",
@@ -409,6 +419,20 @@ class LeanMcpTests(unittest.TestCase):
         self.assertIn("UpdateStates", message_text(results["mcp__arena_lean__lean_hover_info"]))
         settings = json.loads((run_dir(run.run_id) / "scratch" / "project" / ".pi" / "settings.json").read_text())
         self.assertIs(settings["autoEnableCodemode"], False)
+
+
+    def test_mcp_tool_with_malformed_json_is_rejected_and_a_missing_prefix_is_suggested(self):
+        run = FakeRun([{"tool_calls": [{"name": "mcp__arena_lean__lean_goal", "arguments": {},
+                                        "raw_arguments": "{\"line\": "}]},
+                       {"tool_calls": [{"name": "lean_goal", "arguments": {}}]},
+                       {"text": "done"}], timeout=600)
+        self.addCleanup(run.cleanup)
+        run.command = [item for item in run.command if item != "--no-mcp"]
+        run.run()
+        results = {m["toolName"]: m for m in run.requests[-1]["messages"] if m["role"] == "toolResult"}
+        self.assertTrue(results["mcp__arena_lean__lean_goal"]["isError"])
+        self.assertIn("object", message_text(results["mcp__arena_lean__lean_goal"]).lower())
+        self.assertIn("Closest registered tool: mcp__arena_lean__lean_goal", message_text(results["lean_goal"]))
 
 
 class AnthropicWireCaptureTests(unittest.TestCase):
