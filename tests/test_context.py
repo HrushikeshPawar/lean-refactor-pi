@@ -12,6 +12,14 @@ DENYLIST = ("induct-first", "witness", "factor-premises", "focused-goals", "Stru
 
 
 class ParseTests(unittest.TestCase):
+    def test_kickoff_declaration_names_are_source_handles(self):
+        inventory = {"source": [{"name": "A.foo", "decl": "theorem", "origin": "proof", "proof_line": 2,
+                                 "sig": "A.foo : True", "module": "A"}],
+                     "dependency": [{"name": "A.helper", "decl": "theorem", "tag": "helper",
+                                     "sig": "A.helper : True", "module": "A"}]}
+        self.assertIn("decl:A.foo", "\n".join(context._used_section(inventory)))
+        self.assertIn("decl:A.helper", "\n".join(context._dependency_section(inventory)))
+
     def test_records_are_grouped_and_lines_mapped_past_the_instrumentation(self):
         output = "\n".join([
             'noise line',

@@ -262,9 +262,9 @@ def _types_section(context: dict) -> list[str]:
     for item in context.get("type", [])[:LIMITS["types"]]:
         if item["decl"] in ("inductive", "structure"):
             body = "\n".join(f"  | {_clip(c, LIMITS['type_chars'])}" for c in item["ctors"])
-            lines.append(f"{item['decl']} {_clip(_readable(item['sig']), LIMITS['type_chars'])}\n{_readable(body)}")
+            lines.append(f"decl:{item['name']} [{item['decl']}] {_clip(_readable(item['sig']), LIMITS['type_chars'])}\n{_readable(body)}")
         else:
-            lines.append(f"def {_clip(item['sig'], LIMITS['type_chars'])}\n  := {_clip(item.get('value', ''), LIMITS['type_chars'])}")
+            lines.append(f"decl:{item['name']} [def] {_clip(item['sig'], LIMITS['type_chars'])}\n  := {_clip(item.get('value', ''), LIMITS['type_chars'])}")
     return lines
 
 
@@ -318,12 +318,12 @@ def _used_section(context: dict) -> list[str]:
         def at(origin: str) -> str:
             return ",".join(str(i["proof_line"]) for i in items if i.get("origin") == origin)
         unknown = at("unknown")
-        lines.append(f"{name} [{items[0]['decl']}] S:{at('statement') or '-'} P:{at('proof') or '-'}"
+        lines.append(f"decl:{name} [{items[0]['decl']}] S:{at('statement') or '-'} P:{at('proof') or '-'}"
                      + (f" U:{unknown}" if unknown else ""))
     preview = _preview([items[0] for _, items in ordered], context.get("root", ""))
     lines.extend(["", f"Signature preview: {sum(bool(i.get('sig')) for i in preview)} shown of {len(ordered)} distinct source names; "
                   f"{sum(not bool(items[0].get('sig')) for _, items in ordered)} unavailable."])
-    lines.extend(f"[{i['decl']} · {i['module']}] {_clip(_readable(_one_line(i['sig'])), LIMITS['used_chars'])}"
+    lines.extend(f"[decl:{i['name']} · {i['decl']} · {i['module']}] {_clip(_readable(_one_line(i['sig'])), LIMITS['used_chars'])}"
                  for i in preview if i.get("sig"))
     return lines
 
@@ -332,13 +332,13 @@ def _dependency_section(context: dict) -> list[str]:
     helpers, counts, named = _extra_dependencies(context)
     lines = ["Qualified helper theorem name (project/this file first); origin: direct elaborated-proof use; "
              "source handle: `decl:<name>`."]
-    lines.extend(i["name"] for i in helpers)
+    lines.extend(f"decl:{i['name']}" for i in helpers)
     lines += ["", f"Tagged, not listed: {', '.join(f'{tag} {n}' for tag, n in counts.items())}; also source-named: {named}. "
               "Query the constant index or declaration lookup for these."]
     preview = _preview(helpers, context.get("root", ""))
     lines += [f"Signature preview: {sum(bool(i.get('sig')) for i in preview)} shown of {len(helpers)} helpers; "
               f"{sum(not bool(i.get('sig')) for i in helpers)} unavailable."]
-    lines.extend(f"[{i['decl']} · {i['module']}] {_clip(_readable(_one_line(i['sig'])), LIMITS['used_chars'])}"
+    lines.extend(f"[decl:{i['name']} · {i['decl']} · {i['module']}] {_clip(_readable(_one_line(i['sig'])), LIMITS['used_chars'])}"
                  for i in preview if i.get("sig"))
     return lines
 
@@ -391,7 +391,7 @@ def certify_manifest(manifest: dict, expected: list[str] | None = None) -> dict:
 
 
 def _earlier_section(context: dict) -> list[str]:
-    return [f"line {i['line']} [{i['decl']}] {_clip(_readable(_one_line(i['sig'])), LIMITS['earlier_chars'])}"
+    return [f"line {i['line']} [decl:{i['name']} · {i['decl']}] {_clip(_readable(_one_line(i['sig'])), LIMITS['earlier_chars'])}"
             for i in context.get("earlier", [])
             if i["decl"] in ("theorem", "def")][:LIMITS["earlier"]]
 
