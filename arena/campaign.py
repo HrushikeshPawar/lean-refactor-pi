@@ -832,6 +832,23 @@ def _candidate_lock(directory: Path, candidate_id: str):
         yield
 
 
+def _copy_tracked(project: Path, shadow: Path) -> None:
+    """Copy only the files git tracks in the pinned checkout into the run's Lean project.
+
+    Shared workspaces accumulate untracked candidate files from earlier compiles (other runs' proofs);
+    copying the directory would let a new run find them with lean_local_search.
+    """
+    listed = subprocess.run(["git", "-C", str(project), "ls-files", "-z"], check=True,
+                            capture_output=True).stdout.decode().split("\0")
+    for relative in filter(None, listed):
+        source = project / relative
+        if not source.is_file():
+            continue
+        target = shadow / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+
+
 def init(name: str, run_id: str, extra: str = "") -> dict:
     directory = run_dir(run_id)
     # The runner may already have started the run's Lean session here; nothing else counts as a run.
@@ -845,7 +862,7 @@ def init(name: str, run_id: str, extra: str = "") -> dict:
     text = packet(name) + ("\nAdditional instructions:\n" + extra + "\n" if extra else "")
     (directory / "packet.txt").write_text(text)
     shadow = directory / "scratch" / "project"
-    shutil.copytree(project, shadow, ignore=shutil.ignore_patterns(".git", ".lake"))
+    _copy_tracked(project, shadow)
     (shadow / ".lake").symlink_to(project / ".lake", target_is_directory=True)
     _append(directory, {"kind": "init", "theorem": name, "version": version, "commit": commit,
                         "versions": versions(row),

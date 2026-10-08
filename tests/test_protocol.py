@@ -311,6 +311,17 @@ class TruncationEquivalenceTests(unittest.TestCase):
 class ProtocolLogicTests(unittest.TestCase):
     """Behaviour that needs no Lean: lineage defaults, advisory, idea lifecycle."""
 
+    def test_run_project_copies_only_tracked_files_so_old_candidates_cannot_leak(self):
+        project, shadow = Path(self.temporary.name) / "ws", Path(self.temporary.name) / "shadow"
+        (project / "Src").mkdir(parents=True)
+        (project / "Src" / "A.lean").write_text("theorem a : True := trivial\n")
+        subprocess.run(["git", "init", "-q", str(project)], check=True)
+        subprocess.run(["git", "-C", str(project), "add", "Src/A.lean"], check=True)
+        (project / "Src" / "A_EVAL.lean").write_text("-- another run's proof\n")
+        campaign._copy_tracked(project, shadow)
+        self.assertTrue((shadow / "Src" / "A.lean").is_file())
+        self.assertFalse((shadow / "Src" / "A_EVAL.lean").exists())
+
     def test_probe_label_as_parent_resolves_to_the_candidate_it_was_built_on(self):
         first, second = "a" * 64, "b" * 64
         history = [{"kind": "candidate", "candidate_id": first}, {"kind": "candidate", "candidate_id": second},
