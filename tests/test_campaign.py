@@ -47,6 +47,20 @@ class PlanTests(unittest.TestCase):
         self.assertIn("worst case $1.20", text)
         self.assertIn("--hard-cap-usd 0.1", text)
 
+    def test_v6_matrix_preset_is_three_models_by_two_rows_by_three_replicates_at_three_dollars(self):
+        out = io.StringIO()
+        with mock.patch("subprocess.run") as run, contextlib.redirect_stdout(out):
+            code = rc.main(["--prefix", "p", "--preset", "v6-matrix", "--dry-run"])
+        self.assertEqual(code, 0)
+        run.assert_not_called()
+        text = out.getvalue()
+        self.assertIn("18 runs (2 rows x 3 models x 3 replicates", text)
+        self.assertIn("cap $3 each; worst case $54.00", text)
+        for model in ("deepseek-v4.1-flash", "gpt-6-luna", "qwen3.8-flash"):
+            self.assertIn(f"--model {model}", text)
+        self.assertIn("--theorem Core.InitsUpdatesComm", text)
+        self.assertIn("--theorem fundamental_theorem_of_variational_calculus'", text)
+
     def test_replicates_are_sequential_and_ids_distinct(self):
         specs = rc.plan("p", ["A", "B"], ["gpt-6-luna", "qwen3.8-flash"], 2)
         self.assertEqual([s["replicate"] for s in specs], [1] * 4 + [2] * 4)

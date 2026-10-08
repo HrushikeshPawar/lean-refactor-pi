@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a paid comparison campaign: theorem rows x models x N sequential replicates.
+"""Run a paid comparison campaign: theorem rows x models x N replicates, `--jobs` at a time.
 
 Each row gets one certified kickoff packet shared by all its runs. Nothing is spent unless a
 passing Langfuse preflight receipt covers every model (run here, or a fresh one) and every row's
@@ -7,6 +7,8 @@ packet certifies with its mandatory sections. `--dry-run` prints the plan and wo
 
     python tools/run_campaign.py --prefix v6c1 --rows Core.InitsUpdatesComm,fundamental_theorem_of_variational_calculus' \\
         --models gpt-6-luna,deepseek-v4.1-flash --cap 0.10 --replicates 1
+
+`--preset v6-matrix` is the standing comparison: the three models x the Core and PhysLib rows x 3 replicates at a $3 cap.
 
 Arguments after `--` are passed to every run (for example `--no-mcp`).
 """
@@ -21,6 +23,7 @@ import statistics
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -29,6 +32,10 @@ from tools.run_pi_budgeted import MODELS, THINKING_LEVELS  # noqa: E402
 ROOT = Path(__file__).resolve().parents[1]
 RUNS = ROOT / "runs" / "pi-budget"
 RECEIPT_MAX_AGE_HOURS = 12.0
+# Named campaign configurations; explicit --rows/--models/--replicates/--cap override a preset's values.
+PRESETS = {"v6-matrix": {"rows": ["Core.InitsUpdatesComm", "fundamental_theorem_of_variational_calculus'"],
+                         "models": ["deepseek-v4.1-flash", "gpt-6-luna", "qwen3.8-flash"],
+                         "replicates": 3, "cap": 3.0, "jobs": 3}}
 HELPER_DECL = re.compile(r"(?m)^\s*(?:private\s+|protected\s+)?(?:theorem|lemma)\s+\S+")
 
 
@@ -224,23 +231,34 @@ def execute(spec: dict, cap: float, thinking: str, passthrough: list[str], logs:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--prefix", required=True)
-    parser.add_argument("--rows", required=True, help="Comma-separated benchmark names")
-    parser.add_argument("--models", required=True, help=f"Comma-separated: {', '.join(MODELS)}")
-    parser.add_argument("--replicates", type=int, default=3)
-    parser.add_argument("--cap", type=float, default=3.0, help="Spend cap per run in USD (0.10-3.00); below 3 it is a soft cap on actual spend (the last request may overshoot), only 3 is a hard cap")
+    parser.add_argument("--preset", choices=sorted(PRESETS), help="Start from a named configuration")
+    parser.add_argument("--rows", help="Comma-separated benchmark names")
+    parser.add_argument("--models", help=f"Comma-separated: {', '.join(MODELS)}")
+    parser.add_argument("--replicates", type=int)
+    parser.add_argument("--cap", type=float, help="Spend cap per run in USD (0.10-3.00); below 3 it is a soft cap on actual spend (the last request may overshoot), only 3 is a hard cap")
+    parser.add_argument("--jobs", type=int, help="Runs in flight at once (default 1); runs are API-bound, and each Lean daemon holds back workers when memory runs low")
     parser.add_argument("--thinking", default="high", choices=THINKING_LEVELS)
     parser.add_argument("--skip-preflight", action="store_true", help="Explicitly skip the Langfuse preflight gate")
     parser.add_argument("--dry-run", action="store_true")
     args, passthrough = parser.parse_known_args(argv)
     passthrough = [item for item in passthrough if item != "--"]
+    preset = PRESETS[args.preset] if args.preset else {}
+    for name, default in (("rows", None), ("models", None), ("replicates", 3), ("cap", 3.0), ("jobs", 1)):
+        if getattr(args, name) is None:
+            value = preset.get(name, default)
+            setattr(args, name, ",".join(value) if isinstance(value, list) else value)
+    if not args.rows or not args.models:
+        parser.error("--rows and --models are required unless --preset supplies them")
     if not 0.1 <= args.cap <= 3:
         parser.error("--cap must be between 0.10 and 3.00")
+    if args.jobs < 1:
+        parser.error("--jobs must be at least 1")
     rows, models = [r for r in args.rows.split(",") if r], [m for m in args.models.split(",") if m]
     try:
         specs = plan(args.prefix, rows, models, args.replicates)
     except ValueError as error:
         parser.error(str(error))
-    print(f"{len(specs)} runs ({len(rows)} rows x {len(models)} models x {args.replicates} replicates, sequential); "
+    print(f"{len(specs)} runs ({len(rows)} rows x {len(models)} models x {args.replicates} replicates, {args.jobs} at a time); "
           f"cap ${args.cap:g} each; worst case ${worst_case_usd(specs, args.cap):.2f}")
     for spec in specs:
         print(" ", " ".join(command(spec, args.cap, args.thinking, passthrough)[1:]))
@@ -257,7 +275,10 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     out = RUNS / f"{args.prefix}-campaign"
     out.mkdir(parents=True)
-    runs = [execute(spec, args.cap, args.thinking, passthrough, out, expected[spec["row"]]) for spec in specs]
+    # Workers take specs in plan order (replicate-major), so a stopped campaign still has balanced replicates.
+    with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+        runs = list(pool.map(lambda spec: execute(spec, args.cap, args.thinking, passthrough, out,
+                                                  expected[spec["row"]]), specs))
     report = {"cap_usd": args.cap, "prefix": args.prefix, **aggregate(runs, expected)}
     (out / "campaign.json").write_text(json.dumps(report, indent=2) + "\n")
     text = render(report)
