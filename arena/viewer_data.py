@@ -389,7 +389,9 @@ def run_dashboard(run_id: str, directory: Path) -> dict:
         packet_text = packet.read_text(errors="replace")
     except OSError:
         packet_text = None
+    # A live summary always carries a default stop_reason, so only summary.json means the run ended.
     return {"run_id": run_id, "started": start, "last_activity": last,
+            "finished": bool(read_json(directory / "summary.json")),
             "config": read_json(directory / "run-config.json"),
             "summary": summary, "submission": read_json(directory / "submission.json") or None,
             "reference": _reference(summary.get("theorem")),

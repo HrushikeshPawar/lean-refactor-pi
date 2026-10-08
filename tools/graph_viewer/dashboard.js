@@ -20,7 +20,7 @@
   /* ---- header and KPIs ---- */
   function statusInfo() {
     const s = data.summary || {};
-    if (s.stop_reason) return {text: `done · ${s.stop_reason}`, kind: s.stop_reason === 'finished' ? 'good' : 'mid'};
+    if (data.finished) return {text: `done · ${s.stop_reason || 'stopped'}`, kind: s.stop_reason === 'finished' ? 'good' : 'mid'};
     if (data.last_activity && Date.now() / 1000 - data.last_activity > 900) return {text: 'stalled', kind: 'bad'};
     return {text: 'live', kind: 'good'};
   }
@@ -42,7 +42,7 @@
       ['Post-best spend', money(cost.spent_after_best_usd), `bookkeeping+rejected ${cost.bookkeeping_and_rejected_pct ?? '—'}%`],
       ['Cache hit rate', cache.reuse_pct != null ? cache.reuse_pct + '%' : '—', `recent 10: ${cache.reuse_pct_recent_10 ?? '—'}% · cost savings ${cache.savings_pct ?? '—'}%`],
       ['Tool results', num((s.tools || {}).results), `${(s.tools || {}).error_total ?? 0} errors`],
-      ['Submission', sub ? `${sub.candidate} · ${sub.proxy}` : 'none', sub ? (sub.verified_by === 'cold compile' ? 'cold-verified' : `verified by ${sub.verified_by || '?'}`) : (s.stop_reason ? 'not submitted' : 'running')]];
+      ['Submission', sub ? `${sub.candidate} · ${sub.proxy}` : 'none', sub ? (sub.verified_by === 'cold compile' ? 'cold-verified' : `verified by ${sub.verified_by || '?'}`) : (data.finished ? 'not submitted' : 'running')]];
     $('kpis').innerHTML = items.map(([l, v, n, good]) => `<div class="kpi" title="${esc(n)}"><div class="l">${esc(l)}</div><div class="v${good ? ' good' : ''}">${esc(v)}</div><div class="n">${esc(n)}</div></div>`).join('');
   }
 

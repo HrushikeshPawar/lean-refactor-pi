@@ -160,6 +160,14 @@ class DataTests(unittest.TestCase):
         self.assertLess(len(tool["result"]), 4100)
         self.assertIn("more characters", tool["result"])
 
+    def test_dashboard_is_live_until_summary_json(self):
+        directory = make_run(self.root, "r3")
+        (directory / "summary.json").unlink(missing_ok=True)
+        board = run_dashboard("r3", directory)
+        self.assertFalse(board["finished"])  # the live summary's default stop_reason must not read as done
+        (directory / "summary.json").write_text(json.dumps({"stop_reason": "finished"}))
+        self.assertTrue(run_dashboard("r3", directory)["finished"])
+
 
 OBSERVATIONS = [
     {"id": "o1", "traceId": "tr1", "parentObservationId": None, "type": "SPAN", "name": "Conversational Turn",
