@@ -1,5 +1,6 @@
 /* Static Arena graph viewer. The loopback server supplies graph.json; snapshots set GRAPH_SNAPSHOT. */
 (() => {
+  if (/[?&]embed=1/.test(location.search)) document.body.classList.add('embed');
   const $ = id => document.getElementById(id);
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   let data, byId = new Map(), coords = new Map(), selected = localStorage.getItem('arena-selected'),

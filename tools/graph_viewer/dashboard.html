@@ -8,13 +8,32 @@
 </head>
 <body>
   <header>
-    <div><h1 id="title">Run dashboard</h1><div id="sub" class="sub">Loading…</div></div>
-    <div class="navlinks"><a class="btn" href="./">Candidate graph</a><a id="lf-link" class="btn" hidden target="_blank" rel="noopener">Open in Langfuse</a><span id="live" class="live">Connecting…</span></div>
+    <div class="ident"><h1 id="title">Run dashboard</h1><span id="status" class="badge"></span><div id="sub" class="sub">Loading…</div></div>
+    <div class="navlinks"><a id="lf-link" class="btn" hidden target="_blank" rel="noopener">Open in Langfuse</a><span id="live" class="live">Connecting…</span></div>
   </header>
   <main>
-    <div id="kpis" class="kpis"></div>
-    <nav id="tabs" class="tabs" role="tablist"></nav>
-    <section id="panel" role="tabpanel"></section>
+    <section id="kpis" class="kpis"></section>
+    <section class="dash">
+      <article class="card span2"><div class="head"><h2>Score over time</h2><span class="hint">proxy 0 to 100; green step = best verified so far; the gap to 100 is the room left</span></div><div id="c-score"></div></article>
+      <article class="card"><div class="head"><h2>Cumulative spend</h2><span id="h-spend" class="hint"></span></div><div id="c-spend"></div></article>
+      <article class="card"><div class="head"><h2>Tokens</h2><span class="hint">full evaluations; lower is better</span></div><div id="c-tokens"></div></article>
+      <article class="card"><div class="head"><h2>Heartbeats</h2><span class="hint">full evaluations; lower is better</span></div><div id="c-hb"></div></article>
+      <article class="card"><div class="head"><h2>Cost per request</h2><span id="h-cost" class="hint"></span></div><div id="c-cost"></div></article>
+      <article class="card span2"><div class="head"><h2>Tool activity</h2><span class="hint">one row per tool, one bar per call; red = error; click a bar for the call</span></div><div id="c-tools"></div></article>
+      <article class="card"><div class="head"><h2>Ideas</h2><span id="h-ideas" class="hint"></span></div><div id="c-ideas" class="scroll-body"></div></article>
+      <article class="card span2 graphcard"><div class="head"><h2>Candidate graph</h2><a class="hint" href="./" target="_blank" rel="noopener">open full graph &#8599;</a></div><iframe id="graph-frame" class="graph-frame" src="./?embed=1" title="Candidate graph" loading="lazy"></iframe></article>
+      <div class="col">
+        <article class="card"><div class="head"><h2>Lean and cold verification</h2></div><div id="c-lean"></div></article>
+        <article class="card"><div class="head"><h2>Langfuse</h2><span id="h-lf" class="hint"></span></div><div id="c-lf"></div></article>
+      </div>
+    </section>
+    <section class="drill" id="drill">
+      <h2 class="drill-title">Drill down</h2>
+      <nav id="tabs" class="tabs" role="tablist"></nav>
+      <div id="panel" role="tabpanel"></div>
+      <details class="fold"><summary>Events log</summary><div id="d-events"></div></details>
+      <details class="fold"><summary>Kickoff packet</summary><div id="d-packet"></div></details>
+    </section>
   </main>
   <script src="charts.js" defer></script>
   <script src="dashboard.js" defer></script>
