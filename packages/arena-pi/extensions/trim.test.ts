@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { compactDiagnostics, ResultTrimmer } from "./trim.ts";
+import { objectToolArguments, compactDiagnostics, ResultTrimmer } from "./trim.ts";
 
 const skill = "# Proof golfing\n".repeat(40);
 
@@ -56,4 +56,13 @@ test("only long non-error messages are cut", () => {
 
 test("text that is not JSON is untouched", () => {
   assert.equal(compactDiagnostics("plain goal text"), "plain goal text");
+});
+
+test("tool calls with unparsed arguments get an object, so Pi's compaction serializer cannot crash", () => {
+  const messages = [{ role: "user", content: "x" },
+    { role: "assistant", content: [{ type: "toolCall", name: "arena_probe", arguments: null }, { type: "text", text: "t" },
+      { type: "toolCall", name: "arena_find", arguments: { queries: ["a"] } }] }];
+  assert.equal(objectToolArguments(messages), 1);
+  assert.deepEqual((messages[1].content as Array<{ arguments?: unknown }>).map(block => block.arguments), [{}, undefined, { queries: ["a"] }]);
+  assert.equal(objectToolArguments(undefined), 0);
 });

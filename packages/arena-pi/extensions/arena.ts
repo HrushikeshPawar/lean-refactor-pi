@@ -10,7 +10,7 @@ import type { AssistantMessage, AssistantMessageEventStream } from "@earendil-wo
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { BudgetModel, PriorRequest } from "./budget.ts";
 import { nearestToolName, normalizeToolArguments } from "./toolnames.ts";
-import { ResultTrimmer } from "./trim.ts";
+import { objectToolArguments, ResultTrimmer } from "./trim.ts";
 import { continuationPush, finishPush, trimProfile, leanPathViolation, planEvaluate, resolveInlineIdea, planProbe, sinceRefusal, staleNotice } from "./rules.ts";
 import type { RouteStats } from "./rules.ts";
 import { assessFinalPayload, BUDGET_PROVIDER, budgetLimits, softCapGate, cacheAlarm, catalogPriceProblem, cacheUtilization, finishAllowed, isBudgetModel, maxRequestOutputTokens, MODELS, priceForUsage, requestShape, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
@@ -635,6 +635,10 @@ export default function arenaExtension(pi: ExtensionAPI) {
     void injectMemory();
   });
   pi.on("session_compact_failed", () => closeRequest(undefined, "compaction_failed"));
+  pi.on("session_before_compact", event => {
+    const fixed = objectToolArguments(event.preparation.messagesToSummarize) + objectToolArguments(event.preparation.turnPrefixMessages);
+    if (fixed) appendTrace({ kind: "compaction_repair", null_tool_arguments: fixed });
+  });
 
   // After a compaction the harness restates its own record of the run (best verified candidate, routes,
   // ideas, latest failures, allowance) as one hidden message. Built from the ledger, never by the model,
