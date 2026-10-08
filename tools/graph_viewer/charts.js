@@ -139,6 +139,29 @@
   /* series: [{cls, points:[[x,y,tip?]], step?, dots?, hollow?, noLine?, r?}]
      opts: refs:[{y,cls,label}], notes:[{text,cls}], best:{x,y,text}, legend:[[cls,text]], yMin/yMax, exact, includeRefs,
            fmtY(v, step), fmtX, xTime=false for non-time x, xLabel, yLabel, xMin/xMax, extendTo (step lines run on to this x) */
+  /* Monotone cubic (Fritsch–Carlson) path through screen points: smooth, passes through every
+     point, and never overshoots between two of them, so it invents no highs or lows. */
+  function smoothPath(xy, move = true) {
+    const n = xy.length;
+    if (!n) return '';
+    let d = move ? `M${xy[0][0]},${xy[0][1]}` : `L${xy[0][0]},${xy[0][1]}`;
+    if (n === 1) return d;
+    const dx = [], m = [], t = [];
+    for (let i = 0; i < n - 1; i++) { dx.push(xy[i + 1][0] - xy[i][0]); m.push(dx[i] ? (xy[i + 1][1] - xy[i][1]) / dx[i] : 0); }
+    t[0] = m[0]; t[n - 1] = m[n - 2];
+    for (let i = 1; i < n - 1; i++) t[i] = m[i - 1] * m[i] <= 0 ? 0 : (m[i - 1] + m[i]) / 2;
+    for (let i = 0; i < n - 1; i++) {
+      if (m[i] === 0) { t[i] = 0; t[i + 1] = 0; continue; }
+      const a = t[i] / m[i], b = t[i + 1] / m[i], h = a * a + b * b;
+      if (h > 9) { const k = 3 / Math.sqrt(h); t[i] = k * a * m[i]; t[i + 1] = k * b * m[i]; }
+    }
+    for (let i = 0; i < n - 1; i++) {
+      const [x0, y0] = xy[i], [x1, y1] = xy[i + 1], h = dx[i] / 3;
+      d += `C${x0 + h},${y0 + t[i] * h} ${x1 - h},${y1 - t[i + 1] * h} ${x1},${y1}`;
+    }
+    return d;
+  }
+
   function line(series, o = {}) {
     const xs = series.flatMap(s => s.points.map(p => p[0])), ys = series.flatMap(s => s.points.filter(p => p[1] != null).map(p => p[1]));
     if (!xs.length && !(o.refs || []).length) return '<p class="muted">No data yet.</p>';
@@ -149,8 +172,7 @@
         const pts = ser.points.filter(p => p[1] != null);
         if (!pts.length) continue;
         if (!ser.noLine) {
-          let d = '';
-          pts.forEach((p, i) => { const x = s.sx(p[0]), y = s.sy(p[1]); d += i === 0 ? `M${x},${y}` : ser.step ? `H${x}V${y}` : `L${x},${y}`; });
+          let d = smoothPath(pts.map(p => [s.sx(p[0]), s.sy(p[1])]));
           if (ser.step && o.extendTo != null) d += `H${s.sx(o.extendTo)}`;
           out += `<path class="line ${ser.cls}${ser.thin ? ' thin' : ''}" d="${d}"/>`;
         }
@@ -215,12 +237,12 @@
       let below = pts.map(() => 0);
       layers.forEach((layer, k) => {
         const above = pts.map((p, i) => below[i] + (p.parts[k] || 0));
-        const top = pts.map((p, i) => `${i ? 'L' : 'M'}${s.sx(p.x)},${s.sy(above[i])}`).join('');
-        const bottom = pts.map((p, i) => `L${s.sx(p.x)},${s.sy(below[i])}`).reverse().join('');
+        const top = smoothPath(pts.map((p, i) => [s.sx(p.x), s.sy(above[i])]));
+        const bottom = smoothPath(pts.map((p, i) => [s.sx(p.x), s.sy(below[i])]).reverse(), false);
         out += `<path class="area ${layer.cls}" d="${top}${bottom}Z"/>`;
         below = above;
       });
-      out += `<path class="line toptotal" d="${pts.map((p, i) => `${i ? 'L' : 'M'}${s.sx(p.x)},${s.sy(totals[i])}`).join('')}"/>`;
+      out += `<path class="line toptotal" d="${smoothPath(pts.map((p, i) => [s.sx(p.x), s.sy(totals[i])]))}"/>`;
       const right = w - M.r;
       pts.forEach((p, i) => {
         if (p.tip == null || i === 0) return;

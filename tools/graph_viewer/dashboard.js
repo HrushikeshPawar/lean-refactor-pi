@@ -55,7 +55,7 @@
     const pt = (r, v, extra = '') => [r.n, v, `evaluation ${r.n}: candidate ${r.candidate} (${r.mode})\n${extra}proxy ${v}\n${num(r.tokens)} tokens, ${num(r.heartbeats)} heartbeats\nclick to select in the graph`, r.candidate_id];
     const bestFull = full.reduce((m, r) => !m || r.proxy > m.proxy ? r : m, null);
     place('c-score', C.line([
-      {cls: 'k1', step: true, dots: false, points: rows.filter(r => r.best_verified != null).map(r => [r.n, r.best_verified])},
+      {cls: 'k1', step: true, dots: false, points: [[0, data.baseline_proxy], ...rows.filter(r => r.best_verified != null).map(r => [r.n, r.best_verified])]},
       {cls: 'korig', noLine: true, r: 6, points: [[0, data.baseline_proxy, `evaluation 0: the original proof\nproxy ${data.baseline_proxy}`]]},
       {cls: 'k0', noLine: true, r: 5, points: full.map(r => pt(r, r.proxy))},
       {cls: 'k2', noLine: true, hollow: true, r: 4, points: fast.map(r => pt(r, r.estimated_proxy, 'fast estimate '))}],
@@ -92,7 +92,8 @@
 
   function metricChart(id, key, ref, unit, cls) {
     const ok = data.scores.filter(r => r.compiled && r[key] != null), end = evalEnd();
-    let low = Infinity; const steps = [];
+    // The original proof is evaluation 0, so the best-so-far line starts from it.
+    let low = ref ?? Infinity; const steps = ref != null ? [[0, ref]] : [];
     for (const r of ok) { low = Math.min(low, r[key]); steps.push([r.n, low]); }
     const lowest = ok.reduce((m, r) => !m || r[key] < m[key] ? r : m, null);
     const pt = r => [r.n, r[key], `evaluation ${r.n}: candidate ${r.candidate} (${r.mode})\n${num(r[key])} ${unit}\nclick to select in the graph`, r.candidate_id];
