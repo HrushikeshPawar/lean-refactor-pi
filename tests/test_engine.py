@@ -4,6 +4,7 @@ import uuid
 from pathlib import Path
 from unittest.mock import patch
 
+from tests.slow import slow
 from arena import campaign
 from arena.engine import (WRAPPER_LINES, ROOT, candidate_file, declaration_head, evaluate,
                           instrument_sorries, map_measured_line, parse_diagnostics, problem,
@@ -133,6 +134,7 @@ class DiagnosticMappingTests(unittest.TestCase):
         self.assertGreater(validate_proof(row, draft, allow_sorry=True), 0)
 
 
+@slow
 @LEAN
 class RealLeanTests(unittest.TestCase):
     @classmethod

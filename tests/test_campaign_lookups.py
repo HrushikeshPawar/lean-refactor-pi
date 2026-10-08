@@ -4,6 +4,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
+from tests.slow import slow
 from arena import campaign
 from arena.engine import ROOT
 
@@ -296,6 +297,7 @@ class SourceHandleTests(unittest.TestCase):
         self.assertEqual(campaign._declaration_start(lines, 6), 4)
 
 
+@slow
 @unittest.skipUnless((ROOT / "workspaces/strata-v4.29.1").is_dir()
                      and (ROOT / "workspaces/physlib-v4.32.0").is_dir(),
                      "Strata and PhysLib pinned fixtures are required")

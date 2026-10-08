@@ -13,6 +13,7 @@ import uuid
 from pathlib import Path
 from unittest.mock import patch
 
+from tests.slow import slow
 from arena import campaign, engine, lean_session
 from arena.engine import (ROOT, compile_version, force_cold, instrument_sorries, last_lean_run, problem,
                           versions)
@@ -118,6 +119,7 @@ class FallbackTests(unittest.TestCase):
         self.assertNotIn("lean", view["v3"])
 
 
+@slow
 class DaemonTests(unittest.TestCase):
     """The per-run daemon, without any Lean."""
 
@@ -189,6 +191,7 @@ class DaemonTests(unittest.TestCase):
             parent.wait()
 
 
+@slow
 class SubmissionColdVerificationTests(unittest.TestCase):
     """A candidate that only a session vouched for is re-verified cold before it is submitted."""
 
@@ -339,6 +342,7 @@ class SessionHarness:
                     self.assertTrue(cold["goals"], "the hole draft must show its goals")
 
 
+@slow
 @unittest.skipUnless(CORE_READY, "Strata fixture environment is not provisioned")
 class CoreSessionTests(SessionHarness, unittest.TestCase):
     def test_only_the_changed_theorem_is_reelaborated(self):
@@ -444,6 +448,7 @@ class CoreSessionTests(SessionHarness, unittest.TestCase):
         self.assertTrue(ok["passed"])
 
 
+@slow
 @unittest.skipUnless(PHYSLIB_READY, "PhysLib fixture environment is not provisioned")
 class PhysLibSessionTests(SessionHarness, unittest.TestCase):
     name = PHYSLIB
@@ -458,6 +463,7 @@ class PhysLibSessionTests(SessionHarness, unittest.TestCase):
         self.assertLess(again["lean"]["seconds"], 120.0)  # generous: cold PhysLib is ~32 s per compile
 
 
+@slow
 class LifecycleTests(unittest.TestCase):
     """No Lean process outlives the run, however it ends."""
 
@@ -514,6 +520,7 @@ class LifecycleTests(unittest.TestCase):
                         "Lean kept running after its owner died and nothing swept it")
 
 
+@slow
 @unittest.skipUnless(CORE_READY and shutil.which("pi"), "pi and the Strata fixture are required")
 class RunnerSessionTests(unittest.TestCase):
     """The real runner, Pi and tool processes against a scripted provider."""

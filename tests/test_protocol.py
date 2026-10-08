@@ -12,6 +12,7 @@ import uuid
 from pathlib import Path
 from unittest.mock import patch
 
+from tests.slow import slow
 from arena import campaign
 from arena.engine import ROOT
 
@@ -28,6 +29,7 @@ def cli(run_id: str, action: str, *args: str, theorem: str = NAME) -> dict:
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
 
+@slow
 @LEAN
 class CampaignCliTests(unittest.TestCase):
     @classmethod
@@ -204,6 +206,7 @@ class CampaignCliTests(unittest.TestCase):
         self.assertFalse(cli(self.run_id, "candidate", "--candidate", "#999")["ok"])
 
 
+@slow
 @LEAN
 class ProfileCliTests(unittest.TestCase):
     @classmethod
@@ -264,6 +267,7 @@ class ProfileCliTests(unittest.TestCase):
         self.assertIn("without sorry", result["error"])
 
 
+@slow
 @LEAN
 class DeclarationTests(unittest.TestCase):
     def test_namespaced_constructor_and_library_names_resolve_where_text_search_cannot(self):
@@ -284,6 +288,7 @@ class DeclarationTests(unittest.TestCase):
         self.assertFalse(cli("none", "declarations", "--items", json.dumps(["bad name!"]))["ok"])
 
 
+@slow
 @LEAN
 class TruncationEquivalenceTests(unittest.TestCase):
     def test_dropping_later_declarations_does_not_change_the_result(self):

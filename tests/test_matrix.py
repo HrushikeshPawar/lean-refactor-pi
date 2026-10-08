@@ -8,6 +8,7 @@ import unittest
 import uuid
 from pathlib import Path
 
+from tests.slow import slow
 from arena.campaign import run_dir
 from arena.engine import ROOT
 from arena.traces import PATCH_SHA256
@@ -75,6 +76,7 @@ class PlanTests(unittest.TestCase):
                           result["best_proxy"]), ("#3", 70, 800, 60.5))
 
 
+@slow
 @unittest.skipUnless(PI_AVAILABLE, "pi and the Strata fixture are required")
 class MatrixRunTests(unittest.TestCase):
     def test_runs_share_one_packet_and_differ_only_in_the_factor(self):

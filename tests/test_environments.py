@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from tests.slow import slow
 from arena import engine, environments
 from arena.engine import ROOT
 from tools import arena_certify
@@ -152,6 +153,7 @@ class CertificationTests(unittest.TestCase):
         self.assertEqual(result["status"], "unprovisioned")
         self.assertIn("unprovisioned", arena_certify.render([result]))
 
+    @slow
     @unittest.skipUnless((ROOT / "workspaces/strata-v4.29.1").is_dir(), "Strata fixture environment is not provisioned")
     def test_the_fixture_reference_is_certified_with_real_lean(self):
         result = arena_certify.certify("Core.InitsUpdatesComm")

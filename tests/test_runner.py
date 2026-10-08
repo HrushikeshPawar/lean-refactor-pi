@@ -5,12 +5,14 @@ import shutil
 from pathlib import Path
 import unittest
 
+from tests.slow import slow
 from tests.pi_support import LIVE_LANGFUSE, NAME, PI_AVAILABLE, AnthropicWire, FakeRun, message_text
 from tools.arena_skill import SKILL_DIR, skill_hash
 
 STOP = [{"text": "done"}]
 
 
+@slow
 @unittest.skipUnless(PI_AVAILABLE, "pi and the Strata fixture are required")
 class SkillAndThinkingTests(unittest.TestCase):
     def tearDown(self):
@@ -43,6 +45,7 @@ class SkillAndThinkingTests(unittest.TestCase):
             self.assertNotIn(phrase, text)
 
 
+@slow
 @unittest.skipUnless(PI_AVAILABLE, "pi and the Strata fixture are required")
 class LifecycleTests(unittest.TestCase):
     def setUp(self):
@@ -126,6 +129,7 @@ def cheap_tool(name: str, arguments: dict, **usage) -> dict:
 SOURCE = {"handle": "Strata/Languages/Core/StatementSemanticsProps.lean", "first": 950, "last": 960}
 
 
+@slow
 @unittest.skipUnless(PI_AVAILABLE, "pi and the Strata fixture are required")
 class CacheDisciplineTests(unittest.TestCase):
     def setUp(self):
@@ -190,6 +194,7 @@ def tool_texts(request: dict, name: str | None = None) -> list[str]:
             if m["role"] == "toolResult" and (name is None or m.get("toolName") == name)]
 
 
+@slow
 @unittest.skipUnless(PI_AVAILABLE and FIXTURE.exists(), "pi and the Strata fixture are required")
 class AutomaticChecksTests(unittest.TestCase):
     """The harness checks every version and keeps the model informed without being asked."""
@@ -291,6 +296,7 @@ class SkillToolNamesTests(unittest.TestCase):
             self.assertEqual(tools - available, set(), path.name)
 
 
+@slow
 @unittest.skipUnless(PI_AVAILABLE and FIXTURE.exists(), "pi and the Strata fixture are required")
 class ToolArgumentUxTests(unittest.TestCase):
     def test_malformed_arena_json_is_rejected_instead_of_running_with_empty_arguments(self):
@@ -328,6 +334,7 @@ TOOL_WORDS = {"build", "code_actions", "completions", "declaration_file", "file_
               "goal", "diagnostic_messages", "multi_attempt", "local_search", "hover_info"}
 
 
+@slow
 @unittest.skipUnless(PI_AVAILABLE and FIXTURE.exists() and shutil.which("uvx"), "pi, uvx and the Strata fixture are required")
 class LeanMcpTests(unittest.TestCase):
     """The real lean-lsp-mcp server, driven through Pi by the scripted provider."""
@@ -371,6 +378,7 @@ class LeanMcpTests(unittest.TestCase):
         self.assertIs(settings["autoEnableCodemode"], False)
 
 
+@slow
 @unittest.skipUnless(PI_AVAILABLE, "pi and the Strata fixture are required")
 class AnthropicWireTests(unittest.TestCase):
     """Qwen through Pi's real Anthropic Messages client: what the provider receives is what Pi built."""
@@ -504,6 +512,7 @@ def _wait_for_trace(session_id: str, started, pad: str, text: str) -> list[dict]
     return rows
 
 
+@slow
 @unittest.skipUnless(PI_AVAILABLE, "pi and the Strata fixture are required")
 class ErrorLoopAndContinuationTests(unittest.TestCase):
     def setUp(self):
@@ -631,6 +640,7 @@ class ErrorLoopAndContinuationTests(unittest.TestCase):
         self.assertFalse(any(row.get("stop") == "no_work_fallback" for row in controls[:3]), controls)
 
 
+@slow
 @unittest.skipUnless(PI_AVAILABLE, "pi and the Strata fixture are required")
 class FinishReplayTests(unittest.TestCase):
     FIXTURES = Path(__file__).resolve().parent / "fixtures/arena_finish_replays"
@@ -672,6 +682,7 @@ class FinishReplayTests(unittest.TestCase):
                                   "heartbeats": expected[1], "proxy": expected[2]})
 
 
+@slow
 @unittest.skipUnless(PI_AVAILABLE, "pi and the Strata fixture are required")
 class CompactionPolicyTests(unittest.TestCase):
     READS = [("references/compilation-errors.md", 0), ("references/compilation-errors.md", 24000),

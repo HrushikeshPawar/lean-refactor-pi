@@ -1,6 +1,7 @@
 import json
 import unittest
 
+from tests.slow import slow
 from arena import campaign, context
 from arena.engine import ROOT
 
@@ -144,6 +145,7 @@ class TruncationTests(unittest.TestCase):
         self.assertNotIn("entry 39 ", first)
 
 
+@slow
 @LEAN
 class FixturePacketTests(unittest.TestCase):
     @classmethod
@@ -206,6 +208,7 @@ class FixturePacketTests(unittest.TestCase):
             self.assertNotIn(phrase, self.text, phrase)
 
 
+@slow
 @LEAN
 class PortabilityTests(unittest.TestCase):
     def test_wrappers_run_on_every_provisioned_toolchain_of_the_fixture(self):
@@ -230,6 +233,7 @@ class PortabilityTests(unittest.TestCase):
         self.assertGreaterEqual(ran, 1)
 
 
+@slow
 @unittest.skipUnless((ROOT / "workspaces/physlib-v4.32.0").is_dir(), "PhysLib fixture environment is not provisioned")
 class PhyslibInventoryTests(unittest.TestCase):
     name = "fundamental_theorem_of_variational_calculus'"

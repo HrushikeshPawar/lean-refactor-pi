@@ -1,6 +1,7 @@
 import unittest
 from unittest.mock import patch
 
+from tests.slow import slow
 from arena import profile as profiler
 from arena.engine import ROOT, _proof_length, problem
 
@@ -144,6 +145,7 @@ class DegradationTests(unittest.TestCase):
                 profiler.profile("T", "theorem t : True := by\n  sorry")
 
 
+@slow
 @unittest.skipUnless((ROOT / "workspaces/physlib-v4.32.0").is_dir(), "PhysLib fixture is not provisioned")
 class PinnedPhyslibProfileTests(unittest.TestCase):
     def test_profile_lines_reconcile_and_keep_source_coordinates(self):
