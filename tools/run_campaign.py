@@ -77,13 +77,17 @@ def check_packets(rows: list[str], packet_fn=None) -> dict[str, str]:
     if packet_fn is None:
         from arena.campaign import packet as packet_fn  # noqa: PLC0415
     hashes, failures = {}, []
-    for row in rows:
+    for index, row in enumerate(rows, 1):
+        print(f"packet {index}/{len(rows)} {row}: building (Lean context; cached rows are quick, new rows take minutes)", flush=True)
+        started = time.monotonic()
         try:
             text = packet_fn(row)
         except Exception as error:  # noqa: BLE001 - any failure to certify blocks spending
             failures.append(f"{row}: {error}")
+            print(f"packet {index}/{len(rows)} {row}: FAILED after {time.monotonic() - started:.0f}s", flush=True)
             continue
         hashes[row] = hashlib.sha256(text.encode()).hexdigest()
+        print(f"packet {index}/{len(rows)} {row}: certified in {time.monotonic() - started:.0f}s ({len(text):,} chars)", flush=True)
     if failures:
         raise CampaignAbort("packet certification failed: " + "; ".join(failures))
     return hashes
@@ -223,9 +227,11 @@ def execute(spec: dict, cap: float, thinking: str, passthrough: list[str], logs:
     if summary_fn is None:
         from arena.summary import build_summary as summary_fn  # noqa: PLC0415
     directory = RUNS / spec["run_id"]
+    print(f"{time.strftime('%H:%M:%S')} start  {spec['run_id']}", flush=True)
     with (logs / f"{spec['run_id']}.log").open("w") as log:
         proc = run_fn(command(spec, cap, thinking, passthrough), cwd=ROOT, stdout=log,
                       stderr=subprocess.STDOUT, text=True)
+    print(f"{time.strftime('%H:%M:%S')} done   {spec['run_id']} (exit {proc.returncode})", flush=True)
     config_path = directory / "run-config.json"
     packet_sha = json.loads(config_path.read_text()).get("packet_sha256") if config_path.exists() else None
     summary = summary_fn(directory) if directory.exists() else None
@@ -233,6 +239,8 @@ def execute(spec: dict, cap: float, thinking: str, passthrough: list[str], logs:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)  # progress reaches a redirected log as it happens
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--prefix", required=True)
     parser.add_argument("--preset", choices=sorted(PRESETS), help="Start from a named configuration")
