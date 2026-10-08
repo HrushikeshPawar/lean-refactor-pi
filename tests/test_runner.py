@@ -595,6 +595,10 @@ class ErrorLoopAndContinuationTests(unittest.TestCase):
         review = tool_texts(run.requests[2], "arena_finish")[0]
         self.assertIn('"phase":"review"', review)
         self.assertIn('"reminder"', review)
+        facts = json.loads(review.splitlines()[0])
+        self.assertEqual(set(facts["budget"]), {"spent_usd", "cap_usd", "remaining_usd", "used_pct"})
+        self.assertIn("without_attempts", facts["ideas"])
+        self.assertIn("% of the $", facts["next"])
         confirmation = next(row["text"] for row in run.jsonl("trace-journal.jsonl")
                             if row.get("kind") == "tool_result" and row.get("name") == "arena_finish"
                             and '"phase":"confirmed"' in row.get("text", ""))

@@ -965,10 +965,22 @@ export default function arenaExtension(pi: ExtensionAPI) {
         if (reminder) appendCost({ kind: "finish", phase: "reminder", current_idea_id: idea.id });
         const bestVerified = answer.candidate ? { candidate: answer.candidate, tokens: answer.tokens,
           heartbeats: answer.heartbeats, proxy: answer.proxy, status: "cold verified" } : checks.best;
+        // Facts the stop decision depends on: how much of the allowance is left and which routes were tried.
+        const limits = budgetLimits();
+        const spent = costState().spent;
+        const remaining = softCapGate(spent, limits).remainingUsd;
+        const budget = { spent_usd: Number(spent.toFixed(4)), cap_usd: limits.stopUsd,
+          remaining_usd: Number(remaining.toFixed(4)), used_pct: Math.round(100 * spent / limits.stopUsd) };
+        const ideaRows: any[] = portfolio.ideas ?? [];
+        const ideas = { total: ideaRows.length,
+          ...Object.fromEntries(["active", "parked", "succeeded", "abandoned"].map(status =>
+            [status, ideaRows.filter(row => row.status === status).length])),
+          without_attempts: ideaRows.filter(row => !row.attempts).length };
         return reply({ ok: true, phase: "review", best_verified: bestVerified,
-          baseline: checks.baseline, current_idea: idea,
+          baseline: checks.baseline, current_idea: idea, budget, ideas,
           reminder: reminder ? `Idea ${idea.id} has no linked proof attempt; probe it or abandon it before finishing.` : null,
-          next: "Make the decision turn, then call arena_finish again to confirm stop." });
+          next: `${budget.used_pct}% of the $${limits.stopUsd} allowance is spent ($${budget.remaining_usd} left). ` +
+            "Use this decision turn to try another route if one is worth it, then call arena_finish again to confirm stop." });
       }
       finishConfirmed = true;
       appendCost({ kind: "finish", phase: "confirmed" });
