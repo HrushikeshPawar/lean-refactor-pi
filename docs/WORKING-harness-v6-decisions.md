@@ -12,6 +12,8 @@ Cache reasoning checked against [Anthropic's prompt-caching documentation](https
 
 ## Next improvements: deferred until there is more data (2026-10-08)
 
+The agreed v7 work (library dependency graph, routes by subgoals) is in `docs/BACKLOG-harness-v7.md`.
+
 **Compaction memory.** In the `v6pilot` run on Core with DeepSeek, memory injection fired 3 times.
 - Working: no proof was exactly repeated across a compaction, and only 2 of 27 later probes were near-copies of an earlier failure. The model resumed on the best route.
 - Not working: the model forgot what it knew. After the second compaction it re-read 690 source lines it had already read, read no new lines, and repeated searches.
