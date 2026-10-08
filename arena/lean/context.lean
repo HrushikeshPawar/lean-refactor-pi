@@ -20,7 +20,7 @@ elab "arena_context " cmd:command : command => do
   let fm ← getFileMap
   let emit (fields : List (String × Json)) : CommandElabM Unit :=
     logInfo m!"ARENA_CTX {(Lean.Json.mkObj fields).compress}"
-  let clip (s : String) (n : Nat) : String := if s.length > n then String.ofList (s.toList.take n) ++ "…" else s
+  let clip (s : String) (n : Nat) : String := if s.length > n then (s.toList.take n).foldl String.push "" ++ "…" else s
   let sigOf (n : Lean.Name) : CommandElabM String := do
     match (← getEnv).find? n with
     | none => pure ""
