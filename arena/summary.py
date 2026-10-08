@@ -11,6 +11,7 @@ from collections import Counter
 from difflib import SequenceMatcher
 from pathlib import Path
 
+from arena.merges import merge_report, merge_text
 from arena.routes import route_table, routes_text
 
 HARD_CAP_USD = 3.0  # keep equal to MAX_HARD_CAP_USD in packages/arena-pi/extensions/budget.ts
@@ -383,6 +384,7 @@ def build_summary(directory: Path) -> dict:
                   "errors": dict(errors), "error_total": sum(errors.values())},
         "ideas": list(ideas.values()),
         "routes": route_table(ledger),
+        "merge_report": merge_report(ledger),
         "ideas_without_attempts": ideas_without_attempts,
         "submission": submission_result,
     }
@@ -417,6 +419,7 @@ def render_text(summary: dict) -> str:
         f"post-best spend ${cost['spent_after_best_usd']:.4f} over {cost['requests_after_best']} requests; "
         f"ideas without attempts {len(summary['ideas_without_attempts'])}",
         "routes tried: " + routes_text(summary.get("routes") or []),
+        "harness merge check: " + merge_text(summary.get("merge_report") or []),
         f"tool errors {summary['tools']['error_total']}: {summary['tools']['errors']}",
         f"submission: {(summary.get('submission') or {}).get('candidate') or 'none'}",
     ]) + "\n"

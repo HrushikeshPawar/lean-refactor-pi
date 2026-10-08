@@ -1989,8 +1989,9 @@ def submission(run_id: str) -> dict:
     directory = run_dir(run_id)
     history = events(directory)
     rows = _summaries(history)
+    # Harness-combined proofs (auto_merge) are reported by arena.merges but never submitted: the answer is model-written.
     pool = sorted((r for r in rows if r["verified"] and r["score"] is not None and r["status"] == "full"
-                   and r["origin"] != "reference"), key=lambda r: (r["score"], -r["n"]), reverse=True)
+                   and r["origin"] not in ("reference", "auto_merge")), key=lambda r: (r["score"], -r["n"]), reverse=True)
     best, rejected, cold = None, [], None
     for row in pool:
         if not _used_session(row):
