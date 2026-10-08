@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
-from arena.summary import HARD_CAP_USD, _result_ok, _turns, build_summary
+from arena.summary import HARD_CAP_USD, _result_ok, _turns, build_summary, reconcile_spend, session_spend
 
 BASELINE_PROXY = round(100 / 3, 2)
 STALL_SECONDS = 15 * 60
@@ -153,6 +153,8 @@ def hub_row(run_id: str, directory: Path, campaign: str | None = None, now: floa
         if event.get("kind") == "settle" and event.get("usage_known") is not False:
             spent += float(event.get("usd") or 0)
             requests += 1
+    # The summary's figure also covers requests Pi paid for that the ledger never settled.
+    spent = max(spent, float(cost.get("spent_usd") or 0))
     best = state.get("best") or {}
     verified = (summary.get("progress") or {}).get("best_verified_candidate") or {}
     if not best and verified:
@@ -229,12 +231,14 @@ def spend_series(directory: Path, start: float | None, soft_cap: float | None) -
     except (KeyError, TypeError):
         turns = []
     priced = iter(turns)
+    session = session_spend(directory)
+    recon = reconcile_spend(cost_events, session["usd"] if session else None)
     names = {"input": "input", "output": "output", "cacheRead": "cache_read", "cacheWrite": "cache_write"}
     points, spent = [], 0.0
     for settle in settles:
         if settle.get("usage_known") is False:
             continue
-        turn = next(priced, {})
+        turn = {"kind": "compaction"} if settle.get("source") == "orphan_stream" else next(priced, {})
         parts = {names[k]: float(v) for k, v in (settle.get("ledger_components_usd") or {}).items() if k in names}
         tokens = settle.get("tokens") or {}
         spent += float(settle.get("usd") or 0)
@@ -244,14 +248,9 @@ def spend_series(directory: Path, start: float | None, soft_cap: float | None) -
                        "request_usd": float(settle.get("usd") or 0), "spent_usd": round(spent, 6),
                        "parts": parts, "tokens": tokens, "kind": turn.get("kind"), "tools": turn.get("tools", []),
                        "reuse_pct": round(100 * read / (read + write), 1) if read + write else None})
-    unresolved = {}
-    for event in cost_events:
-        if event.get("kind") == "reserve":
-            unresolved[str(event["id"])] = float(event["usd"])
-        elif event.get("kind") in ("settle", "release"):
-            unresolved.pop(str(event["id"]), None)
-    return {"points": points, "spent_usd": round(spent, 6), "soft_cap_usd": soft_cap,
-            "hard_cap_usd": HARD_CAP_USD, "unresolved_usd": round(sum(unresolved.values()), 6)}
+    return {"points": points, "spent_usd": round(max(spent, recon["spent_usd"]), 6), "soft_cap_usd": soft_cap,
+            "hard_cap_usd": HARD_CAP_USD, "unresolved_usd": round(recon["unresolved_usd"], 6),
+            "unsettled_usd": recon["gap_usd"], "reconciliation": recon}
 
 
 def tool_timeline(directory: Path, start: float | None) -> list[dict]:

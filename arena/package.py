@@ -20,6 +20,7 @@ from pathlib import Path
 from string import Template
 
 from arena.engine import ROOT, validate_proof
+from arena.summary import reconcile_spend, session_spend
 from tools.run_pi_budgeted import MODELS
 
 ELIGIBLE_MODELS = tuple(MODELS)  # closed-track models the competitor has confirmed eligible
@@ -99,8 +100,13 @@ def attempts(directory: Path) -> dict:
                          "response_id": response.get("response_id"),
                          "response_model": response.get("response_model"),
                          "stop_reason": response.get("stop_reason")})
-    unresolved = sum(reserved.values())
+    # Pi also pays for requests no agent message carries (compaction summaries); never report less
+    # than Pi's own session total, and do not count a reserve that total already covers.
+    session = session_spend(directory)
+    recon = reconcile_spend(cost, session["usd"] if session else None)
+    spent, unresolved = max(spent, recon["spent_usd"]), recon["unresolved_usd"]
     return {"settles": rows, "spent_usd": spent, "unresolved_usd": unresolved,
+            "unsettled_usd": recon["gap_usd"], "reconciliation": recon,
             "total_usd": spent + unresolved, "retries": sum(1 for r in rows if r["retry_of"]),
             "journal_requests": len(requests)}
 
