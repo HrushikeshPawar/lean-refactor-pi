@@ -55,6 +55,25 @@ class SourceHandleTests(unittest.TestCase):
             self.assertEqual(call.args[1:], ("4.30.0", "measure1"))
         self.assertGreaterEqual(campaign.workspace.call_count, 2)
 
+    def test_source_accepts_line_suffixes_and_the_printed_handle_form(self):
+        target = (Path("project"), "abc123", "Strata/Target.lean")
+        with patch("arena.campaign._git_source", return_value="".join(f"l{i}\n" for i in range(1, 11))), \
+             patch("arena.campaign._source_target", return_value=target) as resolved:
+            for handle, bounds in [("strata:Strata/Target.lean:3", (3, 10)),
+                                   ("Strata/Target.lean:3-5", (3, 5)),
+                                   ("strata@abc123:Strata/Target.lean:4-6", (4, 6)),
+                                   ("strata@abc:Strata/Target.lean:2-3", (2, 3))]:
+                result = campaign.source_range("Target", handle)
+                self.assertEqual((result["first"], result["last"]), bounds, handle)
+                self.assertEqual(resolved.call_args.args[2], "Strata/Target.lean")
+            explicit = campaign.source_range("Target", "Strata/Target.lean:3-5", 1, 2)
+            self.assertEqual((explicit["first"], explicit["last"]), (1, 2))
+        with self.assertRaises(ValueError):
+            campaign.source_range("Target", "strata@def456:Strata/Target.lean:1-2")
+        for bad in ("/etc/x.lean:1", "../x.lean:1", "Strata/x.txt:1"):
+            with self.assertRaises(ValueError):
+                campaign.source_range("Target", bad)
+
     def test_decl_handle_without_first_starts_at_the_declaration(self):
         located = {"root": Path("project"), "pin": "abc123", "path": "Strata/Target.lean", "line": 2,
                    "end": 2, "qualified": "Target.helper", "file_lines": 2}

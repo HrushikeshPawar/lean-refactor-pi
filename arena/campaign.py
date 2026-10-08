@@ -267,6 +267,9 @@ def _source_range(name: str, path: str, first: int | None, last: int | None) -> 
         project, commit, path = located["root"], located["pin"], located["path"]
         first = located["line"] if first is None else first
     else:
+        path, suffix_first, suffix_last = _split_source_handle(path, commit)
+        first = suffix_first if first is None else first
+        last = suffix_last if last is None else last
         project, commit, path = _source_target(project, commit, _canonical_source_path(row, path))
     try:
         lines = _git_source(project, commit, path).splitlines()
@@ -433,6 +436,25 @@ def _candidate_files(hits: list[tuple[int, str, str, int, str]], needle: str, is
         key = (index, pin, path)
         ranked[key] = min(ranked.get(key, tier), tier)
     return [key for key, _ in sorted(ranked.items(), key=lambda item: (item[1], item[0][0], item[0][2]))]
+
+
+_HANDLE_SUFFIX = re.compile(r"^(.*\.lean):(\d+)(?:-(\d+))?$")
+_HANDLE_PIN = re.compile(r"^[A-Za-z0-9_.-]+@([0-9a-fA-F]+):")
+
+
+def _split_source_handle(path: str, pin: str) -> tuple[str, int | None, int | None]:
+    """Split `[src@commit:]path.lean[:N[-M]]` into the path and its optional line range."""
+    first = last = None
+    suffix = _HANDLE_SUFFIX.match(path)
+    if suffix:
+        path, first = suffix.group(1), int(suffix.group(2))
+        last = int(suffix.group(3)) if suffix.group(3) else None
+    printed = _HANDLE_PIN.match(path)
+    if printed:
+        if not pin.startswith(printed.group(1)):
+            raise ValueError(f"Source handle commit {printed.group(1)[:12]} is not the pinned commit {pin[:8]}")
+        path = path[printed.end():]
+    return path, first, last
 
 
 def _canonical_source_path(row: dict, path: str) -> str:
