@@ -34,3 +34,13 @@ test("treats empty optional fields as absent and parses arrays sent as text", ()
   assert.deepEqual(normalizeToolArguments({ items: ["['Core.a', 'Core.b']"] }, schema), { items: ["Core.a", "Core.b"] });
   assert.deepEqual(normalizeToolArguments({ first: 0, proof: "  " }, schema), { first: 0 });
 });
+
+test("an unknown argument key maps to the schema field it stands for, never over a given field", () => {
+  const probe = { properties: { proof: { type: "string" }, drafts: { type: "array" }, label: { type: "string" } } };
+  assert.deepEqual(normalizeToolArguments({ draft: "by simp" }, probe), { drafts: ["by simp"] });
+  assert.deepEqual(normalizeToolArguments({ code: "by rfl" }, probe), { proof: "by rfl" });
+  assert.deepEqual(normalizeToolArguments({ proof: "by rfl", code: "by simp" }, probe), { proof: "by rfl", code: "by simp" });
+  const idea = { properties: { title: { type: "string" }, status: { type: "string" } } };
+  assert.deepEqual(normalizeToolArguments({ idea: "equational route" }, idea), { title: "equational route" });
+  assert.deepEqual(normalizeToolArguments({ project: "x" }, idea), { project: "x" });
+});

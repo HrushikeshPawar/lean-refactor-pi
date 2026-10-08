@@ -46,10 +46,27 @@ function listFromText(text: string): string[] {
  * Some models fill every optional field with an empty value ("", [""]) and send arrays as strings.
  * Treat empty values as absent and parse stringified arrays, using the tool's object schema.
  */
+// Names models use for a schema field that has another name (Qwen sent `idea` for arena_idea's `title`).
+const KEY_SYNONYMS: Record<string, string[]> = { title: ["idea", "name"], proof: ["code", "lean", "body"] };
+
+/** The schema field an unknown key stands for: a synonym, else the nearest name within one edit (`draft` → `drafts`). */
+function schemaKey(key: string, properties: Record<string, unknown>, present: Set<string>): string {
+  if (key in properties) return key;
+  const free = Object.keys(properties).filter(name => !present.has(name));
+  const synonym = free.find(name => KEY_SYNONYMS[name]?.includes(key.toLowerCase()));
+  if (synonym) return synonym;
+  const near = free.filter(name => distance(key.toLowerCase(), name.toLowerCase()) <= 1);
+  return near.length === 1 ? near[0] : key;
+}
+
 export function normalizeToolArguments<T>(params: T, schema: { properties?: Record<string, { type?: string }> }): T {
   if (!params || typeof params !== "object" || Array.isArray(params)) return params;
   const cleaned: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(params as Record<string, unknown>)) {
+  const properties = schema.properties ?? {};
+  const present = new Set(Object.keys(params as Record<string, unknown>).filter(key => key in properties));
+  for (const [given, value] of Object.entries(params as Record<string, unknown>)) {
+    const key = schemaKey(given, properties, present);
+    present.add(key);
     let next: unknown = value;
     if (schema.properties?.[key]?.type === "array" && typeof next === "string") next = next.trim() ? listFromText(next) : [];
     // A validator may already have wrapped the text in a one-element array; unwrap it the same way.
