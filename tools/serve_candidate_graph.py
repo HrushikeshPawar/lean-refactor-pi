@@ -1,8 +1,14 @@
 """Serve static graph assets and live run data on loopback only.
 
-One run: the viewer at `/`. Several runs (more than one ID, or `--match` with a glob over run
-IDs that is re-scanned on every request, so new runs appear while a matrix starts them): a hub
-at `/` with one tab per run, each tab showing that run's viewer from `/run/<id>/`.
+One run: the candidate graph at `/` (dashboard at `/dashboard.html`). Several runs (more than one
+ID, or `--match` with a glob over run IDs that is re-scanned on every request, so new runs appear
+while a matrix starts them): a hub at `/` with a filterable run table and one tab per run, each tab
+showing that run's dashboard from `/run/<id>/dashboard.html` (graph at `/run/<id>/`).
+
+Per-run data: graph.json, dashboard.json, langfuse.json. Langfuse is queried server-side with the
+keys in ~/.pi/agent/langfuse.json (never sent to the browser) and cached; `--no-langfuse` disables it.
+
+    uv run python tools/serve_candidate_graph.py --match 'v6*'
 """
 
 from __future__ import annotations
@@ -11,12 +17,17 @@ import argparse
 import fnmatch
 import json
 import re
+import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from arena.campaign import graph_state, run_dir
-
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:  # allow `python tools/serve_candidate_graph.py`
+    sys.path.insert(0, str(ROOT))
+
+from arena.campaign import graph_state, run_dir  # noqa: E402
+from arena.viewer_data import Langfuse, campaign_of, hub_row, run_dashboard  # noqa: E402
+
 ASSETS = ROOT / "tools" / "graph_viewer"
 
 
@@ -103,7 +114,11 @@ def baseline_point(payload: dict) -> dict | None:
 VIEWER_FILES = {"": ("index.html", "text/html; charset=utf-8"),
                 "index.html": ("index.html", "text/html; charset=utf-8"),
                 "app.js": ("app.js", "text/javascript; charset=utf-8"),
-                "style.css": ("style.css", "text/css; charset=utf-8")}
+                "style.css": ("style.css", "text/css; charset=utf-8"),
+                "dashboard.html": ("dashboard.html", "text/html; charset=utf-8"),
+                "dashboard.js": ("dashboard.js", "text/javascript; charset=utf-8"),
+                "charts.js": ("charts.js", "text/javascript; charset=utf-8"),
+                "dashboard.css": ("dashboard.css", "text/css; charset=utf-8")}
 HUB_FILES = {"": ("hub.html", "text/html; charset=utf-8"),
              "index.html": ("hub.html", "text/html; charset=utf-8"),
              "hub.js": ("hub.js", "text/javascript; charset=utf-8"),
@@ -132,49 +147,20 @@ class Runs:
         return found
 
 
-def run_card(run_id: str) -> dict:
-    """Cheap per-run status for the hub's tabs and overview; read from files the run writes."""
+def run_card(run_id: str, langfuse: Langfuse | None = None) -> dict:
+    """One hub row per run: cheap status from files the run writes (see arena.viewer_data)."""
     directory = run_dir(run_id)
-
-    def read(name: str) -> dict:
-        try:
-            return json.loads((directory / name).read_text())
-        except (OSError, ValueError):
-            return {}
-    config, state, summary, answer = (read("run-config.json"), read("state.json"),
-                                      read("summary.json"), read("submission.json"))
-    spent, requests = 0.0, 0
-    journal = directory / "cost-ledger.jsonl"
-    if journal.exists():
-        for line in journal.read_text().splitlines():
-            try:
-                event = json.loads(line)
-            except ValueError:
-                continue
-            if event.get("kind") == "settle" and event.get("usage_known") is not False:
-                spent += float(event.get("usd") or 0)
-                requests += 1
-    best = state.get("best") or {}
-    reference = None
-    if config.get("theorem"):
-        try:
-            from arena.scoring import reference as published
-            tokens, heartbeats = published(config["theorem"])
-            reference = {"tokens": tokens, "heartbeats": heartbeats, "proxy": round(100 / 3, 2)}
-        except (ValueError, ImportError, KeyError):
-            reference = None
-    return {"run_id": run_id, "model": config.get("model"), "theorem": config.get("theorem"),
-            "reference": reference,
-            "thinking": config.get("thinking"), "cap_usd": config.get("hard_cap_usd"),
-            "spent_usd": round(spent, 6), "requests": requests,
-            "best": {"candidate": best.get("candidate"), "proxy": best.get("proxy"),
-                     "tokens": best.get("tokens"), "heartbeats": best.get("heartbeats")} if best else None,
-            "leading_unverified": state.get("leading_unverified"), "checking": state.get("checking", []),
-            "finished": bool(summary), "stop_reason": summary.get("stop_reason"),
-            "submission": answer.get("candidate")}
+    row = hub_row(run_id, directory, campaign_of(run_id, directory.parent))
+    row["langfuse_url"] = langfuse.session_url(run_id) if langfuse else None
+    return row
 
 
-def handler_for(runs: Runs | str):
+def run_dashboard_start(run_id: str) -> float | None:
+    from arena.viewer_data import _start_end
+    return _start_end(run_dir(run_id))[0]
+
+
+def handler_for(runs: Runs | str, langfuse: Langfuse | None = None):
     if isinstance(runs, str):
         runs = Runs([runs])
 
@@ -197,6 +183,14 @@ def handler_for(runs: Runs | str):
             if rest == "graph.json":
                 self.send(json.dumps(graph_payload(run_id), ensure_ascii=False).encode(),
                           "application/json; charset=utf-8")
+            elif rest == "dashboard.json":
+                self.send(json.dumps(run_dashboard(run_id, run_dir(run_id)), ensure_ascii=False).encode(),
+                          "application/json; charset=utf-8")
+            elif rest == "langfuse.json":
+                started = run_dashboard_start(run_id)
+                body = (langfuse.session(run_id, started, refresh="refresh=1" in self.path) if langfuse else
+                        {"available": False, "error": "Langfuse is not configured for this server", "run_id": run_id})
+                self.send(json.dumps(body, ensure_ascii=False).encode(), "application/json; charset=utf-8")
             elif rest in VIEWER_FILES:
                 filename, content_type = VIEWER_FILES[rest]
                 self.send((ASSETS / filename).read_bytes(), content_type)
@@ -210,7 +204,7 @@ def handler_for(runs: Runs | str):
                     self.viewer(runs.ids()[0], path.lstrip("/"))
                     return
                 if path == "/runs.json":
-                    self.send(json.dumps([run_card(run_id) for run_id in runs.ids()], ensure_ascii=False).encode(),
+                    self.send(json.dumps([run_card(run_id, langfuse) for run_id in runs.ids()], ensure_ascii=False).encode(),
                               "application/json; charset=utf-8")
                     return
                 match = re.fullmatch(r"/run/([A-Za-z0-9._-]+)(/(.*))?", path)
@@ -242,11 +236,14 @@ def main() -> None:
     parser.add_argument("run_ids", nargs="*", help="One run (single viewer) or several (hub with tabs)")
     parser.add_argument("--match", help="Glob over run IDs, re-scanned live, e.g. 'v5-rep-20261006-r3-*'")
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--no-langfuse", action="store_true", help="Never contact Langfuse")
+    parser.add_argument("--langfuse-ttl", type=float, default=45.0, help="Seconds to cache Langfuse answers")
     args = parser.parse_args()
     if not args.run_ids and not args.match:
         parser.error("give at least one run ID or --match")
     runs = Runs(args.run_ids, args.match)
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), handler_for(runs))
+    langfuse = None if args.no_langfuse else Langfuse(ttl=args.langfuse_ttl)
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), handler_for(runs, langfuse))
     kind = "hub" if runs.hub else "viewer"
     print(f"Arena graph {kind}: http://127.0.0.1:{server.server_port}/ ({len(runs.ids())} run(s) now)", flush=True)
     server.serve_forever()
