@@ -9,7 +9,9 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 import re
+import signal
 import subprocess
 import tempfile
 import threading
@@ -340,12 +342,20 @@ def _run_cold(row: dict, project: Path, text: str, timeout: int) -> tuple[int, s
     with tempfile.TemporaryDirectory(prefix="arena-", dir=scratch) as directory:
         candidate = Path(directory) / Path(source_path(row)).name
         candidate.write_text(text, encoding="utf-8")
+        # Own process group: on timeout the `lean` that `lake env` started must die too, or it keeps
+        # running orphaned and competes with every later compile.
+        proc = subprocess.Popen(["lake", "env", "lean", str(candidate)], cwd=project, text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
         try:
-            proc = subprocess.run(["lake", "env", "lean", str(candidate)], cwd=project,
-                                  text=True, capture_output=True, timeout=timeout)
+            stdout, stderr = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.communicate()
             return None
-    return proc.returncode, (proc.stdout + proc.stderr).replace(str(candidate), source_path(row)).strip()
+    return proc.returncode, (stdout + stderr).replace(str(candidate), source_path(row)).strip()
 
 
 def run_lean(row: dict, project: Path, text: str, timeout: int = 180,
