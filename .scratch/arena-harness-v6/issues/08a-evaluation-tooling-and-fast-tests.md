@@ -4,7 +4,7 @@
 
 **Blocked by:** 07: Ideas, finish and run accounting.
 
-**Status:** in-progress
+**Status:** needs-review
 
 **Branch:** `hrushikesh/v6-08-submission` (stacked on `hrushikesh/v6-07-ideas-finish`)
 
@@ -31,3 +31,24 @@ Your branch is **`hrushikesh/v6-08-submission`**, already created and stacked di
 - If you need to change code that a lower ticket introduced, make the change in a commit on your own branch and call it out in the hand-back. Do not edit lower branches' commits. If `but commit` reports a dependency or conflict error, stop and report it rather than moving branches.
 - Do not edit other tickets or `docs/SPEC-harness-v6.md`; put proposed spec changes in the hand-back.
 - **Hand-back:** all your work is committed on `hrushikesh/v6-08-submission` and none of your edits are left uncommitted. Set this ticket's `**Status:**` to `needs-review` in that final commit. Report your commit IDs, the tests you ran with their results, any Langfuse trace or session IDs you used, deviations from the acceptance criteria and open questions. Do not mark the ticket done.
+
+## Hand-back
+
+Built in this session with Sonnet 5.5 subagents and reviewed here; all commits are on `hrushikesh/v6-08-submission`.
+
+- **Fast tests** (`luu`): Pi, Lean, session and live tests run only with `ARENA_SLOW_TESTS=1`. The default suite runs about 290 tests in about 2 s (93 slow tests skipped); before this it was 244 tests in about 22 min.
+- **Campaign driver and report** (`nrr`): `tools/run_campaign.py` runs rows × models × N sequential replicates. Before any paid run it requires a passing Langfuse preflight and a certified packet for every row, and `--dry-run` prints the plan and worst case. It writes `campaign.json` and `campaign.txt`.
+- **Packager** (`orl`): `tools/arena_package.py` writes `proofs.jsonl`, `provenance.json`, `report.md`, `REPRODUCE.md` and `code.tar.gz` to `runs/submission-staging/<name>/`. It checks the $3 ceiling and model eligibility. Ceiling discovery across other runs is opt-in (`--discover`).
+- **Fixes from the first live runs:**
+  - Luna's empty optional arguments and lists sent as text (`vpz`), a probe label as parent (`ykn`), live log lines (`ust`).
+  - Run isolation: a run's Lean project gets only git-tracked files, so earlier runs' candidates can't leak in (`smr`).
+  - `$3` is the only hard cap; lower caps are soft caps on actual spend (`wmt`, spec `nwr`).
+  - Tool hotfixes: exact names in `arena_find` (`tom`), source handle suffixes (`pmo`), bare tactic drafts (`pkm`), evaluate given both proof and candidate (`trr`), Lean MCP path confinement (`kzm`), inline `idea` (`pqv`).
+  - Compaction requests settle in the ledger, and summaries reconcile against the Pi session total (`llk`, `urv`).
+  - The finish review shows the remaining allowance and idea counts (`zzy`).
+- **Viewer:** desktop hub and one-screen run dashboard with Langfuse panels (`tow`, `ows`, `ruy`, `ply`, `nno`, `lux`).
+- **First paid runs:** `v6-first-20261008-*`, `v6c1-*` and `v6c2-*` ($0.10 soft caps). Results are in the session report.
+- **Open:**
+  - The Langfuse trace IDs in provenance need the live lookup.
+  - DeepSeek with thinking set to high reached the 16K output limit twice. Recommendation: a fixed 32K output limit for DeepSeek only.
+  - The official template bundle is still needed for 08b.
