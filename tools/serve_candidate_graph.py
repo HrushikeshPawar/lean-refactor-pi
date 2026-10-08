@@ -17,6 +17,7 @@ import argparse
 import fnmatch
 import json
 import re
+import signal
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -244,9 +245,24 @@ def main() -> None:
     runs = Runs(args.run_ids, args.match)
     langfuse = None if args.no_langfuse else Langfuse(ttl=args.langfuse_ttl)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), handler_for(runs, langfuse))
+    # Open browser connections must not keep the process alive after Ctrl+C.
+    server.daemon_threads = True
     kind = "hub" if runs.hub else "viewer"
-    print(f"Arena graph {kind}: http://127.0.0.1:{server.server_port}/ ({len(runs.ids())} run(s) now)", flush=True)
-    server.serve_forever()
+    print(f"Arena graph {kind}: http://127.0.0.1:{server.server_port}/ ({len(runs.ids())} run(s) now); "
+          "press Ctrl+C to stop", flush=True)
+
+    def stop(_signum, _frame):
+        raise KeyboardInterrupt
+
+    for number in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(number, stop)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nStopping the Arena graph server…", flush=True)
+    finally:
+        server.server_close()
+        print("Stopped.", flush=True)
 
 
 if __name__ == "__main__":
