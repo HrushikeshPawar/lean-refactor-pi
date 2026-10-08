@@ -60,6 +60,21 @@ def attempt_has_model_error(event_log: Path, offset: int) -> bool:
     return pending_error
 
 
+def _describe_result(item: dict) -> str:
+    """One probe or evaluation outcome for the live log: label, outcome, size and versions checked."""
+    if item.get("ok") is False:
+        return f"draft {item.get('index', '?')} rejected: {str(item.get('error', 'unknown error'))[:100]}"
+    compat = item.get("compat") or {}
+    passed = sum(bool(entry.get("passed")) for entry in compat.values())
+    paths = sorted({str(entry["lean"]).split(" ")[0] for entry in compat.values() if entry.get("lean")})
+    label = item.get("candidate") or item.get("probe") or "unrecorded"
+    holes = f" {len(item['goals'])} holes" if item.get("goals") else ""
+    versions = f" {passed}/{len(compat)} versions" if compat else ""
+    via = f" lean={'+'.join(paths)}" if paths else ""
+    return (f"{label} idea={item.get('idea_id', '?')} {item.get('tokens', '?')} tok "
+            f"{item.get('heartbeat', '?')} HB{holes}{versions}{via}")
+
+
 def log_event(event: dict) -> None:
     global _request_count, _tool_result_count, _retry_count
     kind = event.get("type")
@@ -79,23 +94,14 @@ def log_event(event: dict) -> None:
         if name in ("arena_evaluate", "arena_probe"):
             try:
                 result = json.loads(event["result"]["content"][0]["text"].splitlines()[0])
-                compat = result.get("compat", {})
-                passed = sum(bool(item.get("passed")) for item in compat.values())
-                paths = sorted({str(item["lean"]).split(" ")[0] for item in compat.values() if item.get("lean")})
-                via = f" lean={'+'.join(paths)}" if paths else ""
-                if result.get("node_number") or result.get("proof_id"):
-                    label = f"#{result['node_number']}" if result.get("node_number") else f"probe {str(result['proof_id'])[:8]}"
-                    outcome = "Lean pass" if result.get("ok") else "Lean fail"
-                    note = (f"{name} {label} {outcome} idea={result.get('idea_id', '?')} "
-                            f"{result.get('mode', 'fast')} {result.get('tokens', '?')} tokens "
-                            f"{passed}/{len(compat)} versions{via}{elapsed}")
-                elif result.get("ok") is False:
-                    args = started[1] if started else {}
+                args = started[1] if started else {}
+                if result.get("ok") is False:
                     note = (f"{name} rejected idea={args.get('idea_id', '?')} "
                             f"parent={str((args.get('parents') or [args.get('parent', '?')])[0])[:12]}"
                             f"{elapsed}; {result.get('error', 'unknown error')[:130]}")
                 else:
-                    note = f"{name} returned without a recorded node{elapsed}"
+                    items = result.get("drafts") or [result]
+                    note = f"{name}{elapsed}: " + "; ".join(_describe_result(item) for item in items)
             except (KeyError, IndexError, TypeError, ValueError):
                 note = "arena_evaluate returned an unreadable result"
         elif event.get("isError"):
