@@ -14,12 +14,22 @@
   <nav id="tabs" class="tabs" role="tablist" aria-label="Runs"></nav>
   <main id="panels">
     <section id="panel-overview" class="panel-overview" role="tabpanel" aria-label="Overview">
-      <div class="table-wrap"><table class="overview">
-        <thead><tr><th>Run</th><th>Theorem</th><th>Model</th><th>Thinking</th><th>Best verified score</th><th>Tokens</th><th>Heartbeats</th>
-          <th>Leading unverified</th><th>Spend</th><th>Requests</th><th>Status</th><th>Submission</th></tr></thead>
-        <tbody id="overview-rows"><tr><td colspan="12" class="muted">No runs yet.</td></tr></tbody>
+      <div id="strip" class="strip"></div>
+      <div class="filters">
+        <input id="f-text" type="search" placeholder="Search run, theorem, model…" aria-label="Search runs">
+        <select id="f-theorem" aria-label="Theorem"></select>
+        <select id="f-model" aria-label="Model"></select>
+        <select id="f-campaign" aria-label="Campaign"></select>
+        <select id="f-status" aria-label="Status"><option value="">any status</option><option value="live">live</option><option value="finished">finished</option><option value="stalled">stalled</option></select>
+        <label class="check"><input id="f-group" type="checkbox"> group by campaign</label>
+        <button id="f-reset" type="button">Reset</button>
+        <span id="f-count" class="muted"></span>
+      </div>
+      <div class="table-wrap"><table class="overview" id="runs-table">
+        <thead id="thead"></thead>
+        <tbody id="overview-rows"><tr><td colspan="20" class="muted">No runs yet.</td></tr></tbody>
       </table></div>
-      <p class="muted note">Changes are against each theorem's original proof (score 33.33): ↓ fewer tokens or heartbeats, ↑ higher score. The best score per theorem is highlighted. Select a row or a tab to open that run's live viewer; runs started later appear automatically.</p>
+      <p class="muted note">Δ is against each theorem's original proof (proxy 33.33): green = better. Spend bars show spend against the run's soft cap; the only hard cap is $3.00. Cache reuse is read / (read + write). Bookkeeping+rejected is the share of spend on turns that did not compile or gather context. Click a header to sort, a row to open the run's dashboard; runs started later appear automatically.</p>
     </section>
   </main>
   <script src="hub.js" defer></script>
