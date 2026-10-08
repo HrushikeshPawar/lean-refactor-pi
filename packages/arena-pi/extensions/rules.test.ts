@@ -108,12 +108,13 @@ const routes = [
 ];
 
 test("routes come from the harness fingerprint, not from idea titles", () => {
-  assert.equal(routesText(routes), 'r1 "induction: InitStatesSomeMonotone" [the original proof\'s route]: 4 attempts, best proxy 69.1 (#7)');
+  assert.equal(routesText(routes), "r1 (original's route) \u00b7 4 attempts \u00b7 best proxy 69.1 (#7)");
   assert.equal(routesText([]), "none");
   const push = finishPush({ ...base, ideas: [{ id: "i9", title: "brand new idea", status: "active", attempts: 3 }], routes, refusals: 0, newIdeaProbed: true });
   assert.ok(push.message.includes("Routes tried: r1"));
   assert.ok(push.message.includes("Only one route has been tried so far"));
   assert.ok(!push.message.includes("brand new idea"));
+  assert.ok(!push.message.includes("InitStatesSomeMonotone"));
   assert.equal(push.tried.length, 1);
 });
 
@@ -137,8 +138,9 @@ const deep = [
 
 test("the per-route line shows attempts, distinct goal states, min holes, explored or opened and best proxy", () => {
   const text = routesText(deep);
-  assert.ok(text.includes('r2 "recursion: none": 34 attempts, 7 distinct goal states, min holes 0, explored, best proxy 86.07 (#34)'), text);
-  assert.ok(text.includes('r3 "other": 1 attempt, 1 distinct goal state, min holes 2, opened, no scored proof'), text);
+  assert.ok(text.includes("r2 (credited) \u00b7 34 attempts \u00b7 7 goal states \u00b7 best proxy 86.07 (#34)"), text);
+  assert.ok(text.includes("r3 (credited) \u00b7 1 attempt \u00b7 1 goal state \u00b7 no scored proof"), text);
+  assert.ok(!text.includes("recursion: none") && !text.includes("other"), text);
 });
 
 test("since the last refusal: attempts, goal states new to their route and credited routes opened are measured from route stats", () => {
@@ -152,7 +154,7 @@ test("a repeat refusal states the measured fact when nothing new was reached, an
   const stalled = finishPush({ ...base, routes: deep, refusals: 1, newIdeaProbed: true, sinceRefusal: { attempts: 4, newStates: 0, creditedOpened: 0 } });
   assert.ok(stalled.message.includes("4 attempts since the last refusal produced no goal state new to their route"), stalled.message);
   assert.ok(stalled.message.includes("edits that leave the same goals do not count"));
-  assert.ok(stalled.message.includes("7 distinct goal states"));
+  assert.ok(stalled.message.includes("7 goal states"));
   assert.ok(!stalled.message.includes("structurally NEW idea"));
   const single = finishPush({ ...base, routes: deep, refusals: 1, newIdeaProbed: true, sinceRefusal: { attempts: 1, newStates: 0, creditedOpened: 0 } });
   assert.ok(single.message.includes("1 attempt since the last refusal produced no goal state new to its route"));

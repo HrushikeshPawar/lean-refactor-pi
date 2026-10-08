@@ -1059,7 +1059,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
         current_idea: idea ? { id: idea.id, title: idea.title, attempts: idea.attempts } : undefined,
         recent_failures: (portfolio.recent_failures ?? []).map((row: any) => ({ ref: row.ref, error: String(row.error ?? "").slice(0, 160) })),
         routes: (portfolio.routes ?? []).filter((row: any) => row.attempts > 0 || row.original).map((row: any) => dropEmpty({ route: row.route,
-          label: row.label, original: row.original || undefined, attempts: row.attempts, goal_states: row.depth, min_holes: row.min_holes,
+          original: row.original || undefined, attempts: row.attempts, goal_states: row.depth, min_holes: row.min_holes,
           stale_streak: row.stale_streak || undefined, status: row.explored ? "explored" : "opened", credited: row.credited || undefined,
           best_proxy: row.best_proxy })) }));
     },

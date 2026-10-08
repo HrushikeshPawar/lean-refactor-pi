@@ -288,6 +288,44 @@ def _kernel_label(own: dict, reference: dict | None, weight: dict) -> str:
     return "; ".join(parts)
 
 
+def _short(name: str) -> str:
+    """A constant name without its namespace prefix."""
+    return name.rsplit(".", 1)[-1]
+
+
+def short_label(print_: dict, reference: dict | None = None, weights: dict[str, dict[str, float]] | None = None) -> str:
+    """Compact human label for the viewer legend, e.g. `rec: InitStates \u00b7 +UpdateStatesUpdated +2 \u22123`: namespace
+    prefixes dropped, the recursion part omitted when it equals the reference's, `no induction` when the proof
+    has none but the reference does, and lemma changes as the top added name plus counts. Never shown to the model."""
+    if not print_.get("kernel"):
+        return label(print_, reference, weights)
+    own = print_["kernel"]
+    ref = reference["kernel"] if reference and reference.get("kernel") else None
+    weight = (weights or {}).get("lemmas", {})
+    recursion = [_short(_recursion_name(item).removesuffix(".rec")) for item in own["recursion"]]
+    parts = []
+    if ref is None:
+        parts.append("rec: " + ", ".join(recursion) if recursion else "no induction")
+        added = _ranked(own["lemmas"], weight)
+        if added:
+            parts.append(_short(added[0]) + (f" +{len(added) - 1}" if len(added) > 1 else ""))
+        return " \u00b7 ".join(parts)
+    if own["recursion"] != ref["recursion"]:
+        parts.append("rec: " + ", ".join(recursion) if recursion else "no induction")
+    added = _ranked(set(own["lemmas"]) - set(ref["lemmas"]), weight)
+    removed = set(ref["lemmas"]) - set(own["lemmas"])
+    if added or removed:
+        change = []
+        if added:
+            change.append(f"+{_short(added[0])}" + (f" +{len(added) - 1}" if len(added) > 1 else ""))
+        if removed:
+            change.append(f"\u2212{len(removed)}")
+        parts.append(" ".join(change))
+    if not parts:
+        parts.append("same rec/lemmas, other claims" if own["claims"] != ref["claims"] else "same rec/lemmas, other logic")
+    return " \u00b7 ".join(parts)
+
+
 def vocabulary(context: dict) -> set[str]:
     """Lemma names worth fingerprinting: the file's earlier theorems and defs, and non-library constants of the proof."""
     names = {item["name"] for item in context.get("earlier", []) if item.get("decl") in ("theorem", "def")}
@@ -342,7 +380,8 @@ def route_table(history: list[dict]) -> list[dict]:
             credited = event.get("credited")
             if credited is None:  # an event from before credit existed: a kernel route opened by a model attempt
                 credited = bool(event.get("new") and event.get("source") == "kernel" and kind in (None, "model"))
-            table[route] = {"route": route, "label": event.get("label") or route, "original": False, "attempts": 0,
+            table[route] = {"route": route, "label": event.get("label") or route,
+                           "short_label": event.get("short_label") or event.get("label") or route, "original": False, "attempts": 0,
                             "best_candidate": None, "best_proxy": None, "verified": False,
                             "depth": 0, "new_states": 0, "min_holes": None, "stale_streak": 0, "compiled": False,
                             "explored": False, "stale": False, "credited": bool(credited) and kind != "reference",
@@ -400,14 +439,17 @@ def progress(table: list[dict]) -> dict:
 
 
 def routes_text(table: list[dict]) -> str:
-    """One line for the model: the routes with attempts and best proxy (the original's route is marked)."""
+    """One line for the model: neutral facts per route (id, original or credited, attempts, goal states, best proxy).
+    The label is for humans and never appears here, so no route is named or framed."""
     parts = []
     for row in table:
         if not row["attempts"] and not row["original"]:
             continue
         best = f"best proxy {row['best_proxy']} ({row['best_candidate']})" if row["best_proxy"] is not None else "no scored proof"
-        tag = " [the original proof's route]" if row["original"] else ""
-        parts.append(f"{row['route']} \"{row['label']}\"{tag}: {row['attempts']} attempt{'s' if row['attempts'] != 1 else ''}, {best}")
+        tag = (" (original's route)" if row["original"] else " (credited)" if row.get("credited")
+               else " (not credited)" if "credited" in row or "depth" in row else "")
+        states = f" \u00b7 {row['depth']} goal state{'s' if row['depth'] != 1 else ''}" if row.get("depth") is not None else ""
+        parts.append(f"{row['route']}{tag} \u00b7 {row['attempts']} attempt{'s' if row['attempts'] != 1 else ''}{states} \u00b7 {best}")
     return "; ".join(parts) if parts else "none"
 
 
@@ -450,7 +492,9 @@ def file_attempt(earlier: list[dict], proof_id: str, print_: dict, features: dic
              # or else a broken draft whose few elaborated lemmas differ would count as exploring.
              "credited": new and by_kernel and origin in (None, "model") and not (features or {}).get("errored"),
              "label": label(print_, reference, idf([item["fingerprint"] for item in earlier] + [print_])) if new else next(
-                 item["label"] for item in earlier if item["route"] == route)}
+                 item["label"] for item in earlier if item["route"] == route),
+             "short_label": short_label(print_, reference, idf([item["fingerprint"] for item in earlier] + [print_])) if new else next(
+                 item.get("short_label") or item["label"] for item in earlier if item["route"] == route)}
     if print_["source"] == "kernel":
         kernel_ = print_["kernel"]
         event.update(holes=kernel_["holes"], synthetic=kernel_["synthetic"], skeleton=kernel_["holes"] > 0,

@@ -22,7 +22,8 @@ class MemoryTests(unittest.TestCase):
     def test_memory_states_best_routes_ideas_failures_and_allowance(self):
         text = memory_text(FRONT, 1.25, 3)
         self.assertIn("#4 proxy 61.5 (verified)", text)
-        self.assertIn("r2 \"induction\": 3 attempts, best proxy 61.5 (#4)", text)
+        self.assertIn("r2 \u00b7 3 attempts \u00b7 best proxy 61.5 (#4)", text)
+        self.assertNotIn("updatedStatesComm", text)
         self.assertIn("i2 \"induct\" [active]: 3 attempts, best #4", text)
         self.assertIn("#3 (i1): unsolved goals", text)
         self.assertIn("$1.2500 of $3 spent, $1.7500 left", text)
@@ -34,11 +35,11 @@ class MemoryTests(unittest.TestCase):
         self.assertLess(text.index("act \"t\""), text.index("i11"))
         self.assertIn("(+5 more)", text)
 
-    def test_depth_fields_on_route_rows_leave_the_memory_text_byte_identical(self):
+    def test_depth_fields_on_route_rows_add_only_neutral_facts(self):
         depth = {"depth": 4, "new_states": 4, "min_holes": 0, "stale_streak": 6, "stale": True, "compiled": True,
                  "explored": True, "credited": True, "skeleton": True}
         deeper = {**FRONT, "routes": [{**row, **depth} for row in FRONT["routes"]]}
-        self.assertEqual(memory_text(deeper, 1.25, 3), memory_text(FRONT, 1.25, 3))
+        self.assertIn("r2 (credited) \u00b7 3 attempts \u00b7 4 goal states \u00b7 best proxy 61.5 (#4)", memory_text(deeper, 1.25, 3))
 
     def test_empty_run_still_renders(self):
         text = memory_text({})

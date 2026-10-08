@@ -90,16 +90,16 @@ export interface RouteRow {
   depth?: number; new_states?: number; min_holes?: number | null; stale_streak?: number; stale?: boolean; explored?: boolean; credited?: boolean;
 }
 
-/** The routes that carry model attempts, as one line the model cannot influence by naming ideas. */
+/** The routes that carry model attempts, as neutral facts only: no label, so nothing names or frames a strategy. */
 export function routesText(routes: RouteRow[]): string {
   const rows = routes.filter(row => (row.attempts ?? 0) > 0);
-  return rows.length ? rows.map(row => `${row.route} "${row.label ?? ""}"${row.original ? " [the original proof's route]" : ""}: ` +
-    `${row.attempts} attempt${row.attempts === 1 ? "" : "s"}, ${depthText(row)}${row.best_proxy != null ? `best proxy ${row.best_proxy}${row.best_candidate ? ` (${row.best_candidate})` : ""}` : "no scored proof"}`).join("; ") : "none";
+  return rows.length ? rows.map(row => {
+    const tag = row.original ? " (original's route)" : row.credited ? " (credited)" : row.credited === false || row.depth !== undefined ? " (not credited)" : "";
+    const states = row.depth === undefined ? "" : ` \u00b7 ${row.depth} goal state${row.depth === 1 ? "" : "s"}`;
+    const best = row.best_proxy != null ? `best proxy ${row.best_proxy}${row.best_candidate ? ` (${row.best_candidate})` : ""}` : "no scored proof";
+    return `${row.route}${tag} \u00b7 ${row.attempts} attempt${row.attempts === 1 ? "" : "s"}${states} \u00b7 ${best}`;
+  }).join("; ") : "none";
 }
-
-/** Distinct goal states, fewest open holes and explored/opened, when the harness measured them. */
-const depthText = (row: RouteRow) => row.depth === undefined ? "" :
-  `${row.depth} distinct goal state${row.depth === 1 ? "" : "s"}, ${row.min_holes != null ? `min holes ${row.min_holes}, ` : ""}${row.explored ? "explored" : "opened"}, `;
 
 /** What changed on the routes since the last refusal: attempts made, attempts that left a goal state new to their route, credited routes opened. */
 export interface SinceRefusal { attempts: number; newStates: number; creditedOpened: number }
@@ -165,7 +165,7 @@ export function finishPush(input: FinishPushInput) {
   const headroom = axisHeadroom(input.baseline, input.best, input.top);
   const byRoute = input.routes !== undefined;
   const tried: Array<Record<string, any>> = byRoute
-    ? input.routes!.filter(row => (row.attempts ?? 0) > 0).map(row => ({ id: row.route, title: row.label, status: row.original ? "original route" : "tried",
+    ? input.routes!.filter(row => (row.attempts ?? 0) > 0).map(row => ({ id: row.route, status: row.original ? "original route" : "tried",
       attempts: row.attempts ?? 0, best_proxy: row.best_proxy ?? null,
       ...(row.depth === undefined ? {} : { goal_states: row.depth, min_holes: row.min_holes ?? null, explored: Boolean(row.explored), credited: Boolean(row.credited) }) }))
     : input.ideas.map(idea => ({ id: idea.id, title: idea.title, status: idea.status,

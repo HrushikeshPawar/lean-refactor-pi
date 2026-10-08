@@ -180,9 +180,21 @@ class LedgerTests(unittest.TestCase):
 
     def test_routes_text_names_each_route(self):
         text = routes.routes_text(routes.route_table(self.history()))
-        self.assertIn('r1 "induction: x" [the original proof\'s route]: 1 attempt, best proxy 60 (#2)', text)
-        self.assertIn('r2 "no induction: y": 2 attempts, best proxy 80 (#3)', text)
+        self.assertIn("r1 (original's route) \u00b7 1 attempt \u00b7", text)
+        self.assertIn("r2 (not credited) \u00b7 2 attempts \u00b7", text)
+        self.assertIn("best proxy 80 (#3)", text)
+        self.assertNotIn("induction", text)  # the label never reaches the model
         self.assertEqual(routes.routes_text([]), "none")
+
+    def test_short_label_is_compact_and_the_model_text_has_no_label(self):
+        ref = {"kernel": {"recursion": ["rec:Core.UpdateStates"], "lemmas": ["LemmaB", "X", "Y"], "claims": [], "logic": []}}
+        own = {"kernel": {"recursion": ["rec:Core.InitStates"], "lemmas": ["X", "Ns.UpdateStatesUpdated", "Z", "W"], "claims": [], "logic": []}}
+        self.assertEqual(routes.short_label(own, ref), "rec: InitStates \u00b7 +UpdateStatesUpdated +2 \u22122")
+        self.assertIn("Core.InitStates.rec instead of", routes.label(own, ref))
+        none = {"kernel": {**own["kernel"], "recursion": []}}
+        self.assertTrue(routes.short_label(none, ref).startswith("no induction"))
+        same = {"kernel": {**own["kernel"], "recursion": ref["kernel"]["recursion"]}}
+        self.assertFalse(routes.short_label(same, ref).startswith(("rec", "no induction")))
 
     def test_record_route_writes_one_event_per_proof(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -390,7 +402,7 @@ class DepthTests(unittest.TestCase):
         table = routes.route_table(self.ledger([("ref", "r1", None, 0), ("b", "r2", self.goal("A"), 2)]))
         detail = routes.routes_detail_text(table)
         self.assertIn('r2 "r2": 1 attempt, 1 goal state, min holes 2, opened, credited (opened by a skeleton), no scored proof', detail)
-        self.assertIn('r2 "r2": 1 attempt, no scored proof', routes.routes_text(table))
+        self.assertIn('r2 (credited) \u00b7 1 attempt \u00b7 1 goal state \u00b7 no scored proof', routes.routes_text(table))
 
 
 if __name__ == "__main__":
