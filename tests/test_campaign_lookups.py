@@ -203,6 +203,33 @@ class SourceHandleTests(unittest.TestCase):
                          ("Lib.Foo.bar", "Lib/Foo.lean", 2, 3, "libpin"))
         self.assertEqual(match["signature"], "theorem bar (x : Nat) :\n    x = x := rfl")
 
+    def test_find_never_misses_a_name_the_index_holds_exactly(self):
+        inventory = {"constant": [
+            {"name": "List.unzip_zip", "kind": "theorem", "origin": "elaborated-proof", "module": "Init.Data.List.Zip",
+             "start_line": 5, "end_line": 6, "type": "unzip (zip l l') = (l, l')"},
+            {"name": "Core.updatedStatesInit", "kind": "def", "origin": "proof", "module": "this file"},
+            {"name": "Core.gen", "kind": "generated/other", "origin": "proof", "module": None, "tag": "generated"}]}
+        own = "namespace Core\ndef updatedStatesInit : Nat :=\n  0\nend Core\n"
+        row = {"name": "Target", "source": "strata", "file_path": "Strata/Target.lean",
+               "version_info": [{"4.29.1": "abc123"}]}
+        with patch("arena.campaign.problem", return_value=row), \
+             patch("arena.campaign.versions", return_value=[("4.29.1", "abc123")]), \
+             patch("arena.campaign.workspace", return_value=Path("project")), \
+             patch("arena.context.lean_context", return_value=inventory), \
+             patch("arena.campaign._package_roots", return_value=[]), \
+             patch("arena.campaign._declaration_hits", side_effect=AssertionError("no search expected")), \
+             patch("arena.campaign._git_source", side_effect=lambda root, pin, path:
+                   own if path == "Strata/Target.lean" else (_ for _ in ()).throw(
+                       subprocess.CalledProcessError(128, "git"))):
+            result = campaign.find("Target", ["List.unzip_zip", "Core.updatedStatesInit", "Core.gen"])
+        core, own_row, generated = (query["matches"][0] for query in result["queries"])
+        self.assertEqual((core["name"], core["handle"], core["module"], core["type"]),
+                         ("List.unzip_zip", "decl:List.unzip_zip", "Init.Data.List.Zip", "unzip (zip l l') = (l, l')"))
+        self.assertEqual(core["source_unavailable"], "external")
+        self.assertEqual((own_row["path"], own_row["line"]), ("Strata/Target.lean", 2))
+        self.assertNotIn("source_unavailable", own_row)
+        self.assertEqual(generated["source_unavailable"], "generated")
+
     def test_find_reports_misses_with_suggestions_and_scan_truncation(self):
         inventory = {"constant": [{"name": "Lib.Foo.near", "kind": "theorem", "origin": "proof"}]}
         hits = [(0, "abc123", f"F{n}.lean", 1, "theorem zeta : True := trivial") for n in range(campaign.MAX_SCAN_FILES + 5)]

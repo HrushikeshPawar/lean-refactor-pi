@@ -305,7 +305,8 @@ def _find(name: str, queries: list[str], limit: int) -> dict:
                          if not inventory.get("error")]
     row = problem(name)
     version, commit = measure_version(row)
-    roots = _roots(workspace(row, version, commit), commit)
+    project = workspace(row, version, commit)
+    roots = _roots(project, commit)
     needles = [query[5:] if query.startswith("decl:") else query for query in queries]
     named = [bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_'.]*", needle)) for needle in needles]
     # A name the kickoff index holds exactly resolves without searching the source trees.
@@ -319,17 +320,14 @@ def _find(name: str, queries: list[str], limit: int) -> dict:
         found: dict[str, dict] = {}
         if is_name:
             for item in entries:
-                module = item.get("module")
-                if (item["name"] == needle if exact_only else folded in item["name"].casefold()) \
-                        and item["name"] not in found and module not in (None, "this file") \
-                        and "start_line" in item and item.get("tag") != "generated":
-                    located = _module_file(roots, module)
-                    if located is None:
-                        continue
-                    root, pin, path = located
-                    lines = _git_source(root, pin, path).splitlines()
-                    found[item["name"]] = _declaration_row(pin, path, lines, item["name"],
-                                                           item["start_line"], item["end_line"])
+                if not (item["name"] == needle if exact_only else folded in item["name"].casefold()) \
+                        or item["name"] in found:
+                    continue
+                matched = _indexed_row(item, roots, (project, commit, row["file_path"]))
+                if matched is None and item["name"] == needle:
+                    matched = _unavailable_row(item)
+                if matched is not None:
+                    found[item["name"]] = matched
         files_truncated = False
         scanned = 0
         if needle in pending:
@@ -366,6 +364,42 @@ def _find(name: str, queries: list[str], limit: int) -> dict:
                           "truncated": len(found) > len(selected), "files_scanned": scanned,
                           "files_truncated": files_truncated})
     return {"queries": per_query, "pin": commit, "limit": limit}
+
+
+def _indexed_row(item: dict, roots: list[tuple[Path, str, str]], own_file: tuple) -> dict | None:
+    """Locate one kickoff-index declaration in pinned source, or None when its source cannot be found."""
+    module = item.get("module")
+    if item.get("tag") == "generated" or module is None:
+        return None
+    if module == "this file":
+        read = _scan(*own_file)
+        if read is None:
+            return None
+        lines, starts = read
+        for number, (line_number, qualified) in enumerate(starts):
+            if qualified == item["name"] or qualified.endswith("." + item["name"]):
+                return _declaration_row(own_file[1], own_file[2], lines, item["name"],
+                                        _declaration_start(lines, line_number),
+                                        _declaration_end(lines, starts, number))
+        return None
+    if "start_line" not in item:
+        return None
+    located = _module_file(roots, module)
+    if located is None:
+        return None
+    root, pin, path = located
+    lines = _git_source(root, pin, path).splitlines()
+    return _declaration_row(pin, path, lines, item["name"], item["start_line"], item["end_line"])
+
+
+def _unavailable_row(item: dict) -> dict:
+    """An index-only match for a declaration whose source is not in the pinned trees (core, generated)."""
+    matched = {"name": item["name"], "handle": f"decl:{item['name']}", "kind": item.get("kind"),
+               "module": item.get("module"), "source_unavailable": _unavailable_reason(item, item)}
+    for key in ("type", "signature"):
+        if item.get(key):
+            matched[key] = item[key]
+    return matched
 
 
 def _declaration_row(pin: str, path: str, lines: list[str], qualified: str, start: int, end: int) -> dict:
