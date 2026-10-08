@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { leanPathViolation, planEvaluate } from "./rules.ts";
+import { leanPathViolation, planEvaluate, resolveInlineIdea } from "./rules.ts";
 
 test("a proof wins over candidate or probe, which becomes the default parent", () => {
   assert.deepEqual(planEvaluate({ proof: "theorem t", candidate: "#2" }),
@@ -33,4 +33,16 @@ test("Lean file paths are confined to the run project", async () => {
   assert.match(String(await leanPathViolation({ file_path: join(base, "secret.lean") }, project)), /outside/);
   assert.match(String(await leanPathViolation({ file_path: "../secret.lean" }, project)), /outside/);
   assert.match(String(await leanPathViolation({ path: "escape/secret.lean" }, project)), /outside/);
+});
+
+test("an inline idea title creates the idea once and yields its id", async () => {
+  const titles: string[] = [];
+  const create = async (title: string) => { titles.push(title); return { ok: true, id: "i1" }; };
+  assert.deepEqual(await resolveInlineIdea({ idea: " try omega " }, create), { ok: true, idea_id: "i1", created: true });
+  assert.deepEqual(titles, ["try omega"]);
+  assert.deepEqual(await resolveInlineIdea({ idea: "x", idea_id: "i0" }, create), { ok: true, idea_id: "i0" });
+  assert.deepEqual(await resolveInlineIdea({ idea: "" }, create), { ok: true });
+  assert.deepEqual(titles, ["try omega"]);
+  const failed = await resolveInlineIdea({ idea: "x" }, async () => ({ ok: false, error: "bad" }));
+  assert.deepEqual(failed, { ok: false, error: { ok: false, error: "bad" } });
 });

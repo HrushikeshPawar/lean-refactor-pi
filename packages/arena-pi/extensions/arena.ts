@@ -10,7 +10,7 @@ import type { AssistantMessageEventStream } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { BudgetModel } from "./budget.ts";
 import { nearestToolName, normalizeToolArguments } from "./toolnames.ts";
-import { leanPathViolation, planEvaluate } from "./rules.ts";
+import { leanPathViolation, planEvaluate, resolveInlineIdea } from "./rules.ts";
 import { assessFinalPayload, BUDGET_PROVIDER, budgetLimits, softCapGate, cacheAlarm, catalogPriceProblem, cacheUtilization, isBudgetModel, MAX_REQUEST_OUTPUT_TOKENS, MODELS, priceForUsage, requestShape, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
 
 const root = resolve(import.meta.dirname, "../../..");
@@ -790,10 +790,13 @@ export default function arenaExtension(pi: ExtensionAPI) {
     }
   }
 
+  const inlineIdea = (params: { idea?: string; idea_id?: string }) =>
+    resolveInlineIdea(params, title => campaign("idea", ["--title", title]));
+
   registerTool({
     name: "arena_evaluate",
     label: "Arena evaluate",
-    description: "Score a complete theorem (statement + proof) on the primary toolchain. Give `proof`, or an existing node with `candidate` (\"#N\"), or a probe with `from_probe` (\"pN\"). If it compiles, the harness checks the other toolchains in the background and reports the outcome in a later tool result; you never need to request it. `parents`, `idea_id` and `hypothesis` are optional labels; the current candidate is the default parent. If `proof` comes with `candidate`, the proof is scored and that candidate becomes its parent. Returns tokens, heartbeats, per-axis contribution, estimated proxy, deltas, and diagnostics whose file_line matches the candidate file lean_goal reads.",
+    description: "Score a complete theorem (statement + proof) on the primary toolchain. Give `proof`, or an existing node with `candidate` (\"#N\"), or a probe with `from_probe` (\"pN\"). If it compiles, the harness checks the other toolchains in the background and reports the outcome in a later tool result; you never need to request it. `parents`, `idea_id`, `idea` (a one-line route title that creates the idea) and `hypothesis` are optional labels; the current candidate is the default parent. If `proof` comes with `candidate`, the proof is scored and that candidate becomes its parent. Returns tokens, heartbeats, per-axis contribution, estimated proxy, deltas, and diagnostics whose file_line matches the candidate file lean_goal reads.",
     parameters: Type.Object({
       proof: Type.Optional(Type.String({ description: "Complete theorem statement and replacement proof" })),
       candidate: Type.Optional(Type.String({ description: "Existing node such as #4" })),
@@ -801,11 +804,14 @@ export default function arenaExtension(pi: ExtensionAPI) {
       parents: Type.Optional(Type.Array(Type.String())),
       hypothesis: Type.Optional(Type.String()),
       idea_id: Type.Optional(Type.String()),
+      idea: Type.Optional(Type.String({ description: "One-line route title; creates the idea and links this attempt to it" })),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       if (!active) throw new Error("Select a theorem with /arena first");
       const plan = planEvaluate(params);
       if (!plan.ok) return reply({ ok: false, error: "usage_error", detail: plan.detail });
+      const idea = await inlineIdea(params);
+      if (!idea.ok) return reply(idea.error);
       const result = await withProofFile(plan.proof, file => {
         const args = ["--mode", "fast"];
         if (file) args.push("--proof-file", file);
@@ -813,44 +819,48 @@ export default function arenaExtension(pi: ExtensionAPI) {
         if (plan.fromProbe) args.push("--from-probe", plan.fromProbe);
         for (const parent of plan.parents) args.push("--parent", parent);
         if (params.hypothesis) args.push("--hypothesis", params.hypothesis);
-        if (params.idea_id) args.push("--idea-id", params.idea_id);
+        if (idea.idea_id) args.push("--idea-id", idea.idea_id);
         return campaign("evaluate", args);
       });
       kickAutocheck();
-      return reply({ ...result, ...(plan.note ? { note: plan.note } : {}), remaining_usd: Number(budgetStatus(ctx)?.remaining_usd?.toFixed(4)) });
+      return reply({ ...result, ...(idea.created ? { idea_id: idea.idea_id } : {}), ...(plan.note ? { note: plan.note } : {}), remaining_usd: Number(budgetStatus(ctx)?.remaining_usd?.toFixed(4)) });
     },
   });
 
   registerTool({
     name: "arena_probe", label: "Arena probe",
-    description: "Compile one proof draft or one to four drafts on the primary toolchain. Each may be a complete theorem, a `by` proof body, or a `:=` proof body; the exact benchmark statement is supplied for proof bodies. `sorry` is allowed and each incomplete draft returns its actual hole goals and stable pN ID. A complete compiling draft is automatically promoted to a candidate.",
+    description: "Compile one proof draft or one to four drafts on the primary toolchain. Each may be a complete theorem, a `by` proof body, or a `:=` proof body; the exact benchmark statement is supplied for proof bodies. `sorry` is allowed and each incomplete draft returns its actual hole goals and stable pN ID. A complete compiling draft is automatically promoted to a candidate. `idea` (a one-line route title) creates an idea and links the attempt to it.",
     parameters: Type.Object({ proof: Type.Optional(Type.String()),
       drafts: Type.Optional(Type.Array(Type.String(), { minItems: 1, maxItems: 4 })),
-      idea_id: Type.Optional(Type.String()), parent: Type.Optional(Type.String()) }),
+      idea_id: Type.Optional(Type.String()), parent: Type.Optional(Type.String()),
+      idea: Type.Optional(Type.String({ description: "One-line route title; creates the idea and links this attempt to it" })) }),
     async execute(_id, params) {
       if (!active) throw new Error("Select a theorem with /arena first");
       if ((params.proof === undefined) === (params.drafts === undefined)) {
         return reply({ ok: false, error: "usage_error", detail: "Pass exactly one of proof or drafts." });
       }
+      const idea = await inlineIdea(params);
+      if (!idea.ok) return reply(idea.error);
+      const withIdea = (result: Record<string, any>) => reply(idea.created ? { ...result, idea_id: idea.idea_id } : result);
       if (params.proof !== undefined) {
         const result = await withProofFile(params.proof, file => {
           const args = ["--proof-file", file!];
-          if (params.idea_id) args.push("--idea-id", params.idea_id);
+          if (idea.idea_id) args.push("--idea-id", idea.idea_id);
           if (params.parent) args.push("--parent", params.parent);
           return campaign("probe", args);
         });
         if (result.candidate) kickAutocheck();
-        return reply(result);
+        return withIdea(result);
       }
       const result = await withProofFiles(params.drafts!, files => {
         const args: string[] = [];
         for (const file of files) args.push("--draft-file", file);
-        if (params.idea_id) args.push("--idea-id", params.idea_id);
+        if (idea.idea_id) args.push("--idea-id", idea.idea_id);
         if (params.parent) args.push("--parent", params.parent);
         return campaign("probe", args);
       });
       if (result.drafts?.some((draft: any) => draft.candidate)) kickAutocheck();
-      return reply(result);
+      return withIdea(result);
     },
   });
 

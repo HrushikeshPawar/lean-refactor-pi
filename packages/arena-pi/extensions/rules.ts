@@ -46,3 +46,16 @@ export async function leanPathViolation(input: { file_path?: unknown; path?: unk
   if (inside(candidate, project) && inside(await canonicalize(candidate), root)) return undefined;
   return `Lean tools only read files inside this run's project (${project}); ${given} is outside it. Use a path relative to the project, such as the theorem's file_path.`;
 }
+
+export type InlineIdea = { ok: true; idea_id?: string; created?: boolean } | { ok: false; error: Record<string, any> };
+
+/** Create the idea named by `idea` (a one-line route title) unless `idea_id` already names one. */
+export async function resolveInlineIdea(params: { idea?: string; idea_id?: string },
+                                        create: (title: string) => Promise<Record<string, any>>): Promise<InlineIdea> {
+  if (params.idea_id) return { ok: true, idea_id: params.idea_id };
+  const title = params.idea?.trim();
+  if (!title) return { ok: true };
+  const made = await create(title);
+  if (made.ok === false || !made.id) return { ok: false, error: made.ok === false ? made : { ok: false, error: "idea was not created" } };
+  return { ok: true, idea_id: made.id, created: true };
+}

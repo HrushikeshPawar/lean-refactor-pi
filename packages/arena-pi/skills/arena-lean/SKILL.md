@@ -71,7 +71,8 @@ top-level commands or auxiliary declarations, and anything outside the one theor
 
 1. Survey the supplied references and pinned source, then use one concise `arena_idea` to record the route
    you will try. It becomes the current idea; probes, evaluations, and candidates inherit it unless you
-   explicitly choose another. Update or abandon it with a short reason when evidence changes your plan.
+   explicitly choose another. You can also pass `idea` (a one-line route title) to your first
+   `arena_probe` or `arena_evaluate` to create it and link that attempt in one call. Update or abandon it with a short reason when evidence changes your plan.
 2. `arena_probe`: develop a structural rewrite hole by hole. `sorry` is allowed; you get the goal at each
    tactic-position `sorry`. A draft without `sorry` that compiles is recorded and scored as a candidate.
 3. `lean_goal` / `lean_multi_attempt` / `lean_diagnostic_messages` / `lean_hover_info` on the candidate file the harness
