@@ -130,3 +130,5 @@
 .chart svg.swatch,.swatch{display:inline-block;width:auto;height:auto;aspect-ratio:auto;flex:none}
 .card-legend .cost-legend{display:flex;flex-wrap:wrap;gap:4px 10px}
 .chart-tip .tip-table td:first-child{white-space:nowrap}.chart-tip{min-width:260px}
+
+.navlink{color:var(--blue);border:1px solid var(--line);border-radius:7px;padding:5px 10px;text-decoration:none;background:var(--panel2)}.navlink:hover{border-color:var(--blue)}

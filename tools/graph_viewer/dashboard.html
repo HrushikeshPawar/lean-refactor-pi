@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Arena run dashboard</title>
+  <link rel="stylesheet" href="dashboard.css">
+</head>
+<body>
+  <header>
+    <div><h1 id="title">Run dashboard</h1><div id="sub" class="sub">Loading…</div></div>
+    <div class="navlinks"><a class="btn" href="./">Candidate graph</a><a id="lf-link" class="btn" hidden target="_blank" rel="noopener">Open in Langfuse</a><span id="live" class="live">Connecting…</span></div>
+  </header>
+  <main>
+    <div id="kpis" class="kpis"></div>
+    <nav id="tabs" class="tabs" role="tablist"></nav>
+    <section id="panel" role="tabpanel"></section>
+  </main>
+  <script src="charts.js" defer></script>
+  <script src="dashboard.js" defer></script>
+</body>
+</html>
