@@ -13,9 +13,10 @@ from arena.campaign import (autocheck, candidate, declarations, evaluate_request
                             probe_batch,
                             profile_request, record_idea, run_dir, set_decision, source_range,
                             state, submission, write_state)
+from arena.memory import memory
 
 ACTIONS = ("init", "evaluate", "probe", "idea", "frontier", "candidate", "decision", "source",
-           "declarations", "find", "profile", "autocheck", "state", "submission")
+           "declarations", "find", "profile", "autocheck", "state", "submission", "memory")
 
 
 def run(args: argparse.Namespace) -> dict:
@@ -52,6 +53,8 @@ def run(args: argparse.Namespace) -> dict:
         return autocheck(args.theorem, args.run_id, args.max_seconds)
     if args.action == "state":
         return state(args.run_id)
+    if args.action == "memory":
+        return memory(args.run_id, args.spent_usd, args.cap_usd)
     if args.action == "submission":
         return submission(args.run_id)
     if args.action == "source":
@@ -99,6 +102,8 @@ def main() -> int:
     parser.add_argument("--expected-effect")
     parser.add_argument("--status")
     parser.add_argument("--max-seconds", type=float)
+    parser.add_argument("--spent-usd", type=float)
+    parser.add_argument("--cap-usd", type=float)
     args = parser.parse_args()
     try:
         result = run(args)

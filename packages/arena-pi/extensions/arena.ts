@@ -613,8 +613,25 @@ export default function arenaExtension(pi: ExtensionAPI) {
     if (event.message.role === "assistant") closeRequest(event.message, "");
   });
   // Compaction summaries are provider requests with no agent message_end.
-  pi.on("session_compact", () => closeRequest(undefined, "compaction_summary"));
+  pi.on("session_compact", () => {
+    closeRequest(undefined, "compaction_summary");
+    void injectMemory();
+  });
   pi.on("session_compact_failed", () => closeRequest(undefined, "compaction_failed"));
+
+  // After a compaction the harness restates its own record of the run (best verified candidate, routes,
+  // ideas, latest failures, allowance) as one hidden message. Built from the ledger, never by the model,
+  // and sent only here, so it is not repeated every turn. Pi queues it behind the turn's tool results.
+  async function injectMemory() {
+    if (!active || !runId) return;
+    try {
+      const limits = budgetLimits();
+      const result = await campaign("memory", ["--spent-usd", String(costState().spent), "--cap-usd", String(limits.stopUsd)]);
+      if (result.ok === false || typeof result.text !== "string") return;
+      appendCost({ kind: "memory", chars: result.text.length });
+      pi.sendMessage({ customType: "arena-memory", content: result.text, display: false }, { triggerTurn: false });
+    } catch (error) { console.error(`[arena-memory] not injected: ${error}`); }
+  }
 
   function budgetStatus(ctx: ExtensionContext) {
     const model = ctx.model;
