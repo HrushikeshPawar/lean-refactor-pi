@@ -190,7 +190,7 @@
   const facts=rows=>`<dl class="facts">${rows.map(([k,v])=>`<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>`;
   const ROUTE_COLORS=['#7a869a','#e07a1f','#2a9d8f','#9b5de5','#d62839','#3a86ff','#8ac926','#ff006e'];
   const routeColor=id=>ROUTE_COLORS[(Number(String(id).replace(/\D/g,''))-1+ROUTE_COLORS.length)%ROUTE_COLORS.length];
-  const routeName=id=>{const r=(data.routes||[]).find(x=>x.route===id);return r?`${id} (${r.label})`:id;};
+  const routeName=id=>{const r=(data.routes||[]).find(x=>x.route===id);return r?`${id} (${r.label}) · ${r.depth??0} goal states${r.min_holes!=null?`, min holes ${r.min_holes}`:''}${r.stale_streak?`, stale ${r.stale_streak}`:''}, ${r.explored?'explored':'opened'}${r.credited?', credited':''}`:id;};
   const ideaName=id=>id?((data.ideas||[]).find(i=>i.id===id)?.title||id):'';
   function context(node) {
     const evaluated=best(node)?.result||{},derived=node.derivations||[],ancestry=lineageOf(node.id);
@@ -438,7 +438,7 @@
     $('run-label').textContent=`${data.theorem || ''} · ${data.run_id} · ${data.nodes.length} recorded nodes`;
     const full=data.nodes.filter(n=>n.status==='full').length, autos=data.nodes.filter(n=>n.origin==='auto_merge').length;
     const tested=(data.ideas||[]).filter(idea=>idea.attempts).length;
-    $('metrics').innerHTML=[['3/3',full],['Ideas tested',`${tested}/${data.ideas?.length||0}`],['Evaluations',data.evaluations],['Routes',(data.routes||[]).filter(r=>r.attempts).length],['Auto merges',autos],['Merge checks',data.merge_checks.length]].map(([k,v])=>`<span class="metric">${esc(k)} <b>${esc(v)}</b></span>`).join('');
+    $('metrics').innerHTML=[['3/3',full],['Ideas tested',`${tested}/${data.ideas?.length||0}`],['Evaluations',data.evaluations],['Routes',(data.routes||[]).filter(r=>r.attempts).length],['Credited / explored',`${data.route_progress?.credited_routes??0} / ${data.route_progress?.explored_routes??0}`],['New goal state',data.route_progress?.new_state_share==null?'—':`${Math.round(100*data.route_progress.new_state_share)}%`],['Auto merges',autos],['Merge checks',data.merge_checks.length]].map(([k,v])=>`<span class="metric">${esc(k)} <b>${esc(v)}</b></span>`).join('');
     const previous=$('idea-filter').value;
     $('idea-filter').innerHTML='<option value="all">All ideas</option>'+(data.ideas||[]).map(idea=>`<option value="${esc(idea.id)}">${esc(idea.title)}</option>`).join('');
     $('idea-filter').value=(data.ideas||[]).some(idea=>idea.id===previous)?previous:'all';

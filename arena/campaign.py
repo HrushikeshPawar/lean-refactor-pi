@@ -857,8 +857,9 @@ def _append(directory: Path, event: dict) -> None:
 
 
 def _route_features(directory: Path, name: str, proof_id: str, proof: str) -> dict | None:
-    """Kernel-term features of a compiled proof, read by Lean in the background lane after the proof was scored,
-    so they never count toward its metrics. None when extraction fails; the route then uses text features."""
+    """Kernel-term features of an attempt (a compiled proof, or a draft whose declaration Lean still added, with
+    `sorryAx` where holes or errors are), read by Lean in the background lane after it was scored, so they never
+    count toward its metrics. None when the term could not be read; the route then uses text features."""
     from arena import route_features
 
     try:
@@ -866,36 +867,118 @@ def _route_features(directory: Path, name: str, proof_id: str, proof: str) -> di
             features = route_features.extract(name, {proof_id: proof})[proof_id]
     except Exception:
         return None
-    return features if features.get("ok") else None
+    return features if features.get("ok") or features.get("read") else None
 
 
 def _record_route_later(directory: Path, name: str, proof_id: str, proof: str) -> None:
-    """Fingerprint in a detached process: extraction recompiles the file prefix (seconds to minutes), and the
-    model's evaluate call must not wait for a bookkeeping result it only sees later in finish reviews."""
+    """Queue the attempt for fingerprinting by the run's one background worker: extraction recompiles the file
+    prefix (seconds to minutes), and the model's call must not wait for a bookkeeping result it only sees later.
+    One process per attempt piled up 130 waiting processes once every probe draft was fingerprinted."""
     if os.environ.get("ARENA_ROUTES_INLINE") == "1":
         _record_route(directory, name, proof_id, proof)
         return
-    path = _snapshot(directory, proof_id, proof)
-    code = ("import sys; from pathlib import Path; from arena.campaign import _record_route; "
-            "_record_route(Path(sys.argv[1]), sys.argv[2], sys.argv[3], Path(sys.argv[4]).read_text())")
+    _snapshot(directory, proof_id, proof)
+    with (directory / "route-queue.jsonl").open("a") as queue:
+        fcntl.flock(queue, fcntl.LOCK_EX)
+        queue.write(json.dumps({"proof_id": proof_id, "name": name}) + "\n")
+    if _worker_running(directory):
+        return  # it re-reads the queue before exiting, so this entry is not stranded
+    code = "import sys; from pathlib import Path; from arena.campaign import _route_worker; _route_worker(Path(sys.argv[1]))"
     try:
-        subprocess.Popen([sys.executable, "-c", code, str(directory), name, proof_id, str(path)], cwd=ROOT,
-                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         start_new_session=True)
+        subprocess.Popen([sys.executable, "-c", code, str(directory)], cwd=ROOT, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
     except OSError:
         pass
 
 
+def _worker_running(directory: Path) -> bool:
+    with (directory / "route-worker.lock").open("a") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        return False
+
+
+def _route_queue(directory: Path) -> list[dict]:
+    """Queued attempts with no route event yet, oldest first."""
+    try:
+        lines = (directory / "route-queue.jsonl").read_text().splitlines()
+    except OSError:
+        return []
+    filed = {item["proof_id"] for item in events(directory) if item.get("kind") == "route"}
+    pending, seen = [], set()
+    for line in lines:
+        entry = json.loads(line)
+        if entry["proof_id"] not in filed and entry["proof_id"] not in seen:
+            seen.add(entry["proof_id"])
+            pending.append(entry)
+    return pending
+
+
+def _route_worker(directory: Path) -> None:
+    """Drain the run's route queue in one process. An attempt whose extraction fails is not retried in this
+    process; a later worker (or a backfill) tries it again."""
+    tried: set[str] = set()
+    while True:
+        with (directory / "route-worker.lock").open("a") as handle:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return
+            while pending := [entry for entry in _route_queue(directory) if entry["proof_id"] not in tried]:
+                entry = pending[0]
+                tried.add(entry["proof_id"])
+                _room_for_extraction(wait=float("inf"))
+                try:
+                    proof = (directory / "proofs" / f"{entry['proof_id']}.lean").read_text()
+                except OSError:
+                    continue
+                _record_route(directory, entry["name"], entry["proof_id"], proof)
+        # Released: an entry queued while the lock was held saw a running worker, so look once more.
+        if not [entry for entry in _route_queue(directory) if entry["proof_id"] not in tried]:
+            return
+
+
+ROUTE_SLOTS = 2
+ROUTE_EXTRACT_GB = 2.0      # one cold Lean process with the theorem's imports
+ROUTE_WAIT_SECONDS = 180.0
+
+
+def _room_for_extraction(wait: float = ROUTE_WAIT_SECONDS) -> bool:
+    """Wait until an extraction leaves the Lean session daemons their reserve; False if it never does."""
+    from arena.lean_session import RESERVE_GB, _available_gb
+
+    deadline = time.monotonic() + wait
+    while True:
+        free = _available_gb()
+        if free is None or free - ROUTE_EXTRACT_GB >= RESERVE_GB:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(5)
+
+
 def _record_route(directory: Path, name: str, proof_id: str, proof: str) -> dict | None:
-    """Fingerprint a compiled complete proof and file it under a route. Harness-only: the model sees the
-    result in finish reviews and pushes, never as a tool argument. Once per proof; failures are ignored."""
+    """Fingerprint an attempt (compiled candidate or probe draft, with holes or errors) and file it under a route.
+    Harness-only: the model sees the result in finish reviews and pushes, never as a tool argument. Once per proof;
+    failures are ignored. An attempt opens a credited route only through a kernel fingerprint that matches no
+    existing route; one without (the term could not be read) joins the route its text features match best."""
     from arena import routes
     from arena.context import cached_context
 
     try:
         if any(item.get("kind") == "route" and item["proof_id"] == proof_id for item in events(directory)):
             return None
-        features = _route_features(directory, name, proof_id, proof)
+        # Each probe draft is now fingerprinted, and one extraction is a cold Lean process of 1-2 GB: one at a time
+        # per run, and at most ROUTE_SLOTS across the parallel runs of a campaign.
+        slot = directory.parent / f".route-extract-{int(proof_id[:8], 16) % ROUTE_SLOTS if re.fullmatch(r'[0-9a-f]{8}.*', proof_id) else 0}.lock"
+        with (directory / "route-extract.lock").open("a") as own, slot.open("a") as shared:
+            fcntl.flock(own, fcntl.LOCK_EX)
+            fcntl.flock(shared, fcntl.LOCK_EX)
+            if os.environ.get("ARENA_ROUTES_INLINE") != "1" and not _room_for_extraction():
+                return None  # the run's own Lean workers come first; the attempt simply gets no route
+            features = _route_features(directory, name, proof_id, proof)
         with (directory / "route.lock").open("a") as handle:
             fcntl.flock(handle, fcntl.LOCK_EX)
             history = events(directory)
@@ -904,14 +987,10 @@ def _record_route(directory: Path, name: str, proof_id: str, proof: str) -> dict
                 return None
             context = cached_context(name)
             print_ = routes.fingerprint(proof, routes.vocabulary(context), name, features)
-            route, similarity = routes.assign(earlier, print_)
-            new = route not in {item["route"] for item in earlier}
-            reference = next((item["fingerprint"] for item in earlier if item["route"] == "r1"), None)
-            weights = routes.idf([item["fingerprint"] for item in earlier] + [print_])
-            event = {"kind": "route", "proof_id": proof_id, "route": route, "new": new,
-                     "similarity": similarity, "source": print_["source"], "fingerprint": print_,
-                     "label": routes.label(print_, reference, weights) if new else next(
-                         item["label"] for item in earlier if item["route"] == route)}
+            origin = next((item.get("origin", "model") for item in history
+                           if item.get("kind") == "candidate" and item["candidate_id"] == proof_id), None)
+            probe = routes.attempt_results(history).get(proof_id, ("candidate",))[0] == "probe"
+            event = routes.file_attempt(earlier, proof_id, print_, features, origin, probe)
             _append(directory, event)
             return event
     except Exception:
@@ -1572,6 +1651,8 @@ def probe(name: str, run_id: str, proof: str, idea_id: str | None = None, parent
         _snapshot(directory, proof_id, proof)
         _append(directory, {"kind": "probe", "proof_id": proof_id, "idea_id": idea_id,
                             "parent": parent_id, "result": result})
+        if result.get("ok") is not False:
+            _record_route_later(directory, name, proof_id, proof)
     location = materialize(name, run_id, proof) if result.get("tokens") is not None else {}
     label = _probe_numbers(events(directory))[proof_id]
     return _model_view({**result, "probe": label, "idea_id": idea_id or (earlier or {}).get("idea_id"),
@@ -1808,7 +1889,8 @@ def graph_state(run_id: str) -> dict:
     idea_rows = ideas
     return {"run_id": run_id, "theorem": theorem, "nodes": rows, "ledger_events": len(history), "evaluations": len(timeline),
             "timeline": timeline, "merge_checks": checks, "milestones": milestones,
-            "frontier": ranked, "ideas": idea_rows, "probes": probes, "routes": route_table(history)}
+            "frontier": ranked, "ideas": idea_rows, "probes": probes, "routes": (route_rows := route_table(history)),
+            "route_progress": _route_progress(route_rows)}
 
 
 def merge_once(run_id: str, graph: dict | None = None) -> dict | None:
@@ -2078,6 +2160,12 @@ def submission(run_id: str) -> dict:
         answer["rejected_on_cold"] = rejected
     (directory / "submission.json").write_text(json.dumps(answer, indent=2) + "\n")
     return answer
+
+
+def _route_progress(rows: list[dict]) -> dict:
+    from arena.routes import progress
+
+    return progress(rows)
 
 
 def route_table(history: list[dict]) -> list[dict]:

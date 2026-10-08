@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { axisHeadroom, continuationPush, finishPush, routesText, leanPathViolation, trimProfile, planEvaluate, planProbe, resolveInlineIdea } from "./rules.ts";
+import { axisHeadroom, continuationPush, finishPush, routesText, leanPathViolation, trimProfile, planEvaluate, planProbe, resolveInlineIdea, sinceRefusal, staleNotice } from "./rules.ts";
 
 test("a proof wins over candidate or probe, which becomes the default parent", () => {
   assert.deepEqual(planEvaluate({ proof: "theorem t", candidate: "#2" }),
@@ -74,8 +74,8 @@ test("headroom reports the per-axis saving against the original", () => {
 test("a refused finish lists routes tried, headroom and demands a structurally new idea", () => {
   const push = finishPush(base);
   for (const text of ["60% of the $0.1 allowance", "no value", "10% or less", "i1", "5 attempts", "best proxy 67.2",
-    "tokens saved 16%", "heartbeats saved 92%", "structurally NEW idea", "induction versus equational",
-    "different key lemma family", "before calling arena_finish again"]) {
+    "tokens saved 16%", "heartbeats saved 92%", "structurally NEW idea",
+    "before calling arena_finish again"]) {
     assert.ok(push.message.includes(text), `missing: ${text}`);
   }
   assert.ok(!push.message.includes("without probing any new idea"));
@@ -85,7 +85,7 @@ test("a refused finish lists routes tried, headroom and demands a structurally n
 
 test("the plain-answer continuation pushes a new structural route", () => {
   const text = continuationPush({ status: "[arena] best verified: #6", ideas: ["i2 token-golf"], remainingUsd: 0.06, capUsd: 0.1 });
-  for (const part of ["Do not stop", "no value", "structurally new idea", "arena_idea", "i2 token-golf"]) assert.ok(text.includes(part), part);
+  for (const part of ["Do not stop", "no value", "opens a credited route", "sorry holes", "i2 token-golf"]) assert.ok(text.includes(part), part);
 });
 
 test("the model-facing profile keeps the top twelve entries and lines plus totals", () => {
@@ -127,4 +127,52 @@ test("a repeat finish without a compiled proof on a new route is called out", ()
 test("the continuation push lists the routes tried", () => {
   const text = continuationPush({ status: "[arena] best", ideas: [], remainingUsd: 0.5, capUsd: 1, routes });
   assert.ok(text.includes("Routes tried (harness fingerprint): r1"));
+});
+
+const deep = [
+  { route: "r1", label: "original", original: true, attempts: 1, best_proxy: 33.5, best_candidate: "#2", depth: 0, new_states: 0, min_holes: null, explored: true, credited: false },
+  { route: "r2", label: "recursion: none", attempts: 34, best_proxy: 86.07, best_candidate: "#34", depth: 7, new_states: 7, min_holes: 0, stale_streak: 2, explored: true, credited: true },
+  { route: "r3", label: "other", attempts: 1, best_proxy: null, depth: 1, new_states: 1, min_holes: 2, explored: false, credited: true },
+];
+
+test("the per-route line shows attempts, distinct goal states, min holes, explored or opened and best proxy", () => {
+  const text = routesText(deep);
+  assert.ok(text.includes('r2 "recursion: none": 34 attempts, 7 distinct goal states, min holes 0, explored, best proxy 86.07 (#34)'), text);
+  assert.ok(text.includes('r3 "other": 1 attempt, 1 distinct goal state, min holes 2, opened, no scored proof'), text);
+});
+
+test("since the last refusal: attempts, goal states new to their route and credited routes opened are measured from route stats", () => {
+  const before = { r1: { attempts: 1, new_states: 0 }, r2: { attempts: 30, new_states: 7 } };
+  assert.deepEqual(sinceRefusal(deep, before, new Set(["r2"])), { attempts: 5, newStates: 1, creditedOpened: 1 });
+  assert.deepEqual(sinceRefusal(deep, { r1: { attempts: 1, new_states: 0 }, r2: { attempts: 34, new_states: 7 }, r3: { attempts: 1, new_states: 1 } }, new Set(["r2", "r3"])),
+    { attempts: 0, newStates: 0, creditedOpened: 0 });
+});
+
+test("a repeat refusal states the measured fact when nothing new was reached, and says nothing when something was", () => {
+  const stalled = finishPush({ ...base, routes: deep, refusals: 1, newIdeaProbed: true, sinceRefusal: { attempts: 4, newStates: 0, creditedOpened: 0 } });
+  assert.ok(stalled.message.includes("4 attempts since the last refusal produced no goal state new to their route"), stalled.message);
+  assert.ok(stalled.message.includes("edits that leave the same goals do not count"));
+  assert.ok(stalled.message.includes("7 distinct goal states"));
+  assert.ok(!stalled.message.includes("structurally NEW idea"));
+  const single = finishPush({ ...base, routes: deep, refusals: 1, newIdeaProbed: true, sinceRefusal: { attempts: 1, newStates: 0, creditedOpened: 0 } });
+  assert.ok(single.message.includes("1 attempt since the last refusal produced no goal state new to its route"));
+  assert.ok(finishPush({ ...base, routes: deep, refusals: 1, newIdeaProbed: false, sinceRefusal: { attempts: 0, newStates: 0, creditedOpened: 0 } })
+    .message.includes("No attempt was made since the last refusal"));
+  for (const progress of [{ attempts: 1, newStates: 1, creditedOpened: 0 }, { attempts: 1, newStates: 0, creditedOpened: 1 }]) {
+    const moved = finishPush({ ...base, routes: deep, refusals: 1, newIdeaProbed: false, sinceRefusal: progress });
+    assert.ok(!moved.message.includes("do not count") && !moved.message.includes("No attempt was made"), moved.message);
+  }
+  // The first refusal never carries the repeat sentence.
+  assert.ok(!finishPush({ ...base, routes: deep, refusals: 0, newIdeaProbed: false, sinceRefusal: { attempts: 0, newStates: 0, creditedOpened: 0 } }).message.includes("since the last refusal"));
+});
+
+test("a stale notice is one factual line, once per streak", () => {
+  const noticed = new Set<string>();
+  const row = (stale_streak: number) => [{ route: "r2", stale_streak, stale: stale_streak >= 5 }];
+  assert.equal(staleNotice(row(4), noticed), undefined);
+  assert.equal(staleNotice(row(5), noticed), "[arena] r2: the last 5 attempts left goal states already seen on this route.");
+  assert.equal(staleNotice(row(6), noticed), undefined);
+  assert.equal(staleNotice(row(9), noticed), undefined);
+  assert.equal(staleNotice(row(0), noticed), undefined);  // a new goal state breaks the streak
+  assert.equal(staleNotice(row(5), noticed), "[arena] r2: the last 5 attempts left goal states already seen on this route.");
 });

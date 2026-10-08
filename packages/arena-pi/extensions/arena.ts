@@ -11,7 +11,8 @@ import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-wor
 import type { BudgetModel, PriorRequest } from "./budget.ts";
 import { nearestToolName, normalizeToolArguments } from "./toolnames.ts";
 import { ResultTrimmer } from "./trim.ts";
-import { continuationPush, finishPush, trimProfile, leanPathViolation, planEvaluate, resolveInlineIdea, planProbe } from "./rules.ts";
+import { continuationPush, finishPush, trimProfile, leanPathViolation, planEvaluate, resolveInlineIdea, planProbe, sinceRefusal, staleNotice } from "./rules.ts";
+import type { RouteStats } from "./rules.ts";
 import { assessFinalPayload, BUDGET_PROVIDER, budgetLimits, softCapGate, cacheAlarm, catalogPriceProblem, cacheUtilization, finishAllowed, isBudgetModel, maxRequestOutputTokens, MODELS, priceForUsage, requestShape, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
 
 const root = resolve(import.meta.dirname, "../../..");
@@ -172,7 +173,9 @@ export default function arenaExtension(pi: ExtensionAPI) {
   let finishConfirmed = false;
   let finishRefusals = 0;
   let refusalIdeaIds = new Set<string>();
-  let refusalRouteIds = new Set<string>();
+  let refusalRouteStats: RouteStats = {};
+  let refusalCredited = new Set<string>();
+  const staleNoticed = new Set<string>();
   let finishReviewTurn = false;
   let noWorkTurns = 0;
   let turnHadProofAttempt = false;
@@ -362,7 +365,8 @@ export default function arenaExtension(pi: ExtensionAPI) {
     const refused = finishEvents.filter(item => item.phase === "refused");
     finishRefusals = refused.length;
     refusalIdeaIds = new Set(((refused.at(-1)?.idea_ids as string[] | undefined) ?? []).map(String));
-    refusalRouteIds = new Set(((refused.at(-1)?.route_ids as string[] | undefined) ?? []).map(String));
+    refusalRouteStats = (refused.at(-1)?.route_stats as RouteStats | undefined) ?? {};
+    refusalCredited = new Set(((refused.at(-1)?.credited_ids as string[] | undefined) ?? []).map(String));
     noWorkTurns = Number(latest?.no_work_turns ?? 0);
     finishReviewTurn = false;
     turnHadProofAttempt = false;
@@ -838,6 +842,13 @@ export default function arenaExtension(pi: ExtensionAPI) {
   const reply = (result: Record<string, any>) =>
     ({ isError: result.ok === false, content: [{ type: "text" as const, text: JSON.stringify(result) }], details: result });
 
+  // One harness line when a route's attempts keep leaving goal states it already had. Route fingerprints are filed in the
+  // background, so a streak can surface on the call after the attempt that completed it.
+  async function withStaleNotice(result: ReturnType<typeof reply>) {
+    const notice = staleNotice((await campaign("frontier")).routes ?? [], staleNoticed);
+    return notice ? { ...result, content: [...result.content, { type: "text" as const, text: notice }] } : result;
+  }
+
   // Write the proof to a scratch file so the campaign CLI never sees it on argv.
   async function withProofFile<T>(proof: string | undefined, run: (file?: string) => Promise<T>): Promise<T> {
     // Models often fill optional string fields with "" next to `candidate`; that is no proof.
@@ -899,13 +910,13 @@ export default function arenaExtension(pi: ExtensionAPI) {
         return campaign("evaluate", args);
       });
       kickAutocheck();
-      return reply({ ...result, ...(idea.created ? { idea_id: idea.idea_id } : {}), ...(plan.note ? { note: plan.note } : {}), remaining_usd: Number(budgetStatus(ctx)?.remaining_usd?.toFixed(4)) });
+      return withStaleNotice(reply({ ...result, ...(idea.created ? { idea_id: idea.idea_id } : {}), ...(plan.note ? { note: plan.note } : {}), remaining_usd: Number(budgetStatus(ctx)?.remaining_usd?.toFixed(4)) }));
     },
   });
 
   registerTool({
     name: "arena_probe", label: "Arena probe",
-    description: "Compile one proof draft or one to four drafts on the primary toolchain. Each may be a complete theorem, a `by` proof body, or a `:=` proof body; the exact benchmark statement is supplied for proof bodies. `sorry` is allowed and each incomplete draft returns its actual hole goals and stable pN ID. A complete compiling draft is automatically promoted to a candidate. `idea` (a one-line route title) creates an idea and links the attempt to it.",
+    description: "Compile one proof draft or one to four drafts on the primary toolchain. Each may be a complete theorem, a `by` proof body, or a `:=` proof body; the exact benchmark statement is supplied for proof bodies. `sorry` is allowed and each incomplete draft returns its actual hole goals and stable pN ID. A draft with `sorry` holes that elaborates is fingerprinted and opens a route; filling the holes later stays on that route. A complete compiling draft is automatically promoted to a candidate. `idea` (a one-line route title) creates an idea and links the attempt to it.",
     parameters: Type.Object({ proof: Type.Optional(Type.String()),
       drafts: Type.Optional(Type.Array(Type.String(), { minItems: 1, maxItems: 4 })),
       idea_id: Type.Optional(Type.String()), parent: Type.Optional(Type.String()),
@@ -916,8 +927,8 @@ export default function arenaExtension(pi: ExtensionAPI) {
       if (!plan.ok) return reply({ ok: false, error: "usage_error", detail: plan.detail });
       const idea = await inlineIdea(params);
       if (!idea.ok) return reply(idea.error);
-      const withIdea = (result: Record<string, any>) => reply({ ...result,
-        ...(idea.created ? { idea_id: idea.idea_id } : {}), ...(plan.note ? { note: plan.note } : {}) });
+      const withIdea = (result: Record<string, any>) => withStaleNotice(reply({ ...result,
+        ...(idea.created ? { idea_id: idea.idea_id } : {}), ...(plan.note ? { note: plan.note } : {}) }));
       if (plan.proof !== undefined) {
         const result = await withProofFile(plan.proof, file => {
           const args = ["--proof-file", file!];
@@ -990,13 +1001,17 @@ export default function arenaExtension(pi: ExtensionAPI) {
       if (portfolio.ok === false) return reply(portfolio);
       return reply({ ok: true, best_verified: checks.best, baseline: checks.baseline,
         leading_unverified: checks.leading_unverified, checking: checks.checking,
-        current_idea: portfolio.current_idea, recent_failures: portfolio.recent_failures });
+        current_idea: portfolio.current_idea, recent_failures: portfolio.recent_failures,
+        routes: (portfolio.routes ?? []).filter((row: any) => row.attempts > 0 || row.original).map((row: any) => ({ route: row.route,
+          label: row.label, original: row.original, attempts: row.attempts, goal_states: row.depth, min_holes: row.min_holes,
+          stale_streak: row.stale_streak, status: row.explored ? "explored" : "opened", credited: row.credited, opened_by_skeleton: row.credited && row.skeleton,
+          best_proxy: row.best_proxy })) });
     },
   });
 
   registerTool({
     name: "arena_finish", label: "Review and finish the Arena run",
-    description: "Request to stop the run. You may stop only when 10% or less of the spend allowance is left; unspent allowance has no value. Earlier, the call is refused with the routes tried, the per-axis headroom and an instruction to record and probe a structurally new idea; each further confirm needs new proof attempts on a new idea. With 10% or less left, the first call returns one factual review (with at most one reminder if the current idea has no proof attempt) and a second call after the decision turn confirms the stop; finishing is final for this run.",
+    description: "Request to stop the run. You may stop only when 10% or less of the spend allowance is left; unspent allowance has no value. Earlier, the call is refused with the routes tried, the per-axis headroom and an instruction to record and probe a structurally new idea; each further confirm needs a credited route to have opened or an attempt to have produced a goal state new to its route since the last refusal. With 10% or less left, the first call returns one factual review (with at most one reminder if the current idea has no proof attempt) and a second call after the decision turn confirms the stop; finishing is final for this run.",
     parameters: Type.Object({}),
     async execute() {
       if (finishConfirmed) return reply({ ok: true, phase: "confirmed", stop: true });
@@ -1035,15 +1050,16 @@ export default function arenaExtension(pi: ExtensionAPI) {
         // More than 10% of the allowance is left: refuse and push for a structurally new route.
         const newIdeaProbed = ideaRows.some(row => row.attempts > 0 && !refusalIdeaIds.has(String(row.id)));
         const routeRows: any[] = portfolio.routes ?? [];
-        const newRouteProbed = routeRows.some(row => row.attempts > 0 && !refusalRouteIds.has(String(row.route)));
+        const since = sinceRefusal(routeRows, refusalRouteStats, refusalCredited);
         const push = finishPush({ usedPct: budget.used_pct, remainingUsd: room.remainingUsd, capUsd: limits.stopUsd,
           baseline: checks.baseline, best: bestVerified, top: portfolio.top, ideas: ideaRows,
-          refusals: finishRefusals, newIdeaProbed, routes: portfolio.routes, newRouteProbed });
+          refusals: finishRefusals, newIdeaProbed, routes: portfolio.routes, sinceRefusal: since });
         finishRefusals += 1;
         refusalIdeaIds = new Set(ideaRows.map(row => String(row.id)));
-        refusalRouteIds = new Set(routeRows.filter(row => row.attempts > 0).map(row => String(row.route)));
-        appendCost({ kind: "finish", phase: "refused", refusals: finishRefusals, idea_ids: [...refusalIdeaIds], route_ids: [...refusalRouteIds],
-          new_idea_probed: newIdeaProbed, remaining_fraction: Number(room.remainingFraction.toFixed(4)) });
+        refusalRouteStats = Object.fromEntries(routeRows.map(row => [String(row.route), { attempts: row.attempts ?? 0, new_states: row.new_states ?? 0 }]));
+        refusalCredited = new Set(routeRows.filter(row => row.credited).map(row => String(row.route)));
+        appendCost({ kind: "finish", phase: "refused", refusals: finishRefusals, idea_ids: [...refusalIdeaIds], route_stats: refusalRouteStats, credited_ids: [...refusalCredited],
+          new_idea_probed: newIdeaProbed, since_refusal: since, remaining_fraction: Number(room.remainingFraction.toFixed(4)) });
         return reply({ ok: true, phase: firstReview ? "review" : "refused", stop: false, refused: true,
           best_verified: bestVerified, baseline: checks.baseline, current_idea: idea, budget, ideas,
           routes_tried: push.tried, headroom: push.headroom, reminder: reminderText, next: push.message });

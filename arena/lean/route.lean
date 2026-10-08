@@ -71,6 +71,30 @@ meta partial def arena_route_walk (seen : IO.Ref (Std.HashSet Lean.Expr)) (claim
   | .proj _ _ b => arena_route_walk seen claims witnesses b
   | _ => pure ()
 
+-- `sorryAx _ false` is a `sorry` the proof wrote (a hole); `sorryAx _ true` is what error recovery left behind.
+-- Counted as occurrences in the term, memoised on structure so shared subterms cost nothing to revisit.
+open Lean in
+meta partial def arena_route_sorries (cache : IO.Ref (Std.HashMap Lean.Expr (Nat × Nat))) (e : Lean.Expr) : IO (Nat × Nat) := do
+  if let some r := (← cache.get)[e]? then return r
+  let add (a b : Nat × Nat) : Nat × Nat := (a.1 + b.1, a.2 + b.2)
+  let r ← match e with
+    | .app f a =>
+      let args := e.getAppArgs
+      match e.getAppFn with
+      | .const n _ =>
+        if n == ``sorryAx && args.size ≥ 2 then
+          pure (if args[1]!.isConstOf ``Bool.true then (0, 1) else (1, 0))
+        else pure (add (← arena_route_sorries cache f) (← arena_route_sorries cache a))
+      | _ => pure (add (← arena_route_sorries cache f) (← arena_route_sorries cache a))
+    | .lam _ t b _ => pure (add (← arena_route_sorries cache t) (← arena_route_sorries cache b))
+    | .forallE _ t b _ => pure (add (← arena_route_sorries cache t) (← arena_route_sorries cache b))
+    | .letE _ t v b _ => pure (add (add (← arena_route_sorries cache t) (← arena_route_sorries cache v)) (← arena_route_sorries cache b))
+    | .mdata _ b => arena_route_sorries cache b
+    | .proj _ _ b => arena_route_sorries cache b
+    | _ => pure (0, 0)
+  cache.modify (·.insert e r)
+  return r
+
 open Lean in
 meta def arena_route_value (ci : Lean.ConstantInfo) : Option Lean.Expr :=
   match ci with
@@ -133,6 +157,9 @@ elab "arena_route " tag:str short:str cmd:command : command => do
     let seen ← IO.mkRef ({} : Std.HashSet Lean.Expr)
     let claims ← IO.mkRef (#[] : Array String)
     let witnesses ← IO.mkRef (#[] : Array String)
+    let sorryCache ← IO.mkRef ({} : Std.HashMap Lean.Expr (Nat × Nat))
+    let mut holes := 0
+    let mut synthetic := 0
     while fuel > 0 do
       fuel := fuel - 1
       match queue with
@@ -145,6 +172,9 @@ elab "arena_route " tag:str short:str cmd:command : command => do
           | none => pure ()
           | some v =>
             arena_route_walk seen claims witnesses v
+            let (h, y) ← arena_route_sorries sorryCache v
+            holes := holes + h
+            synthetic := synthetic + y
             for c in v.getUsedConstants do
               if follow c then queue := c :: queue
               else used := used.insert c
@@ -190,7 +220,9 @@ elab "arena_route " tag:str short:str cmd:command : command => do
     logic := logic ++ (← witnesses.get)
     let sorted (a : Array String) : Lean.Json := Lean.Json.arr ((a.toList.eraseDups.toArray.qsort (· < ·)).take 600 |>.map Lean.Json.str)
     let sorryUsed := used.contains ``sorryAx
-    fields := fields ++ [("ok", Lean.Json.bool (!hadErrors && failure.isNone && !sorryUsed)),
+    -- `ok`: a complete proof; `read`: the term exists (a failed tactic leaves a synthetic `sorry`, so errored attempts are readable)
+    fields := fields ++ [("ok", Lean.Json.bool (!hadErrors && failure.isNone && !sorryUsed)), ("read", Lean.Json.bool true),
+      ("errored", Lean.Json.bool (hadErrors || failure.isSome)), ("holes", Lean.toJson holes), ("synthetic", Lean.toJson synthetic),
       ("main", Lean.Json.str mainName.toString), ("recursion", sorted recursion), ("lemmas", sorted lemmas),
       ("claims", sorted (← claims.get)), ("logic", sorted logic), ("aux", Lean.toJson (visited.size - 1))]
     if hadErrors || failure.isSome || sorryUsed then

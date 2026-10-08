@@ -14,8 +14,16 @@ An empty part is a normal value, not a veto. When extraction fails the fingerpri
 features (``source: "text"``): whether the proof recurses, the vocabulary lemmas it names, and the head
 tactic of each top-level line.
 
-Candidates are clustered in arrival order: a new proof joins the route whose first proof (its exemplar)
-it most resembles when the similarity reaches ``SAME_ROUTE``, otherwise it starts a new route.
+Attempts (compiled candidates and probe drafts, including drafts with ``sorry`` holes or errors, whose kernel
+term carries ``sorryAx``) are clustered in arrival order: an attempt joins the route whose first attempt (its
+exemplar) it most resembles when the similarity reaches ``SAME_ROUTE``, otherwise it starts a new route. A
+route is *credited* (counts as opened by the model) only when a kernel fingerprint opened it. An incomplete
+attempt (holes or error-recovery sorries) lacks what will fill them, so against it only the parts it has are
+compared, as containment instead of overlap. Attempts without a kernel fingerprint join the route whose text
+features match best and never open one.
+
+Depth is measured by goal states: every attempt has a signature (arena/goalstate.py) of what Lean still reports
+open, and a route's depth is the number of distinct signatures its attempts produced.
 """
 
 from __future__ import annotations
@@ -24,6 +32,8 @@ import math
 import re
 
 SAME_ROUTE = 0.5
+ROUTE_DEPTH = 3     # distinct goal states that make a route explored
+STALE_STREAK = 5    # consecutive attempts leaving an already seen goal state
 MAX_SKELETON = 24
 LABEL_LEMMAS = 3
 WEIGHTS = {"recursion": 0.25, "lemmas": 0.45, "claims": 0.20, "logic": 0.10}
@@ -112,7 +122,7 @@ def fingerprint(proof: str, vocabulary: set[str] | frozenset[str] = frozenset(),
         elif token in vocabulary or tail in short:
             lemmas.add(tail)
     print_ = {"source": "text", "induction": recursive, "lemmas": sorted(lemmas), "skeleton": _heads(body)}
-    if features and features.get("ok"):
+    if features and (features.get("ok") or features.get("read")):
         print_["source"], print_["kernel"] = "kernel", kernel(features)
     return print_
 
@@ -140,12 +150,24 @@ def kernel(features: dict) -> dict:
 
     lemmas = {family(name) for name in clean(features.get("lemmas", [])) if name not in PLUMBING and not _AUXILIARY.search(name)}
     return {"recursion": sorted(clean(features.get("recursion", []))), "lemmas": sorted(lemmas),
-            "claims": sorted(set(features.get("claims", []))), "logic": sorted(clean(features.get("logic", [])))}
+            "claims": sorted(set(features.get("claims", []))), "logic": sorted(clean(features.get("logic", []))),
+            "holes": int(features.get("holes") or 0), "synthetic": int(features.get("synthetic") or 0)}
+
+
+def incomplete(print_: dict) -> bool:
+    """A kernel fingerprint of a term with `sorry` holes or error-recovery sorries."""
+    kernel_ = print_.get("kernel") or {}
+    return bool(kernel_.get("holes") or kernel_.get("synthetic"))
+
+
+def empty(print_: dict) -> bool:
+    return not any((print_.get("kernel") or {}).get(part) for part in PARTS)
 
 
 def idf(prints: list[dict]) -> dict[str, dict[str, float]]:
-    """Rarity weight of every item per part over the kernel fingerprints of one theorem's proofs: ln(1 + N/df)."""
-    kernels = [item["kernel"] for item in prints if item.get("kernel")]
+    """Rarity weight of every item per part over the complete kernel fingerprints of one theorem's proofs: ln(1 + N/df).
+    Drafts with holes or errors are left out: many near-copies of one dead end would make its items look common."""
+    kernels = [item["kernel"] for item in prints if item.get("kernel") and not incomplete(item)]
     weights: dict[str, dict[str, float]] = {}
     for part in PARTS:
         counts: dict[str, int] = {}
@@ -166,11 +188,25 @@ def text_similarity(left: dict, right: dict) -> float:
     return _jaccard(set(left["skeleton"]), set(right["skeleton"]))
 
 
+def _contained(part: set, whole: set, weight: dict | None = None) -> float:
+    weight = weight or {}
+    return sum(weight.get(item, 1.0) for item in part & whole) / sum(weight.get(item, 1.0) for item in part)
+
+
 def similarity(left: dict, right: dict, weights: dict[str, dict[str, float]] | None = None) -> float:
-    """Weighted sum of the rarity-weighted overlaps of the four parts; text features if either proof lacks them."""
+    """Weighted sum of the rarity-weighted overlaps of the four parts; text features if either proof lacks them.
+    `left` is the exemplar. When one side is incomplete (holes or error-recovery sorries) only the parts it has
+    count, weights renormalized over them, and each part is how much of the incomplete side the other contains."""
     if not (left.get("kernel") and right.get("kernel")):
         return text_similarity(left, right)
     weights = weights or {}
+    partial = left if incomplete(left) else right if incomplete(right) else None
+    if partial is not None:
+        other = right if partial is left else left
+        have = [part for part in PARTS if partial["kernel"][part]]
+        if have:
+            return sum(WEIGHTS[part] * _contained(set(partial["kernel"][part]), set(other["kernel"][part]), weights.get(part))
+                       for part in have) / sum(WEIGHTS[part] for part in have)
     return sum(WEIGHTS[part] * _jaccard(set(left["kernel"][part]), set(right["kernel"][part]), weights.get(part))
                for part in PARTS)
 
@@ -195,6 +231,17 @@ def assign(earlier: list[dict], current: dict) -> tuple[str, float]:
     if best_route is not None and best >= SAME_ROUTE:
         return best_route, round(best, 3)
     return f"r{len(first) + 1}", round(best, 3)
+
+
+def assign_by_text(earlier: list[dict], current: dict) -> tuple[str, float] | None:
+    """The route whose exemplar's text features match `current` best (ties to the earliest), however weak; None
+    when there is no route. For attempts the kernel could not read, which therefore never open a route."""
+    best_route, best = None, -1.0
+    for route, event in exemplars(earlier).items():
+        score = text_similarity(event["fingerprint"], current)
+        if score > best:
+            best_route, best = route, score
+    return None if best_route is None else (best_route, round(best, 3))
 
 
 def _recursion_name(item: str) -> str:
@@ -244,8 +291,24 @@ def vocabulary(context: dict) -> set[str]:
     return names
 
 
+def attempt_results(history: list[dict]) -> dict[str, tuple[str, dict | None]]:
+    """Per attempt id: ("probe" | "candidate", the compile result of its first probe or evaluation)."""
+    found: dict[str, tuple[str, dict | None]] = {}
+    for event in history:
+        if event.get("kind") == "probe":
+            found.setdefault(event["proof_id"], ("probe", event.get("result")))
+        elif event.get("kind") == "evaluation":
+            found.setdefault(event["candidate_id"], ("candidate", event.get("result")))
+    return found
+
+
 def route_table(history: list[dict]) -> list[dict]:
-    """Per route: label, number of model proof attempts, best candidate and proxy. Pure function of the ledger."""
+    """Per route: label, number of model attempts (compiled candidates and probe drafts), best candidate and proxy,
+    and depth: distinct goal-state signatures (arena/goalstate.py), the fewest open holes, the stale streak (latest
+    consecutive attempts whose signature the route had already seen), whether it is explored (a compiled proof or
+    `ROUTE_DEPTH` goal states) and whether the model credited it (a kernel fingerprint opened it). Pure function of the ledger."""
+    from arena import goalstate
+
     labels: dict[str, str] = {}
     origin: dict[str, str] = {}
     for event in history:
@@ -261,26 +324,71 @@ def route_table(history: list[dict]) -> list[dict]:
         value = metrics.get("proxy") if verified else metrics.get("estimated_proxy")
         if value is not None and (event["candidate_id"] not in score or (verified, value) > score[event["candidate_id"]]):
             score[event["candidate_id"]] = (verified, value)
+    results = attempt_results(history)
     table: dict[str, dict] = {}
+    seen: dict[str, set[str]] = {}
     for event in history:
         if event.get("kind") != "route":
             continue
-        row = table.setdefault(event["route"], {"route": event["route"], "label": event.get("label") or event["route"],
-                                                "original": False, "attempts": 0, "best_candidate": None,
-                                                "best_proxy": None, "verified": False})
         identifier = event["proof_id"]
         kind = origin.get(identifier)
+        route = event["route"]
+        if route not in table:
+            credited = event.get("credited")
+            if credited is None:  # an event from before credit existed: a kernel route opened by a model attempt
+                credited = bool(event.get("new") and event.get("source") == "kernel" and kind in (None, "model"))
+            table[route] = {"route": route, "label": event.get("label") or route, "original": False, "attempts": 0,
+                            "best_candidate": None, "best_proxy": None, "verified": False,
+                            "depth": 0, "new_states": 0, "min_holes": None, "stale_streak": 0, "compiled": False,
+                            "explored": False, "stale": False, "credited": bool(credited) and kind != "reference",
+                            "skeleton": bool(event.get("skeleton"))}
+            seen[route] = set()
+        row = table[route]
         if kind == "reference":
-            row["original"] = True
+            row["original"] = row["compiled"] = row["explored"] = True
+            seen[route].add(goalstate.CLOSED)
             continue
         if kind == "auto_merge":
             continue
+        if (not row["original"] and event.get("assigned_by", "kernel") == "kernel" and event.get("source") == "kernel"
+                and not event.get("errored")):
+            row["credited"] = True  # a later clean attempt credits a route an errored draft opened
+            row["skeleton"] = row["skeleton"] or bool(event.get("skeleton"))
         row["attempts"] += 1
         if identifier in score and (row["best_proxy"] is None or (score[identifier][0], score[identifier][1]) >
                                     (row["verified"], row["best_proxy"])):
             row["verified"], row["best_proxy"] = score[identifier]
             row["best_candidate"] = labels.get(identifier)
+        if identifier not in results:
+            continue
+        sig = goalstate.signature(results[identifier][1])
+        if sig == goalstate.CLOSED:
+            row["compiled"], open_holes = True, 0
+        else:
+            open_holes = (event.get("holes") or 0) + (event.get("synthetic") or 0) if "holes" in event else None
+        if open_holes is not None and (row["min_holes"] is None or open_holes < row["min_holes"]):
+            row["min_holes"] = open_holes
+        if sig in seen[route]:
+            row["stale_streak"] += 1
+        else:
+            seen[route].add(sig)
+            row["depth"] += 1
+            row["new_states"] += 1
+            row["stale_streak"] = 0
+        row["explored"] = row["compiled"] or row["depth"] >= ROUTE_DEPTH
+    for row in table.values():
+        row["stale"] = row["stale_streak"] >= STALE_STREAK
     return list(table.values())
+
+
+def progress(table: list[dict]) -> dict:
+    """Run-level depth metrics of a route table: credited and explored routes, and the share of model attempts
+    that produced a goal state new to their route."""
+    rows = [row for row in table if row["attempts"]]
+    attempts = sum(row["attempts"] for row in rows)
+    new = sum(row["new_states"] for row in rows)
+    return {"credited_routes": sum(row["credited"] for row in rows), "explored_routes": sum(row["explored"] for row in rows),
+            "new_state_attempts": new, "new_state_share": round(new / attempts, 3) if attempts else None}
 
 
 def routes_text(table: list[dict]) -> str:
@@ -293,3 +401,50 @@ def routes_text(table: list[dict]) -> str:
         tag = " [the original proof's route]" if row["original"] else ""
         parts.append(f"{row['route']} \"{row['label']}\"{tag}: {row['attempts']} attempt{'s' if row['attempts'] != 1 else ''}, {best}")
     return "; ".join(parts) if parts else "none"
+
+
+def routes_detail_text(table: list[dict]) -> str:
+    """`routes_text` with each route's depth: goal states, fewest holes, stale streak, explored/opened, credit."""
+    parts = []
+    for row in table:
+        if not row["attempts"] and not row["original"]:
+            continue
+        best = f"best proxy {row['best_proxy']} ({row['best_candidate']})" if row["best_proxy"] is not None else "no scored proof"
+        tag = " [the original proof's route]" if row["original"] else ""
+        states = row.get("depth", 0)
+        extra = [f"{states} goal state{'s' if states != 1 else ''}"]
+        if row.get("min_holes") is not None:
+            extra.append(f"min holes {row['min_holes']}")
+        if row.get("stale_streak"):
+            extra.append(f"stale streak {row['stale_streak']}")
+        extra.append("explored" if row.get("explored") else "opened")
+        if row.get("credited"):
+            extra.append("credited" + (" (opened by a skeleton)" if row.get("skeleton") else ""))
+        parts.append(f"{row['route']} \"{row['label']}\"{tag}: {row['attempts']} attempt{'s' if row['attempts'] != 1 else ''}, "
+                     f"{', '.join(extra)}, {best}")
+    return "; ".join(parts) if parts else "none"
+
+
+def file_attempt(earlier: list[dict], proof_id: str, print_: dict, features: dict | None, origin: str | None, probe: bool) -> dict:
+    """The route event for one attempt. `origin` is the candidate's (None for a probe draft). Only an attempt with a
+    kernel fingerprint that matches no exemplar opens a credited route; one without joins the route whose text
+    features match best (and starts r1 when there is none); an incomplete one with no recursion, lemmas, claims or
+    logic carries no strategy and counts as one without."""
+    by_kernel = print_["source"] == "kernel" and not (incomplete(print_) and empty(print_))
+    found = None if by_kernel else assign_by_text(earlier, print_)
+    route, similarity = found or (assign(earlier, print_) if by_kernel else ("r1", 0.0))
+    new = route not in {item["route"] for item in earlier}
+    reference = next((item["fingerprint"] for item in earlier if item["route"] == "r1"), None)
+    event = {"kind": "route", "proof_id": proof_id, "route": route, "new": new,
+             "similarity": similarity, "source": print_["source"], "fingerprint": print_,
+             "assigned_by": "kernel" if by_kernel else "text", "attempt_kind": "probe" if probe else "candidate",
+             # An errored draft may open a route for tracking, but credit needs a clean elaboration (holes allowed),
+             # or else a broken draft whose few elaborated lemmas differ would count as exploring.
+             "credited": new and by_kernel and origin in (None, "model") and not (features or {}).get("errored"),
+             "label": label(print_, reference, idf([item["fingerprint"] for item in earlier] + [print_])) if new else next(
+                 item["label"] for item in earlier if item["route"] == route)}
+    if print_["source"] == "kernel":
+        kernel_ = print_["kernel"]
+        event.update(holes=kernel_["holes"], synthetic=kernel_["synthetic"], skeleton=kernel_["holes"] > 0,
+                     errored=bool((features or {}).get("errored")))
+    return event

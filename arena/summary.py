@@ -12,7 +12,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 
 from arena.merges import merge_report, merge_text
-from arena.routes import route_table, routes_text
+from arena.routes import progress as route_progress, route_table, routes_detail_text
 
 HARD_CAP_USD = 3.0  # keep equal to MAX_HARD_CAP_USD in packages/arena-pi/extensions/budget.ts
 COMPILE_TOOLS = {"arena_evaluate", "arena_probe", "arena_profile"}
@@ -354,6 +354,7 @@ def build_summary(directory: Path) -> dict:
     later_requests = [event for event in request_events if best_at is not None
                       and float(event.get("ts", 0)) / 1000 > best_at]
     ideas_without_attempts = [idea["id"] for idea in ideas.values() if idea["attempts"] == 0]
+    route_rows = route_table(ledger)
     return {
         "run_id": directory.name, "theorem": config.get("theorem") or report.get("theorem"),
         "model": config.get("model"), "thinking": config.get("thinking"),
@@ -383,11 +384,18 @@ def build_summary(directory: Path) -> dict:
         "tools": {"calls": dict(calls), "results": sum(event.get("type") == "tool_execution_end" for event in events),
                   "errors": dict(errors), "error_total": sum(errors.values())},
         "ideas": list(ideas.values()),
-        "routes": route_table(ledger),
+        "routes": route_rows, "route_progress": route_progress(route_rows),
         "merge_report": merge_report(ledger),
         "ideas_without_attempts": ideas_without_attempts,
         "submission": submission_result,
     }
+
+
+def route_depth_text(depth: dict | None) -> str:
+    if not depth or depth.get("new_state_share") is None:
+        return "route depth: no attempts on a route yet"
+    return (f"route depth: {depth['credited_routes']} credited routes, {depth['explored_routes']} explored; "
+            f"{round(100 * depth['new_state_share'])}% of attempts produced a goal state new to their route")
 
 
 def render_text(summary: dict) -> str:
@@ -418,7 +426,8 @@ def render_text(summary: dict) -> str:
         f"structural {summary['edits']['structural']} / local {summary['edits']['local']}",
         f"post-best spend ${cost['spent_after_best_usd']:.4f} over {cost['requests_after_best']} requests; "
         f"ideas without attempts {len(summary['ideas_without_attempts'])}",
-        "routes tried: " + routes_text(summary.get("routes") or []),
+        "routes tried: " + routes_detail_text(summary.get("routes") or []),
+        route_depth_text(summary.get("route_progress")),
         "harness merge check: " + merge_text(summary.get("merge_report") or []),
         f"tool errors {summary['tools']['error_total']}: {summary['tools']['errors']}",
         f"submission: {(summary.get('submission') or {}).get('candidate') or 'none'}",

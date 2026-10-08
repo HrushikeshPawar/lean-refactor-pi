@@ -228,7 +228,7 @@
     const ideas = data.ideas, kind = s => s === 'succeeded' ? 'good' : s === 'failed' || s === 'abandoned' ? 'bad' : 'mid';
     $('h-ideas').textContent = `${ideas.length} idea${ideas.length === 1 ? '' : 's'}`;
     const routes = (data.routes || []).filter(r => r.attempts || r.original);
-    const routeHtml = routes.length ? `<div class="idea"><div class="t">Routes (harness fingerprints)</div>${routes.map(r => `<div class="small muted">${esc(r.route)} ${esc(r.label)}${r.original ? ' · original proof' : ''} · ${r.attempts} attempt${r.attempts === 1 ? '' : 's'} · best proxy ${r.best_proxy ?? '—'}</div>`).join('')}</div>` : '';
+    const routeHtml = routes.length ? `<div class="idea"><div class="t">Routes (harness fingerprints)</div>${routes.map(r => `<div class="small muted">${esc(r.route)} ${esc(r.label)}${r.original ? ' · original proof' : ''} · ${r.attempts} attempt${r.attempts === 1 ? '' : 's'} · ${r.depth ?? 0} goal state${r.depth === 1 ? '' : 's'}${r.min_holes != null ? ` · min holes ${r.min_holes}` : ''}${r.stale_streak ? ` · stale streak ${r.stale_streak}` : ''} · ${r.explored ? 'explored' : 'opened'}${r.credited ? ` · credited${r.skeleton ? ' (skeleton)' : ''}` : ''} · best proxy ${r.best_proxy ?? '—'}</div>`).join('')}</div>` : '';
     place('c-ideas', routeHtml + (ideas.length ? ideas.map(i => `<div class="idea"><div class="t">${esc(i.title || i.id)} ${badge(i.status || '?', kind(i.status))}</div>
       <div class="small muted">${i.attempts.length} attempt${i.attempts.length === 1 ? '' : 's'} · ${i.probes} probe${i.probes === 1 ? '' : 's'} · best proxy ${i.best_proxy ?? '—'}${i.attempts.length ? ' · ' + esc(i.attempts.map(a => a.candidate).join(', ')) : ''}</div></div>`).join('') : '<p class="muted">No ideas recorded.</p>'));
   }

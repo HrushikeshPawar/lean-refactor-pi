@@ -34,6 +34,12 @@ class MemoryTests(unittest.TestCase):
         self.assertLess(text.index("act \"t\""), text.index("i11"))
         self.assertIn("(+5 more)", text)
 
+    def test_depth_fields_on_route_rows_leave_the_memory_text_byte_identical(self):
+        depth = {"depth": 4, "new_states": 4, "min_holes": 0, "stale_streak": 6, "stale": True, "compiled": True,
+                 "explored": True, "credited": True, "skeleton": True}
+        deeper = {**FRONT, "routes": [{**row, **depth} for row in FRONT["routes"]]}
+        self.assertEqual(memory_text(deeper, 1.25, 3), memory_text(FRONT, 1.25, 3))
+
     def test_empty_run_still_renders(self):
         text = memory_text({})
         self.assertIn("none verified yet", text)

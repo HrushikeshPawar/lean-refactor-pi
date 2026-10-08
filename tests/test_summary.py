@@ -137,6 +137,8 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual((rows["r1"]["attempts"], rows["r1"]["original"]), (1, True))
         self.assertEqual((rows["r2"]["attempts"], rows["r2"]["best_proxy"], rows["r2"]["best_candidate"]), (1, 60.5, "#3"))
         self.assertIn('routes tried: r1 "label r1" [the original proof\'s route]: 1 attempt', summary.render_text(data))
+        self.assertEqual(data["route_progress"]["credited_routes"], 0)  # these events predate credit and carry no kernel source
+        self.assertIn("route depth: 0 credited routes, ", summary.render_text(data))
 
     def test_coherent_best_metrics_use_cold_submission_heartbeats(self):
         (self.dir / "submission.json").write_text(json.dumps(

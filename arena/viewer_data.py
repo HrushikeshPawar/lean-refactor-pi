@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
-from arena.routes import route_table
+from arena.routes import progress as route_progress, route_table
 from arena.summary import HARD_CAP_USD, _result_ok, _turns, build_summary, hit_rate_pct, reconcile_spend, session_spend
 
 BASELINE_PROXY = round(100 / 3, 2)
@@ -400,7 +400,7 @@ def run_dashboard(run_id: str, directory: Path) -> dict:
             "spend": spend_series(directory, start, soft),
             "tools": tool_timeline(directory, start),
             "ideas": ideas_view(ledger),
-            "routes": route_table(ledger),
+            "routes": (route_rows := route_table(ledger)), "route_progress": route_progress(route_rows),
             "controls": control_events(directory, start),
             "lean": lean_mix(ledger),
             "packet": packet_text}

@@ -84,13 +84,48 @@ export function planProbe(params: { proof?: string; drafts?: string[] }): ProbeP
 
 type Metrics = { candidate?: string; tokens?: number | null; heartbeats?: number | null; proxy?: number | null } | null | undefined;
 /** A route as the harness fingerprints it from compiled proofs (see arena/routes.py). */
-export interface RouteRow { route: string; label?: string; original?: boolean; attempts?: number; best_proxy?: number | null; best_candidate?: string | null }
+export interface RouteRow {
+  route: string; label?: string; original?: boolean; attempts?: number; best_proxy?: number | null; best_candidate?: string | null;
+  /** Goal-state depth, from the ledger: distinct goal states, fewest open holes, stale streak, explored or opened, credited. */
+  depth?: number; new_states?: number; min_holes?: number | null; stale_streak?: number; stale?: boolean; explored?: boolean; credited?: boolean;
+}
 
 /** The routes that carry model attempts, as one line the model cannot influence by naming ideas. */
 export function routesText(routes: RouteRow[]): string {
   const rows = routes.filter(row => (row.attempts ?? 0) > 0);
   return rows.length ? rows.map(row => `${row.route} "${row.label ?? ""}"${row.original ? " [the original proof's route]" : ""}: ` +
-    `${row.attempts} attempt${row.attempts === 1 ? "" : "s"}, ${row.best_proxy != null ? `best proxy ${row.best_proxy}${row.best_candidate ? ` (${row.best_candidate})` : ""}` : "no scored proof"}`).join("; ") : "none";
+    `${row.attempts} attempt${row.attempts === 1 ? "" : "s"}, ${depthText(row)}${row.best_proxy != null ? `best proxy ${row.best_proxy}${row.best_candidate ? ` (${row.best_candidate})` : ""}` : "no scored proof"}`).join("; ") : "none";
+}
+
+/** Distinct goal states, fewest open holes and explored/opened, when the harness measured them. */
+const depthText = (row: RouteRow) => row.depth === undefined ? "" :
+  `${row.depth} distinct goal state${row.depth === 1 ? "" : "s"}, ${row.min_holes != null ? `min holes ${row.min_holes}, ` : ""}${row.explored ? "explored" : "opened"}, `;
+
+/** What changed on the routes since the last refusal: attempts made, attempts that left a goal state new to their route, credited routes opened. */
+export interface SinceRefusal { attempts: number; newStates: number; creditedOpened: number }
+export type RouteStats = Record<string, { attempts: number; new_states: number }>;
+
+export function sinceRefusal(rows: RouteRow[], previous: RouteStats, previousCredited: Set<string>): SinceRefusal {
+  let attempts = 0, newStates = 0, creditedOpened = 0;
+  for (const row of rows) {
+    const before = previous[row.route] ?? { attempts: 0, new_states: 0 };
+    attempts += Math.max(0, (row.attempts ?? 0) - before.attempts);
+    newStates += Math.max(0, (row.new_states ?? 0) - before.new_states);
+    if (row.credited && (row.attempts ?? 0) > 0 && !previousCredited.has(row.route)) creditedOpened += 1;
+  }
+  return { attempts, newStates, creditedOpened };
+}
+
+/** One harness line for routes whose stale streak is newly at its limit; `noticed` keeps routes already told, until the streak breaks. */
+export function staleNotice(rows: RouteRow[], noticed: Set<string>): string | undefined {
+  const lines: string[] = [];
+  for (const row of rows) {
+    if (!row.stale) { noticed.delete(row.route); continue; }
+    if (noticed.has(row.route)) continue;
+    noticed.add(row.route);
+    lines.push(`[arena] ${row.route}: the last ${row.stale_streak} attempts left goal states already seen on this route.`);
+  }
+  return lines.length ? lines.join(" ") : undefined;
 }
 
 export interface FinishPushInput {
@@ -104,6 +139,8 @@ export interface FinishPushInput {
   routes?: RouteRow[];
   /** A route absent at the previous refusal now has proof attempts. */
   newRouteProbed?: boolean;
+  /** Goal-state progress since the last refusal; when present it replaces newRouteProbed. */
+  sinceRefusal?: SinceRefusal;
 }
 
 const saved = (reference: number | null | undefined, value: number | null | undefined) =>
@@ -129,7 +166,8 @@ export function finishPush(input: FinishPushInput) {
   const byRoute = input.routes !== undefined;
   const tried: Array<Record<string, any>> = byRoute
     ? input.routes!.filter(row => (row.attempts ?? 0) > 0).map(row => ({ id: row.route, title: row.label, status: row.original ? "original route" : "tried",
-      attempts: row.attempts ?? 0, best_proxy: row.best_proxy ?? null }))
+      attempts: row.attempts ?? 0, best_proxy: row.best_proxy ?? null,
+      ...(row.depth === undefined ? {} : { goal_states: row.depth, min_holes: row.min_holes ?? null, explored: Boolean(row.explored), credited: Boolean(row.credited) }) }))
     : input.ideas.map(idea => ({ id: idea.id, title: idea.title, status: idea.status,
       attempts: idea.attempts ?? 0, best_proxy: idea.best?.proxy ?? null }));
   const pct = (value: number | null) => value === null ? "unknown" : `${value}%`;
@@ -138,21 +176,32 @@ export function finishPush(input: FinishPushInput) {
     : "none recorded";
   const head = `Stop refused: ${Math.max(0, 100 - input.usedPct)}% of the $${input.capUsd} allowance ($${input.remainingUsd.toFixed(4)}) is unspent, ` +
     "and unspent allowance has no value. You may finish only when 10% or less is left.";
-  const probedNew = byRoute ? Boolean(input.newRouteProbed) : input.newIdeaProbed;
+  const since = input.sinceRefusal;
+  const measured = byRoute && since !== undefined;
+  const probedNew = measured ? since.creditedOpened > 0 || since.newStates > 0 : byRoute ? Boolean(input.newRouteProbed) : input.newIdeaProbed;
   const repeat = input.refusals > 0 && !probedNew
-    ? byRoute
+    ? measured
+      ? since.attempts === 0
+        ? " No attempt was made since the last refusal. "
+        : ` ${since.attempts} attempt${since.attempts === 1 ? "" : "s"} since the last refusal produced no goal state new to ${since.attempts === 1 ? "its" : "their"} route and opened no route; edits that leave the same goals do not count. `
+      : byRoute
       ? " You called arena_finish again without compiling a proof on a new route since the last refusal; renaming or re-labelling an idea does not count, the harness fingerprints routes from your compiled proofs. "
       : " You called arena_finish again without probing any new idea since the last refusal; that does not count as work. "
     : " ";
   const axes = `Headroom against the original: tokens saved ${pct(headroom.tokens_saved_pct)}, heartbeats saved ${pct(headroom.heartbeats_saved_pct)}` +
     (headroom.tokens_vs_lowest_seen !== null ? ` (lowest seen: ${headroom.tokens_vs_lowest_seen} tok, ${headroom.heartbeats_vs_lowest_seen} HB)` : "") +
     ". The axis with the smaller saving has the most points left; a micro-golf of the current proof will not close it.";
-  const instruction = "Record a structurally NEW idea with arena_idea now: a different proof strategy, for example induction versus equational " +
-    "rewriting with existing lemmas, or a different key lemma family, not a variant or golf of a route already tried. " +
+  const instruction = "Record a structurally NEW idea with arena_idea now: a different proof strategy, not a variant or golf of a route already tried. " +
     "Then probe it with arena_probe or arena_evaluate before calling arena_finish again; a confirm without new proof attempts on a new idea is refused again.";
+  const measuredInstruction = `${ROUTE_RULE} Make proof attempts with arena_probe or arena_evaluate before calling arena_finish again; a repeat confirm is refused again ` +
+    "unless a credited route opened or an attempt produced a goal state new to its route since this refusal.";
   const single = byRoute && tried.length <= 1 ? " Only one route has been tried so far." : "";
-  return { headroom, tried, message: `${head}${repeat}Routes tried: ${triedText}.${single} ${axes} ${instruction}` };
+  return { headroom, tried, message: `${head}${repeat}Routes tried: ${triedText}.${single} ${axes} ${measured ? measuredInstruction : instruction}` };
 }
+
+// What the harness credits, stated as its measurement only: it never suggests which structure to try.
+export const ROUTE_RULE = "The harness fingerprints each attempt's compiled proof term: a proof whose structure matches no route tried so far " +
+  "opens a credited route, and a draft with sorry holes that elaborates without errors counts; edits that keep a route's structure stay on it.";
 
 /** Continuation text when a turn ends with a plain answer while more than 10% of the allowance remains. */
 export function continuationPush(args: { status: string; ideas: string[]; remainingUsd: number; capUsd: number; routes?: RouteRow[] }): string {
@@ -160,8 +209,7 @@ export function continuationPush(args: { status: string; ideas: string[]; remain
   return `Do not stop: $${args.remainingUsd.toFixed(4)} of the $${args.capUsd} cap is unspent and unspent allowance has no value; ` +
     "you may finish only when 10% or less remains, by calling arena_finish. " +
     `${args.status}. ${tried}Active ideas: ${args.ideas.length ? args.ideas.join("; ") : "none recorded"}. ` +
-    "Record a structurally new idea (a different proof strategy: induction versus equational rewriting, or a different key lemma family, not a golf of the current route) " +
-    "with arena_idea and probe it now. Make a tool call instead of replying with text.";
+    `${ROUTE_RULE} Make a tool call instead of replying with text.`;
 }
 
 export const PROFILE_MODEL_ENTRIES = 12;

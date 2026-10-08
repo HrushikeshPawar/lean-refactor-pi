@@ -55,6 +55,24 @@ class LeanTests(unittest.TestCase):
                                   routes.fingerprint(synonym, features=got["syn"]))
         self.assertGreaterEqual(score, 0.9)
 
+    def test_drafts_with_holes_or_errors_are_read_and_a_parse_error_is_not(self):
+        from arena import routes
+        from arena.engine import problem
+
+        src = problem("Core.InitsUpdatesComm")["src"]
+        head = src[:src.index(":= by") + 5]
+        drafts = {"skeleton": head + "\n  intro Hup Hinit\n  induction Hup <;> sorry\n",
+                  "failed": head + "\n  intro Hup Hinit\n  induction Hup\n  · simp_all\n  · exact foo\n",
+                  "parse": head + "\n  intro Hup Hinit\n  exact (fun\n", "orig": src}
+        got = route_features.extract("Core.InitsUpdatesComm", drafts, timeout=600)
+        self.assertEqual((got["skeleton"]["holes"], got["skeleton"]["synthetic"], got["skeleton"]["read"]), (2, 0, True))
+        self.assertFalse(got["skeleton"]["ok"])
+        self.assertEqual((got["failed"]["holes"], got["failed"]["errored"], got["failed"]["read"]), (0, True, True))
+        self.assertGreater(got["failed"]["synthetic"], 0)
+        self.assertNotIn("read", got["parse"])
+        skeleton = routes.fingerprint(drafts["skeleton"], features=got["skeleton"])
+        self.assertGreaterEqual(routes.similarity(skeleton, routes.fingerprint(src, features=got["orig"])), routes.SAME_ROUTE)
+
 
 if __name__ == "__main__":
     unittest.main()

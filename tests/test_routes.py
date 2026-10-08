@@ -212,5 +212,206 @@ class LedgerTests(unittest.TestCase):
             self.assertEqual(event["label"], "induction")
 
 
+SKELETON = dict(recursion=["rec:UpdateStates"], lemmas=["Core.A"])
+
+
+def partial(holes=2, synthetic=0, **parts):
+    return features(**parts) | {"holes": holes, "synthetic": synthetic, "read": True, "ok": False}
+
+
+class SkeletonTests(unittest.TestCase):
+    """A skeleton lacks the lemmas that later fill its holes; it is compared on what it has, as containment."""
+
+    def route_of(self, earlier, current):
+        return routes.assign(earlier, current)[0]
+
+    def test_a_completed_proof_of_the_same_induction_stays_on_the_skeleton_route(self):
+        skeleton = routes.fingerprint(INDUCTIVE, VOCAB, "Core.X", partial(**SKELETON))
+        done = kernel_print(**INDUCTION)
+        self.assertTrue(routes.incomplete(skeleton))
+        self.assertEqual(self.route_of([{"route": "r1", "fingerprint": skeleton}], done), "r1")
+        self.assertGreaterEqual(routes.similarity(skeleton, done), routes.SAME_ROUTE)
+        # Without renormalizing, the completed proof's extra lemmas, claims and logic would make it a stranger.
+        plain = routes.fingerprint(INDUCTIVE, VOCAB, "Core.X", features(**SKELETON))
+        self.assertLess(routes.similarity(plain, done), routes.SAME_ROUTE)
+
+    def test_a_different_recursion_is_a_new_route(self):
+        skeleton = routes.fingerprint(INDUCTIVE, VOCAB, "Core.X", partial(**SKELETON))
+        other = kernel_print(recursion=["rec:Core.InitStates"], lemmas=["Core.E", "Core.F"], claims=["Eq#3"])
+        equational = kernel_print(**EQUATIONAL_KERNEL)
+        for done in (other, equational):
+            self.assertEqual(self.route_of([{"route": "r1", "fingerprint": skeleton}], done), "r2")
+
+    def test_a_skeleton_arriving_after_a_complete_proof_joins_its_route_or_opens_its_own(self):
+        done = {"route": "r1", "fingerprint": kernel_print(**INDUCTION)}
+        same = routes.fingerprint(INDUCTIVE, VOCAB, "Core.X", partial(**SKELETON))
+        different = routes.fingerprint(INDUCTIVE, VOCAB, "Core.X", partial(recursion=["rec:Core.InitStates"]))
+        self.assertEqual(self.route_of([done], same), "r1")
+        self.assertEqual(self.route_of([done], different), "r2")
+
+    def test_error_recovery_sorries_make_a_proof_incomplete_too(self):
+        errored = routes.fingerprint(INDUCTIVE, VOCAB, "Core.X", partial(holes=0, synthetic=2, **SKELETON))
+        self.assertTrue(routes.incomplete(errored))
+        self.assertFalse(routes.incomplete(kernel_print(**INDUCTION)))
+
+    def test_the_kernel_part_carries_holes_and_synthetic_counts(self):
+        kernel = routes.kernel(partial(holes=3, synthetic=1, **SKELETON))
+        self.assertEqual((kernel["holes"], kernel["synthetic"]), (3, 1))
+        self.assertTrue(routes.fingerprint("x", features=partial())["source"] == "kernel")
+
+
+class RecordingTests(unittest.TestCase):
+    """Credit: only a kernel fingerprint that matches no exemplar opens a credited route."""
+
+    CONTEXT = {"earlier": [{"name": name, "decl": "theorem"} for name in VOCAB]}
+
+    def record(self, directory, proof_id, proof, record=None, kind="candidate", origin="model", error=None):
+        if kind == "candidate":
+            campaign._append(directory, {"kind": "candidate", "candidate_id": proof_id, "parents": [], "origin": origin})
+            campaign._append(directory, {"kind": "evaluation", "candidate_id": proof_id, "mode": "fast", "result": {}})
+        else:
+            campaign._append(directory, {"kind": "probe", "proof_id": proof_id, "result": {}})
+
+        def extract(name, proofs):
+            if error:
+                raise RuntimeError(error)
+            return {tag: record | {"tag": tag} for tag in proofs}
+        with patch("arena.context.cached_context", return_value=self.CONTEXT), patch("arena.route_features.extract", side_effect=extract):
+            return campaign._record_route(directory, "Core.X", proof_id, proof)
+
+    def test_the_original_is_never_credited_and_a_skeleton_stays_on_its_route(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            original = self.record(directory, "ref", INDUCTIVE, features(**INDUCTION), origin="reference")
+            skeleton = self.record(directory, "s1", INDUCTIVE, partial(**SKELETON), kind="probe")
+            self.assertEqual((original["route"], original["credited"], original["new"]), ("r1", False, True))
+            self.assertEqual((skeleton["route"], skeleton["credited"], skeleton["new"]), ("r1", False, False))
+            self.assertEqual((skeleton["attempt_kind"], skeleton["skeleton"], skeleton["holes"], skeleton["assigned_by"]),
+                             ("probe", True, 2, "kernel"))
+
+    def test_a_kernel_skeleton_opens_a_credited_route_and_an_errored_draft_needs_a_clean_attempt_for_credit(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            self.record(directory, "ref", INDUCTIVE, features(**INDUCTION), origin="reference")
+            opened = self.record(directory, "s2", EQUATIONAL, partial(holes=1, recursion=[], lemmas=["Core.E", "Core.F"]), kind="probe")
+            errored = self.record(directory, "s3", EQUATIONAL, partial(holes=0, synthetic=1, recursion=["rec:Core.InitStates"],
+                                                                      lemmas=["Core.G"]) | {"errored": True}, kind="probe")
+            self.assertEqual((opened["route"], opened["credited"], opened["skeleton"]), ("r2", True, True))
+            self.assertEqual((errored["route"], errored["credited"], errored["skeleton"], errored["errored"]), ("r3", False, False, True))
+            history = [json.loads(line) for line in (directory / "ledger.jsonl").read_text().splitlines()]
+            self.assertFalse(next(row for row in routes.route_table(history) if row["route"] == "r3")["credited"])
+            self.record(directory, "s4", EQUATIONAL, partial(holes=1, recursion=["rec:Core.InitStates"], lemmas=["Core.G"]), kind="probe")
+            history = [json.loads(line) for line in (directory / "ledger.jsonl").read_text().splitlines()]
+            self.assertTrue(next(row for row in routes.route_table(history) if row["route"] == "r3")["credited"])
+
+    def test_text_fallback_never_opens_a_credited_route_and_joins_the_best_text_match(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            first = self.record(directory, "t0", INDUCTIVE, None, error="no Lean")
+            later = self.record(directory, "t1", EQUATIONAL, None, kind="probe", error="no Lean")
+            self.assertEqual((first["route"], first["new"], first["credited"]), ("r1", True, False))
+            # Nothing it resembles, yet it joins the only route instead of opening one.
+            self.assertEqual((later["route"], later["new"], later["credited"], later["assigned_by"]), ("r1", False, False, "text"))
+            self.assertNotIn("holes", later)
+
+    def test_a_model_attempt_with_no_content_in_its_skeleton_cannot_open_a_route(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            self.record(directory, "ref", INDUCTIVE, features(**INDUCTION), origin="reference")
+            empty = self.record(directory, "e1", STATEMENT + " := by\n  intro h\n  sorry\n", partial(holes=1), kind="probe")
+            self.assertEqual((empty["route"], empty["credited"], empty["assigned_by"]), ("r1", False, "text"))
+
+    def test_auto_merges_do_not_credit_routes(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            self.record(directory, "ref", INDUCTIVE, features(**INDUCTION), origin="reference")
+            merged = self.record(directory, "m1", EQUATIONAL, features(**EQUATIONAL_KERNEL), origin="auto_merge")
+            self.assertEqual((merged["route"], merged["new"], merged["credited"]), ("r2", True, False))
+
+
+class DepthTests(unittest.TestCase):
+    """Depth: distinct goal states per route; stale streak; explored; credited."""
+
+    def ledger(self, attempts):
+        """attempts: (id, route, goal text or None for a compiled proof, holes). The first is the reference."""
+        rows, opened = [], set()
+        for index, (identifier, route, goal, holes) in enumerate(attempts):
+            origin = "reference" if index == 0 else "model"
+            rows.append({"kind": "candidate", "candidate_id": identifier, "origin": origin, "parents": []})
+            passed = goal is None
+            diagnostics = [] if passed else [{"severity": "error", "message": "unsolved goals\n" + goal}]
+            result = {"compat": {"v": {"passed": passed, "diagnostics": diagnostics, "goals": []}}, "contains_sorry": False}
+            rows.append({"kind": "evaluation", "candidate_id": identifier, "mode": "fast", "result": result})
+            rows.append({"kind": "route", "proof_id": identifier, "route": route, "new": route not in opened,
+                         "source": "kernel", "label": route, "holes": holes, "synthetic": 0, "skeleton": holes > 0})
+            opened.add(route)
+        return rows
+
+    def goal(self, target):
+        return f"P : Prop\n⊢ {target}"
+
+    def test_attempts_that_leave_the_same_goals_are_stale_and_new_goals_are_depth(self):
+        rows = self.ledger([("ref", "r1", None, 0), ("b", "r2", self.goal("A"), 2), ("c", "r2", self.goal("A"), 2),
+                            ("d", "r2", self.goal("A  "), 2), ("e", "r2", self.goal("B"), 1), ("f", "r2", self.goal("B"), 1)])
+        row = {item["route"]: item for item in routes.route_table(rows)}["r2"]
+        self.assertEqual((row["attempts"], row["depth"], row["new_states"], row["stale_streak"], row["min_holes"]), (5, 2, 2, 1, 1))
+        self.assertFalse(row["explored"])
+        self.assertTrue(row["credited"] and row["skeleton"])
+
+    def test_a_route_is_explored_at_three_goal_states_or_with_a_compiled_proof(self):
+        deep = self.ledger([("ref", "r1", None, 0), ("b", "r2", self.goal("A"), 1), ("c", "r2", self.goal("B"), 1), ("d", "r2", self.goal("C"), 1)])
+        self.assertTrue({r["route"]: r for r in routes.route_table(deep)}["r2"]["explored"])
+        done = self.ledger([("ref", "r1", None, 0), ("b", "r2", self.goal("A"), 1), ("c", "r2", None, 0)])
+        row = {r["route"]: r for r in routes.route_table(done)}["r2"]
+        self.assertEqual((row["compiled"], row["explored"], row["depth"], row["min_holes"]), (True, True, 2, 0))
+
+    def test_the_reference_seeds_closed_so_a_cosmetic_compiled_variant_of_it_is_not_new(self):
+        rows = self.ledger([("ref", "r1", None, 0), ("b", "r1", None, 0)])
+        row = routes.route_table(rows)[0]
+        self.assertEqual((row["original"], row["credited"], row["attempts"], row["depth"], row["stale_streak"]), (True, False, 1, 0, 1))
+
+    def test_stale_flag_at_the_streak_limit_and_it_breaks_on_a_new_state(self):
+        same = [(f"x{n}", "r2", self.goal("A"), 1) for n in range(routes.STALE_STREAK + 1)]
+        rows = self.ledger([("ref", "r1", None, 0), *same])
+        row = {r["route"]: r for r in routes.route_table(rows)}["r2"]
+        self.assertEqual((row["depth"], row["stale_streak"], row["stale"]), (1, routes.STALE_STREAK, True))
+        rows = self.ledger([("ref", "r1", None, 0), *same, ("y", "r2", self.goal("Z"), 1)])
+        row = {r["route"]: r for r in routes.route_table(rows)}["r2"]
+        self.assertEqual((row["stale_streak"], row["stale"]), (0, False))
+
+    def test_progress_counts_credited_explored_and_the_share_of_new_state_attempts(self):
+        rows = self.ledger([("ref", "r1", None, 0), ("b", "r2", self.goal("A"), 1), ("c", "r2", self.goal("A"), 1), ("d", "r2", self.goal("B"), 1)])
+        table = routes.route_table(rows)
+        self.assertEqual(routes.progress(table), {"credited_routes": 1, "explored_routes": 0, "new_state_attempts": 2,
+                                                  "new_state_share": round(2 / 3, 3)})
+        self.assertIsNone(routes.progress([])["new_state_share"])
+
+    def test_detail_text_extends_the_route_line_and_the_memory_line_is_unchanged(self):
+        table = routes.route_table(self.ledger([("ref", "r1", None, 0), ("b", "r2", self.goal("A"), 2)]))
+        detail = routes.routes_detail_text(table)
+        self.assertIn('r2 "r2": 1 attempt, 1 goal state, min holes 2, opened, credited (opened by a skeleton), no scored proof', detail)
+        self.assertIn('r2 "r2": 1 attempt, no scored proof', routes.routes_text(table))
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class RouteQueueTests(unittest.TestCase):
+    def test_one_worker_drains_the_queue_once_and_skips_filed_attempts(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            for proof_id in ("a1", "b2", "a1"):
+                campaign._snapshot(directory, proof_id, f"theorem t : True := trivial -- {proof_id}")
+            (directory / "route-queue.jsonl").write_text("".join(
+                json.dumps({"proof_id": proof_id, "name": "Core.X"}) + "\n" for proof_id in ("a1", "b2", "a1", "c3")))
+            campaign._append(directory, {"kind": "route", "proof_id": "b2", "route": "r1"})
+            seen = []
+            def record(directory_, name, proof_id, proof):
+                seen.append(proof_id)
+                campaign._append(directory_, {"kind": "route", "proof_id": proof_id, "route": "r1"})
+            with patch.object(campaign, "_record_route", record), patch.object(campaign, "_room_for_extraction", lambda wait: True):
+                self.assertEqual([entry["proof_id"] for entry in campaign._route_queue(directory)], ["a1", "c3"])
+                campaign._route_worker(directory)
+            self.assertEqual(seen, ["a1"])  # c3 has no snapshot, so it is skipped rather than retried forever
+            self.assertFalse(campaign._worker_running(directory))
