@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { leanPathViolation, planEvaluate, resolveInlineIdea } from "./rules.ts";
+import { leanPathViolation, planEvaluate, planProbe, resolveInlineIdea } from "./rules.ts";
 
 test("a proof wins over candidate or probe, which becomes the default parent", () => {
   assert.deepEqual(planEvaluate({ proof: "theorem t", candidate: "#2" }),
@@ -45,4 +45,14 @@ test("an inline idea title creates the idea once and yields its id", async () =>
   assert.deepEqual(titles, ["try omega"]);
   const failed = await resolveInlineIdea({ idea: "x" }, async () => ({ ok: false, error: "bad" }));
   assert.deepEqual(failed, { ok: false, error: { ok: false, error: "bad" } });
+});
+
+test("probe keeps a real proof when drafts hold only placeholders, and batches real drafts with it", () => {
+  assert.deepEqual(planProbe({ proof: "by simp", drafts: ["sorry"] }),
+    { ok: true, proof: "by simp", note: "Placeholder drafts were ignored because proof was given." });
+  assert.deepEqual(planProbe({ proof: "by simp", drafts: [":= by sorry", "by omega"] }),
+    { ok: true, drafts: ["by simp", "by omega"], note: "proof was probed as draft 1 together with drafts." });
+  assert.equal(planProbe({ proof: "a", drafts: ["b", "c", "d", "e"] }).ok, false);
+  assert.deepEqual(planProbe({ drafts: ["by rfl"] }), { ok: true, drafts: ["by rfl"] });
+  assert.equal(planProbe({}).ok, false);
 });

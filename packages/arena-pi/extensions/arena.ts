@@ -10,7 +10,7 @@ import type { AssistantMessage, AssistantMessageEventStream } from "@earendil-wo
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { BudgetModel } from "./budget.ts";
 import { nearestToolName, normalizeToolArguments } from "./toolnames.ts";
-import { leanPathViolation, planEvaluate, resolveInlineIdea } from "./rules.ts";
+import { leanPathViolation, planEvaluate, resolveInlineIdea, planProbe } from "./rules.ts";
 import { assessFinalPayload, BUDGET_PROVIDER, budgetLimits, softCapGate, cacheAlarm, catalogPriceProblem, cacheUtilization, isBudgetModel, MAX_REQUEST_OUTPUT_TOKENS, MODELS, priceForUsage, requestShape, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
 
 const root = resolve(import.meta.dirname, "../../..");
@@ -861,14 +861,14 @@ export default function arenaExtension(pi: ExtensionAPI) {
       idea: Type.Optional(Type.String({ description: "One-line route title; creates the idea and links this attempt to it" })) }),
     async execute(_id, params) {
       if (!active) throw new Error("Select a theorem with /arena first");
-      if ((params.proof === undefined) === (params.drafts === undefined)) {
-        return reply({ ok: false, error: "usage_error", detail: "Pass exactly one of proof or drafts." });
-      }
+      const plan = planProbe(params);
+      if (!plan.ok) return reply({ ok: false, error: "usage_error", detail: plan.detail });
       const idea = await inlineIdea(params);
       if (!idea.ok) return reply(idea.error);
-      const withIdea = (result: Record<string, any>) => reply(idea.created ? { ...result, idea_id: idea.idea_id } : result);
-      if (params.proof !== undefined) {
-        const result = await withProofFile(params.proof, file => {
+      const withIdea = (result: Record<string, any>) => reply({ ...result,
+        ...(idea.created ? { idea_id: idea.idea_id } : {}), ...(plan.note ? { note: plan.note } : {}) });
+      if (plan.proof !== undefined) {
+        const result = await withProofFile(plan.proof, file => {
           const args = ["--proof-file", file!];
           if (idea.idea_id) args.push("--idea-id", idea.idea_id);
           if (params.parent) args.push("--parent", params.parent);
@@ -877,7 +877,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
         if (result.candidate) kickAutocheck();
         return withIdea(result);
       }
-      const result = await withProofFiles(params.drafts!, files => {
+      const result = await withProofFiles(plan.drafts!, files => {
         const args: string[] = [];
         for (const file of files) args.push("--draft-file", file);
         if (idea.idea_id) args.push("--idea-id", idea.idea_id);

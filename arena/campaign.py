@@ -250,6 +250,8 @@ def source_range(name: str, path: str, first: int | None = None, last: int | Non
 
     Without `first`, a `decl:` handle starts at its declaration and a path at the top of the file.
     """
+    # Lines are 1-based; some models send 0 to mean "not given".
+    first, last = (first or None), (last or None)
     with _session():
         return _source_range(name, path, first, last)
 

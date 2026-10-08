@@ -59,3 +59,25 @@ export async function resolveInlineIdea(params: { idea?: string; idea_id?: strin
   if (made.ok === false || !made.id) return { ok: false, error: made.ok === false ? made : { ok: false, error: "idea was not created" } };
   return { ok: true, idea_id: made.id, created: true };
 }
+
+export type ProbePlan = { ok: true; proof?: string; drafts?: string[]; note?: string } | { ok: false; detail: string };
+
+/** A draft that is only a hole placeholder (`sorry`, `by sorry`, `:= by sorry`) carries no attempt. */
+function placeholder(draft: string): boolean {
+  return /^(:=\s*)?(by\s+)?sorry$/.test(draft.trim());
+}
+
+/**
+ * Some models fill both `proof` and `drafts`. Drop placeholder drafts; probe the proof alone when
+ * nothing else remains, otherwise batch the proof with the real drafts (at most four in total).
+ */
+export function planProbe(params: { proof?: string; drafts?: string[] }): ProbePlan {
+  const { proof, drafts } = params;
+  if (proof === undefined && drafts === undefined) return { ok: false, detail: "Pass proof or drafts." };
+  if (proof === undefined) return { ok: true, drafts };
+  if (drafts === undefined) return { ok: true, proof };
+  const real = drafts.filter(draft => !placeholder(draft));
+  if (!real.length) return { ok: true, proof, note: "Placeholder drafts were ignored because proof was given." };
+  if (real.length + 1 > 4) return { ok: false, detail: "Pass proof or up to four drafts, not both." };
+  return { ok: true, drafts: [proof, ...real], note: "proof was probed as draft 1 together with drafts." };
+}
