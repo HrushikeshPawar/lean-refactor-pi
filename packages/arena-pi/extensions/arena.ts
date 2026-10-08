@@ -10,7 +10,7 @@ import type { AssistantMessageEventStream } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { BudgetModel } from "./budget.ts";
 import { nearestToolName, normalizeToolArguments } from "./toolnames.ts";
-import { planEvaluate } from "./rules.ts";
+import { leanPathViolation, planEvaluate } from "./rules.ts";
 import { assessFinalPayload, BUDGET_PROVIDER, budgetLimits, softCapGate, cacheAlarm, catalogPriceProblem, cacheUtilization, isBudgetModel, MAX_REQUEST_OUTPUT_TOKENS, MODELS, priceForUsage, requestShape, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
 
 const root = resolve(import.meta.dirname, "../../..");
@@ -628,6 +628,8 @@ export default function arenaExtension(pi: ExtensionAPI) {
     await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
   });
 
+  let leanProject: string | undefined;
+
   pi.registerCommand("arena", {
     description: "Select a benchmark theorem: /arena Core.InitsUpdatesComm",
     handler: async (name, ctx) => {
@@ -643,11 +645,12 @@ export default function arenaExtension(pi: ExtensionAPI) {
       const first = Object.entries(row.version_info[0] ?? {})[0];
       if (first && process.env.ARENA_NO_MCP !== "1") {
         const [version] = first;
+        leanProject = runDirectory ? resolve(runDirectory, "scratch", "project") : resolve(workspaces, `${row.source}-${version}`);
         pi.registerMcpServer("arena-lean", {
           command: "uvx",
           args: ["--from", "lean-lsp-mcp==0.31.0", "lean-lsp-mcp"],
           env: {
-            LEAN_PROJECT_PATH: runDirectory ? resolve(runDirectory, "scratch", "project") : resolve(workspaces, `${row.source}-${version}`),
+            LEAN_PROJECT_PATH: leanProject,
             LEAN_LOG_LEVEL: "WARNING",
             // Elaborate the candidate file as soon as the server starts, so the model's first
             // lean_goal does not wait for Mathlib-sized imports and everything above the theorem.
@@ -676,6 +679,10 @@ export default function arenaExtension(pi: ExtensionAPI) {
     // Lean context comes from MCP; candidate evaluation comes from arena_evaluate.
     if (event.toolName === "bash" || event.toolName === "powershell") {
       return { block: true, reason: "Bash is disabled while an Arena target is active; use Lean MCP or arena_evaluate." };
+    }
+    if (event.toolName.startsWith("mcp__arena_lean__") && leanProject) {
+      const reason = await leanPathViolation(event.input as { file_path?: unknown; path?: unknown }, leanProject);
+      if (reason) return { block: true, reason };
     }
     if (event.toolName === "write" || event.toolName === "edit") {
       const input = event.input as { path?: string };
