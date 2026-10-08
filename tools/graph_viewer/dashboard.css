@@ -29,8 +29,8 @@ main{padding:12px 20px 40px;max-width:2000px;margin:auto}
 .card .head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:4px}
 .hint{font-size:12px;color:var(--muted);text-align:right}
 .scroll-body{max-height:312px;overflow:auto}
-.graphcard{padding-bottom:10px}
-.graph-frame{display:block;width:100%;height:600px;border:1px solid var(--line);border-radius:6px;background:var(--bg)}
+.graphcard{padding-bottom:10px;margin-top:12px}
+.graph-frame{display:block;width:100%;height:max(780px,calc(100vh - 110px));border:1px solid var(--line);border-radius:6px;background:var(--bg)}
 svg.chart{display:block;max-width:100%;overflow:visible}
 .chartbox{width:100%}
 .grid{stroke:var(--grid);stroke-width:1}.axis{stroke:var(--muted);stroke-width:1.2}.xtick{stroke:var(--muted);stroke-width:1}.vgrid{stroke:var(--grid);stroke-width:1}
@@ -41,7 +41,6 @@ svg.chart{display:block;max-width:100%;overflow:visible}
 .line{fill:none;stroke-width:2.5;stroke-linejoin:round}.line.thin{stroke-width:1.5;opacity:.7}.dot{stroke:var(--panel);stroke-width:1.5}.dot.hollow{fill:var(--panel)!important;stroke-width:2.2}
 .hit{fill:transparent;stroke:none}circle.hit:hover{fill:var(--hover);stroke:var(--k);stroke-width:1.5;fill-opacity:.6}rect.hit:hover{fill:var(--text);fill-opacity:.07}
 .bestring{fill:none;stroke:var(--text);stroke-width:2}.besttxt{fill:var(--text);font:700 12px system-ui;paint-order:stroke;stroke:var(--panel);stroke-width:4px;stroke-linejoin:round}
-.charttip{position:fixed;z-index:50;max-width:340px;pointer-events:none;white-space:pre-wrap;background:var(--text);color:var(--bg);font:12px/1.4 system-ui;padding:5px 9px;border-radius:6px;box-shadow:0 2px 8px rgba(0,0,0,.35)}
 .k0{--k:var(--c0)}.k1{--k:var(--c1)}.k2{--k:var(--c2)}.k3{--k:var(--c3)}.k4{--k:var(--c4)}.k5{--k:var(--c5)}.k6{--k:var(--c6)}.k7{--k:var(--c7)}
 .line{stroke:var(--k)}.dot{fill:var(--k)}.dot.hollow{stroke:var(--k)}.bar{fill:var(--k)}.sw{background:var(--k)}
 .legend{display:flex;gap:4px 16px;flex-wrap:wrap;font-size:12px;color:var(--text);margin:2px 0 4px 74px}
@@ -76,6 +75,48 @@ details{border:1px solid var(--line);border-radius:8px;background:var(--panel);p
 .card+.card,.card+.grid2,.grid2+.card{margin-top:12px}.dash>.card+.card,.col>.card+.card{margin-top:0}
 .sw.box{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px}
 .cp0{--k:var(--p-read)}.cp1{--k:var(--p-input)}.cp2{--k:var(--p-write)}.cp3{--k:var(--p-output)}.korig{--k:var(--muted)}
-.area{fill:var(--k);fill-opacity:.85;stroke:none}.line.toptotal{stroke:var(--text);stroke-width:1.5}
+.area{fill:var(--k);fill-opacity:.85;stroke:none}.line.tophalo{stroke:var(--bg);stroke-width:6;opacity:.75}.line.toptotal{stroke:#fff;stroke-width:2.5}
 circle.pick{cursor:pointer}
 .toptot{--k:var(--text)}
+
+/* Tooltip cards */
+.charttip{position:fixed;z-index:300;min-width:190px;max-width:390px;pointer-events:none;background:var(--panel2);color:var(--text);border:1px solid var(--blue);border-radius:9px;padding:9px 12px;box-shadow:0 10px 30px rgba(0,0,0,.55);font:12px/1.4 system-ui}
+.charttip .tt-title{font-weight:700;font-size:13px;color:var(--text)}.charttip .tt-sub{color:var(--muted);margin:1px 0 4px}.charttip .tt-line{color:var(--muted)}
+.charttip table{border-collapse:collapse;width:100%;font-size:12px;margin-top:5px}
+.charttip td,.charttip th{padding:2px 0 2px 12px;border:0;border-bottom:0;text-align:left;vertical-align:baseline;background:none;position:static}
+.charttip td:first-child,.charttip th:first-child{padding-left:0;white-space:nowrap}
+.charttip th{color:var(--muted);font-weight:500}.charttip td.num,.charttip th.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.charttip td.wrap{white-space:normal;max-width:260px;overflow-wrap:anywhere;text-align:left}
+.charttip .tt-table tbody tr:first-child td{padding-top:4px}.charttip .tt-table tr.b td{border-top:1px solid var(--line);font-weight:700;padding-top:4px}.charttip .b{font-weight:700}
+.charttip .tt-foot{margin-top:6px;padding-top:5px;border-top:1px solid var(--line);color:var(--muted);font-size:11px}
+.charttip .good{color:var(--good)}.charttip .bad{color:var(--bad)}.charttip .muted{color:var(--muted)}
+.charttip .sw.box{width:10px;height:10px;margin-right:6px;vertical-align:-1px}
+.sw.errsw{--k:var(--bad)}
+
+/* Widgets */
+.widgets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-top:12px}
+.widget{display:flex;flex-direction:column;text-align:left;padding:9px 14px 6px;border:1px solid var(--line);border-radius:10px;background:var(--panel);min-width:0;color:var(--text)}
+.widget:hover{border-color:var(--blue);background:var(--hover)}
+.w-head{display:flex;justify-content:space-between;align-items:baseline}.w-title{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}.w-open{color:var(--muted);font-size:14px}.widget:hover .w-open{color:var(--blue)}
+.w-val{font-size:26px;font-weight:700;line-height:1.2;font-variant-numeric:tabular-nums}.w-val.good{color:var(--good)}.w-sup{font-size:12px;font-weight:500;color:var(--muted)}
+.w-sub{font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.w-chart{margin-top:4px}.w-chart svg.chart{width:100%}
+
+/* Modal */
+.modal{position:fixed;inset:0;z-index:100;background:rgba(2,8,19,.74);display:flex;align-items:center;justify-content:center}
+.modal-card{width:min(1280px,94vw);max-height:92vh;overflow:auto;background:var(--panel);border:1px solid var(--blue);border-radius:12px;padding:16px 20px 18px;box-shadow:0 24px 80px rgba(0,0,0,.6)}
+.modal-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}.modal-head h2{font-size:20px}.modal-head p{margin:2px 0 8px}
+.modal-table{margin-top:12px;max-height:300px}
+
+/* Lower row: tool activity (2/3) beside a stack of three panels (1/3); the row has one height so nothing leaves a void */
+.lowrow{display:grid;grid-template-columns:2fr 1fr;gap:12px;margin-top:12px;height:560px;align-items:stretch}
+.toolcard{display:flex;flex-direction:column;min-height:0}
+#c-tools{position:relative;flex:1;min-height:0}
+.chartbox.fill{position:absolute;inset:0;overflow:hidden}
+.rowband{fill:transparent}.rowband.odd{fill:var(--panel2);fill-opacity:.45}
+.errn{fill:var(--bad);font:600 11px system-ui}
+.stackcol{position:relative;min-width:0}.stackin{position:absolute;inset:0;display:flex;flex-direction:column;gap:12px}
+.stackin>.card{margin:0;min-height:0;flex:0 0 auto}
+.stackin>.ideacard{flex:1 1 0;display:flex;flex-direction:column}.ideacard .scroll-body{flex:1;min-height:0;max-height:none}
+.line1{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:4px 0;font-size:13px}.line1 .lbl{width:78px;color:var(--muted);font-size:12px;flex:none}
+.line1 .stack{flex:1;min-width:60px;margin:0}

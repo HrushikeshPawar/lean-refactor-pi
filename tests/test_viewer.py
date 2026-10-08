@@ -253,7 +253,7 @@ class ServerTests(unittest.TestCase):
                 run = "/run/v6x-Core.T-m1-r1/"
                 self.assertEqual(json.loads(get(run + "dashboard.json"))["packet"], "kickoff packet text")
                 self.assertTrue(json.loads(get(run + "langfuse.json"))["available"])
-                for page in ("", "dashboard.html", "dashboard.js", "charts.js", "dashboard.css", "app.js", "style.css"):
+                for page in ("", "dashboard.html", "dashboard.js", "charts.js", "dashboard.css", "app.js", "style.css", "highlight.js"):
                     self.assertTrue(get(run + page))
                 for page in ("", "hub.js", "hub.css"):
                     self.assertTrue(get("/" + page))
@@ -275,9 +275,20 @@ class AssetTests(unittest.TestCase):
         self.assertIn("Chart failed to draw", (self.ASSETS / "charts.js").read_text())
         node = shutil.which("node")
         if node:
-            for name in ("charts.js", "dashboard.js", "hub.js", "app.js"):
+            for name in ("charts.js", "dashboard.js", "hub.js", "app.js", "highlight.js"):
                 result = subprocess.run([node, "--check", str(self.ASSETS / name)], capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_lean_highlighter_marks_keywords_comments_and_blocks(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not installed")
+        script = ("global.window = {}; require(process.argv[1]); "
+                  "console.log(window.LeanHL.block('theorem t : 1 = 1 := by\\n  exact ⟨rfl⟩ -- ok\\n  /- a\\n b -/ sorry'))")
+        result = subprocess.run([node, "-e", script, str(self.ASSETS / "highlight.js")], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for expected in ('tk-kw">theorem', 'tk-tac">exact', 'tk-br">⟨', 'tk-cm">-- ok', 'tk-sorry">sorry', 'tk-cm"> b -/'):
+            self.assertIn(expected, result.stdout)
 
 
 if __name__ == "__main__":

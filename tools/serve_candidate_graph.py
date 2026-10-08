@@ -115,6 +115,7 @@ def baseline_point(payload: dict) -> dict | None:
 VIEWER_FILES = {"": ("index.html", "text/html; charset=utf-8"),
                 "index.html": ("index.html", "text/html; charset=utf-8"),
                 "app.js": ("app.js", "text/javascript; charset=utf-8"),
+                "highlight.js": ("highlight.js", "text/javascript; charset=utf-8"),
                 "style.css": ("style.css", "text/css; charset=utf-8"),
                 "dashboard.html": ("dashboard.html", "text/html; charset=utf-8"),
                 "dashboard.js": ("dashboard.js", "text/javascript; charset=utf-8"),

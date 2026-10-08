@@ -46,92 +46,183 @@
     $('kpis').innerHTML = items.map(([l, v, n, good]) => `<div class="kpi" title="${esc(n)}"><div class="l">${esc(l)}</div><div class="v${good ? ' good' : ''}">${esc(v)}</div><div class="n">${esc(n)}</div></div>`).join('');
   }
 
-  /* ---- overview charts: x is the evaluation number (0 = the original proof) or the API request number ---- */
+  /* ---- overview widgets: x is the evaluation number (0 = the original proof) or the API request number ---- */
   const evalEnd = () => Math.max(1, ...data.scores.map(r => r.n || 0));
-  const original = () => ({proxy: data.baseline_proxy, tokens: data.reference?.tokens, heartbeats: data.reference?.heartbeats});
+  const signed = (v, d = 2) => `${v > 0 ? '+' : v < 0 ? '−' : '±'}${Math.abs(+v.toFixed(d))}`;
+  /* A "vs original" delta for a tooltip row; lowerBetter flips which direction is green. */
+  const vs = (v, base, lowerBetter, d = 2) => {
+    if (v == null || base == null) return {};
+    const diff = v - base, better = lowerBetter ? diff < 0 : diff > 0;
+    return {delta: `${signed(diff, d)} vs original`, good: diff !== 0 && better, bad: diff !== 0 && !better};
+  };
+  const evalTip = (r, key, sw) => {
+    const ref = data.reference || {}, score = r.proxy ?? r.estimated_proxy, mark = k => k === key ? {sw, bold: true} : {};
+    return C.tipCard({title: `Evaluation ${r.n} · candidate ${r.candidate}`, sub: `${r.mode} check${r.compiled === false ? ' · did not compile' : ''} · at ${dur(r.t)}`,
+      rows: [{label: r.proxy == null ? 'Fast estimate' : 'Score', value: score == null ? '—' : String(score), ...mark('proxy'), ...vs(score, data.baseline_proxy, false)},
+             {label: 'Tokens', value: num(r.tokens), ...mark('tokens'), ...vs(r.tokens, ref.tokens, true, 0)},
+             {label: 'Heartbeats', value: num(r.heartbeats), ...mark('heartbeats'), ...vs(r.heartbeats, ref.heartbeats, true, 0)}],
+      foot: 'click to select this candidate in the graph'});
+  };
+  const origTip = (label, value) => C.tipCard({title: 'Original proof · evaluation 0', rows: [{sw: 'korig', label, value: String(value), bold: true}], foot: 'the proof the run started from'});
 
-  function scoreChart() {
+  function scoreHtml(spark) {
     const rows = data.scores, full = rows.filter(r => r.mode === 'full' && r.proxy != null), fast = rows.filter(r => r.mode !== 'full' && r.estimated_proxy != null), end = evalEnd();
-    const pt = (r, v, extra = '') => [r.n, v, `evaluation ${r.n}: candidate ${r.candidate} (${r.mode})\n${extra}proxy ${v}\n${num(r.tokens)} tokens, ${num(r.heartbeats)} heartbeats\nclick to select in the graph`, r.candidate_id];
     const bestFull = full.reduce((m, r) => !m || r.proxy > m.proxy ? r : m, null);
-    place('c-score', C.line([
+    const ptF = r => [r.n, r.proxy, evalTip(r, 'proxy', 'k0'), r.candidate_id];
+    const ptE = r => [r.n, r.estimated_proxy, evalTip(r, 'proxy', 'k2'), r.candidate_id];
+    return C.line([
       {cls: 'k1', step: true, dots: false, points: [[0, data.baseline_proxy], ...rows.filter(r => r.best_verified != null).map(r => [r.n, r.best_verified])]},
-      {cls: 'korig', noLine: true, r: 6, points: [[0, data.baseline_proxy, `evaluation 0: the original proof\nproxy ${data.baseline_proxy}`]]},
-      {cls: 'k0', noLine: true, r: 5, points: full.map(r => pt(r, r.proxy))},
-      {cls: 'k2', noLine: true, hollow: true, r: 4, points: fast.map(r => pt(r, r.estimated_proxy, 'fast estimate '))}],
+      {cls: 'korig', noLine: true, r: 6, points: [[0, data.baseline_proxy, origTip('Score', data.baseline_proxy)]]},
+      {cls: 'k0', noLine: true, r: 5, points: full.map(ptF)},
+      {cls: 'k2', noLine: true, hollow: true, r: 4, points: fast.map(ptE)}],
       {refs: [{y: data.baseline_proxy, cls: 'base', label: ''}], pointLabels: [{x: 0, y: data.baseline_proxy, text: `original ${data.baseline_proxy}`, dy: -12}],
-       extendTo: end, xMin: 0, xMax: end, xTime: false, intX: true, yMin: 0, yMax: 100, exact: true, height: 300,
+       extendTo: end, xMin: 0, xMax: end, xTime: false, intX: true, better: 'max', yMax: 100, yMin: 0, height: spark ? 64 : 360, spark,
        fmtY: C.fmt.score, yLabel: 'proxy score (0 to 100)', xLabel: 'evaluation number (0 = original proof)',
        best: bestFull && {x: bestFull.n, y: bestFull.proxy, text: `best ${bestFull.proxy} (${bestFull.candidate})`},
-       legend: [['korig', 'original proof (evaluation 0)'], ['k0', 'full evaluation, all versions checked'], ['k2', 'fast estimate'], ['k1', 'best verified so far']], label: 'score by evaluation'}));
+       legend: [['korig', 'original proof (evaluation 0)'], ['k0', 'full evaluation, all versions checked'], ['k2', 'fast estimate (hollow)'], ['k1', 'best verified so far']], label: 'score by evaluation'});
   }
 
   const PARTS = [['cache_read', 'Cache read', 'cp0'], ['input', 'Input', 'cp1'], ['cache_write', 'Cache write', 'cp2'], ['output', 'Output', 'cp3']];
+  const sumParts = obj => PARTS.reduce((a, [k]) => a + (obj[k] || 0), 0);
 
-  function spendCharts() {
+  function spendHtml(spark) {
     const sp = data.spend, pts = sp.points;
     const sums = Object.fromEntries(PARTS.map(([k]) => [k, 0])), area = [{x: 0, parts: PARTS.map(() => 0)}];
     for (const p of pts) {
       for (const [k] of PARTS) sums[k] += p.parts[k] || 0;
-      const row = PARTS.slice().reverse().map(([k, label]) => `${label}: ${money(p.parts[k] || 0)} (total ${money(sums[k])})`);
-      area.push({x: p.n, parts: PARTS.map(([k]) => sums[k]),
-                 tip: `request #${p.n}${p.kind ? ' ' + p.kind : ''}: ${money(p.request_usd)}\nrunning total ${money(Object.values(sums).reduce((a, v) => a + v, 0))}\n${row.join('\n')}`});
+      const tools = (p.tools || []).map(n => n.replace(/^arena_/, ''));
+      area.push({x: p.n, parts: PARTS.map(([k]) => sums[k]), tip: C.tipCard({
+        title: `Request #${p.n}${p.kind ? ` · ${p.kind} turn` : ''}`, sub: `at ${dur(p.t)} · ${num(p.tokens?.output)} output tokens`,
+        table: {head: ['', 'this request', 'running total'], rows: [...PARTS.slice().reverse().map(([k, label, cls]) => ({sw: cls, label, cells: [money(p.parts[k] || 0), money(sums[k])]})),
+                {sw: 'toptot', label: 'Total', bold: true, cells: [money(p.request_usd), money(sumParts(sums))]}]},
+        foot: `cache reuse ${p.reuse_pct ?? '—'}%${tools.length ? ` · ${tools.slice(0, 3).join(', ')}${tools.length > 3 ? ` +${tools.length - 3}` : ''}` : ''}`})});
     }
-    const grand = Object.values(sums).reduce((a, v) => a + v, 0), top = Math.max(grand, sp.soft_cap_usd || 0, 1e-9);
+    const grand = sumParts(sums), top = Math.max(grand, sp.soft_cap_usd || 0, 1e-9);
     const hardVisible = !!sp.hard_cap_usd && sp.hard_cap_usd <= 2.5 * top;
     const refs = [], notes = [];
     if (sp.soft_cap_usd) refs.push({y: sp.soft_cap_usd, cls: 'soft', label: 'soft cap ' + money(sp.soft_cap_usd)});
     if (hardVisible) refs.push({y: sp.hard_cap_usd, cls: 'hard', label: 'hard cap ' + money(sp.hard_cap_usd)});
-    else if (sp.hard_cap_usd) notes.push({cls: 'hard', text: `hard cap ${money(sp.hard_cap_usd)} is off scale`});
-    $('h-spend').textContent = `${money(sp.spent_usd)} settled · ${money(sp.unresolved_usd)} reserved`;
+    else if (sp.hard_cap_usd && !spark) notes.push({cls: 'hard', text: `hard cap ${money(sp.hard_cap_usd)} is off scale`});
     const legend = [['toptot', `Total ${money(grand)}`], ...PARTS.slice().reverse().map(([k, label, cls]) => [cls, `${label} ${money(sums[k])}${grand ? ` (${(100 * sums[k] / grand).toFixed(0)}%)` : ''}`])];
-    place('c-spend', C.area(area, PARTS.map(([, label, cls]) => ({cls, label})),
-      {refs, notes, xMin: 0, xMax: Math.max(1, pts.length), yMin: 0, yMax: hardVisible ? sp.hard_cap_usd * 1.08 : top * 1.15, exact: true, height: 300,
-       fmtY: C.fmt.money, yLabel: 'cumulative spend (USD)', xLabel: 'API request number', legend, label: 'API spend by component'}));
+    return C.area(area, PARTS.map(([, label, cls]) => ({cls, label})),
+      {refs, notes, xMin: 0, xMax: Math.max(1, pts.length), yMin: 0, yMax: hardVisible && !spark ? sp.hard_cap_usd * 1.08 : top * 1.15, exact: true, height: spark ? 64 : 360, spark,
+       fmtY: C.fmt.money, yLabel: 'cumulative spend (USD)', xLabel: 'API request number', legend, label: 'API spend by component'});
   }
 
-  function metricChart(id, key, ref, unit, cls) {
+  function metricHtml(key, ref, unit, cls, spark) {
     const ok = data.scores.filter(r => r.compiled && r[key] != null), end = evalEnd();
     // The original proof is evaluation 0, so the best-so-far line starts from it.
     let low = ref ?? Infinity; const steps = ref != null ? [[0, ref]] : [];
     for (const r of ok) { low = Math.min(low, r[key]); steps.push([r.n, low]); }
     const lowest = ok.reduce((m, r) => !m || r[key] < m[key] ? r : m, null);
-    const pt = r => [r.n, r[key], `evaluation ${r.n}: candidate ${r.candidate} (${r.mode})\n${num(r[key])} ${unit}\nclick to select in the graph`, r.candidate_id];
-    place(id, C.line([
+    const pt = r => [r.n, r[key], evalTip(r, key, cls), r.candidate_id];
+    return C.line([
       {cls, step: true, dots: false, points: steps},
-      {cls: 'korig', noLine: true, r: 6, points: ref != null ? [[0, ref, `evaluation 0: the original proof\n${num(ref)} ${unit}`]] : []},
+      {cls: 'korig', noLine: true, r: 6, points: ref != null ? [[0, ref, origTip(unit[0].toUpperCase() + unit.slice(1), num(ref))]] : []},
       {cls, noLine: true, r: 4, points: ok.filter(r => r.mode === 'full').map(pt)},
       {cls, noLine: true, r: 4, hollow: true, points: ok.filter(r => r.mode !== 'full').map(pt)}],
       {refs: ref != null ? [{y: ref, cls: 'base', label: ''}] : [], pointLabels: ref != null ? [{x: 0, y: ref, text: `original ${num(ref)}`, dy: 24}] : [],
-       includeRefs: true, extendTo: end, xMin: 0, xMax: end, xTime: false, intX: true, yMin: 0, height: 260, fmtY: C.fmt.num,
+       includeRefs: true, extendTo: end, xMin: 0, xMax: end, xTime: false, intX: true, better: 'min', yMin: 0, height: spark ? 64 : 360, spark, fmtY: C.fmt.num,
        yLabel: unit, xLabel: 'evaluation number (0 = original proof)', best: lowest && {below: true, x: lowest.n, y: lowest[key], text: `${num(lowest[key])} (${lowest.candidate})`},
-       legend: [['korig', 'original proof'], [cls, 'full evaluation (hollow = fast)']], label: unit}));
+       legend: [['korig', 'original proof'], [cls, 'full evaluation (hollow = fast)']], label: unit});
   }
 
+  /* Each widget: headline for the card, the sparkline, the full chart and a data table for the modal. */
+  function widgetInfo(k) {
+    const ref = data.reference || {}, rows = data.scores, sp = data.spend;
+    const pctOf = (v, base) => base ? `${v <= base ? '−' : '+'}${Math.abs(100 * (v - base) / base).toFixed(0)}%` : '';
+    if (k === 'score') {
+      const full = rows.filter(r => r.mode === 'full' && r.proxy != null), best = Math.max(data.baseline_proxy ?? 0, ...full.map(r => r.proxy));
+      return {title: 'Score', value: String(best), sub: `${signed(best - data.baseline_proxy)} vs original ${data.baseline_proxy} · ${rows.length} evaluations`, good: best > data.baseline_proxy, spark: scoreHtml(true), full: scoreHtml(false),
+              sup: 'best so far', modalSub: 'proxy 0 to 100, higher is better; evaluation 0 is the original proof. Click a point or row to select that candidate in the graph.', table: evalTable('proxy')};
+    }
+    if (k === 'tokens' || k === 'hb') {
+      const key = k === 'tokens' ? 'tokens' : 'heartbeats', base = ref[key], ok = rows.filter(r => r.compiled && r[key] != null), low = Math.min(base ?? Infinity, ...ok.map(r => r[key]));
+      return {title: k === 'tokens' ? 'Tokens' : 'Heartbeats', value: isFinite(low) ? num(low) : '—', sub: `${base != null && isFinite(low) ? `${pctOf(low, base)} vs original ${num(base)}` : 'no original'} · lower is better`, good: base != null && low < base,
+              spark: metricHtml(key, base, key, k === 'tokens' ? 'k3' : 'k5', true), full: metricHtml(key, base, key, k === 'tokens' ? 'k3' : 'k5', false), sup: 'lowest so far',
+              modalSub: `${key} per evaluation that compiled; lower is better. Click a point or row to select that candidate in the graph.`, table: evalTable(key)};
+    }
+    const soft = sp.soft_cap_usd;
+    return {title: 'API spend', value: money(sp.spent_usd), sub: `${soft ? `${(100 * sp.spent_usd / soft).toFixed(0)}% of soft cap ${money(soft)}` : 'no soft cap'} · ${sp.points.length} requests`, good: false, sup: 'total',
+            spark: spendHtml(true), full: spendHtml(false), modalSub: `${money(sp.spent_usd)} settled · ${money(sp.unresolved_usd)} reserved · cumulative, stacked by billed component`, table: spendTable()};
+  }
+  const WIDGETS = ['score', 'tokens', 'hb', 'spend'];
+  function widgets() {
+    $('widgets').innerHTML = WIDGETS.map(k => { const w = widgetInfo(k);
+      return `<button type="button" class="widget" data-w="${k}" aria-label="Open the ${esc(w.title)} chart"><div class="w-head"><span class="w-title">${esc(w.title)}</span><span class="w-open" aria-hidden="true">&#10530;</span></div>
+        <div class="w-val${w.good ? ' good' : ''}">${esc(w.value)} <span class="w-sup">${esc(w.sup)}</span></div><div class="w-sub">${esc(w.sub)}</div><div class="w-chart">${w.spark}</div></button>`; }).join('');
+    C.mount($('widgets'));
+    $('widgets').querySelectorAll('[data-w]').forEach(el => el.onclick = () => openModal(el.dataset.w));
+  }
+
+  /* ---- modal with the full chart and its data table ---- */
+  let modalKey = null;
+  function evalTable(key) {
+    const ref = data.reference || {}, rows = data.scores.filter(r => key === 'proxy' ? true : r.compiled && r[key] != null);
+    const cell = (v, base, lower, d) => v == null ? '—' : `${num(v, d)}${base != null ? ` <span class="${(lower ? v < base : v > base) ? 'good' : v === base ? 'muted' : 'bad'}">${signed(v - base, d)}</span>` : ''}`;
+    return `<table><thead><tr><th class="num">#</th><th>candidate</th><th>mode</th><th class="num">score</th><th class="num">tokens</th><th class="num">heartbeats</th><th>compiled</th><th class="num">at</th></tr></thead><tbody>
+      <tr><td class="num">0</td><td>original proof</td><td>reference</td><td class="num">${num(data.baseline_proxy, 2)}</td><td class="num">${num(ref.tokens)}</td><td class="num">${num(ref.heartbeats)}</td><td></td><td></td></tr>
+      ${rows.map(r => { const v = r.proxy ?? r.estimated_proxy; return `<tr class="click" data-cand="${esc(r.candidate_id)}"><td class="num">${r.n}</td><td>${esc(r.candidate)}</td><td>${esc(r.mode)}</td><td class="num">${v == null ? '—' : cell(v, data.baseline_proxy, false, 2)}${r.proxy == null && v != null ? ' <span class="muted">est.</span>' : ''}</td>
+        <td class="num">${cell(r.tokens, ref.tokens, true, 0)}</td><td class="num">${cell(r.heartbeats, ref.heartbeats, true, 0)}</td><td>${r.compiled ? 'yes' : badge('no', 'bad')}</td><td class="num">${dur(r.t)}</td></tr>`; }).join('')}</tbody></table>`;
+  }
+  function spendTable() {
+    const pts = data.spend.points;
+    return `<table><thead><tr><th class="num">#</th><th>kind</th><th class="num">at</th><th class="num">this request</th><th class="num">running total</th>${PARTS.slice().reverse().map(([, l, c]) => `<th class="num"><i class="sw box ${c}"></i>${l}</th>`).join('')}<th class="num">cache reuse</th><th>tools</th></tr></thead><tbody>
+      ${pts.map(p => `<tr><td class="num">${p.n}</td><td>${esc(p.kind || '')}</td><td class="num">${dur(p.t)}</td><td class="num"><b>${money(p.request_usd)}</b></td><td class="num">${money(p.spent_usd)}</td>${PARTS.slice().reverse().map(([k]) => `<td class="num">${money(p.parts[k] || 0)}</td>`).join('')}<td class="num">${p.reuse_pct ?? '—'}%</td><td class="small muted">${esc((p.tools || []).map(n => n.replace(/^arena_/, '')).join(', '))}</td></tr>`).join('')}</tbody></table>`;
+  }
+  function renderModal() {
+    if (!modalKey || !data) return;
+    const w = widgetInfo(modalKey), body = $('modal-body');
+    $('modal-title').textContent = w.title === 'API spend' ? 'API spend by component' : `${w.title} by evaluation`;
+    $('modal-sub').textContent = w.modalSub;
+    const scroll = body.querySelector('.scroll'), top = scroll ? scroll.scrollTop : 0;
+    body.innerHTML = `${w.full}<div class="scroll modal-table">${w.table}</div>`;
+    C.mount(body);
+    const fresh = body.querySelector('.scroll'); if (fresh) fresh.scrollTop = top;
+  }
+  function openModal(key) { modalKey = key; $('modal').hidden = false; renderModal(); $('modal-close').focus(); }
+  function closeModal() { modalKey = null; $('modal').hidden = true; $('modal-body').innerHTML = ''; }
+  $('modal-close').onclick = closeModal;
+  $('modal').addEventListener('mousedown', e => { if (e.target === $('modal')) closeModal(); });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && modalKey) closeModal(); });
+
+  /* ---- tool activity: tall rows filling the card, rich tooltips ---- */
+  const argSummary = t => {
+    let text = String(t.args ?? '');
+    try { const o = JSON.parse(text); if (o && typeof o === 'object') text = Object.entries(o).map(([k, v]) => `${k}=${typeof v === 'string' ? v : JSON.stringify(v)}`).join(', '); } catch {}
+    return text.length > 150 ? text.slice(0, 149) + '…' : text;
+  };
   function toolsTimeline() {
     const all = data.tools;
     if (!all.length) return place('c-tools', '<p class="muted">No tool calls yet.</p>');
     const short = n => String(n).replace(/^mcp__arena_/, '').replace(/^arena_/, '');
-    const counts = new Map(); all.forEach(t => counts.set(t.name, (counts.get(t.name) || 0) + 1));
+    const counts = new Map(), errs = new Map(); all.forEach(t => { counts.set(t.name, (counts.get(t.name) || 0) + 1); if (t.is_error) errs.set(t.name, (errs.get(t.name) || 0) + 1); });
     const names = [...counts.keys()].sort((a, b) => counts.get(b) - counts.get(a));
-    const shown = names.slice(0, 11), rowOf = t => { const i = shown.indexOf(t.name); return i < 0 ? shown.length : i; };
-    const rows = shown.map(n => [short(n), counts.get(n)]);
-    if (names.length > shown.length) rows.push(['other', names.slice(shown.length).reduce((a, n) => a + counts.get(n), 0)]);
+    const shown = names.slice(0, 13), rowOf = t => { const i = shown.indexOf(t.name); return i < 0 ? shown.length : i; };
+    const rows = shown.map(n => [short(n), counts.get(n), errs.get(n) || 0]);
+    if (names.length > shown.length) rows.push(['other', names.slice(shown.length).reduce((a, n) => a + counts.get(n), 0), 0]);
     const end = Math.max(1, ...data.tools.map(t => t.t_end || 0));
-    place('c-tools', C.box(w => {
-      const left = 200, rowH = 22, h = rows.length * rowH + 46, sx = v => left + v / end * (w - left - 14);
+    const mount = C.box((w, hh) => {
+      const left = 190, foot = 40, avail = Math.max(260, hh || 440) - foot, rowH = Math.max(24, Math.min(84, avail / rows.length)), plotH = rows.length * rowH, h = plotH + foot, sx = v => left + v / end * (w - left - 14);
+      const barH = Math.min(28, rowH - 8);
       let g = '';
-      rows.forEach(([name, n], i) => g += `<line class="row" x1="0" x2="${w}" y1="${(i + 1) * rowH}" y2="${(i + 1) * rowH}"/><text class="gname" x="4" y="${i * rowH + 15}">${esc(name.length > 26 ? name.slice(0, 25) + '…' : name)} <tspan class="tick">×${n}</tspan></text>`);
-      for (const v of C.timeTicks(0, end, Math.max(4, Math.floor((w - left) / 90)))) g += `<line class="vgrid" x1="${sx(v)}" x2="${sx(v)}" y1="0" y2="${rows.length * rowH}"/><text class="tick" x="${sx(v)}" y="${rows.length * rowH + 16}" text-anchor="middle">${C.tickTime(Math.round(v))}</text>`;
-      g += `<text class="axtitle" x="${(left + w) / 2}" y="${h - 6}" text-anchor="middle">time since run start</text>`;
+      rows.forEach(([name, n, e], i) => g += `<rect class="rowband${i % 2 ? ' odd' : ''}" x="0" y="${i * rowH}" width="${w}" height="${rowH}"/><text class="gname" x="6" y="${i * rowH + rowH / 2 + 4}">${esc(name.length > 24 ? name.slice(0, 23) + '…' : name)} <tspan class="tick">×${n}</tspan>${e ? ` <tspan class="errn">${e} err</tspan>` : ''}</text>`);
+      for (const v of C.timeTicks(0, end, Math.max(4, Math.floor((w - left) / 90)))) g += `<line class="vgrid" x1="${sx(v)}" x2="${sx(v)}" y1="0" y2="${plotH}"/><text class="tick" x="${sx(v)}" y="${plotH + 16}" text-anchor="middle">${C.tickTime(Math.round(v))}</text>`;
+      g += `<text class="axtitle" x="${(left + w) / 2}" y="${h - 4}" text-anchor="middle">time since run start</text>`;
       all.forEach((t, k) => {
-        const x = sx(t.t || 0), bw = Math.max(3, sx(t.t_end || 0) - x);
-        g += `<rect class="gbar ${toolClass(t.name)}${t.is_error ? ' err' : ''}${selectedTool === k ? ' sel' : ''}" data-tool="${k}" x="${x}" y="${rowOf(t) * rowH + 3}" width="${bw}" height="${rowH - 7}" rx="2" data-tip="${esc(`${t.name} at ${dur(t.t)}, ${t.duration_s}s${t.is_error ? ' (error)' : ''}`)}"/>`;
+        const x = sx(t.t || 0), bw = Math.max(4, sx(t.t_end || 0) - x);
+        const tip = C.tipCard({title: short(t.name), sub: t.is_error ? 'ended in an error' : t.running ? 'still running' : 'completed ok',
+          rows: [{sw: toolClass(t.name) + (t.is_error ? ' errsw' : ''), label: 'Start', value: `${dur(t.t)} into the run`}, {label: 'Duration', value: t.running ? 'running' : `${t.duration_s}s`, bold: true},
+                 {label: 'Status', value: t.is_error ? 'error' : t.running ? 'running' : 'ok', ...(t.is_error ? {bad: true} : {good: !t.running})},
+                 ...(argSummary(t) ? [{label: 'Args', value: argSummary(t), wrap: true}] : []),
+                 ...(t.is_error && t.result ? [{label: 'Result', value: String(t.result).slice(0, 160), wrap: true, bad: true}] : [])], foot: 'click for arguments and result'});
+        g += `<rect class="gbar ${toolClass(t.name)}${t.is_error ? ' err' : ''}${selectedTool === k ? ' sel' : ''}" data-tool="${k}" x="${x}" y="${rowOf(t) * rowH + (rowH - barH) / 2}" width="${bw}" height="${barH}" rx="3" data-tip="${esc(tip)}"/>`;
       });
       return `<svg class="gantt" width="${w}" height="${h}" role="img" aria-label="tool activity timeline">${g}</svg>`;
-    }));
-    $('c-tools').querySelectorAll('[data-tool]').forEach(el => el.onclick = () => openTool(+el.dataset.tool));
+    }, 'fill');
+    place('c-tools', mount);
   }
+  $('c-tools').addEventListener('click', e => { const bar = e.target.closest('[data-tool]'); if (bar) openTool(+bar.dataset.tool); });
 
   function ideasCard() {
     const ideas = data.ideas, kind = s => s === 'succeeded' ? 'good' : s === 'failed' || s === 'abandoned' ? 'bad' : 'mid';
@@ -142,11 +233,11 @@
 
   function leanCard() {
     const mix = data.lean, paths = Object.entries(mix.paths), total = paths.reduce((a, [, v]) => a + v.runs, 0), cold = mix.cold_verification;
-    place('c-lean', `${total ? `<div class="small muted">Per-version compiles by path</div><div class="stack">${paths.map(([k, v], i) => `<span class="k${i}" data-width="${(100 * v.runs / total).toFixed(1)}" title="${esc(k)} ${v.runs}"></span>`).join('')}</div>
-      <div class="kv">${paths.map(([k, v], i) => `<span><i class="sw box k${i}"></i> ${esc(k)}</span><span>${v.runs} compiles · ${v.seconds}s</span>`).join('')}</div>` : '<p class="muted">No Lean runs recorded.</p>'}
-      <h3>Cold verification</h3>${cold ? `<p>${cold.confirmed ? badge('confirmed', 'good') : badge('not confirmed', 'bad')} <span class="small muted">${esc(String(cold.candidate_id).slice(0, 10))}</span></p>
-        <div class="kv">${Object.entries(cold.passed || {}).map(([k, v]) => `<span>${esc(k)}</span><span>${v ? badge('pass', 'good') : badge('fail', 'bad')}</span>`).join('')}<span>heartbeats recorded / cold</span><span>${num(cold.recorded_heartbeats)} / ${num(cold.cold_heartbeats)}</span></div>` : '<p class="muted">Not run yet.</p>'}
-      ${data.submission ? `<div class="small muted">Submission ${esc(data.submission.candidate)}: proxy ${esc(data.submission.proxy)}, ${esc(data.submission.tokens)} tokens / ${esc(data.submission.heartbeats)} heartbeats, ${esc(data.submission.verified_by)}</div>` : ''}`);
+    const compile = total ? `<div class="line1"><span class="lbl">Compiles</span><div class="stack">${paths.map(([k, v], i) => `<span class="k${i}" data-width="${(100 * v.runs / total).toFixed(1)}" title="${esc(k)} ${v.runs}"></span>`).join('')}</div>
+      <span class="small">${paths.map(([k, v]) => `${esc(k)} ${v.runs} · ${v.seconds}s`).join(' · ')}</span></div>` : '<div class="line1 muted">No Lean runs recorded.</div>';
+    const versions = cold ? `<div class="line1"><span class="lbl">Cold</span>${cold.confirmed ? badge('confirmed', 'good') : badge('not confirmed', 'bad')}${Object.entries(cold.passed || {}).map(([k, v]) => badge(`${k} ${v ? '✓' : '✗'}`, v ? 'good' : 'bad')).join('')}</div>
+      <div class="line1"><span class="lbl">Heartbeats</span><span>recorded ${num(cold.recorded_heartbeats)} · cold ${num(cold.cold_heartbeats)}</span>${cold.recorded_heartbeats === cold.cold_heartbeats ? badge('match', 'good') : badge('differ', 'mid')}</div>` : '<div class="line1"><span class="lbl">Cold</span><span class="muted">not run yet</span></div>';
+    place('c-lean', `${compile}${versions}${data.submission ? `<div class="line1 small muted">Submission ${esc(data.submission.candidate)}: proxy ${esc(data.submission.proxy)}, ${esc(data.submission.tokens)} tok / ${esc(data.submission.heartbeats)} hb, ${esc(data.submission.verified_by)}</div>` : ''}`);
   }
 
   function lfCard() {
@@ -154,13 +245,13 @@
     if (!lf.available) return place('c-lf', `<div class="warn">Langfuse unavailable: ${esc(lf.error || 'unknown error')}. <button id="lf-retry">Retry</button></div>`), ($('lf-retry').onclick = () => loadLangfuse(true));
     const t = lf.totals, ledger = data.spend.spent_usd, diff = t.cost_usd - ledger, ok = Math.abs(diff) <= Math.max(0.0005, 0.02 * ledger);
     $('h-lf').innerHTML = lf.session_url ? `<a href="${esc(lf.session_url)}" target="_blank" rel="noopener">session &#8599;</a>` : 'no project link';
-    const gens = lf.observations.filter(o => o.type === 'GENERATION').map((o, i) => [i + 1, o.latency_s, `generation #${i + 1} ${o.name}: ${o.latency_s} s`]).filter(g => g[1] != null);
+    const gens = lf.observations.filter(o => o.type === 'GENERATION').map((o, i) => [i + 1, o.latency_s, C.tipCard({title: `Generation #${i + 1}`, sub: o.name, rows: [{sw: 'k5', label: 'Latency', value: `${o.latency_s} s`, bold: true}, ...(o.cost_usd != null ? [{label: 'Cost', value: money(o.cost_usd)}] : [])]})]).filter(g => g[1] != null);
     const slowest = gens.reduce((m, g) => !m || g[1] > m[1] ? g : m, null);
     place('c-lf', `${lf.stale ? `<div class="warn">Cached data; refresh failed: ${esc(lf.error)}</div>` : ''}
       <div class="mini"><div><div class="l">Traces</div><div class="v">${lf.traces.length}</div></div><div><div class="l">Generations</div><div class="v">${t.generations}</div></div>
       <div><div class="l">Mean latency</div><div class="v">${t.mean_generation_latency_s ?? '—'}s</div></div><div><div class="l">Errors</div><div class="v">${t.errors}</div></div></div>
-      <div class="kv"><span>Langfuse cost</span><span>${money(t.cost_usd)} ${ok ? badge('matches ledger', 'good') : badge(`ledger ${money(ledger)}, differs ${money(Math.abs(diff))}`, 'mid')}</span></div>
-      ${C.line([{cls: 'k5', points: gens}], {xMin: 0, xTime: false, fmtY: C.fmt.sec, yLabel: 'latency', xLabel: 'generation #', height: 190,
+      <div class="line1"><span class="lbl">Cost</span><span>${money(t.cost_usd)}</span>${ok ? badge('matches ledger', 'good') : badge(`ledger ${money(ledger)}, differs ${money(Math.abs(diff))}`, 'mid')}</div>
+      ${C.line([{cls: 'k5', points: gens}], {xMin: 0, xTime: false, fmtY: C.fmt.sec, yLabel: '', xLabel: 'generation #', height: 118, yTicks: 3, better: 'min',
         best: slowest && {x: slowest[0], y: slowest[1], text: `slowest ${slowest[1]} s`}, label: 'generation latency'})}`);
   }
 
@@ -225,9 +316,13 @@
     const el = event.target.closest && event.target.closest('[data-cand]');
     const frame = $('graph-frame');
     if (!el || !frame || !frame.contentWindow) return;
+    if (modalKey) closeModal();
     frame.contentWindow.postMessage({type: 'arena-select', id: el.dataset.cand}, location.origin);
     frame.scrollIntoView({behavior: 'smooth', block: 'nearest'});
   });
+
+  // The graph (an iframe) asks to be brought fully into view before it opens a detail modal.
+  addEventListener('message', e => { if (e.origin === location.origin && e.data && e.data.type === 'arena-focus') $('graph-frame').scrollIntoView({behavior: 'instant', block: 'center'}); });
 
   const panels = {tools: toolsPanel, ideas: ideasPanel, spend: spendPanel, langfuse: lfPanel};
   function renderPanel() {
@@ -243,8 +338,7 @@
 
   function render() {
     if (!data) return;
-    for (const fn of [header, kpis, scoreChart, spendCharts, () => metricChart('c-tokens', 'tokens', data.reference?.tokens, 'tokens', 'k3'),
-                      () => metricChart('c-hb', 'heartbeats', data.reference?.heartbeats, 'heartbeats', 'k5'), toolsTimeline, ideasCard, leanCard, lfCard, folds, renderPanel]) safely(fn);
+    for (const fn of [header, kpis, widgets, toolsTimeline, ideasCard, leanCard, lfCard, folds, renderPanel, renderModal]) safely(fn);
   }
 
   async function loadLangfuse(refresh = false) {

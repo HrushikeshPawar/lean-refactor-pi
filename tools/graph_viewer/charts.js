@@ -1,7 +1,8 @@
 /* Tiny SVG chart helpers (no libraries, no network). Colours come from CSS classes so charts follow
    light/dark mode; the page CSP forbids inline styles, so everything is attributes and classes.
    Charts render at the real pixel width of their container (so text is always 12px) and redraw on resize.
-   Y axes start at 0 unless a caller says otherwise. Hover any point or bar for exact values. */
+   Y axes are data-driven with padding (opts.better = 'max' | 'min' leaves headroom towards improvement); spend charts say yMin 0.
+   Hover any point or bar for a small formatted card with exact values. */
 (() => {
   const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 
@@ -43,19 +44,20 @@
   let seq = 0;
   const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(entries => {
     for (const entry of entries) {
-      const el = entry.target, width = Math.floor(entry.contentRect.width);
-      if (el._fn && width && width !== el._w) draw(el);
+      const el = entry.target, width = Math.floor(entry.contentRect.width), height = Math.floor(entry.contentRect.height);
+      if (el._fn && width && (width !== el._w || (el.classList.contains('fill') && height && height !== el._h))) draw(el);
     }
   });
   function draw(el) {
     el._w = Math.floor(el.clientWidth) || 640;
-    try { el.innerHTML = el._fn(Math.max(300, el._w)); }
+    el._h = Math.floor(el.clientHeight);
+    try { el.innerHTML = el._fn(Math.max(el.classList.contains('narrow') ? 120 : 300, el._w), el._h); }
     catch (error) { console.error('chart failed', error); el.innerHTML = `<p class="warn">Chart failed to draw: ${esc(error.message)}</p>`; }
   }
-  function box(fn) {
+  function box(fn, cls = '') {
     const id = 'c' + (++seq);
     registry.set(id, fn);
-    return `<div class="chartbox" data-cid="${id}"></div>`;
+    return `<div class="chartbox${cls ? ' ' + cls : ''}" data-cid="${id}"></div>`;
   }
   const watched = new Set();
   function mount(root) {
@@ -71,26 +73,36 @@
     });
   }
 
-  /* ---- hover tooltip, shared by every chart on the page ---- */
+  /* ---- hover tooltip, shared by every chart on the page. data-tip holds the card HTML (built by tipCard) or plain text ---- */
+  const tipCard = ({title, sub, rows = [], table, foot}) =>
+    `<div class="tt-title">${esc(title)}</div>${sub ? `<div class="tt-sub">${esc(sub)}</div>` : ''}` +
+    (rows.length ? `<table class="tt-rows">${rows.map(r => `<tr><td>${r.sw ? `<i class="sw box ${r.sw}"></i>` : ''}${esc(r.label)}</td><td class="num${r.bold ? ' b' : ''}${r.wrap ? ' wrap' : ''}">${esc(r.value)}${r.delta ? ` <span class="${r.good ? 'good' : r.bad ? 'bad' : 'muted'}">${esc(r.delta)}</span>` : ''}</td></tr>`).join('')}</table>` : '') +
+    (table ? `<table class="tt-table"><thead><tr>${table.head.map((h, i) => `<th${i ? ' class="num"' : ''}>${esc(h)}</th>`).join('')}</tr></thead><tbody>${table.rows.map(r => `<tr${r.bold ? ' class="b"' : ''}><td>${r.sw ? `<i class="sw box ${r.sw}"></i>` : ''}${esc(r.label)}</td>${r.cells.map(c => `<td class="num">${esc(c)}</td>`).join('')}</tr>`).join('')}</tbody></table>` : '') +
+    (foot ? `<div class="tt-foot">${esc(foot)}</div>` : '');
+  const plainTip = text => { const [first, ...rest] = String(text).split('\n'); return `<div class="tt-title">${esc(first)}</div>${rest.map(l => `<div class="tt-line">${esc(l)}</div>`).join('')}`; };
   let tip = null;
   const showTip = (event, target) => {
     if (!tip) { tip = document.createElement('div'); tip.className = 'charttip'; document.body.appendChild(tip); }
-    tip.textContent = target.getAttribute('data-tip');
+    const raw = target.getAttribute('data-tip');
+    tip.innerHTML = raw.startsWith('<') ? raw : plainTip(raw);
     tip.hidden = false;
-    const pad = 14, w = tip.offsetWidth, h = tip.offsetHeight;
+    // Beside the pointer, flipped to the other side near an edge, then clamped so the card never clips.
+    const pad = 16, w = tip.offsetWidth, h = tip.offsetHeight, vw = window.innerWidth, vh = window.innerHeight;
     let x = event.clientX + pad, y = event.clientY + pad;
-    if (x + w > window.innerWidth - 6) x = event.clientX - w - pad;
-    if (y + h > window.innerHeight - 6) y = event.clientY - h - pad;
-    tip.style.left = `${Math.max(4, x)}px`; tip.style.top = `${Math.max(4, y)}px`;
+    if (x + w > vw - 8) x = event.clientX - w - pad;
+    if (y + h > vh - 8) y = event.clientY - h - pad;
+    tip.style.left = `${Math.max(8, Math.min(x, vw - w - 8))}px`; tip.style.top = `${Math.max(8, Math.min(y, vh - h - 8))}px`;
   };
   document.addEventListener('mousemove', event => {
     const target = event.target.closest && event.target.closest('[data-tip]');
     if (target) showTip(event, target); else if (tip) tip.hidden = true;
   });
-  document.addEventListener('mouseleave', () => { if (tip) tip.hidden = true; });
+  document.addEventListener('mouseout', event => { if (tip && (!event.relatedTarget || event.relatedTarget.tagName === 'IFRAME')) tip.hidden = true; });
+  window.addEventListener('blur', () => { if (tip) tip.hidden = true; });
 
   /* ---- shared drawing ---- */
   function layout(w, o) {
+    if (o.spark) return {w, h: o.height || 70, M: {l: 6, r: 8, t: 8, b: 8}};
     const h = o.height || Math.round(Math.max(230, Math.min(330, w * 0.36)));
     const M = {l: o.yLabel ? 74 : 56, r: 18, t: 22, b: o.xLabel ? 52 : 34};
     return {w, h, M};
@@ -98,8 +110,17 @@
   function makeScales(L, xs, ys, o) {
     let x0 = o.xMin ?? Math.min(0, ...xs), x1 = o.xMax ?? Math.max(1, ...xs);
     let y0 = o.yMin ?? 0, y1 = o.yMax ?? 0;
-    const ymax = Math.max(...ys, ...(o.includeRefs ? (o.refs || []).map(r => r.y) : []));
-    if (isFinite(ymax)) y1 = Math.max(y1, ymax * (o.exact ? 1 : 1.1));
+    const vals = [...ys, ...(o.includeRefs ? (o.refs || []).map(r => r.y) : [])].filter(v => v != null && isFinite(v));
+    if (o.better && vals.length) {
+      // Data-driven range, with headroom in the direction of improvement (above the best for scores, below the lowest for costs).
+      const lo = Math.min(...vals), hi = Math.max(...vals), span = hi - lo > 0 ? hi - lo : Math.max(Math.abs(hi) * 0.1, 1);
+      if (o.better === 'max') { y0 = lo - span * 0.12; y1 = hi + span * 0.2; if (o.yMax != null) y1 = Math.min(y1, o.yMax); if (o.yMin != null) y0 = Math.max(y0, o.yMin); }
+      else { y0 = Math.max(o.yMin ?? 0, lo - span * 0.3); y1 = hi + span * 0.1; }
+      if (y1 - y0 < 1e-9) y1 = y0 + 1;
+    } else {
+      const ymax = Math.max(...vals);
+      if (isFinite(ymax)) y1 = Math.max(y1, ymax * (o.exact ? 1 : 1.1));
+    }
     if (!isFinite(x0) || !isFinite(x1)) { x0 = 0; x1 = 1; }
     if (!(y1 > y0)) y1 = y0 + 1;
     const {w, h, M} = L;
@@ -167,7 +188,7 @@
     if (!xs.length && !(o.refs || []).length) return '<p class="muted">No data yet.</p>';
     return box(w => {
       const L = layout(w, o), s = makeScales(L, xs, ys, o);
-      let out = axes(L, s, o) + refLines(L, s, o);
+      let out = o.spark ? sparkRefs(L, s, o) : axes(L, s, o) + refLines(L, s, o);
       for (const ser of series) {
         const pts = ser.points.filter(p => p[1] != null);
         if (!pts.length) continue;
@@ -180,11 +201,12 @@
       for (const ser of series) {
         if (ser.dots === false) continue;
         for (const p of ser.points.filter(q => q[1] != null)) {
-          const tipText = p[2] ?? `${dur(p[0])}: ${p[1]}`;
-          out += `<circle class="dot ${ser.cls}${ser.hollow ? ' hollow' : ''}" cx="${s.sx(p[0])}" cy="${s.sy(p[1])}" r="${ser.r || 4}"/>` +
-                 `<circle class="hit${p[3] ? ' pick' : ''}" cx="${s.sx(p[0])}" cy="${s.sy(p[1])}" r="10" data-tip="${esc(tipText)}"${p[3] ? ` data-cand="${esc(p[3])}"` : ''}/>`;
+          const tipText = p[2] ?? `${dur(p[0])}: ${p[1]}`, r = o.spark ? Math.min(ser.r || 4, 3) : ser.r || 4;
+          out += `<circle class="dot ${ser.cls}${ser.hollow ? ' hollow' : ''}" cx="${s.sx(p[0])}" cy="${s.sy(p[1])}" r="${r}"/>` +
+                 `<circle class="hit${p[3] ? ' pick' : ''}" cx="${s.sx(p[0])}" cy="${s.sy(p[1])}" r="${o.spark ? 7 : 10}" data-tip="${esc(tipText)}"${p[3] ? ` data-cand="${esc(p[3])}"` : ''}/>`;
         }
       }
+      if (o.spark) return svg(L, out, o.label);
       for (const lab of o.pointLabels || []) {
         if (lab.y == null) continue;
         out += `<text class="besttxt" x="${s.sx(lab.x) + (lab.dx ?? 10)}" y="${s.sy(lab.y) + (lab.dy ?? -10)}" text-anchor="${lab.anchor || 'start'}">${esc(lab.text)}</text>`;
@@ -194,7 +216,13 @@
         out += `<circle class="bestring" cx="${bx}" cy="${by}" r="8"/><text class="besttxt" x="${bx}" y="${o.best.below ? by + 26 : Math.max(12, by - 14)}" text-anchor="${anchor}">${esc(o.best.text)}</text>`;
       }
       return svg(L, out, o.label) + (o.legend ? legend(o.legend) : '');
-    });
+    }, o.spark ? 'narrow' : '');
+  }
+  /* Sparkline widgets draw no axes: only a faint baseline at the original value and the (optional) cap line. */
+  function sparkRefs(L, s, o) {
+    let out = `<line class="grid" x1="${L.M.l}" x2="${L.w - L.M.r}" y1="${L.h - L.M.b}" y2="${L.h - L.M.b}"/>`;
+    for (const r of o.refs || []) if (r.y != null && r.y >= s.y0 && r.y <= s.y1) out += `<line class="ref ${r.cls}" x1="${L.M.l}" x2="${L.w - L.M.r}" y1="${s.sy(r.y)}" y2="${s.sy(r.y)}"/>`;
+    return out;
   }
 
   /* Stacked bars: bars:[{parts:[v...], title}], layers:[{cls,label}]; x is the 1-based bar number. */
@@ -226,14 +254,15 @@
   }
 
 
-  /* Stacked area: pts:[{x, parts:[v...], tip}], layers:[{cls,label}] (first layer at the bottom). The top edge is the running total. */
+  /* Stacked area: pts:[{x, parts:[v...], tip}], layers:[{cls,label}] (first layer at the bottom). The top edge is the running total,
+     drawn as a bright line over a dark halo so it reads against every fill. */
   function area(pts, layers, o = {}) {
     if (!pts.length) return '<p class="muted">No data yet.</p>';
     const totals = pts.map(p => p.parts.reduce((a, v) => a + (v || 0), 0)), xs = pts.map(p => p.x);
     o = {...o, xTime: false, intX: true};
     return box(w => {
       const L = layout(w, o), {M} = L, s = makeScales(L, xs, totals, o);
-      let out = axes(L, s, o) + refLines(L, s, o);
+      let out = o.spark ? sparkRefs(L, s, o) : axes(L, s, o) + refLines(L, s, o);
       let below = pts.map(() => 0);
       layers.forEach((layer, k) => {
         const above = pts.map((p, i) => below[i] + (p.parts[k] || 0));
@@ -242,16 +271,17 @@
         out += `<path class="area ${layer.cls}" d="${top}${bottom}Z"/>`;
         below = above;
       });
-      out += `<path class="line toptotal" d="${smoothPath(pts.map((p, i) => [s.sx(p.x), s.sy(totals[i])]))}"/>`;
+      const edge = smoothPath(pts.map((p, i) => [s.sx(p.x), s.sy(totals[i])]));
+      out += `<path class="line tophalo" d="${edge}"/><path class="line toptotal" d="${edge}"/>`;
       const right = w - M.r;
       pts.forEach((p, i) => {
         if (p.tip == null || i === 0) return;
         const a = Math.max(M.l, (s.sx(xs[i - 1]) + s.sx(p.x)) / 2), b = Math.min(right, i + 1 < pts.length ? (s.sx(p.x) + s.sx(xs[i + 1])) / 2 : right);
         out += `<rect class="hit" x="${a}" y="${M.t}" width="${Math.max(2, b - a)}" height="${L.h - M.t - M.b}" data-tip="${esc(p.tip)}"/>`;
       });
-      return svg(L, out, o.label) + (o.legend ? legend(o.legend) : '');
-    });
+      return svg(L, out, o.label) + (o.legend && !o.spark ? legend(o.legend) : '');
+    }, o.spark ? 'narrow' : '');
   }
 
-  window.Charts = {esc, dur, tickTime, fmt, line, stacked, area, niceTicks, timeTicks, legend, mount, box};
+  window.Charts = {esc, dur, tickTime, fmt, line, stacked, area, niceTicks, timeTicks, legend, mount, box, tipCard, plainTip};
 })();

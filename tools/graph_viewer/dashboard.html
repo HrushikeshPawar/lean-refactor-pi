@@ -13,18 +13,15 @@
   </header>
   <main>
     <section id="kpis" class="kpis"></section>
-    <section class="dash">
-      <article class="card span2"><div class="head"><h2>Score by evaluation</h2><span class="hint">proxy 0 to 100; evaluation 0 is the original proof; click a point to select that candidate in the graph</span></div><div id="c-score"></div></article>
-      <article class="card"><div class="head"><h2>Tokens</h2><span class="hint">per evaluation that compiled; lower is better</span></div><div id="c-tokens"></div></article>
-      <article class="card span2"><div class="head"><h2>API spend by component</h2><span id="h-spend" class="hint"></span></div><div id="c-spend"></div></article>
-      <article class="card"><div class="head"><h2>Heartbeats</h2><span class="hint">per evaluation that compiled; lower is better</span></div><div id="c-hb"></div></article>
-      <article class="card span2"><div class="head"><h2>Tool activity</h2><span class="hint">one row per tool, one bar per call; red = error; click a bar for the call</span></div><div id="c-tools"></div></article>
-      <article class="card"><div class="head"><h2>Ideas</h2><span id="h-ideas" class="hint"></span></div><div id="c-ideas" class="scroll-body"></div></article>
-      <article class="card span2 graphcard"><div class="head"><h2>Candidate graph</h2><a class="hint" href="./" target="_blank" rel="noopener">open full graph &#8599;</a></div><iframe id="graph-frame" class="graph-frame" src="./?embed=1" title="Candidate graph" loading="lazy"></iframe></article>
-      <div class="col">
+    <section id="widgets" class="widgets" aria-label="Key trends; click one for the full chart"></section>
+    <article class="card graphcard"><div class="head"><h2>Candidate graph</h2><span class="hint">click a node for its summary; the detail buttons open proofs, diffs and provenance in a modal</span><a class="hint" href="./" target="_blank" rel="noopener">open full graph &#8599;</a></div><iframe id="graph-frame" class="graph-frame" src="./?embed=1" title="Candidate graph" loading="lazy"></iframe></article>
+    <section class="lowrow">
+      <article class="card toolcard"><div class="head"><h2>Tool activity</h2><span class="hint">one row per tool, one bar per call; red = error; click a bar for the call</span></div><div id="c-tools"></div></article>
+      <div class="stackcol"><div class="stackin">
+        <article class="card ideacard"><div class="head"><h2>Ideas</h2><span id="h-ideas" class="hint"></span></div><div id="c-ideas" class="scroll-body"></div></article>
         <article class="card"><div class="head"><h2>Lean and cold verification</h2></div><div id="c-lean"></div></article>
         <article class="card"><div class="head"><h2>Langfuse</h2><span id="h-lf" class="hint"></span></div><div id="c-lf"></div></article>
-      </div>
+      </div></div>
     </section>
     <section class="drill" id="drill">
       <h2 class="drill-title">Drill down</h2>
@@ -34,6 +31,7 @@
       <details class="fold"><summary>Kickoff packet</summary><div id="d-packet"></div></details>
     </section>
   </main>
+  <div id="modal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="modal-title"><div class="modal-card"><div class="modal-head"><div><h2 id="modal-title"></h2><p id="modal-sub" class="muted small"></p></div><button id="modal-close" type="button" aria-label="Close">&#10005;</button></div><div id="modal-body"></div></div></div>
   <script src="charts.js" defer></script>
   <script src="dashboard.js" defer></script>
 </body>

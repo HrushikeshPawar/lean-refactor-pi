@@ -42,17 +42,18 @@
     const point = coords.get(id); if (!point) return fit();
     const aspect = Math.max(1, wrap.clientWidth) / Math.max(1, wrap.clientHeight);
     const w = Math.max(600, Math.min(1000, Number(graph.dataset.width) || 800)), h = w / aspect;
-    view = {x: point.x - w / 2, y: point.y - h / 2, w, h}; applyView();
+    view = {x: point.x - w / 2, y: point.y - h / 2, w, h};
+    // Keep the window on the graph: no empty space past the last layer when the graph is taller than the window.
+    const W = Number(graph.dataset.width) || 800, H = Number(graph.dataset.height) || 500;
+    if (h < H + 80) view.y = Math.max(-40, Math.min(view.y, H + 40 - h));
+    if (w < W + 80) view.x = Math.max(-40, Math.min(view.x, W + 40 - w));
+    applyView();
   }
   function applyView() {
     if (!view) return;
     graph.setAttribute('viewBox', `${view.x} ${view.y} ${view.w} ${view.h}`);
     if (!data) return;
-    const width=Number(graph.dataset.width)||800,height=Number(graph.dataset.height)||500;
-    minimap.setAttribute('viewBox',`0 0 ${width} ${height}`);
-    minimap.setAttribute('preserveAspectRatio','none');
-    minimap.innerHTML=[...coords.values()].map(p=>`<circle cx="${p.x}" cy="${p.y}" r="${Math.max(3,Math.min(width,height)/100)}"/>`).join('')+
-      `<rect x="${view.x}" y="${view.y}" width="${view.w}" height="${view.h}"/>`;
+    drawMinimap();
   }
   function fit() {
     const width = Number(graph.dataset.width) || 800, height = Number(graph.dataset.height) || 500;
@@ -85,13 +86,28 @@
   wrap.addEventListener('pointerdown', e => { if (e.target.closest('.node')) return; dragging = {x:e.clientX,y:e.clientY,start:{...view}}; wrap.setPointerCapture(e.pointerId); wrap.classList.add('dragging'); });
   wrap.addEventListener('pointermove', e => { if (!dragging) return; view.x = dragging.start.x - (e.clientX-dragging.x)*view.w/wrap.clientWidth; view.y = dragging.start.y - (e.clientY-dragging.y)*view.h/wrap.clientHeight; applyView(); });
   wrap.addEventListener('pointerup', () => { dragging = null; wrap.classList.remove('dragging'); });
-  minimap.addEventListener('pointerdown', e => {
-    e.stopPropagation(); const box=minimap.getBoundingClientRect();
-    const width=Number(graph.dataset.width)||800,height=Number(graph.dataset.height)||500;
-    view.x=(e.clientX-box.left)/box.width*width-view.w/2;
-    view.y=(e.clientY-box.top)/box.height*height-view.h/2;
-    applyView();
-  });
+  // Minimap: the whole graph (edges and status-coloured nodes) with the visible window outlined; it hides when everything is already in view.
+  const MM_PAD=40;
+  function mmBox(){return {W:Number(graph.dataset.width)||800,H:Number(graph.dataset.height)||500};}
+  function drawMinimap() {
+    const {W,H}=mmBox(),inside=view.x<=-MM_PAD/2&&view.y<=-MM_PAD/2&&view.x+view.w>=W+MM_PAD/2&&view.y+view.h>=H+MM_PAD/2;
+    minimap.hidden=inside||!coords.size;if(minimap.hidden)return;
+    minimap.setAttribute('viewBox',`${-MM_PAD} ${-MM_PAD} ${W+2*MM_PAD} ${H+2*MM_PAD}`);
+    minimap.setAttribute('preserveAspectRatio','xMidYMid meet');
+    const edges=[],dots=[];
+    for(const node of data.nodes){
+      const p=coords.get(node.id);if(!p)continue;
+      for(const parent of node.parents){const a=coords.get(parent);if(a)edges.push(`<line class="mm-edge" x1="${a.x}" y1="${a.y}" x2="${p.x}" y2="${p.y}"/>`);}
+      dots.push(`<circle class="mm-node ${esc(status(node))}${selected===node.id?' sel':''}" cx="${p.x}" cy="${p.y}" r="${selected===node.id?16:11}"/>`);
+    }
+    minimap.innerHTML=`${edges.join('')}${dots.join('')}<rect class="mm-view" x="${view.x}" y="${view.y}" width="${view.w}" height="${view.h}"/>`;
+  }
+  function mmPoint(e){const ctm=minimap.getScreenCTM();return ctm?new DOMPoint(e.clientX,e.clientY).matrixTransform(ctm.inverse()):{x:0,y:0};}
+  let mmDrag=false;
+  const mmMove=e=>{const q=mmPoint(e);view.x=q.x-view.w/2;view.y=q.y-view.h/2;applyView();};
+  minimap.addEventListener('pointerdown',e=>{e.stopPropagation();mmDrag=true;minimap.setPointerCapture(e.pointerId);mmMove(e);});
+  minimap.addEventListener('pointermove',e=>{if(mmDrag)mmMove(e);});
+  minimap.addEventListener('pointerup',()=>{mmDrag=false;});
   $('fit').onclick = fit; $('zoom-in').onclick = () => zoom(.8); $('zoom-out').onclick = () => zoom(1.25);
   $('search').oninput = renderGraph; $('filter').onchange = renderGraph; $('idea-filter').onchange = renderGraph;
 
@@ -139,6 +155,13 @@
     graph.innerHTML = edges.join('') + boxes.join(''); applyView();
     graph.querySelectorAll('.node').forEach(el => el.addEventListener('click', () => select(el.dataset.id)));
   }
+  // Highlight a diff row with Lean syntax; old and new sides keep their own block-comment state.
+  function hl(row,hlOld,hlNew) {
+    const L=window.LeanHL;if(!L)return esc(row.text);
+    if(row.kind==='del')return L.line(row.text,hlOld);
+    if(row.kind==='same')L.line(row.text,hlOld);
+    return L.line(row.text,hlNew);
+  }
   function diff(a,b,showAll=false) {
     const x=a.split('\n'),y=b.split('\n'),n=x.length,m=y.length;
     if (n*m > 40000) return '<p class="warning">Diff is too large for the browser; open Full proof below to inspect the candidate.</p>';
@@ -153,52 +176,83 @@
     const context=new Set();
     rows.forEach((row,index)=>{if(row.kind!=='same')for(let k=Math.max(0,index-3);k<=Math.min(rows.length-1,index+3);k++)context.add(k)});
     if(!context.size)context.add(0);
-    const out=[];
+    const out=[],hlOld={block:0},hlNew={block:0},HL=window.LeanHL;
     for(let index=0;index<rows.length;){
       if(!showAll&&!context.has(index)){
         let end=index+1;while(end<rows.length&&!context.has(end))end++;
         out.push(`<div class="diff-fold">⋯ ${end-index} unchanged lines hidden</div>`);index=end;continue;
       }
       const row=rows[index++],sign=row.kind==='add'?'+':row.kind==='del'?'-':' ';
-      out.push(`<div class="diff-row ${row.kind}"><span class="diff-gutter">${row.old}</span><span class="diff-gutter">${row.new}</span><span class="diff-sign">${sign}</span><span class="diff-text">${esc(row.text)}</span></div>`);
+      out.push(`<div class="diff-row ${row.kind}"><span class="diff-gutter">${row.old}</span><span class="diff-gutter">${row.new}</span><span class="diff-sign">${sign}</span><span class="diff-text">${hl(row,hlOld,hlNew)}</span></div>`);
     }
     return out.join('');
   }
-  function detail() {
-    const node = byId.get(selected);
-    if (!node) { $('detail').innerHTML='<p class="empty">Select a graph node, chart point, or frontier item.</p>'; return; }
-    const evaluated = best(node)?.result || {}, derived = node.derivations || [];
-    const ancestry=lineageOf(node.id);
+  const facts=rows=>`<dl class="facts">${rows.map(([k,v])=>`<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>`;
+  const ideaName=id=>id?((data.ideas||[]).find(i=>i.id===id)?.title||id):'';
+  function context(node) {
+    const evaluated=best(node)?.result||{},derived=node.derivations||[],ancestry=lineageOf(node.id);
     const reference=[...ancestry.nodes].map(id=>byId.get(id)).find(item=>item.origin==='reference');
-    const root=reference || [...ancestry.nodes].map(id=>byId.get(id)).sort((a,b)=>a.index-b.index)[0];
-    const relations = derived.map((d,i) => `<div>${i ? 'Alternate derivation' : 'Recorded parents'}: ${d.parents.length ? d.parents.map(p => `<button data-go="${esc(p)}">${esc(byId.get(p) ? nodeLabel(byId.get(p)) : p.slice(0,8))}</button>`).join(' ') : 'root'}${d.merge?.base ? ` · base <button data-go="${esc(d.merge.base)}">${esc(d.merge.base.slice(0,8))}</button>` : ''}</div>`).join('');
-    const options = [...new Set(derived.flatMap(d => d.parents))].map(p => `<option value="${esc(p)}">Parent ${esc(byId.get(p)?.index ?? p.slice(0,8))}</option>`).join('') + (node.merge?.base ? `<option value="${esc(node.merge.base)}">Common base</option>` : '');
-    $('detail').innerHTML = `<div class="card"><h2>${esc(nodeLabel(node))} ${node.origin === 'auto_merge' ? '⊕ automatic merge' : ''}</h2><div class="tags"><span class="tag ${node.status === 'full' ? 'good' : node.status === 'fail' ? 'bad' : ''}">${esc(status(node))}</span><span class="tag">${esc(node.tokens ?? '?')} tokens</span><span class="tag">${esc(node.heartbeat ?? '?')} heartbeats</span><span class="tag">${esc(node.local_proxy?.toFixed?.(2) ?? '—')} provisional score</span>${node.idea_id?`<span class="tag">${esc(node.idea_id)}</span>`:''}</div><details class="node-details"><summary>Reasoning and relationships</summary><code>${esc(node.id)}</code><p>${esc(node.hypothesis || (node.origin === 'auto_merge' ? 'Deterministic combination of disjoint edits' : 'No hypothesis recorded'))}</p><div class="row">${relations}</div><p class="muted">Children: ${node.children.length ? node.children.map(c => `<button data-go="${esc(c)}">#${esc(byId.get(c)?.index)}</button>`).join(' ') : 'none'} · Decision: ${esc(node.decision)}</p><button id="collapse">${collapsed.has(node.id)?'Expand descendants':'Collapse descendants'}</button></details></div>
-      <div class="card"><h3>Diff and merge provenance</h3>${options ? `<div class="diff-controls"><select id="diff-parent">${options}</select><label><input type="checkbox" id="diff-all"> Show unchanged lines</label></div><div class="diff" id="diff"></div>` : '<p class="muted">Recorded root</p>'}${node.merge ? `<details><summary>Exact base-relative edit ranges</summary><pre>${esc(JSON.stringify(node.merge.edits,null,2))}</pre></details>` : ''}<button id="open-lineage" class="modal-link" type="button">Open lineage diffs from ${reference?'original source':'earliest recorded ancestor'} · ${ancestry.edges.length} edges ↗</button></div>
-      <div class="card proof-card"><div class="proof-head"><h3>Full proof · ${esc(node.tokens ?? '?')} tokens</h3><button id="open-proof" type="button">Open in modal ↗</button></div><details><summary>Show inline proof</summary><pre>${esc(node.proof)}</pre></details></div>
-      <div class="card"><h3>All evaluations</h3>${node.evaluations.map(e => `<div class="feed-row"><strong>#${e.number} ${esc(e.mode)}</strong><span>${esc(e.result.tokens ?? '?')} tokens · ${esc(e.result.heartbeat ?? '?')} heartbeats · ${esc(e.result.local_proxy?.toFixed?.(2) ?? '—')} proxy</span>${Object.entries(e.result.compat || {}).map(([v,r]) => `<span class="tag ${r.passed ? 'good' : 'bad'}">${esc(v)} ${r.passed ? 'pass' : 'fail'}</span>`).join('')}<button type="button" class="feedback-toggle" aria-expanded="false">Complete Lean feedback ▸</button><div class="feedback-body" hidden>${Object.entries(e.result.compat || {}).map(([v,r])=>`<h4>${esc(v)}</h4><pre>${esc(diagnosticText(r))}</pre>`).join('')}${e.result.error ? `<pre>${esc(e.result.error)}</pre>` : ''}${!Object.keys(e.result.compat || {}).length&&!e.result.error?'<p class="muted">No Lean diagnostic was recorded for this evaluation.</p>':''}</div></div>`).join('')}</div>`;
-    $('detail').querySelectorAll('[data-go]').forEach(el => el.onclick=()=>select(el.dataset.go));
-    $('collapse').onclick=()=>{collapsed.has(node.id)?collapsed.delete(node.id):collapsed.add(node.id);view=null;layout();renderGraph();detail()};
-    $('detail').querySelectorAll('.feedback-toggle').forEach(button=>button.onclick=()=>{
-      const body=button.nextElementSibling,open=body.hidden;
-      body.hidden=!open;button.setAttribute('aria-expanded',String(open));
-      button.textContent=`Complete Lean feedback ${open?'▾':'▸'}`;
-    });
-    const selector=$('diff-parent'); if(selector){const update=()=>{$('diff').innerHTML=diff(byId.get(selector.value)?.proof ?? '',node.proof,$('diff-all').checked)};selector.onchange=update;$('diff-all').onchange=update;update()}
-    $('open-proof').onclick=()=>openCode(`Full proof · ${nodeLabel(node)}`,`<pre class="full-code">${esc(node.proof)}</pre>`);
-    $('open-lineage').onclick=()=>{
-      const cumulative=root&&root.id!==node.id?`<h3>${esc(nodeLabel(root))} → ${esc(nodeLabel(node))} · cumulative</h3><div class="diff">${diff(root.proof,node.proof)}</div>`:'<p class="muted">This is the earliest recorded proof.</p>';
-      const steps=ancestry.edges.map(({parent,child})=>{
-        const from=byId.get(parent),to=byId.get(child);
-        return `<details class="lineage-step" open><summary>${esc(nodeLabel(from))} → ${esc(nodeLabel(to))}${to.origin==='auto_merge'?' · ⊕ merge':''}</summary><div class="diff">${diff(from.proof,to.proof)}</div></details>`;
-      }).join('');
-      openCode(`Lineage diffs · ${nodeLabel(node)}`,`<p class="muted">${reference?'Pinned original source':'Earliest recorded ancestor'} to current · ${ancestry.edges.length} recorded parent edges, including merge branches</p>${cumulative}<h3>Step-by-step changes</h3>${steps}`);
-    };
+    const root=reference||[...ancestry.nodes].map(id=>byId.get(id)).sort((a,b)=>a.index-b.index)[0];
+    return {evaluated,derived,ancestry,reference,root};
   }
-  function openCode(title,content) {
+  const goBtn=p=>`<button data-go="${esc(p)}">${esc(byId.get(p)?nodeLabel(byId.get(p)):p.slice(0,8))}</button>`;
+  function detail() {
+    const node=byId.get(selected);
+    if (!node) { $('detail').innerHTML='<p class="empty">Select a graph node, chart point, or frontier item.</p>'; return; }
+    const parents=[...new Set((node.derivations?.length?node.derivations:[{parents:node.parents}]).flatMap(d=>d.parents||[]))];
+    const tag=(text,kind='')=>`<span class="tag ${kind}">${esc(text)}</span>`;
+    const proxy=node.local_proxy?.toFixed?.(2),idea=(data.ideas||[]).find(i=>i.id===node.idea_id),chain=[...lineageOf(node.id).nodes].map(id=>byId.get(id)).sort((x,y)=>x.index-y.index);
+    const evals=node.evaluations.map(e=>`<div class="eval-line"><strong>#${e.number}</strong> <span class="muted">${esc(e.mode)}</span> <span>${esc(e.result.tokens ?? '?')} tok · ${esc(e.result.heartbeat ?? '?')} hb · ${esc(e.result.local_proxy?.toFixed?.(2) ?? '—')}</span>${Object.entries(e.result.compat||{}).map(([v,r])=>`<span class="tag ${r.passed?'good':'bad'}">${esc(v)} ${r.passed?'✓':'✗'}</span>`).join('')}</div>`).join('');
+    $('detail').innerHTML=`<div class="side">
+      <div class="card sumcard"><h2>${esc(nodeLabel(node))} ${node.origin==='auto_merge'?'<span class="merge-mark">⊕ merge</span>':''}</h2>
+        ${facts([['Status',tag(status(node),node.status==='full'?'good':node.status==='fail'?'bad':'')],['Tokens',esc(node.tokens ?? '?')],['Heartbeats',esc(node.heartbeat ?? '?')],['Score',esc(proxy ?? '—')],
+                 ['Idea',node.idea_id?esc(ideaName(node.idea_id)):'<span class="muted">none</span>'],['Parent',parents.length?parents.map(goBtn).join(' '):'<span class="muted">root</span>'],
+                 ['Children',node.children.length?node.children.map(goBtn).join(' '):'<span class="muted">none</span>']])}
+        <div class="actions"><button type="button" data-open="overview" class="primary">Details ↗</button><button type="button" data-open="diff">Diff ↗</button><button type="button" data-open="proof">Proof ↗</button><button type="button" data-open="lineage">Lineage ↗</button></div></div>
+      ${node.hypothesis||node.origin==='auto_merge'?`<div class="card hypcard"><h3>Reasoning</h3><p class="hyp">${esc(node.hypothesis||'Deterministic combination of disjoint edits')}</p></div>`:''}
+      ${idea?`<div class="card ideainfo"><h3>Idea · ${esc(idea.title||idea.id)} <span class="tag">${esc(idea.status||'?')}</span></h3><p class="hyp">${esc(idea.hypothesis||'')}</p>${idea.reason?`<p class="hyp muted">${esc(idea.reason)}</p>`:''}</div>`:''}
+      <div class="card"><h3>Evaluations (${node.evaluations.length})</h3><div class="evals">${evals||'<p class="muted">None yet.</p>'}</div></div>
+      <div class="card ancard"><h3>Ancestry (${chain.length})</h3><div class="evals">${chain.map(n=>`<div class="eval-line"><button data-go="${esc(n.id)}" class="${n.id===node.id?'primary':''}">#${esc(n.index)}</button><span class="tag ${n.status==='full'?'good':n.status==='fail'?'bad':''}">${esc(status(n))}</span><span>${esc(n.tokens ?? '?')} tok · ${esc(n.heartbeat ?? '?')} hb · ${esc(n.local_proxy?.toFixed?.(2) ?? '—')}</span></div>`).join('')}</div></div></div>`;
+    $('detail').querySelectorAll('[data-go]').forEach(el=>el.onclick=()=>select(el.dataset.go));
+    $('detail').querySelectorAll('[data-open]').forEach(el=>el.onclick=()=>openDetail(el.dataset.open));
+  }
+  const DETAIL_TABS=[['overview','Reasoning and relations'],['diff','Diff and merge provenance'],['proof','Full proof'],['lineage','Lineage diffs'],['evals','Evaluations and Lean feedback']];
+  function openDetail(tab='overview') {
+    const node=byId.get(selected);if(!node)return;
     const dialog=$('code-dialog');
-    $('code-dialog-body').innerHTML=`<div class="modal-head"><h2>${esc(title)}</h2><button id="close-code" type="button" aria-label="Close details">✕</button></div>${content}`;
-    $('close-code').onclick=()=>dialog.close();dialog.showModal();
+    $('code-dialog-body').innerHTML=`<div class="modal-head"><h2>${esc(nodeLabel(node))} ${node.origin==='auto_merge'?'⊕ automatic merge':''}<span class="muted dsub"> · ${esc(status(node))} · ${esc(node.tokens ?? '?')} tokens · ${esc(node.heartbeat ?? '?')} heartbeats</span></h2><button id="close-code" type="button" aria-label="Close details">✕</button></div>
+      <nav class="dtabs">${DETAIL_TABS.map(([id,label])=>`<button type="button" data-dtab="${id}" aria-selected="${id===tab}">${label}</button>`).join('')}</nav><div id="dtab"></div>`;
+    $('close-code').onclick=()=>dialog.close();
+    $('code-dialog-body').querySelectorAll('[data-dtab]').forEach(b=>b.onclick=()=>openDetail(b.dataset.dtab));
+    renderDetailTab(node,tab);
+    if(!dialog.open){if(document.body.classList.contains('embed'))parent.postMessage({type:'arena-focus'},location.origin);dialog.showModal();}
+  }
+  function renderDetailTab(node,tab) {
+    const {derived,ancestry,reference,root}=context(node),box=$('dtab');
+    const bind=()=>box.querySelectorAll('[data-go]').forEach(el=>el.onclick=()=>{select(el.dataset.go);openDetail(tab)});
+    if(tab==='overview'){
+      const relations=derived.map((d,i)=>`<div>${i?'Alternate derivation':'Recorded parents'}: ${d.parents.length?d.parents.map(goBtn).join(' '):'root'}${d.merge?.base?` · base ${goBtn(d.merge.base)}`:''}</div>`).join('');
+      box.innerHTML=`<code>${esc(node.id)}</code><h3>Reasoning</h3><p class="hyp">${esc(node.hypothesis||(node.origin==='auto_merge'?'Deterministic combination of disjoint edits':'No hypothesis recorded'))}</p>
+        ${node.idea_id?`<p>Idea: <strong>${esc(ideaName(node.idea_id))}</strong></p>`:''}<h3>Relationships</h3><div class="row">${relations}</div>
+        <p class="muted">Children: ${node.children.length?node.children.map(goBtn).join(' '):'none'} · Decision: ${esc(node.decision)}</p><button id="collapse" type="button">${collapsed.has(node.id)?'Expand descendants':'Collapse descendants'}</button>`;
+      $('collapse').onclick=()=>{collapsed.has(node.id)?collapsed.delete(node.id):collapsed.add(node.id);view=null;layout();renderGraph();detail();openDetail(tab)};
+    } else if(tab==='diff'){
+      const options=[...new Set(derived.flatMap(d=>d.parents))].map(p=>`<option value="${esc(p)}">Parent ${esc(byId.get(p)?.index ?? p.slice(0,8))}</option>`).join('')+(node.merge?.base?`<option value="${esc(node.merge.base)}">Common base</option>`:'');
+      box.innerHTML=options?`<div class="diff-controls"><select id="diff-parent">${options}</select><label><input type="checkbox" id="diff-all"> Show unchanged lines</label></div><div class="diff" id="diff"></div>`:'<p class="muted">Recorded root: no parent to compare with.</p>';
+      box.innerHTML+=node.merge?`<details open><summary>Exact base-relative edit ranges</summary><pre>${esc(JSON.stringify(node.merge.edits,null,2))}</pre></details>`:'';
+      const selector=$('diff-parent');if(selector){const update=()=>{$('diff').innerHTML=diff(byId.get(selector.value)?.proof ?? '',node.proof,$('diff-all').checked)};selector.onchange=update;$('diff-all').onchange=update;update();}
+    } else if(tab==='proof'){
+      box.innerHTML=`<pre class="full-code lean">${window.LeanHL?window.LeanHL.block(node.proof):esc(node.proof)}</pre>`;
+    } else if(tab==='lineage'){
+      const cumulative=root&&root.id!==node.id?`<h3>${esc(nodeLabel(root))} → ${esc(nodeLabel(node))} · cumulative</h3><div class="diff">${diff(root.proof,node.proof)}</div>`:'<p class="muted">This is the earliest recorded proof.</p>';
+      const steps=ancestry.edges.map(({parent,child})=>{const from=byId.get(parent),to=byId.get(child);
+        return `<details class="lineage-step" open><summary>${esc(nodeLabel(from))} → ${esc(nodeLabel(to))}${to.origin==='auto_merge'?' · ⊕ merge':''}</summary><div class="diff">${diff(from.proof,to.proof)}</div></details>`;}).join('');
+      box.innerHTML=`<p class="muted">${reference?'Pinned original source':'Earliest recorded ancestor'} to current · ${ancestry.edges.length} recorded parent edges, including merge branches</p>${cumulative}<h3>Step-by-step changes</h3>${steps}`;
+    } else {
+      box.innerHTML=node.evaluations.map(e=>`<div class="feed-row"><strong>#${e.number} ${esc(e.mode)}</strong><span>${esc(e.result.tokens ?? '?')} tokens · ${esc(e.result.heartbeat ?? '?')} heartbeats · ${esc(e.result.local_proxy?.toFixed?.(2) ?? '—')} proxy</span>${Object.entries(e.result.compat || {}).map(([v,r]) => `<span class="tag ${r.passed ? 'good' : 'bad'}">${esc(v)} ${r.passed ? 'pass' : 'fail'}</span>`).join('')}<button type="button" class="feedback-toggle" aria-expanded="false">Complete Lean feedback ▸</button><div class="feedback-body" hidden>${Object.entries(e.result.compat || {}).map(([v,r])=>`<h4>${esc(v)}</h4><pre>${esc(diagnosticText(r))}</pre>`).join('')}${e.result.error ? `<pre>${esc(e.result.error)}</pre>` : ''}${!Object.keys(e.result.compat || {}).length&&!e.result.error?'<p class="muted">No Lean diagnostic was recorded for this evaluation.</p>':''}</div></div>`).join('')||'<p class="muted">No evaluations yet.</p>';
+      box.querySelectorAll('.feedback-toggle').forEach(button=>button.onclick=()=>{const body=button.nextElementSibling,open=body.hidden;body.hidden=!open;button.setAttribute('aria-expanded',String(open));button.textContent=`Complete Lean feedback ${open?'▾':'▸'}`;});
+    }
+    bind();
   }
   $('code-dialog').addEventListener('click',e=>{if(e.target===$('code-dialog'))e.target.close()});
   function select(id) { selected=id; localStorage.setItem('arena-selected',id); if(coords.has(id))focusOn(id); renderGraph(); detail(); renderCharts(); }
@@ -404,7 +458,10 @@
       const next=await response.json(),revision=`${next.ledger_events}:${next.cost_timeline?.length}:${next.worker?.updated_at}`;
       $('live').textContent=window.GRAPH_SNAPSHOT?'Saved snapshot':`Live · ${new Date().toLocaleTimeString()}`;$('live').classList.add('ok');
       if(revision===lastRevision)return;
-      lastRevision=revision;data=next;byId=new Map(data.nodes.map(n=>[n.id,n]));layout();renderGraph();detail();renderCharts();renderMeta();
+      lastRevision=revision;data=next;byId=new Map(data.nodes.map(n=>[n.id,n]));
+      // Open on the latest milestone so the side panel is never empty.
+      if(!selected||!byId.has(selected))selected=data.milestones.at(-1)?.candidate_id??data.nodes.at(-1)?.id??null;
+      layout();renderGraph();detail();renderCharts();renderMeta();
     } catch(error) {$('live').textContent=`Disconnected · ${error.message}`;$('live').classList.remove('ok')}
   }
   refresh(); if(!window.GRAPH_SNAPSHOT)setInterval(refresh,2500);
