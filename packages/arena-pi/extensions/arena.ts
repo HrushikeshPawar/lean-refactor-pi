@@ -804,7 +804,8 @@ export default function arenaExtension(pi: ExtensionAPI) {
       turnHadProofAttempt ||= Boolean(payload && payload.ok !== false &&
         (attempted(payload) || (payload.drafts ?? []).some(attempted)));
     }
-    const keys = discoveryKeys(event.toolName, payload);
+    // A repeated identical result reaches here as the trimmer's `unchanged` stub: nothing new was read.
+    const keys = payload?.unchanged === true ? [] : discoveryKeys(event.toolName, payload);
     if (event.toolName.endsWith("lean_goal") && !payload) {
       const goalText = (result?.content ?? []).filter(part => part?.type === "text")
         .map(part => part.text ?? "").join("\n").trim();

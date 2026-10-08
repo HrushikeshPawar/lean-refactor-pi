@@ -94,8 +94,7 @@ top-level commands or auxiliary declarations, and anything outside the one theor
 - Search before proving: use `arena_find` for batched name or text searches, then `arena_declarations` for full pinned source. Follow every `decl:<qualified-name>` handle with `arena_source` when you need a line range. Do not guess names.
 - Build incrementally and read the exact goal (`lean_goal`) before changing a failing step.
 - Try at least two structurally different routes before you golf anything. A route is a different proof
-  strategy (induction versus equational rewriting with existing lemmas, a different key lemma family, a
-  different decomposition), not a rewording of the same tactic skeleton. Record each as its own `arena_idea`
+  strategy, not a rewording of the same tactic skeleton. Record each as its own `arena_idea`
   and probe it. Marking an idea `succeeded` because it beat the original is not a reason to stop looking: the
   original scores only 33, and a better route usually moves far more points than polishing the first one.
 - Unspent allowance has no value. Stopping is only allowed near the end of the budget (10% or less left);

@@ -77,7 +77,7 @@ class LifecycleTests(unittest.TestCase):
         good = (ROOT / "runs/baseline/Core_InitsUpdatesComm/arena-candidate-126.txt").read_text()
         run = self.fake([
             cheap_tool("arena_evaluate", {"proof": good}, input=100, output=10),
-            {"text": "near-cap response", "usage": {"input": 100, "output": 5_800_000}},
+            {"text": "near-cap response", "usage": {"input": 100, "output": 5_990_000}},
             {"text": "this response must not be requested"},
         ], cap="3", env={"ARENA_FAKE_PAD_INPUT": "600000"}).run()
         requests = run.requests
@@ -106,7 +106,9 @@ class LifecycleTests(unittest.TestCase):
         gates = [row for row in run.jsonl("cost-ledger.jsonl") if row.get("kind") == "gate"]
         self.assertTrue(gates, run.result.stderr + run.result.stdout[-2000:])
         self.assertTrue(all(row["decision"] == "allow" for row in gates), gates)
-        self.assertGreater(min(row["estimate_usd"] for row in gates), 0.1)
+        # Only the first request has no prior token count, so only its estimate is the full byte bound; later
+        # requests are bounded by the provider's count for the repeated prefix and are small.
+        self.assertGreater(gates[0]["estimate_usd"], 0.1)
         self.assertEqual(len(run.requests), 3)
         summary = run.json("summary.json")
         self.assertEqual(summary["stop_reason"], "soft_cap_reached")
@@ -122,7 +124,7 @@ class LifecycleTests(unittest.TestCase):
 
     def test_estimate_gate_applies_only_against_the_three_dollar_hard_cap(self):
         run = self.fake([
-            {"text": "nearly the hard cap", "usage": {"input": 100, "output": 5_800_000}},
+            {"text": "nearly the hard cap", "usage": {"input": 100, "output": 5_990_000}},
             {"text": "must not reach provider"},
         ], cap="3", env={"ARENA_FAKE_PAD_INPUT": "600000"}).run()
         gates = [row for row in run.jsonl("cost-ledger.jsonl") if row.get("kind") == "gate"]
@@ -580,9 +582,11 @@ class ErrorLoopAndContinuationTests(unittest.TestCase):
             cheap_tool("arena_evaluate", {"proof": good, "idea_id": "i1"}),
             {"text": "done for now"}, {"text": "still done"}])
         later = "\n".join(message_text(m) for m in run.requests[-1]["messages"])
-        # More than 10% of the cap is left, so a plain final answer is pushed toward a new route.
+        # More than 10% of the cap is left, so a plain final answer is pushed back to work. The push states
+        # only what the harness credits (ROUTE_RULE); it never suggests which strategy to try.
         self.assertIn("Do not stop", later)
-        self.assertIn("structurally new idea", later)
+        self.assertIn("fingerprints each attempt's compiled proof term", later)
+        self.assertNotIn("structurally new idea", later)
         self.assertIn("no value", later)
         self.assertIn('"candidate":"#2"', later)
         self.assertIn("i1 Rewrite from scratch", later)
@@ -612,10 +616,13 @@ class ErrorLoopAndContinuationTests(unittest.TestCase):
         first, second = refusals
         self.assertEqual((first["phase"], first["refused"], first["stop"]), ("review", True, False))
         self.assertEqual((second["phase"], second["refused"]), ("refused", True))
-        for text in ("Stop refused", "no value", "10% or less", "Induction route", "structurally NEW idea",
-                     "induction versus equational", "different key lemma family", "tokens saved", "heartbeats saved"):
+        for text in ("Stop refused", "no value", "10% or less", "Routes tried", "fingerprints each attempt's compiled proof term",
+                     "tokens saved", "heartbeats saved"):
             self.assertIn(text, first["next"])
-        self.assertIn("without probing any new idea", second["next"])
+        # The push states the credit rule only; it names no strategy (no induction/equational/lemma-family hints).
+        for text in ("structurally NEW", "induction versus equational", "different key lemma family"):
+            self.assertNotIn(text, first["next"])
+        self.assertIn("No attempt was made since the last refusal", second["next"])
         # The refusal is compact: routes and headroom are in the text, nothing is echoed as JSON as well.
         self.assertEqual(set(first), {"ok", "phase", "stop", "refused", "remaining_usd", "next"})
         self.assertIn("Routes tried:", first["next"])
