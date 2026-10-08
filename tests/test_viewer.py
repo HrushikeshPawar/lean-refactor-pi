@@ -1,6 +1,8 @@
 """Offline tests for the run viewer's data shaping and server (no Langfuse network, no live runs)."""
 
 import json
+import shutil
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -254,6 +256,25 @@ class ServerTests(unittest.TestCase):
                     self.assertTrue(get("/" + page))
                 with self.assertRaises(urllib.error.HTTPError):
                     get("/run/nope/dashboard.json")
+
+
+class AssetTests(unittest.TestCase):
+    """The viewer is desktop only and must never fail silently into an empty chart."""
+
+    ASSETS = Path(server.__file__).resolve().parent / "graph_viewer"
+
+    def test_no_mobile_breakpoints(self):
+        for name in ("hub.css", "dashboard.css", "style.css"):
+            self.assertNotIn("max-width:", "".join(
+                line for line in (self.ASSETS / name).read_text().splitlines() if "@media" in line), name)
+
+    def test_charts_report_draw_failures_and_scripts_parse(self):
+        self.assertIn("Chart failed to draw", (self.ASSETS / "charts.js").read_text())
+        node = shutil.which("node")
+        if node:
+            for name in ("charts.js", "dashboard.js", "hub.js", "app.js"):
+                result = subprocess.run([node, "--check", str(self.ASSETS / name)], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == "__main__":
