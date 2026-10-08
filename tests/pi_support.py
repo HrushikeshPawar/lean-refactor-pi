@@ -86,7 +86,11 @@ class FakeRun:
 
     def jsonl(self, name: str) -> list[dict]:
         path = self.directory / name
-        return [json.loads(line) for line in path.read_text().splitlines() if line] if path.exists() else []
+        rows = [json.loads(line) for line in path.read_text().splitlines() if line] if path.exists() else []
+        if name == "trace-journal.jsonl":  # the extension stores payloads as deltas
+            from arena.traces import expand_journal
+            return expand_journal(rows)
+        return rows
 
     @property
     def stdout(self) -> str:

@@ -27,37 +27,55 @@ export function softCapGate(settledUsd: number, limits: BudgetLimits) {
 }
 
 type Usage = { input: number; output: number; cacheRead: number; cacheWrite: number };
-type Price = { input: number; output: number; cacheRead: number; cacheWrite: number };
 
-// OpenCode Go prices per million tokens, as Pi's opencode-go catalog bills them;
-// `catalogPriceProblem` refuses a session when the two disagree. Luna's higher
-// tier applies only when the billed prompt (new input plus cache read/write)
-// exceeds 272K tokens; Pi's catalog has no tier, so the ledger stays conservative.
-export const MODELS = {
-  "gpt-6-luna": {
-    price: { input: 0.10, output: 0.50, cacheRead: 0.01, cacheWrite: 0.125 },
-    highPrice: { input: 0.20, output: 0.75, cacheRead: 0.02, cacheWrite: 0.25 },
-    highContextThreshold: 272_000,
-    contextWindow: 1_050_000,
-    maxTokens: 128_000,
-    requestOutputTokens: 16_000,
-  },
-  "qwen3.8-flash": {
-    price: { input: 0.15, output: 0.47, cacheRead: 0.016, cacheWrite: 0.20 },
-    contextWindow: 1_000_000,
-    maxTokens: 131_072,
-    requestOutputTokens: 16_000,
-  },
-  "deepseek-v4.1-flash": {
-    price: { input: 0.15, output: 0.60, cacheRead: 0.003, cacheWrite: 0 },
-    contextWindow: 1_000_000,
-    maxTokens: 384_000,
-    // DeepSeek's high thinking effort hit a 16K limit mid-thought in v6 runs (output includes thinking).
-    requestOutputTokens: 32_000,
-  },
-} as const;
+export type Price = { input: number; output: number; cacheRead: number; cacheWrite: number };
+export type ModelSpec = {
+  price: Price;
+  /** Higher tier applied when the billed prompt exceeds highContextThreshold; Pi's catalog has no tier. */
+  highPrice?: Price;
+  highContextThreshold?: number;
+  contextWindow: number;
+  maxTokens: number;
+  requestOutputTokens: number;
+  compaction: { atTokens: number; keepRecentTokens: number };
+};
+export type ModelConfig = { provider: string; models: Record<string, ModelSpec> };
 
-export type BudgetModel = keyof typeof MODELS;
+// All per-model facts live in models.yaml. tools/run_pi_budgeted.py loads and validates it and passes
+// it here as JSON, so this side needs no YAML parser and holds no second copy.
+export const MODELS_ENV = "ARENA_MODELS_JSON";
+
+export function parseModelConfig(raw: string | undefined): ModelConfig {
+  if (!raw) throw new Error(`${MODELS_ENV} is not set; Arena models come from models.yaml, so start Pi through tools/run_pi_budgeted.py`);
+  let config: any;
+  try { config = JSON.parse(raw); }
+  catch { throw new Error(`${MODELS_ENV} is not valid JSON`); }
+  const bad = (what: string): never => { throw new Error(`${MODELS_ENV}: ${what}`); };
+  const positive = (where: string, value: unknown, allowZero = false) => {
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || (!allowZero && value === 0)) {
+      bad(`${where} must be a ${allowZero ? "non-negative" : "positive"} number, got ${JSON.stringify(value)}`);
+    }
+  };
+  const price = (where: string, value: any) => {
+    for (const key of ["input", "output", "cacheRead", "cacheWrite"]) positive(`${where}.${key}`, value?.[key], true);
+  };
+  if (typeof config?.provider !== "string" || !config.provider) bad("provider is missing");
+  if (!config.models || typeof config.models !== "object" || !Object.keys(config.models).length) bad("models is empty");
+  for (const [id, spec] of Object.entries<any>(config.models)) {
+    price(`${id}.price`, spec?.price);
+    for (const key of ["contextWindow", "maxTokens", "requestOutputTokens"]) positive(`${id}.${key}`, spec[key]);
+    if (spec.highPrice !== undefined) { price(`${id}.highPrice`, spec.highPrice); positive(`${id}.highContextThreshold`, spec.highContextThreshold); }
+    positive(`${id}.compaction.atTokens`, spec.compaction?.atTokens);
+    positive(`${id}.compaction.keepRecentTokens`, spec.compaction?.keepRecentTokens);
+  }
+  return config as ModelConfig;
+}
+
+const CONFIG = parseModelConfig(process.env[MODELS_ENV]);
+export const PROVIDER = CONFIG.provider;
+export const MODELS: Readonly<Record<string, ModelSpec>> = CONFIG.models;
+
+export type BudgetModel = string;
 
 export function isBudgetModel(model: string): model is BudgetModel {
   return Object.hasOwn(MODELS, model);
@@ -92,15 +110,15 @@ export function usageCostParts(usage: Usage, model: BudgetModel) {
 
 export function priceForUsage(usage: Usage, model: BudgetModel): Price {
   const specification = MODELS[model];
-  if (model === "gpt-6-luna" &&
-      usage.input + usage.cacheRead + usage.cacheWrite > MODELS["gpt-6-luna"].highContextThreshold) {
-    return MODELS["gpt-6-luna"].highPrice;
+  if (specification.highPrice &&
+      usage.input + usage.cacheRead + usage.cacheWrite > specification.highContextThreshold!) {
+    return specification.highPrice;
   }
   return specification.price;
 }
 
 function pricedModel(provider: string, model: string, expected: BudgetModel): BudgetModel {
-  if (provider !== "opencode-go" || model !== expected) {
+  if (provider !== PROVIDER || model !== expected) {
     throw new Error(`Unpriced model in Arena budget session: ${provider}/${model}`);
   }
   return expected;
@@ -158,7 +176,7 @@ export function cacheHitPct(usage: { input?: number; cacheRead?: number; cacheWr
 export function cacheUtilization(entries: readonly SessionEntry[], sessionModel: BudgetModel) {
   const usages = entries.flatMap(entry => entry.type === "message"
     && entry.message.role === "assistant"
-    && entry.message.provider === "opencode-go"
+    && entry.message.provider === PROVIDER
     && entry.message.model === sessionModel
     && entry.message.usage?.totalTokens ? [entry.message.usage] : []);
   const summarize = (items: typeof usages) => {
@@ -241,7 +259,7 @@ export function boundedPayload(payload: unknown, model: BudgetModel, prior?: Pri
     ? Math.min(byteBound, prior.inputTokens + (bytes - prior.bytes) + 4096) : byteBound;
   // Worded so Pi recognises a context overflow and compacts, then retries, instead of failing the turn.
   if (inputBound > MODELS[model].contextWindow) throw new Error("Arena context bound exceeds the context window");
-  const price = model === "gpt-6-luna" ? MODELS[model].highPrice : MODELS[model].price;
+  const price = MODELS[model].highPrice ?? MODELS[model].price;
   const reserve = inputBound * Math.max(price.input, price.cacheRead, price.cacheWrite) / 1_000_000
     + Number(value[outputField]) * price.output / 1_000_000;
   return { payload: value, reserve };

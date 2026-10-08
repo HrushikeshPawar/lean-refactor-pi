@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { nearestToolName, normalizeToolArguments } from "./toolnames.ts";
+import { MISSING_ARGUMENTS_ERROR, nearestToolName, normalizeToolArguments, requireToolArguments } from "./toolnames.ts";
 
 const registered = ["read", "bash", "arena_candidate", "arena_declarations", "arena_evaluate", "arena_find", "arena_probe",
   "arena_profile", "arena_source", "arena_state", "arena_finish", "mcp__arena_lean__lean_goal",
@@ -43,4 +43,10 @@ test("an unknown argument key maps to the schema field it stands for, never over
   const idea = { properties: { title: { type: "string" }, status: { type: "string" } } };
   assert.deepEqual(normalizeToolArguments({ idea: "equational route" }, idea), { title: "equational route" });
   assert.deepEqual(normalizeToolArguments({ project: "x" }, idea), { project: "x" });
+});
+
+test("a null or absent argument object is one clear error, an empty object is not", () => {
+  assert.throws(() => requireToolArguments(null), new RegExp(MISSING_ARGUMENTS_ERROR));
+  assert.throws(() => requireToolArguments(undefined), /resend it with its arguments/);
+  assert.deepEqual(requireToolArguments({}), {});
 });

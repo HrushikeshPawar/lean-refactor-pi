@@ -3,7 +3,7 @@
 Byte-for-byte equality belongs to the journal wire row and the fake provider's socket
 body. Langfuse generation input is the post-hook object after the plugin's key redaction,
 not those bytes: the plugin redacts key-like strings and the provider SDK adds stream
-flags after the hook.
+flags after the hook. The journal stores both payloads as deltas; `read_journal` restores them.
 """
 
 from __future__ import annotations
@@ -222,6 +222,51 @@ def _usage_count(details: dict | None, key: str) -> int:
     return int(details[key])
 
 
+class JournalError(ValueError):
+    """A delta row that cannot be restored: its base is missing or the restored bytes fail their hash."""
+
+
+def _restore(base: bytes | None, row: dict, middle: str, prefix_key: str, suffix_key: str) -> bytes:
+    if base is None:
+        raise JournalError(f"{row.get('kind')} {row.get('id')} is a delta with no earlier row to apply it to")
+    suffix = row[suffix_key]
+    return base[:row[prefix_key]] + middle.encode() + (base[len(base) - suffix:] if suffix else b"")
+
+
+def expand_journal(rows: list[dict]) -> list[dict]:
+    """Rows with their full `body` (wire) and `post_hook` (request) restored.
+
+    The Pi extension stores both as a delta against the previous row of the same kind (journal.ts), with a
+    keyframe first and every few rows. Rows without an encoding field are returned as they are, so older
+    journals and hand-built rows pass through. The full-bytes sha256 on each row is checked.
+    """
+    out, wire, hook = [], None, None
+    for row in rows:
+        if row.get("kind") == "wire" and isinstance(row.get("body"), str):
+            data = _restore(wire, row, row["body"], "prefix", "suffix") if row.get("encoding") == "delta" else row["body"].encode()
+            if row.get("sha256") and hashlib.sha256(data).hexdigest() != row["sha256"]:
+                raise JournalError(f"wire body of {row.get('id')} does not match its sha256")
+            wire = data
+            row = {key: value for key, value in row.items() if key not in ("encoding", "prefix", "suffix")} | {"body": data.decode()}
+        elif row.get("kind") == "request" and row.get("post_hook_encoding"):
+            data = (_restore(hook, row, row["post_hook"], "post_hook_prefix", "post_hook_suffix")
+                    if row["post_hook_encoding"] == "delta" else row["post_hook"].encode())
+            if hashlib.sha256(data).hexdigest() != row.get("post_hook_sha256"):
+                raise JournalError(f"post-hook payload of {row.get('id')} does not match its sha256")
+            hook = data
+            row = {key: value for key, value in row.items()
+                   if not key.startswith("post_hook_")} | {"post_hook": json.loads(data)}
+        out.append(row)
+    return out
+
+
+def read_journal(path: Path) -> list[dict]:
+    """The whole trace journal with payloads restored; empty when there is none."""
+    if not path.exists():
+        return []
+    return expand_journal([json.loads(line) for line in path.read_text().splitlines() if line])
+
+
 def judge(journal: list[dict], observations: list[dict]) -> list[str]:
     """Problems that mean the Langfuse export is missing, clipped, or cannot join the journal.
 
@@ -232,6 +277,10 @@ def judge(journal: list[dict], observations: list[dict]) -> list[str]:
     except where the ledger applied Luna's conservative high tier. Tool spans join their
     journal rows by tool call ID.
     """
+    try:
+        journal = expand_journal(journal)
+    except JournalError as error:
+        return [str(error)]
     problems = [f"truncated observation {item.get('id')}" for item in observations if _truncated(item)]
     for row in journal:
         problems.extend(f"credential field {field} on {row.get('kind')} {row.get('id')}"

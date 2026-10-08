@@ -24,7 +24,13 @@ type Step = {
   delay_ms?: number;
 };
 
-// Fixture prices equal Arena's ledger, as Pi's real opencode-go catalog must.
+// Fixture prices and limits come from models.yaml (via ARENA_MODELS_JSON), as Pi's real catalog must equal them.
+const configured = JSON.parse(process.env.ARENA_MODELS_JSON ?? "{}");
+const catalogModel = (id: string) => {
+  const { price, contextWindow, maxTokens } = configured.models[id];
+  return { cost: price, contextWindow, maxTokens };
+};
+
 export default function fakeOpenCode(pi: ExtensionAPI) {
   let request = 0;
   const script: Step[] = process.env.ARENA_FAKE_SCRIPT
@@ -43,21 +49,19 @@ export default function fakeOpenCode(pi: ExtensionAPI) {
     });
   }
   if (process.env.ARENA_FAKE_WIRE_URL) {
-    pi.registerProvider("opencode-go", {
+    pi.registerProvider(configured.provider, {
       api: "anthropic-messages", apiKey: "offline-test", baseUrl: process.env.ARENA_FAKE_WIRE_URL,
       models: [{ id: "qwen3.8-flash", name: "Offline Qwen wire fixture", api: "anthropic-messages",
         baseUrl: process.env.ARENA_FAKE_WIRE_URL, reasoning: true, input: ["text"],
         compat: { allowEmptySignature: true },
-        cost: { input: 0.15, output: 0.47, cacheRead: 0.016, cacheWrite: 0.20 },
-        contextWindow: 1_000_000, maxTokens: 131_072 }],
+        ...catalogModel("qwen3.8-flash") }],
     });
     return;
   }
-  pi.registerProvider("opencode-go", {
+  pi.registerProvider(configured.provider, {
     api: "openai-responses", apiKey: "offline-test", baseUrl: "http://127.0.0.1:0",
     models: [{ id: "gpt-6-luna", name: "Offline Luna fixture", reasoning: true,
-      input: ["text"], cost: { input: 0.10, output: 0.50, cacheRead: 0.01, cacheWrite: 0.125 },
-      contextWindow: 1_050_000, maxTokens: 128_000 }],
+      input: ["text"], ...catalogModel("gpt-6-luna") }],
     streamSimple(model, context, options) {
       const stream = createAssistantMessageEventStream();
       // Pi's own summarization requests (compaction) carry no system sections; they are answered

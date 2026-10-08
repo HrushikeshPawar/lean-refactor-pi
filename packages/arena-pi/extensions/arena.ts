@@ -9,11 +9,12 @@ import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import type { AssistantMessage, AssistantMessageEventStream } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { BudgetModel, PriorRequest } from "./budget.ts";
-import { nearestToolName, normalizeToolArguments } from "./toolnames.ts";
+import { nearestToolName, normalizeToolArguments, requireToolArguments } from "./toolnames.ts";
+import { DeltaChain } from "./journal.ts";
 import { objectToolArguments, ResultTrimmer } from "./trim.ts";
-import { continuationPush, finishPush, trimProfile, leanPathViolation, planEvaluate, resolveInlineIdea, planProbe, sinceRefusal, staleNotice } from "./rules.ts";
+import { continuationPush, finishPush, routesText, trimProfile, leanPathViolation, planEvaluate, resolveInlineIdea, planProbe, sinceRefusal, staleNotice } from "./rules.ts";
 import type { RouteStats } from "./rules.ts";
-import { assessFinalPayload, BUDGET_PROVIDER, budgetLimits, softCapGate, cacheAlarm, catalogPriceProblem, cacheUtilization, finishAllowed, isBudgetModel, maxRequestOutputTokens, MODELS, priceForUsage, requestShape, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
+import { assessFinalPayload, BUDGET_PROVIDER, budgetLimits, softCapGate, cacheAlarm, catalogPriceProblem, cacheUtilization, finishAllowed, isBudgetModel, maxRequestOutputTokens, MODELS, PROVIDER, priceForUsage, requestShape, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
 
 const root = resolve(import.meta.dirname, "../../..");
 const workspaces = resolve(root, "workspaces");
@@ -142,7 +143,7 @@ function deliveredBlocks(content: unknown): Array<Record<string, unknown>> {
 
 export default function arenaExtension(pi: ExtensionAPI) {
   // Every Arena tool sees cleaned arguments: empty optional fields are absent, text arrays are parsed.
-  const registerTool = ((tool: any) => pi.registerTool({ ...tool,
+  const registerTool = ((tool: any) => pi.registerTool({ ...tool, prepareArguments: requireToolArguments,
     execute: (id: string, params: any, ...rest: any[]) =>
       tool.execute(id, normalizeToolArguments(params, tool.parameters), ...rest) })) as typeof pi.registerTool;
   // A factory invocation owns one Pi session. No active theorem is module-global.
@@ -310,11 +311,26 @@ export default function arenaExtension(pi: ExtensionAPI) {
     finally { closeSync(fd); }
     chmodSync(traceJournal, 0o600);
   }
+  // The wire body and the post-hook payload are each stored as a delta against the previous one (see journal.ts),
+  // so the journal grows with what each request adds, not with the whole context every time. Fields that
+  // describe the encoding come before the heavy `body` / `post_hook`, which stay last in the row.
+  const wireChain = new DeltaChain();
+  const hookChain = new DeltaChain();
   function recordWire(bytes: Uint8Array) {
     if (!pendingRequest || !bytes.byteLength) return;
-    appendTrace({ kind: "wire", id: pendingRequest, retry_index: wireIndex,
-      body: Buffer.from(bytes).toString("utf8"), sha256: createHash("sha256").update(bytes).digest("hex") });
+    const buffer = Buffer.from(bytes);
+    const { sha256, delta } = wireChain.encode(buffer);
+    appendTrace({ kind: "wire", id: pendingRequest, retry_index: wireIndex, sha256,
+      ...(delta ? { encoding: "delta", prefix: delta.prefix, suffix: delta.suffix } : {}),
+      body: delta ? delta.middle : buffer.toString("utf8") });
     wireIndex += 1;
+  }
+  function hookFields(published: unknown) {
+    const text = Buffer.from(JSON.stringify(published));
+    const { sha256, delta } = hookChain.encode(text);
+    return { post_hook_sha256: sha256, post_hook_encoding: delta ? "delta" : "text",
+      ...(delta ? { post_hook_prefix: delta.prefix, post_hook_suffix: delta.suffix } : {}),
+      post_hook: delta ? delta.middle : text.toString("utf8") };
   }
   function costState() {
     const reservations = new Map<string, number>();
@@ -398,7 +414,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
       }
       const runtime = modelRegistry;
       if (!runtime) throw new Error("Arena model registry is unavailable");
-      const physical = runtime.find("opencode-go", model.id);
+      const physical = runtime.find(PROVIDER, model.id);
       if (!physical) throw new Error(`OpenCode Go model unavailable: ${model.id}`);
       if (physical.contextWindow > MODELS[model.id].contextWindow ||
           physical.maxTokens > MODELS[model.id].maxTokens) {
@@ -434,7 +450,10 @@ export default function arenaExtension(pi: ExtensionAPI) {
           return innerFetch(captured.input, captured.init);
         },
         onPayload: async payload => {
-          // A request still open here was sent outside an agent turn (a compaction summary).
+          // A request still open here was sent outside an agent turn. When Pi compacts in the middle of a turn
+          // it makes two sequential summary requests (history, then the turn prefix; compaction.js `compact`);
+          // the first is still open when the second starts. Both are real, billed and needed, so this is
+          // bookkeeping of the first one, not a duplicate request. The second closes on session_compact.
           closeRequest(undefined, "superseded_by_next_request");
           if (gateStopReason) throw new Error(`Arena budget stop: ${gateStopReason}`);
           // Normalize at a fixed run-wide output limit; never use the remaining
@@ -503,7 +522,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
           wireIndex = 0;
           appendTrace({ kind: "request", id, run_id: runId, retry_of: retryOf, model: model.id,
             estimate_usd: decision.estimateUsd, gate_decision: "allow",
-            remaining_allowance_usd: decision.remainingUsd, post_hook: published });
+            remaining_allowance_usd: decision.remainingUsd, ...hookFields(published) });
           return published;
         },
       }), message => { if (pendingRequest) finalMessages.set(pendingRequest, message); });
@@ -519,7 +538,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
       thinkingLevels: ["off", "low", "medium", "high"],
       route(request, ctx) {
         if (!readEntries) throw new Error("Arena budget session has not started");
-        const physical = ctx.modelRegistry.find("opencode-go", id);
+        const physical = ctx.modelRegistry.find(PROVIDER, id);
         const guarded = ctx.modelRegistry.find("arena-guard", id);
         if (!physical || !guarded) throw new Error(`OpenCode Go or Arena guard unavailable: ${id}`);
         const limits = MODELS[id];
@@ -593,7 +612,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
         pi_embedded_cost_usd: usage.cost?.total ?? null });
       // Pi prices the same usage from its catalog, which `catalogPriceProblem` keeps equal to
       // the ledger, except Luna's conservative high tier, which only the ledger applies.
-      const priceTier = model === "gpt-6-luna" && priceForUsage(usage, model) === MODELS["gpt-6-luna"].highPrice ? "high" : "base";
+      const priceTier = MODELS[model].highPrice && priceForUsage(usage, model) === MODELS[model].highPrice ? "high" : "base";
       appendTrace({ ...delivered, settled_usd: usd, price_tier: priceTier, pi_cost_usd: usage.cost?.total ?? null,
         estimate_usd: Number(state.usd), remaining_allowance_usd: remainingAllowanceUsd,
         overshoot_usd: overshootUsd,
@@ -682,12 +701,12 @@ export default function arenaExtension(pi: ExtensionAPI) {
         throw new Error("Budgeted model was not selected");
       }
       report = { ...report, hard_cap_usd: limits.hardCapUsd, soft_cap_usd: limits.stopUsd, stop_target_usd: limits.stopUsd,
-        provider: "opencode-go", model: model.id, ...budgetStatus(ctx),
+        provider: PROVIDER, model: model.id, ...budgetStatus(ctx),
         price_method: "Observed usage priced per request using OpenCode Go list rates; Luna uses the >272K tier only when billed prompt tokens cross that threshold. Neither this nor Pi's embedded estimate is a provider invoice.",
         configured_usd_per_million_tokens: MODELS[model.id].price,
-        configured_high_tier: model.id === "gpt-6-luna" ? {
-          prompt_tokens_over: MODELS["gpt-6-luna"].highContextThreshold,
-          usd_per_million_tokens: MODELS["gpt-6-luna"].highPrice } : null,
+        configured_high_tier: MODELS[model.id].highPrice ? {
+          prompt_tokens_over: MODELS[model.id].highContextThreshold,
+          usd_per_million_tokens: MODELS[model.id].highPrice } : null,
         pi_embedded_estimate: sessionEmbeddedCost(ctx.sessionManager.getEntries()),
         pi_session_spend_usd: sessionSpend(ctx.sessionManager.getEntries(), model.id),
         cache_utilization: cacheUtilization(ctx.sessionManager.getEntries(), model.id) };
@@ -843,6 +862,9 @@ export default function arenaExtension(pi: ExtensionAPI) {
     return changed ? { messages } : undefined;
   });
 
+  const dropEmpty = <T extends Record<string, any>>(value: T): T => Object.fromEntries(Object.entries(value)
+    .filter(([, item]) => item !== undefined && item !== null && !(Array.isArray(item) && !item.length))) as T;
+
   const reply = (result: Record<string, any>) =>
     ({ isError: result.ok === false, content: [{ type: "text" as const, text: JSON.stringify(result) }], details: result });
 
@@ -881,8 +903,31 @@ export default function arenaExtension(pi: ExtensionAPI) {
     }
   }
 
+  // Declaring a new idea closes the idea that was current, from outcomes the harness already knows: it
+  // succeeded when it produced the best candidate so far, was abandoned when it made attempts without that,
+  // and was parked when nothing was attempted. The reason is recorded; an explicit arena_idea status still wins.
+  async function createIdea(args: string[], knownId?: string) {
+    const before = await campaign("frontier");
+    const previous = before.ok === false ? undefined : before.current_idea;
+    if (knownId && (before.ideas ?? []).some((row: any) => row.id === knownId)) return { result: await campaign("idea", args), closed: [] };
+    const result = await campaign("idea", args);
+    const closed: string[] = [];
+    if (result.ok !== false && result.id && previous && previous.id !== result.id && previous.status === "active") {
+      const attempts = Number(previous.attempts ?? 0);
+      const produced = previous.best?.candidate && previous.best.candidate === before.best?.candidate;
+      const [status, reason] = produced
+        ? ["succeeded", `auto: produced the best candidate so far (${briefText(previous.best)}); superseded by ${result.id}`]
+        : attempts > 0
+          ? ["abandoned", `auto: ${attempts} attempt${attempts === 1 ? "" : "s"} did not produce the best candidate${previous.best ? ` (best ${briefText(previous.best)})` : ""}; superseded by ${result.id}`]
+          : ["parked", `auto: no attempt was made before ${result.id} was declared`];
+      const update = await campaign("idea", ["--idea-id", previous.id, "--status", status, "--reason", reason]);
+      if (update.ok !== false) closed.push(`${previous.id} ${status}`);
+    }
+    return { result, closed };
+  }
+
   const inlineIdea = (params: { idea?: string; idea_id?: string }) =>
-    resolveInlineIdea(params, title => campaign("idea", ["--title", title]));
+    resolveInlineIdea(params, async title => (await createIdea(["--title", title])).result);
 
   registerTool({
     name: "arena_evaluate",
@@ -920,7 +965,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
 
   registerTool({
     name: "arena_probe", label: "Arena probe",
-    description: "Compile one proof draft or one to four drafts on the primary toolchain. Each may be a complete theorem, a `by` proof body, or a `:=` proof body; the exact benchmark statement is supplied for proof bodies. `sorry` is allowed and each incomplete draft returns its actual hole goals and stable pN ID. A draft with `sorry` holes that elaborates is fingerprinted and opens a route; filling the holes later stays on that route. A complete compiling draft is automatically promoted to a candidate. `idea` (a one-line route title) creates an idea and links the attempt to it.",
+    description: "Compile one proof draft or one to four drafts on the primary toolchain. Each may be a complete theorem, a `by` proof body, or a `:=` proof body; the exact benchmark statement is supplied for proof bodies. `sorry` is allowed and each incomplete draft returns its actual hole goals and stable pN ID. A draft with `sorry` holes that elaborates is fingerprinted and opens a route; filling the holes later stays on that route. A probe takes several drafts at once (two or three is typical). A complete compiling draft is automatically promoted to a candidate. `idea` (a one-line route title) creates an idea and links the attempt to it.",
     parameters: Type.Object({ proof: Type.Optional(Type.String()),
       drafts: Type.Optional(Type.Array(Type.String(), { minItems: 1, maxItems: 4 })),
       idea_id: Type.Optional(Type.String()), parent: Type.Optional(Type.String()),
@@ -972,7 +1017,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
 
   registerTool({
     name: "arena_idea", label: "Record or update an idea",
-    description: "Create an idea (title, hypothesis, region such as proof lines \"12-30\", expected_effect per axis), optionally naming it yourself with idea_id; or update an existing idea by idea_id: set status active, parked, succeeded or abandoned with a reason. Ideas are yours; the harness only records them.",
+    description: "Create an idea (title, hypothesis, region such as proof lines \"12-30\", expected_effect per axis), optionally naming it yourself with idea_id; or update an existing idea by idea_id: set status active, parked, succeeded or abandoned with a reason. Ideas are yours; the harness only records them. Declaring a new idea closes the one that was current from the harness's own outcomes (succeeded if it produced the best candidate so far, abandoned if it made attempts without doing so, parked if it had none) and records that reason, so a separate status call is only needed to override it. The reply is a one-line acknowledgement.",
     parameters: Type.Object({
       idea_id: Type.Optional(Type.String()), title: Type.Optional(Type.String()),
       hypothesis: Type.Optional(Type.String()), region: Type.Optional(Type.String()),
@@ -991,7 +1036,10 @@ export default function arenaExtension(pi: ExtensionAPI) {
       if (params.expected_effect) args.push("--expected-effect", JSON.stringify(params.expected_effect));
       if (params.status) args.push("--status", params.status);
       if (params.reason) args.push("--reason", params.reason);
-      return reply(await campaign("idea", args));
+      // One-line acknowledgement: the idea's text is already in the model's own call.
+      const { result, closed } = params.title ? await createIdea(args, params.idea_id) : { result: await campaign("idea", args), closed: [] as string[] };
+      if (result.ok === false) return reply(result);
+      return reply({ ok: true, id: result.id, status: result.status, ...(closed.length ? { closed } : {}) });
     },
   });
 
@@ -1003,13 +1051,16 @@ export default function arenaExtension(pi: ExtensionAPI) {
       const [checks, portfolio] = await Promise.all([campaign("state"), campaign("frontier")]);
       if (checks.ok === false) return reply(checks);
       if (portfolio.ok === false) return reply(portfolio);
-      return reply({ ok: true, best_verified: checks.best, baseline: checks.baseline,
-        leading_unverified: checks.leading_unverified, checking: checks.checking,
-        current_idea: portfolio.current_idea, recent_failures: portfolio.recent_failures,
-        routes: (portfolio.routes ?? []).filter((row: any) => row.attempts > 0 || row.original).map((row: any) => ({ route: row.route,
-          label: row.label, original: row.original, attempts: row.attempts, goal_states: row.depth, min_holes: row.min_holes,
-          stale_streak: row.stale_streak, status: row.explored ? "explored" : "opened", credited: row.credited, opened_by_skeleton: row.credited && row.skeleton,
-          best_proxy: row.best_proxy })) });
+      // Compact: only fields the model acts on; the baseline is in the packet and history is in the ledger.
+      const idea = portfolio.current_idea;
+      return reply(dropEmpty({ ok: true, best_verified: checks.best ?? "none", leading_unverified: checks.leading_unverified,
+        checking: checks.checking?.length ? checks.checking : undefined,
+        current_idea: idea ? { id: idea.id, title: idea.title, attempts: idea.attempts } : undefined,
+        recent_failures: (portfolio.recent_failures ?? []).map((row: any) => ({ ref: row.ref, error: String(row.error ?? "").slice(0, 160) })),
+        routes: (portfolio.routes ?? []).filter((row: any) => row.attempts > 0 || row.original).map((row: any) => dropEmpty({ route: row.route,
+          label: row.label, original: row.original || undefined, attempts: row.attempts, goal_states: row.depth, min_holes: row.min_holes,
+          stale_streak: row.stale_streak || undefined, status: row.explored ? "explored" : "opened", credited: row.credited || undefined,
+          best_proxy: row.best_proxy })) }));
     },
   });
 
@@ -1034,10 +1085,6 @@ export default function arenaExtension(pi: ExtensionAPI) {
       const budget = { spent_usd: Number(spent.toFixed(4)), cap_usd: limits.stopUsd,
         remaining_usd: Number(room.remainingUsd.toFixed(4)), used_pct: Math.round(100 * spent / limits.stopUsd) };
       const ideaRows: any[] = portfolio.ideas ?? [];
-      const ideas = { total: ideaRows.length,
-        ...Object.fromEntries(["active", "parked", "succeeded", "abandoned"].map(status =>
-          [status, ideaRows.filter(row => row.status === status).length])),
-        without_attempts: ideaRows.filter(row => !row.attempts).length };
       const firstReview = !finishReviewIssued;
       let reminder = false;
       if (firstReview) {
@@ -1064,16 +1111,16 @@ export default function arenaExtension(pi: ExtensionAPI) {
         refusalCredited = new Set(routeRows.filter(row => row.credited).map(row => String(row.route)));
         appendCost({ kind: "finish", phase: "refused", refusals: finishRefusals, idea_ids: [...refusalIdeaIds], route_stats: refusalRouteStats, credited_ids: [...refusalCredited],
           new_idea_probed: newIdeaProbed, since_refusal: since, remaining_fraction: Number(room.remainingFraction.toFixed(4)) });
-        return reply({ ok: true, phase: firstReview ? "review" : "refused", stop: false, refused: true,
-          best_verified: bestVerified, baseline: checks.baseline, current_idea: idea, budget, ideas,
-          routes_tried: push.tried, headroom: push.headroom, reminder: reminderText, next: push.message });
+        // `next` already carries the routes tried, the headroom and the route-credit rule; nothing is echoed twice.
+        return reply(dropEmpty({ ok: true, phase: firstReview ? "review" : "refused", stop: false, refused: true,
+          remaining_usd: budget.remaining_usd, reminder: reminderText, next: push.message }));
       }
       if (firstReview) {
-        return reply({ ok: true, phase: "review", best_verified: bestVerified,
-          baseline: checks.baseline, current_idea: idea, budget, ideas, reminder: reminderText,
-          routes_tried: (portfolio.routes ?? []).filter((row: any) => row.attempts > 0),
+        return reply(dropEmpty({ ok: true, phase: "review", best_verified: bestVerified ?? "none", reminder: reminderText,
+          remaining_usd: budget.remaining_usd, used_pct: budget.used_pct,
+          routes_tried: routesText(portfolio.routes ?? []),
           next: `${budget.used_pct}% of the $${limits.stopUsd} allowance is spent ($${budget.remaining_usd} left, within the final 10%). ` +
-            "Use this decision turn to try another route if one is worth it, then call arena_finish again to confirm stop." });
+            "Use this decision turn to try another route if one is worth it, then call arena_finish again to confirm stop." }));
       }
       finishConfirmed = true;
       appendCost({ kind: "finish", phase: "confirmed" });
@@ -1082,8 +1129,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
       appendCost({ kind: "control", continuations, plateau, no_work_turns: noWorkTurns,
         error_streak: errorStreak, progress: previousProgress, stop,
         ...(gateStopReason ? { gate_stop_reason: gateStopReason } : {}) });
-      return reply({ ok: true, phase: "confirmed", stop: true, best_verified: bestVerified,
-        baseline: checks.baseline });
+      return reply({ ok: true, phase: "confirmed", stop: true, best_verified: bestVerified });
     },
   });
 

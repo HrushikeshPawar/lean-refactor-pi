@@ -15,6 +15,8 @@ from arena.engine import ROOT
 from arena.traces import (
     ORIG_PLUGIN,
     PATCH_SHA256,
+    JournalError,
+    expand_journal,
     judge,
     plugin_problems,
     preflight_block,

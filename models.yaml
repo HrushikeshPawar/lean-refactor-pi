@@ -1,0 +1,56 @@
+# Central model configuration: the one place for per-model facts. Edit here, not in code.
+# tools/run_pi_budgeted.py loads this file (arena/models.py) and hands it to the Pi extension
+# as ARENA_MODELS_JSON. Subset of YAML only: nested maps, [a, b] lists, {k: v} maps, # comments.
+# Prices are USD per 1M tokens as OpenCode Go bills them; budget.ts refuses a session whose
+# Pi catalog price differs from `price`.
+
+provider: opencode-go          # Pi catalog provider that serves and bills every model below
+provider_timeout_ms: 120000    # a silent request is cut after this; Pi's own default is 300 s
+
+thinking:
+  default: high                # reasoning level when --thinking is not given
+  levels: [off, minimal, low, medium, high, xhigh, max]
+
+# Campaign presets: run_campaign.py --preset <name>. Explicit flags override them.
+presets:
+  v6-matrix:
+    rows: [Core.InitsUpdatesComm, "fundamental_theorem_of_variational_calculus'"]
+    models: [deepseek-v4.1-flash, gpt-6-luna, qwen3.8-flash]
+    replicates: 3
+    cap: 3.0
+    jobs: 3
+
+# Order here is the order of --model choices and of `arena_preflight` runs.
+models:
+  gpt-6-luna:                  # Responses API (max_output_tokens)
+    price: {input: 0.10, output: 0.50, cache_read: 0.01, cache_write: 0.125}
+    # Higher tier when the billed prompt (input + cache read + cache write) exceeds
+    # high_context_threshold. Pi's catalog has no tier, so only the ledger applies it.
+    high_price: {input: 0.20, output: 0.75, cache_read: 0.02, cache_write: 0.25}
+    high_context_threshold: 272000
+    context_window: 1050000
+    max_tokens: 128000         # physical output limit; the catalog may not exceed it
+    request_output_tokens: 16000   # per-request output limit the run uses (includes thinking)
+    compaction:
+      at_tokens: 200000        # compact above this; below it history is never rewritten.
+                               # Kept under the 272K tier boundary, where Luna's prices double.
+      keep_recent_tokens: 40000
+
+  qwen3.8-flash:               # Anthropic Messages API (max_tokens)
+    price: {input: 0.15, output: 0.47, cache_read: 0.016, cache_write: 0.20}
+    context_window: 1000000
+    max_tokens: 131072
+    request_output_tokens: 16000
+    compaction:
+      at_tokens: 300000        # cache read is ~9x cheaper than input; each compaction re-sends
+      keep_recent_tokens: 40000   # tens of thousands of uncached tokens, so compact later
+
+  deepseek-v4.1-flash:         # Anthropic Messages API (max_tokens)
+    # Automatic caching: cache writes are free and not reported (cache_write 0 is expected).
+    price: {input: 0.15, output: 0.60, cache_read: 0.003, cache_write: 0}
+    context_window: 1000000
+    max_tokens: 384000
+    request_output_tokens: 32000   # high thinking hit a 16K limit mid-thought in v6 runs
+    compaction:
+      at_tokens: 500000        # v6 pilot: a compaction costs ~3 uncached requests (~$0.03) while
+      keep_recent_tokens: 40000   # 400K of cached context costs ~$0.001 a request, so compact late

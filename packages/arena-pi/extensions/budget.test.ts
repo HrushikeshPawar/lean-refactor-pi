@@ -1,48 +1,58 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assessFinalPayload, boundedPayload, budgetGate, softCapGate, catalogPriceProblem, cacheAlarm, budgetLimits, cacheUtilization, finishAllowed, FINISH_ALLOWED_REMAINING_FRACTION, maxRequestOutputTokens, requestShape, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
+import "./testmodels.ts";
+import { assessFinalPayload, boundedPayload, budgetGate, softCapGate, catalogPriceProblem, cacheAlarm, budgetLimits, cacheUtilization, finishAllowed, FINISH_ALLOWED_REMAINING_FRACTION, maxRequestOutputTokens, MODELS, parseModelConfig, PROVIDER, requestShape, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
 
 const usage = { input: 1_000_000, output: 100_000, cacheRead: 0, cacheWrite: 0 };
+const LUNA = MODELS["gpt-6-luna"], DEEPSEEK = MODELS["deepseek-v4.1-flash"], QWEN = MODELS["qwen3.8-flash"];
+const cost = (price: { input: number; output: number; cacheRead: number; cacheWrite: number },
+  u: { input: number; output: number; cacheRead: number; cacheWrite: number }) =>
+  (u.input * price.input + u.output * price.output + u.cacheRead * price.cacheRead + u.cacheWrite * price.cacheWrite) / 1_000_000;
+// One request of `usage` (1M input) is above Luna's tier threshold, so it bills at the high tier.
+const usageHigh = cost(LUNA.highPrice!, usage);
+const near = (a: number, b: number) => assert.ok(Math.abs(a - b) < 1e-9, `${a} != ${b}`);
 
-test("uses Luna's low tier until one request crosses 272K prompt tokens", () => {
-  const low = { input: 264, output: 71807, cacheRead: 5780683, cacheWrite: 129347 };
-  assert.equal(usageCost({ input: 0, output: 1000, cacheRead: 200_000, cacheWrite: 0 }, "gpt-6-luna"), 0.0025);
-  assert.ok(Math.abs(usageCost({ input: 0, output: 1000, cacheRead: 273_000, cacheWrite: 0 }, "gpt-6-luna") - 0.00621) < 1e-12);
-  assert.ok(Math.abs((low.input * 0.1 + low.output * 0.5 + low.cacheRead * 0.01
-    + low.cacheWrite * 0.125) / 1_000_000 - 0.109905105) < 1e-10);
-  const entries = [200_000, 273_000].map(cacheRead => ({ type: "message",
-    message: { role: "assistant", provider: "opencode-go", model: "gpt-6-luna",
-      usage: { input: 0, output: 1000, cacheRead, cacheWrite: 0, totalTokens: cacheRead + 1000 } } }));
-  assert.ok(Math.abs(sessionSpend(entries as never, "gpt-6-luna") - 0.00871) < 1e-12);
+test("uses Luna's low tier until one request crosses its high-tier threshold", () => {
+  const threshold = LUNA.highContextThreshold!;
+  const below = { input: 0, output: 1000, cacheRead: threshold - 72_000, cacheWrite: 0 };
+  const above = { ...below, cacheRead: threshold + 1000 };
+  near(usageCost(below, "gpt-6-luna"), cost(LUNA.price, below));
+  near(usageCost(above, "gpt-6-luna"), cost(LUNA.highPrice!, above));
+  const atEdge = { ...below, cacheRead: threshold };  // the tier applies only above the threshold
+  near(usageCost(atEdge, "gpt-6-luna"), cost(LUNA.price, atEdge));
+  const entries = [below, above].map(u => ({ type: "message",
+    message: { role: "assistant", provider: PROVIDER, model: "gpt-6-luna",
+      usage: { ...u, totalTokens: u.cacheRead + 1000 } } }));
+  near(sessionSpend(entries as never, "gpt-6-luna"), cost(LUNA.price, below) + cost(LUNA.highPrice!, above));
 });
 
 test("keeps Pi's embedded estimate separate from conservative ledger pricing", () => {
-  const entries = [{ type: "message", message: { role: "assistant", provider: "opencode-go",
+  const entries = [{ type: "message", message: { role: "assistant", provider: PROVIDER,
     model: "gpt-6-luna", usage: { ...usage, totalTokens: 1_100_000,
       cost: { total: 0.15 } } } }];
-  assert.equal(sessionSpend(entries as never, "gpt-6-luna"), 0.275);
+  near(sessionSpend(entries as never, "gpt-6-luna"), usageHigh);
   assert.deepEqual(sessionEmbeddedCost(entries as never),
     { usd: 0.15, priced_entries: 1, missing_entries: 0 });
   assert.deepEqual(usageCostParts(usage, "gpt-6-luna"),
-    { input: 0.2, output: 0.075, cacheRead: 0, cacheWrite: 0 });
+    { input: LUNA.highPrice!.input, output: 100_000 * LUNA.highPrice!.output / 1_000_000, cacheRead: 0, cacheWrite: 0 });
 });
 
 test("counts all persisted paid usage, including abandoned branches and compaction", () => {
   const entries = [
-    { type: "message", message: { role: "assistant", provider: "opencode-go",
+    { type: "message", message: { role: "assistant", provider: PROVIDER,
       model: "gpt-6-luna", usage } },
-    { type: "usage", provider: "opencode-go", model: "gpt-6-luna", usage },
+    { type: "usage", provider: PROVIDER, model: "gpt-6-luna", usage },
     { type: "compaction", usage },
     { type: "message", message: { role: "toolResult", usage } },
   ];
-  assert.equal(sessionSpend(entries as never, "gpt-6-luna"), 1.1);
+  near(sessionSpend(entries as never, "gpt-6-luna"), 4 * usageHigh);
 });
 
 test("reports measured cache reuse, including a recent window", () => {
   const entries = [
-    { type: "message", message: { role: "assistant", provider: "opencode-go", model: "gpt-6-luna",
+    { type: "message", message: { role: "assistant", provider: PROVIDER, model: "gpt-6-luna",
       usage: { input: 0, output: 1, cacheRead: 0, cacheWrite: 100, totalTokens: 101 } } },
-    { type: "message", message: { role: "assistant", provider: "opencode-go", model: "gpt-6-luna",
+    { type: "message", message: { role: "assistant", provider: PROVIDER, model: "gpt-6-luna",
       usage: { input: 0, output: 1, cacheRead: 990, cacheWrite: 10, totalTokens: 1001 } } },
   ];
   const result = cacheUtilization(entries as never, "gpt-6-luna");
@@ -64,15 +74,15 @@ test("undispatched zero-token errors do not poison exact session resume", () => 
     { type: "message", message: { role: "assistant", provider: "arena-guard",
       model: "gpt-6-luna", stopReason: "error", usage: { input: 0, output: 0,
         cacheRead: 0, cacheWrite: 0, totalTokens: 0 } } },
-    { type: "message", message: { role: "assistant", provider: "opencode-go",
+    { type: "message", message: { role: "assistant", provider: PROVIDER,
       model: "gpt-6-luna", stopReason: "stop", usage } },
   ];
-  assert.equal(sessionSpend(entries as never, "gpt-6-luna"), 0.275);
+  near(sessionSpend(entries as never, "gpt-6-luna"), usageHigh);
 });
 
 test("a bounded final payload permits a ten-cent experiment", () => {
   const { payload, reserve } = boundedPayload({ input: "reference proof", max_output_tokens: 128_000 }, "gpt-6-luna");
-  assert.equal(payload.max_output_tokens, 16_000);
+  assert.equal(payload.max_output_tokens, LUNA.requestOutputTokens);
   assert.ok(reserve < 0.1);
   assert.throws(() => boundedPayload({ input: "x" }, "gpt-6-luna"));
   assert.throws(() => budgetLimits({ ARENA_HARD_CAP_USD: "0.09" }));
@@ -80,8 +90,8 @@ test("a bounded final payload permits a ten-cent experiment", () => {
 
 test("caps Qwen's Anthropic Messages payload before dispatch", () => {
   const { payload, reserve } = boundedPayload({ messages: [{ role: "user", content: "proof" }],
-    max_tokens: 131_072 }, "qwen3.8-flash");
-  assert.equal(payload.max_tokens, 16_000);
+    max_tokens: QWEN.maxTokens }, "qwen3.8-flash");
+  assert.equal(payload.max_tokens, QWEN.requestOutputTokens);
   assert.ok(reserve < 0.1);
 });
 
@@ -89,14 +99,14 @@ test("fixes the Anthropic output and thinking shape independently of remaining a
   // Normalize Pi's initial provider shape once; a smaller balance must not create a new cache key.
   const high = boundedPayload({ messages: [], max_tokens: 32_384,
     thinking: { type: "enabled", budget_tokens: 16_384 } }, "qwen3.8-flash").payload as any;
-  assert.equal(high.max_tokens, 16_000);
-  assert.equal(high.thinking.budget_tokens, 14_976);
+  assert.equal(high.max_tokens, QWEN.requestOutputTokens);
+  assert.equal(high.thinking.budget_tokens, QWEN.requestOutputTokens - 1024);
   const nearCap = boundedPayload({ messages: [], max_tokens: 32_384,
     thinking: { type: "enabled", budget_tokens: 16_384 } }, "qwen3.8-flash").payload as any;
   assert.deepEqual(nearCap, high);
   const low = boundedPayload({ messages: [], max_tokens: 24_192,
     thinking: { type: "enabled", budget_tokens: 8_192 } }, "qwen3.8-flash").payload as any;
-  assert.equal(low.max_tokens, 16_000);
+  assert.equal(low.max_tokens, QWEN.requestOutputTokens);
   assert.equal(low.thinking.budget_tokens, 8_192);
 });
 
@@ -155,7 +165,7 @@ test("gate includes outstanding reservations and never reshapes a request to fit
   const last = assessFinalPayload(payload, "gpt-6-luna", { spent: 0.099, unresolved: 0 }, limits);
   assert.deepEqual(first.payload, last.payload);
   assert.equal(last.allowed, false);
-  assert.equal(first.payload.max_output_tokens, 16_000);
+  assert.equal(first.payload.max_output_tokens, LUNA.requestOutputTokens);
 });
 
 test("cache alarm fires only after warm-up, when a request writes more than it reads", () => {
@@ -167,36 +177,40 @@ test("cache alarm fires only after warm-up, when a request writes more than it r
 });
 
 test("refuses a ledger price that differs from Pi's catalog", () => {
-  assert.equal(catalogPriceProblem("deepseek-v4.1-flash", { input: 0.15, output: 0.6, cacheRead: 0.003, cacheWrite: 0 }), undefined);
-  const problem = catalogPriceProblem("deepseek-v4.1-flash", { input: 0.30, output: 1.20, cacheRead: 0.006, cacheWrite: 0 });
-  assert.match(problem ?? "", /input 0.3 != 0.15/);
+  assert.equal(catalogPriceProblem("deepseek-v4.1-flash", { ...DEEPSEEK.price }), undefined);
+  const problem = catalogPriceProblem("deepseek-v4.1-flash", { ...DEEPSEEK.price, input: DEEPSEEK.price.input * 2 });
+  assert.match(problem ?? "", new RegExp(`input ${DEEPSEEK.price.input * 2} != ${DEEPSEEK.price.input}`));
   assert.match(catalogPriceProblem("qwen3.8-flash", undefined) ?? "", /qwen3.8-flash/);
 });
 
 test("cache hit rate is cache_read over all prompt tokens and savings compare with uncached billing", () => {
-  // DeepSeek: cache write is always 0, so the old read/(read+write) would read 100%.
-  const entries = [{ type: "message", message: { role: "assistant", provider: "opencode-go", model: "deepseek-v4.1-flash",
+  // DeepSeek reports no cache writes, so a read/(read+write) rate would read 100%.
+  const entries = [{ type: "message", message: { role: "assistant", provider: PROVIDER, model: "deepseek-v4.1-flash",
     usage: { input: 2100, output: 10, cacheRead: 7900, cacheWrite: 0, totalTokens: 10010 } } }];
   const { all } = cacheUtilization(entries as never, "deepseek-v4.1-flash");
   assert.equal(all.reuse_pct, 79);
   assert.equal(all.input_tokens, 2100);
-  // actual: 2100*0.15 + 7900*0.003 = 338.7 ; uncached: 10000*0.15 = 1500
-  assert.ok(Math.abs(all.savings_pct! - 100 * (1 - 338.7 / 1500)) < 1e-9);
+  const p = DEEPSEEK.price;  // actual: 2100 input + 7900 cache read; uncached: 10000 input
+  assert.ok(Math.abs(all.savings_pct! - 100 * (1 - (2100 * p.input + 7900 * p.cacheRead) / (10_000 * p.input))) < 1e-9);
   assert.equal(cacheUtilization([] as never, "gpt-6-luna").all.reuse_pct, null);
 });
 
-test("DeepSeek gets a 32K output limit from the start; Luna and Qwen stay at 16K", () => {
-  assert.equal(maxRequestOutputTokens("deepseek-v4.1-flash"), 32_000);
-  assert.equal(maxRequestOutputTokens("gpt-6-luna"), 16_000);
-  assert.equal(maxRequestOutputTokens("qwen3.8-flash"), 16_000);
-  const ds = boundedPayload({ messages: [], max_tokens: 384_000 }, "deepseek-v4.1-flash");
-  assert.equal(ds.payload.max_tokens, 32_000);
+test("each model gets its own output limit from models.yaml", () => {
+  for (const [id, spec] of Object.entries(MODELS)) assert.equal(maxRequestOutputTokens(id), spec.requestOutputTokens);
+  const ds = boundedPayload({ messages: [], max_tokens: DEEPSEEK.maxTokens }, "deepseek-v4.1-flash");
+  assert.equal(ds.payload.max_tokens, DEEPSEEK.requestOutputTokens);
   assert.ok(ds.reserve < 0.1);
-  const again = boundedPayload({ messages: [], max_tokens: 384_000 }, "deepseek-v4.1-flash");
+  const again = boundedPayload({ messages: [], max_tokens: DEEPSEEK.maxTokens }, "deepseek-v4.1-flash");
   assert.equal(requestShape(again.payload), requestShape(ds.payload));
-  const thinking = boundedPayload({ messages: [], max_tokens: 64_000,
+  const thinking = boundedPayload({ messages: [], max_tokens: 2 * DEEPSEEK.requestOutputTokens,
     thinking: { type: "enabled", budget_tokens: 40_000 } }, "deepseek-v4.1-flash").payload as any;
-  assert.equal(thinking.thinking.budget_tokens, 32_000 - 1024);
+  assert.equal(thinking.thinking.budget_tokens, DEEPSEEK.requestOutputTokens - 1024);
+});
+
+test("every model compacts below its context window, DeepSeek later than Luna", () => {
+  for (const spec of Object.values(MODELS)) assert.ok(spec.compaction.atTokens < spec.contextWindow);
+  assert.ok(LUNA.compaction.atTokens <= LUNA.highContextThreshold!);
+  assert.ok(DEEPSEEK.compaction.atTokens > LUNA.compaction.atTokens);
 });
 
 test("the model may finish only with at most 10% of the soft cap left", () => {
@@ -218,4 +232,14 @@ test("the context bound uses the provider's prior token count, and an overflow r
   assert.ok(boundedPayload(grown, "gpt-6-luna", { bytes, inputTokens: 180_000 }).reserve < 0.1);
   // A payload smaller than the prior one (after compaction) falls back to its own bytes.
   assert.throws(() => boundedPayload(big, "gpt-6-luna", { bytes: bytes + 10, inputTokens: 180_000 }), /context window/);
+});
+
+test("a missing or invalid model config fails with a clear error", () => {
+  assert.throws(() => parseModelConfig(undefined), /ARENA_MODELS_JSON is not set.*models\.yaml/);
+  assert.throws(() => parseModelConfig("{"), /not valid JSON/);
+  const good = JSON.parse(process.env.ARENA_MODELS_JSON!);
+  parseModelConfig(JSON.stringify(good));
+  const broken = structuredClone(good);
+  broken.models["gpt-6-luna"].contextWindow = 0;
+  assert.throws(() => parseModelConfig(JSON.stringify(broken)), /gpt-6-luna\.contextWindow must be a positive number/);
 });

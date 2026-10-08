@@ -18,9 +18,9 @@ import time
 from datetime import datetime
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from arena import lean_session
+from arena import lean_session, models as model_config
 from arena.campaign import autocheck, init, packet, run_dir, submission, write_state
-from arena.summary import cost_report_from_ledger, render_text, write_summary
+from arena.summary import configured_cap, cost_report_from_ledger, render_text, write_summary
 from arena.traces import langfuse_environment, langfuse_extension, plugin_problems
 from tools.arena_skill import SKILL_DIR, skill_hash, skill_prompt
 
@@ -29,14 +29,16 @@ SYSTEM_PROMPT = ("You are optimizing one Lean 4 proof for the Lean Refactor Aren
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MODELS = ("gpt-6-luna", "qwen3.8-flash", "deepseek-v4.1-flash")
-MODEL_WINDOWS = {"gpt-6-luna": 1_050_000, "qwen3.8-flash": 1_000_000, "deepseek-v4.1-flash": 1_000_000}
+# Every per-model fact (prices, windows, output limits, compaction, timeout, thinking levels) lives in models.yaml.
+CONFIG = model_config.load()
+MODELS = model_config.models()
+MODEL_WINDOWS = {name: row["context_window"] for name, row in CONFIG["models"].items()}
 # After Pi exits, pending background full checks get this long before the submission is chosen.
 DRAIN_S = 300
 # How long Pi gets to finish an in-flight evaluation and write cost.json after a stop request.
-PROVIDER_TIMEOUT_MS = 120_000
+PROVIDER_TIMEOUT_MS = CONFIG["provider_timeout_ms"]
 STOP_GRACE_S = 45
-THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
+THINKING_LEVELS = tuple(CONFIG["thinking"]["levels"])
 _tool_started: dict[str, tuple[float, dict]] = {}
 _request_count = 0
 _tool_result_count = 0
@@ -196,12 +198,13 @@ def run() -> int:
                         help="Spend cap in USD, 0.10-3.00. Only $3 is a hard cap (worst-case request estimates are "
                              "gated against it); a value below 3 is a soft cap on actual settled spend, so the last "
                              "request may overshoot it")
-    parser.add_argument("--thinking", choices=THINKING_LEVELS, default="high",
+    parser.add_argument("--thinking", choices=THINKING_LEVELS, default=CONFIG["thinking"]["default"],
                         help="Reasoning level, recorded in run-config.json (default: high)")
-    parser.add_argument("--compact-at-tokens", type=int, default=200_000,
-                        help="Context size above which Pi compacts older turns; below it history is never rewritten")
-    parser.add_argument("--compact-keep-tokens", type=int, default=40_000,
-                        help="Recent tokens kept verbatim when compaction runs")
+    parser.add_argument("--compact-at-tokens", type=int,
+                        help="Context size above which Pi compacts older turns; below it history is never rewritten "
+                             "(default: the model's value in models.yaml)")
+    parser.add_argument("--compact-keep-tokens", type=int,
+                        help="Recent tokens kept verbatim when compaction runs (default: the model's value in models.yaml)")
     parser.add_argument("--merge-worker", action="store_true",
                         help="Run the deterministic merge worker beside the model (off by default: it competes for Lean CPU)")
     parser.add_argument("--no-lean-session", action="store_true",
@@ -218,6 +221,11 @@ def run() -> int:
     parser.add_argument("--dry-run", action="store_true", help="Validate setup without launching Pi")
     args = parser.parse_args()
 
+    compaction = CONFIG["models"][args.model]["compaction"]
+    if args.compact_at_tokens is None:
+        args.compact_at_tokens = compaction["at_tokens"]
+    if args.compact_keep_tokens is None:
+        args.compact_keep_tokens = compaction["keep_recent_tokens"]
     if not math.isfinite(args.hard_cap_usd) or not 0.1 <= args.hard_cap_usd <= 3:
         parser.error("--hard-cap-usd must be between 0.10 and 3.00")
 
@@ -235,7 +243,7 @@ def run() -> int:
         start_lean_session(directory, os.getpid())
     if args.resume_run:
         config = json.loads((directory / "run-config.json").read_text())
-        if (config["theorem"], config["model"], config["hard_cap_usd"]) != (args.theorem, args.model, args.hard_cap_usd):
+        if (config["theorem"], config["model"], configured_cap(config)) != (args.theorem, args.model, args.hard_cap_usd):
             parser.error("resume theorem, model, or cap differs from the original run")
         if config.get("thinking") not in (None, args.thinking) or (
                 config.get("skill") and config["skill"]["sha256"] != (None if args.no_skill else skill_hash())):
@@ -281,7 +289,7 @@ def run() -> int:
     if not args.resume_run:
         init(args.theorem, args.run_id, extra)
         (directory / "run-config.json").write_text(json.dumps({"theorem": args.theorem,
-            "model": args.model, "hard_cap_usd": args.hard_cap_usd,
+            "model": args.model, "soft_cap_usd": args.hard_cap_usd,
             "packet_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
             "thinking": args.thinking, "merge_worker": args.merge_worker, "compact_at_tokens": args.compact_at_tokens,
             "compact_keep_tokens": args.compact_keep_tokens,
@@ -295,6 +303,7 @@ def run() -> int:
     env["ARENA_AUTOCONTINUE"] = "0" if args.preflight else "1"
     env["ARENA_RUN_ID"] = args.run_id
     env["ARENA_MODEL"] = args.model
+    env["ARENA_MODELS_JSON"] = model_config.pi_json(CONFIG)
     env["ARENA_HARD_CAP_USD"] = str(args.hard_cap_usd)
     env["ARENA_SKILL_DIR"] = "" if args.no_skill else str(SKILL_DIR)
     if args.no_mcp:

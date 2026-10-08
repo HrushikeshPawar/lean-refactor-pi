@@ -27,15 +27,13 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from tools.run_pi_budgeted import MODELS, THINKING_LEVELS  # noqa: E402
+from tools.run_pi_budgeted import CONFIG, MODELS, THINKING_LEVELS  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNS = ROOT / "runs" / "pi-budget"
 RECEIPT_MAX_AGE_HOURS = 12.0
-# Named campaign configurations; explicit --rows/--models/--replicates/--cap override a preset's values.
-PRESETS = {"v6-matrix": {"rows": ["Core.InitsUpdatesComm", "fundamental_theorem_of_variational_calculus'"],
-                         "models": ["deepseek-v4.1-flash", "gpt-6-luna", "qwen3.8-flash"],
-                         "replicates": 3, "cap": 3.0, "jobs": 3}}
+# Named campaign configurations (models.yaml); explicit --rows/--models/--replicates/--cap override a preset's values.
+PRESETS = CONFIG.get("presets", {})
 HELPER_DECL = re.compile(r"(?m)^\s*(?:private\s+|protected\s+)?(?:theorem|lemma)\s+\S+")
 
 
@@ -150,6 +148,7 @@ def run_row(spec: dict, summary: dict | None, exit_code: int, packet_sha256: str
             "ideas_without_attempts": len(summary.get("ideas_without_attempts") or []),
             "routes": [{key: row[key] for key in ("route", "label", "attempts", "best_proxy")}
                        for row in summary.get("routes") or [] if row.get("attempts")],
+            "route_progress": summary.get("route_progress"),
             "tool_errors": (summary.get("tools") or {}).get("error_total"),
             "tool_errors_by_tool": (summary.get("tools") or {}).get("errors") or {},
             "cache_reuse_pct": (summary.get("cache") or {}).get("reuse_pct"),
@@ -182,6 +181,9 @@ def aggregate(runs: list[dict], expected: dict[str, str]) -> dict:
             "best_uses_helper_runs": sum(bool((item["helpers"] or {}).get("best_uses_helper")) for item in items),
             "ideas_never_attempted": sum(item["ideas_without_attempts"] for item in items),
             "routes_tried": _stats([len(item.get("routes") or []) for item in items]),
+            "credited_routes": _stats([(item.get("route_progress") or {}).get("credited_routes") for item in items]),
+            "explored_routes": _stats([(item.get("route_progress") or {}).get("explored_routes") for item in items]),
+            "new_state_share": _stats([(item.get("route_progress") or {}).get("new_state_share") for item in items]),
             "single_route_runs": sum(len(item.get("routes") or []) <= 1 for item in items),
             "tool_errors": sum(item["tool_errors"] or 0 for item in items),
             "cache_reuse_pct": _stats([item["cache_reuse_pct"] for item in items]),
@@ -206,6 +208,8 @@ def render(report: dict) -> str:
                   f"  best-verified proxy min/median/max: {span(g['best_proxy'])}",
                   f"  helper discovery: {g['helper_runs']} runs declared helpers, {g['best_uses_helper_runs']} in the best candidate",
                   f"  routes tried per run min/median/max: {span(g['routes_tried'])}; runs with a single route: {g['single_route_runs']}",
+                  f"  route depth credited/explored min/median/max: {span(g['credited_routes'])} / {span(g['explored_routes'])}; "
+                  f"new-goal-state share: {span(g['new_state_share'], '{:.2f}')}",
                   f"  ideas never attempted: {g['ideas_never_attempted']}; tool errors: {g['tool_errors']}",
                   f"  cache reuse %: {span(g['cache_reuse_pct'])}; bookkeeping+rejected %: {span(g['bookkeeping_and_rejected_pct'])}",
                   f"  all-call cost per problem min/median/max: {span(g['all_call_cost_usd'], '${:.4f}')} "
@@ -237,7 +241,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--replicates", type=int)
     parser.add_argument("--cap", type=float, help="Spend cap per run in USD (0.10-3.00); below 3 it is a soft cap on actual spend (the last request may overshoot), only 3 is a hard cap")
     parser.add_argument("--jobs", type=int, help="Runs in flight at once (default 1); runs are API-bound, and each Lean daemon holds back workers when memory runs low")
-    parser.add_argument("--thinking", default="high", choices=THINKING_LEVELS)
+    parser.add_argument("--thinking", default=CONFIG["thinking"]["default"], choices=THINKING_LEVELS)
     parser.add_argument("--skip-preflight", action="store_true", help="Explicitly skip the Langfuse preflight gate")
     parser.add_argument("--dry-run", action="store_true")
     args, passthrough = parser.parse_known_args(argv)

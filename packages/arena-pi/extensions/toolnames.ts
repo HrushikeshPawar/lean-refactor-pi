@@ -78,3 +78,11 @@ export function normalizeToolArguments<T>(params: T, schema: { properties?: Reco
   }
   return cleaned as T;
 }
+
+export const MISSING_ARGUMENTS_ERROR = "the tool call arrived without arguments; resend it with its arguments";
+
+/** Pi calls this before schema validation; a dropped (null) argument object gets one clear error instead of a validation dump. */
+export function requireToolArguments(args: unknown): unknown {
+  if (args === null || args === undefined) throw new Error(MISSING_ARGUMENTS_ERROR);
+  return args;
+}

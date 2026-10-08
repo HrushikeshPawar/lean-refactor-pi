@@ -336,7 +336,8 @@ class ToolArgumentUxTests(unittest.TestCase):
                    if message.get("role") == "toolResult" and message.get("toolName") == "arena_skill_read"]
         self.assertEqual(len(results), 1)
         self.assertTrue(results[0]["isError"])
-        self.assertIn("object", message_text(results[0]).lower())
+        self.assertIn("without arguments", message_text(results[0]).lower())
+        self.assertNotIn("validation", message_text(results[0]).lower())
         self.assertNotIn("No Arena skill is loaded", message_text(results[0]))
 
     def test_misnamed_tools_get_the_nearest_registered_name_in_the_next_provider_context(self):
@@ -615,8 +616,9 @@ class ErrorLoopAndContinuationTests(unittest.TestCase):
                      "induction versus equational", "different key lemma family", "tokens saved", "heartbeats saved"):
             self.assertIn(text, first["next"])
         self.assertIn("without probing any new idea", second["next"])
-        self.assertIn("i1", {row["id"] for row in first["routes_tried"]})
-        self.assertIn("tokens_saved_pct", first["headroom"])
+        # The refusal is compact: routes and headroom are in the text, nothing is echoed as JSON as well.
+        self.assertEqual(set(first), {"ok", "phase", "stop", "refused", "remaining_usd", "next"})
+        self.assertIn("Routes tried:", first["next"])
         phases = [row.get("phase") for row in run.jsonl("cost-ledger.jsonl") if row.get("kind") == "finish"]
         self.assertEqual((phases.count("refused"), phases.count("confirmed")), (2, 0))
         # The refusing model still terminates: no new work for two turns ends the run.
@@ -637,10 +639,9 @@ class ErrorLoopAndContinuationTests(unittest.TestCase):
         self.assertNotIn('"hypothesis"', state_text)
         review = tool_texts(run.requests[2], "arena_finish")[0]
         self.assertIn('"phase":"review"', review)
-        self.assertIn('"reminder"', review)
         facts = json.loads(review.splitlines()[0])
-        self.assertEqual(set(facts["budget"]), {"spent_usd", "cap_usd", "remaining_usd", "used_pct"})
-        self.assertIn("without_attempts", facts["ideas"])
+        self.assertTrue({"remaining_usd", "used_pct", "best_verified", "routes_tried"} <= set(facts))
+        self.assertNotIn("baseline", facts)
         self.assertIn("% of the $", facts["next"])
         self.assertIn("final 10%", facts["next"])
         self.assertNotIn("refused", facts)
@@ -696,9 +697,27 @@ class ErrorLoopAndContinuationTests(unittest.TestCase):
         review = next(json.loads(row["text"]) for row in run.jsonl("trace-journal.jsonl")
                       if row.get("kind") == "tool_result" and row.get("name") == "arena_finish"
                       and '"phase":"review"' in row.get("text", ""))
-        self.assertEqual(review["reminder"], None)
-        self.assertEqual(review["current_idea"]["attempts"], 1)
-        self.assertEqual(review["current_idea"]["status"], "active")
+        self.assertNotIn("reminder", review)
+        self.assertEqual([row for row in run.jsonl("ledger.jsonl") if row.get("kind") == "idea_update"], [])
+
+    def test_declaring_a_new_idea_closes_the_previous_one_from_known_outcomes(self):
+        from arena.campaign import problem
+        row = problem("Core.InitsUpdatesComm")
+        run = self.fake([
+            cheap_tool("arena_idea", {"title": "First route"}),
+            cheap_tool("arena_probe", {"proof": row["statement"] + " := by\n  sorry"}),
+            cheap_tool("arena_idea", {"title": "Second route"}),
+            cheap_tool("arena_idea", {"title": "Third route"}),
+        ])
+        replies = [json.loads(item["text"].splitlines()[0]) for item in run.jsonl("trace-journal.jsonl")
+                   if item.get("kind") == "tool_result" and item.get("name") == "arena_idea"]
+        self.assertEqual([reply["id"] for reply in replies], ["i1", "i2", "i3"])
+        self.assertNotIn("hypothesis", replies[0])
+        self.assertEqual(replies[1]["closed"], ["i1 abandoned"])  # one attempt, no best candidate
+        self.assertEqual(replies[2]["closed"], ["i2 parked"])  # nothing attempted
+        updates = {item["id"]: item for item in run.jsonl("ledger.jsonl") if item.get("kind") == "idea_update"}
+        self.assertIn("superseded by i2", updates["i1"]["reason"])
+        self.assertEqual(updates["i2"]["status"], "parked")
 
     def test_batch_probe_turns_count_as_proof_attempts(self):
         from arena.campaign import problem
