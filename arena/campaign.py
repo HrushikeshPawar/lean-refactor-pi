@@ -939,6 +939,18 @@ def resolve_probe_ref(history: list[dict], reference: str) -> str:
     raise ValueError(f"Unknown probe {reference}; probes are p1-p{len(_probe_numbers(history))}")
 
 
+def resolve_parent_ref(history: list[dict], reference: str) -> str:
+    """A parent given as a candidate (#N) or as a probe (pN); a probe stands for the candidate it was built on."""
+    if re.fullmatch(r"\s*[pP][1-9][0-9]*\s*", reference):
+        proof_id = resolve_probe_ref(history, reference)
+        parent = next((item.get("parent") for item in reversed(history)
+                       if item.get("kind") == "probe" and item["proof_id"] == proof_id), None)
+        if parent:
+            return parent
+        raise ValueError(f"Probe {reference.strip()} has no recorded parent candidate")
+    return resolve_candidate_ref(history, reference)
+
+
 IDEA_STATUSES = ("active", "parked", "succeeded", "abandoned")
 
 
@@ -1370,7 +1382,7 @@ def probe(name: str, run_id: str, proof: str, idea_id: str | None = None, parent
     parent_id = None
     if parent:
         try:
-            parent_id = resolve_candidate_ref(history, parent)
+            parent_id = resolve_parent_ref(history, parent)
         except ValueError as error:
             notes.append(f"parent {parent} ignored: {error}")
     parent_id = parent_id or _current(history)
@@ -1427,7 +1439,7 @@ def probe_batch(name: str, run_id: str, drafts: list[str], idea_id: str | None =
     if not isinstance(drafts, list) or not 1 <= len(drafts) <= 4:
         raise ValueError("Pass between one and four drafts")
     history = events(run_dir(run_id))
-    fixed_parent = resolve_candidate_ref(history, parent) if parent else _current(history)
+    fixed_parent = resolve_parent_ref(history, parent) if parent else _current(history)
     outcomes = []
     token = _PRECOMPILED.set(_compile_probes(name, run_dir(run_id), drafts) if len(drafts) > 1 else {})
     try:

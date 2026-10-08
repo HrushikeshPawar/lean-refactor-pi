@@ -311,6 +311,15 @@ class TruncationEquivalenceTests(unittest.TestCase):
 class ProtocolLogicTests(unittest.TestCase):
     """Behaviour that needs no Lean: lineage defaults, advisory, idea lifecycle."""
 
+    def test_probe_label_as_parent_resolves_to_the_candidate_it_was_built_on(self):
+        first, second = "a" * 64, "b" * 64
+        history = [{"kind": "candidate", "candidate_id": first}, {"kind": "candidate", "candidate_id": second},
+                   {"kind": "probe", "proof_id": "c" * 64, "parent": second, "result": {}}]
+        self.assertEqual(campaign.resolve_parent_ref(history, "p1"), second)
+        self.assertEqual(campaign.resolve_parent_ref(history, "#1"), first)
+        with self.assertRaisesRegex(ValueError, "Unknown probe"):
+            campaign.resolve_parent_ref(history, "p2")
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
