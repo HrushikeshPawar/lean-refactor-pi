@@ -226,8 +226,14 @@ def handler_for(runs: Runs | str, langfuse: Langfuse | None = None):
                     self.send((ASSETS / filename).read_bytes(), content_type)
                 else:
                     self.send_error(404)
+            except (BrokenPipeError, ConnectionResetError):
+                # The browser closed the connection (refresh, tab closed); nothing is left to answer.
+                return
             except (OSError, ValueError, KeyError) as error:
-                self.send_error(500, str(error))
+                try:
+                    self.send_error(500, str(error))
+                except (BrokenPipeError, ConnectionResetError):
+                    return
 
     return Handler
 
