@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Callable
 
 from arena.routes import progress as route_progress, route_table
-from arena.summary import HARD_CAP_USD, _result_ok, _turns, build_summary, hit_rate_pct, reconcile_spend, session_spend
+from arena.summary import HARD_CAP_USD, _result_ok, _turns, build_summary, hit_rate_pct, reconcile_spend, session_spend, trace_rows
 
 BASELINE_PROXY = round(100 / 3, 2)
 STALL_SECONDS = 15 * 60
@@ -61,6 +61,17 @@ def read_jsonl(path: Path) -> list[dict]:
     for old in jsonl_keys[: max(0, len(jsonl_keys) - 23)]:  # keep memory bounded: oldest files go first
         _CACHE.pop(old, None)
     _CACHE.pop(key, None)
+    _CACHE[key] = (stamp, rows)
+    return rows
+
+
+def _trace(path: Path) -> list[dict]:
+    """The tool events of a trace journal, re-read only when it changes; payloads are never held."""
+    key, stamp = ("trace", str(path)), _stamp(path)
+    hit = _CACHE.get(key)
+    if hit and hit[0] == stamp:
+        return hit[1]
+    rows = [row for row in trace_rows(path) if row.get("kind") in ("tool_call", "tool_result")]
     _CACHE[key] = (stamp, rows)
     return rows
 
@@ -260,7 +271,7 @@ def spend_series(directory: Path, start: float | None, soft_cap: float | None) -
 def tool_timeline(directory: Path, start: float | None) -> list[dict]:
     """Each tool call with start/end from the trace journal (its rows carry timestamps)."""
     calls: dict[str, dict] = {}
-    for row in read_jsonl(directory / "trace-journal.jsonl"):
+    for row in _trace(directory / "trace-journal.jsonl"):
         kind = row.get("kind")
         key = str(row.get("tool_call_id"))
         if kind == "tool_call":

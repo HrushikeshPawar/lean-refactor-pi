@@ -7,6 +7,7 @@ events.jsonl, run-config.json, cost.json), so a run that was killed can still be
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -19,6 +20,30 @@ COMPILE_TOOLS = {"arena_evaluate", "arena_probe", "arena_profile"}
 BOOKKEEPING_TOOLS = {"arena_idea", "arena_frontier", "arena_state", "arena_finish"}
 LOCAL_EDIT_MAX_LINES = 2
 WARMUP_REQUESTS = 2
+
+
+# Each request logs its full payload twice (`post_hook` and the `wire` body): 99% of a trace journal, which reaches
+# hundreds of MB. Readers that need only event headers cut a line there instead of parsing and holding it.
+_HEAVY_FIELD = re.compile(r',"(?:post_hook|body)":')
+
+
+def trace_rows(path: Path) -> list[dict]:
+    """trace-journal.jsonl without request payloads and wire bodies; every other event is whole."""
+    rows = []
+    try:
+        handle = path.open(errors="replace")  # streamed: the whole file as one str is 4 bytes a character
+    except OSError:
+        return rows
+    with handle:
+        for line in handle:
+            cut = _HEAVY_FIELD.search(line, 0, 600)
+            try:
+                row = json.loads(line[:cut.start()] + "}" if cut else line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(row, dict):
+                rows.append(row)
+    return rows
 
 
 def _jsonl(path: Path) -> list[dict]:
@@ -267,7 +292,7 @@ def build_summary(directory: Path) -> dict:
     ledger = _jsonl(directory / "ledger.jsonl")
     events = _jsonl(directory / "events.jsonl")
     cost_events = _jsonl(directory / "cost-ledger.jsonl")
-    trace = _jsonl(directory / "trace-journal.jsonl")
+    trace = trace_rows(directory / "trace-journal.jsonl")
     config = _read_json(directory / "run-config.json")
     report = _read_json(directory / "cost.json") or cost_report_from_ledger(directory)
     submission_result = _json(directory / "submission.json")
