@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { axisHeadroom, continuationPush, finishPush, leanPathViolation, trimProfile, planEvaluate, planProbe, resolveInlineIdea } from "./rules.ts";
+import { axisHeadroom, continuationPush, finishPush, routesText, leanPathViolation, trimProfile, planEvaluate, planProbe, resolveInlineIdea } from "./rules.ts";
 
 test("a proof wins over candidate or probe, which becomes the default parent", () => {
   assert.deepEqual(planEvaluate({ proof: "theorem t", candidate: "#2" }),
@@ -100,4 +100,31 @@ test("the model-facing profile keeps the top twelve entries and lines plus total
   assert.ok(trimmed.trimmed_for_model);
   const small = { ok: true, entries: entries.slice(0, 3), line_profile: [] };
   assert.deepEqual(trimProfile(small), { ...small, omitted_entries: 0 });
+});
+
+const routes = [
+  { route: "r1", label: "induction: InitStatesSomeMonotone", original: true, attempts: 4, best_proxy: 69.1, best_candidate: "#7" },
+  { route: "r2", label: "no induction: updatedStatesComm", attempts: 0, best_proxy: null },
+];
+
+test("routes come from the harness fingerprint, not from idea titles", () => {
+  assert.equal(routesText(routes), 'r1 "induction: InitStatesSomeMonotone" [the original proof\'s route]: 4 attempts, best proxy 69.1 (#7)');
+  assert.equal(routesText([]), "none");
+  const push = finishPush({ ...base, ideas: [{ id: "i9", title: "brand new idea", status: "active", attempts: 3 }], routes, refusals: 0, newIdeaProbed: true });
+  assert.ok(push.message.includes("Routes tried: r1"));
+  assert.ok(push.message.includes("Only one route has been tried so far"));
+  assert.ok(!push.message.includes("brand new idea"));
+  assert.equal(push.tried.length, 1);
+});
+
+test("a repeat finish without a compiled proof on a new route is called out", () => {
+  const repeat = finishPush({ ...base, routes, refusals: 1, newIdeaProbed: true, newRouteProbed: false });
+  assert.ok(repeat.message.includes("renaming or re-labelling an idea does not count"));
+  const fresh = finishPush({ ...base, routes, refusals: 1, newIdeaProbed: false, newRouteProbed: true });
+  assert.ok(!fresh.message.includes("renaming or re-labelling"));
+});
+
+test("the continuation push lists the routes tried", () => {
+  const text = continuationPush({ status: "[arena] best", ideas: [], remainingUsd: 0.5, capUsd: 1, routes });
+  assert.ok(text.includes("Routes tried (harness fingerprint): r1"));
 });

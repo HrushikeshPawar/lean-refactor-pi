@@ -150,7 +150,7 @@
         const ay=a.y+NODE_R, cy=p.y-NODE_R, bend=Math.max(18,(cy-ay)*.48);
         edges.push(`<path class="edge${i ? ' alternate' : ''}${focus}${faded}${dim}" d="M${a.x},${ay} C${a.x},${ay+bend} ${p.x},${cy-bend} ${p.x},${cy}"/>`);
       }));
-      boxes.push(`<g class="node ${esc(status(node))}${node.origin === 'auto_merge' ? ' auto_merge' : ''}${milestone.has(node.id) ? ' best' : ''}${lineage.nodes.has(node.id) && selected !== node.id ? ' ancestor' : ''}${selected === node.id ? ' selected' : ''}${selected && !lineage.nodes.has(node.id) ? ' unrelated' : ''}${dim}" data-id="${node.id}" transform="translate(${p.x},${p.y})"><title>${esc(nodeLabel(node))} · ${esc(node.tokens ?? '?')} tokens · ${esc(status(node))} · idea ${esc(node.idea_id ?? 'legacy')}${node.origin === 'auto_merge' ? ' · automatic merge' : ''}</title>${node.origin === 'auto_merge' ? '<circle class="merge-ring" r="27"/><text class="merge-badge" x="20" y="-20">⊕</text>' : ''}<circle class="node-body" r="${NODE_R}"/><text class="node-number" text-anchor="middle" dominant-baseline="central">#${esc(node.index)}</text></g>`);
+      boxes.push(`<g class="node ${esc(status(node))}${node.origin === 'auto_merge' ? ' auto_merge' : ''}${milestone.has(node.id) ? ' best' : ''}${lineage.nodes.has(node.id) && selected !== node.id ? ' ancestor' : ''}${selected === node.id ? ' selected' : ''}${selected && !lineage.nodes.has(node.id) ? ' unrelated' : ''}${dim}" data-id="${node.id}" transform="translate(${p.x},${p.y})"><title>${esc(nodeLabel(node))} · ${esc(node.tokens ?? '?')} tokens · ${esc(status(node))} · idea ${esc(node.idea_id ?? 'legacy')}${node.origin === 'auto_merge' ? ' · automatic merge' : ''}${node.route?` · route ${esc(routeName(node.route))}`:''}</title>${node.origin === 'auto_merge' ? '<circle class="merge-ring" r="27"/><text class="merge-badge" x="20" y="-20">⊕</text>' : ''}<circle class="node-body" r="${NODE_R}"/>${node.route?`<circle class="route-dot" cx="-17" cy="-17" r="6" fill="${routeColor(node.route)}"/>`:''}<text class="node-number" text-anchor="middle" dominant-baseline="central">#${esc(node.index)}</text></g>`);
     }
     graph.innerHTML = edges.join('') + boxes.join(''); applyView();
     graph.querySelectorAll('.node').forEach(el => el.addEventListener('click', () => select(el.dataset.id)));
@@ -188,6 +188,9 @@
     return out.join('');
   }
   const facts=rows=>`<dl class="facts">${rows.map(([k,v])=>`<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>`;
+  const ROUTE_COLORS=['#7a869a','#e07a1f','#2a9d8f','#9b5de5','#d62839','#3a86ff','#8ac926','#ff006e'];
+  const routeColor=id=>ROUTE_COLORS[(Number(String(id).replace(/\D/g,''))-1+ROUTE_COLORS.length)%ROUTE_COLORS.length];
+  const routeName=id=>{const r=(data.routes||[]).find(x=>x.route===id);return r?`${id} (${r.label})`:id;};
   const ideaName=id=>id?((data.ideas||[]).find(i=>i.id===id)?.title||id):'';
   function context(node) {
     const evaluated=best(node)?.result||{},derived=node.derivations||[],ancestry=lineageOf(node.id);
@@ -435,7 +438,7 @@
     $('run-label').textContent=`${data.theorem || ''} · ${data.run_id} · ${data.nodes.length} recorded nodes`;
     const full=data.nodes.filter(n=>n.status==='full').length, autos=data.nodes.filter(n=>n.origin==='auto_merge').length;
     const tested=(data.ideas||[]).filter(idea=>idea.attempts).length;
-    $('metrics').innerHTML=[['3/3',full],['Ideas tested',`${tested}/${data.ideas?.length||0}`],['Evaluations',data.evaluations],['Auto merges',autos],['Merge checks',data.merge_checks.length]].map(([k,v])=>`<span class="metric">${esc(k)} <b>${esc(v)}</b></span>`).join('');
+    $('metrics').innerHTML=[['3/3',full],['Ideas tested',`${tested}/${data.ideas?.length||0}`],['Evaluations',data.evaluations],['Routes',(data.routes||[]).filter(r=>r.attempts).length],['Auto merges',autos],['Merge checks',data.merge_checks.length]].map(([k,v])=>`<span class="metric">${esc(k)} <b>${esc(v)}</b></span>`).join('');
     const previous=$('idea-filter').value;
     $('idea-filter').innerHTML='<option value="all">All ideas</option>'+(data.ideas||[]).map(idea=>`<option value="${esc(idea.id)}">${esc(idea.title)}</option>`).join('');
     $('idea-filter').value=(data.ideas||[]).some(idea=>idea.id===previous)?previous:'all';

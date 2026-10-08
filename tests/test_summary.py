@@ -127,6 +127,17 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(ideas[0]["attempts"], 3)
         self.assertEqual(ideas[0]["probes"], 1)
 
+    def test_routes_are_summarised_from_the_ledger(self):
+        with (self.dir / "ledger.jsonl").open("a") as handle:
+            for proof_id, route in (("ref", "r1"), ("local", "r1"), ("struct", "r2")):
+                handle.write(json.dumps({"kind": "route", "proof_id": proof_id, "route": route,
+                                         "label": "label " + route, "fingerprint": {}}) + "\n")
+        data = summary.build_summary(self.dir)
+        rows = {row["route"]: row for row in data["routes"]}
+        self.assertEqual((rows["r1"]["attempts"], rows["r1"]["original"]), (1, True))
+        self.assertEqual((rows["r2"]["attempts"], rows["r2"]["best_proxy"], rows["r2"]["best_candidate"]), (1, 60.5, "#3"))
+        self.assertIn('routes tried: r1 "label r1" [the original proof\'s route]: 1 attempt', summary.render_text(data))
+
     def test_coherent_best_metrics_use_cold_submission_heartbeats(self):
         (self.dir / "submission.json").write_text(json.dumps(
             {"candidate": "#3", "tokens": 70, "heartbeats": 801, "proxy": 60.5,

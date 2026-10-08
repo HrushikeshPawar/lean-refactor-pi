@@ -160,6 +160,17 @@ def lean_context(name: str) -> dict:
     return parsed
 
 
+def cached_context(name: str) -> dict:
+    """The kickoff context if it is already cached, else {}; never starts Lean."""
+    try:
+        row = problem(name)
+        version, commit = measure_version(row)
+        cache = _cache("context", name, commit, LEAN_FILE.read_text() + row["src"])
+        return json.loads(cache.read_text()) if cache.exists() else {}
+    except (ValueError, OSError, KeyError):
+        return {}
+
+
 def reference_profile(name: str) -> dict:
     """Heartbeat profile of the reference proof, cached like the context."""
     row = problem(name)

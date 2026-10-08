@@ -168,6 +168,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
   let finishConfirmed = false;
   let finishRefusals = 0;
   let refusalIdeaIds = new Set<string>();
+  let refusalRouteIds = new Set<string>();
   let finishReviewTurn = false;
   let noWorkTurns = 0;
   let turnHadProofAttempt = false;
@@ -355,6 +356,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
     const refused = finishEvents.filter(item => item.phase === "refused");
     finishRefusals = refused.length;
     refusalIdeaIds = new Set(((refused.at(-1)?.idea_ids as string[] | undefined) ?? []).map(String));
+    refusalRouteIds = new Set(((refused.at(-1)?.route_ids as string[] | undefined) ?? []).map(String));
     noWorkTurns = Number(latest?.no_work_turns ?? 0);
     finishReviewTurn = false;
     turnHadProofAttempt = false;
@@ -988,12 +990,15 @@ export default function arenaExtension(pi: ExtensionAPI) {
       if (!room.allowed) {
         // More than 10% of the allowance is left: refuse and push for a structurally new route.
         const newIdeaProbed = ideaRows.some(row => row.attempts > 0 && !refusalIdeaIds.has(String(row.id)));
+        const routeRows: any[] = portfolio.routes ?? [];
+        const newRouteProbed = routeRows.some(row => row.attempts > 0 && !refusalRouteIds.has(String(row.route)));
         const push = finishPush({ usedPct: budget.used_pct, remainingUsd: room.remainingUsd, capUsd: limits.stopUsd,
           baseline: checks.baseline, best: bestVerified, top: portfolio.top, ideas: ideaRows,
-          refusals: finishRefusals, newIdeaProbed });
+          refusals: finishRefusals, newIdeaProbed, routes: portfolio.routes, newRouteProbed });
         finishRefusals += 1;
         refusalIdeaIds = new Set(ideaRows.map(row => String(row.id)));
-        appendCost({ kind: "finish", phase: "refused", refusals: finishRefusals, idea_ids: [...refusalIdeaIds],
+        refusalRouteIds = new Set(routeRows.filter(row => row.attempts > 0).map(row => String(row.route)));
+        appendCost({ kind: "finish", phase: "refused", refusals: finishRefusals, idea_ids: [...refusalIdeaIds], route_ids: [...refusalRouteIds],
           new_idea_probed: newIdeaProbed, remaining_fraction: Number(room.remainingFraction.toFixed(4)) });
         return reply({ ok: true, phase: firstReview ? "review" : "refused", stop: false, refused: true,
           best_verified: bestVerified, baseline: checks.baseline, current_idea: idea, budget, ideas,
@@ -1002,6 +1007,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
       if (firstReview) {
         return reply({ ok: true, phase: "review", best_verified: bestVerified,
           baseline: checks.baseline, current_idea: idea, budget, ideas, reminder: reminderText,
+          routes_tried: (portfolio.routes ?? []).filter((row: any) => row.attempts > 0),
           next: `${budget.used_pct}% of the $${limits.stopUsd} allowance is spent ($${budget.remaining_usd} left, within the final 10%). ` +
             "Use this decision turn to try another route if one is worth it, then call arena_finish again to confirm stop." });
       }
@@ -1155,7 +1161,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
     const status = current ? stateLine(current, true) : `[arena] best verified: ${briefText(state.best)}`;
     const room = finishAllowed(budget.spent, limits);
     const content = !room.allowed
-      ? continuationPush({ status, ideas, remainingUsd: room.remainingUsd, capUsd: limits.stopUsd })
+      ? continuationPush({ status, ideas, remainingUsd: room.remainingUsd, capUsd: limits.stopUsd, routes: state.routes })
       : `Continue proof optimization. ${status}. Active ideas: ${ideas.length ? ideas.join("; ") : "none recorded"}. Remaining on the $${limits.stopUsd} cap (actual settled spend): $${softCapGate(budget.spent, limits).remainingUsd.toFixed(4)}.`;
     return { entries: [...event.entries, { type: "custom_message" as const, customType: "arena-continuation",
       content, display: false }], continue: true };

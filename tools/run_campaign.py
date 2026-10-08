@@ -141,6 +141,8 @@ def run_row(spec: dict, summary: dict | None, exit_code: int, packet_sha256: str
             "best_proxy": best.get("proxy") if best else None,
             "helpers": helper_discovery(directory, best.get("candidate") if best else None) if directory else None,
             "ideas_without_attempts": len(summary.get("ideas_without_attempts") or []),
+            "routes": [{key: row[key] for key in ("route", "label", "attempts", "best_proxy")}
+                       for row in summary.get("routes") or [] if row.get("attempts")],
             "tool_errors": (summary.get("tools") or {}).get("error_total"),
             "tool_errors_by_tool": (summary.get("tools") or {}).get("errors") or {},
             "cache_reuse_pct": (summary.get("cache") or {}).get("reuse_pct"),
@@ -172,6 +174,8 @@ def aggregate(runs: list[dict], expected: dict[str, str]) -> dict:
             "helper_runs": sum(bool((item["helpers"] or {}).get("candidates_with_helpers")) for item in items),
             "best_uses_helper_runs": sum(bool((item["helpers"] or {}).get("best_uses_helper")) for item in items),
             "ideas_never_attempted": sum(item["ideas_without_attempts"] for item in items),
+            "routes_tried": _stats([len(item.get("routes") or []) for item in items]),
+            "single_route_runs": sum(len(item.get("routes") or []) <= 1 for item in items),
             "tool_errors": sum(item["tool_errors"] or 0 for item in items),
             "cache_reuse_pct": _stats([item["cache_reuse_pct"] for item in items]),
             "bookkeeping_and_rejected_pct": _stats([item["bookkeeping_and_rejected_pct"] for item in items]),
@@ -194,6 +198,7 @@ def render(report: dict) -> str:
         lines += [f"{g['row']} | {g['model']} | n={g['replicates']} (verified {g['verified_runs']})",
                   f"  best-verified proxy min/median/max: {span(g['best_proxy'])}",
                   f"  helper discovery: {g['helper_runs']} runs declared helpers, {g['best_uses_helper_runs']} in the best candidate",
+                  f"  routes tried per run min/median/max: {span(g['routes_tried'])}; runs with a single route: {g['single_route_runs']}",
                   f"  ideas never attempted: {g['ideas_never_attempted']}; tool errors: {g['tool_errors']}",
                   f"  cache reuse %: {span(g['cache_reuse_pct'])}; bookkeeping+rejected %: {span(g['bookkeeping_and_rejected_pct'])}",
                   f"  all-call cost per problem min/median/max: {span(g['all_call_cost_usd'], '${:.4f}')} "

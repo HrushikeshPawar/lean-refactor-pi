@@ -836,6 +836,34 @@ def _append(directory: Path, event: dict) -> None:
         os.close(fd)
 
 
+def _record_route(directory: Path, name: str, proof_id: str, proof: str) -> dict | None:
+    """Fingerprint a compiled complete proof and file it under a route. Harness-only: the model sees the
+    result in finish reviews and pushes, never as a tool argument. Once per proof; failures are ignored."""
+    from arena import routes
+    from arena.context import cached_context
+
+    try:
+        with (directory / "route.lock").open("a") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            history = events(directory)
+            earlier = [item for item in history if item.get("kind") == "route"]
+            if any(item["proof_id"] == proof_id for item in earlier):
+                return None
+            context = cached_context(name)
+            print_ = routes.fingerprint(proof, routes.vocabulary(context), name)
+            route, similarity = routes.assign(earlier, print_)
+            new = route not in {item["route"] for item in earlier}
+            reference = next((item["fingerprint"] for item in earlier if item["route"] == "r1"), None)
+            event = {"kind": "route", "proof_id": proof_id, "route": route, "new": new,
+                     "similarity": similarity, "fingerprint": print_,
+                     "label": routes.label(print_, reference) if new else next(
+                         item["label"] for item in earlier if item["route"] == route)}
+            _append(directory, event)
+            return event
+    except Exception:
+        return None
+
+
 def events(directory: Path) -> list[dict]:
     file = directory / "ledger.jsonl"
     if not file.exists():
@@ -933,6 +961,7 @@ def init(name: str, run_id: str, extra: str = "") -> dict:
                         "evaluator_sha256": hashlib.sha256(Path(__file__).with_name("engine.py").read_bytes()).hexdigest()})
     materialize(name, run_id, row["src"])
     _append(directory, {"kind": "current", "candidate_id": reference_id})
+    _record_route(directory, name, reference_id, row["src"])
     return {"packet": str(directory / "packet.txt"), "shadow": str(shadow),
             "candidate_path": str(shadow / source_path(row))}
 
@@ -1306,6 +1335,8 @@ def record_evaluation(name: str, run_id: str, proof: str, mode: str,
             _externalize_output(directory, candidate_id, result)
             _append(directory, {"kind": "evaluation", "candidate_id": candidate_id, "key": key,
                                 "mode": mode, "trigger": trigger, "result": result})
+    if result.get("tokens") is not None:
+        _record_route(directory, name, candidate_id, proof)
     location = materialize(name, run_id, proof) if materialize_live and result.get("tokens") is not None else {}
     if location:
         _append(directory, {"kind": "current", "candidate_id": candidate_id})
@@ -1642,7 +1673,7 @@ def graph_state(run_id: str) -> dict:
                                  "source_versions": event.get("source_versions", []),
                                  "evaluator_sha256": event.get("evaluator_sha256"),
                                  "proof": (directory / "proofs" / f"{identifier}.lean").read_text(),
-                                 "children": [], "decision": "pursue"}
+                                 "children": [], "decision": "pursue", "route": None}
             order.append(identifier)
         elif kind == "derivation" and event["candidate_id"] in nodes:
             nodes[event["candidate_id"]]["derivations"].append(event)
@@ -1657,6 +1688,8 @@ def graph_state(run_id: str) -> dict:
                              "local_proxy": result.get("local_proxy"), "ts": event.get("ts")})
         elif kind == "merge_check":
             checks.append(event)
+        elif kind == "route" and event["proof_id"] in nodes:
+            nodes[event["proof_id"]]["route"] = event["route"]
         elif kind == "decision" and event.get("candidate_id") in nodes:
             nodes[event["candidate_id"]]["decision"] = event["decision"]
     best_proxy = float("-inf")
@@ -1721,7 +1754,7 @@ def graph_state(run_id: str) -> dict:
     idea_rows = ideas
     return {"run_id": run_id, "theorem": theorem, "nodes": rows, "ledger_events": len(history), "evaluations": len(timeline),
             "timeline": timeline, "merge_checks": checks, "milestones": milestones,
-            "frontier": ranked, "ideas": idea_rows, "probes": probes}
+            "frontier": ranked, "ideas": idea_rows, "probes": probes, "routes": route_table(history)}
 
 
 def merge_once(run_id: str, graph: dict | None = None) -> dict | None:
@@ -1992,6 +2025,12 @@ def submission(run_id: str) -> dict:
     return answer
 
 
+def route_table(history: list[dict]) -> list[dict]:
+    from arena.routes import route_table as table
+
+    return table(history)
+
+
 def frontier(run_id: str) -> dict:
     """Compact status: best candidates, the model's ideas with their attempts, recent failures."""
     history = events(run_dir(run_id))
@@ -2033,7 +2072,8 @@ def frontier(run_id: str) -> dict:
             "ideas": list(ideas.values()), "recent_failures": failures[-3:],
             "current_idea": current_idea,
             "candidates": len(rows), "evaluations": evaluations,
-            "probes": len(probe_numbers), "advisory": _advisory(rows)}
+            "probes": len(probe_numbers), "advisory": _advisory(rows),
+            "routes": route_table(history)}
 
 
 def _probe_failed(result: dict) -> bool:

@@ -83,6 +83,16 @@ export function planProbe(params: { proof?: string; drafts?: string[] }): ProbeP
 }
 
 type Metrics = { candidate?: string; tokens?: number | null; heartbeats?: number | null; proxy?: number | null } | null | undefined;
+/** A route as the harness fingerprints it from compiled proofs (see arena/routes.py). */
+export interface RouteRow { route: string; label?: string; original?: boolean; attempts?: number; best_proxy?: number | null; best_candidate?: string | null }
+
+/** The routes that carry model attempts, as one line the model cannot influence by naming ideas. */
+export function routesText(routes: RouteRow[]): string {
+  const rows = routes.filter(row => (row.attempts ?? 0) > 0);
+  return rows.length ? rows.map(row => `${row.route} "${row.label ?? ""}"${row.original ? " [the original proof's route]" : ""}: ` +
+    `${row.attempts} attempt${row.attempts === 1 ? "" : "s"}, ${row.best_proxy != null ? `best proxy ${row.best_proxy}${row.best_candidate ? ` (${row.best_candidate})` : ""}` : "no scored proof"}`).join("; ") : "none";
+}
+
 export interface FinishPushInput {
   usedPct: number; remainingUsd: number; capUsd: number;
   baseline: Metrics; best: Metrics; top?: Metrics[];
@@ -90,6 +100,10 @@ export interface FinishPushInput {
   refusals: number;
   /** An idea absent at the previous refusal now has proof attempts. */
   newIdeaProbed: boolean;
+  /** Harness route fingerprints; when present they replace the model's ideas as the record of what was tried. */
+  routes?: RouteRow[];
+  /** A route absent at the previous refusal now has proof attempts. */
+  newRouteProbed?: boolean;
 }
 
 const saved = (reference: number | null | undefined, value: number | null | undefined) =>
@@ -112,30 +126,40 @@ export function axisHeadroom(baseline: Metrics, best: Metrics, top: Metrics[] = 
 /** The reply to an arena_finish confirm that is refused because too much allowance is left. */
 export function finishPush(input: FinishPushInput) {
   const headroom = axisHeadroom(input.baseline, input.best, input.top);
-  const tried = input.ideas.map(idea => ({ id: idea.id, title: idea.title, status: idea.status,
-    attempts: idea.attempts ?? 0, best_proxy: idea.best?.proxy ?? null }));
+  const byRoute = input.routes !== undefined;
+  const tried: Array<Record<string, any>> = byRoute
+    ? input.routes!.filter(row => (row.attempts ?? 0) > 0).map(row => ({ id: row.route, title: row.label, status: row.original ? "original route" : "tried",
+      attempts: row.attempts ?? 0, best_proxy: row.best_proxy ?? null }))
+    : input.ideas.map(idea => ({ id: idea.id, title: idea.title, status: idea.status,
+      attempts: idea.attempts ?? 0, best_proxy: idea.best?.proxy ?? null }));
   const pct = (value: number | null) => value === null ? "unknown" : `${value}%`;
-  const triedText = tried.length
+  const triedText = byRoute ? routesText(input.routes!) : tried.length
     ? tried.map(item => `${item.id} "${item.title ?? ""}" (${item.attempts} attempt${item.attempts === 1 ? "" : "s"}, best proxy ${item.best_proxy ?? "none"})`).join("; ")
     : "none recorded";
   const head = `Stop refused: ${Math.max(0, 100 - input.usedPct)}% of the $${input.capUsd} allowance ($${input.remainingUsd.toFixed(4)}) is unspent, ` +
     "and unspent allowance has no value. You may finish only when 10% or less is left.";
-  const repeat = input.refusals > 0 && !input.newIdeaProbed
-    ? " You called arena_finish again without probing any new idea since the last refusal; that does not count as work. " : " ";
+  const probedNew = byRoute ? Boolean(input.newRouteProbed) : input.newIdeaProbed;
+  const repeat = input.refusals > 0 && !probedNew
+    ? byRoute
+      ? " You called arena_finish again without compiling a proof on a new route since the last refusal; renaming or re-labelling an idea does not count, the harness fingerprints routes from your compiled proofs. "
+      : " You called arena_finish again without probing any new idea since the last refusal; that does not count as work. "
+    : " ";
   const axes = `Headroom against the original: tokens saved ${pct(headroom.tokens_saved_pct)}, heartbeats saved ${pct(headroom.heartbeats_saved_pct)}` +
     (headroom.tokens_vs_lowest_seen !== null ? ` (lowest seen: ${headroom.tokens_vs_lowest_seen} tok, ${headroom.heartbeats_vs_lowest_seen} HB)` : "") +
     ". The axis with the smaller saving has the most points left; a micro-golf of the current proof will not close it.";
   const instruction = "Record a structurally NEW idea with arena_idea now: a different proof strategy, for example induction versus equational " +
     "rewriting with existing lemmas, or a different key lemma family, not a variant or golf of a route already tried. " +
     "Then probe it with arena_probe or arena_evaluate before calling arena_finish again; a confirm without new proof attempts on a new idea is refused again.";
-  return { headroom, tried, message: `${head}${repeat}Routes tried: ${triedText}. ${axes} ${instruction}` };
+  const single = byRoute && tried.length <= 1 ? " Only one route has been tried so far." : "";
+  return { headroom, tried, message: `${head}${repeat}Routes tried: ${triedText}.${single} ${axes} ${instruction}` };
 }
 
 /** Continuation text when a turn ends with a plain answer while more than 10% of the allowance remains. */
-export function continuationPush(args: { status: string; ideas: string[]; remainingUsd: number; capUsd: number }): string {
+export function continuationPush(args: { status: string; ideas: string[]; remainingUsd: number; capUsd: number; routes?: RouteRow[] }): string {
+  const tried = args.routes ? `Routes tried (harness fingerprint): ${routesText(args.routes)}. ` : "";
   return `Do not stop: $${args.remainingUsd.toFixed(4)} of the $${args.capUsd} cap is unspent and unspent allowance has no value; ` +
     "you may finish only when 10% or less remains, by calling arena_finish. " +
-    `${args.status}. Active ideas: ${args.ideas.length ? args.ideas.join("; ") : "none recorded"}. ` +
+    `${args.status}. ${tried}Active ideas: ${args.ideas.length ? args.ideas.join("; ") : "none recorded"}. ` +
     "Record a structurally new idea (a different proof strategy: induction versus equational rewriting, or a different key lemma family, not a golf of the current route) " +
     "with arena_idea and probe it now. Make a tool call instead of replying with text.";
 }
