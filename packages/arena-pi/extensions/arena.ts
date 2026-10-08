@@ -9,7 +9,7 @@ import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import type { AssistantMessageEventStream } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { BudgetModel } from "./budget.ts";
-import { nearestToolName } from "./toolnames.ts";
+import { nearestToolName, normalizeToolArguments } from "./toolnames.ts";
 import { assessFinalPayload, BUDGET_PROVIDER, budgetLimits, cacheAlarm, catalogPriceProblem, cacheUtilization, isBudgetModel, MAX_REQUEST_OUTPUT_TOKENS, MODELS, priceForUsage, requestShape, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
 
 const root = resolve(import.meta.dirname, "../../..");
@@ -134,6 +134,10 @@ function deliveredBlocks(content: unknown): Array<Record<string, unknown>> {
 }
 
 export default function arenaExtension(pi: ExtensionAPI) {
+  // Every Arena tool sees cleaned arguments: empty optional fields are absent, text arrays are parsed.
+  const registerTool = ((tool: any) => pi.registerTool({ ...tool,
+    execute: (id: string, params: any, ...rest: any[]) =>
+      tool.execute(id, normalizeToolArguments(params, tool.parameters), ...rest) })) as typeof pi.registerTool;
   // A factory invocation owns one Pi session. No active theorem is module-global.
   let active: string | undefined;
   const runId = process.env.ARENA_RUN_ID;
@@ -754,7 +758,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
     }
   }
 
-  pi.registerTool({
+  registerTool({
     name: "arena_evaluate",
     label: "Arena evaluate",
     description: "Score a complete theorem (statement + proof) on the primary toolchain. Give `proof`, or an existing node with `candidate` (\"#N\"), or a probe with `from_probe` (\"pN\"). If it compiles, the harness checks the other toolchains in the background and reports the outcome in a later tool result; you never need to request it. `parents`, `idea_id` and `hypothesis` are optional labels; the current candidate is the default parent. Returns tokens, heartbeats, per-axis contribution, estimated proxy, deltas, and diagnostics whose file_line matches the candidate file lean_goal reads.",
@@ -788,7 +792,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
+  registerTool({
     name: "arena_probe", label: "Arena probe",
     description: "Compile one proof draft or one to four drafts on the primary toolchain. Each may be a complete theorem, a `by` proof body, or a `:=` proof body; the exact benchmark statement is supplied for proof bodies. `sorry` is allowed and each incomplete draft returns its actual hole goals and stable pN ID. A complete compiling draft is automatically promoted to a candidate.",
     parameters: Type.Object({ proof: Type.Optional(Type.String()),
@@ -821,7 +825,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
+  registerTool({
     name: "arena_profile", label: "Arena heartbeat profile",
     description: "Per-tactic heartbeat profile of a compiling proof: heartbeats per proof line or tactic block (inclusive and self), share of the total, nesting, the top self costs with cumulative share, and how the profiled total relates to the measured whole-proof heartbeats. Give `candidate` (\"#N\" or probe \"pN\"), `proof`, or nothing for the current candidate. Informational only; it makes no recommendation.",
     parameters: Type.Object({ candidate: Type.Optional(Type.String()), proof: Type.Optional(Type.String()) }),
@@ -836,7 +840,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
+  registerTool({
     name: "arena_idea", label: "Record or update an idea",
     description: "Create an idea (title, hypothesis, region such as proof lines \"12-30\", expected_effect per axis), optionally naming it yourself with idea_id; or update an existing idea by idea_id: set status active, parked, succeeded or abandoned with a reason. Ideas are yours; the harness only records them.",
     parameters: Type.Object({
@@ -861,7 +865,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
+  registerTool({
     name: "arena_state", label: "Arena run state",
     description: "Show the best verified candidate, pinned original baseline, leading unchecked result, active idea with attempt count, and recent failures. Read-only and concise; no title or hypothesis is needed.",
     parameters: Type.Object({}),
@@ -875,7 +879,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
+  registerTool({
     name: "arena_finish", label: "Review and finish the Arena run",
     description: "First call returns one factual review of the best verified result and current idea, with at most one reminder if that idea has no proof attempt. Call again after the decision turn to confirm stop; finishing is final for this run.",
     parameters: Type.Object({}),
@@ -917,14 +921,14 @@ export default function arenaExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
+  registerTool({
     name: "arena_candidate", label: "Restore a candidate or probe",
     description: "Restore node \"#N\" or probe \"pN\" into the Lean scratch project (so lean_goal reads it) and return its exact proof and recorded results.",
     parameters: Type.Object({ candidate: Type.String({ description: "#N or pN" }) }),
     async execute(_id, params) { return reply(await campaign("candidate", ["--candidate", params.candidate])); },
   });
 
-  pi.registerTool({
+  registerTool({
     name: "arena_skill_read", label: "Read Arena skill reference",
     description: "Read a file from the Arena Lean skill (for example references/proof-golfing.md). Without `path`, list the available files. Read-only and scoped to the skill directory.",
     parameters: Type.Object({ path: Type.Optional(Type.String()), offset: Type.Optional(Type.Number()) }),
@@ -952,7 +956,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
+  registerTool({
     name: "arena_source", label: "Pinned Lean source",
     description: "Read pinned source by a decl:<qualified-name> handle or a project/dependency path alias (up to 400 lines per call; next_first continues; a decl: handle without first starts at its declaration). Reports the pin, canonical path and file length.",
     parameters: Type.Object({ handle: Type.String(), first: Type.Optional(Type.Number()), last: Type.Optional(Type.Number()) }),
@@ -964,7 +968,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
+  registerTool({
     name: "arena_declarations", label: "Pinned declarations",
     description: "Read several declarations by qualified name or decl: handle. Returns full pinned source bodies, typed unavailable reasons, local scope/type, or per-name misses. Use next_cursor to continue a long batch.",
     // One object schema: providers reject a top-level anyOf. Exactly one of the two fields is used.
@@ -981,7 +985,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
+  registerTool({
     name: "arena_find", label: "Search pinned declarations",
     description: "Search pinned source by several names or text queries. Results are distinct qualified declarations with name, decl: handle, path, line and signature (not the body; read bodies with arena_declarations), counted toward limit; at most 30 files are scanned per query and files_truncated reports more. Misses include qualified-name suggestions.",
     parameters: Type.Object({ queries: Type.Array(Type.String()), limit: Type.Optional(Type.Number()) }),

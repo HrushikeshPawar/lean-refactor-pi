@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { nearestToolName } from "./toolnames.ts";
+import { nearestToolName, normalizeToolArguments } from "./toolnames.ts";
 
 const registered = ["read", "bash", "arena_candidate", "arena_declarations", "arena_evaluate", "arena_find", "arena_probe",
   "arena_profile", "arena_source", "arena_state", "arena_finish", "mcp__arena_lean__lean_goal",
@@ -21,4 +21,16 @@ test("suggests nothing for unrelated names and is order independent", () => {
   assert.equal(nearestToolName("completely_different_thing", registered), undefined);
   assert.equal(nearestToolName("arena_evalute", registered), nearestToolName("arena_evalute", [...registered].reverse()));
   assert.equal(nearestToolName("probe", []), undefined);
+});
+
+test("treats empty optional fields as absent and parses arrays sent as text", () => {
+  const schema = { properties: { proof: { type: "string" }, drafts: { type: "array" }, items: { type: "array" },
+    cursor: { type: "string" }, first: { type: "number" } } };
+  assert.deepEqual(normalizeToolArguments({ proof: "", drafts: ["by rfl"], cursor: "" }, schema), { drafts: ["by rfl"] });
+  assert.deepEqual(normalizeToolArguments({ proof: "by rfl", drafts: [""] }, schema), { proof: "by rfl" });
+  assert.deepEqual(normalizeToolArguments({ drafts: "[\"by\\n  simp\", \"by rfl\"]" }, schema), { drafts: ["by\n  simp", "by rfl"] });
+  assert.deepEqual(normalizeToolArguments({ items: "['Core.a', \"Core.b'\"]" }, schema), { items: ["Core.a", "Core.b'"] });
+  assert.deepEqual(normalizeToolArguments({ items: "Core.a" }, schema), { items: ["Core.a"] });
+  assert.deepEqual(normalizeToolArguments({ items: ["['Core.a', 'Core.b']"] }, schema), { items: ["Core.a", "Core.b"] });
+  assert.deepEqual(normalizeToolArguments({ first: 0, proof: "  " }, schema), { first: 0 });
 });

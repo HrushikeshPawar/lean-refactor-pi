@@ -29,3 +29,35 @@ export function nearestToolName(name: string, registered: readonly string[]): st
     .sort((a, b) => a.score - b.score || (a.candidate < b.candidate ? -1 : a.candidate > b.candidate ? 1 : 0));
   return ranked[0] && ranked[0].score <= Math.max(2, Math.floor(core.length / 4)) ? ranked[0].candidate : undefined;
 }
+
+/** A list sent as text: JSON (`["a"]`) or Python-style (`['a', "b'"]`). Anything else is one item. */
+function listFromText(text: string): string[] {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("[")) return [text];
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (Array.isArray(parsed)) return parsed.map(String);
+  } catch { /* fall through to quoted items */ }
+  const items = [...trimmed.matchAll(/'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)"/g)].map(match => match[1] ?? match[2]);
+  return items.length ? items : [text];
+}
+
+/**
+ * Some models fill every optional field with an empty value ("", [""]) and send arrays as strings.
+ * Treat empty values as absent and parse stringified arrays, using the tool's object schema.
+ */
+export function normalizeToolArguments<T>(params: T, schema: { properties?: Record<string, { type?: string }> }): T {
+  if (!params || typeof params !== "object" || Array.isArray(params)) return params;
+  const cleaned: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(params as Record<string, unknown>)) {
+    let next: unknown = value;
+    if (schema.properties?.[key]?.type === "array" && typeof next === "string") next = next.trim() ? listFromText(next) : [];
+    // A validator may already have wrapped the text in a one-element array; unwrap it the same way.
+    if (Array.isArray(next)) next = next.flatMap(item => typeof item === "string" && item.trim().startsWith("[")
+      ? listFromText(item) : [item]).filter(item => !(typeof item === "string" && !item.trim()));
+    const empty = next === null || next === undefined || (typeof next === "string" && !next.trim())
+      || (Array.isArray(next) && next.length === 0);
+    if (!empty) cleaned[key] = next;
+  }
+  return cleaned as T;
+}
