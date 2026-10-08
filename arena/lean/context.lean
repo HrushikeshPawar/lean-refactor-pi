@@ -328,17 +328,17 @@ elab "arena_context " cmd:command : command => do
     let isThm := match ci with | .thmInfo _ => true | .axiomInfo _ => !isAxiomC n env | _ => false
     if isThm && n != targetName && !generatedName n && !isPrivateName n &&
         (match env.getModuleIdxFor? n with | some idx => !skipModule[idx.toNat]! | none => false) then
-      let all := ci.type.getUsedConstants.filter usable
-      for u in all do df := df.insert u (df.getD u 0 + 1)
-      pool := pool.push (n, all)
+      let usedConsts := ci.type.getUsedConstants.filter usable
+      for u in usedConsts do df := df.insert u (df.getD u 0 + 1)
+      pool := pool.push (n, usedConsts)
   let scanMs := (← IO.monoMsNow) - libStart
   let total := pool.size.toFloat
   let idf := fun (u : Lean.Name) => Float.log ((total + 1.0) / ((df.getD u 0).toFloat + 0.5))
   let mut scored : Array (Float × Lean.Name) := #[]
-  for (n, all) in pool do
+  for (n, usedConsts) in pool do
     let mut shared := 0.0
     let mut rest := 0.0
-    for u in all do
+    for u in usedConsts do
       match wanted[u]? with
       | some w => shared := shared + w * idf u
       | none => rest := rest + idf u
