@@ -2,7 +2,7 @@
 
 One run: the candidate graph at `/` (dashboard at `/dashboard.html`). Several runs (more than one
 ID, or `--match` with a glob over run IDs that is re-scanned on every request, so new runs appear
-while a matrix starts them): a hub at `/` with a filterable run table and one tab per run, each tab
+while a matrix starts them): a hub at `/` with a filterable run table; clicking a row opens its dashboard in a closable tab, each
 showing that run's dashboard from `/run/<id>/dashboard.html` (graph at `/run/<id>/`).
 
 Per-run data: graph.json, dashboard.json, langfuse.json. Langfuse is queried server-side with the

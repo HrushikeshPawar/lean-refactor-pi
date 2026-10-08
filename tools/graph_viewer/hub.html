@@ -8,13 +8,13 @@
 </head>
 <body>
   <header>
-    <div><h1>Arena runs</h1><div id="hub-sub" class="sub">Connecting…</div></div>
+    <h1>Arena runs</h1><div id="hub-sub" class="sub">Connecting…</div>
+    <div id="strip" class="strip"></div>
     <div id="hub-live" class="live">Connecting…</div>
   </header>
-  <nav id="tabs" class="tabs" role="tablist" aria-label="Runs"></nav>
+  <nav id="tabs" class="tabs" role="tablist" aria-label="Open runs"></nav>
   <main id="panels">
-    <section id="panel-overview" class="panel-overview" role="tabpanel" aria-label="Overview">
-      <div id="strip" class="strip"></div>
+    <section id="panel-overview" class="panel-overview" role="tabpanel" aria-label="Runs">
       <div class="filters">
         <input id="f-text" type="search" placeholder="Search run, theorem, model…" aria-label="Search runs">
         <select id="f-theorem" aria-label="Theorem"></select>
@@ -24,14 +24,15 @@
         <label class="check"><input id="f-group" type="checkbox"> group by campaign</label>
         <button id="f-reset" type="button">Reset</button>
         <span id="f-count" class="muted"></span>
+        <span class="muted legend-note">Click a header to sort, a row to open its dashboard in a tab; hover a row for more. Δ is against the original proof (proxy 33.33).</span>
       </div>
-      <div class="table-wrap"><table class="overview" id="runs-table">
+      <table class="overview" id="runs-table">
         <thead id="thead"></thead>
-        <tbody id="overview-rows"><tr><td colspan="20" class="muted">No runs yet.</td></tr></tbody>
-      </table></div>
-      <p class="muted note">Δ is against each theorem's original proof (proxy 33.33): green = better. Spend bars show spend against the run's soft cap; the only hard cap is $3.00. Cache reuse is read / (read + write). Bookkeeping+rejected is the share of spend on turns that did not compile or gather context. Click a header to sort, a row to open the run's dashboard; runs started later appear automatically.</p>
+        <tbody id="overview-rows"><tr><td colspan="8" class="muted">No runs yet.</td></tr></tbody>
+      </table>
     </section>
   </main>
+  <div id="rowtip" class="rowtip" hidden></div>
   <script src="hub.js" defer></script>
 </body>
 </html>
