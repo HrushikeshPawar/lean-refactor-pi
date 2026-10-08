@@ -69,8 +69,8 @@ top-level commands or auxiliary declarations, and anything outside the one theor
 
 ## Tool workflow
 
-1. Survey the supplied references and pinned source, then use one concise `arena_idea` to record the route
-   you will try. It becomes the current idea; probes, evaluations, and candidates inherit it unless you
+1. Survey the supplied references and pinned source (look for lemma families next to the ones the
+   reference proof uses), then use one concise `arena_idea` to record the route you will try. It becomes the current idea; probes, evaluations, and candidates inherit it unless you
    explicitly choose another. You can also pass `idea` (a one-line route title) to your first
    `arena_probe` or `arena_evaluate` to create it and link that attempt in one call. Update or abandon it with a short reason when evidence changes your plan.
 2. `arena_probe`: develop a structural rewrite hole by hole. `sorry` is allowed; you get the goal at each
@@ -81,9 +81,10 @@ top-level commands or auxiliary declarations, and anything outside the one theor
 4. `arena_profile` on a compiling candidate or probe to see where heartbeats go.
 5. `arena_evaluate` scores a complete proof on the primary version. `candidate: "#N"` re-reads an existing
    node; `from_probe: "pN"` promotes a probe without resending the proof.
-6. Use `arena_state` when you need the compact verified frontier, current idea, or recent failures. When
-   ready to stop, call `arena_finish` once for its factual review, take one decision turn, then call it again
-   to confirm. The harness checks every compiling candidate on the other versions in the background,
+6. Use `arena_state` when you need the compact verified frontier, current idea, or recent failures.
+   `arena_finish` is allowed to end the run only when 10% or less of the spend allowance is left; before that
+   it is refused and lists the routes tried and the headroom per axis. Near the end, call it once for its
+   factual review, take one decision turn, then call it again to confirm. The harness checks every compiling candidate on the other versions in the background,
    appends an `[arena]` line to a later tool result when a check finishes or the best candidate changes, and
    submits the best verified candidate when the run ends.
 
@@ -91,13 +92,22 @@ top-level commands or auxiliary declarations, and anything outside the one theor
 
 - Search before proving: use `arena_find` for batched name or text searches, then `arena_declarations` for full pinned source. Follow every `decl:<qualified-name>` handle with `arena_source` when you need a line range. Do not guess names.
 - Build incrementally and read the exact goal (`lean_goal`) before changing a failing step.
-- Judge ideas by the per-axis numbers they produce. Local polish is cheap to try once a proof's overall
-  structure is settled, so spend early effort on the structure.
+- Try at least two structurally different routes before you golf anything. A route is a different proof
+  strategy (induction versus equational rewriting with existing lemmas, a different key lemma family, a
+  different decomposition), not a rewording of the same tactic skeleton. Record each as its own `arena_idea`
+  and probe it. Marking an idea `succeeded` because it beat the original is not a reason to stop looking: the
+  original scores only 33, and a better route usually moves far more points than polishing the first one.
+- Unspent allowance has no value. Stopping is only allowed near the end of the budget (10% or less left);
+  with more left, record a new structurally different idea and probe it instead of finishing.
+- Judge ideas by the per-axis numbers they produce, and look at which axis has the most headroom: a
+  proof already 90% down on heartbeats gains little from heartbeat work, and micro-golf of a settled
+  route rarely closes a large token gap. Golf only after the route is settled.
 - Never discard a compiling candidate: restore it with `arena_candidate` instead of retyping it.
 
 ## References (read on demand with `arena_skill_read`)
 
-The references come from a general Lean skill. Where they mention running `lake build`, `lake env lean`
+The golfing and simplification references apply after the route is settled, not before you have compared
+routes. The references come from a general Lean skill. Where they mention running `lake build`, `lake env lean`
 or a shell, use `arena_probe` / `arena_evaluate` instead; where they suggest editing a file directly,
 send the whole proof to those tools. `references/lean-lsp-server.md` describes the Lean tools you have.
 

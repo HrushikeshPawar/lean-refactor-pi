@@ -10,8 +10,8 @@ import type { AssistantMessage, AssistantMessageEventStream } from "@earendil-wo
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { BudgetModel } from "./budget.ts";
 import { nearestToolName, normalizeToolArguments } from "./toolnames.ts";
-import { leanPathViolation, planEvaluate, resolveInlineIdea, planProbe } from "./rules.ts";
-import { assessFinalPayload, BUDGET_PROVIDER, budgetLimits, softCapGate, cacheAlarm, catalogPriceProblem, cacheUtilization, isBudgetModel, MAX_REQUEST_OUTPUT_TOKENS, MODELS, priceForUsage, requestShape, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
+import { continuationPush, finishPush, trimProfile, leanPathViolation, planEvaluate, resolveInlineIdea, planProbe } from "./rules.ts";
+import { assessFinalPayload, BUDGET_PROVIDER, budgetLimits, softCapGate, cacheAlarm, catalogPriceProblem, cacheUtilization, finishAllowed, isBudgetModel, maxRequestOutputTokens, MODELS, priceForUsage, requestShape, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
 
 const root = resolve(import.meta.dirname, "../../..");
 const workspaces = resolve(root, "workspaces");
@@ -166,6 +166,8 @@ export default function arenaExtension(pi: ExtensionAPI) {
   let finishReviewIssued = false;
   let finishReminderIssued = false;
   let finishConfirmed = false;
+  let finishRefusals = 0;
+  let refusalIdeaIds = new Set<string>();
   let finishReviewTurn = false;
   let noWorkTurns = 0;
   let turnHadProofAttempt = false;
@@ -350,6 +352,9 @@ export default function arenaExtension(pi: ExtensionAPI) {
     finishReviewIssued = finishEvents.some(item => item.phase === "review" || item.phase === "reminder");
     finishReminderIssued = finishEvents.some(item => item.phase === "reminder");
     finishConfirmed = finishEvents.some(item => item.phase === "confirmed");
+    const refused = finishEvents.filter(item => item.phase === "refused");
+    finishRefusals = refused.length;
+    refusalIdeaIds = new Set(((refused.at(-1)?.idea_ids as string[] | undefined) ?? []).map(String));
     noWorkTurns = Number(latest?.no_work_turns ?? 0);
     finishReviewTurn = false;
     turnHadProofAttempt = false;
@@ -404,7 +409,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
       const innerFetch = rest.fetch ?? globalThis.fetch;
       return guardMalformedToolArguments(runtime.streamSimple(physical, context, {
         ...rest,
-        maxTokens: Math.min(rest.maxTokens ?? MAX_REQUEST_OUTPUT_TOKENS, MAX_REQUEST_OUTPUT_TOKENS),
+        maxTokens: Math.min(rest.maxTokens ?? maxRequestOutputTokens(model.id), maxRequestOutputTokens(model.id)),
         fetch: async (input, init) => {
           if (gateStopReason) {
             throw new Error(`Arena budget stop: ${gateStopReason}`);
@@ -895,12 +900,12 @@ export default function arenaExtension(pi: ExtensionAPI) {
     parameters: Type.Object({ candidate: Type.Optional(Type.String()), proof: Type.Optional(Type.String()) }),
     async execute(_id, params) {
       if (!active) throw new Error("Select a theorem with /arena first");
-      return reply(await withProofFile(params.proof, file => {
+      return reply(trimProfile(await withProofFile(params.proof, file => {
         const args: string[] = [];
         if (file) args.push("--proof-file", file);
         if (params.candidate) args.push("--candidate", params.candidate);
         return campaign("profile", args);
-      }));
+      })));
     },
   });
 
@@ -945,7 +950,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
 
   registerTool({
     name: "arena_finish", label: "Review and finish the Arena run",
-    description: "First call returns one factual review of the best verified result and current idea, with at most one reminder if that idea has no proof attempt. Call again after the decision turn to confirm stop; finishing is final for this run.",
+    description: "Request to stop the run. You may stop only when 10% or less of the spend allowance is left; unspent allowance has no value. Earlier, the call is refused with the routes tried, the per-axis headroom and an instruction to record and probe a structurally new idea; each further confirm needs new proof attempts on a new idea. With 10% or less left, the first call returns one factual review (with at most one reminder if the current idea has no proof attempt) and a second call after the decision turn confirms the stop; finishing is final for this run.",
     parameters: Type.Object({}),
     async execute() {
       if (finishConfirmed) return reply({ ok: true, phase: "confirmed", stop: true });
@@ -954,44 +959,59 @@ export default function arenaExtension(pi: ExtensionAPI) {
       ]);
       if (checks.ok === false) return reply(checks);
       if (portfolio.ok === false) return reply(portfolio);
-      if (!finishReviewIssued) {
+      const limits = budgetLimits();
+      const spent = costState().spent;
+      const room = finishAllowed(spent, limits);
+      const idea = portfolio.current_idea ?? null;
+      const bestVerified = answer.candidate ? { candidate: answer.candidate, tokens: answer.tokens,
+        heartbeats: answer.heartbeats, proxy: answer.proxy, status: "cold verified" } : checks.best;
+      // Facts the stop decision depends on: how much of the allowance is left and which routes were tried.
+      const budget = { spent_usd: Number(spent.toFixed(4)), cap_usd: limits.stopUsd,
+        remaining_usd: Number(room.remainingUsd.toFixed(4)), used_pct: Math.round(100 * spent / limits.stopUsd) };
+      const ideaRows: any[] = portfolio.ideas ?? [];
+      const ideas = { total: ideaRows.length,
+        ...Object.fromEntries(["active", "parked", "succeeded", "abandoned"].map(status =>
+          [status, ideaRows.filter(row => row.status === status).length])),
+        without_attempts: ideaRows.filter(row => !row.attempts).length };
+      const firstReview = !finishReviewIssued;
+      let reminder = false;
+      if (firstReview) {
         finishReviewIssued = true;
         finishReviewTurn = true;
-        const idea = portfolio.current_idea ?? null;
-        const reminder = Boolean(idea && idea.attempts === 0 && !finishReminderIssued);
+        reminder = Boolean(idea && idea.attempts === 0 && !finishReminderIssued);
         if (reminder) finishReminderIssued = true;
         appendCost({ kind: "finish", phase: "review", current_idea_id: idea?.id ?? null,
-          reminder_issued: reminder });
+          reminder_issued: reminder, remaining_fraction: Number(room.remainingFraction.toFixed(4)) });
         if (reminder) appendCost({ kind: "finish", phase: "reminder", current_idea_id: idea.id });
-        const bestVerified = answer.candidate ? { candidate: answer.candidate, tokens: answer.tokens,
-          heartbeats: answer.heartbeats, proxy: answer.proxy, status: "cold verified" } : checks.best;
-        // Facts the stop decision depends on: how much of the allowance is left and which routes were tried.
-        const limits = budgetLimits();
-        const spent = costState().spent;
-        const remaining = softCapGate(spent, limits).remainingUsd;
-        const budget = { spent_usd: Number(spent.toFixed(4)), cap_usd: limits.stopUsd,
-          remaining_usd: Number(remaining.toFixed(4)), used_pct: Math.round(100 * spent / limits.stopUsd) };
-        const ideaRows: any[] = portfolio.ideas ?? [];
-        const ideas = { total: ideaRows.length,
-          ...Object.fromEntries(["active", "parked", "succeeded", "abandoned"].map(status =>
-            [status, ideaRows.filter(row => row.status === status).length])),
-          without_attempts: ideaRows.filter(row => !row.attempts).length };
+      }
+      const reminderText = reminder ? `Idea ${idea.id} has no linked proof attempt; probe it or abandon it before finishing.` : null;
+      if (!room.allowed) {
+        // More than 10% of the allowance is left: refuse and push for a structurally new route.
+        const newIdeaProbed = ideaRows.some(row => row.attempts > 0 && !refusalIdeaIds.has(String(row.id)));
+        const push = finishPush({ usedPct: budget.used_pct, remainingUsd: room.remainingUsd, capUsd: limits.stopUsd,
+          baseline: checks.baseline, best: bestVerified, top: portfolio.top, ideas: ideaRows,
+          refusals: finishRefusals, newIdeaProbed });
+        finishRefusals += 1;
+        refusalIdeaIds = new Set(ideaRows.map(row => String(row.id)));
+        appendCost({ kind: "finish", phase: "refused", refusals: finishRefusals, idea_ids: [...refusalIdeaIds],
+          new_idea_probed: newIdeaProbed, remaining_fraction: Number(room.remainingFraction.toFixed(4)) });
+        return reply({ ok: true, phase: firstReview ? "review" : "refused", stop: false, refused: true,
+          best_verified: bestVerified, baseline: checks.baseline, current_idea: idea, budget, ideas,
+          routes_tried: push.tried, headroom: push.headroom, reminder: reminderText, next: push.message });
+      }
+      if (firstReview) {
         return reply({ ok: true, phase: "review", best_verified: bestVerified,
-          baseline: checks.baseline, current_idea: idea, budget, ideas,
-          reminder: reminder ? `Idea ${idea.id} has no linked proof attempt; probe it or abandon it before finishing.` : null,
-          next: `${budget.used_pct}% of the $${limits.stopUsd} allowance is spent ($${budget.remaining_usd} left). ` +
+          baseline: checks.baseline, current_idea: idea, budget, ideas, reminder: reminderText,
+          next: `${budget.used_pct}% of the $${limits.stopUsd} allowance is spent ($${budget.remaining_usd} left, within the final 10%). ` +
             "Use this decision turn to try another route if one is worth it, then call arena_finish again to confirm stop." });
       }
       finishConfirmed = true;
       appendCost({ kind: "finish", phase: "confirmed" });
-      const budget = costState();
       const stop = gateStopReason ? gateStopCode ?? "estimated_request_unaffordable"
-        : softCapGate(budget.spent, budgetLimits()).stop ?? "finished";
+        : softCapGate(costState().spent, budgetLimits()).stop ?? "finished";
       appendCost({ kind: "control", continuations, plateau, no_work_turns: noWorkTurns,
         error_streak: errorStreak, progress: previousProgress, stop,
         ...(gateStopReason ? { gate_stop_reason: gateStopReason } : {}) });
-      const bestVerified = answer.candidate ? { candidate: answer.candidate, tokens: answer.tokens,
-        heartbeats: answer.heartbeats, proxy: answer.proxy, status: "cold verified" } : checks.best;
       return reply({ ok: true, phase: "confirmed", stop: true, best_verified: bestVerified,
         baseline: checks.baseline });
     },
@@ -1105,7 +1125,8 @@ export default function arenaExtension(pi: ExtensionAPI) {
       : errorStreak >= MAX_ERROR_STREAK ? "error_loop"
       : continuations >= 12 ? "continuation_limit"
       : noWorkTurns >= 2 ? "no_work_fallback"
-      : continuations >= 4 && plateau >= 4 ? "plateau" : null;
+      // A plateau only ends the run inside the final 10%; earlier the model must try a new route.
+      : continuations >= 4 && plateau >= 4 && finishAllowed(budget.spent, limits).allowed ? "plateau" : null;
     turnHadProofAttempt = false;
     turnHadNovelContext = false;
     turnHadVerifiedImprovement = false;
@@ -1132,7 +1153,10 @@ export default function arenaExtension(pi: ExtensionAPI) {
       .map((idea: any) => `${idea.id} ${idea.title}`);
     const current = readState();
     const status = current ? stateLine(current, true) : `[arena] best verified: ${briefText(state.best)}`;
-    const content = `Continue proof optimization. ${status}. Active ideas: ${ideas.length ? ideas.join("; ") : "none recorded"}. Remaining on the $${limits.stopUsd} cap (actual settled spend): $${softCapGate(budget.spent, limits).remainingUsd.toFixed(4)}.`;
+    const room = finishAllowed(budget.spent, limits);
+    const content = !room.allowed
+      ? continuationPush({ status, ideas, remainingUsd: room.remainingUsd, capUsd: limits.stopUsd })
+      : `Continue proof optimization. ${status}. Active ideas: ${ideas.length ? ideas.join("; ") : "none recorded"}. Remaining on the $${limits.stopUsd} cap (actual settled spend): $${softCapGate(budget.spent, limits).remainingUsd.toFixed(4)}.`;
     return { entries: [...event.entries, { type: "custom_message" as const, customType: "arena-continuation",
       content, display: false }], continue: true };
   });

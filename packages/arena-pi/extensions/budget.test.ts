@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assessFinalPayload, boundedPayload, budgetGate, softCapGate, catalogPriceProblem, cacheAlarm, budgetLimits, cacheUtilization, requestShape, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
+import { assessFinalPayload, boundedPayload, budgetGate, softCapGate, catalogPriceProblem, cacheAlarm, budgetLimits, cacheUtilization, finishAllowed, FINISH_ALLOWED_REMAINING_FRACTION, maxRequestOutputTokens, requestShape, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
 
 const usage = { input: 1_000_000, output: 100_000, cacheRead: 0, cacheWrite: 0 };
 
@@ -171,4 +171,40 @@ test("refuses a ledger price that differs from Pi's catalog", () => {
   const problem = catalogPriceProblem("deepseek-v4.1-flash", { input: 0.30, output: 1.20, cacheRead: 0.006, cacheWrite: 0 });
   assert.match(problem ?? "", /input 0.3 != 0.15/);
   assert.match(catalogPriceProblem("qwen3.8-flash", undefined) ?? "", /qwen3.8-flash/);
+});
+
+test("cache hit rate is cache_read over all prompt tokens and savings compare with uncached billing", () => {
+  // DeepSeek: cache write is always 0, so the old read/(read+write) would read 100%.
+  const entries = [{ type: "message", message: { role: "assistant", provider: "opencode-go", model: "deepseek-v4.1-flash",
+    usage: { input: 2100, output: 10, cacheRead: 7900, cacheWrite: 0, totalTokens: 10010 } } }];
+  const { all } = cacheUtilization(entries as never, "deepseek-v4.1-flash");
+  assert.equal(all.reuse_pct, 79);
+  assert.equal(all.input_tokens, 2100);
+  // actual: 2100*0.15 + 7900*0.003 = 338.7 ; uncached: 10000*0.15 = 1500
+  assert.ok(Math.abs(all.savings_pct! - 100 * (1 - 338.7 / 1500)) < 1e-9);
+  assert.equal(cacheUtilization([] as never, "gpt-6-luna").all.reuse_pct, null);
+});
+
+test("DeepSeek gets a 32K output limit from the start; Luna and Qwen stay at 16K", () => {
+  assert.equal(maxRequestOutputTokens("deepseek-v4.1-flash"), 32_000);
+  assert.equal(maxRequestOutputTokens("gpt-6-luna"), 16_000);
+  assert.equal(maxRequestOutputTokens("qwen3.8-flash"), 16_000);
+  const ds = boundedPayload({ messages: [], max_tokens: 384_000 }, "deepseek-v4.1-flash");
+  assert.equal(ds.payload.max_tokens, 32_000);
+  assert.ok(ds.reserve < 0.1);
+  const again = boundedPayload({ messages: [], max_tokens: 384_000 }, "deepseek-v4.1-flash");
+  assert.equal(requestShape(again.payload), requestShape(ds.payload));
+  const thinking = boundedPayload({ messages: [], max_tokens: 64_000,
+    thinking: { type: "enabled", budget_tokens: 40_000 } }, "deepseek-v4.1-flash").payload as any;
+  assert.equal(thinking.thinking.budget_tokens, 32_000 - 1024);
+});
+
+test("the model may finish only with at most 10% of the soft cap left", () => {
+  const limits = budgetLimits({ ARENA_HARD_CAP_USD: "0.1" });
+  assert.equal(FINISH_ALLOWED_REMAINING_FRACTION, 0.1);
+  assert.equal(finishAllowed(0.0, limits).allowed, false);
+  assert.equal(finishAllowed(0.089, limits).allowed, false);
+  assert.equal(finishAllowed(0.09, limits).allowed, true);
+  assert.equal(finishAllowed(0.095, limits).allowed, true);
+  assert.equal(finishAllowed(0.2, limits).allowed, true);
 });

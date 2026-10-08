@@ -151,6 +151,8 @@ def cheap_tool(name: str, arguments: dict, **usage) -> dict:
             "usage": {"input": 300, "output": 40, "cacheRead": 4000, "cacheWrite": 100, **usage}}
 
 
+# One scripted Luna response whose 180K output tokens ($0.50/M) spend 90% of the $0.1 test cap.
+SPEND_90_PCT = 180_000
 SOURCE = {"handle": "Strata/Languages/Core/StatementSemanticsProps.lean", "first": 950, "last": 960}
 
 
@@ -401,6 +403,8 @@ class LeanMcpTests(unittest.TestCase):
         self.assertIn("UpdateStates", message_text(results["mcp__arena_lean__lean_hover_info"]))
         settings = json.loads((run_dir(run.run_id) / "scratch" / "project" / ".pi" / "settings.json").read_text())
         self.assertIs(settings["autoEnableCodemode"], False)
+        self.assertEqual(settings["httpIdleTimeoutMs"], 120_000)
+        self.assertEqual(settings["retry"]["provider"]["timeoutMs"], 120_000)
 
 
 @slow
@@ -575,15 +579,54 @@ class ErrorLoopAndContinuationTests(unittest.TestCase):
             cheap_tool("arena_evaluate", {"proof": good, "idea_id": "i1"}),
             {"text": "done for now"}, {"text": "still done"}])
         later = "\n".join(message_text(m) for m in run.requests[-1]["messages"])
-        self.assertIn("Continue proof optimization", later)
+        # More than 10% of the cap is left, so a plain final answer is pushed toward a new route.
+        self.assertIn("Do not stop", later)
+        self.assertIn("structurally new idea", later)
+        self.assertIn("no value", later)
         self.assertIn('"candidate":"#2"', later)
         self.assertIn("i1 Rewrite from scratch", later)
         for advice in ("seed", "scheduled", "Rotate"):
-            self.assertNotIn(advice, later.split("Continue proof optimization")[-1])
+            self.assertNotIn(advice, later.split("Do not stop")[-1])
+
+    def test_continuation_inside_the_final_ten_percent_is_the_plain_prompt(self):
+        run = self.fake([cheap_tool("arena_state", {}, output=SPEND_90_PCT), {"text": "done"}, {"text": "still done"}],
+                        env={"ARENA_AUTOCONTINUE": "1"})
+        later = "\n".join(message_text(m) for m in run.requests[-1]["messages"])
+        self.assertIn("Continue proof optimization", later)
+        self.assertNotIn("Do not stop", later)
+
+    def test_finish_is_refused_while_more_than_ten_percent_remains_and_pushes_a_new_route(self):
+        from arena.campaign import problem
+        statement = problem(NAME)["statement"]
+        run = self.fake([
+            cheap_tool("arena_idea", {"title": "Induction route"}),
+            cheap_tool("arena_probe", {"proof": statement + " := by\n  sorry"}),
+            cheap_tool("arena_finish", {}),
+            cheap_tool("arena_finish", {}),
+            {"text": "I am done"}, {"text": "really done"}, {"text": "still done"}, {"text": "must not be requested"},
+        ], env={"ARENA_AUTOCONTINUE": "1"})
+        refusals = [json.loads(row["text"].splitlines()[0]) for row in run.jsonl("trace-journal.jsonl")
+                    if row.get("kind") == "tool_result" and row.get("name") == "arena_finish"]
+        self.assertEqual(len(refusals), 2)
+        first, second = refusals
+        self.assertEqual((first["phase"], first["refused"], first["stop"]), ("review", True, False))
+        self.assertEqual((second["phase"], second["refused"]), ("refused", True))
+        for text in ("Stop refused", "no value", "10% or less", "Induction route", "structurally NEW idea",
+                     "induction versus equational", "different key lemma family", "tokens saved", "heartbeats saved"):
+            self.assertIn(text, first["next"])
+        self.assertIn("without probing any new idea", second["next"])
+        self.assertIn("i1", {row["id"] for row in first["routes_tried"]})
+        self.assertIn("tokens_saved_pct", first["headroom"])
+        phases = [row.get("phase") for row in run.jsonl("cost-ledger.jsonl") if row.get("kind") == "finish"]
+        self.assertEqual((phases.count("refused"), phases.count("confirmed")), (2, 0))
+        # The refusing model still terminates: no new work for two turns ends the run.
+        controls = [row for row in run.jsonl("cost-ledger.jsonl") if row.get("kind") == "control"]
+        self.assertEqual(controls[-1]["stop"], "no_work_fallback")
+        self.assertNotEqual(run.json("summary.json")["stop_reason"], "finished")
 
     def test_state_finish_review_and_confirmation_stop_provider_continuations(self):
         run = self.fake([
-            cheap_tool("arena_state", {}),
+            cheap_tool("arena_state", {}, output=SPEND_90_PCT),  # 10% or less of the $0.1 cap remains
             cheap_tool("arena_finish", {}),
             cheap_tool("arena_finish", {}),
             {"text": "must not be requested"},
@@ -599,6 +642,8 @@ class ErrorLoopAndContinuationTests(unittest.TestCase):
         self.assertEqual(set(facts["budget"]), {"spent_usd", "cap_usd", "remaining_usd", "used_pct"})
         self.assertIn("without_attempts", facts["ideas"])
         self.assertIn("% of the $", facts["next"])
+        self.assertIn("final 10%", facts["next"])
+        self.assertNotIn("refused", facts)
         confirmation = next(row["text"] for row in run.jsonl("trace-journal.jsonl")
                             if row.get("kind") == "tool_result" and row.get("name") == "arena_finish"
                             and '"phase":"confirmed"' in row.get("text", ""))
@@ -691,7 +736,8 @@ class FinishReplayTests(unittest.TestCase):
         for label, theorem, model, first, later, expected in replays:
             with self.subTest(replay=label):
                 run = FakeRun([
-                    cheap_tool("arena_evaluate", {"proof": (self.FIXTURES / first).read_text()}),
+                    cheap_tool("arena_evaluate", {"proof": (self.FIXTURES / first).read_text()},
+                               output=SPEND_90_PCT),
                     cheap_tool("arena_finish", {}),
                     cheap_tool("arena_evaluate", {"proof": (self.FIXTURES / later).read_text()}),
                     cheap_tool("arena_finish", {}),

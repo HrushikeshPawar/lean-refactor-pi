@@ -40,16 +40,20 @@ export const MODELS = {
     highContextThreshold: 272_000,
     contextWindow: 1_050_000,
     maxTokens: 128_000,
+    requestOutputTokens: 16_000,
   },
   "qwen3.8-flash": {
     price: { input: 0.15, output: 0.47, cacheRead: 0.016, cacheWrite: 0.20 },
     contextWindow: 1_000_000,
     maxTokens: 131_072,
+    requestOutputTokens: 16_000,
   },
   "deepseek-v4.1-flash": {
     price: { input: 0.15, output: 0.60, cacheRead: 0.003, cacheWrite: 0 },
     contextWindow: 1_000_000,
     maxTokens: 384_000,
+    // DeepSeek's high thinking effort hit a 16K limit mid-thought in v6 runs (output includes thinking).
+    requestOutputTokens: 32_000,
   },
 } as const;
 
@@ -142,6 +146,15 @@ export function sessionEmbeddedCost(entries: readonly SessionEntry[]): { usd: nu
   return { usd, priced_entries, missing_entries };
 }
 
+// Cache hit rate in the provider-standard sense: cache_read over every prompt token
+// (input + cache_read + cache_write). Savings compare the input-side bill with billing
+// every prompt token at the uncached input rate.
+export function cacheHitPct(usage: { input?: number; cacheRead?: number; cacheWrite?: number }): number | null {
+  const read = usage.cacheRead ?? 0;
+  const prompt = (usage.input ?? 0) + read + (usage.cacheWrite ?? 0);
+  return prompt ? 100 * read / prompt : null;
+}
+
 export function cacheUtilization(entries: readonly SessionEntry[], sessionModel: BudgetModel) {
   const usages = entries.flatMap(entry => entry.type === "message"
     && entry.message.role === "assistant"
@@ -149,10 +162,18 @@ export function cacheUtilization(entries: readonly SessionEntry[], sessionModel:
     && entry.message.model === sessionModel
     && entry.message.usage?.totalTokens ? [entry.message.usage] : []);
   const summarize = (items: typeof usages) => {
-    const read = items.reduce((sum, usage) => sum + (usage.cacheRead ?? 0), 0);
-    const write = items.reduce((sum, usage) => sum + (usage.cacheWrite ?? 0), 0);
-    return { read_tokens: read, write_tokens: write,
-      reuse_pct: read + write ? 100 * read / (read + write) : null };
+    const sum = (key: "input" | "cacheRead" | "cacheWrite") => items.reduce((total, usage) => total + (usage[key] ?? 0), 0);
+    const read = sum("cacheRead"), write = sum("cacheWrite"), input = sum("input");
+    let actual = 0, uncached = 0;
+    for (const usage of items) {
+      const price = priceForUsage(usage, sessionModel);
+      actual += ((usage.input ?? 0) * price.input + (usage.cacheRead ?? 0) * price.cacheRead
+        + (usage.cacheWrite ?? 0) * price.cacheWrite) / 1_000_000;
+      uncached += ((usage.input ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0)) * price.input / 1_000_000;
+    }
+    return { read_tokens: read, write_tokens: write, input_tokens: input,
+      reuse_pct: cacheHitPct({ input, cacheRead: read, cacheWrite: write }),
+      savings_pct: uncached ? 100 * (1 - actual / uncached) : null };
   };
   return { all: summarize(usages), recent_ten: summarize(usages.slice(-10)) };
 }
@@ -166,8 +187,11 @@ export function cacheAlarm(usage: { cacheRead?: number; cacheWrite?: number }, s
 }
 
 // The Responses API uses max_output_tokens; Anthropic Messages uses max_tokens.
-// Both include generated thinking tokens in the output limit.
-export const MAX_REQUEST_OUTPUT_TOKENS = 16_000;
+// Both include generated thinking tokens in the output limit. The limit is fixed per model
+// for the whole run (the request shape must not change within a run).
+export function maxRequestOutputTokens(model: BudgetModel): number {
+  return MODELS[model].requestOutputTokens;
+}
 
 export function requestShape(payload: Record<string, unknown>): string {
   const hasThinking = Object.hasOwn(payload, "thinking");
@@ -194,7 +218,7 @@ export function boundedPayload(payload: unknown, model: BudgetModel): { payload:
   if (!outputField || !Number.isFinite(value[outputField]) || Number(value[outputField]) <= 0) {
     throw new Error("Cannot enforce Arena output bound on provider payload");
   }
-  value[outputField] = Math.min(Number(value[outputField]), MAX_REQUEST_OUTPUT_TOKENS);
+  value[outputField] = Math.min(Number(value[outputField]), maxRequestOutputTokens(model));
   // Anthropic Messages requires budget_tokens < max_tokens. Normalize a too-large initial budget
   // once to leave room for an answer; this does not depend on remaining allowance.
   const thinking = value.thinking as { type?: string; budget_tokens?: number } | undefined;
@@ -229,4 +253,15 @@ export function budgetGate(estimateUsd: number, spentUsd: number, unresolvedUsd:
   return { allowed, estimateUsd, remainingUsd,
     overshootUsd: Math.max(0, estimateUsd - remainingUsd),
     reason: allowed ? "estimate fits remaining allowance" : "estimated request exceeds remaining allowance" };
+}
+
+// The model may stop on its own only when at most this fraction of the soft cap is left.
+// Unspent allowance has no value; safety stops (soft cap, $3 estimate gate, error loop,
+// continuation limit, no-work fallback) are independent of this rule.
+export const FINISH_ALLOWED_REMAINING_FRACTION = 0.10;
+
+export function finishAllowed(settledUsd: number, limits: BudgetLimits) {
+  const remainingUsd = softCapGate(settledUsd, limits).remainingUsd;
+  const remainingFraction = limits.stopUsd > 0 ? remainingUsd / limits.stopUsd : 0;
+  return { allowed: remainingFraction <= FINISH_ALLOWED_REMAINING_FRACTION + 1e-12, remainingUsd, remainingFraction };
 }

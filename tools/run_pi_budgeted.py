@@ -34,6 +34,7 @@ MODEL_WINDOWS = {"gpt-6-luna": 1_050_000, "qwen3.8-flash": 1_000_000, "deepseek-
 # After Pi exits, pending background full checks get this long before the submission is chosen.
 DRAIN_S = 300
 # How long Pi gets to finish an in-flight evaluation and write cost.json after a stop request.
+PROVIDER_TIMEOUT_MS = 120_000
 STOP_GRACE_S = 45
 THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
 _tool_started: dict[str, tuple[float, dict]] = {}
@@ -336,7 +337,11 @@ def run() -> int:
         "reserveTokens": max(0, MODEL_WINDOWS[args.model] - args.compact_at_tokens)},
         # The model gets only declared tools; Pi's codemode sandbox could call any tool and
         # non-LLM models outside the Arena budget guard.
-        "autoEnableCodemode": False}, indent=2) + "\n")
+        "autoEnableCodemode": False,
+        # Pi's default HTTP idle timeout is 300 s (v6c2 DeepSeek lost a request to it); a silent
+        # request is cut after PROVIDER_TIMEOUT_MS instead. Provider-level retries stay off.
+        "httpIdleTimeoutMs": PROVIDER_TIMEOUT_MS,
+        "retry": {"provider": {"timeoutMs": PROVIDER_TIMEOUT_MS, "maxRetries": 0}}}, indent=2) + "\n")
     event_log = directory / "events.jsonl"
     event_offset = event_log.stat().st_size if event_log.exists() else 0
     state: dict = {"process": None, "signal": None, "timer": None}
@@ -453,7 +458,9 @@ def finish(args, directory: Path, event_log: Path, event_offset: int, exit_code:
         print(f"Pricing drift: ledger ${report['spent_usd']:.6f} vs Pi's estimate ${embedded['usd']:.6f}; check the price table in budget.ts", file=sys.stderr, flush=True)
     cache = report.get("cache_utilization", {})
     if cache.get("all", {}).get("reuse_pct") is not None:
-        print(f"Cache reuse: all={cache['all']['reuse_pct']:.1f}% recent-10={cache['recent_ten']['reuse_pct']:.1f}%", flush=True)
+        saved = cache["all"].get("savings_pct")
+        print(f"Cache hit rate: all={cache['all']['reuse_pct']:.1f}% recent-10={cache['recent_ten']['reuse_pct']:.1f}%"
+              + (f", input-side cost savings {saved:.1f}%" if saved is not None else ""), flush=True)
     if report["spent_usd"] > args.hard_cap_usd:
         print(f"Observed usage overshot the ${args.hard_cap_usd:g} cap by ${report['spent_usd'] - args.hard_cap_usd:.6f} on the final in-flight request", file=sys.stderr)
     if attempt_has_model_error(event_log, event_offset):

@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { leanPathViolation, planEvaluate, planProbe, resolveInlineIdea } from "./rules.ts";
+import { axisHeadroom, continuationPush, finishPush, leanPathViolation, trimProfile, planEvaluate, planProbe, resolveInlineIdea } from "./rules.ts";
 
 test("a proof wins over candidate or probe, which becomes the default parent", () => {
   assert.deepEqual(planEvaluate({ proof: "theorem t", candidate: "#2" }),
@@ -55,4 +55,49 @@ test("probe keeps a real proof when drafts hold only placeholders, and batches r
   assert.equal(planProbe({ proof: "a", drafts: ["b", "c", "d", "e"] }).ok, false);
   assert.deepEqual(planProbe({ drafts: ["by rfl"] }), { ok: true, drafts: ["by rfl"] });
   assert.equal(planProbe({}).ok, false);
+});
+
+const base = { usedPct: 40, remainingUsd: 0.06, capUsd: 0.1,
+  baseline: { tokens: 224, heartbeats: 4251 }, best: { candidate: "#6", tokens: 188, heartbeats: 339, proxy: 69.37 },
+  top: [{ candidate: "#5", tokens: 190, heartbeats: 400 }],
+  ideas: [{ id: "i1", title: "induction", status: "succeeded", attempts: 5, best: { proxy: 67.2 } },
+          { id: "i2", title: "token-golf", status: "active", attempts: 1, best: null }],
+  refusals: 0, newIdeaProbed: false };
+
+test("headroom reports the per-axis saving against the original", () => {
+  const headroom = axisHeadroom(base.baseline, base.best, base.top);
+  assert.equal(headroom.tokens_saved_pct, 16);
+  assert.equal(headroom.heartbeats_saved_pct, 92);
+  assert.equal(headroom.tokens_vs_lowest_seen, 188);
+});
+
+test("a refused finish lists routes tried, headroom and demands a structurally new idea", () => {
+  const push = finishPush(base);
+  for (const text of ["60% of the $0.1 allowance", "no value", "10% or less", "i1", "5 attempts", "best proxy 67.2",
+    "tokens saved 16%", "heartbeats saved 92%", "structurally NEW idea", "induction versus equational",
+    "different key lemma family", "before calling arena_finish again"]) {
+    assert.ok(push.message.includes(text), `missing: ${text}`);
+  }
+  assert.ok(!push.message.includes("without probing any new idea"));
+  assert.ok(finishPush({ ...base, refusals: 1, newIdeaProbed: false }).message.includes("without probing any new idea"));
+  assert.ok(!finishPush({ ...base, refusals: 1, newIdeaProbed: true }).message.includes("without probing any new idea"));
+});
+
+test("the plain-answer continuation pushes a new structural route", () => {
+  const text = continuationPush({ status: "[arena] best verified: #6", ideas: ["i2 token-golf"], remainingUsd: 0.06, capUsd: 0.1 });
+  for (const part of ["Do not stop", "no value", "structurally new idea", "arena_idea", "i2 token-golf"]) assert.ok(text.includes(part), part);
+});
+
+test("the model-facing profile keeps the top twelve entries and lines plus totals", () => {
+  const entries = Array.from({ length: 30 }, (_, i) => ({ lines: String(i), hb: i }));
+  const lines = Array.from({ length: 30 }, (_, i) => ({ proof_line: i + 1, self_hb: (i * 7) % 30 }));
+  const trimmed = trimProfile({ ok: true, profiled_total: 99, entries, omitted_entries: 2, line_profile: lines });
+  assert.equal(trimmed.entries.length, 12);
+  assert.equal(trimmed.line_profile.length, 12);
+  assert.equal(trimmed.profiled_total, 99);
+  assert.equal(trimmed.omitted_entries, 20);
+  assert.ok(Math.min(...trimmed.entries.map((e: any) => e.hb)) >= 18);
+  assert.ok(trimmed.trimmed_for_model);
+  const small = { ok: true, entries: entries.slice(0, 3), line_profile: [] };
+  assert.deepEqual(trimProfile(small), { ...small, omitted_entries: 0 });
 });
