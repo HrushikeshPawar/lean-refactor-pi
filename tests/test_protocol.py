@@ -144,6 +144,11 @@ class CampaignCliTests(unittest.TestCase):
         complete = statement + " := by\n  trivial"
         self.assertEqual(campaign.normalize_draft(NAME, complete), complete)
         self.assertEqual(campaign.normalize_draft(NAME, "\n" + complete), complete)
+        self.assertEqual(campaign.normalize_draft(NAME, "simp\nomega"), statement + " := by\n  simp\n  omega")
+        self.assertEqual(campaign.normalize_draft(NAME, "  intro h\n  exact h\n"),
+                         statement + " := by\n  intro h\n  exact h")
+        with self.assertRaises(ValueError):
+            campaign.normalize_draft(NAME, "  \n")
 
     def test_probe_batch_keeps_the_initial_parent_for_every_draft(self):
         candidate_id = "a" * 64

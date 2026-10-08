@@ -1503,7 +1503,11 @@ def normalize_draft(name: str, draft: str) -> str:
         return statement + " " + body
     if re.match(r"by\b", body):
         return statement + " := " + body
-    raise ValueError("Draft must be a complete theorem or a proof body beginning with `by` or `:=`")
+    # Anything else is a bare tactic block.
+    block = draft.strip("\n").rstrip()
+    if not block[:1].isspace():
+        block = "\n".join("  " + line if line.strip() else line for line in block.splitlines())
+    return statement + " := by\n" + block
 
 
 def probe_batch(name: str, run_id: str, drafts: list[str], idea_id: str | None = None,
