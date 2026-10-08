@@ -173,3 +173,18 @@ class ExecuteAndReportTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StdlibSourceTest(unittest.TestCase):
+    def test_reads_lean_library_alias_from_toolchain(self):
+        from arena import campaign as c
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / ".elan/toolchains/leanprover--lean4---v4.29.1/src/lean/Init/Data/X.lean"
+            target.parent.mkdir(parents=True)
+            target.write_text("theorem x : True := trivial\n")
+            with mock.patch.object(Path, "home", return_value=Path(tmp)):
+                self.assertIn("theorem x", c._stdlib_source("v4.29.1", ".lean-stdlib/lean/Init/Data/X.lean"))
+                with self.assertRaises(ValueError):
+                    c._stdlib_source("v4.29.1", ".lean-stdlib/lean/../secret.lean")
+                with self.assertRaises(ValueError):
+                    c._stdlib_source("v4.29.1", ".lean-stdlib/lean/Init/Missing.lean")

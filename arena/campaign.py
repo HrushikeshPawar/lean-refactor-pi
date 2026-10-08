@@ -273,9 +273,14 @@ def _source_range(name: str, path: str, first: int | None, last: int | None) -> 
         path, suffix_first, suffix_last = _split_source_handle(path, commit)
         first = suffix_first if first is None else first
         last = suffix_last if last is None else last
-        project, commit, path = _source_target(project, commit, _canonical_source_path(row, path))
+        if path.startswith(STDLIB_ALIAS):
+            # lean_local_search reports Lean's own library under this alias; it is not a Git root.
+            lines, commit = _stdlib_source(version, path).splitlines(), f"lean4-{version}"
+        else:
+            project, commit, path = _source_target(project, commit, _canonical_source_path(row, path))
     try:
-        lines = _git_source(project, commit, path).splitlines()
+        if not path.startswith(STDLIB_ALIAS):
+            lines = _git_source(project, commit, path).splitlines()
     except subprocess.CalledProcessError:
         raise ValueError(f"{path} does not exist in the pinned project at {commit[:8]}") from None
     first = 1 if first is None else first
@@ -458,6 +463,20 @@ def _split_source_handle(path: str, pin: str) -> tuple[str, int | None, int | No
             raise ValueError(f"Source handle commit {printed.group(1)[:12]} is not the pinned commit {pin[:8]}")
         path = path[printed.end():]
     return path, first, last
+
+
+STDLIB_ALIAS = ".lean-stdlib/lean/"
+
+
+def _stdlib_source(version: str, path: str) -> str:
+    """Lean's own library source from the measured toolchain, which elan installs read-only per version."""
+    relative = Path(path[len(STDLIB_ALIAS):])
+    if relative.is_absolute() or ".." in relative.parts or relative.suffix != ".lean":
+        raise ValueError("Only relative .lean paths inside Lean's library are allowed")
+    target = Path.home() / ".elan" / "toolchains" / f"leanprover--lean4---{version}" / "src" / "lean" / relative
+    if not target.is_file():
+        raise ValueError(f"{path} does not exist in Lean {version}'s library")
+    return target.read_text()
 
 
 def _canonical_source_path(row: dict, path: str) -> str:
