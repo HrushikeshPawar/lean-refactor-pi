@@ -10,6 +10,7 @@ import type { AssistantMessageEventStream } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { BudgetModel } from "./budget.ts";
 import { nearestToolName, normalizeToolArguments } from "./toolnames.ts";
+import { planEvaluate } from "./rules.ts";
 import { assessFinalPayload, BUDGET_PROVIDER, budgetLimits, softCapGate, cacheAlarm, catalogPriceProblem, cacheUtilization, isBudgetModel, MAX_REQUEST_OUTPUT_TOKENS, MODELS, priceForUsage, requestShape, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
 
 const root = resolve(import.meta.dirname, "../../..");
@@ -785,7 +786,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
   registerTool({
     name: "arena_evaluate",
     label: "Arena evaluate",
-    description: "Score a complete theorem (statement + proof) on the primary toolchain. Give `proof`, or an existing node with `candidate` (\"#N\"), or a probe with `from_probe` (\"pN\"). If it compiles, the harness checks the other toolchains in the background and reports the outcome in a later tool result; you never need to request it. `parents`, `idea_id` and `hypothesis` are optional labels; the current candidate is the default parent. Returns tokens, heartbeats, per-axis contribution, estimated proxy, deltas, and diagnostics whose file_line matches the candidate file lean_goal reads.",
+    description: "Score a complete theorem (statement + proof) on the primary toolchain. Give `proof`, or an existing node with `candidate` (\"#N\"), or a probe with `from_probe` (\"pN\"). If it compiles, the harness checks the other toolchains in the background and reports the outcome in a later tool result; you never need to request it. `parents`, `idea_id` and `hypothesis` are optional labels; the current candidate is the default parent. If `proof` comes with `candidate`, the proof is scored and that candidate becomes its parent. Returns tokens, heartbeats, per-axis contribution, estimated proxy, deltas, and diagnostics whose file_line matches the candidate file lean_goal reads.",
     parameters: Type.Object({
       proof: Type.Optional(Type.String({ description: "Complete theorem statement and replacement proof" })),
       candidate: Type.Optional(Type.String({ description: "Existing node such as #4" })),
@@ -796,23 +797,20 @@ export default function arenaExtension(pi: ExtensionAPI) {
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       if (!active) throw new Error("Select a theorem with /arena first");
-      const references = [Boolean(params.proof?.trim()), Boolean(params.candidate), Boolean(params.from_probe)];
-      if (references.filter(Boolean).length !== 1) {
-        return reply({ ok: false, error: "usage_error",
-          detail: "Pass exactly one of complete proof text, candidate (#N), or from_probe (pN)." });
-      }
-      const result = await withProofFile(params.proof, file => {
+      const plan = planEvaluate(params);
+      if (!plan.ok) return reply({ ok: false, error: "usage_error", detail: plan.detail });
+      const result = await withProofFile(plan.proof, file => {
         const args = ["--mode", "fast"];
         if (file) args.push("--proof-file", file);
-        if (params.candidate) args.push("--candidate", params.candidate);
-        if (params.from_probe) args.push("--from-probe", params.from_probe);
-        for (const parent of params.parents ?? []) args.push("--parent", parent);
+        if (plan.candidate) args.push("--candidate", plan.candidate);
+        if (plan.fromProbe) args.push("--from-probe", plan.fromProbe);
+        for (const parent of plan.parents) args.push("--parent", parent);
         if (params.hypothesis) args.push("--hypothesis", params.hypothesis);
         if (params.idea_id) args.push("--idea-id", params.idea_id);
         return campaign("evaluate", args);
       });
       kickAutocheck();
-      return reply({ ...result, remaining_usd: Number(budgetStatus(ctx)?.remaining_usd?.toFixed(4)) });
+      return reply({ ...result, ...(plan.note ? { note: plan.note } : {}), remaining_usd: Number(budgetStatus(ctx)?.remaining_usd?.toFixed(4)) });
     },
   });
 
