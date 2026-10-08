@@ -77,9 +77,9 @@ class LifecycleTests(unittest.TestCase):
         good = (ROOT / "runs/baseline/Core_InitsUpdatesComm/arena-candidate-126.txt").read_text()
         run = self.fake([
             cheap_tool("arena_evaluate", {"proof": good}, input=100, output=10),
-            {"text": "near-cap response", "usage": {"input": 490_000, "output": 10}},
+            {"text": "near-cap response", "usage": {"input": 100, "output": 5_800_000}},
             {"text": "this response must not be requested"},
-        ]).run()
+        ], cap="3", env={"ARENA_FAKE_PAD_INPUT": "600000"}).run()
         requests = run.requests
         gates = [row for row in run.jsonl("cost-ledger.jsonl") if row.get("kind") == "gate"]
         self.assertGreaterEqual(len(gates), 2, run.result.stderr)
@@ -94,16 +94,41 @@ class LifecycleTests(unittest.TestCase):
         submission = run.json("submission.json")
         self.assertEqual(submission["candidate"], "#2", "refusal must preserve the best verified candidate")
 
-    def test_first_unaffordable_request_is_refused_before_transport(self):
-        run = self.fake([{"text": "must not reach provider"}], cap="0.1",
-                        env={"ARENA_FAKE_PAD_INPUT": "600000"}).run()
+    def test_cap_below_three_is_a_soft_cap_on_actual_spend_and_ignores_the_estimate(self):
+        # The padded payload's worst-case reserve exceeds the $0.10 cap, yet requests are sent
+        # while actual spend is low; the run stops only once settled spend reaches the cap.
+        run = self.fake([
+            cheap_tool("arena_state", {}),
+            cheap_tool("arena_state", {}),
+            {"text": "costly response", "usage": {"input": 100, "output": 250_000}},
+            {"text": "must not be requested after the soft cap"},
+        ], cap="0.1", env={"ARENA_FAKE_PAD_INPUT": "600000"}).run()
         gates = [row for row in run.jsonl("cost-ledger.jsonl") if row.get("kind") == "gate"]
-        self.assertEqual(len(run.requests), 0)
         self.assertTrue(gates, run.result.stderr + run.result.stdout[-2000:])
-        self.assertEqual(gates[0]["decision"], "refuse")
+        self.assertTrue(all(row["decision"] == "allow" for row in gates), gates)
+        self.assertGreater(min(row["estimate_usd"] for row in gates), 0.1)
+        self.assertEqual(len(run.requests), 3)
+        summary = run.json("summary.json")
+        self.assertEqual(summary["stop_reason"], "soft_cap_reached")
+        cost = summary["cost"]
+        self.assertEqual((cost["hard_cap_usd"], cost["soft_cap_usd"]), (3, 0.1))
+        self.assertGreater(cost["overshoot_usd"], 0)
+        self.assertEqual(cost["remaining_usd"], 0)
+        settles = [row for row in run.jsonl("cost-ledger.jsonl") if row.get("kind") == "settle"]
+        self.assertEqual(settles[0]["soft_overshoot_usd"], 0)
+        self.assertGreater(settles[0]["soft_remaining_usd"], 0)
+        self.assertGreater(settles[-1]["soft_overshoot_usd"], 0)
+        self.assertIn("soft cap (hard $3;", (run.directory / "summary.txt").read_text())
+
+    def test_estimate_gate_applies_only_against_the_three_dollar_hard_cap(self):
+        run = self.fake([
+            {"text": "nearly the hard cap", "usage": {"input": 100, "output": 5_800_000}},
+            {"text": "must not reach provider"},
+        ], cap="3", env={"ARENA_FAKE_PAD_INPUT": "600000"}).run()
+        gates = [row for row in run.jsonl("cost-ledger.jsonl") if row.get("kind") == "gate"]
+        self.assertEqual(len(run.requests), 1)
+        self.assertEqual([row["decision"] for row in gates], ["allow", "refuse"], run.result.stderr)
         self.assertEqual(run.json("summary.json")["stop_reason"], "estimated_request_unaffordable")
-        self.assertEqual(run.json("submission.json"), {
-            "ok": True, "candidate": None, "reason": "no model candidate passed every version; the original proof stands"})
 
     def test_sigterm_mid_request_still_leaves_cost_json_and_summary(self):
         import signal

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assessFinalPayload, boundedPayload, budgetGate, catalogPriceProblem, cacheAlarm, budgetLimits, cacheUtilization, requestShape, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
+import { assessFinalPayload, boundedPayload, budgetGate, softCapGate, catalogPriceProblem, cacheAlarm, budgetLimits, cacheUtilization, requestShape, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
 
 const usage = { input: 1_000_000, output: 100_000, cacheRead: 0, cacheWrite: 0 };
 
@@ -52,9 +52,8 @@ test("reports measured cache reuse, including a recent window", () => {
 });
 
 test("fails closed on unpriced models or invalid usage", () => {
-  assert.equal(budgetLimits({ ARENA_HARD_CAP_USD: "1" }).stopUsd, 1);
+  assert.deepEqual(budgetLimits({ ARENA_HARD_CAP_USD: "1" }), { hardCapUsd: 3, stopUsd: 1 });
   assert.throws(() => budgetLimits({ ARENA_HARD_CAP_USD: "3.01" }));
-  assert.throws(() => budgetLimits({ ARENA_HARD_CAP_USD: "1", ARENA_STOP_USD: "0.85" }));
   assert.throws(() => sessionSpend([{ type: "message", message: { role: "assistant",
     provider: "other", model: "gpt-6-luna", usage } }] as never, "gpt-6-luna"));
   assert.throws(() => usageCost({ ...usage, output: Number.NaN }, "gpt-6-luna"));
@@ -112,20 +111,36 @@ test("large serialized text fits the model when its byte token upper bound fits"
   assert.ok(boundedPayload(payload, "gpt-6-luna").reserve > 0);
 });
 
-test("final transport guard compares the conservative request estimate to aggregate allowance", () => {
+test("the worst-case estimate is gated against the $3 hard cap only, whatever the configured cap", () => {
   const payload = { max_output_tokens: 16000, input: "proof" };
-  for (const hardCap of [0.1, 1, 3]) {
-    const limits = budgetLimits({ ARENA_HARD_CAP_USD: String(hardCap) });
+  for (const configured of [0.1, 1, 3]) {
+    const limits = budgetLimits({ ARENA_HARD_CAP_USD: String(configured) });
+    assert.equal(limits.hardCapUsd, 3);
     const estimate = assessFinalPayload(payload, "gpt-6-luna", { spent: 0, unresolved: 0 }, limits).estimateUsd;
     assert.equal(assessFinalPayload(payload, "gpt-6-luna",
-      { spent: hardCap - estimate - 1e-10, unresolved: 0 }, limits).allowed, true);
+      { spent: 3 - estimate - 1e-10, unresolved: 0 }, limits).allowed, true);
     assert.equal(assessFinalPayload(payload, "gpt-6-luna",
-      { spent: hardCap - estimate / 2, unresolved: 0 }, limits).allowed, false);
+      { spent: 3 - estimate / 2, unresolved: 0 }, limits).allowed, false);
   }
 });
 
+test("a cap below $3 is a soft cap on actual settled spend and ignores the estimate", () => {
+  const limits = budgetLimits({ ARENA_HARD_CAP_USD: "0.10" });
+  // spent 0.03 with a 0.08 reserve: the estimate alone would exceed 0.10, but only $3 gates it.
+  assert.equal(budgetGate(0.08, 0.03, 0, limits).allowed, true);
+  assert.equal(softCapGate(0.03, limits).allowed, true);
+  assert.ok(Math.abs(softCapGate(0.03, limits).remainingUsd - 0.07) < 1e-12);
+  const reached = softCapGate(0.10, limits);
+  assert.equal(reached.allowed, false);
+  assert.equal(reached.stop, "soft_cap_reached");
+  assert.equal(softCapGate(0.12, limits).overshootUsd > 0.0199, true);
+  // At the $3 cap soft equals hard and keeps the historical stop name.
+  assert.equal(softCapGate(3, budgetLimits({})).stop, "actual_usage_cap");
+  assert.equal(softCapGate(2.99, budgetLimits({})).stop, null);
+});
+
 test("gate includes outstanding reservations and never reshapes a request to fit", () => {
-  const limits = { hardCapUsd: 0.1, stopUsd: 0.1 };
+  const limits = { hardCapUsd: 0.1, stopUsd: 0.1 };  // the gate itself only reads hardCapUsd
   const affordable = budgetGate(0.03, 0.04, 0.02, limits);
   assert.equal(affordable.allowed, true);
   assert.ok(Math.abs(affordable.remainingUsd - 0.04) < 1e-12);

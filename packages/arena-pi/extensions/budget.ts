@@ -4,14 +4,26 @@ export const MAX_HARD_CAP_USD = 3;
 export const BUDGET_PROVIDER = "arena-budget";
 export type BudgetLimits = { hardCapUsd: number; stopUsd: number };
 
+// The only hard cap is MAX_HARD_CAP_USD: the worst-case request estimate is gated against it alone.
+// A configured cap below it (ARENA_HARD_CAP_USD, name kept for callers) is a soft cap checked
+// against actual settled spend only; the request that crosses it may overshoot.
 export function budgetLimits(env: NodeJS.ProcessEnv = process.env): BudgetLimits {
-  const hardCapUsd = Number(env.ARENA_HARD_CAP_USD ?? "3");
-  const stopUsd = Number(env.ARENA_STOP_USD ?? String(hardCapUsd));
-  if (!Number.isFinite(hardCapUsd) || hardCapUsd < 0.1 || hardCapUsd > MAX_HARD_CAP_USD
-    || stopUsd !== hardCapUsd) {
-    throw new Error("Arena actual-usage limit must satisfy $0.10 <= cap <= $3; stop target must equal cap");
+  const configured = Number(env.ARENA_HARD_CAP_USD ?? String(MAX_HARD_CAP_USD));
+  if (!Number.isFinite(configured) || configured < 0.1 || configured > MAX_HARD_CAP_USD) {
+    throw new Error("Arena spend cap must satisfy $0.10 <= cap <= $3");
   }
-  return { hardCapUsd, stopUsd };
+  return { hardCapUsd: MAX_HARD_CAP_USD, stopUsd: configured };
+}
+
+/** Soft-cap check on actual settled spend. No estimate is involved. */
+export function softCapGate(settledUsd: number, limits: BudgetLimits) {
+  if (!Number.isFinite(settledUsd) || settledUsd < 0) throw new Error("Invalid Arena settled spend");
+  const reached = settledUsd >= limits.stopUsd;
+  return { allowed: !reached, reached,
+    remainingUsd: Math.max(0, limits.stopUsd - settledUsd),
+    overshootUsd: Math.max(0, settledUsd - limits.stopUsd),
+    // At the $3 hard cap the same condition is the historical actual_usage_cap stop.
+    stop: reached ? (limits.stopUsd >= limits.hardCapUsd ? "actual_usage_cap" : "soft_cap_reached") : null };
 }
 
 type Usage = { input: number; output: number; cacheRead: number; cacheWrite: number };

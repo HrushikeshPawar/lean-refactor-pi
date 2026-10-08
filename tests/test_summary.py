@@ -164,7 +164,7 @@ class SummaryTests(unittest.TestCase):
         self.assertAlmostEqual(data["cost"]["overshoot_usd"], 0.008)
         self.assertIn("overshoot $0.0080", (self.dir / "summary.txt").read_text())
 
-    def test_unsettled_transport_attempt_remains_in_the_allowance(self):
+    def test_unsettled_transport_attempt_is_reported_but_not_charged_to_the_soft_cap(self):
         (self.dir / "run-config.json").write_text(json.dumps({"hard_cap_usd": 0.1}))
         write(self.dir / "cost-ledger.jsonl", [
             {"kind": "reserve", "id": "uncertain", "usd": 0.03},
@@ -172,7 +172,7 @@ class SummaryTests(unittest.TestCase):
         ])
         cost = summary.build_summary(self.dir)["cost"]
         self.assertEqual(cost["unresolved_usd"], 0.03)
-        self.assertEqual(cost["remaining_usd"], 0.07)
+        self.assertEqual(cost["remaining_usd"], 0.1)  # soft cap: actual spend only
 
 
 if __name__ == "__main__":

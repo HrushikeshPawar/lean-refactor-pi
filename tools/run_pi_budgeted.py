@@ -191,7 +191,10 @@ def run() -> int:
     parser.add_argument("--theorem", required=True)
     parser.add_argument("--prompt-file", type=Path, help="Optional extra instructions appended after the source packet")
     parser.add_argument("--run-id", required=True)
-    parser.add_argument("--hard-cap-usd", type=float, default=3.0)
+    parser.add_argument("--hard-cap-usd", "--cap-usd", dest="hard_cap_usd", type=float, default=3.0,
+                        help="Spend cap in USD, 0.10-3.00. Only $3 is a hard cap (worst-case request estimates are "
+                             "gated against it); a value below 3 is a soft cap on actual settled spend, so the last "
+                             "request may overshoot it")
     parser.add_argument("--thinking", choices=THINKING_LEVELS, default="high",
                         help="Reasoning level, recorded in run-config.json (default: high)")
     parser.add_argument("--compact-at-tokens", type=int, default=200_000,
@@ -440,7 +443,7 @@ def finish(args, directory: Path, event_log: Path, event_offset: int, exit_code:
         print(f"Invalid cost report: {report.get('error', 'theorem mismatch')}",
               file=sys.stderr)
         return 1
-    if report["hard_cap_usd"] != args.hard_cap_usd:
+    if report.get("soft_cap_usd") != args.hard_cap_usd or report.get("hard_cap_usd") != 3:
         print("Arena cap configuration changed", file=sys.stderr)
         return 1
     print(f"Ledger-priced observed tokens=${report['spent_usd']:.6f}; unresolved exposure=${report.get('unresolved_usd', 0):.6f}; cap=${args.hard_cap_usd:.2f}", flush=True)
@@ -452,7 +455,7 @@ def finish(args, directory: Path, event_log: Path, event_offset: int, exit_code:
     if cache.get("all", {}).get("reuse_pct") is not None:
         print(f"Cache reuse: all={cache['all']['reuse_pct']:.1f}% recent-10={cache['recent_ten']['reuse_pct']:.1f}%", flush=True)
     if report["spent_usd"] > args.hard_cap_usd:
-        print("Observed usage exceeded the cap on the final in-flight request", file=sys.stderr)
+        print(f"Observed usage overshot the ${args.hard_cap_usd:g} cap by ${report['spent_usd'] - args.hard_cap_usd:.6f} on the final in-flight request", file=sys.stderr)
     if attempt_has_model_error(event_log, event_offset):
         print("Pi ended with a model error or abort; inspect events.jsonl", file=sys.stderr)
         return 1

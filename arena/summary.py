@@ -11,6 +11,7 @@ from collections import Counter
 from difflib import SequenceMatcher
 from pathlib import Path
 
+HARD_CAP_USD = 3.0  # keep equal to MAX_HARD_CAP_USD in packages/arena-pi/extensions/budget.ts
 COMPILE_TOOLS = {"arena_evaluate", "arena_probe", "arena_profile"}
 BOOKKEEPING_TOOLS = {"arena_idea", "arena_frontier", "arena_state", "arena_finish"}
 LOCAL_EDIT_MAX_LINES = 2
@@ -60,7 +61,7 @@ def cost_report_from_ledger(directory: Path) -> dict:
                 spent += float(event["usd"])
     config = _read_json(directory / "run-config.json")
     return {"theorem": config.get("theorem"), "model": config.get("model"),
-            "hard_cap_usd": config.get("hard_cap_usd"), "spent_usd": spent,
+            "hard_cap_usd": HARD_CAP_USD, "soft_cap_usd": config.get("hard_cap_usd"), "spent_usd": spent,
             "unresolved_usd": sum(reserved.values()), "written_by": "runner_ledger_reconstruction"}
 
 
@@ -179,9 +180,11 @@ def build_summary(directory: Path) -> dict:
     request_events = [event for event in trace if event.get("kind") == "request"]
     retries = sum(event.get("retry_of") is not None for event in request_events)
     spent = report.get("spent_usd") or sum(s["usd"] for s in settles if s.get("usage_known") is not False)
-    cap = report.get("hard_cap_usd") or config.get("hard_cap_usd")
+    # Only $3 is a hard cap. The configured cap (run-config "hard_cap_usd", the CLI flag's name)
+    # is a soft cap on actual settled spend. Older reports carried the configured cap as hard_cap_usd.
+    cap = report.get("soft_cap_usd") or config.get("hard_cap_usd") or report.get("hard_cap_usd")
     unresolved = float(report.get("unresolved_usd") or 0.0)
-    remaining = max(0.0, float(cap or 0.0) - spent - unresolved)
+    remaining = max(0.0, float(cap or 0.0) - spent)
     by_kind: dict[str, dict] = {}
     for turn in turns:
         row = by_kind.setdefault(turn["kind"], {"requests": 0, "usd": 0.0})
@@ -251,7 +254,7 @@ def build_summary(directory: Path) -> dict:
         "skill": (config.get("skill") or {}).get("sha256"),
         "stop_reason": (controls[-1].get("stop") if controls else None) or "model_stopped",
         "cost": {"spent_usd": round(spent, 6), "unresolved_usd": round(unresolved, 6),
-                 "hard_cap_usd": cap, "remaining_usd": round(remaining, 6), "overshoot_usd": round(overshoot, 6),
+                 "hard_cap_usd": HARD_CAP_USD, "soft_cap_usd": cap, "remaining_usd": round(remaining, 6), "overshoot_usd": round(overshoot, 6),
                  "requests": len(request_events) if request_events else len(turns),
                  "priced_responses": len(turns), "retries": retries,
                  "requests_after_best": len(later_requests),
@@ -288,8 +291,8 @@ def render_text(summary: dict) -> str:
                      else "best verified candidate: none (original proof baseline stands)")
     return "\n".join([
         f"{summary['run_id']}: {summary['theorem']} · {summary['model']} · thinking {summary['thinking']} · stop {summary['stop_reason']}",
-        (f"cost ${cost['spent_usd']:.4f} settled + ${cost['unresolved_usd']:.4f} unresolved of ${cost['hard_cap_usd']} "
-         f"(remaining ${cost['remaining_usd']:.4f}; overshoot ${cost['overshoot_usd']:.4f}) over "
+        (f"cost ${cost['spent_usd']:.4f} settled + ${cost['unresolved_usd']:.4f} unresolved of ${cost['soft_cap_usd']} soft cap "
+         f"(hard ${cost['hard_cap_usd']:g}; remaining ${cost['remaining_usd']:.4f}; overshoot ${cost['overshoot_usd']:.4f}) over "
          f"{cost['requests']} requests / {summary['tools']['results']} tool results "
          f"({cost['retries']} retries); {kinds}; bookkeeping+rejected {cost['bookkeeping_and_rejected_pct']}%"),
         f"cache reuse {cache['reuse_pct']}% (recent {cache['reuse_pct_recent_10']}%), alarms {cache['alarms']}",

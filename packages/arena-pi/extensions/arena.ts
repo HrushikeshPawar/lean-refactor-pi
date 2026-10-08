@@ -10,7 +10,7 @@ import type { AssistantMessageEventStream } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { BudgetModel } from "./budget.ts";
 import { nearestToolName, normalizeToolArguments } from "./toolnames.ts";
-import { assessFinalPayload, BUDGET_PROVIDER, budgetLimits, cacheAlarm, catalogPriceProblem, cacheUtilization, isBudgetModel, MAX_REQUEST_OUTPUT_TOKENS, MODELS, priceForUsage, requestShape, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
+import { assessFinalPayload, BUDGET_PROVIDER, budgetLimits, softCapGate, cacheAlarm, catalogPriceProblem, cacheUtilization, isBudgetModel, MAX_REQUEST_OUTPUT_TOKENS, MODELS, priceForUsage, requestShape, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
 
 const root = resolve(import.meta.dirname, "../../..");
 const workspaces = resolve(root, "workspaces");
@@ -149,6 +149,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
   let previousFailed: string | undefined;
   let fixedRequestShape: string | undefined;
   let gateStopReason: string | undefined;
+  let gateStopCode: "soft_cap_reached" | "actual_usage_cap" | "estimated_request_unaffordable" | undefined;
   let wireIndex = 0;
   let continuations = 0;
   let plateau = 0;
@@ -353,6 +354,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
     }
     fixedRequestShape = undefined;
     gateStopReason = undefined;
+    gateStopCode = undefined;
   });
 
   // The guard provider owns the final transport callback. Extension hook errors
@@ -409,7 +411,19 @@ export default function arenaExtension(pi: ExtensionAPI) {
           if (gateStopReason) throw new Error(`Arena budget stop: ${gateStopReason}`);
           // Normalize at a fixed run-wide output limit; never use the remaining
           // dollars to rewrite the provider request.
-          const bounded = assessFinalPayload(payload, model.id as BudgetModel, costState(), budgetLimits());
+          const softLimits = budgetLimits();
+          const soft = softCapGate(costState().spent, softLimits);
+          if (!soft.allowed) {
+            gateStopCode = soft.stop as typeof gateStopCode;
+            gateStopReason = `settled spend $${costState().spent.toFixed(6)} reached the $${softLimits.stopUsd} cap`;
+            appendCost({ kind: "gate", id: `${Date.now()}-soft`, model: model.id, decision: "refuse",
+              reason: gateStopReason, stop: soft.stop, spent_usd: costState().spent,
+              reserved_usd: costState().unresolved, soft_remaining_usd: 0, soft_overshoot_usd: soft.overshootUsd });
+            appendTrace({ kind: "gate_refusal", run_id: runId, model: model.id, reason: gateStopReason,
+              stop: soft.stop, soft_overshoot_usd: soft.overshootUsd });
+            throw new Error(`Arena budget stop: ${gateStopReason}`);
+          }
+          const bounded = assessFinalPayload(payload, model.id as BudgetModel, costState(), softLimits);
           const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
           const retryOf = previousFailed ?? null;
           const shape = requestShape(bounded.payload);
@@ -428,6 +442,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
           if (!decision.allowed) {
             appendCost(attempt);
             gateStopReason = decision.reason;
+            gateStopCode = "estimated_request_unaffordable";
             appendTrace({ kind: "gate_refusal", id, run_id: runId, model: model.id,
               estimate_usd: decision.estimateUsd, reason: decision.reason,
               remaining_usd: decision.remainingUsd, overshoot_usd: decision.overshootUsd,
@@ -440,6 +455,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
           const publishedShape = requestShape(published as Record<string, unknown>);
           if (publishedShape !== fixedRequestShape) {
             gateStopReason = "provider hook changed the fixed request shape";
+            gateStopCode = "estimated_request_unaffordable";
             appendCost({ ...attempt, decision: "refuse", reason: gateStopReason });
             appendTrace({ kind: "gate_refusal", id, run_id: runId, model: model.id,
               estimate_usd: decision.estimateUsd, reason: gateStopReason,
@@ -524,10 +540,12 @@ export default function arenaExtension(pi: ExtensionAPI) {
       const unresolvedAfter = Math.max(0, costState().unresolved - Number(state.usd));
       const remainingAllowanceUsd = Math.max(0, limits.hardCapUsd - settledSpend - unresolvedAfter);
       const overshootUsd = Math.max(0, settledSpend - limits.hardCapUsd);
+      const soft = softCapGate(settledSpend, limits);
       appendCost({ kind: "settle", id: pendingRequest, usd, usage_known: true,
         bound_violation: boundViolation,
         estimate_usd: Number(state.usd), remaining_usd: remainingAllowanceUsd,
         overshoot_usd: overshootUsd,
+        soft_remaining_usd: soft.remainingUsd, soft_overshoot_usd: soft.overshootUsd,
         tokens: { input: usage.input ?? 0, output: usage.output ?? 0,
           cache_read: usage.cacheRead ?? 0, cache_write: usage.cacheWrite ?? 0 },
         ledger_components_usd: usageCostParts(usage, model),
@@ -538,6 +556,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
       appendTrace({ ...delivered, settled_usd: usd, price_tier: priceTier, pi_cost_usd: usage.cost?.total ?? null,
         estimate_usd: Number(state.usd), remaining_allowance_usd: remainingAllowanceUsd,
         overshoot_usd: overshootUsd,
+        soft_remaining_usd: soft.remainingUsd, soft_overshoot_usd: soft.overshootUsd,
         usage: { input: usage.input ?? 0, output: usage.output ?? 0,
           cache_read: usage.cacheRead ?? 0, cache_write: usage.cacheWrite ?? 0 } });
       const alarm = cacheAlarm(usage, costEvents().filter(item => item.kind === "settle" && item.usage_known === true).length);
@@ -554,7 +573,9 @@ export default function arenaExtension(pi: ExtensionAPI) {
       appendCost({ kind: sent ? "unknown" : "release", id: pendingRequest,
         reason: sent ? "provider_attempt_without_settled_usage" : event.message.stopReason ?? "not_sent",
         usage_known: false, estimate_usd: Number(state.usd), remaining_usd: Math.max(0, limits.hardCapUsd - spent - unresolvedAfter),
-        overshoot_usd: Math.max(0, spent - limits.hardCapUsd), cache_read_tokens: 0, cache_write_tokens: 0 });
+        overshoot_usd: Math.max(0, spent - limits.hardCapUsd),
+        soft_remaining_usd: softCapGate(spent, limits).remainingUsd,
+        soft_overshoot_usd: softCapGate(spent, limits).overshootUsd, cache_read_tokens: 0, cache_write_tokens: 0 });
       appendTrace({ ...delivered, settled_usd: null, pi_cost_usd: null });
       previousFailed = pendingRequest;
       console.error(`[arena-cost] released failed request ${pendingRequest}; no usage returned`);
@@ -567,10 +588,13 @@ export default function arenaExtension(pi: ExtensionAPI) {
     if (model?.provider !== BUDGET_PROVIDER || !isBudgetModel(model.id)) return undefined;
     const state = costState();
     const limits = budgetLimits();
+    const soft = softCapGate(state.spent, limits);
     return { spent_usd: state.spent, unresolved_usd: state.unresolved,
-      remaining_usd: Math.max(0, limits.hardCapUsd - state.spent - state.unresolved),
-      overshoot_usd: Math.max(0, state.spent - limits.hardCapUsd),
-      can_continue: state.spent + state.unresolved < limits.hardCapUsd,
+      remaining_usd: soft.remainingUsd,
+      hard_remaining_usd: Math.max(0, limits.hardCapUsd - state.spent - state.unresolved),
+      overshoot_usd: soft.overshootUsd,
+      hard_overshoot_usd: Math.max(0, state.spent - limits.hardCapUsd),
+      can_continue: soft.allowed,
       cap_is_actual_usage_only: true };
   }
 
@@ -586,7 +610,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
       if (model?.provider !== BUDGET_PROVIDER || !isBudgetModel(model.id)) {
         throw new Error("Budgeted model was not selected");
       }
-      report = { ...report, hard_cap_usd: limits.hardCapUsd, stop_target_usd: limits.stopUsd,
+      report = { ...report, hard_cap_usd: limits.hardCapUsd, soft_cap_usd: limits.stopUsd, stop_target_usd: limits.stopUsd,
         provider: "opencode-go", model: model.id, ...budgetStatus(ctx),
         price_method: "Observed usage priced per request using OpenCode Go list rates; Luna uses the >272K tier only when billed prompt tokens cross that threshold. Neither this nor Pi's embedded estimate is a provider invoice.",
         configured_usd_per_million_tokens: MODELS[model.id].price,
@@ -909,8 +933,8 @@ export default function arenaExtension(pi: ExtensionAPI) {
       finishConfirmed = true;
       appendCost({ kind: "finish", phase: "confirmed" });
       const budget = costState();
-      const stop = gateStopReason ? "estimated_request_unaffordable"
-        : budget.spent >= budgetLimits().hardCapUsd ? "actual_usage_cap" : "finished";
+      const stop = gateStopReason ? gateStopCode ?? "estimated_request_unaffordable"
+        : softCapGate(budget.spent, budgetLimits()).stop ?? "finished";
       appendCost({ kind: "control", continuations, plateau, no_work_turns: noWorkTurns,
         error_streak: errorStreak, progress: previousProgress, stop,
         ...(gateStopReason ? { gate_stop_reason: gateStopReason } : {}) });
@@ -1022,8 +1046,9 @@ export default function arenaExtension(pi: ExtensionAPI) {
       else if (turnHadProofAttempt || turnHadNovelContext || turnHadVerifiedImprovement) noWorkTurns = 0;
       else noWorkTurns += 1;
     }
-    const stop = gateStopReason ? "estimated_request_unaffordable"
-      : budget.spent >= limits.hardCapUsd ? "actual_usage_cap"
+    const softStop = softCapGate(budget.spent, limits).stop;
+    const stop = gateStopReason ? gateStopCode ?? "estimated_request_unaffordable"
+      : softStop ? softStop
       : finishConfirmed ? "finished"
       : errorStreak >= MAX_ERROR_STREAK ? "error_loop"
       : continuations >= 12 ? "continuation_limit"
@@ -1055,7 +1080,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
       .map((idea: any) => `${idea.id} ${idea.title}`);
     const current = readState();
     const status = current ? stateLine(current, true) : `[arena] best verified: ${briefText(state.best)}`;
-    const content = `Continue proof optimization. ${status}. Active ideas: ${ideas.length ? ideas.join("; ") : "none recorded"}. Remaining estimated allowance after outstanding requests: $${Math.max(0, limits.hardCapUsd - budget.spent - budget.unresolved).toFixed(4)}.`;
+    const content = `Continue proof optimization. ${status}. Active ideas: ${ideas.length ? ideas.join("; ") : "none recorded"}. Remaining on the $${limits.stopUsd} cap (actual settled spend): $${softCapGate(budget.spent, limits).remainingUsd.toFixed(4)}.`;
     return { entries: [...event.entries, { type: "custom_message" as const, customType: "arena-continuation",
       content, display: false }], continue: true };
   });

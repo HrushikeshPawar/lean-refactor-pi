@@ -222,7 +222,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rows", required=True, help="Comma-separated benchmark names")
     parser.add_argument("--models", required=True, help=f"Comma-separated: {', '.join(MODELS)}")
     parser.add_argument("--replicates", type=int, default=3)
-    parser.add_argument("--cap", type=float, default=3.0, help="Hard cap per run in USD (0.10-3.00)")
+    parser.add_argument("--cap", type=float, default=3.0, help="Spend cap per run in USD (0.10-3.00); below 3 it is a soft cap on actual spend (the last request may overshoot), only 3 is a hard cap")
     parser.add_argument("--thinking", default="high", choices=THINKING_LEVELS)
     parser.add_argument("--skip-preflight", action="store_true", help="Explicitly skip the Langfuse preflight gate")
     parser.add_argument("--dry-run", action="store_true")
