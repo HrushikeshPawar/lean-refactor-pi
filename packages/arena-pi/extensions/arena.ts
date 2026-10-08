@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, resolve, relative, sep } from "node:path";
 import { Type } from "typebox";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
-import type { AssistantMessageEventStream } from "@earendil-works/pi-ai";
+import type { AssistantMessage, AssistantMessageEventStream } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { BudgetModel } from "./budget.ts";
 import { nearestToolName, normalizeToolArguments } from "./toolnames.ts";
@@ -34,7 +34,8 @@ function validObjectJson(raw: string | undefined): boolean {
   }
 }
 
-function guardMalformedToolArguments(source: AssistantMessageEventStream): AssistantMessageEventStream {
+function guardMalformedToolArguments(source: AssistantMessageEventStream,
+    onFinal?: (message: AssistantMessage) => void): AssistantMessageEventStream {
   const guarded = createAssistantMessageEventStream();
   void (async () => {
     const rawByIndex = new Map<number, string>();
@@ -67,11 +68,14 @@ function guardMalformedToolArguments(source: AssistantMessageEventStream): Assis
             }
           }
         }
+        if (event.type === "done") onFinal?.(event.message);
+        if (event.type === "error") onFinal?.(event.error);
         guarded.push(event);
       }
       guarded.end(await source.result());
     } catch {
       const result = await source.result();
+      onFinal?.(result);
       guarded.push({ type: "error", reason: result.stopReason === "aborted" ? "aborted" : "error", error: result });
     }
   })();
@@ -146,6 +150,9 @@ export default function arenaExtension(pi: ExtensionAPI) {
   const costJournal = runDirectory ? resolve(runDirectory, "cost-ledger.jsonl") : undefined;
   const traceJournal = runDirectory ? resolve(runDirectory, "trace-journal.jsonl") : undefined;
   let pendingRequest: string | undefined;
+  // Final provider message of each request as the guard stream delivered it. Requests Pi sends
+  // outside an agent turn (compaction summaries) never reach message_end; this is their usage.
+  const finalMessages = new Map<string, AssistantMessage>();
   let openAttempt: string | undefined;
   let previousFailed: string | undefined;
   let fixedRequestShape: string | undefined;
@@ -409,6 +416,8 @@ export default function arenaExtension(pi: ExtensionAPI) {
           return innerFetch(captured.input, captured.init);
         },
         onPayload: async payload => {
+          // A request still open here was sent outside an agent turn (a compaction summary).
+          closeRequest(undefined, "superseded_by_next_request");
           if (gateStopReason) throw new Error(`Arena budget stop: ${gateStopReason}`);
           // Normalize at a fixed run-wide output limit; never use the remaining
           // dollars to rewrite the provider request.
@@ -478,7 +487,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
             remaining_allowance_usd: decision.remainingUsd, post_hook: published });
           return published;
         },
-      }));
+      }), message => { if (pendingRequest) finalMessages.set(pendingRequest, message); });
     },
   });
 
@@ -516,8 +525,15 @@ export default function arenaExtension(pi: ExtensionAPI) {
   // Preserve earlier tool messages byte-for-byte. Rewriting them when a new
   // evaluation arrives invalidates the provider's cached prompt prefix.
 
-  pi.on("message_end", event => {
-    if (!pendingRequest || event.message.role !== "assistant") return;
+  // Close the open request in the ledger: settle with real usage, else unknown/release.
+  // `message` is the agent's assistant message (message_end); without it the request was not an
+  // agent message (compaction summary) and its usage is whatever the guard stream delivered.
+  function closeRequest(agentMessage: AssistantMessage | undefined, orphanReason: string) {
+    if (!pendingRequest) return;
+    const orphan = agentMessage === undefined;
+    const message = agentMessage ?? finalMessages.get(pendingRequest);
+    const event = { message: message ?? ({ role: "assistant", content: [], stopReason: "error",
+      errorMessage: orphanReason, usage: undefined } as unknown as AssistantMessage) };
     const model = process.env.ARENA_MODEL;
     if (!model || !isBudgetModel(model)) return;
     const state = costEvents().findLast(item => item.kind === "reserve" && item.id === pendingRequest);
@@ -527,7 +543,8 @@ export default function arenaExtension(pi: ExtensionAPI) {
     const delivered = { kind: "response", id: pendingRequest, content: blocks, text,
       stop_reason: event.message.stopReason, response_id: event.message.responseId ?? null,
       response_model: event.message.responseModel ?? event.message.model,
-      error_message: event.message.errorMessage ?? null };
+      error_message: event.message.errorMessage ?? null,
+      ...(orphan ? { source: "orphan_stream", orphan_reason: orphanReason } : {}) };
     let usd = 0;
     let boundViolation = false;
     if (event.message.usage?.totalTokens) {
@@ -543,6 +560,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
       const overshootUsd = Math.max(0, settledSpend - limits.hardCapUsd);
       const soft = softCapGate(settledSpend, limits);
       appendCost({ kind: "settle", id: pendingRequest, usd, usage_known: true,
+        ...(orphan ? { source: "orphan_stream", orphan_reason: orphanReason, stop_reason: event.message.stopReason } : {}),
         bound_violation: boundViolation,
         estimate_usd: Number(state.usd), remaining_usd: remainingAllowanceUsd,
         overshoot_usd: overshootUsd,
@@ -572,17 +590,24 @@ export default function arenaExtension(pi: ExtensionAPI) {
       const sent = wireIndex > 0;
       const unresolvedAfter = Math.max(0, costState().unresolved - (sent ? 0 : Number(state.usd)));
       appendCost({ kind: sent ? "unknown" : "release", id: pendingRequest,
-        reason: sent ? "provider_attempt_without_settled_usage" : event.message.stopReason ?? "not_sent",
+        reason: sent ? (orphan ? `orphan_request_without_usage:${orphanReason}` : "provider_attempt_without_settled_usage") : event.message.stopReason ?? "not_sent",
         usage_known: false, estimate_usd: Number(state.usd), remaining_usd: Math.max(0, limits.hardCapUsd - spent - unresolvedAfter),
         overshoot_usd: Math.max(0, spent - limits.hardCapUsd),
         soft_remaining_usd: softCapGate(spent, limits).remainingUsd,
         soft_overshoot_usd: softCapGate(spent, limits).overshootUsd, cache_read_tokens: 0, cache_write_tokens: 0 });
       appendTrace({ ...delivered, settled_usd: null, pi_cost_usd: null });
-      previousFailed = pendingRequest;
+      if (!orphan) previousFailed = pendingRequest;
       console.error(`[arena-cost] released failed request ${pendingRequest}; no usage returned`);
     }
+    finalMessages.delete(pendingRequest);
     pendingRequest = undefined;
+  }
+  pi.on("message_end", event => {
+    if (event.message.role === "assistant") closeRequest(event.message, "");
   });
+  // Compaction summaries are provider requests with no agent message_end.
+  pi.on("session_compact", () => closeRequest(undefined, "compaction_summary"));
+  pi.on("session_compact_failed", () => closeRequest(undefined, "compaction_failed"));
 
   function budgetStatus(ctx: ExtensionContext) {
     const model = ctx.model;

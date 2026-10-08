@@ -748,14 +748,43 @@ class CompactionPolicyTests(unittest.TestCase):
         first = compacted[0]
         self.assertNotIn("Reference proof (224 tokens)", message_text(first["messages"][1]),
                          "the summary should replace the old turns, not repeat them")
-        # Pi sends summarization requests straight to the provider, so the guard's journal does not
-        # see them; the session's recorded usage does, and the cost report takes the larger audit.
-        ledger = sum(e["usd"] for e in run.jsonl("cost-ledger.jsonl")
-                     if e["kind"] == "settle" and e.get("usage_known") is not False)
+        # Compaction summaries are provider requests with no agent message_end. The guard settles
+        # each from the usage its stream delivered, so the ledger matches Pi's session record.
+        settles = [e for e in run.jsonl("cost-ledger.jsonl") if e["kind"] == "settle"]
+        orphans = [e for e in settles if e.get("source") == "orphan_stream"]
+        self.assertEqual(len(orphans), len(summaries))
+        self.assertEqual(len(settles) - len(orphans), len(agent))
         report = run.json("cost.json")
-        self.assertEqual(len([e for e in run.jsonl("cost-ledger.jsonl") if e["kind"] == "settle"]), len(agent))
-        self.assertGreater(report["pi_session_spend_usd"], ledger, "summarization usage must be audited")
-        self.assertAlmostEqual(report["spent_usd"], max(ledger, report["pi_session_spend_usd"]), places=9)
+        self.assertAlmostEqual(sum(e["usd"] for e in settles), report["pi_session_spend_usd"], places=9)
+        self.assertAlmostEqual(report["spent_usd"], report["pi_session_spend_usd"], places=9)
+        recon = run.json("summary.json")["cost"]["reconciliation"]
+        self.assertTrue(recon["balanced"], recon)
+        self.assertEqual(recon["open_reserves"], [])
+
+
+    def test_a_length_stop_leaves_no_request_open_in_the_ledger(self):
+        steps = [{"tool_calls": [{"name": "arena_skill_read", "arguments": {"path": path, "offset": offset}}],
+                  "usage": {"input": 3000, "output": 50}} for path, offset in self.READS[:2]]
+        steps += [{"text": "cut off", "stop_reason": "length", "usage": {"input": 3000, "output": 16000}},
+                  {"text": "done", "usage": {"input": 100, "output": 20}}] + [{"text": "done"}] * 3
+        run = FakeRun(steps)
+        self.runs.append(run)
+        run.run("--compact-keep-tokens", "300")
+        requests = run.requests
+        summaries = [r for r in requests if not r["messages"][0].get("sections")]
+        self.assertTrue(summaries, "a length stop should make Pi compact before retrying")
+        events = run.jsonl("cost-ledger.jsonl")
+        reserved = {e["id"] for e in events if e["kind"] == "reserve"}
+        closed = {e["id"] for e in events if e["kind"] in ("settle", "release", "unknown")}
+        self.assertEqual(reserved - closed, set(), "every reserved request must be closed")
+        orphans = [e for e in events if e["kind"] == "settle" and e.get("source") == "orphan_stream"]
+        self.assertEqual(len(orphans), len(summaries))
+        self.assertTrue(all(e["usage_known"] and e["usd"] > 0 for e in orphans))
+        cost = run.json("summary.json")["cost"]
+        self.assertTrue(cost["reconciliation"]["balanced"], cost["reconciliation"])
+        self.assertAlmostEqual(cost["spent_usd"], run.json("cost.json")["pi_session_spend_usd"], places=5)
+        self.assertEqual(cost["by_turn_type"]["compaction"]["requests"], len(summaries))
+
 
 if __name__ == "__main__":
     unittest.main()

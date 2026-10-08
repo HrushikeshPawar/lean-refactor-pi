@@ -19,6 +19,7 @@ type Step = {
   text?: string;
   tool_calls?: Array<{ name: string; arguments: Record<string, unknown>; raw_arguments?: string }>;
   usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
+  stop_reason?: "length";  // the response hit its output limit; Pi answers with compaction and a retry
   error?: string;
   delay_ms?: number;
 };
@@ -99,7 +100,7 @@ export default function fakeOpenCode(pi: ExtensionAPI) {
             provider: model.provider, model: model.id,
             usage: { ...usage, totalTokens: usage.input + usage.output + usage.cacheRead + usage.cacheWrite,
               cost: zeroCost },
-            stopReason: step?.tool_calls?.length ? "toolUse" as const : "stop" as const,
+            stopReason: step?.stop_reason ?? (step?.tool_calls?.length ? "toolUse" as const : "stop" as const),
             timestamp: Date.now() };
           stream.push({ type: "start", partial: { ...message, content: [] } });
           content.forEach((block, number) => {
