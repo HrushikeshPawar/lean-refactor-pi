@@ -40,7 +40,7 @@
       ['Spend', money(data.spend.spent_usd), `soft cap $${+(data.spend.soft_cap_usd ?? 0).toFixed(2)} · hard $${data.spend.hard_cap_usd}`],
       ['Requests', num(cost.requests ?? data.spend.points.length), `${cost.retries ?? 0} retries · ${cost.requests_after_best ?? '—'} after best`],
       ['Post-best spend', money(cost.spent_after_best_usd), `bookkeeping+rejected ${cost.bookkeeping_and_rejected_pct ?? '—'}%`],
-      ['Cache reuse', cache.reuse_pct != null ? cache.reuse_pct + '%' : '—', `recent 10: ${cache.reuse_pct_recent_10 ?? '—'}%`],
+      ['Cache hit rate', cache.reuse_pct != null ? cache.reuse_pct + '%' : '—', `recent 10: ${cache.reuse_pct_recent_10 ?? '—'}% · cost savings ${cache.savings_pct ?? '—'}%`],
       ['Tool results', num((s.tools || {}).results), `${(s.tools || {}).error_total ?? 0} errors`],
       ['Submission', sub ? `${sub.candidate} · ${sub.proxy}` : 'none', sub ? (sub.verified_by === 'cold compile' ? 'cold-verified' : `verified by ${sub.verified_by || '?'}`) : (s.stop_reason ? 'not submitted' : 'running')]];
     $('kpis').innerHTML = items.map(([l, v, n, good]) => `<div class="kpi" title="${esc(n)}"><div class="l">${esc(l)}</div><div class="v${good ? ' good' : ''}">${esc(v)}</div><div class="n">${esc(n)}</div></div>`).join('');
@@ -95,7 +95,7 @@
         title: `Request #${p.n}${p.kind ? ` · ${p.kind} turn` : ''}`, sub: `at ${dur(p.t)} · ${num(p.tokens?.output)} output tokens`,
         table: {head: ['', 'this request', 'running total'], rows: [...PARTS.slice().reverse().map(([k, label, cls]) => ({sw: cls, label, cells: [money(p.parts[k] || 0), money(sums[k])]})),
                 {sw: 'toptot', label: 'Total', bold: true, cells: [money(p.request_usd), money(sumParts(sums))]}]},
-        foot: `cache reuse ${p.reuse_pct ?? '—'}%${tools.length ? ` · ${tools.slice(0, 3).join(', ')}${tools.length > 3 ? ` +${tools.length - 3}` : ''}` : ''}`})});
+        foot: `cache hit rate ${p.reuse_pct ?? '—'}%${tools.length ? ` · ${tools.slice(0, 3).join(', ')}${tools.length > 3 ? ` +${tools.length - 3}` : ''}` : ''}`})});
     }
     const grand = sumParts(sums), top = Math.max(grand, sp.soft_cap_usd || 0, 1e-9);
     const hardVisible = !!sp.hard_cap_usd && sp.hard_cap_usd <= 2.5 * top;
@@ -167,7 +167,7 @@
   }
   function spendTable() {
     const pts = data.spend.points;
-    return `<table><thead><tr><th class="num">#</th><th>kind</th><th class="num">at</th><th class="num">this request</th><th class="num">running total</th>${PARTS.slice().reverse().map(([, l, c]) => `<th class="num"><i class="sw box ${c}"></i>${l}</th>`).join('')}<th class="num">cache reuse</th><th>tools</th></tr></thead><tbody>
+    return `<table><thead><tr><th class="num">#</th><th>kind</th><th class="num">at</th><th class="num">this request</th><th class="num">running total</th>${PARTS.slice().reverse().map(([, l, c]) => `<th class="num"><i class="sw box ${c}"></i>${l}</th>`).join('')}<th class="num">cache hit rate</th><th>tools</th></tr></thead><tbody>
       ${pts.map(p => `<tr><td class="num">${p.n}</td><td>${esc(p.kind || '')}</td><td class="num">${dur(p.t)}</td><td class="num"><b>${money(p.request_usd)}</b></td><td class="num">${money(p.spent_usd)}</td>${PARTS.slice().reverse().map(([k]) => `<td class="num">${money(p.parts[k] || 0)}</td>`).join('')}<td class="num">${p.reuse_pct ?? '—'}%</td><td class="small muted">${esc((p.tools || []).map(n => n.replace(/^arena_/, '')).join(', '))}</td></tr>`).join('')}</tbody></table>`;
   }
   function renderModal() {
@@ -279,13 +279,13 @@
 
   function spendPanel() {
     const pts = data.spend.points, cache = data.summary.cache || {}, byType = Object.entries((data.summary.cost || {}).by_turn_type || {}), spent = data.spend.spent_usd;
-    $('panel').innerHTML = `<div class="grid2"><div class="card"><div class="head"><h2>Cache tokens per request</h2><span class="hint">overall reuse ${cache.reuse_pct ?? '—'}% · read ${num(cache.read_tokens)} / write ${num(cache.write_tokens)} · alarms ${cache.alarms ?? 0}</span></div>
+    $('panel').innerHTML = `<div class="grid2"><div class="card"><div class="head"><h2>Cache tokens per request</h2><span class="hint">overall hit rate ${cache.reuse_pct ?? '—'}% · read ${num(cache.read_tokens)} / write ${num(cache.write_tokens)} · alarms ${cache.alarms ?? 0}</span></div>
       ${C.stacked(pts.map(p => ({parts: [p.tokens.cache_read || 0, p.tokens.cache_write || 0], title: `#${p.n}: read ${num(p.tokens.cache_read)}, write ${num(p.tokens.cache_write)}, reuse ${p.reuse_pct ?? '—'}%`})),
         [{cls: 'k2', label: 'cache read'}, {cls: 'k3', label: 'cache write'}], {fmtY: C.fmt.num, yLabel: 'tokens per request', height: 260, label: 'cache tokens'})}</div>
-      <div class="card"><div class="head"><h2>Cache reuse per request</h2><span class="hint">a low read share after the first requests means the prompt prefix is not reused</span></div>
-      ${C.line([{cls: 'k1', points: pts.filter(p => p.reuse_pct != null).map(p => [p.n, p.reuse_pct, `request #${p.n}: ${p.reuse_pct}% of cached tokens were reads`])}], {yMin: 0, yMax: 100, exact: true, xTime: false, xMin: 0, xMax: Math.max(1, pts.length), fmtY: C.fmt.pct, yLabel: 'cache reuse (%)', xLabel: 'request #', height: 260, label: 'cache reuse'})}</div></div>
+      <div class="card"><div class="head"><h2>Cache hit rate per request</h2><span class="hint">cache read over all prompt tokens; low after the first requests means the prompt prefix is not reused</span></div>
+      ${C.line([{cls: 'k1', points: pts.filter(p => p.reuse_pct != null).map(p => [p.n, p.reuse_pct, `request #${p.n}: ${p.reuse_pct}% of prompt tokens were cache reads`])}], {yMin: 0, yMax: 100, exact: true, xTime: false, xMin: 0, xMax: Math.max(1, pts.length), fmtY: C.fmt.pct, yLabel: 'cache hit rate (%)', xLabel: 'request #', height: 260, label: 'cache hit rate'})}</div></div>
       <div class="card"><div class="head"><h2>Cost per request</h2><span class="hint">each request's own cost by billed component; the overview chart shows the running total</span></div>
-      ${C.stacked(pts.map(p => ({parts: PARTS.map(([k]) => p.parts[k] || 0), title: `#${p.n} ${p.kind || ''}: ${money(p.request_usd)}\ncache reuse ${p.reuse_pct ?? '—'}%\n${(p.tools || []).join(', ')}`})),
+      ${C.stacked(pts.map(p => ({parts: PARTS.map(([k]) => p.parts[k] || 0), title: `#${p.n} ${p.kind || ''}: ${money(p.request_usd)}\ncache hit rate ${p.reuse_pct ?? '—'}%\n${(p.tools || []).join(', ')}`})),
         PARTS.map(([, label, cls]) => ({cls, label})), {fmtY: C.fmt.money, yLabel: 'cost per request (USD)', xLabel: 'API request number', height: 240, label: 'cost per request'})}</div>
       <div class="card"><div class="head"><h2>By turn type</h2></div><table><thead><tr><th>type</th><th class="num">requests</th><th class="num">cost</th><th class="num">share</th></tr></thead><tbody>
       ${byType.map(([k, v]) => `<tr><td>${esc(k)}</td><td class="num">${v.requests}</td><td class="num">${money(v.usd)}</td><td class="num">${spent ? (100 * v.usd / spent).toFixed(1) : 0}%</td></tr>`).join('')}</tbody></table></div>`;

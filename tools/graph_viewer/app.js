@@ -335,7 +335,7 @@
       const head=`API request ${esc(x)}${p.ts?` · ${esc(new Date(p.ts*1000).toLocaleTimeString())}`:''}`;
       const parts=COST_PARTS.slice().reverse().map(([k,label,color])=>`<tr><td>${swatch(color)}${esc(label)}</td><td>${esc(t[k]??0)}</td><td>${esc(money((p.parts?.[k]||0)-(prev[k]||0)))}</td><td>${esc(money(p.parts?.[k]||0))}</td></tr>`).join('');
       const share=spec.cap?` (${Math.round(100*p.spent_usd/spec.cap)}% of cap)`:'';
-      return `<div class="tip-head">${head}</div><div class="tip-row"><span>This request</span><b>${esc(money(p.request_usd))}</b></div><div class="tip-row"><span>Cumulative</span><b>${esc(money(p.spent_usd))}${esc(share)}</b></div><div class="tip-row"><span>Cache reuse</span><b>${p.reuse_pct==null?'—':esc(p.reuse_pct.toFixed(1))+'%'}</b></div><table class="tip-table"><thead><tr><th></th><th>tokens</th><th>request</th><th>total</th></tr></thead><tbody>${parts}</tbody></table>`;
+      return `<div class="tip-head">${head}</div><div class="tip-row"><span>This request</span><b>${esc(money(p.request_usd))}</b></div><div class="tip-row"><span>Cumulative</span><b>${esc(money(p.spent_usd))}${esc(share)}</b></div><div class="tip-row"><span>Cache hit rate</span><b>${p.reuse_pct==null?'—':esc(p.reuse_pct.toFixed(1))+'%'}</b></div><table class="tip-table"><thead><tr><th></th><th>tokens</th><th>request</th><th>total</th></tr></thead><tbody>${parts}</tbody></table>`;
     }
     const node=byId.get(p.candidate_id),base=data.baseline||{};
     const status=p.is_reference?'original proof, every version':p.status==='full'?'passes every version':p.status==='primary'?'primary version only':'failed';
@@ -389,7 +389,7 @@
   function chartTable(spec,points) {
     if(spec.stack){
       const rows=points.map(p=>{const t=p.tokens||{};return `<tr><td>${esc(p.number)}</td><td>${esc(money(p.request_usd))}</td><td>${esc(money(p.spent_usd))}</td>${COST_PARTS.map(([k])=>`<td>${esc(t[k] ?? '—')}</td>`).join('')}<td>${p.reuse_pct==null?'—':esc(p.reuse_pct.toFixed(1))+'%'}</td><td>${p.ts?esc(new Date(p.ts*1000).toLocaleTimeString()):'—'}</td></tr>`;}).join('');
-      return `<thead><tr><th>Request</th><th>Request $</th><th>Cumulative $</th>${COST_PARTS.map(([,label])=>`<th>${esc(label)} tok</th>`).join('')}<th>Cache reuse</th><th>Time</th></tr></thead><tbody>${rows}</tbody>`;
+      return `<thead><tr><th>Request</th><th>Request $</th><th>Cumulative $</th>${COST_PARTS.map(([,label])=>`<th>${esc(label)} tok</th>`).join('')}<th>Cache hit rate</th><th>Time</th></tr></thead><tbody>${rows}</tbody>`;
     }
     const rows=points.map((p,i)=>`<tr ${p.candidate_id?`data-candidate="${esc(p.candidate_id)}"`:''}><td>${p.is_reference?'0 (original)':esc(p.number ?? i+1)}</td><td>${p.candidate_id?`#${esc(byId.get(p.candidate_id)?.index ?? '?')} ${p.is_reference?'original proof':esc(p.candidate_id.slice(0,8))}`:'—'}</td><td>${esc(p[spec.key].toFixed(spec.key==='local_proxy'?2:0))}</td><td>${esc(p.status ?? p.mode ?? '—')}</td><td>${esc(p.tokens ?? '—')}</td><td>${esc(p.heartbeat ?? '—')}</td><td>${esc(p.local_proxy?.toFixed?.(2) ?? '—')}</td><td>${p.ts?esc(new Date(p.ts*1000).toLocaleString()):'—'}</td></tr>`).join('');
     return `<thead><tr><th>${esc(spec.xLabel)}</th><th>Candidate</th><th>Value</th><th>Status / mode</th><th>Tokens</th><th>Heartbeats</th><th>Proxy</th><th>Time</th></tr></thead><tbody>${rows}</tbody>`;

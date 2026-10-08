@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
-from arena.summary import HARD_CAP_USD, _result_ok, _turns, build_summary, reconcile_spend, session_spend
+from arena.summary import HARD_CAP_USD, _result_ok, _turns, build_summary, hit_rate_pct, reconcile_spend, session_spend
 
 BASELINE_PROXY = round(100 / 3, 2)
 STALL_SECONDS = 15 * 60
@@ -173,6 +173,7 @@ def hub_row(run_id: str, directory: Path, campaign: str | None = None, now: floa
         "spent_usd": round(spent, 6), "requests": cost.get("requests") or requests,
         "tool_results": tools.get("results"), "tool_errors": tools.get("error_total"),
         "cache_reuse_pct": cache.get("reuse_pct"),
+        "cache_savings_pct": cache.get("savings_pct"),
         "bookkeeping_pct": cost.get("bookkeeping_and_rejected_pct"),
         "spent_after_best_usd": cost.get("spent_after_best_usd"),
         "requests_after_best": cost.get("requests_after_best"),
@@ -245,11 +246,11 @@ def spend_series(directory: Path, start: float | None, soft_cap: float | None) -
         tokens = settle.get("tokens") or {}
         spent += float(settle.get("usd") or 0)
         stamp = _seconds(settle.get("ts"))
-        read, write = tokens.get("cache_read", 0), tokens.get("cache_write", 0)
+        read, write, fresh = tokens.get("cache_read", 0), tokens.get("cache_write", 0), tokens.get("input", 0)
         points.append({"n": len(points) + 1, "t": round(stamp - start, 1) if start and stamp else None,
                        "request_usd": float(settle.get("usd") or 0), "spent_usd": round(spent, 6),
                        "parts": parts, "tokens": tokens, "kind": turn.get("kind"), "tools": turn.get("tools", []),
-                       "reuse_pct": round(100 * read / (read + write), 1) if read + write else None})
+                       "reuse_pct": hit_rate_pct(read, write, fresh)})
     return {"points": points, "spent_usd": round(max(spent, recon["spent_usd"]), 6), "soft_cap_usd": soft_cap,
             "hard_cap_usd": HARD_CAP_USD, "unresolved_usd": round(recon["unresolved_usd"], 6),
             "unsettled_usd": recon["gap_usd"], "reconciliation": recon}

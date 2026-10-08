@@ -55,7 +55,7 @@
   ];
   // Secondary metrics live in the row's hover card instead of more columns.
   const detail = r => [['Run', r.run_id], ['Thinking', r.thinking || '—'], ['Original proof', r.reference ? `${r.reference.tokens} tokens / ${r.reference.heartbeats} heartbeats` : '—'],
-    ['Cache reuse', pct(r.cache_reuse_pct)], ['Bookkeeping + rejected', pct(r.bookkeeping_pct)],
+    ['Cache hit rate', pct(r.cache_reuse_pct)], ['Bookkeeping + rejected', pct(r.bookkeeping_pct)],
     ['Spend after best', r.spent_after_best_usd == null ? '—' : `${money(r.spent_after_best_usd)} (${r.requests_after_best ?? '?'} req)`]];
 
   function showTip(row) {

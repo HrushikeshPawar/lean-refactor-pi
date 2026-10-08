@@ -136,7 +136,7 @@ class DataTests(unittest.TestCase):
         self.assertEqual([p["n"] for p in points], [1, 2])
         self.assertEqual([p["spent_usd"] for p in points], [0.01, 0.03])
         self.assertEqual(points[1]["parts"]["cache_read"], 0.005)
-        self.assertEqual(points[1]["reuse_pct"], 90.0)
+        self.assertEqual(points[1]["reuse_pct"], 89.6)  # 900 / (5 + 900 + 100)
         self.assertEqual((board["spend"]["soft_cap_usd"], board["spend"]["hard_cap_usd"]), (0.1, 3.0))
         self.assertEqual([(t["name"], t["is_error"], t["duration_s"]) for t in board["tools"]],
                          [("arena_evaluate", False, 1.5), ("arena_probe", True, 0.2)])

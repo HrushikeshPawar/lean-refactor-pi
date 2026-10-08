@@ -179,7 +179,7 @@ class ViewerTests(unittest.TestCase):
             self.assertEqual([round(row["spent_usd"], 3) for row in timeline], [0.1, 0.3])
             self.assertEqual({k: round(v, 3) for k, v in timeline[-1]["parts"].items()},
                              {"input": 0.02, "output": 0.13, "cache_read": 0.08, "cache_write": 0.07})
-            self.assertEqual(timeline[1]["reuse_pct"], 75.0)
+            self.assertAlmostEqual(timeline[1]["reuse_pct"], 100 * 150 / 201)  # read / (input + read + write)
             self.assertAlmostEqual(timeline[0]["ts"], 1791274568.395)
             self.assertAlmostEqual(payload["cost"]["pi_embedded_usd"], 0.3)
             self.assertEqual(payload["hard_cap_usd"], 0.1)
@@ -193,6 +193,18 @@ class ViewerTests(unittest.TestCase):
                          (0, "ref", 224, 33.33))
         self.assertGreater(point["heartbeat"], 0)
         self.assertIsNone(baseline_point({"theorem": "Core.InitsUpdatesComm", "nodes": []}))
+
+    def test_original_proof_node_shows_its_published_numbers(self):
+        from tools.serve_candidate_graph import baseline_point, give_reference_its_numbers
+        payload = {"theorem": "Core.InitsUpdatesComm",
+                   "nodes": [{"id": "ref", "origin": "reference", "status": "unevaluated", "tokens": None,
+                              "heartbeat": None, "local_proxy": None}, {"id": "a", "origin": "model", "tokens": None}]}
+        payload["baseline"] = baseline_point(payload)
+        give_reference_its_numbers(payload)
+        ref, other = payload["nodes"]
+        self.assertEqual((ref["status"], ref["tokens"], ref["local_proxy"]), ("full", 224, 33.33))
+        self.assertGreater(ref["heartbeat"], 0)
+        self.assertIsNone(other["tokens"])
 
     def test_hub_lists_matching_runs_and_serves_each_viewer_under_its_own_path(self):
         import threading

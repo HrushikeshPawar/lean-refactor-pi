@@ -168,10 +168,36 @@ def _turns(events: list[dict], settles: list[dict]) -> list[dict]:
             kind = "context"
         else:
             kind = "reasoning"
+        parts = (settle or {}).get("ledger_components_usd") or {}
+        tokens = (settle or {}).get("tokens") or {}
         turns.append({"kind": kind, "tools": names, "usd": float(settle["usd"]) if settle else 0.0,
+                      "input": usage.get("input", 0),
                       "cache_read": usage.get("cacheRead", 0), "cache_write": usage.get("cacheWrite", 0),
+                      "input_side_usd": sum(float(parts.get(k) or 0) for k in ("input", "cacheRead", "cacheWrite")),
+                      "uncached_rate": (float(parts["input"]) / tokens["input"]
+                                        if parts.get("input") and tokens.get("input") else None),
                       "stop_reason": message.get("stopReason")})
     return turns
+
+
+def hit_rate_pct(read: int, write: int, uncached: int) -> float | None:
+    """Industry-standard cache hit rate: cache_read over every prompt token (input + read + write)."""
+    prompt = uncached + read + write
+    return round(100 * read / prompt, 1) if prompt else None
+
+
+def cache_savings_pct(turns: list[dict]) -> float | None:
+    """1 - actual input-side cost / cost had every prompt token been billed at the uncached input
+    rate. The rate comes from the turn's own settle, else the run's last observed uncached rate."""
+    rates = [t["uncached_rate"] for t in turns if t.get("uncached_rate")]
+    if not rates:
+        return None
+    actual = baseline = 0.0
+    for turn in turns:
+        rate = turn.get("uncached_rate") or rates[-1]
+        actual += turn.get("input_side_usd", 0.0)
+        baseline += (turn["input"] + turn["cache_read"] + turn["cache_write"]) * rate
+    return round(100 * (1 - actual / baseline), 1) if baseline else None
 
 
 def _edit_classes(ledger: list[dict], directory: Path) -> dict:
@@ -272,6 +298,7 @@ def build_summary(directory: Path) -> dict:
     write = sum(t["cache_write"] for t in turns)
     recent = turns[-10:]
     recent_read, recent_write = sum(t["cache_read"] for t in recent), sum(t["cache_write"] for t in recent)
+    uncached, recent_uncached = sum(t["input"] for t in turns), sum(t["input"] for t in recent)
     alarms = [e for e in cost_events if e.get("kind") == "cache_alarm"]
     calls, errors = Counter(), Counter()
     result_ok = {str(e.get("toolCallId")): _result_ok(e) for e in events if e.get("type") == "tool_execution_end"}
@@ -340,11 +367,14 @@ def build_summary(directory: Path) -> dict:
                                                                  for k in ("bookkeeping", "rejected")) / spent, 1) if spent else 0.0,
                  "usd_per_evaluation": round(spent / len(evaluations), 6) if evaluations else None,
                  "report_source": report.get("written_by", "pi_session_shutdown")},
-        "cache": {"reuse_pct": round(100 * read / (read + write), 1) if read + write else None,
-                  "reuse_pct_recent_10": round(100 * recent_read / (recent_read + recent_write), 1)
-                  if recent_read + recent_write else None,
-                  "read_tokens": read, "write_tokens": write, "alarms": len(alarms),
-                  "per_request": [[t["cache_read"], t["cache_write"]] for t in turns]},
+        # reuse_pct is the cache hit rate (cache_read / (input + cache_read + cache_write)); the key
+        # name is kept for stored summaries and the viewer.
+        "cache": {"reuse_pct": hit_rate_pct(read, write, uncached),
+                  "reuse_pct_recent_10": hit_rate_pct(recent_read, recent_write, recent_uncached),
+                  "savings_pct": cache_savings_pct(turns),
+                  "savings_pct_recent_10": cache_savings_pct(recent),
+                  "read_tokens": read, "write_tokens": write, "input_tokens": uncached, "alarms": len(alarms),
+                  "per_request": [[t["cache_read"], t["cache_write"], t["input"]] for t in turns]},
         "progress": progress, "edits": _edit_classes(ledger, directory),
         "evaluations": len(evaluations), "probes": len(probes),
         "tools": {"calls": dict(calls), "results": sum(event.get("type") == "tool_execution_end" for event in events),
@@ -375,7 +405,7 @@ def render_text(summary: dict) -> str:
            f"${cost['reconciliation']['session_usd'] or 0:.4f}, gap ${cost['reconciliation']['gap_usd']:.4f}, "
            f"{len(cost['reconciliation']['open_reserves'])} reserve(s) still open"]
           if not cost["reconciliation"]["balanced"] else []),
-        f"cache reuse {cache['reuse_pct']}% (recent {cache['reuse_pct_recent_10']}%), alarms {cache['alarms']}",
+        f"cache hit rate {cache['reuse_pct']}% (recent {cache['reuse_pct_recent_10']}%), cost savings {cache['savings_pct']}%, alarms {cache['alarms']}",
         verified_line,
         f"per-axis highs: tokens {pick('tokens')}, heartbeats {pick('heartbeats')}, proxy {pick('proxy')}, "
         f"estimated proxy {pick('estimated_proxy')}",

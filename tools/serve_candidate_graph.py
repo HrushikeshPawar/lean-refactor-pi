@@ -60,17 +60,19 @@ def graph_payload(run_id: str) -> dict:
                 if key in names:
                     parts[names[key]] += float(value)
             tokens = event.get("tokens") or {}
-            cached = tokens.get("cache_read", 0) + tokens.get("cache_write", 0)
+            # Cache hit rate: cache_read over every prompt token (input + cache_read + cache_write).
+            prompt = tokens.get("input", 0) + tokens.get("cache_read", 0) + tokens.get("cache_write", 0)
             ts = event.get("ts")
             costs.append({"number": len(costs) + 1, "spent_usd": charged, "request_usd": usd,
                           "parts": dict(parts), "tokens": tokens,
-                          "reuse_pct": 100 * tokens.get("cache_read", 0) / cached if cached else None,
+                          "reuse_pct": 100 * tokens.get("cache_read", 0) / prompt if prompt else None,
                           # The cost journal stamps milliseconds; the candidate ledger uses seconds.
                           "ts": ts / 1000 if ts and ts > 1e11 else ts})
     payload["cost_timeline"] = costs
     payload["cost"] = {"spent_usd": charged, "unresolved_usd": sum(unresolved.values()),
                        "pi_embedded_usd": pi_embedded}
     payload["baseline"] = baseline_point(payload)
+    give_reference_its_numbers(payload)
     config = directory / "run-config.json"
     payload["hard_cap_usd"] = json.loads(config.read_text()).get("hard_cap_usd") if config.exists() else None
     report = directory / "cost.json"
@@ -110,6 +112,17 @@ def baseline_point(payload: dict) -> dict | None:
         return None
     return {"number": 0, "candidate_id": reference["id"], "mode": "reference", "status": "full",
             "tokens": tokens, "heartbeat": heartbeats, "local_proxy": round(100 / 3, 2), "is_reference": True}
+
+
+def give_reference_its_numbers(payload: dict) -> None:
+    """Node #1 (the original proof) is never evaluated by the model; show its published tokens and
+    heartbeats and the 33.33 baseline instead of "unevaluated"."""
+    point = payload.get("baseline")
+    node = next((n for n in payload.get("nodes", []) if n.get("origin") == "reference"), None)
+    if not point or not node or node.get("tokens") is not None:
+        return
+    node.update({"status": "full", "tokens": point["tokens"], "heartbeat": point["heartbeat"],
+                 "local_proxy": point["local_proxy"]})
 
 
 VIEWER_FILES = {"": ("index.html", "text/html; charset=utf-8"),

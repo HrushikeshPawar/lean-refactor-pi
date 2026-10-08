@@ -12,7 +12,7 @@ def write(path: Path, rows: list[dict]) -> None:
 
 def assistant(calls: list[tuple[str, str]], read: int, write_tokens: int, stop: str = "toolUse") -> dict:
     return {"type": "message_end", "message": {"role": "assistant", "stopReason": stop,
-            "usage": {"totalTokens": 100 + read + write_tokens, "cacheRead": read, "cacheWrite": write_tokens},
+            "usage": {"totalTokens": 100 + read + write_tokens, "input": 100, "cacheRead": read, "cacheWrite": write_tokens},
             "content": [{"type": "toolCall", "id": cid, "name": name} for cid, name in calls]}}
 
 
@@ -87,9 +87,25 @@ class SummaryTests(unittest.TestCase):
     def test_cache_kpis_alarms_and_tool_errors(self):
         data = summary.build_summary(self.dir)
         self.assertEqual(data["cache"]["alarms"], 1)
-        self.assertEqual(data["cache"]["per_request"], [[0, 3000], [3000, 100], [3100, 50], [3150, 20]])
-        self.assertEqual(data["cache"]["reuse_pct"], round(100 * 9250 / (9250 + 3170), 1))
+        self.assertEqual(data["cache"]["per_request"], [[0, 3000, 100], [3000, 100, 100], [3100, 50, 100], [3150, 20, 100]])
+        # Hit rate = cache_read / (input + cache_read + cache_write), not read / (read + write).
+        self.assertEqual(data["cache"]["reuse_pct"], round(100 * 9250 / (9250 + 3170 + 400), 1))
+        self.assertEqual(data["cache"]["input_tokens"], 400)
+        self.assertIsNone(data["cache"]["savings_pct"])  # these settles carry no component costs
         self.assertEqual(data["tools"]["errors"], {"arena_source": 1})
+
+    def test_deepseek_hit_rate_and_cache_cost_savings(self):
+        # DeepSeek never writes cache: read/(read+write) would be 100%; the real hit rate is 79%.
+        self.assertEqual(summary.hit_rate_pct(7900, 0, 2100), 79.0)
+        self.assertIsNone(summary.hit_rate_pct(0, 0, 0))
+        events = [assistant([("a", "arena_idea")], 7900, 0)]
+        events[0]["message"]["usage"]["input"] = 2100
+        settle = {"usd": 0.0004, "usage_known": True, "tokens": {"input": 2100, "cache_read": 7900, "cache_write": 0},
+                  "ledger_components_usd": {"input": 2100 * 0.15e-6, "cacheRead": 7900 * 0.003e-6, "cacheWrite": 0.0}}
+        turns = summary._turns(events, [settle])
+        saved = summary.cache_savings_pct(turns)
+        self.assertAlmostEqual(saved, 100 * (1 - (2100 * 0.15 + 7900 * 0.003) / (10000 * 0.15)), places=1)
+        self.assertIsNone(summary.cache_savings_pct([]))
 
     def test_progress_best_per_axis_and_timeline(self):
         data = summary.build_summary(self.dir)
