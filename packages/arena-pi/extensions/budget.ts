@@ -210,7 +210,10 @@ export function requestShape(payload: Record<string, unknown>): string {
 const MIN_THINKING_BUDGET_TOKENS = 1024;
 const THINKING_ANSWER_TOKENS = 1024;
 
-export function boundedPayload(payload: unknown, model: BudgetModel): { payload: Record<string, unknown>; reserve: number } {
+// The last settled request: its payload size and the input tokens the provider counted for it.
+export type PriorRequest = { bytes: number; inputTokens: number };
+
+export function boundedPayload(payload: unknown, model: BudgetModel, prior?: PriorRequest): { payload: Record<string, unknown>; reserve: number } {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error("Unknown provider payload");
   const value = { ...payload as Record<string, unknown> };
   const outputField = typeof value.max_output_tokens === "number" ? "max_output_tokens"
@@ -230,8 +233,14 @@ export function boundedPayload(payload: unknown, model: BudgetModel): { payload:
   const bytes = Buffer.byteLength(JSON.stringify(value), "utf8");
   // Text-only Responses payloads cannot tokenize into more tokens than their
   // UTF-8 bytes; allow a fixed margin for protocol framing outside the JSON.
-  const inputBound = bytes + 4096;
-  if (inputBound > MODELS[model].contextWindow) throw new Error("Arena context bound exceeds model window");
+  // A grown payload repeats the prior one, so its tokens are at most the provider's count for that
+  // prefix plus one per added byte. This matters for encrypted reasoning blobs, which are byte-heavy
+  // but token-light: a pure byte bound passed the window at ~180K real tokens, before Pi compacts.
+  const byteBound = bytes + 4096;
+  const inputBound = prior && prior.inputTokens > 0 && bytes >= prior.bytes
+    ? Math.min(byteBound, prior.inputTokens + (bytes - prior.bytes) + 4096) : byteBound;
+  // Worded so Pi recognises a context overflow and compacts, then retries, instead of failing the turn.
+  if (inputBound > MODELS[model].contextWindow) throw new Error("Arena context bound exceeds the context window");
   const price = model === "gpt-6-luna" ? MODELS[model].highPrice : MODELS[model].price;
   const reserve = inputBound * Math.max(price.input, price.cacheRead, price.cacheWrite) / 1_000_000
     + Number(value[outputField]) * price.output / 1_000_000;
@@ -239,8 +248,8 @@ export function boundedPayload(payload: unknown, model: BudgetModel): { payload:
 }
 
 export function assessFinalPayload(payload: unknown, model: BudgetModel,
-  state: { spent: number; unresolved?: number }, limits: BudgetLimits) {
-  const bounded = boundedPayload(payload, model);
+  state: { spent: number; unresolved?: number }, limits: BudgetLimits, prior?: PriorRequest) {
+  const bounded = boundedPayload(payload, model, prior);
   const gate = budgetGate(bounded.reserve, state.spent, state.unresolved ?? 0, limits);
   return { ...bounded, ...gate };
 }

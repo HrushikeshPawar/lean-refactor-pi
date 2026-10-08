@@ -208,3 +208,14 @@ test("the model may finish only with at most 10% of the soft cap left", () => {
   assert.equal(finishAllowed(0.095, limits).allowed, true);
   assert.equal(finishAllowed(0.2, limits).allowed, true);
 });
+
+test("the context bound uses the provider's prior token count, and an overflow reads as one to Pi", () => {
+  // ~1.1 MB of encrypted reasoning that the provider counted as ~180K tokens.
+  const big = { input: [{ type: "reasoning", encrypted_content: "x".repeat(1_100_000) }], max_output_tokens: 16_000 };
+  const bytes = Buffer.byteLength(JSON.stringify(big), "utf8");
+  assert.throws(() => boundedPayload(big, "gpt-6-luna"), /exceeds the context window/);
+  const grown = { ...big, input: [...big.input, { type: "message", content: "y".repeat(2_000) }] };
+  assert.ok(boundedPayload(grown, "gpt-6-luna", { bytes, inputTokens: 180_000 }).reserve < 0.1);
+  // A payload smaller than the prior one (after compaction) falls back to its own bytes.
+  assert.throws(() => boundedPayload(big, "gpt-6-luna", { bytes: bytes + 10, inputTokens: 180_000 }), /context window/);
+});

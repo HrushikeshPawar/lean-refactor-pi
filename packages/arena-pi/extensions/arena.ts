@@ -8,7 +8,7 @@ import { Type } from "typebox";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import type { AssistantMessage, AssistantMessageEventStream } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
-import type { BudgetModel } from "./budget.ts";
+import type { BudgetModel, PriorRequest } from "./budget.ts";
 import { nearestToolName, normalizeToolArguments } from "./toolnames.ts";
 import { ResultTrimmer } from "./trim.ts";
 import { continuationPush, finishPush, trimProfile, leanPathViolation, planEvaluate, resolveInlineIdea, planProbe } from "./rules.ts";
@@ -156,6 +156,9 @@ export default function arenaExtension(pi: ExtensionAPI) {
   const finalMessages = new Map<string, AssistantMessage>();
   let openAttempt: string | undefined;
   let previousFailed: string | undefined;
+  // Payload bytes per open request, and the last settled one, for the context bound.
+  const requestBytes = new Map<string, number>();
+  let priorRequest: PriorRequest | undefined;
   let fixedRequestShape: string | undefined;
   let gateStopReason: string | undefined;
   let gateStopCode: "soft_cap_reached" | "actual_usage_cap" | "estimated_request_unaffordable" | undefined;
@@ -444,7 +447,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
               stop: soft.stop, soft_overshoot_usd: soft.overshootUsd });
             throw new Error(`Arena budget stop: ${gateStopReason}`);
           }
-          const bounded = assessFinalPayload(payload, model.id as BudgetModel, costState(), softLimits);
+          const bounded = assessFinalPayload(payload, model.id as BudgetModel, costState(), softLimits, priorRequest);
           const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
           const retryOf = previousFailed ?? null;
           const shape = requestShape(bounded.payload);
@@ -490,6 +493,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
             gate: "allow", reason: decision.reason, remaining_usd: decision.remainingUsd,
             overshoot_usd: decision.overshootUsd, model: model.id,
             bytes: Buffer.byteLength(JSON.stringify(published)) });
+          requestBytes.set(id, Buffer.byteLength(JSON.stringify(bounded.payload), "utf8"));
           pendingRequest = id;
           openAttempt = id;
           wireIndex = 0;
@@ -561,6 +565,9 @@ export default function arenaExtension(pi: ExtensionAPI) {
     if (event.message.usage?.totalTokens) {
       const usage = event.message.usage;
       usd = usageCost(usage, model);
+      const bytes = requestBytes.get(pendingRequest);
+      const inputTokens = (usage.input ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
+      if (bytes !== undefined && inputTokens > 0) priorRequest = { bytes, inputTokens };
       boundViolation = usd > Number(state.usd);
       const limits = budgetLimits();
           const ledgerSettled = costEvents().filter(item => item.kind === "settle" && item.usage_known !== false)
@@ -611,6 +618,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
       console.error(`[arena-cost] released failed request ${pendingRequest}; no usage returned`);
     }
     finalMessages.delete(pendingRequest);
+    requestBytes.delete(pendingRequest);
     pendingRequest = undefined;
   }
   pi.on("message_end", event => {
