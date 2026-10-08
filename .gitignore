@@ -14,3 +14,7 @@ __pycache__/
 
 # Scratch / backups
 *.bak
+
+# Local secrets (Arena submission key, API keys)
+.env
+.env.*
