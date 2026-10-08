@@ -10,6 +10,25 @@ Rules checked against the [official Arena Space](https://huggingface.co/spaces/d
 and its [public app source](https://huggingface.co/spaces/delta-lab-ai/lean-refactor-arena/blob/main/app.py).
 Cache reasoning checked against [Anthropic's prompt-caching documentation](https://platform.claude.com/docs/en/build-with-claude/prompt-caching#what-invalidates-the-cache).
 
+## Next improvements: deferred until there is more data (2026-10-08)
+
+**Compaction memory.** In the `v6pilot` run on Core with DeepSeek, memory injection fired 3 times.
+- Working: no proof was exactly repeated across a compaction, and only 2 of 27 later probes were near-copies of an earlier failure. The model resumed on the best route.
+- Not working: the model forgot what it knew. After the second compaction it re-read 690 source lines it had already read, read no new lines, and repeated searches.
+- Change the memory text only after more runs show its other quirks. Candidates:
+  1. Include the full text of the best proof, not a pointer to it.
+  2. Add a key-lemmas block with the exact statements used by the best proof and by each route's best attempt; the harness fetches them.
+  3. Add a "read so far" list of files and line ranges.
+  4. For each latest failure, show the remaining goal and its route, not just the error headline.
+
+**F: hide the incumbent proof during a new-route sprint.** This is the only lever that targets anchoring itself. It may break the prompt cache, because the context prefix changes.
+- Test it offline first: replay stored traces up to a refusal, then branch with and without the best proof in context.
+- Compare structural novelty (kernel fingerprint), cache hit rate and cost before enabling it in live runs.
+
+**Rejected for now.**
+- D, harness-chosen structural constraints: the harness is not smart enough. It would either repeat the same pushes or send the model off in the wrong direction.
+- E, a mechanically built route menu: it needs planning in advance, which defeats the purpose of exploration.
+
 ## Decisions after the cross-theorem and rules review (2026-10-07)
 
 1. **First official submission is a v6 milestone.** The user will upload it manually. Prepare a warm-up JSONL from
