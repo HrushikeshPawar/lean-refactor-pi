@@ -10,6 +10,7 @@ import type { AssistantMessage, AssistantMessageEventStream } from "@earendil-wo
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { BudgetModel } from "./budget.ts";
 import { nearestToolName, normalizeToolArguments } from "./toolnames.ts";
+import { ResultTrimmer } from "./trim.ts";
 import { continuationPush, finishPush, trimProfile, leanPathViolation, planEvaluate, resolveInlineIdea, planProbe } from "./rules.ts";
 import { assessFinalPayload, BUDGET_PROVIDER, budgetLimits, softCapGate, cacheAlarm, catalogPriceProblem, cacheUtilization, finishAllowed, isBudgetModel, maxRequestOutputTokens, MODELS, priceForUsage, requestShape, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
 
@@ -176,6 +177,8 @@ export default function arenaExtension(pi: ExtensionAPI) {
   let turnHadVerifiedImprovement = false;
   let previousVerified: Record<string, any> | null | undefined;
   const discoveries = new Set<string>();
+  // Model-facing trimming of tool results; its record of what the model has seen resets on compaction.
+  const trimmer = new ResultTrimmer();
   let readEntries: (() => SessionEntry[]) | undefined;
   let modelRegistry: ExtensionContext["modelRegistry"] | undefined;
 
@@ -364,6 +367,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
     turnHadVerifiedImprovement = false;
     previousVerified = undefined;
     discoveries.clear();
+    trimmer.forget();
     for (const item of costEvents()) if (item.kind === "discovery" && typeof item.signature === "string") {
       discoveries.add(item.signature);
     }
@@ -615,6 +619,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
   // Compaction summaries are provider requests with no agent message_end.
   pi.on("session_compact", () => {
     closeRequest(undefined, "compaction_summary");
+    trimmer.forget();
     void injectMemory();
   });
   pi.on("session_compact_failed", () => closeRequest(undefined, "compaction_failed"));
@@ -754,6 +759,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
       name: event.toolName, args: event.args });
   });
 
+  const untrimmed = new Map<string, string>();
   pi.on("tool_execution_end", event => {
     const result = event.result as { content?: Array<{ type?: string; text?: string }> } | undefined;
     const payload = payloadFromToolResult(result);
@@ -780,16 +786,29 @@ export default function arenaExtension(pi: ExtensionAPI) {
     const text = Array.isArray(result?.content)
       ? result.content.filter(part => part?.type === "text" && part.text).map(part => part.text).join("\n")
       : "";
+    // `tool_result` runs before this event, so the trace takes the untrimmed text it stashed.
+    const full = untrimmed.get(event.toolCallId);
+    untrimmed.delete(event.toolCallId);
     appendTrace({ kind: "tool_result", id: openAttempt, tool_call_id: event.toolCallId,
-      name: event.toolName, result: event.result, text, is_error: event.isError });
+      name: event.toolName, result: event.result, text: full ?? text, ...(full !== undefined ? { trimmed: true } : {}),
+      is_error: event.isError });
   });
 
   pi.on("tool_result", event => {
     if (!active) return;
+    // Errors reach the model untouched; only successful results are trimmed (the trace keeps the full text).
+    const content = event.isError ? event.content : event.content.map(part => {
+      if (part.type !== "text" || !part.text) return part;
+      const text = trimmer.trim(event.toolName, event.input, part.text);
+      return text === part.text ? part : { ...part, text };
+    });
+    const changed = content.some((part, index) => part !== event.content[index]);
+    if (changed) untrimmed.set(event.toolCallId, event.content.filter(part => part.type === "text" && part.text)
+      .map(part => (part as { text: string }).text).join("\n"));
     const state = readState();
     const line = state && stateLine(state);
-    if (!line) return;
-    return { content: [...event.content, { type: "text" as const, text: line }],
+    if (!line && !changed) return;
+    return { content: line ? [...content, { type: "text" as const, text: line }] : content,
       details: event.details, isError: event.isError };
   });
 
