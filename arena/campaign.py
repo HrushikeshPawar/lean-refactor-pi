@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import fcntl
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -836,6 +837,36 @@ def _append(directory: Path, event: dict) -> None:
         os.close(fd)
 
 
+def _route_features(directory: Path, name: str, proof_id: str, proof: str) -> dict | None:
+    """Kernel-term features of a compiled proof, read by Lean in the background lane after the proof was scored,
+    so they never count toward its metrics. None when extraction fails; the route then uses text features."""
+    from arena import route_features
+
+    try:
+        with lean_lock(directory, "background"):
+            features = route_features.extract(name, {proof_id: proof})[proof_id]
+    except Exception:
+        return None
+    return features if features.get("ok") else None
+
+
+def _record_route_later(directory: Path, name: str, proof_id: str, proof: str) -> None:
+    """Fingerprint in a detached process: extraction recompiles the file prefix (seconds to minutes), and the
+    model's evaluate call must not wait for a bookkeeping result it only sees later in finish reviews."""
+    if os.environ.get("ARENA_ROUTES_INLINE") == "1":
+        _record_route(directory, name, proof_id, proof)
+        return
+    path = _snapshot(directory, proof_id, proof)
+    code = ("import sys; from pathlib import Path; from arena.campaign import _record_route; "
+            "_record_route(Path(sys.argv[1]), sys.argv[2], sys.argv[3], Path(sys.argv[4]).read_text())")
+    try:
+        subprocess.Popen([sys.executable, "-c", code, str(directory), name, proof_id, str(path)], cwd=ROOT,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except OSError:
+        pass
+
+
 def _record_route(directory: Path, name: str, proof_id: str, proof: str) -> dict | None:
     """Fingerprint a compiled complete proof and file it under a route. Harness-only: the model sees the
     result in finish reviews and pushes, never as a tool argument. Once per proof; failures are ignored."""
@@ -843,6 +874,9 @@ def _record_route(directory: Path, name: str, proof_id: str, proof: str) -> dict
     from arena.context import cached_context
 
     try:
+        if any(item.get("kind") == "route" and item["proof_id"] == proof_id for item in events(directory)):
+            return None
+        features = _route_features(directory, name, proof_id, proof)
         with (directory / "route.lock").open("a") as handle:
             fcntl.flock(handle, fcntl.LOCK_EX)
             history = events(directory)
@@ -850,13 +884,14 @@ def _record_route(directory: Path, name: str, proof_id: str, proof: str) -> dict
             if any(item["proof_id"] == proof_id for item in earlier):
                 return None
             context = cached_context(name)
-            print_ = routes.fingerprint(proof, routes.vocabulary(context), name)
+            print_ = routes.fingerprint(proof, routes.vocabulary(context), name, features)
             route, similarity = routes.assign(earlier, print_)
             new = route not in {item["route"] for item in earlier}
             reference = next((item["fingerprint"] for item in earlier if item["route"] == "r1"), None)
+            weights = routes.idf([item["fingerprint"] for item in earlier] + [print_])
             event = {"kind": "route", "proof_id": proof_id, "route": route, "new": new,
-                     "similarity": similarity, "fingerprint": print_,
-                     "label": routes.label(print_, reference) if new else next(
+                     "similarity": similarity, "source": print_["source"], "fingerprint": print_,
+                     "label": routes.label(print_, reference, weights) if new else next(
                          item["label"] for item in earlier if item["route"] == route)}
             _append(directory, event)
             return event
@@ -961,7 +996,7 @@ def init(name: str, run_id: str, extra: str = "") -> dict:
                         "evaluator_sha256": hashlib.sha256(Path(__file__).with_name("engine.py").read_bytes()).hexdigest()})
     materialize(name, run_id, row["src"])
     _append(directory, {"kind": "current", "candidate_id": reference_id})
-    _record_route(directory, name, reference_id, row["src"])
+    _record_route_later(directory, name, reference_id, row["src"])
     return {"packet": str(directory / "packet.txt"), "shadow": str(shadow),
             "candidate_path": str(shadow / source_path(row))}
 
@@ -1336,7 +1371,7 @@ def record_evaluation(name: str, run_id: str, proof: str, mode: str,
             _append(directory, {"kind": "evaluation", "candidate_id": candidate_id, "key": key,
                                 "mode": mode, "trigger": trigger, "result": result})
     if result.get("tokens") is not None:
-        _record_route(directory, name, candidate_id, proof)
+        _record_route_later(directory, name, candidate_id, proof)
     location = materialize(name, run_id, proof) if materialize_live and result.get("tokens") is not None else {}
     if location:
         _append(directory, {"kind": "current", "candidate_id": candidate_id})

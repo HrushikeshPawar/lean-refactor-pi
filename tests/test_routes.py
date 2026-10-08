@@ -71,6 +71,88 @@ class FingerprintTests(unittest.TestCase):
         self.assertEqual([e["route"] for e in events], ["r1", "r2", "r2", "r1"])
 
 
+def features(recursion=(), lemmas=(), claims=(), logic=()):
+    """A successful extractor record, as the Lean metaprogram reports it."""
+    return {"ok": True, "recursion": list(recursion), "lemmas": list(lemmas), "claims": list(claims), "logic": list(logic)}
+
+
+def kernel_print(**parts):
+    return routes.fingerprint(INDUCTIVE, VOCAB, "Core.X", features(**parts))
+
+
+INDUCTION = dict(recursion=["rec:UpdateStates"], lemmas=["Core.A", "Core.B", "Core.C", "Core.D"],
+                 claims=["Eq#1", "Eq#2"], logic=["Exists.intro@Core.f", "contra"])
+EQUATIONAL_KERNEL = dict(recursion=[], lemmas=["Core.E", "Core.F", "Core.G", "Core.D"],
+                         claims=["Eq#3"], logic=["Exists.intro@Core.f"])
+
+
+class KernelTests(unittest.TestCase):
+    def test_kernel_part_drops_plumbing_and_merges_lemma_variants(self):
+        part = routes.kernel(features(lemmas=["Eq.mpr", "congrArg", "Nat.add_comm'", "Int.add_comm", "foo_left", "foo_right",
+                                              "Finset.card_bij'", "Finset.card_bij", "Core.X"],
+                                      logic=["Exists.intro@_private.Mod.0.Core.W"]))
+        self.assertEqual(part["lemmas"], ["Core.X", "Finset.card_bij", "NatInt.add_comm", "foo"])
+        self.assertEqual(part["logic"], ["Exists.intro@Core.W"])
+
+    def test_features_make_a_kernel_fingerprint_and_failure_falls_back_to_text(self):
+        self.assertEqual(kernel_print(**INDUCTION)["source"], "kernel")
+        failed = routes.fingerprint(INDUCTIVE, VOCAB, "Core.X", {"ok": False, "error": "timeout"})
+        self.assertEqual((failed["source"], "kernel" in failed), ("text", False))
+        self.assertTrue(failed["induction"])
+
+    def test_identical_features_are_one_route_whatever_the_text(self):
+        same = routes.similarity(routes.fingerprint(INDUCTIVE, VOCAB, "Core.X", features(**INDUCTION)),
+                                 routes.fingerprint(EQUATIONAL, VOCAB, "Core.X", features(**INDUCTION)))
+        self.assertEqual(same, 1.0)
+
+    def test_recursion_is_a_part_of_the_score_and_never_a_veto(self):
+        left, right = kernel_print(**INDUCTION), kernel_print(**{**INDUCTION, "recursion": []})
+        score = routes.similarity(left, right)
+        self.assertAlmostEqual(score, 1 - routes.WEIGHTS["recursion"])
+        # two proofs without any recursion agree on that part
+        self.assertAlmostEqual(routes.similarity(right, right), 1.0)
+
+    def test_rare_lemmas_weigh_more_than_common_ones(self):
+        prints = [kernel_print(lemmas=["Core.common", "Core.rare"]), kernel_print(lemmas=["Core.common"]),
+                  kernel_print(lemmas=["Core.common"]), kernel_print(lemmas=["Core.common"])]
+        weights = routes.idf(prints)["lemmas"]
+        self.assertGreater(weights["Core.rare"], weights["Core.common"])
+        shared_rare = routes.similarity(kernel_print(lemmas=["Core.common", "Core.rare"]),
+                                        kernel_print(lemmas=["Core.rare", "Core.other"]), routes.idf(prints))
+        shared_common = routes.similarity(kernel_print(lemmas=["Core.common", "Core.x"]),
+                                          kernel_print(lemmas=["Core.common", "Core.y"]), routes.idf(prints))
+        self.assertGreater(shared_rare, shared_common)
+
+    def test_induction_and_equational_routes_separate(self):
+        a, b = kernel_print(**INDUCTION), kernel_print(**EQUATIONAL_KERNEL)
+        self.assertLess(routes.similarity(a, b), routes.SAME_ROUTE)
+
+    def test_a_route_is_compared_by_its_first_proof_so_it_cannot_drift(self):
+        base = dict(recursion=[], logic=["contra"], claims=["Eq#1"])
+        first = kernel_print(lemmas=["L1", "L2", "L3", "L4"], **base)
+        second = kernel_print(lemmas=["L1", "L2", "L3", "L5"], **base)
+        third = kernel_print(lemmas=["L1", "L5", "L6", "L7"], **{**base, "claims": ["Eq#9"]})
+        events = []
+        for print_ in (first, second, third):
+            route, _ = routes.assign(events, print_)
+            events.append({"route": route, "fingerprint": print_})
+        # the third resembles the second but not the first, so it starts its own route
+        self.assertEqual([e["route"] for e in events], ["r1", "r1", "r2"])
+
+    def test_label_names_the_recursion_change_and_the_lemma_difference(self):
+        reference = kernel_print(**INDUCTION)
+        other = kernel_print(recursion=["rec:List"], lemmas=["Core.A", "Core.Z"], claims=[], logic=[])
+        text = routes.label(other, reference)
+        self.assertTrue(text.startswith("recursion: List.rec instead of UpdateStates.rec; "))
+        self.assertIn("+Core.Z", text)
+        self.assertIn("\u2212Core.B", text)
+        self.assertEqual(routes.label(reference, None), "recursion: UpdateStates.rec; Core.A, Core.B, Core.C")
+
+    def test_mixed_sources_compare_by_text(self):
+        text = routes.fingerprint(INDUCTIVE, VOCAB, "Core.X")
+        self.assertEqual(routes.similarity(text, kernel_print(**INDUCTION)), routes.text_similarity(text, kernel_print(**INDUCTION)))
+
+
 class LedgerTests(unittest.TestCase):
     def history(self):
         def candidate(identifier, origin="model"):
@@ -106,7 +188,10 @@ class LedgerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw)
             context = {"earlier": [{"name": name, "decl": "theorem"} for name in VOCAB]}
-            with patch("arena.context.cached_context", return_value=context):
+            with patch("arena.context.cached_context", return_value=context), \
+                    patch("arena.route_features.extract", side_effect=lambda name, proofs: {
+                        tag: features(**(INDUCTION if proof == INDUCTIVE else EQUATIONAL_KERNEL)) | {"tag": tag}
+                        for tag, proof in proofs.items()}):
                 first = campaign._record_route(directory, "Core.X", "p1", INDUCTIVE)
                 again = campaign._record_route(directory, "Core.X", "p1", INDUCTIVE)
                 second = campaign._record_route(directory, "Core.X", "p2", EQUATIONAL)
@@ -114,7 +199,17 @@ class LedgerTests(unittest.TestCase):
             rows = [json.loads(line) for line in (directory / "ledger.jsonl").read_text().splitlines()]
             self.assertEqual([row["kind"] for row in rows], ["route", "route"])
             self.assertTrue(rows[1]["new"])
-            self.assertTrue(rows[1]["label"].startswith("no induction"))
+            self.assertEqual((rows[0]["source"], rows[1]["source"]), ("kernel", "kernel"))
+            self.assertTrue(rows[1]["label"].startswith("recursion: none instead of UpdateStates.rec"))
+
+    def test_record_route_falls_back_to_text_when_extraction_fails(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            with patch("arena.context.cached_context", return_value={}), \
+                    patch("arena.route_features.extract", side_effect=RuntimeError("no Lean")):
+                event = campaign._record_route(directory, "Core.X", "p1", INDUCTIVE)
+            self.assertEqual(event["source"], "text")
+            self.assertEqual(event["label"], "induction")
 
 
 if __name__ == "__main__":
