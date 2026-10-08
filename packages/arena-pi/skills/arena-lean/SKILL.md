@@ -30,7 +30,8 @@ assumes the other versions pass; only a full evaluation is a verified score. Hea
 Tokens are counted on the proof after the statement, with comments and attributes removed. An identifier or
 number (letters, digits, `.`, `_`, `'`) is one token. Every other non-space character is its own token, except
 these operators which count once: `:=  !=  &&  -.  ->  ←  ..  ...  ::  :>  <;>  ;;  ==  ||  =>  <=  >=  ⁻¹  ?_`.
-Whitespace, newlines and indentation are free. Consequences: `exact foo` is two tokens, `⟨a, b⟩` is five,
+Spaces, newlines and indentation are free (a tab character counts as a token). `_` can stand in for any argument
+or term Lean infers; restating it, such as a lambda, costs tokens. Consequences: `exact foo` is two tokens, `⟨a, b⟩` is five,
 a `by` block costs the `by`, deleting a line costs nothing, and a long name costs the same as a short one.
 
 ### Heartbeats
@@ -70,7 +71,7 @@ top-level commands or auxiliary declarations, and anything outside the one theor
 ## Tool workflow
 
 1. Survey the supplied references and pinned source (look for lemma families next to the ones the
-   reference proof uses), then use one concise `arena_idea` to record the route you will try. It becomes the current idea; probes, evaluations, and candidates inherit it unless you
+   reference proof uses, and for imported library lemmas whose statements match the goal: the packet ranks them), then use one concise `arena_idea` to record the route you will try. It becomes the current idea; probes, evaluations, and candidates inherit it unless you
    explicitly choose another. You can also pass `idea` (a one-line route title) to your first
    `arena_probe` or `arena_evaluate` to create it and link that attempt in one call. Update or abandon it with a short reason when evidence changes your plan.
 2. `arena_probe`: develop a structural rewrite hole by hole. `sorry` is allowed; you get the goal at each

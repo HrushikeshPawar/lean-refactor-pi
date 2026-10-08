@@ -200,6 +200,61 @@ class RankingTests(unittest.TestCase):
         self.assertEqual(parsed["earlier"][0]["consts"], ["A"])
 
 
+class LibrarySectionTests(unittest.TestCase):
+    @staticmethod
+    def record(name, score, shared=("A.foo", "B.bar"), sig=None):
+        return {"kind": "library", "name": name, "score": str(score), "module": "Mathlib.X", "shared": list(shared),
+                "concl_shared": [], "sig": sig or f"{name} : A.foo x -> B.bar x"}
+
+    def test_records_are_parsed_in_order_and_rendered_with_handles_and_shared_constants(self):
+        output = "\n".join(["ARENA_CTX " + json.dumps(self.record("L.best", 9)), "ARENA_CTX " + json.dumps(self.record("L.next", 8)),
+                            "ARENA_CTX " + json.dumps({"kind": "library_scan", "scanned": 5, "pool": 3, "truncated": False, "ms": 1}),
+                            "ARENA_CTX " + json.dumps({"kind": "end"})])
+        parsed = context.parse_context(output, 0, 1)
+        self.assertEqual([r["name"] for r in parsed["library"]], ["L.best", "L.next"])
+        lines = context._library_section(parsed)
+        self.assertTrue(lines[1].startswith("1. [decl:L.best · Mathlib.X · mentions foo, bar]"))
+        self.assertTrue(lines[2].startswith("2. [decl:L.next"))
+
+    def test_lemmas_the_reference_already_uses_are_skipped_and_empty_is_safe(self):
+        parsed = {"library": [self.record("L.used", 9), self.record("L.new", 8)], "source": [{"name": "L.used"}],
+                  "dependency": []}
+        lines = context._library_section(parsed)
+        self.assertFalse(any("L.used" in line for line in lines))
+        self.assertIn("1. [decl:L.new", lines[1])
+        self.assertEqual(context._library_section({}), [])
+        self.assertEqual(context._library_section({"library": [self.record("L.used", 9)], "source": [{"name": "L.used"}]}), [])
+
+    def test_section_respects_line_and_character_budgets_and_is_shed_before_the_goals(self):
+        parsed = {"library": [self.record(f"L.n{i}", 9 - i / 100, sig="L.n : " + "t " * 400) for i in range(60)]}
+        lines = context._library_section(parsed)
+        self.assertLessEqual(len(lines) - 1, context.LIMITS["library"])
+        self.assertLessEqual(sum(len(line) + 1 for line in lines[1:]), context.LIMITS["library_budget"])
+        self.assertTrue(all(len(line) < context.LIMITS["library_chars"] + 120 for line in lines[1:]))
+        parts = [("Head", ["keep"]), ("Goal before each top-level tactic of the reference proof", ["goal"]),
+                 (context.LIBRARY_TITLE, lines), (context.EARLIER_TITLE, ["e " * 100] * 10)]
+        text = context._fit(parts, 3000)
+        self.assertLessEqual(len(text), 3000)
+        self.assertIn("goal", text)
+
+    def test_scoring_facts_state_the_formula_and_the_counter_without_row_specific_rates(self):
+        facts = context.SCORING_FACTS
+        for phrase in ("(token_reduction% + heartbeat_reduction% + compatibility%) / 3", "`_` can replace", "tab counts"):
+            self.assertIn(phrase, facts)
+        self.assertNotIn("heartbeats per token", facts)
+
+    def test_counter_facts_match_the_pinned_counter(self):
+        from arena.engine import ROOT as root
+        if not (root / "vendor/lean-refactor").is_dir():
+            self.skipTest("pinned counter not vendored")
+        from arena.engine import _proof_length
+        head = "theorem t : True"
+        self.assertEqual(_proof_length(head + " := by\n  exact ⟨a, b⟩"), 7)      # ⟨ a , b ⟩ are five tokens
+        self.assertEqual(_proof_length(head + " := by\n\n  trivial\n"), 2)       # blank lines and indentation are free
+        self.assertEqual(_proof_length(head + " := by\n \t trivial"), 3)        # a tab is a token
+        self.assertEqual(_proof_length(head + " := fun x => x.1 -- note"), 4)    # `=>` once, comment removed
+
+
 class TruncationTests(unittest.TestCase):
     def test_over_budget_packets_shed_the_lowest_priority_entries_deterministically(self):
         big = [f"entry {i} " + "x" * 200 for i in range(40)]
@@ -330,6 +385,14 @@ class PhyslibInventoryTests(unittest.TestCase):
         self.assertLessEqual(len(self.packet), context.MAX_PACKET_CHARS + 1)
         self.assertIn("Source names:", self.packet)
         self.assertIn("Extra direct theorem/lemma dependencies:", self.packet)
+
+    def test_the_library_lemma_that_decides_the_row_is_ranked_in_the_packet(self):
+        winner = "Continuous.integral_pos_of_hasCompactSupport_nonneg_nonzero"
+        ranked = [item["name"] for item in self.context["library"]]
+        self.assertLess(ranked.index(winner), 10)
+        self.assertIn(context.LIBRARY_TITLE, self.packet)
+        self.assertIn(f"decl:{winner} ", self.packet)
+        self.assertFalse(self.context["library_scan"][0]["truncated"])
 
     def test_constant_index_and_packet_are_stable_for_the_same_pin(self):
         all_constants = context.constant_index(self.context)

@@ -129,6 +129,7 @@ elab "arena_context " cmd:command : command => do
         | _, _ => pure ()
   | none => pure ()
   let seenGoal ← IO.mkRef (#[] : Array (Nat × Nat))
+  let goalConsts ← IO.mkRef (#[] : Array Lean.Name)
   let sourceRefs ← IO.mkRef (#[] : Array (Lean.Name × Nat × Nat))
   let rec visit : Nat → Option ContextInfo → InfoTree → CommandElabM Unit
     | 0, _, _ => pure ()
@@ -155,7 +156,10 @@ elab "arena_context " cmd:command : command => do
                 let mut shape : List (String × Json) := []
                 for g in ti.goalsBefore do
                   match ti.mctxBefore.findDecl? g with
-                  | some d => shape := shape ++ summ (instantiateMVarsCore ti.mctxBefore d.type).1 ctx.env
+                  | some d =>
+                    let goalType := (instantiateMVarsCore ti.mctxBefore d.type).1
+                    goalConsts.modify (· ++ goalType.getUsedConstants)
+                    shape := shape ++ summ goalType ctx.env
                   | none => pure ()
                 emit (([("kind", "goal"), ("line", line), ("endLine", endLine), ("text", text)] : List (String × Json)) ++
                   (if shape.length > 7 then shape.take 7 else shape))
@@ -273,6 +277,92 @@ elab "arena_context " cmd:command : command => do
       | _ => Json.arr #[]
     emit (([("kind", "earlier"), ("name", n.toString), ("line", line), ("decl", decl),
           ("sig", clip (← sigOf n) 400), ("uses", uses)] : List (String × Json)) ++ shape)
+  -- Imported theorems whose statements match the goal. Each theorem scores the IDF-weighted mass of the
+  -- constants of its statement that also occur in the pinned theorem's statement (weight 1), the goals of the
+  -- reference proof (0.7) and the statements of the lemmas its source names (0.5), saturated against its own
+  -- unshared mass so long generic statements do not win. A theorem in the namespace of such a constant
+  -- (`Continuous.foo`, `HomBisimilarity.foo`) counts that constant once more. Rare constants dominate: the
+  -- IDF is taken over every imported theorem. The scan stops after a time budget.
+  let libStart ← IO.monoMsNow
+  let referenced := (← sourceRefs.get).map (·.1)
+  let goalNames ← goalConsts.get
+  let isParentProj := fun (u : Lean.Name) => (match u with
+    | .str _ s => s.length > 2 && s.startsWith "to" && (s.get ⟨2⟩).isUpper
+    | _ => false) && env.isProjectionFn u
+  let usable := fun (u : Lean.Name) => !u.isInternal && !Lean.Meta.isInstanceCore env u && !isParentProj u
+  let wanted : Std.HashMap Lean.Name Float := Id.run do
+    let mut w : Std.HashMap Lean.Name Float := {}
+    let bump := fun (w : Std.HashMap Lean.Name Float) (n : Lean.Name) (x : Float) =>
+      if usable n && w.getD n 0.0 < x then w.insert n x else w
+    for n in referenced do
+      match env.find? n with
+      | some ci => for u in ci.type.getUsedConstants do w := bump w u 0.5
+      | none => pure ()
+    for u in goalNames do w := bump w u 0.7
+    match env.find? targetName with
+    | some ci => for u in ci.type.getUsedConstants do w := bump w u 1.0
+    | none => pure ()
+    return w
+  -- Tactic, meta and Lean-internal modules and generated declarations are not statements a proof would cite.
+  let rec hasComp : Lean.Name → Bool
+    | .str p s => s == "Tactic" || s == "Meta" || hasComp p
+    | .num p _ => hasComp p
+    | .anonymous => false
+  let skipModule : Array Bool := env.header.moduleNames.map fun m => m.getRoot.toString == "Lean" || hasComp m
+  let generatedSuffixes := ["inj", "injEq", "brecOn", "binductionOn", "sizeOf_spec", "eq_def", "ext_iff", "noConfusion",
+    "noConfusionType", "below", "ibelow", "casesOn", "recOn", "rec", "congr_simp", "induct", "induct_unfolding"]
+  let generatedName := fun (n : Lean.Name) =>
+    n.isInternal || n.isInternalDetail || (match n with
+      | .str _ s => generatedSuffixes.contains s ||
+          ((s.startsWith "match_" || s.startsWith "eq_") && s.length > 3 && (s.drop 3).all (fun c => c.isDigit || c == '_'))
+      | _ => false)
+  let mut pool : Array (Lean.Name × Array Lean.Name) := #[]
+  let mut df : Std.HashMap Lean.Name Nat := {}
+  let mut scanned := 0
+  let mut truncated := false
+  for (n, ci) in env.constants.map₁ do
+    scanned := scanned + 1
+    if scanned % 8192 == 0 && (← IO.monoMsNow) - libStart > 30000 then
+      truncated := true
+      break
+    let isThm := match ci with | .thmInfo _ => true | .axiomInfo _ => !isAxiomC n env | _ => false
+    if isThm && n != targetName && !generatedName n && !isPrivateName n &&
+        (match env.getModuleIdxFor? n with | some idx => !skipModule[idx.toNat]! | none => false) then
+      let all := ci.type.getUsedConstants.filter usable
+      for u in all do df := df.insert u (df.getD u 0 + 1)
+      pool := pool.push (n, all)
+  let scanMs := (← IO.monoMsNow) - libStart
+  let total := pool.size.toFloat
+  let idf := fun (u : Lean.Name) => Float.log ((total + 1.0) / ((df.getD u 0).toFloat + 0.5))
+  let mut scored : Array (Float × Lean.Name) := #[]
+  for (n, all) in pool do
+    let mut shared := 0.0
+    let mut rest := 0.0
+    for u in all do
+      match wanted[u]? with
+      | some w => shared := shared + w * idf u
+      | none => rest := rest + idf u
+    match n with
+    | .str ns _ =>
+      match wanted[ns]? with
+      | some w => shared := shared + w * idf ns
+      | none => pure ()
+    | _ => pure ()
+    if shared > 0.0 then scored := scored.push (shared / (shared + 0.5 * rest + 3.0), n)
+  let top := (scored.qsort (fun a b => a.1 > b.1 || (a.1 == b.1 && a.2.toString < b.2.toString))).toList.take 60
+  for (score, n) in top do
+    match env.find? n with
+    | some ci =>
+      let shared := (ci.type.getUsedConstants.filter (fun u => wanted.contains u)).toList
+      let sharedSorted := (shared.toArray.qsort (fun a b => wanted.getD a 0.0 * idf a > wanted.getD b 0.0 * idf b)).toList.take 4
+      emit [("kind", "library"), ("name", n.toString), ("score", (Float.round (score * 10000.0) / 10000.0 : Float).toString),
+            ("module", match env.getModuleIdxFor? n with
+              | some idx => (env.header.moduleNames[idx.toNat]!).toString | none => ""),
+            ("shared", Json.arr ((sharedSorted.map (fun u => Json.str u.toString)).toArray)),
+            ("sig", clip (← sigOf n) 600)]
+    | none => pure ()
+  emit [("kind", "library_scan"), ("scanned", scanned), ("pool", pool.size), ("truncated", truncated),
+        ("scan_ms", scanMs), ("ms", ((← IO.monoMsNow) - libStart : Nat))]
   emit [("kind", "end")]
 
 arena_context

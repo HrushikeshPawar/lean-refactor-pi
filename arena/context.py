@@ -23,9 +23,10 @@ from arena.scoring import exchange_rates
 LEAN_FILE = Path(__file__).with_name("lean") / "context.lean"
 _RECORD = re.compile(r"^ARENA_CTX (\{.*\})$", re.M)
 MAX_PACKET_CHARS = 40_000
+CONTEXT_TIMEOUT = 360  # seconds; the library scan adds about 20-40 s to the largest environments
 LIMITS = {"goals": 40, "goal_chars": 700, "used": 5, "used_chars": 320, "earlier": 60, "earlier_budget": 12_000,
           "earlier_chars": 240, "types": 8, "type_chars": 700, "profile_entries": 24,
-          "scope": 25, "scope_chars": 600}
+          "scope": 25, "scope_chars": 600, "library": 20, "library_budget": 7_000, "library_chars": 340}
 REQUIRED_SECTIONS = ("Pinned environment and candidate", "Source-named declarations",
                      "Elaborated proof dependencies", "Reference proof")
 
@@ -47,7 +48,7 @@ def parse_context(output: str, shift: int, start_line: int, proof_boundary: tupl
     """Group the wrapper's JSON records. `shift` is the instrumentation's line count."""
     groups: dict[str, list[dict]] = {"goal": [], "used": [], "source": [], "dependency": [], "constant": [],
                                     "local": [], "failure": [],
-                                    "type": [], "earlier": [], "target": []}
+                                    "type": [], "earlier": [], "target": [], "library": [], "library_scan": []}
     complete = False
     for raw in _RECORD.findall(output):
         record = json.loads(raw)
@@ -145,7 +146,7 @@ def lean_context(name: str) -> dict:
     inserted = source.replace("@@ROOTS@@", roots).replace("@@TARGET@@", _lean_name(name))
     built = candidate_file(row, row["src"], version, commit)
     text = built["text"][:built["head"]] + inserted + built["text"][built["head"]:]
-    ran = run_lean(row, built["path"], text, prefix_end=built["head"])
+    ran = run_lean(row, built["path"], text, timeout=CONTEXT_TIMEOUT, prefix_end=built["head"])
     if ran is None:
         return {"error": "Lean timed out while collecting context"}
     returncode, output = ran
@@ -197,6 +198,19 @@ def _clip(text: str, limit: int) -> str:
 
 def _one_line(text: str) -> str:
     return " ".join(text.split())
+
+
+SCORING_FACTS = (
+    "Scoring facts. Proxy = (token_reduction% + heartbeat_reduction% + compatibility%) / 3, where "
+    "token_reduction% = (reference_tokens - tokens) / reference_tokens * 100, heartbeat_reduction% = "
+    "(reference_heartbeats - heartbeats) / reference_heartbeats * 100 (heartbeats in `maxHeartbeats` units, "
+    "measured with `maxHeartbeats 0`) and compatibility% = versions that compile / versions listed * 100; "
+    "a proof that does not compile scores 0 on all three. Tokens are counted by the harness's pinned counter "
+    "on the text after the statement's `:=`, with comments and attributes removed: each run of letters, digits, "
+    "`.`, `_`, `'` is one token whatever its length, every other non-space character is one token (so `⟨a, b⟩` "
+    "is 5), except the operators `:= != && -. -> ← .. ... :: :> <;> ;; == || => <= >= ⁻¹ ?_`, which count once. "
+    "Spaces and line breaks are free; a tab counts as a token. `_` can replace any argument or term Lean infers; "
+    "restating it, such as a lambda, costs tokens.")
 
 
 def _rates(name: str, total_versions: int) -> str:
@@ -520,6 +534,31 @@ def _earlier_section(context: dict) -> list[str]:
     return lines
 
 
+GOALS_FLOOR = 8  # goals kept before library lines are shed when the packet is over budget
+LIBRARY_TITLE = "Imported library lemmas matching the statement and goals (ranked)"
+
+
+def _library_section(context: dict) -> list[str]:
+    """Imported theorems ranked by the wrapper (rare constants shared with the statement, the goals and the
+    lemmas the source names), minus those the reference proof already uses; fixed line and character budget."""
+    known = {item["name"] for item in context.get("source", [])} | {item["name"] for item in context.get("dependency", [])}
+    records = [item for item in context.get("library", []) if item["name"] not in known and item.get("sig")]
+    if not records:
+        return []
+    lines = ["Rank by IDF over the imported environment of the constants shared with the theorem statement, its goals "
+             "and the lemmas its source names; not already used by the reference proof. `mentions` lists the shared constants."]
+    used = 0
+    for rank, item in enumerate(records[:LIMITS["library"]], 1):
+        shared = ", ".join(_short(name) for name in item.get("shared", [])[:3])
+        line = (f"{rank}. [decl:{item['name']} · {item['module']}{' · mentions ' + shared if shared else ''}] "
+                f"{_clip(_readable(_one_line(item['sig'])), LIMITS['library_chars'])}")
+        if used + len(line) + 1 > LIMITS["library_budget"]:
+            break
+        lines.append(line)
+        used += len(line) + 1
+    return lines if len(lines) > 1 else []
+
+
 def _profile_section(prof: dict) -> list[str]:
     if prof.get("error"):
         return [f"(profile unavailable: {_clip(prof['error'], 160)})"]
@@ -560,11 +599,14 @@ def _fit(parts: list[tuple[str, list[str]]], limit: int) -> str:
     sections = [(title, list(body)) for title, body in parts]
     def render() -> str:
         return "\n\n".join((f"{title}\n" if title else "") + "\n".join(body) for title, body in sections if body)
-    order = [EARLIER_TITLE, "Goal before each top-level tactic of the reference proof"]
+    # Shed order: earlier-lemma lines, then goals beyond the first few (later goals mostly repeat the same
+    # hypotheses), then library lines, then the remaining goals down to one.
+    goals = "Goal before each top-level tactic of the reference proof"
+    stages = [(EARLIER_TITLE, 0), (goals, GOALS_FLOOR), (LIBRARY_TITLE, 0), (goals, 1)]
     while len(render()) > limit:
-        for title in order:
+        for title, floor in stages:
             target = next((body for t, body in sections if t.startswith(title)), None)
-            if target and (len(target) > 1 or not title.startswith("Goal before")):
+            if target and len(target) > floor:
                 target.pop()
                 break
         else:
@@ -586,6 +628,7 @@ def render_packet(name: str) -> str:
         "The statement must stay byte-exact. The score is the mean of three percentages: proof tokens saved, "
         "Lean heartbeats saved, and the share of listed toolchain versions the proof compiles on.",
         _rates(name, len(targets)),
+        SCORING_FACTS,
         "Survey the supplied references and pinned source before recording a route with arena_idea. "
         "Then pursue the route and update its status with a reason as evidence arrives. "
         "arena_probe compiles drafts (sorry allowed, goals reported; a draft with `sorry` holes that elaborates is fingerprinted and opens a route, and filling the holes later stays on that route); arena_profile shows where heartbeats go; "
@@ -613,6 +656,7 @@ def render_packet(name: str) -> str:
         ("Source-named declarations", _used_section(context)),
         ("Elaborated proof dependencies", _dependency_section(context)),
         ("Local variables", _local_section(context)),
+        (LIBRARY_TITLE, _library_section(context)),
         (EARLIER_TITLE, _earlier_section(context)),
     ]
     if note:
