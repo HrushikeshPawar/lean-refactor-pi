@@ -305,7 +305,7 @@
       <td><span class="bars"><span data-width="${(100 * (o.latency_s || 0) / maxLat).toFixed(1)}"></span></span>${o.latency_s ?? '—'}s</td><td class="num">${o.cost_usd != null ? money(o.cost_usd) : ''}</td>
       <td class="num">${o.input_tokens || o.output_tokens ? num(o.input_tokens) + ' / ' + num(o.output_tokens) : ''}</td><td class="num">${o.cache_read_tokens || o.cache_write_tokens ? num(o.cache_read_tokens) + ' / ' + num(o.cache_write_tokens) : ''}</td>
       <td>${o.url ? `<a href="${esc(o.url)}" target="_blank" rel="noopener">open</a>` : ''}</td></tr>`).join('')}</tbody></table></div></div>`;
-    $('obs-type').onchange = e => { obsType = e.target.value; renderPanel(); };
+    $('obs-type').onchange = e => { obsType = e.target.value; renderPanel(true); };
   }
 
   function folds() {
@@ -327,8 +327,15 @@
   addEventListener('message', e => { if (e.origin === location.origin && e.data && e.data.type === 'arena-focus') $('graph-frame').scrollIntoView({behavior: 'instant', block: 'center'}); });
 
   const panels = {tools: toolsPanel, ideas: ideasPanel, spend: spendPanel, langfuse: lfPanel};
-  function renderPanel() {
+  // The panel is rebuilt by polls (new data, Langfuse refresh); doing that while a <select> inside it has focus
+  // tears down its open menu and snaps it to the first option, so the rebuild waits until the control blurs.
+  function renderPanel(force = false) {
     if (!data) return;
+    const active = document.activeElement;
+    if (!force && active && active.tagName === 'SELECT' && $('panel').contains(active)) {
+      if (!active.dataset.deferred) { active.dataset.deferred = '1'; active.addEventListener('blur', () => renderPanel(true), {once: true}); }
+      return;
+    }
     $('tabs').innerHTML = TABS.map(([id, label]) => `<button role="tab" data-tab="${id}" aria-selected="${id === tab}">${label}</button>`).join('');
     $('tabs').querySelectorAll('[data-tab]').forEach(b => b.onclick = () => { selectTab(b.dataset.tab); });
     safely(() => panels[tab]());

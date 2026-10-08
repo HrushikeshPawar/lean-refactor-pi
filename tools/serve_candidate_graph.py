@@ -27,14 +27,59 @@ if str(ROOT) not in sys.path:  # allow `python tools/serve_candidate_graph.py`
     sys.path.insert(0, str(ROOT))
 
 from arena.campaign import graph_state, run_dir  # noqa: E402
-from arena.viewer_data import Langfuse, campaign_of, hub_row, run_dashboard  # noqa: E402
+from arena.summary import configured_cap  # noqa: E402
+from arena.viewer_data import Langfuse, campaign_of, hub_row, read_jsonl, run_dashboard  # noqa: E402
 
 ASSETS = ROOT / "tools" / "graph_viewer"
+
+
+def _clip(text, limit: int) -> str:
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def slim_probes(payload: dict, history: list[dict]) -> list[dict]:
+    """Probes for the graph: one small row each (no diagnostics dump), with the harness route the
+    ledger assigned to the probe's proof and a pass / skeleton / fail verdict.
+
+    `skeleton` is a probe that compiles but still contains `sorry`: a valid proof skeleton whose
+    holes are the next goals. A probe whose proof id later became a candidate is left to the node."""
+    nodes = {node["id"] for node in payload.get("nodes", [])}
+    routes = {e["proof_id"]: e.get("route") for e in history if e.get("kind") == "route" and e.get("proof_id")}
+    rows = []
+    for probe in payload.get("probes") or []:
+        identifier = probe.get("proof_id")
+        if not identifier or identifier in nodes:
+            continue
+        result = probe.get("result") or {}
+        compat = result.get("compat") or {}
+        first = next(iter(compat.values()), {}) if compat else {}
+        diagnostics = first.get("diagnostics") or []
+        sorry = any("sorry" in str(d.get("message", "")) for d in diagnostics if isinstance(d, dict))
+        passed = bool(compat) and all(v.get("passed") for v in compat.values())
+        goals = first.get("goals") or []
+        counts = first.get("diagnostic_counts")
+        headlines = first.get("error_headlines") or [d.get("message") for d in diagnostics
+                                                      if isinstance(d, dict) and d.get("severity") == "error"]
+        rows.append({
+            "proof_id": identifier, "idea_id": probe.get("idea_id"), "parent": probe.get("parent"),
+            "ts": probe.get("ts"), "route": routes.get(identifier),
+            "status": "skeleton" if passed and sorry else "pass" if passed else "fail",
+            "tokens": result.get("tokens"), "heartbeat": first.get("heartbeats"),
+            "goals": len(goals),
+            "first_goal": _clip(goals[0].get("goals") if goals and isinstance(goals[0], dict) else "", 600),
+            "errors": counts.get("errors") if isinstance(counts, dict) else None,
+            "headlines": [_clip(h, 220) for h in headlines[:3]],
+            "result": {"tokens": result.get("tokens"),
+                       "compat": {v: {"passed": bool(r.get("passed"))} for v, r in compat.items()}},
+        })
+    return rows
 
 
 def graph_payload(run_id: str) -> dict:
     payload = graph_state(run_id)
     directory = run_dir(run_id)
+    payload["probes"] = slim_probes(payload, read_jsonl(directory / "ledger.jsonl"))
     status = directory / "merge-worker.json"
     payload["worker"] = json.loads(status.read_text()) if status.exists() else None
     charged = 0.0
@@ -74,7 +119,8 @@ def graph_payload(run_id: str) -> dict:
     payload["baseline"] = baseline_point(payload)
     give_reference_its_numbers(payload)
     config = directory / "run-config.json"
-    payload["hard_cap_usd"] = json.loads(config.read_text()).get("hard_cap_usd") if config.exists() else None
+    # The run's configured cap (soft; the key keeps its old name for the page): new files say soft_cap_usd.
+    payload["hard_cap_usd"] = configured_cap(json.loads(config.read_text())) if config.exists() else None
     report = directory / "cost.json"
     payload["cost_report"] = json.loads(report.read_text()) if report.exists() else {}
     if "pi_embedded_estimate" not in payload["cost_report"]:

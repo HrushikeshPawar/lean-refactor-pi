@@ -22,13 +22,11 @@
     <section class="workspace">
       <div class="graph-pane">
         <div class="toolbar">
-          <input id="search" type="search" placeholder="Search proof, ID, reasoning…" aria-label="Search candidates">
-          <select id="filter" aria-label="Filter candidates"><option value="all">All nodes</option><option value="full">3/3 valid</option><option value="primary">Primary valid</option><option value="fail">Failed</option><option value="auto_merge">Auto merges</option></select>
-          <select id="idea-filter" aria-label="Filter by proof idea"><option value="all">All ideas</option></select>
-          <button id="fit">Fit</button><button id="zoom-in" aria-label="Zoom in">+</button><button id="zoom-out" aria-label="Zoom out">−</button>
+          <input id="search" type="search" placeholder="Search proof, ID, route, reasoning…" aria-label="Search nodes">
+          <div id="chips" class="chips" role="group" aria-label="Filter nodes by kind and result"></div>
+          <button id="reset-filters" type="button" class="linkish" hidden>Reset filters</button>
         </div>
-        <div class="legend"><span class="key full"></span> 3/3 compatible <span class="key primary"></span> primary valid, transfer pending or failed <span class="key fail"></span> Lean failed <span class="key pending"></span> unevaluated <span class="key merge"></span> ⊕ automatic merge · bright paths: selected node ancestry · dashed path: alternate derivation</div>
-        <div id="graph-wrap"><svg id="graph" role="img" aria-label="Candidate ancestry graph"></svg><svg id="minimap" role="img" aria-label="Graph minimap"></svg></div>
+        <div id="graph-wrap"><svg id="graph" role="img" aria-label="Candidate ancestry graph"></svg><div class="view-ctrl"><button id="best-path" type="button" class="toggle" aria-pressed="true" title="Highlight the path from the original proof to the best verified candidate">★ Best path</button><button id="clear-sel" type="button" title="Clear the selection (Esc)" disabled>Clear selection</button><button id="fit" type="button">Fit</button><button id="zoom-in" type="button" aria-label="Zoom in">+</button><button id="zoom-out" type="button" aria-label="Zoom out">−</button></div><div id="legend" class="legend-panel"></div><div id="node-tip" class="node-tip" hidden></div><svg id="minimap" role="img" aria-label="Graph minimap"></svg></div>
       </div>
       <aside id="detail"><p class="empty">Select a graph node, chart point, or frontier item.</p></aside>
     </section>

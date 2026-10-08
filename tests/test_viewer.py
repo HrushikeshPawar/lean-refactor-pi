@@ -299,5 +299,52 @@ class AssetTests(unittest.TestCase):
             self.assertIn(expected, result.stdout)
 
 
+class GraphViewerUpgradeTests(unittest.TestCase):
+    """Probe rows for the graph and the static-asset rules (CSP, no rebuilt dropdowns)."""
+    ASSETS = server.ASSETS
+
+    def probe(self, ident, parent, passed, message, goals=0):
+        diagnostics = [{"severity": "warning" if passed else "error", "message": message}]
+        compat = {"v1": {"passed": passed, "heartbeats": 5, "diagnostics": diagnostics,
+                         "diagnostic_counts": {"errors": 0 if passed else 1}, "goals": [{"goals": "x : Nat"}] * goals}}
+        return {"proof_id": ident, "idea_id": "i1", "parent": parent, "ts": 1.0,
+                "result": {"tokens": 12, "compat": compat}}
+
+    def test_slim_probes_classify_route_and_drop_diagnostics(self):
+        payload = {"nodes": [{"id": "c1"}], "probes": [
+            self.probe("p1", "c1", True, "declaration uses `sorry`", goals=2),
+            self.probe("p2", "c1", False, "type mismatch"),
+            self.probe("p3", "c1", True, "unused variable"),
+            self.probe("c1", None, True, "x")]}
+        history = [{"kind": "route", "proof_id": "p3", "route": "r2"}]
+        rows = {row["proof_id"]: row for row in server.slim_probes(payload, history)}
+        self.assertEqual(set(rows), {"p1", "p2", "p3"})  # a probe that became a candidate is the node's job
+        self.assertEqual((rows["p1"]["status"], rows["p1"]["goals"]), ("skeleton", 2))
+        self.assertEqual((rows["p2"]["status"], rows["p2"]["errors"]), ("fail", 1))
+        self.assertEqual((rows["p3"]["status"], rows["p3"]["route"]), ("pass", "r2"))
+        self.assertEqual(rows["p2"]["headlines"], ["type mismatch"])
+        self.assertNotIn("diagnostics", rows["p1"]["result"]["compat"]["v1"])
+
+    def test_assets_keep_csp_rules_and_do_not_rebuild_open_selects(self):
+        for name in ("index.html", "dashboard.html", "hub.html"):
+            self.assertNotRegex((self.ASSETS / name).read_text(), r'\sstyle\s*=', name)
+        for name in ("app.js", "dashboard.js", "hub.js"):
+            self.assertNotRegex((self.ASSETS / name).read_text(), r'style\s*=\s*\\?"', name)
+        graph = (self.ASSETS / "index.html").read_text()
+        self.assertNotIn("<select", graph)  # route/idea/kind/status filters are chips and a legend, not dropdowns
+        hub = (self.ASSETS / "hub.js").read_text()
+        self.assertIn("dataset.sig", hub)
+        self.assertIn("document.activeElement !== select", hub)
+        self.assertIn("document.activeElement", (self.ASSETS / "dashboard.js").read_text())
+
+    def test_viewer_scripts_parse(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not installed")
+        for name in ("app.js", "dashboard.js", "hub.js", "charts.js"):
+            result = subprocess.run([node, "--check", str(self.ASSETS / name)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, f"{name}: {result.stderr}")
+
+
 if __name__ == "__main__":
     unittest.main()

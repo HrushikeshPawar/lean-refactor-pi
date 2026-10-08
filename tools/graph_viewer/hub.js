@@ -94,9 +94,17 @@
   }
   const saveTabs = () => { try { localStorage.setItem('arena-hub-open', JSON.stringify(openTabs)); } catch {} };
 
+  // A native <select> must never be rebuilt while its menu is open: replacing its options on a poll closes
+  // the menu and snaps the choice back to the first entry. Rebuild only when the option list really
+  // changed, and not at all while the control has focus (the blur handler below catches up).
   function fillSelect(id, label, values) {
     const select = $(id), current = view[id.slice(2)];
-    select.innerHTML = `<option value="">${label}</option>` + [...new Set(values.filter(Boolean))].sort().map(v => `<option ${v === current ? 'selected' : ''} value="${esc(v)}">${esc(id === 'f-theorem' ? shortTheorem(v) : v)}</option>`).join('');
+    const list = [...new Set(values.filter(Boolean))].sort(), signature = JSON.stringify([label, list]);
+    if (select.dataset.sig !== signature && document.activeElement !== select) {
+      select.innerHTML = `<option value="">${label}</option>` + list.map(v => `<option value="${esc(v)}">${esc(id === 'f-theorem' ? shortTheorem(v) : v)}</option>`).join('');
+      select.dataset.sig = signature;
+    }
+    if (select.dataset.sig === signature && select.value !== current && document.activeElement !== select) select.value = current;
   }
   function matches(run) {
     const hay = [run.run_id, run.theorem, run.model, run.campaign, run.thinking].join(' ').toLowerCase();
@@ -120,7 +128,8 @@
     fillSelect('f-theorem', 'any theorem', runs.map(r => r.theorem));
     fillSelect('f-model', 'any model', runs.map(r => r.model));
     fillSelect('f-campaign', 'any campaign', runs.map(r => r.campaign));
-    $('f-status').value = view.status; $('f-group').checked = view.group;
+    if (document.activeElement !== $('f-status')) $('f-status').value = view.status;
+    $('f-group').checked = view.group;
     if (document.activeElement !== $('f-text')) $('f-text').value = view.text;
     const list = runs.filter(matches);
     $('f-count').textContent = `${list.length} shown`;
@@ -200,6 +209,7 @@
   }
   for (const [id, key] of [['f-theorem', 'theorem'], ['f-model', 'model'], ['f-campaign', 'campaign'], ['f-status', 'status']]) {
     $(id).onchange = () => { view[key] = $(id).value; save(); renderOverview(); };
+    $(id).onblur = () => renderOverview();
   }
   $('f-text').oninput = () => { view.text = $('f-text').value; save(); renderOverview(); };
   $('f-group').onchange = () => { view.group = $('f-group').checked; save(); renderOverview(); };
