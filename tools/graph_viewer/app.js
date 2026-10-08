@@ -205,7 +205,7 @@
       rows = list.map(r => {
         const key = r.route, stats = r.route === 'none' ? '' : `${r.attempts ?? 0} att${r.best_proxy != null ? ` · best ${r.best_proxy.toFixed(1)}` : ''}`;
         const tags = `${r.original ? '<span class="lp-tag">original</span>' : ''}${r.credited ? '<span class="lp-tag good" title="credited: verified structure and new goal states">credited</span>' : r.explored ? '<span class="lp-tag" title="explored but not credited">explored</span>' : ''}`;
-        return `<button type="button" class="lp-item${off.route.has(key) ? ' off' : ''}" data-group="route" data-key="${esc(key)}" aria-pressed="${!off.route.has(key)}" title="${esc(r.label || '')}"><i class="sw" data-bg="${routeColor(r.route === 'none' ? null : r.route)}"></i><span class="lp-name"><b>${esc(key)}</b> ${esc(clip(r.label, 44))}</span><span class="lp-stats">${tags}${esc(stats)} · ${n.get(key) ?? 0} nodes</span></button>`;
+        return `<button type="button" class="lp-item${off.route.has(key) ? ' off' : ''}" data-group="route" data-key="${esc(key)}" aria-pressed="${!off.route.has(key)}" title="${esc(r.label || '')}"><i class="sw" data-bg="${routeColor(r.route === 'none' ? null : r.route)}"></i><span class="lp-name"><b>${esc(key)}</b> ${esc(clip(r.short_label || r.label, 44))}</span><span class="lp-stats">${tags}${esc(stats)} · ${n.get(key) ?? 0} nodes</span></button>`;
       }).join('');
     } else if (colorBy === 'idea') {
       const list = (data.ideas || []).map(i => ({id: i.id, title: i.title, st: i.status, attempts: i.attempts, probes: i.probes})); if (n.get('none')) list.push({id: 'none', title: 'no idea recorded'});

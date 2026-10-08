@@ -221,6 +221,11 @@ def run_dashboard_start(run_id: str) -> float | None:
     return _start_end(run_dir(run_id))[0]
 
 
+def assets_version() -> str:
+    """Changes whenever a viewer asset is edited, so an already-open page can notice it runs stale code."""
+    return str(max((f.stat().st_mtime_ns for f in ASSETS.iterdir() if f.is_file()), default=0))
+
+
 def handler_for(runs: Runs | str, langfuse: Langfuse | None = None):
     if isinstance(runs, str):
         runs = Runs([runs])
@@ -233,6 +238,7 @@ def handler_for(runs: Runs | str, langfuse: Langfuse | None = None):
             self.send_response(200)
             self.send_header("Content-Type", content_type)
             self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Assets-Version", assets_version())
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; "
                              "connect-src 'self'; frame-src 'self'; frame-ancestors 'self'")

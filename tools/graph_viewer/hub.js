@@ -186,10 +186,15 @@
     renderTabs();
   }
 
+  let assetsVersion = null;
   async function refresh() {
     try {
       const response = await fetch('runs.json', {cache: 'no-store'});
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      // A tab opened before the viewer code changed keeps running the old code; reload it once the server has newer assets.
+      const version = response.headers.get('X-Assets-Version');
+      if (version && assetsVersion && version !== assetsVersion && !document.querySelector('select:focus')) { location.reload(); return; }
+      if (version) assetsVersion = assetsVersion || version;
       runs = await response.json();
       const live = runs.filter(run => run.status === 'live').length;
       $('hub-sub').textContent = `${runs.length} run${runs.length === 1 ? '' : 's'}`;
