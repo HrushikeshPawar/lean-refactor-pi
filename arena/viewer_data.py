@@ -210,13 +210,15 @@ def score_timeline(ledger: list[dict], start: float | None) -> list[dict]:
     for event in ledger:
         if event.get("kind") != "evaluation":
             continue
+        number = len(rows) + 1  # evaluation 0 is the original proof; the charts' x axis is this number
         result = event.get("result") or {}
         metrics = result.get("metrics") or {}
         proxy = metrics.get("proxy")
         if event.get("mode") == "full" and metrics.get("compiled") and proxy is not None:
             best = proxy if best is None else max(best, proxy)
-        rows.append({"t": round(event["ts"] - start, 1) if start else None,
-                     "candidate": labels.get(event.get("candidate_id")), "mode": event.get("mode"),
+        rows.append({"n": number, "t": round(event["ts"] - start, 1) if start else None,
+                     "candidate": labels.get(event.get("candidate_id")), "candidate_id": event.get("candidate_id"),
+                     "mode": event.get("mode"),
                      "proxy": proxy, "estimated_proxy": metrics.get("estimated_proxy"),
                      "tokens": result.get("tokens"), "heartbeats": result.get("heartbeat"),
                      "compiled": bool(metrics.get("compiled")), "best_verified": best})

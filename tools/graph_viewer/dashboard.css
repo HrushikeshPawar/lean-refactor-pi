@@ -1,8 +1,8 @@
 /* Run dashboard + shared chart styling. Desktop only; dark is the default, light follows the OS. */
 :root{color-scheme:dark;--bg:#0e141b;--panel:#151e28;--panel2:#1c2835;--line:#2f4155;--text:#e4edf6;--muted:#9db0c3;--good:#6bd6a5;--mid:#edc475;--bad:#ed8795;--blue:#78baff;
---c0:#78baff;--c1:#6bd6a5;--c2:#edc475;--c3:#c3a1f0;--c4:#ed8795;--c5:#6fd6e6;--c6:#c9d96b;--c7:#f08fbd;--grid:#243546;--hover:#1d3046}
+--c0:#78baff;--c1:#6bd6a5;--c2:#edc475;--c3:#c3a1f0;--c4:#ed8795;--c5:#6fd6e6;--c6:#c9d96b;--c7:#f08fbd;--grid:#243546;--hover:#1d3046;--p-read:#5fd3a5;--p-input:#c792ea;--p-write:#edc475;--p-output:#78baff}
 @media (prefers-color-scheme:light){:root{color-scheme:light;--bg:#f6f8fa;--panel:#fff;--panel2:#eef2f6;--line:#d0d9e2;--text:#1b2733;--muted:#5d6f80;--good:#12805c;--mid:#a86b00;--bad:#c2303f;--blue:#1d6fd0;
---c0:#1d6fd0;--c1:#12805c;--c2:#a86b00;--c3:#8a4fd1;--c4:#c2303f;--c5:#0f8ea0;--c6:#7a8a1a;--c7:#c0467f;--grid:#e2e8ee;--hover:#e9f1fb}}
+--c0:#1d6fd0;--c1:#12805c;--c2:#a86b00;--c3:#8a4fd1;--c4:#c2303f;--c5:#0f8ea0;--c6:#7a8a1a;--c7:#c0467f;--grid:#e2e8ee;--hover:#e9f1fb;--p-read:#2fa57a;--p-input:#8a5cc0;--p-write:#c99a2e;--p-output:#2f7fd0}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,sans-serif;min-width:1200px}
 a{color:var(--blue)}
@@ -75,3 +75,7 @@ details{border:1px solid var(--line);border-radius:8px;background:var(--panel);p
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .card+.card,.card+.grid2,.grid2+.card{margin-top:12px}.dash>.card+.card,.col>.card+.card{margin-top:0}
 .sw.box{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px}
+.cp0{--k:var(--p-read)}.cp1{--k:var(--p-input)}.cp2{--k:var(--p-write)}.cp3{--k:var(--p-output)}.korig{--k:var(--muted)}
+.area{fill:var(--k);fill-opacity:.85;stroke:none}.line.toptotal{stroke:var(--text);stroke-width:1.5}
+circle.pick{cursor:pointer}
+.toptot{--k:var(--text)}

@@ -202,6 +202,8 @@
   }
   $('code-dialog').addEventListener('click',e=>{if(e.target===$('code-dialog'))e.target.close()});
   function select(id) { selected=id; localStorage.setItem('arena-selected',id); if(coords.has(id))focusOn(id); renderGraph(); detail(); renderCharts(); }
+  // The run dashboard embeds this page and asks it to select a candidate when a chart point is clicked.
+  addEventListener('message', e => { if (e.origin === location.origin && e.data && e.data.type === 'arena-select' && byId.has(e.data.id)) select(e.data.id); });
 
   // Stacked bottom to top: cheap cache reads first, the usually dominant output last.
   const COST_PARTS=[['cache_read','Cache read','#5fd3a5'],['input','Input','#c792ea'],['cache_write','Cache write','#edc475'],['output','Output','#78baff']];

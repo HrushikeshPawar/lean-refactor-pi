@@ -46,51 +46,65 @@
     $('kpis').innerHTML = items.map(([l, v, n, good]) => `<div class="kpi" title="${esc(n)}"><div class="l">${esc(l)}</div><div class="v${good ? ' good' : ''}">${esc(v)}</div><div class="n">${esc(n)}</div></div>`).join('');
   }
 
-  /* ---- overview charts ---- */
-  function timeEnd() { return Math.max(1, ...data.scores.map(r => r.t || 0), ...data.spend.points.map(p => p.t || 0), ...data.tools.map(t => t.t_end || 0)); }
+  /* ---- overview charts: x is the evaluation number (0 = the original proof) or the API request number ---- */
+  const evalEnd = () => Math.max(1, ...data.scores.map(r => r.n || 0));
+  const original = () => ({proxy: data.baseline_proxy, tokens: data.reference?.tokens, heartbeats: data.reference?.heartbeats});
 
   function scoreChart() {
-    const rows = data.scores, full = rows.filter(r => r.mode === 'full' && r.proxy != null), fast = rows.filter(r => r.mode !== 'full' && r.estimated_proxy != null), end = timeEnd();
-    const pt = (r, v, extra = '') => [r.t, v, `${r.candidate} ${r.mode} at ${dur(r.t)}: ${extra}${v}  (${num(r.tokens)} tokens, ${num(r.heartbeats)} heartbeats)`];
+    const rows = data.scores, full = rows.filter(r => r.mode === 'full' && r.proxy != null), fast = rows.filter(r => r.mode !== 'full' && r.estimated_proxy != null), end = evalEnd();
+    const pt = (r, v, extra = '') => [r.n, v, `evaluation ${r.n}: candidate ${r.candidate} (${r.mode})\n${extra}proxy ${v}\n${num(r.tokens)} tokens, ${num(r.heartbeats)} heartbeats\nclick to select in the graph`, r.candidate_id];
     const bestFull = full.reduce((m, r) => !m || r.proxy > m.proxy ? r : m, null);
     place('c-score', C.line([
-      {cls: 'k1', step: true, dots: false, points: [[0, data.baseline_proxy], ...rows.filter(r => r.best_verified != null).map(r => [r.t, r.best_verified])]},
+      {cls: 'k1', step: true, dots: false, points: rows.filter(r => r.best_verified != null).map(r => [r.n, r.best_verified])},
+      {cls: 'korig', noLine: true, r: 6, points: [[0, data.baseline_proxy, `evaluation 0: the original proof\nproxy ${data.baseline_proxy}`]]},
       {cls: 'k0', noLine: true, r: 5, points: full.map(r => pt(r, r.proxy))},
-      {cls: 'k2', noLine: true, hollow: true, r: 4, points: fast.map(r => pt(r, r.estimated_proxy, 'estimate '))}],
-      {refs: [{y: data.baseline_proxy, cls: 'base', label: `original proof ${data.baseline_proxy}`}], extendTo: end, xMax: end, yMin: 0, yMax: 100, exact: true, height: 300,
-       fmtY: C.fmt.score, yLabel: 'proxy score (0 to 100)', xLabel: 'time since run start',
-       best: bestFull && {x: bestFull.t, y: bestFull.proxy, text: `best ${bestFull.proxy} (${bestFull.candidate})`},
-       legend: [['k1', 'best verified so far'], ['k0', 'full evaluation'], ['k2', 'fast estimate']], label: 'score over time'}));
+      {cls: 'k2', noLine: true, hollow: true, r: 4, points: fast.map(r => pt(r, r.estimated_proxy, 'fast estimate '))}],
+      {refs: [{y: data.baseline_proxy, cls: 'base', label: ''}], pointLabels: [{x: 0, y: data.baseline_proxy, text: `original ${data.baseline_proxy}`, dy: -12}],
+       extendTo: end, xMin: 0, xMax: end, xTime: false, intX: true, yMin: 0, yMax: 100, exact: true, height: 300,
+       fmtY: C.fmt.score, yLabel: 'proxy score (0 to 100)', xLabel: 'evaluation number (0 = original proof)',
+       best: bestFull && {x: bestFull.n, y: bestFull.proxy, text: `best ${bestFull.proxy} (${bestFull.candidate})`},
+       legend: [['korig', 'original proof (evaluation 0)'], ['k0', 'full evaluation, all versions checked'], ['k2', 'fast estimate'], ['k1', 'best verified so far']], label: 'score by evaluation'}));
   }
 
+  const PARTS = [['cache_read', 'Cache read', 'cp0'], ['input', 'Input', 'cp1'], ['cache_write', 'Cache write', 'cp2'], ['output', 'Output', 'cp3']];
+
   function spendCharts() {
-    const sp = data.spend, pts = sp.points, end = timeEnd();
-    const top = Math.max(sp.spent_usd, sp.soft_cap_usd || 0, 1e-9);
+    const sp = data.spend, pts = sp.points;
+    const sums = Object.fromEntries(PARTS.map(([k]) => [k, 0])), area = [{x: 0, parts: PARTS.map(() => 0)}];
+    for (const p of pts) {
+      for (const [k] of PARTS) sums[k] += p.parts[k] || 0;
+      const row = PARTS.slice().reverse().map(([k, label]) => `${label}: ${money(p.parts[k] || 0)} (total ${money(sums[k])})`);
+      area.push({x: p.n, parts: PARTS.map(([k]) => sums[k]),
+                 tip: `request #${p.n}${p.kind ? ' ' + p.kind : ''}: ${money(p.request_usd)}\nrunning total ${money(Object.values(sums).reduce((a, v) => a + v, 0))}\n${row.join('\n')}`});
+    }
+    const grand = Object.values(sums).reduce((a, v) => a + v, 0), top = Math.max(grand, sp.soft_cap_usd || 0, 1e-9);
     const hardVisible = !!sp.hard_cap_usd && sp.hard_cap_usd <= 2.5 * top;
     const refs = [], notes = [];
     if (sp.soft_cap_usd) refs.push({y: sp.soft_cap_usd, cls: 'soft', label: 'soft cap ' + money(sp.soft_cap_usd)});
     if (hardVisible) refs.push({y: sp.hard_cap_usd, cls: 'hard', label: 'hard cap ' + money(sp.hard_cap_usd)});
     else if (sp.hard_cap_usd) notes.push({cls: 'hard', text: `hard cap ${money(sp.hard_cap_usd)} is off scale`});
     $('h-spend').textContent = `${money(sp.spent_usd)} settled · ${money(sp.unresolved_usd)} reserved`;
-    place('c-spend', C.line([{cls: 'k0', step: true, points: [[0, 0], ...pts.map(p => [p.t ?? 0, p.spent_usd, `request #${p.n} ${p.kind || ''}: ${money(p.request_usd)}; total ${money(p.spent_usd)} at ${dur(p.t)}`])]}],
-      {refs, notes, yMin: 0, yMax: hardVisible ? sp.hard_cap_usd * 1.08 : top * 1.12, exact: true, extendTo: end, xMax: end, height: 300, fmtY: C.fmt.money, yLabel: 'spend (USD)', xLabel: 'time since run start', label: 'cumulative spend'}));
-    const layers = [{cls: 'k0', label: 'input'}, {cls: 'k1', label: 'output'}, {cls: 'k2', label: 'cache read'}, {cls: 'k3', label: 'cache write'}];
-    const reuse = ((data.summary.cache || {}).reuse_pct);
-    $('h-cost').textContent = reuse != null ? `cache reuse ${reuse}% overall` : 'by billed component';
-    place('c-cost', C.stacked(pts.map(p => ({parts: ['input', 'output', 'cache_read', 'cache_write'].map(k => p.parts[k] || 0),
-      title: `#${p.n} ${p.kind || ''}: ${money(p.request_usd)}\ncache reuse ${p.reuse_pct ?? '—'}%\n${(p.tools || []).join(', ')}`})), layers, {fmtY: C.fmt.money, yLabel: 'cost per request (USD)', height: 260, label: 'cost per request'}));
+    const legend = [['toptot', `Total ${money(grand)}`], ...PARTS.slice().reverse().map(([k, label, cls]) => [cls, `${label} ${money(sums[k])}${grand ? ` (${(100 * sums[k] / grand).toFixed(0)}%)` : ''}`])];
+    place('c-spend', C.area(area, PARTS.map(([, label, cls]) => ({cls, label})),
+      {refs, notes, xMin: 0, xMax: Math.max(1, pts.length), yMin: 0, yMax: hardVisible ? sp.hard_cap_usd * 1.08 : top * 1.15, exact: true, height: 300,
+       fmtY: C.fmt.money, yLabel: 'cumulative spend (USD)', xLabel: 'API request number', legend, label: 'API spend by component'}));
   }
 
   function metricChart(id, key, ref, unit, cls) {
-    const full = data.scores.filter(r => r.mode === 'full' && r[key] != null), end = timeEnd();
+    const ok = data.scores.filter(r => r.compiled && r[key] != null), end = evalEnd();
     let low = Infinity; const steps = [];
-    for (const r of full) { low = Math.min(low, r[key]); steps.push([r.t, low]); }
-    const lowest = full.reduce((m, r) => !m || r[key] < m[key] ? r : m, null);
+    for (const r of ok) { low = Math.min(low, r[key]); steps.push([r.n, low]); }
+    const lowest = ok.reduce((m, r) => !m || r[key] < m[key] ? r : m, null);
+    const pt = r => [r.n, r[key], `evaluation ${r.n}: candidate ${r.candidate} (${r.mode})\n${num(r[key])} ${unit}\nclick to select in the graph`, r.candidate_id];
     place(id, C.line([
       {cls, step: true, dots: false, points: steps},
-      {cls, noLine: true, r: 4, points: full.map(r => [r.t, r[key], `${r.candidate} at ${dur(r.t)}: ${num(r[key])} ${unit}`])}],
-      {refs: ref != null ? [{y: ref, cls: 'base', label: `original proof ${num(ref)}`}] : [], includeRefs: true, extendTo: end, xMax: end, yMin: 0, height: 260, fmtY: C.fmt.num,
-       yLabel: unit, xLabel: 'time since run start', best: lowest && {below: true, x: lowest.t, y: lowest[key], text: `${num(lowest[key])} (${lowest.candidate})`}, label: unit}));
+      {cls: 'korig', noLine: true, r: 6, points: ref != null ? [[0, ref, `evaluation 0: the original proof\n${num(ref)} ${unit}`]] : []},
+      {cls, noLine: true, r: 4, points: ok.filter(r => r.mode === 'full').map(pt)},
+      {cls, noLine: true, r: 4, hollow: true, points: ok.filter(r => r.mode !== 'full').map(pt)}],
+      {refs: ref != null ? [{y: ref, cls: 'base', label: ''}] : [], pointLabels: ref != null ? [{x: 0, y: ref, text: `original ${num(ref)}`, dy: 24}] : [],
+       includeRefs: true, extendTo: end, xMin: 0, xMax: end, xTime: false, intX: true, yMin: 0, height: 260, fmtY: C.fmt.num,
+       yLabel: unit, xLabel: 'evaluation number (0 = original proof)', best: lowest && {below: true, x: lowest.n, y: lowest[key], text: `${num(lowest[key])} (${lowest.candidate})`},
+       legend: [['korig', 'original proof'], [cls, 'full evaluation (hollow = fast)']], label: unit}));
   }
 
   function toolsTimeline() {
@@ -102,7 +116,7 @@
     const shown = names.slice(0, 11), rowOf = t => { const i = shown.indexOf(t.name); return i < 0 ? shown.length : i; };
     const rows = shown.map(n => [short(n), counts.get(n)]);
     if (names.length > shown.length) rows.push(['other', names.slice(shown.length).reduce((a, n) => a + counts.get(n), 0)]);
-    const end = timeEnd();
+    const end = Math.max(1, ...data.tools.map(t => t.t_end || 0));
     place('c-tools', C.box(w => {
       const left = 200, rowH = 22, h = rows.length * rowH + 46, sx = v => left + v / end * (w - left - 14);
       let g = '';
@@ -178,6 +192,9 @@
         [{cls: 'k2', label: 'cache read'}, {cls: 'k3', label: 'cache write'}], {fmtY: C.fmt.num, yLabel: 'tokens per request', height: 260, label: 'cache tokens'})}</div>
       <div class="card"><div class="head"><h2>Cache reuse per request</h2><span class="hint">a low read share after the first requests means the prompt prefix is not reused</span></div>
       ${C.line([{cls: 'k1', points: pts.filter(p => p.reuse_pct != null).map(p => [p.n, p.reuse_pct, `request #${p.n}: ${p.reuse_pct}% of cached tokens were reads`])}], {yMin: 0, yMax: 100, exact: true, xTime: false, xMin: 0, xMax: Math.max(1, pts.length), fmtY: C.fmt.pct, yLabel: 'cache reuse (%)', xLabel: 'request #', height: 260, label: 'cache reuse'})}</div></div>
+      <div class="card"><div class="head"><h2>Cost per request</h2><span class="hint">each request's own cost by billed component; the overview chart shows the running total</span></div>
+      ${C.stacked(pts.map(p => ({parts: PARTS.map(([k]) => p.parts[k] || 0), title: `#${p.n} ${p.kind || ''}: ${money(p.request_usd)}\ncache reuse ${p.reuse_pct ?? '—'}%\n${(p.tools || []).join(', ')}`})),
+        PARTS.map(([, label, cls]) => ({cls, label})), {fmtY: C.fmt.money, yLabel: 'cost per request (USD)', xLabel: 'API request number', height: 240, label: 'cost per request'})}</div>
       <div class="card"><div class="head"><h2>By turn type</h2></div><table><thead><tr><th>type</th><th class="num">requests</th><th class="num">cost</th><th class="num">share</th></tr></thead><tbody>
       ${byType.map(([k, v]) => `<tr><td>${esc(k)}</td><td class="num">${v.requests}</td><td class="num">${money(v.usd)}</td><td class="num">${spent ? (100 * v.usd / spent).toFixed(1) : 0}%</td></tr>`).join('')}</tbody></table></div>`;
   }
@@ -202,6 +219,14 @@
     $('d-events').innerHTML = rows.length ? `<table><thead><tr><th>t</th><th>event</th><th>details</th></tr></thead><tbody>${rows.map(r => `<tr><td>${dur(r.t)}</td><td>${badge(r.kind, r.kind === 'gate' || r.kind === 'cache_alarm' ? 'bad' : r.kind === 'soft_cap' ? 'mid' : '')} ${esc(r.label)}</td><td class="small"><code>${esc(JSON.stringify(r.detail))}</code></td></tr>`).join('')}</tbody></table>` : '<p class="muted">No finish, control or gate events yet.</p>';
     $('d-packet').innerHTML = data.packet ? `<p class="muted small">${num(data.packet.length)} characters</p><pre>${esc(data.packet)}</pre>` : '<p class="muted">No packet.txt in this run.</p>';
   }
+
+  document.addEventListener('click', event => {
+    const el = event.target.closest && event.target.closest('[data-cand]');
+    const frame = $('graph-frame');
+    if (!el || !frame || !frame.contentWindow) return;
+    frame.contentWindow.postMessage({type: 'arena-select', id: el.dataset.cand}, location.origin);
+    frame.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+  });
 
   const panels = {tools: toolsPanel, ideas: ideasPanel, spend: spendPanel, langfuse: lfPanel};
   function renderPanel() {

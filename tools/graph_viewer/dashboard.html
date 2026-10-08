@@ -14,11 +14,10 @@
   <main>
     <section id="kpis" class="kpis"></section>
     <section class="dash">
-      <article class="card span2"><div class="head"><h2>Score over time</h2><span class="hint">proxy 0 to 100; green step = best verified so far; the gap to 100 is the room left</span></div><div id="c-score"></div></article>
-      <article class="card"><div class="head"><h2>Cumulative spend</h2><span id="h-spend" class="hint"></span></div><div id="c-spend"></div></article>
-      <article class="card"><div class="head"><h2>Tokens</h2><span class="hint">full evaluations; lower is better</span></div><div id="c-tokens"></div></article>
-      <article class="card"><div class="head"><h2>Heartbeats</h2><span class="hint">full evaluations; lower is better</span></div><div id="c-hb"></div></article>
-      <article class="card"><div class="head"><h2>Cost per request</h2><span id="h-cost" class="hint"></span></div><div id="c-cost"></div></article>
+      <article class="card span2"><div class="head"><h2>Score by evaluation</h2><span class="hint">proxy 0 to 100; evaluation 0 is the original proof; click a point to select that candidate in the graph</span></div><div id="c-score"></div></article>
+      <article class="card"><div class="head"><h2>Tokens</h2><span class="hint">per evaluation that compiled; lower is better</span></div><div id="c-tokens"></div></article>
+      <article class="card span2"><div class="head"><h2>API spend by component</h2><span id="h-spend" class="hint"></span></div><div id="c-spend"></div></article>
+      <article class="card"><div class="head"><h2>Heartbeats</h2><span class="hint">per evaluation that compiled; lower is better</span></div><div id="c-hb"></div></article>
       <article class="card span2"><div class="head"><h2>Tool activity</h2><span class="hint">one row per tool, one bar per call; red = error; click a bar for the call</span></div><div id="c-tools"></div></article>
       <article class="card"><div class="head"><h2>Ideas</h2><span id="h-ideas" class="hint"></span></div><div id="c-ideas" class="scroll-body"></div></article>
       <article class="card span2 graphcard"><div class="head"><h2>Candidate graph</h2><a class="hint" href="./" target="_blank" rel="noopener">open full graph &#8599;</a></div><iframe id="graph-frame" class="graph-frame" src="./?embed=1" title="Candidate graph" loading="lazy"></iframe></article>

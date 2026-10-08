@@ -130,7 +130,10 @@ class DataTests(unittest.TestCase):
         board = run_dashboard("r1", directory)
         self.assertEqual([(r["mode"], r["proxy"], r["estimated_proxy"], r["best_verified"]) for r in board["scores"]],
                          [("fast", None, 60.0, None), ("full", 60.5, None, 60.5)])
+        self.assertEqual([(r["n"], r["candidate"], r["candidate_id"]) for r in board["scores"]], [(1, "#2", "c2"), (2, "#2", "c2")])
+        self.assertEqual(board["reference"], None)
         points = board["spend"]["points"]
+        self.assertEqual([p["n"] for p in points], [1, 2])
         self.assertEqual([p["spent_usd"] for p in points], [0.01, 0.03])
         self.assertEqual(points[1]["parts"]["cache_read"], 0.005)
         self.assertEqual(points[1]["reuse_pct"], 90.0)

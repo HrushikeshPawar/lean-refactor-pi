@@ -113,7 +113,7 @@
     if (o.xTickList) {
       for (const [pos, label] of o.xTickList) out += `<line class="xtick" x1="${s.sx(pos)}" x2="${s.sx(pos)}" y1="${h - M.b}" y2="${h - M.b + 4}"/><text class="tick" x="${s.sx(pos)}" y="${h - M.b + 18}" text-anchor="middle">${esc(label)}</text>`;
     }
-    const xt = o.xTickList ? [] : o.xTime === false ? niceTicks(s.x0, s.x1, Math.max(3, Math.floor((w - M.l - M.r) / 70))) : timeTicks(s.x0, s.x1, Math.max(3, Math.floor((w - M.l - M.r) / 80)));
+    const xt = o.xTickList ? [] : o.xTime === false ? (t => o.intX ? t.filter(Number.isInteger) : t)(niceTicks(s.x0, s.x1, Math.max(3, Math.floor((w - M.l - M.r) / 70)))) : timeTicks(s.x0, s.x1, Math.max(3, Math.floor((w - M.l - M.r) / 80)));
     const fmtX = o.fmtX || (o.xTime === false ? (v => fmt.num(v, 1)) : tickTime);
     for (const v of xt) out += `<line class="xtick" x1="${s.sx(v)}" x2="${s.sx(v)}" y1="${h - M.b}" y2="${h - M.b + 4}"/><text class="tick" x="${s.sx(v)}" y="${h - M.b + 18}" text-anchor="middle">${esc(fmtX(v))}</text>`;
     out += `<line class="axis" x1="${M.l}" x2="${w - M.r}" y1="${h - M.b}" y2="${h - M.b}"/><line class="axis" x1="${M.l}" x2="${M.l}" y1="${M.t}" y2="${h - M.b}"/>`;
@@ -160,8 +160,12 @@
         for (const p of ser.points.filter(q => q[1] != null)) {
           const tipText = p[2] ?? `${dur(p[0])}: ${p[1]}`;
           out += `<circle class="dot ${ser.cls}${ser.hollow ? ' hollow' : ''}" cx="${s.sx(p[0])}" cy="${s.sy(p[1])}" r="${ser.r || 4}"/>` +
-                 `<circle class="hit" cx="${s.sx(p[0])}" cy="${s.sy(p[1])}" r="10" data-tip="${esc(tipText)}"/>`;
+                 `<circle class="hit${p[3] ? ' pick' : ''}" cx="${s.sx(p[0])}" cy="${s.sy(p[1])}" r="10" data-tip="${esc(tipText)}"${p[3] ? ` data-cand="${esc(p[3])}"` : ''}/>`;
         }
+      }
+      for (const lab of o.pointLabels || []) {
+        if (lab.y == null) continue;
+        out += `<text class="besttxt" x="${s.sx(lab.x) + (lab.dx ?? 10)}" y="${s.sy(lab.y) + (lab.dy ?? -10)}" text-anchor="${lab.anchor || 'start'}">${esc(lab.text)}</text>`;
       }
       if (o.best && o.best.y != null) {
         const bx = s.sx(o.best.x), by = s.sy(o.best.y), anchor = bx > w - 120 ? 'end' : bx < L.M.l + 60 ? 'start' : 'middle';
@@ -199,5 +203,33 @@
     });
   }
 
-  window.Charts = {esc, dur, tickTime, fmt, line, stacked, niceTicks, timeTicks, legend, mount, box};
+
+  /* Stacked area: pts:[{x, parts:[v...], tip}], layers:[{cls,label}] (first layer at the bottom). The top edge is the running total. */
+  function area(pts, layers, o = {}) {
+    if (!pts.length) return '<p class="muted">No data yet.</p>';
+    const totals = pts.map(p => p.parts.reduce((a, v) => a + (v || 0), 0)), xs = pts.map(p => p.x);
+    o = {...o, xTime: false, intX: true};
+    return box(w => {
+      const L = layout(w, o), {M} = L, s = makeScales(L, xs, totals, o);
+      let out = axes(L, s, o) + refLines(L, s, o);
+      let below = pts.map(() => 0);
+      layers.forEach((layer, k) => {
+        const above = pts.map((p, i) => below[i] + (p.parts[k] || 0));
+        const top = pts.map((p, i) => `${i ? 'L' : 'M'}${s.sx(p.x)},${s.sy(above[i])}`).join('');
+        const bottom = pts.map((p, i) => `L${s.sx(p.x)},${s.sy(below[i])}`).reverse().join('');
+        out += `<path class="area ${layer.cls}" d="${top}${bottom}Z"/>`;
+        below = above;
+      });
+      out += `<path class="line toptotal" d="${pts.map((p, i) => `${i ? 'L' : 'M'}${s.sx(p.x)},${s.sy(totals[i])}`).join('')}"/>`;
+      const right = w - M.r;
+      pts.forEach((p, i) => {
+        if (p.tip == null || i === 0) return;
+        const a = Math.max(M.l, (s.sx(xs[i - 1]) + s.sx(p.x)) / 2), b = Math.min(right, i + 1 < pts.length ? (s.sx(p.x) + s.sx(xs[i + 1])) / 2 : right);
+        out += `<rect class="hit" x="${a}" y="${M.t}" width="${Math.max(2, b - a)}" height="${L.h - M.t - M.b}" data-tip="${esc(p.tip)}"/>`;
+      });
+      return svg(L, out, o.label) + (o.legend ? legend(o.legend) : '');
+    });
+  }
+
+  window.Charts = {esc, dur, tickTime, fmt, line, stacked, area, niceTicks, timeTicks, legend, mount, box};
 })();
