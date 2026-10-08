@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from pathlib import Path
 
@@ -22,7 +23,7 @@ from arena.scoring import exchange_rates
 LEAN_FILE = Path(__file__).with_name("lean") / "context.lean"
 _RECORD = re.compile(r"^ARENA_CTX (\{.*\})$", re.M)
 MAX_PACKET_CHARS = 40_000
-LIMITS = {"goals": 40, "goal_chars": 700, "used": 5, "used_chars": 320, "earlier": 30,
+LIMITS = {"goals": 40, "goal_chars": 700, "used": 5, "used_chars": 320, "earlier": 60, "earlier_budget": 12_000,
           "earlier_chars": 240, "types": 8, "type_chars": 700, "profile_entries": 24,
           "scope": 25, "scope_chars": 600}
 REQUIRED_SECTIONS = ("Pinned environment and candidate", "Source-named declarations",
@@ -46,7 +47,7 @@ def parse_context(output: str, shift: int, start_line: int, proof_boundary: tupl
     """Group the wrapper's JSON records. `shift` is the instrumentation's line count."""
     groups: dict[str, list[dict]] = {"goal": [], "used": [], "source": [], "dependency": [], "constant": [],
                                     "local": [], "failure": [],
-                                    "type": [], "earlier": []}
+                                    "type": [], "earlier": [], "target": []}
     complete = False
     for raw in _RECORD.findall(output):
         record = json.loads(raw)
@@ -391,10 +392,121 @@ def certify_manifest(manifest: dict, expected: list[str] | None = None) -> dict:
     return {"certified": not reasons, "reasons": reasons}
 
 
+EARLIER_TITLE = "Relevant lemmas from this file (ranked)"
+CORE_FACTOR = 0.25  # library (Init/Std/Lean) constants count a quarter of project and Mathlib ones
+GENERIC_SHARE = 0.2  # a constant in more than this share of earlier statements is infrastructure
+WEIGHTS = {"overlap": 10.0, "head": 5.0, "equation": 3.0, "co_usage": 3.0, "distance": 0.5}
+
+
+def _short(name: str) -> str:
+    return name.rsplit(".", 1)[-1]
+
+
+def _key_heads(item: dict) -> set[str]:
+    """Constants a lemma is 'about' at its conclusion: both sides of an equation or iff, else the head."""
+    heads = {item.get("lhs_head", ""), item.get("rhs_head", "")} if item.get("rel") else {item.get("concl_head", "")}
+    return {head for head in heads if head}
+
+
+def _stated(item: dict) -> set[str]:
+    return set(item.get("consts", [])) | set(item.get("core_consts", []))
+
+
+def score_earlier(context: dict) -> list[dict]:
+    """Rank the file's earlier theorems and defs by relevance to the target (highest first).
+
+    Each result is {"item", "score", "relevance", "reason"}. Pure function of the extracted context:
+      overlap   (<=10) IDF mass of the lemma's statement constants shared with the target statement
+                (weight 1) and the original proof's and goals' constants (weight 0.7), saturated
+                against the lemma's own non-shared mass so long generic statements do not win;
+      head      (<=5)  the lemma's conclusion (or equation-side) head constant is the head of a captured goal;
+      equation  (<=3)  an Eq/Iff whose left side mentions those constants (rewrite-ready);
+      co_usage  (<=3)  other relevant earlier lemmas use it in their proofs;
+      distance  (<=0.5) nearness to the theorem, as a tie-break only.
+    IDF is computed over the earlier statements; a constant in more than GENERIC_SHARE of them gets 0.
+    """
+    earlier = context.get("earlier", [])
+    count = len(earlier)
+    if not count:
+        return []
+    frequency: dict[str, int] = {}
+    for item in earlier:
+        for name in set(item.get("consts", [])) | set(item.get("core_consts", [])) | _key_heads(item):
+            frequency[name] = frequency.get(name, 0) + 1
+    core = {name for item in earlier for name in item.get("core_consts", [])}
+    core |= {name for g in context.get("goal", []) for name in g.get("core_consts", [])}
+    core |= set((context.get("target") or [{}])[0].get("core_consts", []))
+    core |= {c["name"] for c in context.get("constant", [])
+             if c.get("tag") == "core" or c.get("module", "").split(".")[0] in ("Init", "Std", "Lean")}
+    def idf(name: str) -> float:
+        seen = frequency.get(name, 0)
+        if seen > GENERIC_SHARE * count:
+            return 0.0
+        return (CORE_FACTOR if name in core else 1.0) * math.log((count + 1) / (seen + 0.5))
+    target = (context.get("target") or [{}])[0]
+    wanted: dict[str, float] = {}
+    for name in ([c["name"] for c in context.get("constant", [])] +
+                 [n for g in context.get("goal", []) for n in g.get("consts", []) + g.get("core_consts", [])]):
+        wanted[name] = 0.7
+    for name in target.get("consts", []) + target.get("core_consts", []):
+        wanted[name] = 1.0
+    goal_heads = {head for g in context.get("goal", []) for head in _key_heads(g) | {g.get("concl_head", "")} if head}
+    def shared(item: dict) -> dict[str, float]:
+        return {n: wanted[n] * idf(n) for n in _stated(item) if n in wanted and idf(n) > 0}
+    statement = set(target.get("consts", [])) | set(target.get("core_consts", []))
+    overlap_mass = {item["name"]: sum(wanted[n] * idf(n) for n in _stated(item) & statement) for item in earlier}
+    relevant_users = {item["name"]: min(1.0, overlap_mass[item["name"]] / 3.0) for item in earlier}
+    used_by: dict[str, float] = {}
+    for item in earlier:
+        for used in item.get("uses", []):
+            used_by[used] = used_by.get(used, 0.0) + relevant_users[item["name"]]
+    top_line = max(item["line"] for item in earlier) or 1
+    ranked = []
+    for item in earlier:
+        if item["decl"] not in ("theorem", "def"):
+            continue
+        mine = shared(item)
+        total = sum(idf(n) for n in _stated(item))
+        gained = sum(mine.values())
+        overlap = WEIGHTS["overlap"] * gained / (gained + 0.5 * max(0.0, total - gained) + 3.0) if gained else 0.0
+        matched = sorted(h for h in _key_heads(item) & goal_heads if idf(h) > 0)
+        head = WEIGHTS["head"] * min(1.0, max((idf(h) for h in matched), default=0.0) / 2.0)
+        left = sum(wanted[n] * idf(n) for n in set(item.get("lhs_consts", [])) if n in wanted)
+        equation = WEIGHTS["equation"] * left / (left + 2.0) if item.get("rel") and left else 0.0
+        co = WEIGHTS["co_usage"] * min(1.0, used_by.get(item["name"], 0.0) / 3.0)
+        relevance = overlap + head + equation + co
+        score = relevance + WEIGHTS["distance"] * item["line"] / top_line
+        tags = []
+        if mine:
+            tags.append("mentions " + ", ".join(_short(n) for n in sorted(mine, key=lambda n: (-mine[n], n))[:3]))
+        if matched:
+            tags.append("concludes " + ", ".join(_short(h) for h in matched[:2]))
+        if equation:
+            tags.append("rw-ready")
+        if co:
+            tags.append("used by related lemmas")
+        ranked.append({"item": item, "score": round(score, 3), "relevance": round(relevance, 3),
+                       "reason": " · ".join(tags)})
+    return sorted(ranked, key=lambda r: (-r["score"], r["item"]["name"]))
+
+
 def _earlier_section(context: dict) -> list[str]:
-    return [f"line {i['line']} [decl:{i['name']} · {i['decl']}] {_clip(_readable(_one_line(i['sig'])), LIMITS['earlier_chars'])}"
-            for i in context.get("earlier", [])
-            if i["decl"] in ("theorem", "def")][:LIMITS["earlier"]]
+    """Ranked lemma lines under the character budget; zero-relevance (distance-only) entries fill at most 5 slots."""
+    lines, used, filler = [], 0, 0
+    for entry in score_earlier(context):
+        item = entry["item"]
+        if not entry["relevance"]:
+            filler += 1
+            if filler > 5:
+                continue
+        tag = f" · {entry['reason']}" if entry["reason"] else ""
+        line = (f"line {item['line']} [decl:{item['name']} · {item['decl']}{tag}] "
+                f"{_clip(_readable(_one_line(item['sig'])), LIMITS['earlier_chars'])}")
+        if used + len(line) > LIMITS["earlier_budget"] or len(lines) >= LIMITS["earlier"]:
+            break
+        lines.append(line)
+        used += len(line) + 1
+    return lines
 
 
 def _profile_section(prof: dict) -> list[str]:
@@ -437,7 +549,7 @@ def _fit(parts: list[tuple[str, list[str]]], limit: int) -> str:
     sections = [(title, list(body)) for title, body in parts]
     def render() -> str:
         return "\n\n".join((f"{title}\n" if title else "") + "\n".join(body) for title, body in sections if body)
-    order = ["Lemmas declared earlier in this file", "Goal before each top-level tactic of the reference proof"]
+    order = [EARLIER_TITLE, "Goal before each top-level tactic of the reference proof"]
     while len(render()) > limit:
         for title in order:
             target = next((body for t, body in sections if t.startswith(title)), None)
@@ -490,7 +602,7 @@ def render_packet(name: str) -> str:
         ("Source-named declarations", _used_section(context)),
         ("Elaborated proof dependencies", _dependency_section(context)),
         ("Local variables", _local_section(context)),
-        ("Lemmas declared earlier in this file", _earlier_section(context)),
+        (EARLIER_TITLE, _earlier_section(context)),
     ]
     if note:
         parts.append(("", [note]))

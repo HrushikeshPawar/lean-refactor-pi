@@ -130,12 +130,82 @@ class ParseTests(unittest.TestCase):
         self.assertFalse(context.parse_context("ARENA_CTX " + json.dumps({"kind": "goal", "line": 1, "endLine": 1, "text": ""}), 0, 1)["complete"])
 
 
+class RankingTests(unittest.TestCase):
+    @staticmethod
+    def lemma(name, line, consts, **extra):
+        return {"name": name, "line": line, "decl": "theorem", "sig": f"{name} : ...", "consts": consts,
+                "core_consts": extra.pop("core", []), "uses": extra.pop("uses", []), "rel": extra.pop("rel", ""),
+                "concl_head": extra.pop("head", ""), "lhs_head": "", "rhs_head": "", "lhs_consts": [], **extra}
+
+    def inventory(self):
+        noise = [self.lemma(f"N.noise{i}", 100 + i, ["N.Ctx", "N.Wf"]) for i in range(12)]
+        earlier = noise + [
+            self.lemma("N.near", 999, ["N.Ctx", "N.other"]),
+            self.lemma("N.far_rw", 5, ["N.step", "N.Ctx"], rel="eq", lhs_head="N.step", rhs_head="N.run",
+                       lhs_consts=["N.step"]),
+            self.lemma("N.far_mention", 6, ["N.step", "N.Ctx"], head="N.Reach"),
+            self.lemma("N.libonly", 7, ["N.lemma_free"], core=["List.map", "Nat.add"]),
+            self.lemma("N.helper", 8, ["N.Ctx", "N.zip"]),
+            self.lemma("N.user", 9, ["N.step", "N.run"], uses=["N.helper"]),
+        ]
+        return {"earlier": earlier,
+                "target": [{"consts": ["N.step", "N.run", "N.Ctx"], "core_consts": ["List.map"]}],
+                "constant": [{"name": "N.run", "tag": "helper", "module": "this file"},
+                             {"name": "Nat.add", "tag": "core", "module": "Init.Prelude"}],
+                "goal": [{"consts": ["N.step"], "core_consts": [], "concl_head": "N.Reach", "lhs_head": "", "rhs_head": "",
+                          "rel": ""}]}
+
+    def test_relevant_far_lemmas_beat_nearby_noise_and_generic_constants_score_zero(self):
+        ranked = [entry["item"]["name"] for entry in context.score_earlier(self.inventory())]
+        for name in ("N.far_rw", "N.far_mention", "N.user"):
+            self.assertLess(ranked.index(name), ranked.index("N.near"))
+        self.assertLess(ranked.index("N.far_mention"), ranked.index("N.libonly"))
+        by_name = {e["item"]["name"]: e for e in context.score_earlier(self.inventory())}
+        self.assertEqual(by_name["N.noise0"]["relevance"], 0)  # N.Ctx is in most statements: no signal
+
+    def test_reasons_name_the_shared_constants_equations_and_goal_heads(self):
+        by_name = {e["item"]["name"]: e for e in context.score_earlier(self.inventory())}
+        self.assertIn("rw-ready", by_name["N.far_rw"]["reason"])
+        self.assertIn("mentions step", by_name["N.far_rw"]["reason"])
+        self.assertIn("concludes Reach", by_name["N.far_mention"]["reason"])
+        self.assertIn("used by related lemmas", by_name["N.helper"]["reason"])
+
+    def test_section_orders_by_score_keeps_handles_and_fits_the_character_budget(self):
+        lines = context._earlier_section(self.inventory())
+        self.assertTrue(lines[0].startswith("line "))
+        self.assertIn("[decl:N.", lines[0])
+        self.assertLess(next(i for i, l in enumerate(lines) if "decl:N.far_rw " in l),
+                        next(i for i, l in enumerate(lines) if "decl:N.near " in l))
+        context.LIMITS["earlier_budget"], saved = 300, context.LIMITS["earlier_budget"]
+        try:
+            short = context._earlier_section(self.inventory())
+        finally:
+            context.LIMITS["earlier_budget"] = saved
+        self.assertLessEqual(sum(len(l) + 1 for l in short), 300)
+        self.assertEqual(short, lines[:len(short)])
+
+    def test_zero_relevance_filler_is_capped_and_empty_context_is_safe(self):
+        lines = context._earlier_section(self.inventory())
+        self.assertLessEqual(sum("mentions" not in l and "concludes" not in l and "rw-ready" not in l
+                                 and "related" not in l for l in lines), 5)
+        self.assertEqual(context._earlier_section({}), [])
+
+    def test_parse_context_keeps_target_and_relevance_fields(self):
+        output = "\n".join(['ARENA_CTX ' + json.dumps({"kind": "target", "consts": ["A"]}),
+                            'ARENA_CTX ' + json.dumps({"kind": "earlier", "name": "A.b", "line": 3, "decl": "theorem",
+                                                       "sig": "", "uses": [], "consts": ["A"]}),
+                            'ARENA_CTX ' + json.dumps({"kind": "end"})])
+        parsed = context.parse_context(output, 0, 1)
+        self.assertEqual(parsed["target"][0]["consts"], ["A"])
+        self.assertEqual(parsed["earlier"][0]["consts"], ["A"])
+
+
 class TruncationTests(unittest.TestCase):
     def test_over_budget_packets_shed_the_lowest_priority_entries_deterministically(self):
         big = [f"entry {i} " + "x" * 200 for i in range(40)]
         parts = [("Head", ["keep me"]), ("Goal before each top-level tactic of the reference proof", big[:10]),
                  ("Signatures of constants the reference proof mentions", big[:20]),
-                 ("Lemmas declared earlier in this file", big)]
+                 (context.EARLIER_TITLE, big)]
         first = context._fit(parts, 6000)
         second = context._fit(parts, 6000)
         self.assertEqual(first, second)
@@ -161,6 +231,13 @@ class FixturePacketTests(unittest.TestCase):
         self.assertIn("Core.InitStatesSomeMonotone", self.text)
         self.assertIn("List.unzip_zip", self.text)
         self.assertIn("Core.updatedStatesInit [theorem]", self.text)
+
+    def test_relevant_lemmas_are_ranked_ahead_of_nearby_unrelated_ones(self):
+        ranked = [e["item"]["name"] for e in context.score_earlier(context.lean_context(NAME))]
+        for name in ("Core.updatedStatesUpdate", "Core.updatedStatesDefMonotone", "Core.updatedStatesComm"):
+            self.assertIn(f"decl:{name} ", self.text)
+            self.assertLess(ranked.index(name), 12, name)
+        self.assertIn(context.EARLIER_TITLE, self.text)
 
     def test_pinned_constant_index_keeps_elaborated_constructor_queryable(self):
         indexed = context.constant_index(context.lean_context(NAME), name="Exists.intro",

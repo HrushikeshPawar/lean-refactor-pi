@@ -28,6 +28,34 @@ elab "arena_context " cmd:command : command => do
       try
         liftTermElabM (do pure s!"{n} : {← ppExpr ci.type}")
       catch _ => pure ""
+  -- Relevance summary of a statement: its constants and the shape of its conclusion. Equations and
+  -- iffs report the heads and constants of their sides, so rewrite lemmas can be matched to goals.
+  let rec stripPi : Nat → Lean.Expr → Lean.Expr
+    | 0, e => e
+    | fuel + 1, .forallE _ _ b _ => stripPi fuel b
+    | fuel + 1, .mdata _ b => stripPi fuel b
+    | _, e => e
+  let headOf (e : Lean.Expr) : String := match e.getAppFn with | .const n _ => n.toString | _ => ""
+  -- Library constants (Init, Std, Lean) are reported apart: they are generic glue, not subject matter.
+  let isCoreConst (n : Lean.Name) (env : Lean.Environment) : Bool :=
+    match env.getModuleIdxFor? n with
+    | none => false
+    | some idx => ["Init", "Std", "Lean"].contains (env.header.moduleNames[idx.toNat]!).getRoot.toString
+  let constsOf (e : Lean.Expr) (env : Lean.Environment) (core : Bool) : Json :=
+    Json.arr (((e.getUsedConstants.filter (fun n => !n.isInternal && !Lean.Meta.isInstanceCore env n &&
+        isCoreConst n env == core)).toList.take 60).map (fun n => Json.str n.toString)).toArray
+  let summ (ty : Lean.Expr) (env : Lean.Environment) : List (String × Json) :=
+    let c := stripPi 100 ty
+    let (rel, l, r) :=
+      if c.isAppOfArity ``Eq 3 then ("eq", c.getArg! 1, c.getArg! 2)
+      else if c.isAppOfArity ``Iff 2 then ("iff", c.getArg! 0, c.getArg! 1)
+      else ("", c, c)
+    -- Bound with `:=` so the list never starts a line after a term: project notations such as
+    -- CSLib's `t [μ]↠ t'` would otherwise parse `("", c, c)` followed by `[` as their own syntax.
+    let fields : List (String × Json) := [("consts", constsOf ty env false),
+      ("core_consts", constsOf ty env true), ("concl_head", headOf c), ("rel", rel), ("lhs_head", headOf l),
+      ("rhs_head", headOf r), ("lhs_consts", constsOf l env false)]
+    fields
   -- Source line span of an imported declaration, so lookups read exact pinned lines without searching.
   let moduleRanges ← IO.mkRef (({} : Std.HashMap Lean.Name (Array (Lean.Name × Lean.DeclarationRanges))))
   let rangeOf (n : Lean.Name) : CommandElabM (List (String × Json)) := do
@@ -124,7 +152,13 @@ elab "arena_context " cmd:command : command => do
                     let f ← ({ ctx with mctx := ti.mctxBefore } : ContextInfo).runMetaM {} (ppGoal g)
                     text := text ++ toString f ++ "\n"
                   catch _ => pure ()
-                emit [("kind", "goal"), ("line", line), ("endLine", endLine), ("text", text)]
+                let mut shape : List (String × Json) := []
+                for g in ti.goalsBefore do
+                  match ti.mctxBefore.findDecl? g with
+                  | some d => shape := shape ++ summ (instantiateMVarsCore ti.mctxBefore d.type).1 ctx.env
+                  | none => pure ()
+                emit (([("kind", "goal"), ("line", line), ("endLine", endLine), ("text", text)] : List (String × Json)) ++
+                  (if shape.length > 7 then shape.take 7 else shape))
           | _, _ => pure ()
         | .ofTermInfo ti =>
           let sourceAuthored := match ti.stx.getHeadInfo with
@@ -211,20 +245,34 @@ elab "arena_context " cmd:command : command => do
                   ("module", constantModule), ("sig", clip (← sigOf n) 500)]
           | _ => pure ()
     | _ => emit [("kind", "failure"), ("message", s!"Pinned theorem {targetName} did not elaborate as a theorem")]
-  -- declarations earlier in this file, nearest first
+  -- Statement constants of the pinned theorem, for ranking earlier lemmas by relevance.
+  match env.find? targetName with
+    | some ci => emit (([("kind", "target")] : List (String × Json)) ++ summ ci.type env)
+    | none => pure ()
+  -- declarations earlier in this file, nearest first, each with its relevance summary
   let mut earlier : Array (Nat × Lean.Name) := #[]
   for (n, ci) in envBefore.constants.map₂.toList do
     unless n.isInternal || isPrivateName n || ((toString n).splitOn "rena_").length > 1 do
       match ← findDeclarationRanges? n with
       | some r => earlier := earlier.push (r.range.pos.line, n)
       | none => pure ()
-  let sorted := earlier.qsort (fun a b => a.1 > b.1)
-  for (line, n) in sorted.toList.take 120 do
+  let sorted := (earlier.qsort (fun a b => a.1 > b.1)).toList.take 400
+  let earlierSet : Std.HashSet Lean.Name := sorted.foldl (fun acc (_, n) => acc.insert n) {}
+  for (line, n) in sorted do
     let decl := match envBefore.find? n with
       | some (.thmInfo _) => "theorem" | some (.defnInfo _) => "def" | some (.inductInfo _) => "inductive"
       | some (.ctorInfo _) => "constructor" | _ => "other"
-    emit [("kind", "earlier"), ("name", n.toString), ("line", line), ("decl", decl),
-          ("sig", clip (← sigOf n) 400)]
+    let shape := match envBefore.find? n with
+      | some ci => summ ci.type envBefore
+      | none => []
+    -- earlier declarations of this file that the lemma's proof uses
+    let uses : Json := match envBefore.find? n with
+      | some (.thmInfo v) =>
+        Json.arr ((v.value.getUsedConstants.filter (fun u => u != n && earlierSet.contains u)).toList.take 40
+          |>.map (fun u => Json.str u.toString)).toArray
+      | _ => Json.arr #[]
+    emit (([("kind", "earlier"), ("name", n.toString), ("line", line), ("decl", decl),
+          ("sig", clip (← sigOf n) 400), ("uses", uses)] : List (String × Json)) ++ shape)
   emit [("kind", "end")]
 
 arena_context
