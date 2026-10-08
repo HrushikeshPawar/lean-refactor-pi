@@ -901,7 +901,8 @@ def _worker_running(directory: Path) -> bool:
 
 
 def _route_queue(directory: Path) -> list[dict]:
-    """Queued attempts with no route event yet, oldest first."""
+    """Queued attempts with no route event yet, oldest first, the reference proof's before any other: every later
+    route is compared against it, so it is fingerprinted first."""
     try:
         lines = (directory / "route-queue.jsonl").read_text().splitlines()
     except OSError:
@@ -913,13 +914,16 @@ def _route_queue(directory: Path) -> list[dict]:
         if entry["proof_id"] not in filed and entry["proof_id"] not in seen:
             seen.add(entry["proof_id"])
             pending.append(entry)
-    return pending
+    references = {item["candidate_id"] for item in events(directory)
+                  if item.get("kind") == "candidate" and item.get("origin") == "reference"}
+    return sorted(pending, key=lambda entry: entry["proof_id"] not in references)  # stable
 
 
 def _route_worker(directory: Path) -> None:
     """Drain the run's route queue in one process. An attempt whose extraction fails is not retried in this
-    process; a later worker (or a backfill) tries it again."""
+    process (the reference proof is, REFERENCE_ROUNDS times); a later worker (or a backfill) tries it again."""
     tried: set[str] = set()
+    failed: dict[str, int] = {}
     while True:
         with (directory / "route-worker.lock").open("a") as handle:
             try:
@@ -928,13 +932,18 @@ def _route_worker(directory: Path) -> None:
                 return
             while pending := [entry for entry in _route_queue(directory) if entry["proof_id"] not in tried]:
                 entry = pending[0]
-                tried.add(entry["proof_id"])
+                _yield_to_lean_session(directory)
                 _room_for_extraction(wait=float("inf"))
                 try:
                     proof = (directory / "proofs" / f"{entry['proof_id']}.lean").read_text()
                 except OSError:
+                    tried.add(entry["proof_id"])
                     continue
-                _record_route(directory, entry["name"], entry["proof_id"], proof)
+                filed = _record_route(directory, entry["name"], entry["proof_id"], proof)
+                failed[entry["proof_id"]] = failed.get(entry["proof_id"], 0) + 1
+                if filed is not None or failed[entry["proof_id"]] >= (
+                        REFERENCE_ROUNDS if _origin(directory, entry["proof_id"]) == "reference" else 1):
+                    tried.add(entry["proof_id"])
         # Released: an entry queued while the lock was held saw a running worker, so look once more.
         if not [entry for entry in _route_queue(directory) if entry["proof_id"] not in tried]:
             return
@@ -943,16 +952,35 @@ def _route_worker(directory: Path) -> None:
 ROUTE_SLOTS = 2
 ROUTE_EXTRACT_GB = 2.0      # one cold Lean process with the theorem's imports
 ROUTE_WAIT_SECONDS = 180.0
+REFERENCE_TRIES = 3         # kernel extractions of the reference proof per _record_route call
+REFERENCE_ROUNDS = 3        # worker passes over a reference that still has no kernel print
+REFERENCE_RETRY_SECONDS = 20.0
+
+
+def _origin(directory: Path, proof_id: str) -> str | None:
+    return next((item.get("origin", "model") for item in events(directory)
+                 if item.get("kind") == "candidate" and item["candidate_id"] == proof_id), None)
+
+
+def _yield_to_lean_session(directory: Path) -> None:
+    """Hold route extraction back while the run's own Lean session is refusing workers for memory (it leaves a
+    marker, see lean_session.memory_pressure): the model's probes come first, extraction is bookkeeping. The marker
+    ages out 2 minutes after the last refusal, so this ends by itself."""
+    from arena.lean_session import memory_pressure
+
+    while memory_pressure(directory):
+        time.sleep(5)
 
 
 def _room_for_extraction(wait: float = ROUTE_WAIT_SECONDS) -> bool:
-    """Wait until an extraction leaves the Lean session daemons their reserve; False if it never does."""
-    from arena.lean_session import RESERVE_GB, _available_gb
+    """Wait until an extraction leaves the Lean session daemons their reserve plus one more worker (else an
+    extraction started at 7 GB free starves the session, which needs 8 GB to open a worker); False if never."""
+    from arena.lean_session import RESERVE_GB, WORKER_GB, _available_gb
 
     deadline = time.monotonic() + wait
     while True:
         free = _available_gb()
-        if free is None or free - ROUTE_EXTRACT_GB >= RESERVE_GB:
+        if free is None or free - ROUTE_EXTRACT_GB >= RESERVE_GB + WORKER_GB:
             return True
         if time.monotonic() >= deadline:
             return False
@@ -973,12 +1001,26 @@ def _record_route(directory: Path, name: str, proof_id: str, proof: str) -> dict
         # Each probe draft is now fingerprinted, and one extraction is a cold Lean process of 1-2 GB: one at a time
         # per run, and at most ROUTE_SLOTS across the parallel runs of a campaign.
         slot = directory.parent / f".route-extract-{int(proof_id[:8], 16) % ROUTE_SLOTS if re.fullmatch(r'[0-9a-f]{8}.*', proof_id) else 0}.lock"
-        with (directory / "route-extract.lock").open("a") as own, slot.open("a") as shared:
-            fcntl.flock(own, fcntl.LOCK_EX)
-            fcntl.flock(shared, fcntl.LOCK_EX)
-            if os.environ.get("ARENA_ROUTES_INLINE") != "1" and not _room_for_extraction():
-                return None  # the run's own Lean workers come first; the attempt simply gets no route
-            features = _route_features(directory, name, proof_id, proof)
+        # The reference proof is every route's yardstick: it is never filed from text. Without a kernel print it
+        # stays unfiled (the worker tries again later) rather than become an exemplar that absorbs kernel attempts.
+        reference = _origin(directory, proof_id) == "reference"
+        features = None
+        inline = os.environ.get("ARENA_ROUTES_INLINE") == "1"
+        for attempt in range(REFERENCE_TRIES if reference and not inline else 1):
+            if attempt:
+                time.sleep(REFERENCE_RETRY_SECONDS)
+            with (directory / "route-extract.lock").open("a") as own, slot.open("a") as shared:
+                fcntl.flock(own, fcntl.LOCK_EX)
+                fcntl.flock(shared, fcntl.LOCK_EX)
+                if not inline:
+                    _yield_to_lean_session(directory)
+                    if not _room_for_extraction():
+                        continue  # the run's own Lean workers come first; the attempt simply gets no route (yet)
+                features = _route_features(directory, name, proof_id, proof)
+            if features:
+                break
+        if reference and not features:
+            return None
         with (directory / "route.lock").open("a") as handle:
             fcntl.flock(handle, fcntl.LOCK_EX)
             history = events(directory)

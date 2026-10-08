@@ -160,8 +160,15 @@ class ExecuteAndReportTests(unittest.TestCase):
         self.assertIn("routes tried per run", text)
         self.assertIn("min/median/max: 60/70/80", text)
         self.assertIn("stop reasons", text)
+        self.assertIn("route depth credited/explored", text)
         bad = rc.aggregate([rc.run_row(specs[0], fixture_summary(1.0), 0, "x", "h")], {"A": "h"})
         self.assertFalse(bad["identical_packets"])
+
+    def test_route_depth_reaches_the_campaign_table(self):
+        spec = rc.plan("p", ["A"], ["gpt-6-luna"], 1)[0]
+        summary = fixture_summary(60.0) | {"route_progress": {"credited_routes": 2, "explored_routes": 1, "new_state_share": 0.5}}
+        group = rc.aggregate([rc.run_row(spec, summary, 0, "h", "h")], {"A": "h"})["groups"][0]
+        self.assertEqual((group["credited_routes"]["max"], group["new_state_share"]["max"]), (2, 0.5))
 
     def test_helper_discovery(self):
         with tempfile.TemporaryDirectory() as tmp:

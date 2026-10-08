@@ -265,5 +265,29 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual([t["usd"] for t in turns], [0.01])
 
 
+class StopReasonTests(unittest.TestCase):
+    def test_one_stop_reason_for_summary_and_campaign(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            write(directory / "ledger.jsonl", [{"kind": "init", "ts": 1.0, "theorem": "T"}])
+            self.assertEqual(summary.build_summary(directory)["stop_reason"], "model_stopped")
+            written = summary.write_summary(directory, "interrupted")
+            self.assertEqual(written["stop_reason"], "interrupted")
+            # a later rebuild (the campaign report) agrees with summary.txt
+            self.assertEqual(summary.build_summary(directory)["stop_reason"], "interrupted")
+            self.assertIn("stop interrupted", (directory / "summary.txt").read_text())
+            summary.write_summary(directory)  # a resumed run that ends normally clears the note
+            self.assertEqual(summary.build_summary(directory)["stop_reason"], "model_stopped")
+
+    def test_the_cap_is_read_from_the_new_or_the_old_run_config_key(self):
+        self.assertEqual(summary.configured_cap({"soft_cap_usd": 0.5}), 0.5)
+        self.assertEqual(summary.configured_cap({"hard_cap_usd": 0.4}), 0.4)
+        self.assertEqual(summary.configured_cap({"soft_cap_usd": 0.5, "hard_cap_usd": 3}), 0.5)
+
+    def test_route_depth_text_shows_credited_routes_before_any_attempt(self):
+        text = summary.route_depth_text({"credited_routes": 0, "explored_routes": 1, "new_state_share": None})
+        self.assertIn("0 credited routes, 1 explored", text)
+
+
 if __name__ == "__main__":
     unittest.main()

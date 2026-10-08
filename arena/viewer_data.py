@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Callable
 
 from arena.routes import progress as route_progress, route_table
-from arena.summary import HARD_CAP_USD, _result_ok, _turns, build_summary, hit_rate_pct, reconcile_spend, session_spend, trace_rows
+from arena.summary import HARD_CAP_USD, configured_cap, _result_ok, _turns, build_summary, hit_rate_pct, reconcile_spend, session_spend, trace_rows
 
 BASELINE_PROXY = round(100 / 3, 2)
 STALL_SECONDS = 15 * 60
@@ -180,8 +180,8 @@ def hub_row(run_id: str, directory: Path, campaign: str | None = None, now: floa
     return {
         "run_id": run_id, "campaign": campaign, "model": config.get("model"),
         "theorem": config.get("theorem"), "reference": reference, "thinking": config.get("thinking"),
-        "soft_cap_usd": cost.get("soft_cap_usd") or config.get("hard_cap_usd"),
-        "cap_usd": config.get("hard_cap_usd"), "hard_cap_usd": HARD_CAP_USD,
+        "soft_cap_usd": cost.get("soft_cap_usd") or configured_cap(config),
+        "cap_usd": configured_cap(config), "hard_cap_usd": HARD_CAP_USD,
         "spent_usd": round(spent, 6), "requests": cost.get("requests") or requests,
         "tool_results": tools.get("results"), "tool_errors": tools.get("error_total"),
         "cache_reuse_pct": cache.get("reuse_pct"),
@@ -394,7 +394,7 @@ def run_dashboard(run_id: str, directory: Path) -> dict:
     ledger = read_jsonl(directory / "ledger.jsonl")
     start, last = _start_end(directory)
     summary = _live_summary(directory)
-    soft = (summary.get("cost") or {}).get("soft_cap_usd") or read_json(directory / "run-config.json").get("hard_cap_usd")
+    soft = (summary.get("cost") or {}).get("soft_cap_usd") or configured_cap(read_json(directory / "run-config.json"))
     packet = directory / "packet.txt"
     try:
         packet_text = packet.read_text(errors="replace")

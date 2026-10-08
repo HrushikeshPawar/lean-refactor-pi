@@ -415,3 +415,80 @@ class RouteQueueTests(unittest.TestCase):
                 campaign._route_worker(directory)
             self.assertEqual(seen, ["a1"])  # c3 has no snapshot, so it is skipped rather than retried forever
             self.assertFalse(campaign._worker_running(directory))
+
+
+class ReferenceRouteTests(unittest.TestCase):
+    """The reference proof is every route's yardstick: kernel print or nothing, filed first, original even if late."""
+
+    CONTEXT = {"earlier": [{"name": name, "decl": "theorem"} for name in VOCAB]}
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.directory = Path(self.temp.name)
+        campaign._append(self.directory, {"kind": "candidate", "candidate_id": "ref", "parents": [], "origin": "reference"})
+        campaign._append(self.directory, {"kind": "candidate", "candidate_id": "c1", "parents": [], "origin": "model"})
+
+    def record(self, proof_id, proof, extract):
+        with patch("arena.context.cached_context", return_value=self.CONTEXT), \
+                patch("arena.route_features.extract", side_effect=extract), \
+                patch.object(campaign, "REFERENCE_RETRY_SECONDS", 0), patch.object(campaign, "_yield_to_lean_session"), \
+                patch.object(campaign, "_room_for_extraction", lambda wait=0: True), \
+                patch.dict("os.environ", {"ARENA_ROUTES_INLINE": "0"}):
+            return campaign._record_route(self.directory, "Core.X", proof_id, proof)
+
+    def routes_filed(self):
+        return [r for r in campaign.events(self.directory) if r["kind"] == "route"]
+
+    def test_a_reference_without_a_kernel_print_is_not_filed_from_text(self):
+        def extract(name, proofs):
+            return {tag: {"tag": tag, "ok": False, "error": "timeout"} for tag in proofs}
+        self.assertIsNone(self.record("ref", INDUCTIVE, extract))
+        self.assertEqual(self.routes_filed(), [])
+        # an ordinary attempt still falls back to text
+        self.assertEqual(self.record("c1", INDUCTIVE, extract)["source"], "text")
+
+    def test_a_reference_is_retried_until_the_kernel_answers(self):
+        calls = []
+        def extract(name, proofs):
+            calls.append(1)
+            if len(calls) < 3:
+                raise RuntimeError("memory")
+            return {tag: features(**INDUCTION) | {"tag": tag} for tag in proofs}
+        event = self.record("ref", INDUCTIVE, extract)
+        self.assertEqual((len(calls), event["source"], event["credited"]), (3, "kernel", False))
+
+    def test_the_worker_files_the_reference_first_and_tries_it_again(self):
+        (self.directory / "route-queue.jsonl").write_text("".join(
+            json.dumps({"proof_id": p, "name": "Core.X"}) + "\n" for p in ("c1", "ref")))
+        self.assertEqual([e["proof_id"] for e in campaign._route_queue(self.directory)], ["ref", "c1"])
+        for p in ("c1", "ref"):
+            campaign._snapshot(self.directory, p, INDUCTIVE)
+        seen = []
+        def record(directory, name, proof_id, proof):
+            seen.append(proof_id)
+            return None  # extraction keeps failing
+        with patch.object(campaign, "_record_route", record), patch.object(campaign, "_room_for_extraction", lambda wait: True), \
+                patch.object(campaign, "_yield_to_lean_session"):
+            campaign._route_worker(self.directory)
+        self.assertEqual(seen, ["ref"] * campaign.REFERENCE_ROUNDS + ["c1"])
+
+    def test_a_late_reference_marks_the_route_it_joins_as_original_and_not_credited(self):
+        history = [
+            {"kind": "candidate", "candidate_id": "ref", "origin": "reference", "parents": []},
+            {"kind": "candidate", "candidate_id": "c1", "origin": "model", "parents": []},
+            {"kind": "route", "proof_id": "c1", "route": "r1", "new": True, "source": "kernel", "credited": True, "label": "x"},
+            {"kind": "route", "proof_id": "ref", "route": "r1", "new": False, "source": "kernel", "credited": False, "label": "x"}]
+        row = routes.route_table(history)[0]
+        self.assertTrue(row["original"])
+        self.assertFalse(row["credited"])
+        self.assertEqual(row["attempts"], 1)
+
+    def test_a_text_exemplar_does_not_absorb_a_dissimilar_kernel_attempt(self):
+        text = routes.fingerprint(INDUCTIVE, VOCAB, "Core.X")  # no kernel features
+        earlier = [{"route": "r1", "fingerprint": text}]
+        weak = kernel_print(recursion=["rec:UpdateStates"], lemmas=["Core.A"])
+        weak["lemmas"] = ["InitStatesLength", "Other"]  # text overlap 1/3, above SAME_ROUTE=0.5? no: below TEXT_EXEMPLAR_MIN
+        self.assertEqual(routes.assign(earlier, weak)[0], "r2")
+        same = dict(weak, lemmas=text["lemmas"])
+        self.assertEqual(routes.assign(earlier, same)[0], "r1")

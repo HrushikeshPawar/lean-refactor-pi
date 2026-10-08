@@ -588,3 +588,41 @@ class RunnerSessionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class SessionLogTests(unittest.TestCase):
+    """The daemon's decisions are logged, and a memory refusal leaves a marker background work yields to."""
+
+    class FakeServer:
+        def __init__(self):
+            self.opened = 0
+        def alive(self):
+            return True
+        def doc(self, uri):
+            self.opened += 1
+            return lean_session._Doc(uri)
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.directory = Path(self.temp.name)
+        self.session = lean_session.Session(self.directory)
+        self.entry = lean_session._Entry(self.directory / "proj", {}, self.FakeServer())
+        self.session.entries[str(self.entry.project)] = self.entry
+
+    def test_a_worker_open_and_a_memory_refusal_are_logged_and_marked(self):
+        lines = []
+        with patch.object(lean_session, "_log", lines.append):
+            with patch.object(lean_session, "_available_gb", return_value=100.0):
+                self.session._acquire(self.entry, 1)
+            self.assertFalse(lean_session.memory_pressure(self.directory))
+            other = lean_session._Entry(self.directory / "other", {}, self.FakeServer())
+            self.session.entries[str(other.project)] = other
+            with patch.object(lean_session, "_available_gb", return_value=4.0), \
+                    self.assertRaises(lean_session.SessionError):
+                self.session._acquire(other, 1)
+        self.assertTrue(any(line.startswith("worker open proj") for line in lines), lines)
+        self.assertTrue(any("no room for a Lean worker: memory (4.0 GB available)" in line for line in lines), lines)
+        self.assertTrue(lean_session.memory_pressure(self.directory))
+        self.assertFalse(lean_session.memory_pressure(self.directory, within=0))
+        self.assertIn(lean_session.WAITING_NAME, lean_session.SESSION_FILES)
+

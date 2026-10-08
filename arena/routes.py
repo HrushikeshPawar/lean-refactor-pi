@@ -33,6 +33,7 @@ import re
 
 SAME_ROUTE = 0.5
 ROUTE_DEPTH = 3     # distinct goal states that make a route explored
+TEXT_EXEMPLAR_MIN = 0.7   # a kernel attempt joins a text-only exemplar's route only this close: text overlap is a weak proxy
 STALE_STREAK = 5    # consecutive attempts leaving an already seen goal state
 MAX_SKELETON = 24
 LABEL_LEMMAS = 3
@@ -223,14 +224,18 @@ def assign(earlier: list[dict], current: dict) -> tuple[str, float]:
     """Route id for `current` given earlier route events ({route, fingerprint}); a new id if none is close enough."""
     first = exemplars(earlier)
     weights = idf([event["fingerprint"] for event in earlier] + [current])
-    best_route, best = None, 0.0
+    best_route, best, closest = None, 0.0, 0.0
     for route, event in first.items():
         score = similarity(event["fingerprint"], current, weights)
-        if score > best:
+        closest = max(closest, score)
+        # A text-only exemplar (kernel extraction failed for it) must not absorb kernel attempts it only vaguely
+        # resembles: that is how a whole run once piled onto one text-labelled route.
+        threshold = SAME_ROUTE if event["fingerprint"].get("kernel") or not current.get("kernel") else TEXT_EXEMPLAR_MIN
+        if score > best and score >= threshold:
             best_route, best = route, score
-    if best_route is not None and best >= SAME_ROUTE:
+    if best_route is not None:
         return best_route, round(best, 3)
-    return f"r{len(first) + 1}", round(best, 3)
+    return f"r{len(first) + 1}", round(closest, 3)
 
 
 def assign_by_text(earlier: list[dict], current: dict) -> tuple[str, float] | None:
@@ -345,7 +350,10 @@ def route_table(history: list[dict]) -> list[dict]:
             seen[route] = set()
         row = table[route]
         if kind == "reference":
+            # The reference may be filed after attempts that already opened its route (a late fingerprint): the
+            # route is then the original's, and not one the model opened.
             row["original"] = row["compiled"] = row["explored"] = True
+            row["credited"] = False
             seen[route].add(goalstate.CLOSED)
             continue
         if kind == "auto_merge":

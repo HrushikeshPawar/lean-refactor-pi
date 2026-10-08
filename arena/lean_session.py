@@ -38,7 +38,7 @@ ENV = "ARENA_LEAN_SESSION"
 PROTOCOL = 1
 SOCKET_NAME = "lean-session.sock"
 INFO_NAME = "lean-session.json"
-SESSION_FILES = (SOCKET_NAME, INFO_NAME, "lean-session")
+SESSION_FILES = (SOCKET_NAME, INFO_NAME, "lean-session", "lean-session.waiting")
 MAX_SLOTS = 4            # concurrent documents (workers) per toolchain
 MAX_WORKERS = 6          # across toolchains
 WORKER_GB = 3.0          # planning figure until a real worker has been measured
@@ -50,6 +50,26 @@ SOCKET_LIMIT = 100       # sun_path is 108 bytes
 # the session must not receive them: `lake env` supplies LEAN_PATH, and pointing LAKE at nothing
 # makes the server treat the file as having no lakefile.
 NO_LAKE = "/nonexistent/arena-no-lake"
+WAITING_NAME = "lean-session.waiting"  # touched when a request was refused a worker for memory; see memory_pressure()
+WAITING_SECONDS = 120.0
+
+
+def _log(message: str) -> None:
+    """One timestamped line on stderr, which `start_daemon` points at lean-session.log: the only record of why
+    a probe went cold (worker refused, evicted, timed out) once the run is over."""
+    try:
+        print(f"{time.strftime('%H:%M:%S')} {message}", file=sys.stderr, flush=True)
+    except (OSError, ValueError):
+        pass
+
+
+def memory_pressure(directory: Path, within: float = WAITING_SECONDS) -> bool:
+    """True when this run's session refused a worker for memory in the last `within` seconds. Background work of the
+    same run (route extraction) yields to it: its cold Lean process is what the session was short of."""
+    try:
+        return time.time() - (directory / WAITING_NAME).stat().st_mtime < within
+    except OSError:
+        return False
 
 
 # -- fingerprint ------------------------------------------------------------------------------
@@ -444,6 +464,7 @@ class Session:
                 reason = "crashed" if not entry.server.alive() else "changed"
                 old = self.entries.pop(str(project))
                 old.server.stop()
+                _log(f"server {project.name} restarted: {reason}")
                 if reason == "changed":
                     changed = sorted(k for k in key if key[k] != old.key.get(k))
                     raise SessionError("stale session: " + ", ".join(changed) + " changed; restarting it")
@@ -451,6 +472,7 @@ class Session:
             if entry is None:
                 server = LeanServer(project, self.logs / f"{project.name}.log")
                 server.start()
+                _log(f"server {project.name} started")
                 entry = self.entries[str(project)] = _Entry(project, key, server)
                 self.primary = self.primary or str(project)
             entry.used = time.monotonic()
@@ -468,6 +490,7 @@ class Session:
             with self.lock:
                 self.entries.pop(str(entry.project), None)
             entry.server.stop()
+            _log(f"server {entry.project.name} restarted: file prefix changed")
             raise SessionError("stale session: the file prefix changed; restarting it")
 
     def _workers(self) -> int:
@@ -502,15 +525,28 @@ class Session:
                         slot = entry.server.doc((entry.project / "ArenaScratch" / f"Session{self.counter}.lean").as_uri())
                         slot.busy = True
                         entry.slots.append(slot)
-                        return slot
+                        opened = (len(entry.slots), self._workers())
+                if blocked is None:
+                    _log(f"worker open {entry.project.name} slot {opened[0]}, {opened[1]} workers total")
+                    return slot
                 if blocked != "slots" and not entry.slots and not self._evict_idle(entry):
+                    self._refused(entry, blocked)
                     raise SessionError(f"no room for a Lean worker: {blocked}")
                 if blocked != "slots" and not entry.slots:
                     continue
                 left = deadline - time.monotonic()
                 if left <= 0:
+                    _log(f"timeout {entry.project.name}: every worker busy for {timeout:.0f} s")
                     raise SessionError("every Lean worker was busy for too long")
                 entry.condition.wait(min(left, 1.0))
+
+    def _refused(self, entry: _Entry, blocked: str) -> None:
+        _log(f"refused {entry.project.name}: no room for a Lean worker: {blocked}; {self._workers()} workers open")
+        if blocked.startswith("memory"):
+            try:
+                (self.directory / WAITING_NAME).touch()
+            except OSError:
+                pass
 
     def _evict_idle(self, keep: _Entry) -> bool:
         """Close the longest-idle worker of another toolchain to make room; False if none is idle."""
@@ -528,6 +564,7 @@ class Session:
                     return False
                 other.server.close_doc(slot)
                 other.slots.remove(slot)
+                _log(f"worker evicted from {other.project.name} to make room for {keep.project.name}")
             finally:
                 other.condition.release()
             return True
@@ -558,6 +595,7 @@ class Session:
                         slot.busy = True
                         entry.slots.append(slot)
                         text = entry.last_text
+                        _log(f"worker open {entry.project.name} slot {len(entry.slots)} (pre-warm)")
                 worker = threading.Thread(target=self._warm, args=(entry, slot, text), daemon=True, name="lean-warm")
                 worker.start()
                 workers.append(worker)
@@ -605,6 +643,7 @@ class Session:
         finally:
             self._release(entry, slot)
         if outcome.get("timeout"):
+            _log(f"timeout {entry.project.name}: check ran past {timeout:.0f} s")
             return {"ok": True, "timeout": True}
         returncode, text = render(outcome["diagnostics"], request["text"], request["display"])
         self._measure(entry)
@@ -637,6 +676,7 @@ class Session:
             for name, entry in list(self.entries.items()):
                 if name != self.primary and now - entry.used > IDLE_SECONDS and not any(s.busy for s in entry.slots):
                     self.entries.pop(name).server.stop()
+                    _log(f"server {Path(name).name} closed: idle {IDLE_SECONDS} s")
 
     def pgids(self) -> list[int]:
         return [e.server.pgid for e in self.entries.values() if e.server.pgid]
@@ -647,6 +687,7 @@ class Session:
 
     def shutdown(self) -> None:
         self.closing = True
+        _log("session shutdown")
         with self.lock:
             entries, self.entries = list(self.entries.values()), {}
         for entry in entries:
@@ -732,6 +773,7 @@ def serve(directory: Path, parent: int | None, max_slots: int) -> int:
                     pass
             time.sleep(1.0)
 
+    _log(f"session up (pid {os.getpid()}, max slots {max_slots}, reserve {RESERVE_GB} GB)")
     write_info()
     threading.Thread(target=watch, daemon=True, name="watch").start()
     try:

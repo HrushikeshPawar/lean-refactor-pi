@@ -16,6 +16,27 @@ from arena.merges import merge_report, merge_text
 from arena.routes import progress as route_progress, route_table, routes_detail_text
 
 HARD_CAP_USD = 3.0  # keep equal to MAX_HARD_CAP_USD in packages/arena-pi/extensions/budget.ts
+
+
+def configured_cap(config: dict) -> float | None:
+    """The run's configured spend cap, a soft cap on settled spend (only HARD_CAP_USD is hard). run-config.json
+    now says `soft_cap_usd`; older files called it `hard_cap_usd`, after the CLI flag."""
+    return config.get("soft_cap_usd") or config.get("hard_cap_usd")
+
+
+STOP_FILE = "stop-reason.txt"  # a stop the runner imposed (e.g. "interrupted"); wins over the cost ledger's control row
+
+
+def stop_reason_of(directory: Path, controls: list[dict]) -> str:
+    """The one source of truth for how a run ended, shared by summary.json, summary.txt and campaign tables:
+    the runner's own note, else the last control row of the cost ledger, else "model_stopped"."""
+    try:
+        noted = (directory / STOP_FILE).read_text().strip()
+    except OSError:
+        noted = ""
+    return noted or (controls[-1].get("stop") if controls else None) or "model_stopped"
+
+
 COMPILE_TOOLS = {"arena_evaluate", "arena_probe", "arena_profile"}
 BOOKKEEPING_TOOLS = {"arena_idea", "arena_frontier", "arena_state", "arena_finish"}
 LOCAL_EDIT_MAX_LINES = 2
@@ -155,7 +176,7 @@ def cost_report_from_ledger(directory: Path) -> dict:
     spent, unresolved = recon["spent_usd"], recon["unresolved_usd"]
     config = _read_json(directory / "run-config.json")
     return {"theorem": config.get("theorem"), "model": config.get("model"),
-            "hard_cap_usd": HARD_CAP_USD, "soft_cap_usd": config.get("hard_cap_usd"), "spent_usd": spent,
+            "hard_cap_usd": HARD_CAP_USD, "soft_cap_usd": configured_cap(config), "spent_usd": spent,
             "unresolved_usd": unresolved, "written_by": "runner_ledger_reconstruction"}
 
 
@@ -305,9 +326,9 @@ def build_summary(directory: Path) -> dict:
     # The complete figure: never below the cost report, the ledger's settles or Pi's session total.
     spent = max(float(report.get("spent_usd") or 0.0), recon["spent_usd"])
     recon["cost_report_usd"] = report.get("spent_usd")
-    # Only $3 is a hard cap. The configured cap (run-config "hard_cap_usd", the CLI flag's name)
-    # is a soft cap on actual settled spend. Older reports carried the configured cap as hard_cap_usd.
-    cap = report.get("soft_cap_usd") or config.get("hard_cap_usd") or report.get("hard_cap_usd")
+    # Only $3 is a hard cap; the configured cap is a soft cap on actual settled spend (see configured_cap).
+    # Older reports carried the configured cap as hard_cap_usd.
+    cap = report.get("soft_cap_usd") or configured_cap(config) or report.get("hard_cap_usd")
     unresolved = recon["unresolved_usd"] if cost_events else float(report.get("unresolved_usd") or 0.0)
     remaining = max(0.0, float(cap or 0.0) - spent)
     by_kind: dict[str, dict] = {}
@@ -384,7 +405,7 @@ def build_summary(directory: Path) -> dict:
         "run_id": directory.name, "theorem": config.get("theorem") or report.get("theorem"),
         "model": config.get("model"), "thinking": config.get("thinking"),
         "skill": (config.get("skill") or {}).get("sha256"),
-        "stop_reason": (controls[-1].get("stop") if controls else None) or "model_stopped",
+        "stop_reason": stop_reason_of(directory, controls),
         "cost": {"spent_usd": round(spent, 6), "unresolved_usd": round(unresolved, 6),
                  "hard_cap_usd": HARD_CAP_USD, "soft_cap_usd": cap, "remaining_usd": round(remaining, 6), "overshoot_usd": round(overshoot, 6),
                  "requests": len(request_events) if request_events else len(turns),
@@ -417,10 +438,12 @@ def build_summary(directory: Path) -> dict:
 
 
 def route_depth_text(depth: dict | None) -> str:
-    if not depth or depth.get("new_state_share") is None:
-        return "route depth: no attempts on a route yet"
-    return (f"route depth: {depth['credited_routes']} credited routes, {depth['explored_routes']} explored; "
-            f"{round(100 * depth['new_state_share'])}% of attempts produced a goal state new to their route")
+    if not depth:
+        return "route depth: no route events"
+    head = f"route depth: {depth['credited_routes']} credited routes, {depth['explored_routes']} explored"
+    if depth.get("new_state_share") is None:
+        return head + "; no attempts on a route yet"
+    return head + f"; {round(100 * depth['new_state_share'])}% of attempts produced a goal state new to their route"
 
 
 def render_text(summary: dict) -> str:
@@ -461,6 +484,13 @@ def render_text(summary: dict) -> str:
 
 def write_summary(directory: Path, stop_reason: str | None = None) -> dict:
     """`stop_reason` overrides the ledger's, e.g. when the runner was interrupted."""
+    try:  # persisted so a later build_summary (campaign report, viewer) names the stop the same way
+        if stop_reason:
+            (directory / STOP_FILE).write_text(stop_reason + "\n")
+        else:
+            (directory / STOP_FILE).unlink(missing_ok=True)
+    except OSError:
+        pass
     summary = build_summary(directory)
     if stop_reason:
         summary["stop_reason"] = stop_reason
