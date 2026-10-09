@@ -4,8 +4,9 @@ meta unsafe def arena_moduleRanges (m : Lean.Name) : IO (Array (Lean.Name × Lea
   let fname ← Lean.findOLean m
   let parts ← Lean.readModuleDataParts #[fname, Lean.OLeanLevel.server.adjustFileName fname]
   for (data, _) in parts do
-    for (ext, entries) in data.entries do
-      if ext == Lean.declRangeExt.name then
+    -- Not `ext`: Mathlib projects that define `ext` as a token make `(ext, entries)` an unsupported pattern.
+    for (extName, entries) in data.entries do
+      if extName == Lean.declRangeExt.name then
         return unsafeCast entries
   return #[]
 

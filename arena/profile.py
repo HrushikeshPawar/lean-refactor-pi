@@ -296,7 +296,7 @@ def profile(name: str, proof: str, measured: int | None = None) -> dict:
     if measured is None:
         measure = compile_version(row, proof, version, commit, measure=True)
         measured = measure.get("heartbeats")
-    whole_tokens = _proof_length(proof)
+    whole_tokens = _proof_length(proof, row.get("statement"))
     token_lines = _line_token_counts(proof, whole_tokens)
     rates = exchange_rates(name, len(versions(row)))
     summary = summarize(records, built["text"].splitlines(), measured, instrumented, token_lines,

@@ -7,6 +7,7 @@ from unittest.mock import patch
 from tests.slow import slow
 from arena import campaign
 from arena.engine import (WRAPPER_LINES, ROOT, candidate_file, declaration_head, evaluate,
+                          locate_source, _proof_length,
                           instrument_sorries, map_measured_line, parse_diagnostics, problem,
                           reconstruct, structure_diagnostics, validate_proof)
 
@@ -142,6 +143,91 @@ class DiagnosticMappingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "FORBIDDEN: sorry"):
             validate_proof(row, draft)
         self.assertGreater(validate_proof(row, draft, allow_sorry=True), 0)
+
+
+class LocateSourceTests(unittest.TestCase):
+    def test_exact_match_wins(self):
+        source = "a\ntheorem t : True := by\n  trivial\nb\n"
+        original = "theorem t : True := by\n  trivial"
+        start, end = locate_source(source, original, "v1")
+        self.assertEqual((start, end), (2, 2 + len(original)))
+        self.assertEqual(source[start:end], original)
+
+    def test_exact_match_beats_a_whitespace_variant_elsewhere(self):
+        original = "theorem t : True := trivial"
+        source = original + "\n-- theorem  t :  True := trivial\n"
+        # Exact count is 1, so the fallback is never consulted.
+        self.assertEqual(locate_source(source, original, "v1"), (0, len(original)))
+
+    def test_unique_whitespace_difference_maps_to_original_offsets(self):
+        source = "def a := 1\n\ntheorem t :  True := by\n    trivial\n\ndef b := 2\n"
+        original = "theorem t : True := by\n  trivial"
+        start, end = locate_source(source, original, "v1")
+        self.assertEqual(source[start:end], "theorem t :  True := by\n    trivial")
+        self.assertEqual(start, source.index("theorem"))
+        self.assertEqual(source[end:], "\n\ndef b := 2\n")
+
+    def test_ambiguous_or_absent_declaration_is_file_modified(self):
+        original = "theorem t : True := trivial"
+        for source in ("theorem t : True := trivial\ntheorem t : True := trivial\n",   # two exact
+                       "theorem t :  True := trivial\ntheorem t : True  := trivial\n",  # two loose
+                       "theorem u : True := trivial\n"):                                 # none
+            with self.assertRaisesRegex(ValueError, "FILE_MODIFIED: pinned theorem is absent or ambiguous on v9"):
+                locate_source(source, original, "v9")
+
+
+class ProofLengthStatementTests(unittest.TestCase):
+    def setUp(self):
+        if not (ROOT / "vendor/lean-refactor").is_dir():
+            self.skipTest("pinned counter not vendored")
+
+    def test_top_level_let_in_statement_does_not_cut_the_proof_early(self):
+        statement = "theorem t : let x := 1 + 2 + 3; x = 6"
+        body = " := by\n  intro x\n  rfl"
+        proof = statement + body
+        counted_body = _proof_length("theorem x : True" + body)
+        self.assertEqual(_proof_length(proof, statement), counted_body)
+        # Old behaviour (first depth-0 `:=`) swallowed the rest of the statement.
+        self.assertGreater(_proof_length(proof), counted_body)
+
+    def test_rows_without_a_statement_keep_their_counts(self):
+        head = "theorem t : True"
+        self.assertEqual(_proof_length(head + " := by\n  exact ⟨a, b⟩"), 7)
+        self.assertEqual(_proof_length(head + " := by\n  exact ⟨a, b⟩", head), 7)
+        # A statement that is not a prefix of the proof leaves it untouched.
+        self.assertEqual(_proof_length(head + " := by\n  exact ⟨a, b⟩", "theorem other : True"), 7)
+
+
+class PrefixCombinatorTests(unittest.TestCase):
+    def head_is_before_prefix(self, prefix):
+        text = f"def a := 1\n\n{prefix}\n/-- doc -/\ntheorem t : True := trivial\n"
+        self.assertEqual(declaration_head(text, text.index("theorem")), text.index(prefix.split("\n")[0]))
+
+    def test_head_goes_before_omit_include_and_set_option_in(self):
+        for prefix in ("omit [Foo] in", "include h in", "set_option maxHeartbeats 1 in"):
+            with self.subTest(prefix=prefix):
+                self.head_is_before_prefix(prefix)
+
+    def test_prefix_without_doc_comment(self):
+        text = "def a := 1\n\nomit [Foo] in\ntheorem t : True := trivial\n"
+        self.assertEqual(declaration_head(text, text.index("theorem")), text.index("omit"))
+
+    def test_multi_line_prefix_and_stacked_prefixes(self):
+        text = "def a := 1\n\nomit [Foo]\n  [Bar] in\n/-- doc -/\ntheorem t : True := trivial\n"
+        self.assertEqual(declaration_head(text, text.index("theorem")), text.index("omit"))
+        stacked = "def a := 1\n\ninclude h in\nomit [Foo] in\n/-- doc -/\ntheorem t : True := trivial\n"
+        self.assertEqual(declaration_head(stacked, stacked.index("theorem")), stacked.index("include"))
+
+    def test_without_a_prefix_behaviour_is_unchanged(self):
+        text = "def a := 1\n\n/-- doc -/\ntheorem t : True := trivial\n"
+        self.assertEqual(declaration_head(text, text.index("theorem")), text.index("/--"))
+        plain = "variable (h : True)\n\ntheorem t : True := trivial\n"
+        self.assertEqual(declaration_head(plain, plain.index("theorem")), plain.index("theorem"))
+
+    def test_prefix_more_than_six_lines_up_is_not_swallowed(self):
+        filler = "\n".join(f"  [C{i}]" for i in range(7))
+        text = f"omit [Foo]\n{filler} in\ntheorem t : True := trivial\n"
+        self.assertEqual(declaration_head(text, text.index("theorem")), text.index("theorem"))
 
 
 @slow

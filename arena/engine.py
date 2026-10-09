@@ -43,7 +43,15 @@ arena_measure_heartbeats
 WRAPPER_LINES = HEARTBEAT_WRAPPER.count("\n")
 
 
-def _proof_length(proof: str) -> int:
+def _proof_length(proof: str, statement: str | None = None) -> int:
+    """Pinned token count. With the row's `statement`, only the text after it is counted.
+
+    The pinned utility finds the end of the declaration at the first top-level `:=`; a statement that
+    itself contains one (a `let x := ...` in the goal) would put the rest of the statement into the
+    count. The published denominators count the proof only, so the statement is swapped for a neutral one.
+    """
+    if statement is not None and proof.startswith(statement):
+        proof = "theorem x : True" + proof[len(statement):]
     spec = importlib.util.spec_from_file_location("pinned_check_proof", UPSTREAM_CHECKER)
     if spec is None or spec.loader is None:
         raise RuntimeError("Pinned proof utility is unavailable")
@@ -88,7 +96,7 @@ def validate_proof(row: dict, proof: str, allow_sorry: bool = False) -> int:
             continue
         if pattern.search(clean):
             raise ValueError(f"FORBIDDEN: {label}")
-    return _proof_length(proof)
+    return _proof_length(proof, statement)
 
 
 def workspace(row: dict, version: str, commit: str) -> Path:
@@ -125,6 +133,23 @@ def measure_version(row: dict) -> tuple[str, str]:
     return listed[0]
 
 
+_COMBINATOR_START = re.compile(r"(?:omit|include|open|variable|set_option|attribute|universe)\b")
+
+
+def _prefix_combinator(before: str) -> int | None:
+    """Start of an `omit ... in` / `include ... in` / `set_option ... in` command that ends `before`.
+
+    Such a command applies to the next declaration, so inserted commands must go ahead of it.
+    """
+    lines = before.split("\n")
+    if not re.search(r"(?:^|\s)in$", lines[-1].rstrip()):
+        return None
+    for back in range(1, min(6, len(lines)) + 1):
+        if _COMBINATOR_START.match(lines[-back]):
+            return len("\n".join(lines[:len(lines) - back])) + (1 if back < len(lines) else 0)
+    return None
+
+
 def declaration_head(text: str, offset: int) -> int:
     """Start of the declaration at `offset`, including a doc comment and attributes right before it.
 
@@ -144,10 +169,28 @@ def declaration_head(text: str, offset: int) -> int:
             # Only a whole line that is an attribute list belongs to the declaration; a `]` that
             # ends a `variable` binder, or `@[expose] public section`, does not.
             head = before.rfind("\n") + 1
-        elif before.endswith("]"):
-            return head
+        elif (start := _prefix_combinator(before)) is not None:
+            head = start
         else:
             return head
+
+
+def locate_source(source: str, original: str, version: str) -> tuple[int, int]:
+    """Span of the pinned declaration in `source`: an exact match, else a unique match up to whitespace.
+
+    Rows pin the declaration text of their primary version; an older commit may differ in spacing
+    only (for example a doubled space). Anything else, or several matches, is a modified file.
+    """
+    if source.count(original) == 1:
+        start = source.index(original)
+        return start, start + len(original)
+    words = original.split()
+    if words:
+        pattern = re.compile(r"\s+".join(re.escape(word) for word in words))
+        found = list(pattern.finditer(source))
+        if len(found) == 1:
+            return found[0].start(), found[0].end()
+    raise ValueError(f"FILE_MODIFIED: pinned theorem is absent or ambiguous on {version}")
 
 
 def candidate_file(row: dict, proof: str, version: str, commit: str, truncate: bool = True) -> dict:
@@ -172,11 +215,8 @@ def candidate_file(row: dict, proof: str, version: str, commit: str, truncate: b
         ["git", "show", f"{commit}:{row['file_path']}"],
         cwd=path, text=True, capture_output=True, check=True,
     ).stdout
-    original = row["src"]
-    if source.count(original) != 1:
-        raise ValueError(f"FILE_MODIFIED: pinned theorem is absent or ambiguous on {version}")
-    offset = source.index(original)
-    text = source[:offset] + body + source[offset + len(original):]
+    offset, end = locate_source(source, row["src"], version)
+    text = source[:offset] + body + source[end:]
     if truncate:
         text = text[:offset + len(body)] + "\n"
     start = source.count("\n", 0, offset) + 1
