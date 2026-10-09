@@ -64,7 +64,7 @@ FAKE = textwrap.dedent('''
             threading.Thread(target=waiter, args=(p["uri"], p["version"], m["id"]), daemon=True).start()
 ''')
 
-HEADER = "import X\n-- IMPORT 1.0\n"
+HEADER = "import X\n-- IMPORT 0.3\n"
 
 
 class FakeLean(lean_session.LeanServer):
@@ -122,7 +122,7 @@ class HeaderFirstTests(Base):
         reply = session.check(self.request("-- PROOF 0.1\n", timeout=0.6))
         self.assertTrue(reply["ok"], reply)
         self.assertNotIn("timeout", reply)
-        self.assertGreaterEqual(reply["header_seconds"], 1.0)
+        self.assertGreaterEqual(reply["header_seconds"], 0.3)
         self.assertLess(reply["seconds"], 0.6)
         self.assertEqual([e["method"] for e in self.events()], ["didOpen", "didChange"])
         self.assertEqual(self.events("didOpen")[0]["size"], len(HEADER))
@@ -141,7 +141,7 @@ class WarmTimeoutTests(Base):
         session = self.session()
         slow = session.check(self.request("-- PROOF 30\n", timeout=0.4))
         self.assertEqual((slow["ok"], slow["timeout"], slow["warm_kept"]), (True, True, True))
-        self.assertGreaterEqual(slow["header_seconds"], 1.0)
+        self.assertGreaterEqual(slow["header_seconds"], 0.3)
         started = time.monotonic()
         fast = session.check(self.request("-- PROOF 0.05\n", timeout=5))
         self.assertTrue(fast["ok"] and not fast.get("timeout"), fast)
@@ -176,14 +176,14 @@ class WarmTimeoutTests(Base):
 
 
 class WarmOpTests(Base):
-    def test_warm_opens_n_workers_in_parallel_with_the_header_only(self):
+    def test_warm_opens_n_workers_one_after_another_with_the_header_only(self):
         session = self.session()
         started = time.monotonic()
         reply = session.warm({**self.request(), "slots": 3, "timeout": 30})
         took = time.monotonic() - started
         self.assertEqual((reply["ok"], reply["workers"], reply["failed"]), (True, 3, []))
         self.assertEqual(len(reply["seconds"]), 3)
-        self.assertLess(took, 2.5)  # three 1 s imports side by side
+        self.assertGreaterEqual(took, 0.9)  # three 0.3 s imports, one at a time (WorkerBudget.opening)
         self.assertEqual([e["size"] for e in self.events("didOpen")], [len(HEADER)] * 3)
         followup = session.check(self.request("-- PROOF 0\n", timeout=5))
         self.assertTrue(followup["ok"] and not followup["new_worker"], followup)
@@ -525,6 +525,39 @@ class MachineBudgetTests(Base):
         holder.kill()
         holder.wait()
         self.assertTrue(budget.available())
+
+
+class OpeningGateTests(Base):
+    def test_header_loads_take_turns_across_sessions(self):
+        first, second = self.session("a", limit=8), self.session("b", limit=8)
+        replies = []
+        threads = [threading.Thread(target=lambda s=s: replies.append(s.check(self.request(timeout=5))))
+                   for s in (first, second)]
+        started = time.monotonic()
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertTrue(all(r["ok"] for r in replies), replies)
+        self.assertGreaterEqual(time.monotonic() - started, 0.6)  # two 0.3 s imports, one after the other
+
+    def test_a_header_load_waits_for_memory_and_then_gives_up(self):
+        budget = lean_session.WorkerBudget(self.dir / "tokens", 8)
+        with patch.object(lean_session, "_available_gb", return_value=lean_session.RESERVE_GB + 1.0):
+            with self.assertRaisesRegex(lean_session.SessionError, "no memory"):
+                with budget.opening(2.0, 0.5):
+                    pass
+            with budget.opening(0.5, 0.5) as waited:
+                self.assertLess(waited, 0.5)
+
+    def test_a_held_gate_blocks_another_holder_until_released(self):
+        budget = lean_session.WorkerBudget(self.dir / "tokens", 8)
+        with budget.opening(0.0, 1.0):
+            with self.assertRaisesRegex(lean_session.SessionError, "still loading"):
+                with budget.opening(0.0, 0.3):
+                    pass
+        with budget.opening(0.0, 0.5):
+            pass
 
 
 class ColdPathTests(unittest.TestCase):

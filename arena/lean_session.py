@@ -31,8 +31,10 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import contextmanager, nullcontext
 from functools import lru_cache
 from pathlib import Path
+from typing import Callable, Iterator
 
 ROOT = Path(__file__).resolve().parents[1]
 ENV = "ARENA_LEAN_SESSION"
@@ -50,6 +52,7 @@ QUEUE_LOG_S = 30         # waits for a worker longer than this are logged
 OPEN_TIMEOUT = 900       # a fresh worker's header (imports) may take this long; not charged to a request's timeout
 MACHINE_MAX_WORKERS = int(os.environ.get("ARENA_MACHINE_MAX_WORKERS", "8"))  # model workers across every daemon on the machine (background workers are extra)
 TOKEN_DIR_NAME = "arena-lean-workers"
+OPENING_NAME = "opening.lock"  # held by whichever worker on the machine is loading its imports (see WorkerBudget.opening)
 WORKER_GB = 3.0          # planning figure until a real worker has been measured
 RESERVE_GB = 5.0         # memory that must stay available after opening another worker
 IDLE_SECONDS = 600       # a toolchain nobody asked for in this long is closed
@@ -224,6 +227,35 @@ class WorkerBudget:
         live = self.live_sessions()
         return max(2, self.limit // live), live
 
+    @contextmanager
+    def opening(self, need_gb: float, timeout: float) -> Iterator[float]:
+        """Hold the machine-wide right to load one worker's imports, once `need_gb` fits above RESERVE_GB; yields the
+        seconds spent waiting. A worker still loading has not reached its size, so memory read at open time cannot be
+        trusted while another one loads: three runs warming at once each saw 24 GB free and filled swap together."""
+        deadline = time.monotonic() + timeout
+        try:
+            self.directory.mkdir(parents=True, exist_ok=True)
+            fd = os.open(self.directory / OPENING_NAME, os.O_RDWR | os.O_CREAT, 0o666)
+        except OSError:
+            fd = -1  # an unusable directory gates nothing but memory
+        try:
+            while fd >= 0:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise SessionError(f"another Lean worker was still loading after {timeout:.0f} s") from None
+                    time.sleep(0.2)
+            while (free := _available_gb()) is not None and free - need_gb < RESERVE_GB:
+                if time.monotonic() >= deadline:
+                    raise SessionError(f"no memory to load a Lean worker ({free:.1f} GB available)")
+                time.sleep(1.0)
+            yield timeout - (deadline - time.monotonic())
+        finally:
+            if fd >= 0:
+                os.close(fd)  # drops the flock
+
 
 # -- fingerprint ------------------------------------------------------------------------------
 
@@ -325,6 +357,7 @@ class LeanServer:
         self.state_lock = threading.Lock()
         self.dead: str | None = None
         self.started = 0.0
+        self.open_gate: Callable[[float], object] | None = None  # timeout -> context held while a header loads
 
     # lifecycle
     def command(self) -> list[str]:
@@ -487,16 +520,18 @@ class LeanServer:
         """Load only the header (imports and the pinned prefix) into `doc` and wait for it; returns the seconds
         that took. On any failure the document is closed and SessionError raised: the worker is not usable."""
         started = time.monotonic()
-        version = self._send_text(doc, header)
-        doc.header = header
-        try:
-            reply = self._request("textDocument/waitForDiagnostics", {"uri": doc.uri, "version": version}, timeout)
-        except TimeoutError:
-            self.close_doc(doc)
-            raise SessionError(f"the file header did not load within {timeout:.0f} s") from None
-        except SessionError:
-            self.close_doc(doc)
-            raise
+        with self.open_gate(timeout) if self.open_gate else nullcontext(0.0) as waited:
+            left = max(1.0, timeout - waited)
+            version = self._send_text(doc, header)
+            doc.header = header
+            try:
+                reply = self._request("textDocument/waitForDiagnostics", {"uri": doc.uri, "version": version}, left)
+            except TimeoutError:
+                self.close_doc(doc)
+                raise SessionError(f"the file header did not load within {timeout:.0f} s") from None
+            except SessionError:
+                self.close_doc(doc)
+                raise
         if "error" in reply:
             self.close_doc(doc)
             raise SessionError(f"waitForDiagnostics failed: {reply['error'].get('message', reply['error'])[:200]}")
@@ -696,6 +731,7 @@ class Session:
                 server.start()
                 _log(f"server {project.name} started")
                 entry = self.entries[str(project)] = _Entry(project, key, server)
+                server.open_gate = lambda timeout, entry=entry: self.budget.opening(entry.worker_gb, timeout)
                 self.primary = self.primary or str(project)
             entry.used = time.monotonic()
             return entry
