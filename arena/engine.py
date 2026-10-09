@@ -274,7 +274,11 @@ def structure_diagnostics(output: str, text: str, start_line: int, end_line: int
                                 for i in ordered if i["severity"] == "error"][:_DIAGNOSTIC_LIMIT]}
 
 
-_SORRY_TACTIC = re.compile(r"(?m)(^[ \t]*(?:[·.][ \t]*)?|\bby[ \t]+|<;>[ \t]*)sorry\b(?![_'])")
+# Tactic positions: a line start (after a bullet), `by`, `<;>`, and the `=>` of a match or case arm
+# (`| .inl h => sorry`, `case h => sorry`, `next => sorry`).
+_SORRY_TACTIC = re.compile(
+    r"(?m)(^[ \t]*(?:[·.][ \t]*)?|\bby[ \t]+|<;>[ \t]*|"
+    r"(?:\||\bcase\b|\bnext\b)[^\n=]*=>[ \t]*)sorry\b(?![_'])")
 _GOAL_MARKER = re.compile(r"^ARENA_SORRY (\d+)$")
 
 

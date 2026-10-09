@@ -126,6 +126,16 @@ class DiagnosticMappingTests(unittest.TestCase):
         self.assertEqual(out.count("\n"), proof.count("\n"))
         self.assertEqual(out.count("trace_state; sorry"), 3)
 
+    def test_sorry_in_match_and_case_arms_is_instrumented(self):
+        proof = ("theorem t : True := by\n  rcases h with h | h\n  | inl h => sorry\n  | .inr h => sorry\n"
+                 "  case foo => sorry\n  next x => sorry\n  exact sorry_lemma\n  exact h_sorry")
+        out = instrument_sorries(proof)
+        self.assertEqual(out.count("\n"), proof.count("\n"))
+        self.assertEqual(out.count("trace_state; sorry"), 4)
+        self.assertEqual(instrument_sorries("| case => sorry").count("trace_state; sorry"), 1)
+        self.assertEqual(instrument_sorries("  | .inl h => sorry\n").count("trace_state; sorry"), 1)
+        self.assertEqual(instrument_sorries("| a => foo\n  x = sorry"), "| a => foo\n  x = sorry")
+
     def test_probe_is_the_only_mode_that_accepts_sorry(self):
         row = problem(NAME)
         draft = row["statement"] + " := by\n  sorry"
