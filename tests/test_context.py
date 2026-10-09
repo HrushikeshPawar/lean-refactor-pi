@@ -255,6 +255,73 @@ class LibrarySectionTests(unittest.TestCase):
         self.assertEqual(_proof_length(head + " := fun x => x.1 -- note"), 4)    # `=>` once, comment removed
 
 
+class LocalSheddingTests(unittest.TestCase):
+    GOALS = "Goal before each top-level tactic of the reference proof"
+
+    def parts(self, locals_=76, goals=12, library=30):
+        return [("Head", ["keep head"]),
+                ("Reference proof", ["ref " + "r" * 100] * 3),
+                ("Source-named declarations", ["used " + "u" * 100] * 3),
+                ("Elaborated proof dependencies", ["dep " + "d" * 100] * 3),
+                ("Environment", ["env " + "e" * 100] * 3),
+                (self.GOALS, [f"goal {i} " + "g" * 200 for i in range(goals)]),
+                (context.LOCAL_TITLE, ["Hdr local names"] + [f"loc{i} : " + "l" * 200 for i in range(locals_)]),
+                (context.LIBRARY_TITLE, [f"lib{i} " + "b" * 200 for i in range(library)])]
+
+    def count(self, text, prefix):
+        return sum(1 for line in text.split("\n") if line.startswith(prefix))
+
+    def test_under_budget_packet_is_untouched(self):
+        parts = self.parts()
+        text = context._fit(parts, 10**7)
+        self.assertEqual(self.count(text, "loc"), 76)
+        self.assertEqual(self.count(text, "lib"), 30)
+        self.assertEqual(self.count(text, "goal "), 12)
+
+    def test_locals_shed_to_floor_after_library_and_before_goals(self):
+        # Budget that fits the goals floor and the floor of locals but nothing more (goals above
+        # GOALS_FLOOR are shed before library lines, so start at the floor).
+        parts = self.parts(goals=context.GOALS_FLOOR)
+        keep = [p for p in parts if p[0] not in (context.LOCAL_TITLE, context.LIBRARY_TITLE)]
+        floor_locals = (context.LOCAL_TITLE, parts[6][1][:context.LOCAL_FLOOR])
+        limit = len(context._fit(keep + [floor_locals], 10**7))
+        text = context._fit(parts, limit)
+        self.assertEqual(self.count(text, "lib"), 0)                       # library shed first
+        self.assertEqual(1 + self.count(text, "loc"), context.LOCAL_FLOOR)  # header + 19 variable lines
+        self.assertEqual(self.count(text, "goal "), context.GOALS_FLOOR)   # goals untouched
+        for required in ("keep head", "ref ", "used ", "dep ", "env "):
+            self.assertIn(required, text)
+
+    def test_goals_shed_only_after_locals_reach_the_floor(self):
+        parts = self.parts(goals=context.GOALS_FLOOR)
+        keep = [p for p in parts if p[0] != context.LIBRARY_TITLE]
+        keep[-1] = (context.LOCAL_TITLE, parts[6][1][:context.LOCAL_FLOOR])
+        # Tighter than the floors allow: goals must shrink, locals stay at the floor.
+        text = context._fit(parts, len(context._fit(keep, 10**7)) - 600)
+        self.assertEqual(self.count(text, "lib"), 0)
+        self.assertEqual(1 + self.count(text, "loc"), context.LOCAL_FLOOR)
+        self.assertLess(self.count(text, "goal "), 12)
+        self.assertGreaterEqual(self.count(text, "goal "), 1)
+
+    def test_required_sections_are_never_shed(self):
+        parts = self.parts()
+        required = [p for p in parts if p[0] in ("Head", "Reference proof", "Source-named declarations",
+                                                  "Elaborated proof dependencies", "Environment")]
+        with self.assertRaisesRegex(ValueError, "Required kickoff inventory exceeds packet budget"):
+            context._fit(parts, len(context._fit(required, 10**7)) - 1)
+
+
+class LocalContextLeanTests(unittest.TestCase):
+    def test_context_lean_does_not_bind_ext_as_a_pattern_variable(self):
+        # `ext` is a reserved token in ArkLib's environment, so `(ext, entries)` is an unsupported pattern.
+        text = (ROOT / "arena/lean/context.lean").read_text(encoding="utf-8")
+        code = "\n".join(line for line in text.split("\n") if not line.strip().startswith("--"))
+        self.assertNotIn("for (ext,", code)
+        self.assertNotRegex(code, r"\(ext\s*,")
+        self.assertIn("`ext`", text)  # the explaining comment stays
+        self.assertIn("for (extName, entries)", text)
+
+
 class TruncationTests(unittest.TestCase):
     def test_over_budget_packets_shed_the_lowest_priority_entries_deterministically(self):
         big = [f"entry {i} " + "x" * 200 for i in range(40)]

@@ -534,6 +534,8 @@ def _earlier_section(context: dict) -> list[str]:
     return lines
 
 
+LOCAL_TITLE = "Local variables"
+LOCAL_FLOOR = 20  # local-variable lines kept (header included) before the rest of the packet is shed
 GOALS_FLOOR = 8  # goals kept before library lines are shed when the packet is over budget
 LIBRARY_TITLE = "Imported library lemmas matching the statement and goals (ranked)"
 
@@ -600,9 +602,10 @@ def _fit(parts: list[tuple[str, list[str]]], limit: int) -> str:
     def render() -> str:
         return "\n\n".join((f"{title}\n" if title else "") + "\n".join(body) for title, body in sections if body)
     # Shed order: earlier-lemma lines, then goals beyond the first few (later goals mostly repeat the same
-    # hypotheses), then library lines, then the remaining goals down to one.
+    # hypotheses), then library lines, then local-variable lines past a floor (every hypothesis already
+    # appears in the goals), then the remaining goals down to one.
     goals = "Goal before each top-level tactic of the reference proof"
-    stages = [(EARLIER_TITLE, 0), (goals, GOALS_FLOOR), (LIBRARY_TITLE, 0), (goals, 1)]
+    stages = [(EARLIER_TITLE, 0), (goals, GOALS_FLOOR), (LIBRARY_TITLE, 0), (LOCAL_TITLE, LOCAL_FLOOR), (goals, 1)]
     while len(render()) > limit:
         for title, floor in stages:
             target = next((body for t, body in sections if t.startswith(title)), None)
@@ -655,7 +658,7 @@ def render_packet(name: str) -> str:
         ("Goal before each top-level tactic of the reference proof", _goal_section(context)),
         ("Source-named declarations", _used_section(context)),
         ("Elaborated proof dependencies", _dependency_section(context)),
-        ("Local variables", _local_section(context)),
+        (LOCAL_TITLE, _local_section(context)),
         (LIBRARY_TITLE, _library_section(context)),
         (EARLIER_TITLE, _earlier_section(context)),
     ]
