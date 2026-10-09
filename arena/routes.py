@@ -36,7 +36,6 @@ ROUTE_DEPTH = 3     # distinct goal states that make a route explored
 TEXT_EXEMPLAR_MIN = 0.7   # a kernel attempt joins a text-only exemplar's route only this close: text overlap is a weak proxy
 STALE_STREAK = 5    # consecutive attempts leaving an already seen goal state
 MAX_SKELETON = 24
-LABEL_LEMMAS = 3
 WEIGHTS = {"recursion": 0.25, "lemmas": 0.45, "claims": 0.20, "logic": 0.10}
 PARTS = tuple(WEIGHTS)
 # Logic plumbing that every proof by rewriting or simplification carries, whatever its strategy.
@@ -165,6 +164,13 @@ def empty(print_: dict) -> bool:
     return not any((print_.get("kernel") or {}).get(part) for part in PARTS)
 
 
+def strategy(print_: dict) -> bool:
+    """Whether a fingerprint carries recursion, lemmas or logic. Claims alone do not count for an incomplete proof:
+    a draft that failed to parse or elaborate leaves a stray claim from error recovery, and must not open a route."""
+    kernel_ = print_.get("kernel") or {}
+    return any(kernel_.get(part) for part in ("recursion", "lemmas", "logic"))
+
+
 def idf(prints: list[dict]) -> dict[str, dict[str, float]]:
     """Rarity weight of every item per part over the complete kernel fingerprints of one theorem's proofs: ln(1 + N/df).
     Drafts with holes or errors are left out: many near-copies of one dead end would make its items look common."""
@@ -249,81 +255,30 @@ def assign_by_text(earlier: list[dict], current: dict) -> tuple[str, float] | No
     return None if best_route is None else (best_route, round(best, 3))
 
 
-def _recursion_name(item: str) -> str:
-    kind, _, rest = item.partition(":")
-    return f"{rest}.rec" if kind == "rec" else rest
-
-
-def _ranked(items, weight: dict) -> list[str]:
-    return sorted(items, key=lambda name: (-weight.get(name, 1.0), name))
+def _constants(print_: dict) -> set[str]:
+    """The constants a fingerprint names, as opaque items (only ever counted, never shown to the model or labelled)."""
+    kernel_ = print_.get("kernel")
+    if kernel_:
+        return set(kernel_["recursion"]) | set(kernel_["lemmas"])
+    return set(print_.get("lemmas", []))
 
 
 def label(print_: dict, reference: dict | None = None, weights: dict[str, dict[str, float]] | None = None) -> str:
-    """A short deterministic name: how it recurses plus the lemmas that set it apart from the original."""
-    if print_.get("kernel"):
-        return _kernel_label(print_["kernel"], reference["kernel"] if reference and reference.get("kernel") else None,
-                             (weights or {}).get("lemmas", {}))
-    own = print_["lemmas"]
-    fresh = [name for name in own if not reference or name not in reference["lemmas"]] or own
-    kind = "induction" if print_["induction"] else "no induction"
-    return kind + (": " + ", ".join(fresh[:LABEL_LEMMAS]) if fresh else "")
-
-
-def _kernel_label(own: dict, reference: dict | None, weight: dict) -> str:
-    recursion = [_recursion_name(item) for item in own["recursion"]]
+    """A neutral, deterministic description made only of measured facts: how the fingerprint was read, how many of
+    its constants differ from the original's route (r1), and its open holes. No proof-content term appears in it."""
+    source = "kernel" if print_.get("kernel") else "text"
     if reference is None:
-        lemmas = _ranked(own["lemmas"], weight)[:LABEL_LEMMAS]
-        return "; ".join(["recursion: " + (", ".join(recursion) or "none")] + ([", ".join(lemmas)] if lemmas else []))
-    parts = []
-    before = [_recursion_name(item) for item in reference["recursion"]]
-    if recursion != before:
-        parts.append("recursion: " + (", ".join(recursion) or "none") + " instead of " + (", ".join(before) or "none"))
-    added = _ranked(set(own["lemmas"]) - set(reference["lemmas"]), weight)[:LABEL_LEMMAS]
-    removed = _ranked(set(reference["lemmas"]) - set(own["lemmas"]), weight)[:LABEL_LEMMAS]
-    if added or removed:
-        parts.append(" ".join([f"+{name}" for name in added] + [f"\u2212{name}" for name in removed]))
-    if not parts:
-        parts.append("same recursion and lemmas, different claims" if own["claims"] != reference["claims"]
-                     else "same recursion and lemmas, different logic")
-    return "; ".join(parts)
-
-
-def _short(name: str) -> str:
-    """A constant name without its namespace prefix."""
-    return name.rsplit(".", 1)[-1]
+        return f"{source} fingerprint, first route"
+    differ = len(_constants(print_) ^ _constants(reference))
+    holes = int((print_.get("kernel") or {}).get("holes") or 0) + int((print_.get("kernel") or {}).get("synthetic") or 0)
+    return f"{source} fingerprint, {differ} constants differ from r1" + (f", {holes} open holes" if holes else "")
 
 
 def short_label(print_: dict, reference: dict | None = None, weights: dict[str, dict[str, float]] | None = None) -> str:
-    """Compact human label for the viewer legend, e.g. `rec: InitStates \u00b7 +UpdateStatesUpdated +2 \u22123`: namespace
-    prefixes dropped, the recursion part omitted when it equals the reference's, `no induction` when the proof
-    has none but the reference does, and lemma changes as the top added name plus counts. Never shown to the model."""
-    if not print_.get("kernel"):
-        return label(print_, reference, weights)
-    own = print_["kernel"]
-    ref = reference["kernel"] if reference and reference.get("kernel") else None
-    weight = (weights or {}).get("lemmas", {})
-    recursion = [_short(_recursion_name(item).removesuffix(".rec")) for item in own["recursion"]]
-    parts = []
-    if ref is None:
-        parts.append("rec: " + ", ".join(recursion) if recursion else "no induction")
-        added = _ranked(own["lemmas"], weight)
-        if added:
-            parts.append(_short(added[0]) + (f" +{len(added) - 1}" if len(added) > 1 else ""))
-        return " \u00b7 ".join(parts)
-    if own["recursion"] != ref["recursion"]:
-        parts.append("rec: " + ", ".join(recursion) if recursion else "no induction")
-    added = _ranked(set(own["lemmas"]) - set(ref["lemmas"]), weight)
-    removed = set(ref["lemmas"]) - set(own["lemmas"])
-    if added or removed:
-        change = []
-        if added:
-            change.append(f"+{_short(added[0])}" + (f" +{len(added) - 1}" if len(added) > 1 else ""))
-        if removed:
-            change.append(f"\u2212{len(removed)}")
-        parts.append(" ".join(change))
-    if not parts:
-        parts.append("same rec/lemmas, other claims" if own["claims"] != ref["claims"] else "same rec/lemmas, other logic")
-    return " \u00b7 ".join(parts)
+    """Compact form of `label` for the viewer legend."""
+    if reference is None:
+        return "first route"
+    return f"\u0394{len(_constants(print_) ^ _constants(reference))} vs r1"
 
 
 def vocabulary(context: dict) -> set[str]:
@@ -480,7 +435,7 @@ def file_attempt(earlier: list[dict], proof_id: str, print_: dict, features: dic
     kernel fingerprint that matches no exemplar opens a credited route; one without joins the route whose text
     features match best (and starts r1 when there is none); an incomplete one with no recursion, lemmas, claims or
     logic carries no strategy and counts as one without."""
-    by_kernel = print_["source"] == "kernel" and not (incomplete(print_) and empty(print_))
+    by_kernel = print_["source"] == "kernel" and not (incomplete(print_) and not strategy(print_))
     found = None if by_kernel else assign_by_text(earlier, print_)
     route, similarity = found or (assign(earlier, print_) if by_kernel else ("r1", 0.0))
     new = route not in {item["route"] for item in earlier}

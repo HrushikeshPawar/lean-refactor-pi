@@ -139,14 +139,18 @@ class KernelTests(unittest.TestCase):
         # the third resembles the second but not the first, so it starts its own route
         self.assertEqual([e["route"] for e in events], ["r1", "r1", "r2"])
 
-    def test_label_names_the_recursion_change_and_the_lemma_difference(self):
+    BANNED = ("induction", "recursion", "rec:", "lemma", "cases", "simp", ".rec")
+
+    def test_labels_are_neutral_facts_only(self):
         reference = kernel_print(**INDUCTION)
         other = kernel_print(recursion=["rec:List"], lemmas=["Core.A", "Core.Z"], claims=[], logic=[])
-        text = routes.label(other, reference)
-        self.assertTrue(text.startswith("recursion: List.rec instead of UpdateStates.rec; "))
-        self.assertIn("+Core.Z", text)
-        self.assertIn("\u2212Core.B", text)
-        self.assertEqual(routes.label(reference, None), "recursion: UpdateStates.rec; Core.A, Core.B, Core.C")
+        self.assertEqual(routes.label(reference, None), "kernel fingerprint, first route")
+        self.assertEqual(routes.label(other, reference), "kernel fingerprint, 6 constants differ from r1")
+        self.assertEqual(routes.short_label(other, reference), "\u03946 vs r1")
+        text = routes.fingerprint(INDUCTIVE, VOCAB, "Core.X")
+        for value in (routes.label(other, reference), routes.short_label(other, reference), routes.label(text, reference),
+                      routes.label(text, None), routes.short_label(text, None)):
+            self.assertFalse(any(word in value for word in self.BANNED), value)
 
     def test_mixed_sources_compare_by_text(self):
         text = routes.fingerprint(INDUCTIVE, VOCAB, "Core.X")
@@ -164,11 +168,11 @@ class LedgerTests(unittest.TestCase):
 
         def route(identifier, name, label):
             return {"kind": "route", "proof_id": identifier, "route": name, "label": label}
-        return [candidate("a", "reference"), route("a", "r1", "induction: x"),
-                candidate("b"), route("b", "r1", "induction: x"), evaluation("b", 60),
-                candidate("c"), route("c", "r2", "no induction: y"), evaluation("c", 80),
-                candidate("d"), route("d", "r2", "no induction: y"), evaluation("d", 70, "fast"),
-                candidate("e", "auto_merge"), route("e", "r2", "no induction: y")]
+        return [candidate("a", "reference"), route("a", "r1", "kernel fingerprint, first route"),
+                candidate("b"), route("b", "r1", "kernel fingerprint, first route"), evaluation("b", 60),
+                candidate("c"), route("c", "r2", "kernel fingerprint, 2 constants differ from r1"), evaluation("c", 80),
+                candidate("d"), route("d", "r2", "kernel fingerprint, 2 constants differ from r1"), evaluation("d", 70, "fast"),
+                candidate("e", "auto_merge"), route("e", "r2", "kernel fingerprint, 2 constants differ from r1")]
 
     def test_route_table_counts_attempts_and_best_proxy(self):
         table = {row["route"]: row for row in routes.route_table(self.history())}
@@ -189,12 +193,8 @@ class LedgerTests(unittest.TestCase):
     def test_short_label_is_compact_and_the_model_text_has_no_label(self):
         ref = {"kernel": {"recursion": ["rec:Core.UpdateStates"], "lemmas": ["LemmaB", "X", "Y"], "claims": [], "logic": []}}
         own = {"kernel": {"recursion": ["rec:Core.InitStates"], "lemmas": ["X", "Ns.UpdateStatesUpdated", "Z", "W"], "claims": [], "logic": []}}
-        self.assertEqual(routes.short_label(own, ref), "rec: InitStates \u00b7 +UpdateStatesUpdated +2 \u22122")
-        self.assertIn("Core.InitStates.rec instead of", routes.label(own, ref))
-        none = {"kernel": {**own["kernel"], "recursion": []}}
-        self.assertTrue(routes.short_label(none, ref).startswith("no induction"))
-        same = {"kernel": {**own["kernel"], "recursion": ref["kernel"]["recursion"]}}
-        self.assertFalse(routes.short_label(same, ref).startswith(("rec", "no induction")))
+        self.assertEqual(routes.short_label(own, ref), "\u03947 vs r1")
+        self.assertEqual(routes.label(own, ref), "kernel fingerprint, 7 constants differ from r1")
 
     def test_record_route_writes_one_event_per_proof(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -212,7 +212,8 @@ class LedgerTests(unittest.TestCase):
             self.assertEqual([row["kind"] for row in rows], ["route", "route"])
             self.assertTrue(rows[1]["new"])
             self.assertEqual((rows[0]["source"], rows[1]["source"]), ("kernel", "kernel"))
-            self.assertTrue(rows[1]["label"].startswith("recursion: none instead of UpdateStates.rec"))
+            self.assertTrue(rows[1]["label"].startswith("kernel fingerprint, "))
+            self.assertNotIn("recursion", rows[1]["label"])
 
     def test_record_route_falls_back_to_text_when_extraction_fails(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -221,7 +222,7 @@ class LedgerTests(unittest.TestCase):
                     patch("arena.route_features.extract", side_effect=RuntimeError("no Lean")):
                 event = campaign._record_route(directory, "Core.X", "p1", INDUCTIVE)
             self.assertEqual(event["source"], "text")
-            self.assertEqual(event["label"], "induction")
+            self.assertEqual(event["label"], "text fingerprint, first route")
 
 
 SKELETON = dict(recursion=["rec:UpdateStates"], lemmas=["Core.A"])
@@ -332,6 +333,15 @@ class RecordingTests(unittest.TestCase):
             self.record(directory, "ref", INDUCTIVE, features(**INDUCTION), origin="reference")
             empty = self.record(directory, "e1", STATEMENT + " := by\n  intro h\n  sorry\n", partial(holes=1), kind="probe")
             self.assertEqual((empty["route"], empty["credited"], empty["assigned_by"]), ("r1", False, "text"))
+
+    def test_a_draft_that_failed_to_parse_does_not_open_a_route(self):
+        # The Fsub v6cov phantom r2: synthetic hole, no recursion, lemmas or logic, only a stray error-recovery claim.
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            self.record(directory, "ref", INDUCTIVE, features(**INDUCTION), origin="reference")
+            broken = self.record(directory, "b1", EQUATIONAL, partial(holes=0, synthetic=1, recursion=[], lemmas=[], logic=[],
+                                                                      claims=["List#1034881954"]) | {"errored": True}, kind="probe")
+            self.assertEqual((broken["route"], broken["new"], broken["credited"], broken["assigned_by"]), ("r1", False, False, "text"))
 
     def test_auto_merges_do_not_credit_routes(self):
         with tempfile.TemporaryDirectory() as raw:
