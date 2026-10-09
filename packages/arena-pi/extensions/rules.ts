@@ -160,6 +160,19 @@ export function axisHeadroom(baseline: Metrics, best: Metrics, top: Metrics[] = 
   };
 }
 
+/** Spend, the 10% rule and per-axis points left: the facts shared by the finish refusal and the plain-text continuation. */
+function allowanceFacts(usedPct: number, remainingUsd: number, capUsd: number, headroom: ReturnType<typeof axisHeadroom>) {
+  const pct = (value: number | null) => value === null ? "unknown" : `${value}%`;
+  const spentPct = Math.min(100, Math.max(0, usedPct));
+  const spend = `$${(capUsd * spentPct / 100).toFixed(2)} of $${capUsd} spent, $${remainingUsd.toFixed(2)} (${Math.max(0, 100 - spentPct)}%) left. ` +
+    "A finish confirm is accepted once 10% or less of the allowance remains.";
+  // Each axis is a third of the score: points not yet earned = (100 - saved%) / 3.
+  const left = (value: number | null) => value === null ? "unknown" : `${((100 - value) / 3).toFixed(1)}`;
+  const axes = `Current best, saving vs the original and score points not yet earned per axis: tokens ${pct(headroom.tokens_saved_pct)} saved, ${left(headroom.tokens_saved_pct)} pts left; ` +
+    `heartbeats ${pct(headroom.heartbeats_saved_pct)} saved, ${left(headroom.heartbeats_saved_pct)} pts left.`;
+  return { spend, axes, head: `Stop refused: ${spend}` };
+}
+
 /** The reply to an arena_finish confirm that is refused because too much allowance is left. */
 export function finishPush(input: FinishPushInput) {
   const headroom = axisHeadroom(input.baseline, input.best, input.top);
@@ -170,17 +183,10 @@ export function finishPush(input: FinishPushInput) {
       ...(row.depth === undefined ? {} : { goal_states: row.depth, min_holes: row.min_holes ?? null, explored: Boolean(row.explored), credited: Boolean(row.credited) }) }))
     : input.ideas.map(idea => ({ id: idea.id, title: idea.title, status: idea.status,
       attempts: idea.attempts ?? 0, best_proxy: idea.best?.proxy ?? null }));
-  const pct = (value: number | null) => value === null ? "unknown" : `${value}%`;
   const triedText = byRoute ? routesText(input.routes!) : tried.length
     ? tried.map(item => `${item.id} "${item.title ?? ""}" (${item.attempts} attempt${item.attempts === 1 ? "" : "s"}, best proxy ${item.best_proxy ?? "none"})`).join("; ")
     : "none recorded";
-  const spentPct = Math.min(100, Math.max(0, input.usedPct));
-  const head = `Stop refused: $${(input.capUsd * spentPct / 100).toFixed(2)} of $${input.capUsd} spent, $${input.remainingUsd.toFixed(2)} (${Math.max(0, 100 - spentPct)}%) left. ` +
-    "A finish confirm is accepted once 10% or less of the allowance remains.";
-  // Each axis is a third of the score: points not yet earned = (100 - saved%) / 3.
-  const left = (value: number | null) => value === null ? "unknown" : `${((100 - value) / 3).toFixed(1)}`;
-  const axes = `Current best, saving vs the original and score points not yet earned per axis: tokens ${pct(headroom.tokens_saved_pct)} saved, ${left(headroom.tokens_saved_pct)} pts left; ` +
-    `heartbeats ${pct(headroom.heartbeats_saved_pct)} saved, ${left(headroom.heartbeats_saved_pct)} pts left.`;
+  const { head, axes } = allowanceFacts(input.usedPct, input.remainingUsd, input.capUsd, headroom);
   const routesLine = byRoute ? `Routes tried: ${triedText}.` : `Ideas tried: ${triedText}.`;
   const message = `${head} ${routesLine} ${axes}`;
   return { headroom, tried, message: message.length > FINISH_MESSAGE_MAX ? `${message.slice(0, FINISH_MESSAGE_MAX - 1)}\u2026` : message };
@@ -189,17 +195,12 @@ export function finishPush(input: FinishPushInput) {
 /** The refusal never grows with the run: it states a handful of facts. */
 export const FINISH_MESSAGE_MAX = 1500;
 
-// What the harness credits, stated as its measurement only: it never suggests which structure to try.
-export const ROUTE_RULE = "The harness fingerprints each attempt's compiled proof term: a proof whose structure matches no route tried so far " +
-  "opens a credited route, and a draft with sorry holes that elaborates without errors counts; edits that keep a route's structure stay on it.";
-
-/** Continuation text when a turn ends with a plain answer while more than 10% of the allowance remains. */
-export function continuationPush(args: { status: string; ideas: string[]; remainingUsd: number; capUsd: number; routes?: RouteRow[] }): string {
-  const tried = args.routes ? `Routes tried (harness fingerprint): ${routesText(args.routes)}. ` : "";
-  return `Do not stop: $${args.remainingUsd.toFixed(4)} of the $${args.capUsd} cap is unspent and unspent allowance has no value; ` +
-    "you may finish only when 10% or less remains, by calling arena_finish. " +
-    `${args.status}. ${tried}Active ideas: ${args.ideas.length ? args.ideas.join("; ") : "none recorded"}. ` +
-    `${ROUTE_RULE} Make a tool call instead of replying with text.`;
+/** Continuation text when a turn ends with a plain answer while more than 10% of the allowance remains: facts only, same pieces as the finish refusal. */
+export function continuationPush(args: { usedPct: number; remainingUsd: number; capUsd: number; baseline: Metrics; best: Metrics; top?: Metrics[]; routes?: RouteRow[] }): string {
+  const { spend, axes } = allowanceFacts(args.usedPct, args.remainingUsd, args.capUsd, axisHeadroom(args.baseline, args.best, args.top));
+  const routes = args.routes ? ` Routes tried: ${routesText(args.routes)}.` : "";
+  const message = `The turn ended with text and no tool call. ${spend}${routes} ${axes}`;
+  return message.length > FINISH_MESSAGE_MAX ? `${message.slice(0, FINISH_MESSAGE_MAX - 1)}\u2026` : message;
 }
 
 export const PROFILE_MODEL_ENTRIES = 12;

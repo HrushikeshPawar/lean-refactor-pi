@@ -89,9 +89,17 @@ test("a repeat refusal is the same facts, and its size is capped", () => {
   assert.ok(big.message.startsWith("Stop refused: $0.04 of $0.1 spent"));
 });
 
-test("the plain-answer continuation pushes a new structural route", () => {
-  const text = continuationPush({ status: "[arena] best verified: #6", ideas: ["i2 token-golf"], remainingUsd: 0.06, capUsd: 0.1 });
-  for (const part of ["Do not stop", "no value", "opens a credited route", "sorry holes", "i2 token-golf"]) assert.ok(text.includes(part), part);
+test("the plain-answer continuation states the same facts as the refusal, with no directions", () => {
+  const input = { usedPct: 40, remainingUsd: 0.06, capUsd: 0.1, baseline: base.baseline, best: base.best, top: base.top };
+  const text = continuationPush(input);
+  assert.equal(text, "The turn ended with text and no tool call. $0.04 of $0.1 spent, $0.06 (60%) left. A finish confirm is accepted once 10% or less of the allowance remains. " +
+    "Current best, saving vs the original and score points not yet earned per axis: tokens 16% saved, 28.0 pts left; heartbeats 92% saved, 2.7 pts left.");
+  const withRoutes = continuationPush({ ...input, routes: [{ route: "r1", label: "x", original: true, attempts: 4, best_proxy: 69.1, best_candidate: "#7" }] });
+  assert.ok(withRoutes.includes("Routes tried: r1 (original's route)"));
+  const banned = ["credit", "Do not stop", "no value", "opens", "must", "should", "Make a tool call", "induction", "lemma", "recursion", "sorry", "Active ideas"];
+  for (const word of banned) assert.ok(!withRoutes.toLowerCase().includes(word.toLowerCase()), `unexpected: ${word}`);
+  const many = Array.from({ length: 400 }, (_, i) => ({ route: `r${i}`, label: "x", attempts: 3, best_proxy: 50.5, best_candidate: `#${i}` }));
+  assert.ok(continuationPush({ ...input, routes: many }).length <= 1500);
 });
 
 test("the model-facing profile keeps the top twelve entries and lines plus totals", () => {
@@ -124,8 +132,8 @@ test("routes come from the harness fingerprint, not from idea titles", () => {
 });
 
 test("the continuation push lists the routes tried", () => {
-  const text = continuationPush({ status: "[arena] best", ideas: [], remainingUsd: 0.5, capUsd: 1, routes });
-  assert.ok(text.includes("Routes tried (harness fingerprint): r1"));
+  const text = continuationPush({ usedPct: 50, remainingUsd: 0.5, capUsd: 1, baseline: base.baseline, best: base.best, routes });
+  assert.ok(text.includes("Routes tried: r1"));
 });
 
 const deep = [

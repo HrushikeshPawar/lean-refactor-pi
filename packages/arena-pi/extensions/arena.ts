@@ -1305,8 +1305,10 @@ export default function arenaExtension(pi: ExtensionAPI) {
     const current = readState();
     const status = current ? stateLine(current, true) : `[arena] best verified: ${briefText(state.best)}`;
     const room = finishAllowed(budget.spent, limits);
+    const checks = !room.allowed ? await campaign("state") : undefined;
     const content = !room.allowed
-      ? continuationPush({ status, ideas, remainingUsd: room.remainingUsd, capUsd: limits.stopUsd, routes: state.routes })
+      ? continuationPush({ usedPct: Math.round(100 * budget.spent / limits.stopUsd), remainingUsd: room.remainingUsd, capUsd: limits.stopUsd,
+        baseline: checks?.baseline, best: checks?.best, top: state.top, routes: state.routes })
       : `Continue proof optimization. ${status}. Active ideas: ${ideas.length ? ideas.join("; ") : "none recorded"}. Remaining on the $${limits.stopUsd} cap (actual settled spend): $${softCapGate(budget.spent, limits).remainingUsd.toFixed(4)}.`;
     return { entries: [...event.entries, { type: "custom_message" as const, customType: "arena-continuation",
       content, display: false }], continue: true };
