@@ -51,3 +51,43 @@ single automation call has no subgoals and forms its own "closed directly" route
 - Harness merge step, so hybrid rows come from inside the harness and its budget (needed for closed-track rules).
 - A live compaction test: `v6check` never crossed Luna's 200K threshold (max prompt 194K), so compaction and the
   memory message are unverified on the fixed harness.
+
+## 4. Findings from v6cov runs 1–2 (2026-10-09, a4 and b2)
+
+### 4a. Compaction must bypass the budget guard (agreed fix)
+
+**Seen.** All compactions failed: 25 in a4, 24 in b2 (`Arena context bound exceeds the context window`). The
+context only grew (a4 ended at 696K tokens), so b2's single provider cache miss cost $0.0845 on 563K uncached
+tokens.
+
+**Cause (harness, not Pi).** The compaction summary request goes through the same guard as model turns
+(`packages/arena-pi/extensions/budget.ts` `boundedPayload`). It is not a growth of the prior request, so the guard
+falls back to one token per byte. Payloads run about 2.9 bytes per token, so DeepSeek's summary request "exceeds"
+the 1M window from about 345K real tokens, below the 500K trigger.
+
+**Fix.** Compaction is a required step and always within budget, so it never passes the window check or the cost
+gate. Pi marks it with `session_before_compact`, and its usage is still settled in the cost ledger so spend stays
+exact. Model turns are unchanged.
+
+### 4b. Credit for opening a route: where the branch starts (needs thought)
+
+**Seen.** In a4, `finish` was refused 25 times. Each refusal was followed by a batch of `sorry` skeletons that differed
+only in one or two `have` statements. Each opened a "credited" route, giving 311 route openings and
+"165 credited routes, 4 explored", with no score gain after #19 ($0.32 spent after the best). a4's candidate graph is
+a chain 28 deep, and 292 of about 360 probes hung off the deepest node. In b2 (chain 48 deep) deep refinement found
+the best (#80, about depth 47).
+
+**Idea.** For `finish` credit, require a new route to branch from a shallow node of the candidate graph, so new
+routes start where diversity is likelier. Normal work from any node stays allowed.
+
+**Open questions.**
+- Shallow as an absolute level (1–2), relative to graph depth, or "off the current best's ancestor chain"?
+- Parents are labels (the default is the current candidate; the model may name any parent). How do we verify a draft
+  really came from its stated parent? Text similarity to the parent can backfire: a genuinely new draft resembles no
+  node, and a small edit of the tip can be relabelled. Needs a design, not a quick fix.
+- Must stay content-neutral: the rule may say where to branch, never what kind of proof to write.
+
+### 4c. Refusal message grows with the route count
+
+The `finish` refusal lists every route, which reached about 10K characters in a4 (165 routes) and is re-read in
+context each time. Cap the list and summarise the rest in one neutral count.
