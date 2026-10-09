@@ -195,3 +195,46 @@ class StdlibSourceTest(unittest.TestCase):
                     c._stdlib_source("v4.29.1", ".lean-stdlib/lean/../secret.lean")
                 with self.assertRaises(ValueError):
                     c._stdlib_source("v4.29.1", ".lean-stdlib/lean/Init/Missing.lean")
+
+
+class LeanUnhealthyTests(unittest.TestCase):
+    def test_campaign_continues_after_a_lean_unhealthy_row_and_reports_it(self):
+        specs = rc.plan("p", ["A", "B"], ["gpt-6-luna"], 1)
+        codes = {specs[0]["run_id"]: 75, specs[1]["run_id"]: 0}
+        ran = []
+
+        def fake(cmd, **kw):
+            run_id = cmd[cmd.index("--run-id") + 1]
+            ran.append(run_id)
+            return SimpleNamespace(returncode=codes[run_id])
+
+        def summary(directory):
+            return fixture_summary(None, spent=0.0, stop="lean_unhealthy") | {"lean": {"alarm": True}} \
+                if directory.name == specs[0]["run_id"] else fixture_summary(70.0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for spec in specs:
+                write_run(root, spec["run_id"], False)
+            out = io.StringIO()
+            with mock.patch.object(rc, "RUNS", root), contextlib.redirect_stdout(out):
+                runs = [rc.execute(spec, 0.1, "high", [], root, "h", run_fn=fake, summary_fn=summary) for spec in specs]
+        self.assertEqual(ran, [s["run_id"] for s in specs])
+        self.assertIn("skipped", out.getvalue())
+        self.assertEqual([r["exit_code"] for r in runs], [75, 0])
+        self.assertEqual([r["run_id"] for r in rc.lean_unhealthy_rows(runs)], [specs[0]["run_id"]])
+        text = rc.render(rc.aggregate(runs, {"A": "h", "B": "h"}))
+        self.assertIn("LEAN UNHEALTHY: 1 run(s)", text)
+        self.assertIn(specs[0]["run_id"], text)
+
+    def test_execute_cleans_up_around_each_run(self):
+        spec = rc.plan("p", ["A"], ["gpt-6-luna"], 1)[0]
+        calls = []
+        hk = mock.Mock()
+        hk.before_run.side_effect = lambda run_id: calls.append(("before", run_id))
+        hk.after_run.side_effect = lambda run_id, directory: calls.append(("after", run_id))
+        fake = lambda cmd, **kw: calls.append(("run",)) or SimpleNamespace(returncode=1)  # noqa: E731
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(rc, "RUNS", Path(tmp)):
+            rc.execute(spec, 0.1, "high", [], Path(tmp), "h", run_fn=fake, summary_fn=lambda d: None, housekeeping=hk)
+        self.assertEqual(calls, [("before", spec["run_id"]), ("run",), ("after", spec["run_id"])])
+

@@ -17,7 +17,9 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
 
-from arena import lean_session
+import inspect
+
+from arena import lean_health, lean_session
 from arena.engine import (ROOT, candidate_file, evaluate, force_cold, measure_version, problem, source_path,
                           validate_proof, versions, workspace)
 from arena.profile import heartbeat_floor, profile
@@ -856,6 +858,24 @@ def _append(directory: Path, event: dict) -> None:
         os.close(fd)
 
 
+def _evaluate(name: str, proof: str, mode: str, known: dict | None = None, lane: str = "model") -> dict:
+    """`engine.evaluate`, sending background-lane work (full checks, cold verification) to the Lean session's
+    background lane when the engine supports lanes, so it never takes a model worker."""
+    if lane != "model" and "lane" in inspect.signature(evaluate).parameters:
+        return evaluate(name, proof, mode, known=known, lane=lane)
+    return evaluate(name, proof, mode, known=known)
+
+
+def _refuse_if_tripped(directory: Path) -> None:
+    """After the Lean circuit breaker tripped, model-lane work is refused: the runner is stopping the run."""
+    if lean_health.tripped(directory):
+        raise ValueError("The harness has stopped this run")
+
+
+def _check_breaker(directory: Path) -> None:
+    lean_health.trip_if_unhealthy(directory, events(directory))
+
+
 def _route_features(directory: Path, name: str, proof_id: str, proof: str) -> dict | None:
     """Kernel-term features of an attempt (a compiled proof, or a draft whose declaration Lean still added, with
     `sorryAx` where holes or errors are), read by Lean in the background lane after it was scored, so they never
@@ -931,6 +951,8 @@ def _route_worker(directory: Path) -> None:
             except BlockingIOError:
                 return
             while pending := [entry for entry in _route_queue(directory) if entry["proof_id"] not in tried]:
+                if lean_health.tripped(directory):
+                    return
                 entry = pending[0]
                 _yield_to_lean_session(directory)
                 _room_for_extraction(wait=float("inf"))
@@ -996,6 +1018,8 @@ def _record_route(directory: Path, name: str, proof_id: str, proof: str) -> dict
     from arena.context import cached_context
 
     try:
+        if lean_health.tripped(directory):
+            return None
         if any(item.get("kind") == "route" and item["proof_id"] == proof_id for item in events(directory)):
             return None
         # Each probe draft is now fingerprinted, and one extraction is a cold Lean process of 1-2 GB: one at a time
@@ -1446,6 +1470,8 @@ def record_evaluation(name: str, run_id: str, proof: str, mode: str,
     if mode not in ("fast", "full"):
         raise ValueError("mode must be fast or full")
     directory = run_dir(run_id)
+    if lane == "model" and trigger == "model":
+        _refuse_if_tripped(directory)
     row = problem(name)
     # Forbidden constructs and statement edits are rejected before anything is recorded,
     # so `sorry` drafts can never become candidates.
@@ -1501,15 +1527,19 @@ def record_evaluation(name: str, run_id: str, proof: str, mode: str,
         else:
             try:
                 with lean_lock(directory, lane):
-                    result = evaluate(name, proof, mode, known=_compiled_versions(history, candidate_id, row)
-                                      if mode == "full" else None)
+                    result = _evaluate(name, proof, mode, known=_compiled_versions(history, candidate_id, row)
+                                       if mode == "full" else None, lane=lane)
             except (ValueError, FileNotFoundError) as error:
                 result = {"ok": False, "name": name, "mode": mode, "error": str(error),
                           "compat": {}, "tokens": None, "heartbeat": None, "local_proxy": None}
+                if isinstance(error, FileNotFoundError):
+                    result["lean_unavailable"] = True  # Lean (or the workspace) could not run: counts for the breaker
         if not prior:
             _externalize_output(directory, candidate_id, result)
             _append(directory, {"kind": "evaluation", "candidate_id": candidate_id, "key": key,
                                 "mode": mode, "trigger": trigger, "result": result})
+    if lane == "model" and trigger == "model" and not prior:
+        _check_breaker(directory)
     if result.get("tokens") is not None:
         _record_route_later(directory, name, candidate_id, proof)
     location = materialize(name, run_id, proof) if materialize_live and result.get("tokens") is not None else {}
@@ -1617,7 +1647,8 @@ def _compile_probe(name: str, row: dict, proof: str) -> dict:
     try:
         return evaluate(name, proof, "fast" if complete else "probe")
     except (ValueError, FileNotFoundError) as error:
-        return {"ok": False, "mode": "probe", "error": str(error), "compat": {}}
+        return {"ok": False, "mode": "probe", "error": str(error), "compat": {},
+                **({"lean_unavailable": True} if isinstance(error, FileNotFoundError) else {})}
 
 
 def _compile_probes(name: str, directory: Path, drafts: list[str]) -> dict[str, dict]:
@@ -1657,6 +1688,7 @@ def probe(name: str, run_id: str, proof: str, idea_id: str | None = None, parent
     """Compile a draft (sorry allowed) in the shadow project without creating a candidate."""
     proof = normalize_draft(name, proof)
     directory = run_dir(run_id)
+    _refuse_if_tripped(directory)
     history = events(directory)
     row = problem(name)
     notes: list[str] = []
@@ -1693,6 +1725,7 @@ def probe(name: str, run_id: str, proof: str, idea_id: str | None = None, parent
         _snapshot(directory, proof_id, proof)
         _append(directory, {"kind": "probe", "proof_id": proof_id, "idea_id": idea_id,
                             "parent": parent_id, "result": result})
+        _check_breaker(directory)
         if result.get("ok") is not False:
             _record_route_later(directory, name, proof_id, proof)
     location = materialize(name, run_id, proof) if result.get("tokens") is not None else {}
@@ -2053,6 +2086,8 @@ def autocheck(name: str, run_id: str, max_seconds: float | None = None) -> dict:
         except BlockingIOError:
             return {"ok": True, "checked": [], "running_elsewhere": True}
         while max_seconds is None or time.monotonic() - started < max_seconds:
+            if lean_health.tripped(directory):
+                break  # Lean is unhealthy: background checks pause with the model's work
             history = events(directory)
             jobs = _autocheck_jobs(_summaries(history))
             if not jobs:
@@ -2137,11 +2172,16 @@ def cold_verify(run_id: str, row: dict) -> dict:
                  and item["candidate_id"] == row["id"]), None)
     if done:
         return done
+    if lean_health.tripped(directory):
+        # Paused, not recorded: the verification can still run once Lean is healthy again.
+        return {"kind": "cold_verification", "candidate_id": row["id"], "confirmed": False,
+                "error": "Lean unhealthy; cold verification paused", "recorded_heartbeats": row["heartbeats"],
+                "paused": True}
     name = history[0]["theorem"]
     proof = (directory / "proofs" / f"{row['id']}.lean").read_text()
     try:
         with lean_lock(directory, "background"), force_cold():
-            cold = evaluate(name, proof, "full")
+            cold = _evaluate(name, proof, "full", lane="background")
         compat = cold["compat"]
         passed = {version: bool(info.get("passed")) for version, info in compat.items()}
         total = len(history[0].get("versions") or [1])

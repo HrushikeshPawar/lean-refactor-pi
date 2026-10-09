@@ -289,5 +289,45 @@ class StopReasonTests(unittest.TestCase):
         self.assertIn("0 credited routes, 1 explored", text)
 
 
+class LeanStatsTests(unittest.TestCase):
+    @staticmethod
+    def entry(seconds, path="session", error=None, warm_kept=False):
+        return {"passed": error is None, "lean": {"path": path, "seconds": seconds, "warm_kept": warm_kept},
+                **({"error": error} if error else {})}
+
+    def test_percentiles_timeout_rate_warm_and_cold_counts(self):
+        ledger = [{"kind": "probe", "result": {"compat": {"v": self.entry(1.0, warm_kept=True)}}},
+                  {"kind": "probe", "result": {"compat": {"v": self.entry(3.0)}}},
+                  {"kind": "evaluation", "trigger": "model", "result": {"compat": {"v": self.entry(9.0, path="cold")}}},
+                  {"kind": "evaluation", "trigger": "auto", "result": {"compat": {"v": self.entry(500.0, error="Lean timed out after 180 seconds")}}}]
+        lean = summary.lean_stats(ledger)
+        self.assertEqual((lean["checks"], lean["p50_seconds"], lean["p95_seconds"]), (3, 3.0, 9.0))
+        self.assertEqual((lean["timeouts"], lean["warm_kept"], lean["cold_path"], lean["alarm"]), (0, 1, 1, False))
+        self.assertIn("3 model-lane checks", summary.lean_text(lean))
+        self.assertNotIn("ALARM", summary.lean_text(lean))
+
+    def test_alarm_on_timeout_rate_or_unhealthy_stop(self):
+        slow = [{"kind": "probe", "result": {"compat": {"v": self.entry(180.0, error="Lean timed out after 180 seconds")}}}] * 2 \
+            + [{"kind": "probe", "result": {"compat": {"v": self.entry(1.0)}}}] * 3
+        lean = summary.lean_stats(slow)
+        self.assertEqual((lean["timeout_rate"], lean["alarm"]), (0.4, True))
+        self.assertIn("ALARM", summary.lean_text(lean))
+        self.assertTrue(summary.lean_stats([], None, "lean_unhealthy")["alarm"])
+        self.assertFalse(summary.lean_stats([])["alarm"])
+
+    def test_summary_json_and_text_carry_the_lean_line(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp) / "r"
+            directory.mkdir()
+            write(directory / "ledger.jsonl", [{"kind": "init", "ts": 1.0, "theorem": "T"},
+                                               {"kind": "probe", "proof_id": "p", "result": {"compat": {"v": self.entry(2.0)}}}])
+            (directory / "run-config.json").write_text(json.dumps({"theorem": "T", "model": "m", "hard_cap_usd": 0.1}))
+            data = summary.write_summary(directory, "lean_unhealthy")
+            self.assertTrue(data["lean"]["alarm"])
+            self.assertEqual(json.loads((directory / "summary.json").read_text())["lean"]["checks"], 1)
+            self.assertIn("lean: 1 model-lane checks", (directory / "summary.txt").read_text())
+            self.assertIn("ALARM", (directory / "summary.txt").read_text())
+
+
 if __name__ == "__main__":
     unittest.main()

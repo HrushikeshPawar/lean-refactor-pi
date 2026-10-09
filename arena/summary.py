@@ -7,6 +7,7 @@ events.jsonl, run-config.json, cost.json), so a run that was killed can still be
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections import Counter
 from difflib import SequenceMatcher
@@ -400,12 +401,14 @@ def build_summary(directory: Path) -> dict:
     later_requests = [event for event in request_events if best_at is not None
                       and float(event.get("ts", 0)) / 1000 > best_at]
     ideas_without_attempts = [idea["id"] for idea in ideas.values() if idea["attempts"] == 0]
+    stopped = stop_reason_of(directory, controls)
     route_rows = route_table(ledger)
     return {
         "run_id": directory.name, "theorem": config.get("theorem") or report.get("theorem"),
         "model": config.get("model"), "thinking": config.get("thinking"),
         "skill": (config.get("skill") or {}).get("sha256"),
-        "stop_reason": stop_reason_of(directory, controls),
+        "stop_reason": stopped,
+        "lean": lean_stats(ledger, directory, stopped),
         "cost": {"spent_usd": round(spent, 6), "unresolved_usd": round(unresolved, 6),
                  "hard_cap_usd": HARD_CAP_USD, "soft_cap_usd": cap, "remaining_usd": round(remaining, 6), "overshoot_usd": round(overshoot, 6),
                  "requests": len(request_events) if request_events else len(turns),
@@ -437,6 +440,60 @@ def build_summary(directory: Path) -> dict:
     }
 
 
+LEAN_ALARM_TIMEOUT_RATE = 0.2
+
+
+def _percentile(values: list[float], share: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    return ordered[min(len(ordered) - 1, max(0, math.ceil(share * len(ordered)) - 1))]
+
+
+def lean_stats(ledger: list[dict], directory: Path | None = None, stop_reason: str | None = None) -> dict:
+    """Lean latency of the model lane: every compat entry of a probe or a model-triggered evaluation is one check
+    (a cached repeat is not recorded again, so it is not counted). Alarm: timeout rate above 20%, or a run that
+    stopped `lean_unhealthy`."""
+    seconds: list[float] = []
+    checks = timeouts = warm_kept = cold = 0
+    for event in ledger:
+        if event.get("kind") == "evaluation" and event.get("trigger", "model") != "model":
+            continue
+        if event.get("kind") not in ("probe", "evaluation"):
+            continue
+        for entry in ((event.get("result") or {}).get("compat") or {}).values():
+            lean = entry.get("lean") or {}
+            checks += 1
+            timeouts += str(entry.get("error") or "").startswith("Lean timed out")
+            warm_kept += bool(lean.get("warm_kept"))
+            cold += lean.get("path") in ("cold", "cold-fallback")
+            if isinstance(lean.get("seconds"), (int, float)):
+                seconds.append(float(lean["seconds"]))
+    rate = round(timeouts / checks, 3) if checks else 0.0
+    gate = None
+    if directory is not None:
+        gate = _json(directory / "lean-health.json")
+    unhealthy = stop_reason == "lean_unhealthy"
+    return {"checks": checks, "p50_seconds": _percentile(seconds, 0.5), "p95_seconds": _percentile(seconds, 0.95),
+            "timeouts": timeouts, "timeout_rate": rate, "warm_kept": warm_kept, "cold_path": cold,
+            "gate": ({"verdict": gate.get("verdict"), "timeout": gate.get("timeout"),
+                      "slowest_warm_seconds": gate.get("slowest_warm_seconds")} if gate else None),
+            "alarm": rate > LEAN_ALARM_TIMEOUT_RATE or unhealthy}
+
+
+def lean_text(lean: dict | None) -> str:
+    if not lean:
+        return "lean: no data"
+    def sec(value):
+        return "n/a" if value is None else f"{value:.1f}s"
+    gate = lean.get("gate")
+    return ("lean: " + f"{lean['checks']} model-lane checks, p50 {sec(lean['p50_seconds'])} p95 {sec(lean['p95_seconds'])}, "
+            f"timeout rate {round(100 * lean['timeout_rate'])}% ({lean['timeouts']}), warm-kept {lean['warm_kept']}, "
+            f"cold path {lean['cold_path']}"
+            + (f"; gate {gate['verdict']} limit {gate['timeout']}s" if gate else "")
+            + ("; ALARM" if lean.get("alarm") else ""))
+
+
 def route_depth_text(depth: dict | None) -> str:
     if not depth:
         return "route depth: no route events"
@@ -466,6 +523,7 @@ def render_text(summary: dict) -> str:
            f"${cost['reconciliation']['session_usd'] or 0:.4f}, gap ${cost['reconciliation']['gap_usd']:.4f}, "
            f"{len(cost['reconciliation']['open_reserves'])} reserve(s) still open"]
           if not cost["reconciliation"]["balanced"] else []),
+        lean_text(summary.get("lean")),
         f"cache hit rate {cache['reuse_pct']}% (recent {cache['reuse_pct_recent_10']}%), cost savings {cache['savings_pct']}%, alarms {cache['alarms']}",
         verified_line,
         f"per-axis highs: tokens {pick('tokens')}, heartbeats {pick('heartbeats')}, proxy {pick('proxy')}, "
@@ -494,6 +552,8 @@ def write_summary(directory: Path, stop_reason: str | None = None) -> dict:
     summary = build_summary(directory)
     if stop_reason:
         summary["stop_reason"] = stop_reason
+        if summary.get("lean") is not None:
+            summary["lean"]["alarm"] = summary["lean"]["alarm"] or stop_reason == "lean_unhealthy"
     (directory / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
     (directory / "summary.txt").write_text(render_text(summary))
     return summary

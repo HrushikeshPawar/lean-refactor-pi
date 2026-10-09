@@ -18,7 +18,7 @@ import time
 from datetime import datetime
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from arena import lean_session, models as model_config
+from arena import lean_health, lean_session, models as model_config
 from arena.campaign import autocheck, init, packet, run_dir, submission, write_state
 from arena.summary import configured_cap, cost_report_from_ledger, render_text, write_summary
 from arena.traces import langfuse_environment, langfuse_extension, plugin_problems
@@ -145,20 +145,39 @@ def start_lean_session(directory: Path, parent_pid: int) -> None:
         print(f"Lean session unavailable ({error}); Lean calls will compile cold", file=sys.stderr, flush=True)
 
 
-def warm_lean_session(theorem: str) -> None:
-    """Elaborate the pinned file once in the background so the model's first probe is incremental."""
-    from arena.engine import candidate_file, measure_version, problem, run_lean
+def lean_gate(theorem: str, directory: Path, gate_fn=None) -> dict | None:
+    """Blocking Lean health gate, run after the session daemon is up and before Pi or any model request.
 
-    def work() -> None:
-        try:
-            row = problem(theorem)
-            version, commit = measure_version(row)
-            built = candidate_file(row, row["src"], version, commit)
-            run_lean(row, built["path"], built["text"])
-        except Exception:  # warming is best effort; the first real call then pays for it
-            pass
+    Healthy: the row's per-check limit goes into ARENA_LEAN_TIMEOUT (Pi and every tool process it spawns inherit the
+    environment this runner copies for them). Returns the gate report, or None when no gate applies (no session, or
+    ARENA_LEAN_GATE=0 for offline tests).
+    """
+    (directory / lean_health.TRIPPED_FILE).unlink(missing_ok=True)  # a resumed run starts with a clean breaker
+    if _LEAN["process"] is None or os.environ.get(lean_health.GATE_ENV) == "0":
+        return None
+    slots = min(lean_session.MAX_SLOTS, 4)
+    print(f"Lean health gate: warming {slots} workers per version and checking the reference proof "
+          f"(blocks until done; no model request is made before it passes)", flush=True)
+    report = (gate_fn or lean_health.gate)(theorem, slots, directory)
+    if report["verdict"] == "healthy":
+        lean_health.apply_timeout_env(report)
+        print(f"Lean gate healthy: {lean_health.TIMEOUT_ENV}={os.environ[lean_health.TIMEOUT_ENV]}", flush=True)
+    return report
 
-    threading.Thread(target=work, daemon=True, name="lean-warm").start()
+
+def stop_unhealthy(args, directory: Path, reasons: list[str]) -> int:
+    """End a run that never reached Pi (or was stopped by the breaker) as `lean_unhealthy`: cost.json and a
+    summary the normal tooling reads, exit status EXIT_CODE so a campaign skips the row and goes on."""
+    print(f"Lean unhealthy; not starting the model: {'; '.join(reasons)}", file=sys.stderr, flush=True)
+    report_path = directory / "cost.json"
+    try:
+        report_path.write_text(json.dumps(cost_report_from_ledger(directory), indent=2) + "\n")
+        print(render_text(write_summary(directory, lean_health.STOP_REASON)), end="", flush=True)
+    except Exception as error:  # the stop must still be reported
+        (directory / "stop-reason.txt").write_text(lean_health.STOP_REASON + "\n")
+        print(f"Run summary failed: {error}", file=sys.stderr)
+    print(f"stop_reason={lean_health.STOP_REASON}; spent $0 on the model", flush=True)
+    return lean_health.EXIT_CODE
 
 
 def stop_lean_session() -> None:
@@ -295,8 +314,9 @@ def run() -> int:
             "compact_keep_tokens": args.compact_keep_tokens,
             "skill": None if args.no_skill else {"name": "arena-lean", "sha256": skill_hash()}},
             indent=2) + "\n")
-    if _LEAN["process"] is not None:
-        warm_lean_session(args.theorem)
+    health = lean_gate(args.theorem, directory)
+    if health is not None and health["verdict"] != "healthy":
+        return stop_unhealthy(args, directory, health["reasons"])
     shadow = directory / "scratch" / "project"
     env = os.environ.copy()
     env["ARENA_BUDGET_REQUIRED"] = "1"
@@ -353,7 +373,7 @@ def run() -> int:
         "retry": {"provider": {"timeoutMs": PROVIDER_TIMEOUT_MS, "maxRetries": 0}}}, indent=2) + "\n")
     event_log = directory / "events.jsonl"
     event_offset = event_log.stat().st_size if event_log.exists() else 0
-    state: dict = {"process": None, "signal": None, "timer": None}
+    state: dict = {"process": None, "signal": None, "timer": None, "tripped": False}
     segment_started = time.time()
 
     def force_stop() -> None:
@@ -389,12 +409,23 @@ def run() -> int:
             process.terminate()
         assert process.stdout is not None
         for line in process.stdout:
+            line = stamp_tool_event(line)
             output.write(line)
             output.flush()
             try:
                 log_event(json.loads(line))
             except (json.JSONDecodeError, TypeError, ValueError):
                 print(f"[{datetime.now().astimezone().strftime('%H:%M:%S')}] non-JSON Pi output recorded", flush=True)
+            if not state["tripped"] and lean_health.tripped(directory):
+                # The Lean circuit breaker fired while a tool result was recorded: no further model requests.
+                state["tripped"] = True
+                print(f"Lean circuit breaker tripped ({lean_health.BREAKER_LIMIT} consecutive Lean timeouts or "
+                      f"failures); stopping Pi cleanly", file=sys.stderr, flush=True)
+                if process.poll() is None:
+                    process.terminate()
+                    state["timer"] = threading.Timer(STOP_GRACE_S, force_stop)
+                    state["timer"].daemon = True
+                    state["timer"].start()
         try:
             exit_code = process.wait(timeout=STOP_GRACE_S)
         except subprocess.TimeoutExpired:
@@ -406,7 +437,22 @@ def run() -> int:
     kill_group(process, signal.SIGTERM)
     if worker is not None and worker.poll() is None:
         worker.terminate()
-    return finish(args, directory, event_log, event_offset, exit_code, state["signal"], segment_started)
+    return finish(args, directory, event_log, event_offset, exit_code, state["signal"], segment_started,
+                  tripped=state["tripped"] or lean_health.tripped(directory) is not None)
+
+
+def stamp_tool_event(line: str) -> str:
+    """Add the wall-clock `ts` to tool_execution_start/end events so tool latency can be computed later."""
+    if '"tool_execution_' not in line:
+        return line
+    try:
+        event = json.loads(line)
+    except ValueError:
+        return line
+    if event.get("type") in ("tool_execution_start", "tool_execution_end") and "ts" not in event:
+        event["ts"] = round(time.time(), 3)
+        return json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
+    return line
 
 
 def kill_group(process: subprocess.Popen, number: int) -> None:
@@ -417,7 +463,7 @@ def kill_group(process: subprocess.Popen, number: int) -> None:
 
 
 def finish(args, directory: Path, event_log: Path, event_offset: int, exit_code: int, interrupted: int | None,
-           segment_started: float = 0.0) -> int:
+           segment_started: float = 0.0, tripped: bool = False) -> int:
     """Always leave cost.json and a run summary behind, even for a killed or crashed run."""
     report_path = directory / "cost.json"
     # On a resumed run, a cost.json left by an earlier segment is stale.
@@ -427,7 +473,7 @@ def finish(args, directory: Path, event_log: Path, event_offset: int, exit_code:
     try:
         # Checks still queued when the model stopped are finished here (no model cost), unless the
         # run was interrupted, so the submission reflects every candidate the model produced.
-        if interrupted is None:
+        if interrupted is None and not tripped:
             drained = autocheck(args.theorem, args.run_id, DRAIN_S)
             if drained["checked"] or drained.get("remaining"):
                 print(f"Background checks after Pi exited: {drained['checked']}; still pending {drained.get('remaining', [])}", flush=True)
@@ -439,10 +485,14 @@ def finish(args, directory: Path, event_log: Path, event_offset: int, exit_code:
     except Exception as error:
         print(f"Choosing the submission failed: {error}", file=sys.stderr)
     try:
-        print(render_text(write_summary(directory, "interrupted" if interrupted is not None else None)),
+        print(render_text(write_summary(directory, "interrupted" if interrupted is not None and not tripped
+                                        else lean_health.STOP_REASON if tripped else None)),
               end="", flush=True)
     except Exception as error:  # a summary failure must never hide the run's own result
         print(f"Run summary failed: {error}", file=sys.stderr)
+    if tripped:
+        print(f"stop_reason={lean_health.STOP_REASON}; cost.json and summary.json were written", flush=True)
+        return lean_health.EXIT_CODE
     if interrupted is not None:
         print(f"Interrupted by signal {interrupted}; cost.json and summary.json were written", file=sys.stderr)
         return 128 + interrupted

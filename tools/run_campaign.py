@@ -18,12 +18,17 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
+import shutil
+import signal
 import statistics
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -35,6 +40,12 @@ RECEIPT_MAX_AGE_HOURS = 12.0
 # Named campaign configurations (models.yaml); explicit --rows/--models/--replicates/--cap override a preset's values.
 PRESETS = CONFIG.get("presets", {})
 HELPER_DECL = re.compile(r"(?m)^\s*(?:private\s+|protected\s+)?(?:theorem|lemma)\s+\S+")
+
+
+MIN_FREE_GB = 8.0         # MemAvailable needed before another run starts (nothing else in flight)
+CLEANUP_WAIT_S = 300.0    # longest wait for finished runs' Lean processes to go and memory to come back
+EVALUATIONS = ROOT / "runs" / "evaluations"
+LEAN_UNHEALTHY_EXIT = 75  # keep equal to arena.lean_health.EXIT_CODE
 
 
 class CampaignAbort(Exception):
@@ -145,7 +156,7 @@ def run_row(spec: dict, summary: dict | None, exit_code: int, packet_sha256: str
     cost, progress = summary.get("cost") or {}, summary.get("progress") or {}
     best = progress.get("best_verified_candidate")
     return {**spec, "exit_code": exit_code, "packet_matches": packet_sha256 == expected_packet,
-            "stop_reason": summary.get("stop_reason"),
+            "stop_reason": summary.get("stop_reason"), "lean": summary.get("lean"),
             "best_candidate": best.get("candidate") if best else None,
             "best_proxy": best.get("proxy") if best else None,
             "helpers": helper_discovery(directory, best.get("candidate") if best else None) if directory else None,
@@ -219,19 +230,209 @@ def render(report: dict) -> str:
                   f"  all-call cost per problem min/median/max: {span(g['all_call_cost_usd'], '${:.4f}')} "
                   f"(total ${g['all_call_cost_usd']['total']:.4f})",
                   f"  stop reasons: {g['stop_reasons']}"]
+    skipped = lean_unhealthy_rows(report["runs"])
+    if skipped:
+        lines.append(f"LEAN UNHEALTHY: {len(skipped)} run(s) stopped lean_unhealthy (skipped or cut short): "
+                     + ", ".join(f"{run['run_id']} (${run['all_call_cost_usd']:.4f})" for run in skipped))
+    alarmed = [run for run in report["runs"] if (run.get("lean") or {}).get("alarm") and run not in skipped]
+    if alarmed:
+        lines.append("LEAN ALARM (timeout rate above 20%): " + ", ".join(run["run_id"] for run in alarmed))
     return "\n".join(lines) + "\n"
 
 
+def lean_unhealthy_rows(runs: list[dict]) -> list[dict]:
+    return [run for run in runs
+            if run.get("stop_reason") == "lean_unhealthy" or run.get("exit_code") == LEAN_UNHEALTHY_EXIT]
+
+
+# ---- housekeeping between runs --------------------------------------------------------------------------------------
+
+def mem_available_gb() -> float | None:
+    with suppress(OSError, ValueError):
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) / 1024 / 1024
+    return None
+
+
+def read_session_info(directory: Path) -> dict:
+    """The run's Lean session record (pids and process groups), or {} when the run already cleaned up after itself."""
+    from arena.lean_session import INFO_NAME  # noqa: PLC0415
+
+    with suppress(OSError, ValueError):
+        info = json.loads((directory / INFO_NAME).read_text())
+        return info if isinstance(info, dict) else {}
+    return {}
+
+
+def proc_comm(pid: int) -> str | None:
+    with suppress(OSError):
+        return Path(f"/proc/{pid}/comm").read_text().strip()
+    return None
+
+
+def proc_cmdline(pid: int) -> str:
+    with suppress(OSError):
+        return Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+    return ""
+
+
+def proc_alive(pid: int) -> bool:
+    """Exists and is not a zombie."""
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+    except (OSError, IndexError):
+        return False
+
+
+def recorded_pids(directory: Path) -> tuple[list[int], list[int]]:
+    """(pids, pgids) the run's session record names: the daemon, its workers and their process groups."""
+    info = read_session_info(directory)
+    pids, pgids = [], []
+    for key, bucket in (("pid", pids), ("pids", pids), ("pgids", pgids)):
+        value = info.get(key)
+        for item in value if isinstance(value, list) else [value]:
+            with suppress(TypeError, ValueError):
+                bucket.append(int(item))
+    return sorted(set(pids)), sorted(set(pgids))
+
+
+def ours(pid: int, directory: Path, comm_fn=proc_comm, cmdline_fn=proc_cmdline) -> bool:
+    """A recorded pid may have been reused: only Lean, lake, or that run's own session daemon qualifies."""
+    comm = comm_fn(pid)
+    if comm is None:
+        return False
+    if comm in ("lean", "lake"):
+        return True
+    return comm.startswith("python") and "arena.lean_session" in cmdline_fn(pid) and str(directory) in cmdline_fn(pid)
+
+
+def lingering(directory: Path, comm_fn=proc_comm, cmdline_fn=proc_cmdline, alive_fn=proc_alive) -> list[int]:
+    """Recorded Lean/lake/daemon pids of a finished run that are still alive."""
+    pids, _ = recorded_pids(directory)
+    return [pid for pid in pids if alive_fn(pid) and ours(pid, directory, comm_fn, cmdline_fn)]
+
+
+def reap_run(directory: Path, *, comm_fn=proc_comm, cmdline_fn=proc_cmdline, alive_fn=proc_alive,
+             kill_fn=os.kill, killpg_fn=os.killpg, sleep_fn=time.sleep, grace: float = 5.0) -> int:
+    """Make sure the run's session daemon and every recorded Lean/lake process are gone. Only exact recorded PIDs
+    and PGIDs are signalled, and only when /proc says they are still Lean, lake or that run's daemon. Returns how
+    many leftovers it had to signal (0 for a run that cleaned up after itself)."""
+    pids, pgids = recorded_pids(directory)
+
+    def mine(pid: int) -> bool:
+        return alive_fn(pid) and ours(pid, directory, comm_fn, cmdline_fn)
+
+    live = [pid for pid in pids if mine(pid)]
+    # A process group goes only when its leader is itself one of ours (the daemon and each worker lead their own).
+    groups = [pgid for pgid in pgids if mine(pgid)]
+    found = len(live) or len(groups)
+    for number in (signal.SIGTERM, signal.SIGKILL):
+        if not live and not groups:
+            break
+        for pgid in groups:
+            with suppress(ProcessLookupError, PermissionError):
+                killpg_fn(pgid, number)
+        for pid in live:
+            if mine(pid):
+                with suppress(ProcessLookupError, PermissionError):
+                    kill_fn(pid, number)
+        if number == signal.SIGTERM:
+            sleep_fn(grace)
+            live, groups = [pid for pid in live if mine(pid)], [pgid for pgid in groups if mine(pgid)]
+    return found
+
+
+def sweep_candidate_dirs(root: Path, newer_than: float) -> int:
+    """Remove temporary cold-compile directories (`arena-*`) a finished run left behind. Only called when no run is
+    in flight, and only for directories created since the campaign started, so nothing else's is touched."""
+    removed = 0
+    with suppress(OSError):
+        for item in root.glob("arena-*"):
+            with suppress(OSError):
+                if item.is_dir() and item.stat().st_mtime >= newer_than:
+                    shutil.rmtree(item)
+                    removed += 1
+    return removed
+
+
+class Housekeeping:
+    """Cleanup after every run and a wait before the next: nothing of a finished run may still be using Lean or
+    memory when another starts (the SharedDrive is NTFS/FUSE; stray Lean imports slow every later check)."""
+
+    def __init__(self, min_free_gb: float = MIN_FREE_GB, max_wait: float = CLEANUP_WAIT_S, started: float | None = None,
+                 evaluations: Path = EVALUATIONS, *, mem_fn=mem_available_gb, reap_fn=reap_run, lingering_fn=lingering,
+                 sweep_fn=sweep_candidate_dirs, sleep_fn=time.sleep, now_fn=time.monotonic, log=print):
+        self.min_free_gb, self.max_wait, self.evaluations = min_free_gb, max_wait, evaluations
+        self.started = time.time() if started is None else started
+        self.mem_fn, self.reap_fn, self.lingering_fn, self.sweep_fn = mem_fn, reap_fn, lingering_fn, sweep_fn
+        self.sleep_fn, self.now_fn, self.log = sleep_fn, now_fn, log
+        self.lock = threading.Lock()
+        self.in_flight = 0
+        self.finished: list[Path] = []
+
+    def say(self, message: str) -> None:
+        self.log(f"{time.strftime('%H:%M:%S')} {message}", flush=True) if self.log is print else self.log(message)
+
+    def before_run(self, run_id: str) -> None:
+        """Wait (printing progress, at most `max_wait`) until no Lean process of a finished run remains and, when
+        nothing else is running, MemAvailable is at least `min_free_gb`."""
+        deadline = self.now_fn() + self.max_wait
+        last = None
+        while True:
+            with self.lock:
+                alone = self.in_flight == 0
+                finished = list(self.finished)
+            stray = [pid for directory in finished for pid in self.lingering_fn(directory)]
+            free = self.mem_fn()
+            low = alone and free is not None and free < self.min_free_gb
+            shown = "?" if free is None else f"{free:.1f}"
+            if not stray and not low:
+                break
+            if self.now_fn() >= deadline:
+                self.say(f"cleanup: starting {run_id} anyway after {self.max_wait:.0f}s "
+                         f"(Lean pids left {stray}, MemAvailable {shown} GB)")
+                break
+            state = (tuple(stray), low)
+            if state != last:
+                self.say(f"waiting before {run_id}: {len(stray)} Lean process(es) of finished runs still alive, "
+                         f"MemAvailable {shown} GB (need {self.min_free_gb:g})")
+                last = state
+            self.sleep_fn(5)
+        with self.lock:
+            self.in_flight += 1
+
+    def after_run(self, run_id: str, directory: Path) -> None:
+        reaped = self.reap_fn(directory)
+        with self.lock:
+            self.in_flight -= 1
+            self.finished.append(directory)
+            idle = self.in_flight == 0
+        swept = self.sweep_fn(self.evaluations, self.started) if idle else 0
+        free = self.mem_fn()
+        self.say(f"cleanup {run_id}: reaped {reaped}" + (f", removed {swept} temporary dir(s)" if swept else "")
+                 + f", MemAvailable {'?' if free is None else f'{free:.1f}'} GB")
+
+
 def execute(spec: dict, cap: float, thinking: str, passthrough: list[str], logs: Path, expected: str,
-            run_fn=subprocess.run, summary_fn=None) -> dict:
+            run_fn=subprocess.run, summary_fn=None, housekeeping: Housekeeping | None = None) -> dict:
     if summary_fn is None:
         from arena.summary import build_summary as summary_fn  # noqa: PLC0415
     directory = RUNS / spec["run_id"]
+    if housekeeping:
+        housekeeping.before_run(spec["run_id"])
     print(f"{time.strftime('%H:%M:%S')} start  {spec['run_id']}", flush=True)
-    with (logs / f"{spec['run_id']}.log").open("w") as log:
-        proc = run_fn(command(spec, cap, thinking, passthrough), cwd=ROOT, stdout=log,
-                      stderr=subprocess.STDOUT, text=True)
+    try:
+        with (logs / f"{spec['run_id']}.log").open("w") as log:
+            proc = run_fn(command(spec, cap, thinking, passthrough), cwd=ROOT, stdout=log,
+                          stderr=subprocess.STDOUT, text=True)
+    finally:
+        if housekeeping:
+            housekeeping.after_run(spec["run_id"], directory)
     print(f"{time.strftime('%H:%M:%S')} done   {spec['run_id']} (exit {proc.returncode})", flush=True)
+    if proc.returncode == LEAN_UNHEALTHY_EXIT:
+        print(f"{time.strftime('%H:%M:%S')} skipped {spec['run_id']}: Lean unhealthy, no model spend; "
+              f"continuing with the next row", flush=True)
     config_path = directory / "run-config.json"
     packet_sha = json.loads(config_path.read_text()).get("packet_sha256") if config_path.exists() else None
     summary = summary_fn(directory) if directory.exists() else None
@@ -250,6 +451,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cap", type=float, help="Spend cap per run in USD (0.10-3.00); below 3 it is a soft cap on actual spend (the last request may overshoot), only 3 is a hard cap")
     parser.add_argument("--jobs", type=int, help="Runs in flight at once (default 1); runs are API-bound, and each Lean daemon holds back workers when memory runs low")
     parser.add_argument("--thinking", default=CONFIG["thinking"]["default"], choices=THINKING_LEVELS)
+    parser.add_argument("--min-free-gb", type=float, default=MIN_FREE_GB,
+                        help="MemAvailable (GB) to wait for before starting a run when nothing else is running")
+    parser.add_argument("--cleanup-wait", type=float, default=CLEANUP_WAIT_S,
+                        help="Longest wait (s) for finished runs' Lean processes to exit and memory to recover")
     parser.add_argument("--skip-preflight", action="store_true", help="Explicitly skip the Langfuse preflight gate")
     parser.add_argument("--dry-run", action="store_true")
     args, passthrough = parser.parse_known_args(argv)
@@ -288,10 +493,12 @@ def main(argv: list[str] | None = None) -> int:
     out = RUNS / f"{args.prefix}-campaign"
     out.mkdir(parents=True)
     # Workers take specs in plan order (replicate-major), so a stopped campaign still has balanced replicates.
+    housekeeping = Housekeeping(args.min_free_gb, args.cleanup_wait)
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
         runs = list(pool.map(lambda spec: execute(spec, args.cap, args.thinking, passthrough, out,
-                                                  expected[spec["row"]]), specs))
-    report = {"cap_usd": args.cap, "prefix": args.prefix, **aggregate(runs, expected)}
+                                                  expected[spec["row"]], housekeeping=housekeeping), specs))
+    report = {"cap_usd": args.cap, "prefix": args.prefix, **aggregate(runs, expected),
+              "lean_unhealthy_runs": [run["run_id"] for run in lean_unhealthy_rows(runs)]}
     (out / "campaign.json").write_text(json.dumps(report, indent=2) + "\n")
     text = render(report)
     (out / "campaign.txt").write_text(text)
