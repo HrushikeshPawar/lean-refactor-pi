@@ -29,6 +29,15 @@ class ModelConfigTests(unittest.TestCase):
                              row["request_output_tokens"], name)
         self.assertEqual(GOOD["models"]["deepseek-v4.1-flash"]["request_output_tokens"], 64000)
 
+    def test_deepseek_compaction_leaves_room_for_summary_and_output_turn(self):
+        row = GOOD["models"]["deepseek-v4.1-flash"]
+        self.assertEqual(row["compaction"]["at_tokens"], 850000)
+        reserve = row["context_window"] - row["compaction"]["at_tokens"]  # Pi: compact when context > window - reserve
+        overshoot = 25000  # one turn of tool results past the trigger
+        summary_cap = int(0.8 * reserve)  # Pi caps the summary output at 0.8 * reserveTokens
+        self.assertLess(row["compaction"]["at_tokens"] + overshoot + summary_cap, row["context_window"])
+        self.assertLess(row["compaction"]["at_tokens"] + overshoot + row["request_output_tokens"], row["context_window"])
+
     def test_required_keys_and_positive_numbers(self):
         luna = lambda config: config["models"]["gpt-6-luna"]
         self.broken(lambda c: c.pop("provider"))
