@@ -40,12 +40,11 @@ Elaboration cost is concentrated, not spread evenly. Use `arena_profile` before 
 lines or tactic blocks hold the heartbeats and what share of the total they are. After a change, profile again
 to see whether cost moved or disappeared. Facts that usually hold:
 
-- Search-style tactics (`simp_all`, `simp at *`, `grind`, `aesop`, `omega`/`decide` over big contexts) cost
-  far more than explicit terms and `simp only [...]` with named lemmas.
-- Cost scales with context size: clearing or avoiding large hypotheses before an expensive tactic helps.
+- A tactic's heartbeat cost depends on the goal and context it runs on, not on the tactic's name alone;
+  `arena_profile` reports heartbeats per line, so measure a tactic on your own goal.
+- Cost scales with context size: the same tactic can cost more with many or large hypotheses in scope.
 - A tactic that runs inside `<;>` or a `case` runs once per goal, so its cost multiplies.
-- Replacing one expensive tactic with several cheap ones can win heartbeats and lose tokens; the exchange
-  rates tell you whether it is worth it.
+- A change can lower heartbeats and raise tokens, or the reverse; the exchange rates show the net effect.
 - Heartbeat counts vary slightly from run to run; treat differences of a few heartbeats as noise.
 
 ## Compatibility
@@ -57,7 +56,7 @@ newer ones accept, and simp normal forms drift between versions. Rules learned t
   ones. If a full check fails on one version, read that version's diagnostics before retrying.
 - Prefer long-stable names and tactics; avoid relying on auto-generated hypothesis names.
 - A proof that leans on the exact `simp` set may close on one version and leave a different goal on another;
-  `simp only [...]` with explicit lemmas is more portable.
+  the full check reports which versions differ.
 - One lost version costs about as many points as dozens of tokens. A candidate is only an improvement once
   the harness reports that it passes every version.
 
@@ -70,8 +69,8 @@ top-level commands or auxiliary declarations, and anything outside the one theor
 
 ## Tool workflow
 
-1. Survey the supplied references and pinned source (look for lemma families next to the ones the
-   reference proof uses, and for imported library lemmas whose statements match the goal: the packet ranks them), then use one concise `arena_idea` to record the route you will try. It becomes the current idea; probes, evaluations, and candidates inherit it unless you
+1. Survey the supplied references and pinned source (the packet ranks imported library
+   declarations by how closely their statements match the goal), then use one concise `arena_idea` to record the route you will try. It becomes the current idea; probes, evaluations, and candidates inherit it unless you
    explicitly choose another. You can also pass `idea` (a one-line route title) to your first
    `arena_probe` or `arena_evaluate` to create it and link that attempt in one call. Update or abandon it with a short reason when evidence changes your plan.
 2. `arena_probe`: develop a structural rewrite hole by hole. `sorry` is allowed; you get the goal at each
