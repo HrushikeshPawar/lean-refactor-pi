@@ -71,16 +71,22 @@ test("headroom reports the per-axis saving against the original", () => {
   assert.equal(headroom.tokens_vs_lowest_seen, 188);
 });
 
-test("a refused finish lists routes tried, headroom and demands a structurally new idea", () => {
+test("a refused finish states spend, the 10% rule and per-axis points left, with no directions", () => {
   const push = finishPush(base);
-  for (const text of ["60% of the $0.1 allowance", "no value", "10% or less", "i1", "5 attempts", "best proxy 67.2",
-    "tokens saved 16%", "heartbeats saved 92%", "structurally NEW idea",
-    "before calling arena_finish again"]) {
-    assert.ok(push.message.includes(text), `missing: ${text}`);
+  assert.equal(push.message, "Stop refused: $0.04 of $0.1 spent, $0.06 (60%) left. A finish confirm is accepted once 10% or less of the allowance remains. " +
+    'Ideas tried: i1 "induction" (5 attempts, best proxy 67.2); i2 "token-golf" (1 attempt, best proxy none). ' +
+    "Current best, saving vs the original and score points not yet earned per axis: tokens 16% saved, 28.0 pts left; heartbeats 92% saved, 2.7 pts left.");
+  for (const banned of ["credited", "micro-golf", "structurally", "NEW", "must", "should", "before calling arena_finish again", "no value"]) {
+    assert.ok(!push.message.includes(banned), `unexpected: ${banned}`);
   }
-  assert.ok(!push.message.includes("without probing any new idea"));
-  assert.ok(finishPush({ ...base, refusals: 1, newIdeaProbed: false }).message.includes("without probing any new idea"));
-  assert.ok(!finishPush({ ...base, refusals: 1, newIdeaProbed: true }).message.includes("without probing any new idea"));
+});
+
+test("a repeat refusal is the same facts, and its size is capped", () => {
+  assert.equal(finishPush({ ...base, refusals: 3, newIdeaProbed: false }).message, finishPush(base).message);
+  const many = Array.from({ length: 400 }, (_, i) => ({ route: `r${i}`, label: "x", attempts: 3, best_proxy: 50.5, best_candidate: `#${i}` }));
+  const big = finishPush({ ...base, routes: many });
+  assert.ok(big.message.length <= 1500, String(big.message.length));
+  assert.ok(big.message.startsWith("Stop refused: $0.04 of $0.1 spent"));
 });
 
 test("the plain-answer continuation pushes a new structural route", () => {
@@ -112,17 +118,9 @@ test("routes come from the harness fingerprint, not from idea titles", () => {
   assert.equal(routesText([]), "none");
   const push = finishPush({ ...base, ideas: [{ id: "i9", title: "brand new idea", status: "active", attempts: 3 }], routes, refusals: 0, newIdeaProbed: true });
   assert.ok(push.message.includes("Routes tried: r1"));
-  assert.ok(push.message.includes("Only one route has been tried so far"));
   assert.ok(!push.message.includes("brand new idea"));
   assert.ok(!push.message.includes("InitStatesSomeMonotone"));
   assert.equal(push.tried.length, 1);
-});
-
-test("a repeat finish without a compiled proof on a new route is called out", () => {
-  const repeat = finishPush({ ...base, routes, refusals: 1, newIdeaProbed: true, newRouteProbed: false });
-  assert.ok(repeat.message.includes("renaming or re-labelling an idea does not count"));
-  const fresh = finishPush({ ...base, routes, refusals: 1, newIdeaProbed: false, newRouteProbed: true });
-  assert.ok(!fresh.message.includes("renaming or re-labelling"));
 });
 
 test("the continuation push lists the routes tried", () => {
@@ -148,24 +146,6 @@ test("since the last refusal: attempts, goal states new to their route and credi
   assert.deepEqual(sinceRefusal(deep, before, new Set(["r2"])), { attempts: 5, newStates: 1, creditedOpened: 1 });
   assert.deepEqual(sinceRefusal(deep, { r1: { attempts: 1, new_states: 0 }, r2: { attempts: 34, new_states: 7 }, r3: { attempts: 1, new_states: 1 } }, new Set(["r2", "r3"])),
     { attempts: 0, newStates: 0, creditedOpened: 0 });
-});
-
-test("a repeat refusal states the measured fact when nothing new was reached, and says nothing when something was", () => {
-  const stalled = finishPush({ ...base, routes: deep, refusals: 1, newIdeaProbed: true, sinceRefusal: { attempts: 4, newStates: 0, creditedOpened: 0 } });
-  assert.ok(stalled.message.includes("4 attempts since the last refusal produced no goal state new to their route"), stalled.message);
-  assert.ok(stalled.message.includes("edits that leave the same goals do not count"));
-  assert.ok(stalled.message.includes("7 goal states"));
-  assert.ok(!stalled.message.includes("structurally NEW idea"));
-  const single = finishPush({ ...base, routes: deep, refusals: 1, newIdeaProbed: true, sinceRefusal: { attempts: 1, newStates: 0, creditedOpened: 0 } });
-  assert.ok(single.message.includes("1 attempt since the last refusal produced no goal state new to its route"));
-  assert.ok(finishPush({ ...base, routes: deep, refusals: 1, newIdeaProbed: false, sinceRefusal: { attempts: 0, newStates: 0, creditedOpened: 0 } })
-    .message.includes("No attempt was made since the last refusal"));
-  for (const progress of [{ attempts: 1, newStates: 1, creditedOpened: 0 }, { attempts: 1, newStates: 0, creditedOpened: 1 }]) {
-    const moved = finishPush({ ...base, routes: deep, refusals: 1, newIdeaProbed: false, sinceRefusal: progress });
-    assert.ok(!moved.message.includes("do not count") && !moved.message.includes("No attempt was made"), moved.message);
-  }
-  // The first refusal never carries the repeat sentence.
-  assert.ok(!finishPush({ ...base, routes: deep, refusals: 0, newIdeaProbed: false, sinceRefusal: { attempts: 0, newStates: 0, creditedOpened: 0 } }).message.includes("since the last refusal"));
 });
 
 test("a stale notice is one factual line, once per streak", () => {

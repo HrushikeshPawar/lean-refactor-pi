@@ -14,7 +14,7 @@ import { DeltaChain } from "./journal.ts";
 import { objectToolArguments, ResultTrimmer } from "./trim.ts";
 import { continuationPush, finishPush, routesText, trimProfile, leanPathViolation, planEvaluate, resolveInlineIdea, planProbe, sinceRefusal, staleNotice } from "./rules.ts";
 import type { RouteStats } from "./rules.ts";
-import { assessFinalPayload, compactionPayload, BUDGET_PROVIDER, budgetLimits, softCapGate, cacheAlarm, catalogPriceProblem, cacheUtilization, finishAllowed, enforcedMaxTokens, isBudgetModel, maxRequestOutputTokens, MODELS, PROVIDER, priceForUsage, requestShape, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
+import { assessFinalPayload, compactionPayload, BUDGET_PROVIDER, budgetLimits, softCapGate, cacheAlarm, catalogPriceProblem, cacheUtilization, finishAllowed, budgetFooter, enforcedMaxTokens, isBudgetModel, maxRequestOutputTokens, MODELS, PROVIDER, priceForUsage, requestShape, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
 
 const root = resolve(import.meta.dirname, "../../..");
 const workspaces = resolve(root, "workspaces");
@@ -873,7 +873,10 @@ export default function arenaExtension(pi: ExtensionAPI) {
     if (changed) untrimmed.set(event.toolCallId, event.content.filter(part => part.type === "text" && part.text)
       .map(part => (part as { text: string }).text).join("\n"));
     const state = readState();
-    const line = state && stateLine(state);
+    const stateText = state && stateLine(state);
+    let spend = "";
+    try { spend = budgetFooter(costState().spent, budgetLimits()); } catch { /* the footer is best effort */ }
+    const line = spend ? (stateText ? `${stateText} \u00b7 ${spend}` : `[arena] ${spend}`) : stateText;
     if (!line && !changed) return;
     return { content: line ? [...content, { type: "text" as const, text: line }] : content,
       details: event.details, isError: event.isError };
@@ -1098,7 +1101,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
 
   registerTool({
     name: "arena_finish", label: "Review and finish the Arena run",
-    description: "Request to stop the run. You may stop only when 10% or less of the spend allowance is left; unspent allowance has no value. Earlier, the call is refused with the routes tried, the per-axis headroom and an instruction to record and probe a structurally new idea; each further confirm needs a credited route to have opened or an attempt to have produced a goal state new to its route since the last refusal. With 10% or less left, the first call returns one factual review (with at most one reminder if the current idea has no proof attempt) and a second call after the decision turn confirms the stop; finishing is final for this run.",
+    description: "Request to stop the run. A confirm is accepted once 10% or less of the spend allowance remains. Before that, the call is refused with the amount spent and left, the routes tried and the current best's saving per score axis (compat, tokens, heartbeats). With 10% or less left, the first call returns one factual review (with at most one reminder if the current idea has no proof attempt) and a second call after the decision turn confirms the stop; finishing is final for this run.",
     parameters: Type.Object({}),
     async execute() {
       if (finishConfirmed) return reply({ ok: true, phase: "confirmed", stop: true });
@@ -1130,7 +1133,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
       }
       const reminderText = reminder ? `Idea ${idea.id} has no linked proof attempt; probe it or abandon it before finishing.` : null;
       if (!room.allowed) {
-        // More than 10% of the allowance is left: refuse and push for a structurally new route.
+        // More than 10% of the allowance is left: refuse, stating the facts.
         const newIdeaProbed = ideaRows.some(row => row.attempts > 0 && !refusalIdeaIds.has(String(row.id)));
         const routeRows: any[] = portfolio.routes ?? [];
         const since = sinceRefusal(routeRows, refusalRouteStats, refusalCredited);
@@ -1143,7 +1146,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
         refusalCredited = new Set(routeRows.filter(row => row.credited).map(row => String(row.route)));
         appendCost({ kind: "finish", phase: "refused", refusals: finishRefusals, idea_ids: [...refusalIdeaIds], route_stats: refusalRouteStats, credited_ids: [...refusalCredited],
           new_idea_probed: newIdeaProbed, since_refusal: since, remaining_fraction: Number(room.remainingFraction.toFixed(4)) });
-        // `next` already carries the routes tried, the headroom and the route-credit rule; nothing is echoed twice.
+        // `next` already carries the spend, the routes tried and the headroom; nothing is echoed twice.
         return reply(dropEmpty({ ok: true, phase: firstReview ? "review" : "refused", stop: false, refused: true,
           remaining_usd: budget.remaining_usd, reminder: reminderText, next: push.message }));
       }

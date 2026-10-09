@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import "./testmodels.ts";
-import { assessFinalPayload, compactionPayload, boundedPayload, budgetGate, softCapGate, catalogPriceProblem, cacheAlarm, budgetLimits, cacheUtilization, finishAllowed, FINISH_ALLOWED_REMAINING_FRACTION, enforcedMaxTokens, maxRequestOutputTokens, MODELS, parseModelConfig, PROVIDER, requestShape, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
+import { assessFinalPayload, compactionPayload, boundedPayload, budgetGate, softCapGate, catalogPriceProblem, cacheAlarm, budgetLimits, budgetFooter, cacheUtilization, finishAllowed, FINISH_ALLOWED_REMAINING_FRACTION, enforcedMaxTokens, maxRequestOutputTokens, MODELS, parseModelConfig, PROVIDER, requestShape, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
 
 const usage = { input: 1_000_000, output: 100_000, cacheRead: 0, cacheWrite: 0 };
 const LUNA = MODELS["gpt-6-luna"], DEEPSEEK = MODELS["deepseek-v4.1-flash"], QWEN = MODELS["qwen3.8-flash"];
@@ -267,4 +267,10 @@ test("compaction summary payloads bypass the window check and never refuse, only
   const odd = compactionPayload({ model: "x", input: "y".repeat(1000) }, "deepseek-v4.1-flash");
   assert.ok(odd.reserve > 0);
   assert.throws(() => boundedPayload({ model: "x" }, "deepseek-v4.1-flash"), /Cannot enforce/);
+});
+
+test("the footer line states settled spend against the allowance", () => {
+  const limits = { stopUsd: 0.5 } as any;
+  assert.equal(budgetFooter(0.21, limits), "budget: $0.21 of $0.50 spent \u00b7 58% left");
+  assert.equal(budgetFooter(0.6, limits), "budget: $0.60 of $0.50 spent \u00b7 0% left");
 });

@@ -319,3 +319,9 @@ export function finishAllowed(settledUsd: number, limits: BudgetLimits) {
   const remainingFraction = limits.stopUsd > 0 ? remainingUsd / limits.stopUsd : 0;
   return { allowed: remainingFraction <= FINISH_ALLOWED_REMAINING_FRACTION + 1e-12, remainingUsd, remainingFraction };
 }
+
+/** One factual footer line: settled spend against the allowance. No advice. */
+export function budgetFooter(settledUsd: number, limits: BudgetLimits): string {
+  const left = limits.stopUsd > 0 ? Math.max(0, Math.round(100 * (1 - settledUsd / limits.stopUsd))) : 0;
+  return `budget: $${settledUsd.toFixed(2)} of $${limits.stopUsd.toFixed(2)} spent \u00b7 ${left}% left`;
+}

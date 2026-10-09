@@ -174,30 +174,20 @@ export function finishPush(input: FinishPushInput) {
   const triedText = byRoute ? routesText(input.routes!) : tried.length
     ? tried.map(item => `${item.id} "${item.title ?? ""}" (${item.attempts} attempt${item.attempts === 1 ? "" : "s"}, best proxy ${item.best_proxy ?? "none"})`).join("; ")
     : "none recorded";
-  const head = `Stop refused: ${Math.max(0, 100 - input.usedPct)}% of the $${input.capUsd} allowance ($${input.remainingUsd.toFixed(4)}) is unspent, ` +
-    "and unspent allowance has no value. You may finish only when 10% or less is left.";
-  const since = input.sinceRefusal;
-  const measured = byRoute && since !== undefined;
-  const probedNew = measured ? since.creditedOpened > 0 || since.newStates > 0 : byRoute ? Boolean(input.newRouteProbed) : input.newIdeaProbed;
-  const repeat = input.refusals > 0 && !probedNew
-    ? measured
-      ? since.attempts === 0
-        ? " No attempt was made since the last refusal. "
-        : ` ${since.attempts} attempt${since.attempts === 1 ? "" : "s"} since the last refusal produced no goal state new to ${since.attempts === 1 ? "its" : "their"} route and opened no route; edits that leave the same goals do not count. `
-      : byRoute
-      ? " You called arena_finish again without compiling a proof on a new route since the last refusal; renaming or re-labelling an idea does not count, the harness fingerprints routes from your compiled proofs. "
-      : " You called arena_finish again without probing any new idea since the last refusal; that does not count as work. "
-    : " ";
-  const axes = `Headroom against the original: tokens saved ${pct(headroom.tokens_saved_pct)}, heartbeats saved ${pct(headroom.heartbeats_saved_pct)}` +
-    (headroom.tokens_vs_lowest_seen !== null ? ` (lowest seen: ${headroom.tokens_vs_lowest_seen} tok, ${headroom.heartbeats_vs_lowest_seen} HB)` : "") +
-    ". The axis with the smaller saving has the most points left; a micro-golf of the current proof will not close it.";
-  const instruction = "Record a structurally NEW idea with arena_idea now: a different proof strategy, not a variant or golf of a route already tried. " +
-    "Then probe it with arena_probe or arena_evaluate before calling arena_finish again; a confirm without new proof attempts on a new idea is refused again.";
-  const measuredInstruction = `${ROUTE_RULE} Make proof attempts with arena_probe or arena_evaluate before calling arena_finish again; a repeat confirm is refused again ` +
-    "unless a credited route opened or an attempt produced a goal state new to its route since this refusal.";
-  const single = byRoute && tried.length <= 1 ? " Only one route has been tried so far." : "";
-  return { headroom, tried, message: `${head}${repeat}Routes tried: ${triedText}.${single} ${axes} ${measured ? measuredInstruction : instruction}` };
+  const spentPct = Math.min(100, Math.max(0, input.usedPct));
+  const head = `Stop refused: $${(input.capUsd * spentPct / 100).toFixed(2)} of $${input.capUsd} spent, $${input.remainingUsd.toFixed(2)} (${Math.max(0, 100 - spentPct)}%) left. ` +
+    "A finish confirm is accepted once 10% or less of the allowance remains.";
+  // Each axis is a third of the score: points not yet earned = (100 - saved%) / 3.
+  const left = (value: number | null) => value === null ? "unknown" : `${((100 - value) / 3).toFixed(1)}`;
+  const axes = `Current best, saving vs the original and score points not yet earned per axis: tokens ${pct(headroom.tokens_saved_pct)} saved, ${left(headroom.tokens_saved_pct)} pts left; ` +
+    `heartbeats ${pct(headroom.heartbeats_saved_pct)} saved, ${left(headroom.heartbeats_saved_pct)} pts left.`;
+  const routesLine = byRoute ? `Routes tried: ${triedText}.` : `Ideas tried: ${triedText}.`;
+  const message = `${head} ${routesLine} ${axes}`;
+  return { headroom, tried, message: message.length > FINISH_MESSAGE_MAX ? `${message.slice(0, FINISH_MESSAGE_MAX - 1)}\u2026` : message };
 }
+
+/** The refusal never grows with the run: it states a handful of facts. */
+export const FINISH_MESSAGE_MAX = 1500;
 
 // What the harness credits, stated as its measurement only: it never suggests which structure to try.
 export const ROUTE_RULE = "The harness fingerprints each attempt's compiled proof term: a proof whose structure matches no route tried so far " +
