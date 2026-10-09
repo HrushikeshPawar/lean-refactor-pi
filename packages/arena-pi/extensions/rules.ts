@@ -164,8 +164,10 @@ export function axisHeadroom(baseline: Metrics, best: Metrics, top: Metrics[] = 
 function allowanceFacts(usedPct: number, remainingUsd: number, capUsd: number, headroom: ReturnType<typeof axisHeadroom>) {
   const pct = (value: number | null) => value === null ? "unknown" : `${value}%`;
   const spentPct = Math.min(100, Math.max(0, usedPct));
-  const spend = `$${(capUsd * spentPct / 100).toFixed(2)} of $${capUsd} spent, $${remainingUsd.toFixed(2)} (${Math.max(0, 100 - spentPct)}%) left. ` +
-    "A finish confirm is accepted once 10% or less of the allowance remains.";
+  // The left share comes from the unrounded remainder, to one decimal, so it matches the gate (10.7% never reads as 11%).
+  const leftPct = capUsd > 0 ? Math.min(100, Math.max(0, 100 * remainingUsd / capUsd)) : 0;
+  const spend = `$${(capUsd * spentPct / 100).toFixed(2)} of $${capUsd} spent, $${remainingUsd.toFixed(2)} (${leftPct.toFixed(1)}%) left. ` +
+    `Stop condition: arena_finish is accepted when $${(capUsd * 0.1).toFixed(2)} (10%) or less of the allowance remains.`;
   // Each axis is a third of the score: points not yet earned = (100 - saved%) / 3.
   const left = (value: number | null) => value === null ? "unknown" : `${((100 - value) / 3).toFixed(1)}`;
   const axes = `Current best, saving vs the original and score points not yet earned per axis: tokens ${pct(headroom.tokens_saved_pct)} saved, ${left(headroom.tokens_saved_pct)} pts left; ` +

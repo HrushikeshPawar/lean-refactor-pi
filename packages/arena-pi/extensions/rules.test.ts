@@ -73,7 +73,7 @@ test("headroom reports the per-axis saving against the original", () => {
 
 test("a refused finish states spend, the 10% rule and per-axis points left, with no directions", () => {
   const push = finishPush(base);
-  assert.equal(push.message, "Stop refused: $0.04 of $0.1 spent, $0.06 (60%) left. A finish confirm is accepted once 10% or less of the allowance remains. " +
+  assert.equal(push.message, "Stop refused: $0.04 of $0.1 spent, $0.06 (60.0%) left. Stop condition: arena_finish is accepted when $0.01 (10%) or less of the allowance remains. " +
     'Ideas tried: i1 "induction" (5 attempts, best proxy 67.2); i2 "token-golf" (1 attempt, best proxy none). ' +
     "Current best, saving vs the original and score points not yet earned per axis: tokens 16% saved, 28.0 pts left; heartbeats 92% saved, 2.7 pts left.");
   for (const banned of ["credited", "micro-golf", "structurally", "NEW", "must", "should", "before calling arena_finish again", "no value"]) {
@@ -92,7 +92,7 @@ test("a repeat refusal is the same facts, and its size is capped", () => {
 test("the plain-answer continuation states the same facts as the refusal, with no directions", () => {
   const input = { usedPct: 40, remainingUsd: 0.06, capUsd: 0.1, baseline: base.baseline, best: base.best, top: base.top };
   const text = continuationPush(input);
-  assert.equal(text, "The turn ended with text and no tool call. $0.04 of $0.1 spent, $0.06 (60%) left. A finish confirm is accepted once 10% or less of the allowance remains. " +
+  assert.equal(text, "The turn ended with text and no tool call. $0.04 of $0.1 spent, $0.06 (60.0%) left. Stop condition: arena_finish is accepted when $0.01 (10%) or less of the allowance remains. " +
     "Current best, saving vs the original and score points not yet earned per axis: tokens 16% saved, 28.0 pts left; heartbeats 92% saved, 2.7 pts left.");
   const withRoutes = continuationPush({ ...input, routes: [{ route: "r1", label: "x", original: true, attempts: 4, best_proxy: 69.1, best_candidate: "#7" }] });
   assert.ok(withRoutes.includes("Routes tried: r1 (original's route)"));
@@ -165,4 +165,11 @@ test("a stale notice is one factual line, once per streak", () => {
   assert.equal(staleNotice(row(9), noticed), undefined);
   assert.equal(staleNotice(row(0), noticed), undefined);  // a new goal state breaks the streak
   assert.equal(staleNotice(row(5), noticed), "[arena] r2: the last 5 attempts left goal states already seen on this route.");
+});
+
+
+test("the left share is the unrounded remainder to one decimal, matching the gate", () => {
+  const text = continuationPush({ usedPct: 89, remainingUsd: 0.0535, capUsd: 0.5, baseline: null, best: null });
+  assert.ok(text.includes("$0.05 (10.7%) left."), text);
+  assert.ok(text.includes("accepted when $0.05 (10%) or less"), text);
 });
