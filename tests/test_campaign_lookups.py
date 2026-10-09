@@ -9,6 +9,21 @@ from arena import campaign
 from arena.engine import ROOT
 
 
+class LeanNameTests(unittest.TestCase):
+    def test_accepts_lean_identifiers(self):
+        for name in ("ι_timeOrderF_superCommuteF_eq_time", "Binius.BinaryBasefold.fold_advances_evaluation_poly",
+                     "foo₀", "h'", "α.β", "«weird name»", "A.«b c».d", "x!", "y?", "a_1ᵢ", "ℝ.foo"):
+            self.assertTrue(campaign._LEAN_NAME.fullmatch(name), name)
+
+    def test_rejects_non_identifiers(self):
+        for name in ("a b", "a;b", "", "a..b", ".a", "a.", "1a", "a$(x)", "a`b", "a|b", "a\nb", "«»", "a/b"):
+            self.assertFalse(campaign._LEAN_NAME.fullmatch(name), repr(name))
+
+    def test_source_declarations_see_unicode_names(self):
+        self.assertEqual([name for _, name in campaign._source_declarations(["theorem ι_foo : True := trivial"])],
+                         ["ι_foo"])
+
+
 class SourceHandleTests(unittest.TestCase):
     def setUp(self):
         self.row = {"name": "Target", "source": "strata", "file_path": "Strata/Target.lean",

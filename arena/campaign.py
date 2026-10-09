@@ -321,7 +321,7 @@ def _find(name: str, queries: list[str], limit: int) -> dict:
     project = workspace(row, version, commit)
     roots = _roots(project, commit)
     needles = [query[5:] if query.startswith("decl:") else query for query in queries]
-    named = [bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_'.]*", needle)) for needle in needles]
+    named = [bool(re.fullmatch(_LEAN_NAME, needle)) for needle in needles]
     # A name the kickoff index holds exactly resolves without searching the source trees.
     pending = [needle for needle, is_name in zip(needles, named)
                if not (is_name and any(item["name"] == needle for item in entries))]
@@ -533,13 +533,18 @@ def _source_target(project: Path, commit: str, path: str,
     raise ValueError(f"{path} does not exist in the pinned project or its dependency roots")
 
 
+# One Lean 4 identifier: dotted components, each a Unicode letter or `_` followed by letters, digits,
+# subscripts, `_`, `'`, `!`, `?`, or a «...» escape.
+_LEAN_COMPONENT = r"(?:[^\W\d]\w*(?:['!?]\w*)*['!?]*|«[^«»\r\n]+»)"
+_LEAN_NAME_BODY = _LEAN_COMPONENT + r"(?:\." + _LEAN_COMPONENT + r")*"
+_LEAN_NAME = re.compile(_LEAN_NAME_BODY)
 _DECLARATION_PATTERN = re.compile(
     r"^\s*(?:@\[[^\]]*\]\s*)*(?:(?:private|protected|noncomputable|nonrec|unsafe|partial)\s+)*"
     r"(?:theorem|lemma|def|opaque|example|instance|abbrev|inductive|structure|class|axiom)\s+"
-    r"([A-Za-z_][A-Za-z0-9_'.]*)")
+    r"(" + _LEAN_NAME_BODY + r")")
 _SCOPE_PATTERN = re.compile(
-    r"^\s*(?:@\[[^\]]*\]\s*)*(?:(?:public|noncomputable|meta)\s+)*(namespace|section)\b(?:\s+([A-Za-z_][A-Za-z0-9_'.]*))?\s*$")
-_END_PATTERN = re.compile(r"^\s*end(?:\s+([A-Za-z_][A-Za-z0-9_'.]*))?\s*$")
+    r"^\s*(?:@\[[^\]]*\]\s*)*(?:(?:public|noncomputable|meta)\s+)*(namespace|section)\b(?:\s+(" + _LEAN_NAME_BODY + r"))?\s*$")
+_END_PATTERN = re.compile(r"^\s*end(?:\s+(" + _LEAN_NAME_BODY + r"))?\s*$")
 # The same shape for `git grep -E`, which only needs declaration lines and never body text.
 _DECLARATION_GREP = (r"^[[:space:]]*(@\[[^]]*\][[:space:]]*)*((private|protected|noncomputable|nonrec|unsafe|partial)"
                      r"[[:space:]]+)*(theorem|lemma|def|opaque|instance|abbrev|inductive|structure|class|axiom)[[:space:]]+")
@@ -646,7 +651,7 @@ def _declaration_hits(roots: list[tuple[Path, str, str]], needles: list[str]) ->
     """
     alternatives = []
     for needle in needles:
-        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_'.]*", needle):
+        if re.fullmatch(_LEAN_NAME, needle):
             parts = needle.split(".")
             alternatives.append(_DECLARATION_GREP + r"[^[:space:]]*" + _alternation(parts[-1]))
             if len(parts) > 1:
@@ -697,7 +702,7 @@ def _resolve_declaration_source(name: str, symbol: str, module: str | None = Non
     search; otherwise only declaration lines mentioning the name are searched. An exact qualified
     match wins; several distinct qualified matches raise AmbiguousDeclaration.
     """
-    if not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9'.]*", symbol):
+    if not re.fullmatch(_LEAN_NAME, symbol):
         raise ValueError("Invalid declaration name")
     row = problem(name)
     version, commit = measure_version(row)
@@ -789,7 +794,7 @@ def _source_declaration(name: str, symbol: str) -> dict:
     """Resolve a source-backed declaration without invoking Lean for a missing name."""
     if symbol.startswith("decl:"):
         symbol = symbol[5:]
-    if not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9'.]*", symbol):
+    if not re.fullmatch(_LEAN_NAME, symbol):
         raise ValueError("Invalid declaration name")
     source_symbol, module, span = _source_hint(name, symbol)
     try:
