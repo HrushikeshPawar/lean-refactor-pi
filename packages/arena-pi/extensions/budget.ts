@@ -231,7 +231,8 @@ const THINKING_ANSWER_TOKENS = 1024;
 // The last settled request: its payload size and the input tokens the provider counted for it.
 export type PriorRequest = { bytes: number; inputTokens: number };
 
-export function boundedPayload(payload: unknown, model: BudgetModel, prior?: PriorRequest): { payload: Record<string, unknown>; reserve: number } {
+export function boundedPayload(payload: unknown, model: BudgetModel, prior?: PriorRequest,
+    skipWindowCheck = false): { payload: Record<string, unknown>; reserve: number } {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error("Unknown provider payload");
   const value = { ...payload as Record<string, unknown> };
   const outputField = typeof value.max_output_tokens === "number" ? "max_output_tokens"
@@ -258,11 +259,28 @@ export function boundedPayload(payload: unknown, model: BudgetModel, prior?: Pri
   const inputBound = prior && prior.inputTokens > 0 && bytes >= prior.bytes
     ? Math.min(byteBound, prior.inputTokens + (bytes - prior.bytes) + 4096) : byteBound;
   // Worded so Pi recognises a context overflow and compacts, then retries, instead of failing the turn.
-  if (inputBound > MODELS[model].contextWindow) throw new Error("Arena context bound exceeds the context window");
+  if (!skipWindowCheck && inputBound > MODELS[model].contextWindow) throw new Error("Arena context bound exceeds the context window");
   const price = MODELS[model].highPrice ?? MODELS[model].price;
   const reserve = inputBound * Math.max(price.input, price.cacheRead, price.cacheWrite) / 1_000_000
     + Number(value[outputField]) * price.output / 1_000_000;
   return { payload: value, reserve };
+}
+
+// Compaction summary requests are always within budget: no window check, no gate, and they never
+// refuse. This only yields the ledger reserve, a pure byte-bound estimate (the summary payload is not
+// a growth of any prior request, so no token count applies). Output is clamped to the run-wide limit
+// when the payload carries one; a payload shape the bound cannot normalize is passed through as is.
+export function compactionPayload(payload: unknown, model: BudgetModel): { payload: unknown; reserve: number } {
+  let value = payload, output = maxRequestOutputTokens(model);
+  try {
+    const bounded = boundedPayload(payload, model, undefined, true);
+    value = bounded.payload;
+    return { payload: value, reserve: bounded.reserve };
+  } catch { /* not normalizable; estimate from its size below */ }
+  const bytes = Buffer.byteLength(JSON.stringify(value ?? null), "utf8");
+  const price = MODELS[model].highPrice ?? MODELS[model].price;
+  return { payload: value, reserve: (bytes + 4096) * Math.max(price.input, price.cacheRead, price.cacheWrite) / 1_000_000
+    + output * price.output / 1_000_000 };
 }
 
 export function assessFinalPayload(payload: unknown, model: BudgetModel,

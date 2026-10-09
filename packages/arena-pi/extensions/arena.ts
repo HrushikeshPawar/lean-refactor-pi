@@ -14,7 +14,7 @@ import { DeltaChain } from "./journal.ts";
 import { objectToolArguments, ResultTrimmer } from "./trim.ts";
 import { continuationPush, finishPush, routesText, trimProfile, leanPathViolation, planEvaluate, resolveInlineIdea, planProbe, sinceRefusal, staleNotice } from "./rules.ts";
 import type { RouteStats } from "./rules.ts";
-import { assessFinalPayload, BUDGET_PROVIDER, budgetLimits, softCapGate, cacheAlarm, catalogPriceProblem, cacheUtilization, finishAllowed, isBudgetModel, maxRequestOutputTokens, MODELS, PROVIDER, priceForUsage, requestShape, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
+import { assessFinalPayload, compactionPayload, BUDGET_PROVIDER, budgetLimits, softCapGate, cacheAlarm, catalogPriceProblem, cacheUtilization, finishAllowed, isBudgetModel, maxRequestOutputTokens, MODELS, PROVIDER, priceForUsage, requestShape, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
 
 const root = resolve(import.meta.dirname, "../../..");
 const workspaces = resolve(root, "workspaces");
@@ -161,6 +161,11 @@ export default function arenaExtension(pi: ExtensionAPI) {
   // Payload bytes per open request, and the last settled one, for the context bound.
   const requestBytes = new Map<string, number>();
   let priorRequest: PriorRequest | undefined;
+  // True from session_before_compact until session_compact / session_compact_failed. Compaction is a
+  // necessary step and always within budget: its summary requests skip the window check and every gate
+  // but are still reserved and settled, so spend stays exact. Agent turns are never affected.
+  let compacting = false;
+  const compactionRequests = new Set<string>();
   let fixedRequestShape: string | undefined;
   let gateStopReason: string | undefined;
   let gateStopCode: "soft_cap_reached" | "actual_usage_cap" | "estimated_request_unaffordable" | undefined;
@@ -422,7 +427,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
       }
       const priceProblem = catalogPriceProblem(model.id, physical.cost);
       if (priceProblem) throw new Error(priceProblem);
-      if (finishConfirmed || (process.env.ARENA_AUTOCONTINUE === "1" && noWorkTurns >= 2)) {
+      if (!compacting && (finishConfirmed || (process.env.ARENA_AUTOCONTINUE === "1" && noWorkTurns >= 2))) {
         const stopped = createAssistantMessageEventStream();
         const zeroCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
         const message = { role: "assistant" as const, content: [], api: model.api,
@@ -440,7 +445,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
         ...rest,
         maxTokens: Math.min(rest.maxTokens ?? maxRequestOutputTokens(model.id), maxRequestOutputTokens(model.id)),
         fetch: async (input, init) => {
-          if (gateStopReason) {
+          if (gateStopReason && !compacting) {
             throw new Error(`Arena budget stop: ${gateStopReason}`);
           }
           // Headers stay on the request. Only the body is journaled, after the SDK
@@ -455,6 +460,23 @@ export default function arenaExtension(pi: ExtensionAPI) {
           // the first is still open when the second starts. Both are real, billed and needed, so this is
           // bookkeeping of the first one, not a duplicate request. The second closes on session_compact.
           closeRequest(undefined, "superseded_by_next_request");
+          if (compacting) {
+            // No check and no gate. Reserve a byte-based estimate for the ledger only; actual usage settles on close.
+            const summary = compactionPayload(payload, model.id as BudgetModel);
+            const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+            const published = await options?.onPayload?.(summary.payload, physical) ?? summary.payload;
+            const bytes = Buffer.byteLength(JSON.stringify(published ?? null));
+            appendCost({ kind: "reserve", id, usd: summary.reserve, estimate_usd: summary.reserve, gate: "allow",
+              reason: "compaction summary bypasses the budget guard", purpose: "compaction", model: model.id, bytes });
+            requestBytes.set(id, bytes);
+            compactionRequests.add(id);
+            pendingRequest = id;
+            openAttempt = id;
+            wireIndex = 0;
+            appendTrace({ kind: "request", id, run_id: runId, retry_of: null, model: model.id,
+              estimate_usd: summary.reserve, gate_decision: "bypass_compaction", ...hookFields(published) });
+            return published;
+          }
           if (gateStopReason) throw new Error(`Arena budget stop: ${gateStopReason}`);
           // Normalize at a fixed run-wide output limit; never use the remaining
           // dollars to rewrite the provider request.
@@ -553,6 +575,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
   }
 
   pi.on("before_agent_start", (_event, ctx) => {
+    compacting = false;  // safety: an agent turn never inherits the bypass
     if (process.env.ARENA_BUDGET_REQUIRED !== "1") return;
     if (!active || ctx.model?.provider !== BUDGET_PROVIDER || !isBudgetModel(ctx.model.id)) {
       ctx.abort();
@@ -590,7 +613,8 @@ export default function arenaExtension(pi: ExtensionAPI) {
       usd = usageCost(usage, model);
       const bytes = requestBytes.get(pendingRequest);
       const inputTokens = (usage.input ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
-      if (bytes !== undefined && inputTokens > 0) priorRequest = { bytes, inputTokens };
+      // A summary request is not a prefix of the next agent request, so it must not seed the context bound.
+      if (bytes !== undefined && inputTokens > 0 && !compactionRequests.has(pendingRequest)) priorRequest = { bytes, inputTokens };
       boundViolation = usd > Number(state.usd);
       const limits = budgetLimits();
           const ledgerSettled = costEvents().filter(item => item.kind === "settle" && item.usage_known !== false)
@@ -642,6 +666,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
     }
     finalMessages.delete(pendingRequest);
     requestBytes.delete(pendingRequest);
+    compactionRequests.delete(pendingRequest);
     pendingRequest = undefined;
   }
   pi.on("message_end", event => {
@@ -649,12 +674,14 @@ export default function arenaExtension(pi: ExtensionAPI) {
   });
   // Compaction summaries are provider requests with no agent message_end.
   pi.on("session_compact", () => {
+    compacting = false;
     closeRequest(undefined, "compaction_summary");
     trimmer.forget();
     void injectMemory();
   });
-  pi.on("session_compact_failed", () => closeRequest(undefined, "compaction_failed"));
+  pi.on("session_compact_failed", () => { compacting = false; closeRequest(undefined, "compaction_failed"); });
   pi.on("session_before_compact", event => {
+    compacting = true;
     const fixed = objectToolArguments(event.preparation.messagesToSummarize) + objectToolArguments(event.preparation.turnPrefixMessages);
     if (fixed) appendTrace({ kind: "compaction_repair", null_tool_arguments: fixed });
   });

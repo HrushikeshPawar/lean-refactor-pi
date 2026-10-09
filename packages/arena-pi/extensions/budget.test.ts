@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import "./testmodels.ts";
-import { assessFinalPayload, boundedPayload, budgetGate, softCapGate, catalogPriceProblem, cacheAlarm, budgetLimits, cacheUtilization, finishAllowed, FINISH_ALLOWED_REMAINING_FRACTION, maxRequestOutputTokens, MODELS, parseModelConfig, PROVIDER, requestShape, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
+import { assessFinalPayload, compactionPayload, boundedPayload, budgetGate, softCapGate, catalogPriceProblem, cacheAlarm, budgetLimits, cacheUtilization, finishAllowed, FINISH_ALLOWED_REMAINING_FRACTION, maxRequestOutputTokens, MODELS, parseModelConfig, PROVIDER, requestShape, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
 
 const usage = { input: 1_000_000, output: 100_000, cacheRead: 0, cacheWrite: 0 };
 const LUNA = MODELS["gpt-6-luna"], DEEPSEEK = MODELS["deepseek-v4.1-flash"], QWEN = MODELS["qwen3.8-flash"];
@@ -242,4 +242,18 @@ test("a missing or invalid model config fails with a clear error", () => {
   const broken = structuredClone(good);
   broken.models["gpt-6-luna"].contextWindow = 0;
   assert.throws(() => parseModelConfig(JSON.stringify(broken)), /gpt-6-luna\.contextWindow must be a positive number/);
+});
+
+test("compaction summary payloads bypass the window check and never refuse, only reserve", () => {
+  const big = { model: "deepseek-v4.1-flash", max_tokens: 64_000,
+    messages: [{ role: "user", content: "x".repeat(DEEPSEEK.contextWindow + 10) }] };
+  // The agent-turn check is unchanged.
+  assert.throws(() => boundedPayload(big, "deepseek-v4.1-flash"), /exceeds the context window/);
+  const summary = compactionPayload(big, "deepseek-v4.1-flash");
+  assert.ok(summary.reserve > 0 && Number.isFinite(summary.reserve));
+  assert.equal((summary.payload as { max_tokens: number }).max_tokens, Math.min(64_000, maxRequestOutputTokens("deepseek-v4.1-flash")));
+  // A payload the bound cannot normalize (no output field) is passed through with a byte estimate.
+  const odd = compactionPayload({ model: "x", input: "y".repeat(1000) }, "deepseek-v4.1-flash");
+  assert.ok(odd.reserve > 0);
+  assert.throws(() => boundedPayload({ model: "x" }, "deepseek-v4.1-flash"), /Cannot enforce/);
 });
