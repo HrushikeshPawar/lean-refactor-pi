@@ -1421,6 +1421,12 @@ def _model_view(result: dict) -> dict:
     view = {key: result[key] for key in ("ok", "mode", "candidate", "probe", "tokens", "heartbeat",
             "idea_id", "cached", "candidate_path", "start_line", "end_line", "error", "notes",
             "full_check", "advisory", "scored", "contains_sorry", "goals") if result.get(key) not in (None, [], "")}
+    # `ok` says the tool ran; `compiled` says whether the draft compiled. On a failed compile the
+    # heartbeat is only the work done before the error, not a cost of the draft.
+    failed = any(not info.get("passed") for info in (result.get("compat") or {}).values())
+    if failed:
+        view = {("heartbeat_to_failure" if key == "heartbeat" else key): value for key, value in view.items()}
+        view["compiled"] = False
     metrics = result.get("metrics")
     if metrics and metrics.get("axes"):
         view["metrics"] = {key: metrics[key] for key in ("proxy", "estimated_proxy", "assumes_full_compat",
@@ -1434,7 +1440,7 @@ def _model_view(result: dict) -> dict:
         item = {"passed": bool(info.get("passed"))}
         for key in ("heartbeats", "diagnostics", "full_diagnostics_ref", "error"):
             if info.get(key) not in (None, [], ""):
-                item[key] = info[key]
+                item["heartbeats_to_failure" if key == "heartbeats" and not item["passed"] else key] = info[key]
         lean = info.get("lean") or {}
         if lean.get("path") == "session":
             item["lean"] = "session"

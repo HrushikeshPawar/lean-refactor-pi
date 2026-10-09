@@ -119,6 +119,22 @@ class FallbackTests(unittest.TestCase):
         self.assertNotIn("lean", view["v3"])
 
 
+    def test_model_view_labels_a_failed_draft_heartbeat_and_marks_it_not_compiled(self):
+        failed = {"ok": True, "heartbeat": 6834, "tokens": 42,
+                  "compat": {"v1": {"passed": False, "heartbeats": 6834}}}
+        view = campaign._model_view(failed)
+        self.assertIs(view["compiled"], False)
+        self.assertTrue(view["ok"])
+        self.assertEqual(view["heartbeat_to_failure"], 6834)
+        self.assertNotIn("heartbeat", view)
+        self.assertEqual(view["compat"]["v1"], {"passed": False, "heartbeats_to_failure": 6834})
+        good = campaign._model_view({"ok": True, "heartbeat": 10,
+                                     "compat": {"v1": {"passed": True, "heartbeats": 10}}})
+        self.assertEqual(good["heartbeat"], 10)
+        self.assertEqual(good["compat"]["v1"]["heartbeats"], 10)
+        self.assertNotIn("compiled", good)
+
+
 @slow
 class DaemonTests(unittest.TestCase):
     """The per-run daemon, without any Lean."""
