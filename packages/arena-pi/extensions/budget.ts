@@ -211,6 +211,15 @@ export function maxRequestOutputTokens(model: BudgetModel): number {
   return MODELS[model].requestOutputTokens;
 }
 
+/**
+ * Pi treats a `length` stop below `model.maxTokens` as context pressure and compacts (isRecoverableLength).
+ * Our own per-request limit ends turns below the physical limit, so Pi's models must advertise the limit we
+ * enforce. Messages carry the physical provider, so Pi resolves its maxTokens from that catalog model.
+ */
+export function enforcedMaxTokens(model: { maxTokens: number }, id: BudgetModel): void {
+  model.maxTokens = Math.min(model.maxTokens, maxRequestOutputTokens(id));
+}
+
 export function requestShape(payload: Record<string, unknown>): string {
   const hasThinking = Object.hasOwn(payload, "thinking");
   const hasReasoning = Object.hasOwn(payload, "reasoning");

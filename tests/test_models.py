@@ -21,6 +21,14 @@ class ModelConfigTests(unittest.TestCase):
         self.assertLessEqual(GOOD["models"]["gpt-6-luna"]["compaction"]["at_tokens"],
                              GOOD["models"]["gpt-6-luna"]["high_context_threshold"])
 
+    def test_pi_max_tokens_is_the_enforced_output_limit(self):
+        # Pi compacts on a `length` stop below the maxTokens it knows; arena.ts advertises the enforced limit.
+        for name, row in GOOD["models"].items():
+            self.assertLessEqual(row["request_output_tokens"], row["max_tokens"], name)
+            self.assertEqual(json.loads(models.pi_json())["models"][name]["requestOutputTokens"],
+                             row["request_output_tokens"], name)
+        self.assertEqual(GOOD["models"]["deepseek-v4.1-flash"]["request_output_tokens"], 64000)
+
     def test_required_keys_and_positive_numbers(self):
         luna = lambda config: config["models"]["gpt-6-luna"]
         self.broken(lambda c: c.pop("provider"))

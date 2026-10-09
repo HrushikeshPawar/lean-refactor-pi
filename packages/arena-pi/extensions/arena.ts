@@ -14,7 +14,7 @@ import { DeltaChain } from "./journal.ts";
 import { objectToolArguments, ResultTrimmer } from "./trim.ts";
 import { continuationPush, finishPush, routesText, trimProfile, leanPathViolation, planEvaluate, resolveInlineIdea, planProbe, sinceRefusal, staleNotice } from "./rules.ts";
 import type { RouteStats } from "./rules.ts";
-import { assessFinalPayload, compactionPayload, BUDGET_PROVIDER, budgetLimits, softCapGate, cacheAlarm, catalogPriceProblem, cacheUtilization, finishAllowed, isBudgetModel, maxRequestOutputTokens, MODELS, PROVIDER, priceForUsage, requestShape, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
+import { assessFinalPayload, compactionPayload, BUDGET_PROVIDER, budgetLimits, softCapGate, cacheAlarm, catalogPriceProblem, cacheUtilization, finishAllowed, enforcedMaxTokens, isBudgetModel, maxRequestOutputTokens, MODELS, PROVIDER, priceForUsage, requestShape, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
 
 const root = resolve(import.meta.dirname, "../../..");
 const workspaces = resolve(root, "workspaces");
@@ -411,7 +411,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
     api: "openai-responses", baseUrl: "http://127.0.0.1/arena-guard-unused", apiKey: "guard-routing-only",
     models: Object.entries(MODELS).map(([id, limits]) => ({
       id, name: `Arena guarded ${id}`, reasoning: true, input: ["text"],
-      cost: limits.price, contextWindow: limits.contextWindow, maxTokens: limits.maxTokens,
+      cost: limits.price, contextWindow: limits.contextWindow, maxTokens: limits.requestOutputTokens,
     })),
     streamSimple(model, context, options) {
       if (!isBudgetModel(model.id) || !active || !runDirectory) {
@@ -425,6 +425,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
           physical.maxTokens > MODELS[model.id].maxTokens) {
         throw new Error(`Arena budget reservation is outdated for ${model.id}`);
       }
+      enforcedMaxTokens(physical, model.id);
       const priceProblem = catalogPriceProblem(model.id, physical.cost);
       if (priceProblem) throw new Error(priceProblem);
       if (!compacting && (finishConfirmed || (process.env.ARENA_AUTOCONTINUE === "1" && noWorkTurns >= 2))) {
@@ -567,6 +568,9 @@ export default function arenaExtension(pi: ExtensionAPI) {
         if (physical.contextWindow > limits.contextWindow || physical.maxTokens > limits.maxTokens) {
           throw new Error(`Arena budget reservation is outdated for ${id}`);
         }
+        // Pi resolves each reply's model from the physical catalog (messages carry its provider), so that
+        // entry's maxTokens must be the enforced per-request limit, not the physical one.
+        enforcedMaxTokens(physical, id);
         const priceProblem = catalogPriceProblem(id, physical.cost);
         if (priceProblem) throw new Error(priceProblem);
         return { model: guarded, thinkingLevel: request.thinkingLevel };

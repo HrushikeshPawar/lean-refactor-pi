@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import "./testmodels.ts";
-import { assessFinalPayload, compactionPayload, boundedPayload, budgetGate, softCapGate, catalogPriceProblem, cacheAlarm, budgetLimits, cacheUtilization, finishAllowed, FINISH_ALLOWED_REMAINING_FRACTION, maxRequestOutputTokens, MODELS, parseModelConfig, PROVIDER, requestShape, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
+import { assessFinalPayload, compactionPayload, boundedPayload, budgetGate, softCapGate, catalogPriceProblem, cacheAlarm, budgetLimits, cacheUtilization, finishAllowed, FINISH_ALLOWED_REMAINING_FRACTION, enforcedMaxTokens, maxRequestOutputTokens, MODELS, parseModelConfig, PROVIDER, requestShape, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
 
 const usage = { input: 1_000_000, output: 100_000, cacheRead: 0, cacheWrite: 0 };
 const LUNA = MODELS["gpt-6-luna"], DEEPSEEK = MODELS["deepseek-v4.1-flash"], QWEN = MODELS["qwen3.8-flash"];
@@ -203,8 +203,19 @@ test("each model gets its own output limit from models.yaml", () => {
   const again = boundedPayload({ messages: [], max_tokens: DEEPSEEK.maxTokens }, "deepseek-v4.1-flash");
   assert.equal(requestShape(again.payload), requestShape(ds.payload));
   const thinking = boundedPayload({ messages: [], max_tokens: 2 * DEEPSEEK.requestOutputTokens,
-    thinking: { type: "enabled", budget_tokens: 40_000 } }, "deepseek-v4.1-flash").payload as any;
+    thinking: { type: "enabled", budget_tokens: 2 * DEEPSEEK.requestOutputTokens } }, "deepseek-v4.1-flash").payload as any;
   assert.equal(thinking.thinking.budget_tokens, DEEPSEEK.requestOutputTokens - 1024);
+});
+
+test("Pi's maxTokens for every model is the enforced output limit, not the physical one", () => {
+  for (const [id, spec] of Object.entries(MODELS)) {
+    assert.ok(spec.requestOutputTokens <= spec.maxTokens);
+    const physical = { maxTokens: spec.maxTokens };
+    enforcedMaxTokens(physical, id);
+    assert.equal(physical.maxTokens, spec.requestOutputTokens);
+    enforcedMaxTokens(physical, id);
+    assert.equal(physical.maxTokens, spec.requestOutputTokens);
+  }
 });
 
 test("every model compacts below its context window, DeepSeek later than Luna", () => {
