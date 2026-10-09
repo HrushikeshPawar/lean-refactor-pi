@@ -419,3 +419,19 @@ class ScopeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RouteRuleAgreementTests(unittest.TestCase):
+    """The packet, the arena_probe description and SKILL.md state the route rule once each; they must agree."""
+
+    RULE = "drafts with `sorry` holes are not fingerprinted"
+
+    def test_packet_tool_description_and_skill_state_the_same_route_rule(self):
+        sources = {"packet": ROOT / "arena" / "context.py",
+                   "tool": ROOT / "packages" / "arena-pi" / "extensions" / "arena.ts",
+                   "skill": ROOT / "packages" / "arena-pi" / "skills" / "arena-lean" / "SKILL.md"}
+        for label, path in sources.items():
+            text = " ".join(path.read_text(encoding="utf-8").split())
+            with self.subTest(label):
+                self.assertIn(self.RULE, text)
+                self.assertNotIn("opens a route, and filling the holes", text)

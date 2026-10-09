@@ -278,10 +278,11 @@ class RecordingTests(unittest.TestCase):
 
     CONTEXT = {"earlier": [{"name": name, "decl": "theorem"} for name in VOCAB]}
 
-    def record(self, directory, proof_id, proof, record=None, kind="candidate", origin="model", error=None):
+    def record(self, directory, proof_id, proof, record=None, kind="candidate", origin="model", error=None, passed=False):
         if kind == "candidate":
             campaign._append(directory, {"kind": "candidate", "candidate_id": proof_id, "parents": [], "origin": origin})
-            campaign._append(directory, {"kind": "evaluation", "candidate_id": proof_id, "mode": "fast", "result": {}})
+            result = {"compat": {"v": {"passed": True, "diagnostics": []}}} if passed else {}
+            campaign._append(directory, {"kind": "evaluation", "candidate_id": proof_id, "mode": "fast", "result": result})
         else:
             campaign._append(directory, {"kind": "probe", "proof_id": proof_id, "result": {}})
 
@@ -300,22 +301,40 @@ class RecordingTests(unittest.TestCase):
             self.assertEqual((original["route"], original["credited"], original["new"]), ("r1", False, True))
             self.assertEqual((skeleton["route"], skeleton["credited"], skeleton["new"]), ("r1", False, False))
             self.assertEqual((skeleton["attempt_kind"], skeleton["skeleton"], skeleton["holes"], skeleton["assigned_by"]),
-                             ("probe", True, 2, "kernel"))
+                             ("probe", True, 2, "text"))
 
-    def test_a_kernel_skeleton_opens_a_credited_route_and_an_errored_draft_needs_a_clean_attempt_for_credit(self):
+    def test_a_sorry_skeleton_or_errored_draft_gets_no_credit_and_opens_no_route(self):
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw)
             self.record(directory, "ref", INDUCTIVE, features(**INDUCTION), origin="reference")
-            opened = self.record(directory, "s2", EQUATIONAL, partial(holes=1, recursion=[], lemmas=["Core.E", "Core.F"]), kind="probe")
+            skeleton = self.record(directory, "s2", EQUATIONAL, partial(holes=1, recursion=[], lemmas=["Core.E", "Core.F"]), kind="probe")
             errored = self.record(directory, "s3", EQUATIONAL, partial(holes=0, synthetic=1, recursion=["rec:Core.InitStates"],
                                                                       lemmas=["Core.G"]) | {"errored": True}, kind="probe")
-            self.assertEqual((opened["route"], opened["credited"], opened["skeleton"]), ("r2", True, True))
-            self.assertEqual((errored["route"], errored["credited"], errored["skeleton"], errored["errored"]), ("r3", False, False, True))
+            # an incomplete attempt filed as a candidate is no different
+            held = self.record(directory, "s5", EQUATIONAL, partial(holes=1, recursion=[], lemmas=["Core.E", "Core.F"]))
+            for event in (skeleton, errored, held):
+                self.assertEqual((event["route"], event["new"], event["credited"], event["assigned_by"]), ("r1", False, False, "text"))
             history = [json.loads(line) for line in (directory / "ledger.jsonl").read_text().splitlines()]
-            self.assertFalse(next(row for row in routes.route_table(history) if row["route"] == "r3")["credited"])
-            self.record(directory, "s4", EQUATIONAL, partial(holes=1, recursion=["rec:Core.InitStates"], lemmas=["Core.G"]), kind="probe")
+            self.assertEqual([row["route"] for row in routes.route_table(history)], ["r1"])
+
+    def test_a_compiled_new_structure_opens_a_credited_route(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            self.record(directory, "ref", INDUCTIVE, features(**INDUCTION), origin="reference")
+            self.record(directory, "s2", EQUATIONAL, partial(holes=1, lemmas=["Core.E", "Core.F"]), kind="probe")
+            done = self.record(directory, "c2", EQUATIONAL, features(**EQUATIONAL_KERNEL), passed=True)
+            self.assertEqual((done["route"], done["new"], done["credited"], done["skeleton"]), ("r2", True, True, False))
             history = [json.loads(line) for line in (directory / "ledger.jsonl").read_text().splitlines()]
-            self.assertTrue(next(row for row in routes.route_table(history) if row["route"] == "r3")["credited"])
+            self.assertTrue(next(row for row in routes.route_table(history) if row["route"] == "r2")["credited"])
+
+    def test_a_failed_compile_is_not_credited_by_the_route_table(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            self.record(directory, "ref", INDUCTIVE, features(**INDUCTION), origin="reference")
+            failed = self.record(directory, "c3", EQUATIONAL, features(**EQUATIONAL_KERNEL))  # result {}: did not pass
+            self.assertTrue(failed["credited"])  # the event alone cannot know; the table and the queue gate on the compile
+            history = [json.loads(line) for line in (directory / "ledger.jsonl").read_text().splitlines()]
+            self.assertFalse(next(row for row in routes.route_table(history) if row["route"] == "r2")["credited"])
 
     def test_text_fallback_never_opens_a_credited_route_and_joins_the_best_text_match(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -378,7 +397,8 @@ class DepthTests(unittest.TestCase):
         row = {item["route"]: item for item in routes.route_table(rows)}["r2"]
         self.assertEqual((row["attempts"], row["depth"], row["new_states"], row["stale_streak"], row["min_holes"]), (5, 2, 2, 1, 1))
         self.assertFalse(row["explored"])
-        self.assertTrue(row["credited"] and row["skeleton"])
+        self.assertFalse(row["credited"])  # failed compiles with holes: counted for depth, never credited
+        self.assertTrue(row["skeleton"])
 
     def test_a_route_is_explored_at_three_goal_states_or_with_a_compiled_proof(self):
         deep = self.ledger([("ref", "r1", None, 0), ("b", "r2", self.goal("A"), 1), ("c", "r2", self.goal("B"), 1), ("d", "r2", self.goal("C"), 1)])
@@ -404,15 +424,28 @@ class DepthTests(unittest.TestCase):
     def test_progress_counts_credited_explored_and_the_share_of_new_state_attempts(self):
         rows = self.ledger([("ref", "r1", None, 0), ("b", "r2", self.goal("A"), 1), ("c", "r2", self.goal("A"), 1), ("d", "r2", self.goal("B"), 1)])
         table = routes.route_table(rows)
-        self.assertEqual(routes.progress(table), {"credited_routes": 1, "explored_routes": 0, "new_state_attempts": 2,
+        self.assertEqual(routes.progress(table), {"credited_routes": 0, "explored_routes": 0, "new_state_attempts": 2,
                                                   "new_state_share": round(2 / 3, 3)})
+        rows = self.ledger([("ref", "r1", None, 0), ("b", "r2", None, 0)])
+        self.assertEqual(routes.progress(routes.route_table(rows))["credited_routes"], 1)
         self.assertIsNone(routes.progress([])["new_state_share"])
 
     def test_detail_text_extends_the_route_line_and_the_memory_line_is_unchanged(self):
-        table = routes.route_table(self.ledger([("ref", "r1", None, 0), ("b", "r2", self.goal("A"), 2)]))
+        table = routes.route_table(self.ledger([("ref", "r1", None, 0), ("b", "r2", None, 0)]))
         detail = routes.routes_detail_text(table)
-        self.assertIn('r2 "r2": 1 attempt, 1 goal state, min holes 2, opened, credited (opened by a skeleton), no scored proof', detail)
+        self.assertIn('r2 "r2": 1 attempt, 1 goal state, min holes 0, explored, credited, no scored proof', detail)
         self.assertIn('r2 (credited) \u00b7 1 attempt \u00b7 1 goal state \u00b7 no scored proof', routes.routes_text(table))
+        table = routes.route_table(self.ledger([("ref", "r1", None, 0), ("b", "r2", self.goal("A"), 2)]))
+        self.assertIn('r2 (not credited)', routes.routes_text(table))
+
+    def test_a_failed_or_hole_carrying_candidate_is_not_credited_even_in_an_old_ledger(self):
+        rows = self.ledger([("ref", "r1", None, 0), ("b", "r2", self.goal("A"), 2)])
+        rows[-1]["credited"] = True  # an event written before credit required a compiled proof
+        self.assertFalse({r["route"]: r for r in routes.route_table(rows)}["r2"]["credited"])
+        rows = self.ledger([("ref", "r1", None, 0), ("p", "r2", None, 0)])
+        rows[-2] = {"kind": "probe", "proof_id": "p", "result": {}}  # a probe draft opened it
+        rows[-3:-2] = []
+        self.assertFalse({r["route"]: r for r in routes.route_table(rows)}["r2"]["credited"])
 
 
 if __name__ == "__main__":

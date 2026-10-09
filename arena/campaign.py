@@ -19,7 +19,7 @@ from pathlib import Path
 
 import inspect
 
-from arena import lean_health, lean_session
+from arena import goalstate, lean_health, lean_session
 from arena.engine import (ROOT, candidate_file, evaluate, force_cold, measure_version, problem, source_path,
                           validate_proof, versions, workspace)
 from arena.profile import heartbeat_floor, profile
@@ -1551,7 +1551,8 @@ def record_evaluation(name: str, run_id: str, proof: str, mode: str,
                                 "mode": mode, "trigger": trigger, "result": result})
     if lane == "model" and trigger == "model" and not prior:
         _check_breaker(directory)
-    if result.get("tokens") is not None:
+    if result.get("tokens") is not None and goalstate.closed(result):
+        # Route credit is for compiled proofs only: a failed compile is not queued for extraction.
         _record_route_later(directory, name, candidate_id, proof)
     location = materialize(name, run_id, proof) if materialize_live and result.get("tokens") is not None else {}
     if location:
@@ -1737,8 +1738,7 @@ def probe(name: str, run_id: str, proof: str, idea_id: str | None = None, parent
         _append(directory, {"kind": "probe", "proof_id": proof_id, "idea_id": idea_id,
                             "parent": parent_id, "result": result})
         _check_breaker(directory)
-        if result.get("ok") is not False:
-            _record_route_later(directory, name, proof_id, proof)
+        # A draft (holes, errors or a failed compile) never opens a route, so it is not queued for extraction.
     location = materialize(name, run_id, proof) if result.get("tokens") is not None else {}
     label = _probe_numbers(events(directory))[proof_id]
     return _model_view({**result, "probe": label, "idea_id": idea_id or (earlier or {}).get("idea_id"),

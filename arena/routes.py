@@ -14,11 +14,11 @@ An empty part is a normal value, not a veto. When extraction fails the fingerpri
 features (``source: "text"``): whether the proof recurses, the vocabulary lemmas it names, and the head
 tactic of each top-level line.
 
-Attempts (compiled candidates and probe drafts, including drafts with ``sorry`` holes or errors, whose kernel
-term carries ``sorryAx``) are clustered in arrival order: an attempt joins the route whose first attempt (its
+Attempts are compiled, closed candidates only (probe drafts, ``sorry`` drafts and failed compiles are never
+queued). They are clustered in arrival order: an attempt joins the route whose first attempt (its
 exemplar) it most resembles when the similarity reaches ``SAME_ROUTE``, otherwise it starts a new route. A
 route is *credited* (counts as opened by the model) only when a kernel fingerprint opened it. An incomplete
-attempt (holes or error-recovery sorries) lacks what will fill them, so against it only the parts it has are
+attempt (holes or error-recovery sorries; only in ledgers from before this rule) lacks what will fill them, so against it only the parts it has are
 compared, as containment instead of overlap. Attempts without a kernel fingerprint join the route whose text
 features match best and never open one.
 
@@ -331,6 +331,9 @@ def route_table(history: list[dict]) -> list[dict]:
         identifier = event["proof_id"]
         kind = origin.get(identifier)
         route = event["route"]
+        # Credit is for compiled proofs only: the attempt must be a candidate whose compile passed with no error and no
+        # sorry. A draft, a hole-carrying skeleton or a failed compile never opens or credits a route (also in old ledgers).
+        earned = identifier in results and results[identifier][0] == "candidate" and goalstate.closed(results[identifier][1])
         if route not in table:
             credited = event.get("credited")
             if credited is None:  # an event from before credit existed: a kernel route opened by a model attempt
@@ -339,7 +342,7 @@ def route_table(history: list[dict]) -> list[dict]:
                            "short_label": event.get("short_label") or event.get("label") or route, "original": False, "attempts": 0,
                             "best_candidate": None, "best_proxy": None, "verified": False,
                             "depth": 0, "new_states": 0, "min_holes": None, "stale_streak": 0, "compiled": False,
-                            "explored": False, "stale": False, "credited": bool(credited) and kind != "reference",
+                            "explored": False, "stale": False, "credited": bool(credited) and earned and kind != "reference",
                             "skeleton": bool(event.get("skeleton"))}
             seen[route] = set()
         row = table[route]
@@ -353,8 +356,8 @@ def route_table(history: list[dict]) -> list[dict]:
         if kind == "auto_merge":
             continue
         if (not row["original"] and event.get("assigned_by", "kernel") == "kernel" and event.get("source") == "kernel"
-                and not event.get("errored")):
-            row["credited"] = True  # a later clean attempt credits a route an errored draft opened
+                and not event.get("errored") and earned and not event.get("holes") and not event.get("synthetic")):
+            row["credited"] = True  # a later compiled proof credits a route an uncredited attempt opened
             row["skeleton"] = row["skeleton"] or bool(event.get("skeleton"))
         row["attempts"] += 1
         if identifier in score and (row["best_proxy"] is None or (score[identifier][0], score[identifier][1]) >
@@ -432,10 +435,11 @@ def routes_detail_text(table: list[dict]) -> str:
 
 def file_attempt(earlier: list[dict], proof_id: str, print_: dict, features: dict | None, origin: str | None, probe: bool) -> dict:
     """The route event for one attempt. `origin` is the candidate's (None for a probe draft). Only an attempt with a
-    kernel fingerprint that matches no exemplar opens a credited route; one without joins the route whose text
-    features match best (and starts r1 when there is none); an incomplete one with no recursion, lemmas, claims or
-    logic carries no strategy and counts as one without."""
-    by_kernel = print_["source"] == "kernel" and not (incomplete(print_) and not strategy(print_))
+    kernel fingerprint of a complete proof that matches no exemplar opens a credited route. A probe draft, an
+    incomplete (holes or errors) or kernel-less attempt joins the route whose text features match best, starts r1 only
+    when there is none, and is never credited."""
+    complete = not probe and not incomplete(print_) and not (features or {}).get("errored")
+    by_kernel = print_["source"] == "kernel" and complete
     found = None if by_kernel else assign_by_text(earlier, print_)
     route, similarity = found or (assign(earlier, print_) if by_kernel else ("r1", 0.0))
     new = route not in {item["route"] for item in earlier}
@@ -443,9 +447,9 @@ def file_attempt(earlier: list[dict], proof_id: str, print_: dict, features: dic
     event = {"kind": "route", "proof_id": proof_id, "route": route, "new": new,
              "similarity": similarity, "source": print_["source"], "fingerprint": print_,
              "assigned_by": "kernel" if by_kernel else "text", "attempt_kind": "probe" if probe else "candidate",
-             # An errored draft may open a route for tracking, but credit needs a clean elaboration (holes allowed),
-             # or else a broken draft whose few elaborated lemmas differ would count as exploring.
-             "credited": new and by_kernel and origin in (None, "model") and not (features or {}).get("errored"),
+             # Credit is for a compiled, complete proof only: a probe draft, a skeleton with holes or an errored draft
+             # never opens a route (it joins the closest existing one by text, and is never credited).
+             "credited": new and by_kernel and origin == "model",
              "label": label(print_, reference, idf([item["fingerprint"] for item in earlier] + [print_])) if new else next(
                  item["label"] for item in earlier if item["route"] == route),
              "short_label": short_label(print_, reference, idf([item["fingerprint"] for item in earlier] + [print_])) if new else next(

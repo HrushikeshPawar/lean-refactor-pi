@@ -426,19 +426,20 @@ class ProtocolLogicTests(unittest.TestCase):
         self.assertEqual(listed["best"]["candidate"], "#2")
         self.assertIn("recent_failures", campaign.frontier("logic"))
 
-    def test_a_new_probe_that_elaborated_is_fingerprinted_once_and_one_that_did_not_run_is_not(self):
+    def test_only_a_compiled_candidate_is_queued_for_a_route(self):
+        # Route credit is for compiled proofs only: probe drafts and failed compiles are never fingerprinted.
         compiled = {"ok": True, "tokens": 5, "compat": {"v1": {"passed": False}}}
         with patch.object(campaign, "normalize_draft", side_effect=lambda name, text: text), \
                 patch.object(campaign, "validate_proof"), patch.object(campaign, "materialize", return_value={}), \
                 patch.object(campaign, "_record_route_later") as filed:
             with patch.object(campaign, "_compile_probe", return_value=compiled):
                 campaign.probe("T", "logic", "theorem t := by\n  sorry")
-                campaign.probe("T", "logic", "theorem t := by\n  sorry")
+            self.assertEqual(filed.call_count, 0)
+            self.evaluate("theorem t := by\n  bad")
+            self.assertEqual(filed.call_count, 0)
+            self.evaluate("theorem t := by\n  good")
             self.assertEqual(filed.call_count, 1)
             self.assertEqual(filed.call_args.args[1], "T")
-            with patch.object(campaign, "_compile_probe", return_value={"ok": False, "error": "x", "compat": {}}):
-                campaign.probe("T", "logic", "theorem t := by\n  sorry -- other")
-            self.assertEqual(filed.call_count, 1)
 
     def test_latest_active_idea_is_inherited_by_probes_and_evaluations(self):
         campaign.record_idea("logic", "Factor repeated cases")

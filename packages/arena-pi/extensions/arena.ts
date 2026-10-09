@@ -1000,7 +1000,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
 
   registerTool({
     name: "arena_probe", label: "Arena probe",
-    description: "Compile one proof draft or one to four drafts on the primary toolchain. Each may be a complete theorem, a `by` proof body, or a `:=` proof body; the exact benchmark statement is supplied for proof bodies. `sorry` is allowed and each incomplete draft returns its actual hole goals and stable pN ID. A draft with `sorry` holes that elaborates is fingerprinted and opens a route; filling the holes later stays on that route. A probe takes several drafts at once (two or three is typical). A complete compiling draft is automatically promoted to a candidate. `idea` (a one-line route title) creates an idea and links the attempt to it.",
+    description: "Compile one proof draft or one to four drafts on the primary toolchain. Each may be a complete theorem, a `by` proof body, or a `:=` proof body; the exact benchmark statement is supplied for proof bodies. `sorry` is allowed and each incomplete draft returns its actual hole goals and stable pN ID. Routes are fingerprinted from complete proofs that compile; drafts with `sorry` holes are not fingerprinted. A probe takes several drafts at once (two or three is typical). A complete compiling draft is automatically promoted to a candidate. `idea` (a one-line route title) creates an idea and links the attempt to it.",
     parameters: Type.Object({ proof: Type.Optional(Type.String()),
       drafts: Type.Optional(Type.Array(Type.String(), { minItems: 1, maxItems: 4 })),
       idea_id: Type.Optional(Type.String()), parent: Type.Optional(Type.String()),
