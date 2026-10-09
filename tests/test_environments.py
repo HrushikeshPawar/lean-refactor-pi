@@ -111,7 +111,8 @@ class MeasurementVersionTests(unittest.TestCase):
     def test_fast_mode_also_compiles_the_measurement_version_and_records_it(self):
         calls = []
 
-        def compile_stub(row, proof, version, commit, measure=False, probe=False, report_start_line=None):
+        def compile_stub(row, proof, version, commit, measure=False, probe=False, report_start_line=None,
+                         lane="model"):
             calls.append((version, measure))
             return {"passed": True, "heartbeats": 100 if measure else None, "diagnostics": [],
                     "diagnostic_counts": {}, "outside_target": {}, "goals": [], "error_headlines": []}

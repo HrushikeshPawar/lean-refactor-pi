@@ -60,7 +60,7 @@ def extract(name: str, proofs: dict[str, str], timeout: int = TIMEOUT) -> dict[s
         return {}
     row = problem(name)
     project, text, head = extraction_text(name, proofs)
-    ran = run_lean(row, project, text, timeout=timeout, prefix_end=head)
+    ran = run_lean(row, project, text, timeout=timeout, prefix_end=head, lane="background")
     if ran is None:
         return {tag: {"tag": tag, "ok": False, "error": "timeout"} for tag in proofs}
     _, output = ran

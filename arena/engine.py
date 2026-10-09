@@ -11,6 +11,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import tempfile
@@ -336,15 +337,61 @@ def _fingerprint(project: str) -> dict:
     return lean_session.fingerprint(Path(project))
 
 
+DEFAULT_LEAN_TIMEOUT = 180
+
+
+def lean_timeout() -> int:
+    """Seconds a model-lane Lean check may take: ARENA_LEAN_TIMEOUT (set per row after measuring it) or 180."""
+    try:
+        return max(1, int(os.environ.get("ARENA_LEAN_TIMEOUT", str(DEFAULT_LEAN_TIMEOUT))))
+    except ValueError:
+        return DEFAULT_LEAN_TIMEOUT
+
+
+def reorder_lean_path(lean_path: str, project: Path) -> str:
+    """Put the project's own build folder first (see `lean_session.reorder_lean_path`)."""
+    from arena import lean_session
+
+    return lean_session.reorder_lean_path(lean_path, project)
+
+
+@lru_cache(maxsize=16)
+def _lean_command(project: str) -> tuple[str, dict[str, str]] | None:
+    """(lean binary, environment) for compiling directly in `project`, or None to use `lake env lean`."""
+    try:
+        done = subprocess.run(["lake", "env", "env", "-0"], cwd=project, capture_output=True, timeout=120)
+        if done.returncode != 0:
+            return None
+        env = dict(item.split("=", 1) for item in done.stdout.decode(errors="replace").split("\0") if "=" in item)
+        lean_path = env.get("LEAN_PATH")
+        if not lean_path:
+            return None
+        env["LEAN_PATH"] = reorder_lean_path(lean_path, Path(project))
+        binary = env.get("LEAN") or ""
+        if not binary and env.get("LEAN_SYSROOT"):
+            binary = str(Path(env["LEAN_SYSROOT"]) / "bin" / "lean")
+        binary = binary or shutil.which("lean", path=env.get("PATH")) or ""
+        if not binary or not os.access(binary, os.X_OK):
+            return None
+        return binary, env
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
 def _run_cold(row: dict, project: Path, text: str, timeout: int) -> tuple[int, str] | None:
     scratch = ROOT / "runs" / "evaluations"
     scratch.mkdir(parents=True, exist_ok=True)
+    direct = _lean_command(str(project))
     with tempfile.TemporaryDirectory(prefix="arena-", dir=scratch) as directory:
         candidate = Path(directory) / Path(source_path(row)).name
         candidate.write_text(text, encoding="utf-8")
         # Own process group: on timeout the `lean` that `lake env` started must die too, or it keeps
         # running orphaned and competes with every later compile.
-        proc = subprocess.Popen(["lake", "env", "lean", str(candidate)], cwd=project, text=True,
+        if direct is not None:
+            command, env = [direct[0], str(candidate)], {**os.environ, **direct[1]}
+        else:
+            command, env = ["lake", "env", "lean", str(candidate)], None
+        proc = subprocess.Popen(command, cwd=project, text=True, env=env,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
         try:
             stdout, stderr = proc.communicate(timeout=timeout)
@@ -358,29 +405,44 @@ def _run_cold(row: dict, project: Path, text: str, timeout: int) -> tuple[int, s
     return proc.returncode, (stdout + stderr).replace(str(candidate), source_path(row)).strip()
 
 
-def run_lean(row: dict, project: Path, text: str, timeout: int = 180,
-             prefix_end: int | None = None) -> tuple[int, str] | None:
+def _session_request(row: dict, project: Path, text: str, prefix_end: int | None) -> dict:
+    return {"project": str(project), "fingerprint": _fingerprint(str(project)), "text": text,
+            "display": source_path(row), "header_end": prefix_end,
+            "prefix_sha": None if prefix_end is None else hashlib.sha256(text[:prefix_end].encode()).hexdigest()[:16]}
+
+
+def run_lean(row: dict, project: Path, text: str, timeout: int | None = None,
+             prefix_end: int | None = None, lane: str = "model") -> tuple[int, str] | None:
     """Compile `text` as the target's file inside the pinned project; None on timeout.
 
     With a per-run Lean session configured, only the changed part of the file is
     re-elaborated by the session's server. If the session cannot answer, the file is
     compiled cold. `last_lean_run()` says which path ran. `prefix_end` is where the target
-    declaration starts: the text before it is pinned, and a session whose prefix differs is stale.
+    declaration starts: the text before it is pinned, and a session whose prefix differs is stale;
+    it is also the header a fresh session worker loads before the timeout starts counting.
+    `lane` is "model" (the default) or "background" (extraction, cold verification): background work has
+    one worker of its own and never takes the model's. `timeout` defaults to `lean_timeout()`.
     """
     from arena import lean_session
 
+    timeout = lean_timeout() if timeout is None else timeout
     started = time.monotonic()
     info: dict = {"path": "cold"}
     if lean_session.configured() and not _FORCE_COLD.get():
-        reply = lean_session.request({
-            "op": "check", "protocol": lean_session.PROTOCOL, "project": str(project),
-            "fingerprint": _fingerprint(str(project)), "text": text, "display": source_path(row),
-            "timeout": timeout,
-            "prefix_sha": None if prefix_end is None else hashlib.sha256(text[:prefix_end].encode()).hexdigest()[:16],
-            }, 2 * timeout + 60) or {}
+        payload = {**_session_request(row, project, text, prefix_end), "op": "check",
+                   "protocol": lean_session.PROTOCOL, "timeout": timeout, "lane": lane}
+        # queue for a worker + header open + the check (+ a restore after a timeout) + slack
+        queue = lean_session.MODEL_QUEUE_TIMEOUT if lane == "model" else timeout + lean_session.OPEN_TIMEOUT
+        wait = queue + lean_session.OPEN_TIMEOUT + 2 * timeout + 60
+        reply = lean_session.request(payload, wait) or {}
         if reply.get("ok"):
             _LAST.info = {"path": "session", "seconds": round(time.monotonic() - started, 2),
-                          "new_worker": reply.get("new_worker"), "changed_from_line": reply.get("changed_from_line")}
+                          "new_worker": reply.get("new_worker"), "changed_from_line": reply.get("changed_from_line"),
+                          "lane": lane}
+            if reply.get("header_seconds") is not None:
+                _LAST.info["header_seconds"] = reply["header_seconds"]
+            if reply.get("warm_kept"):
+                _LAST.info["warm_kept"] = True
             return None if reply.get("timeout") else (reply["returncode"], reply["output"])
         info = {"path": "cold-fallback", "reason": str(reply.get("reason") or "session unavailable")[:200]}
     done = _run_cold(row, project, text, timeout)
@@ -388,9 +450,24 @@ def run_lean(row: dict, project: Path, text: str, timeout: int = 180,
     return done
 
 
+def warm_session(row: dict, version: str, commit: str, slots: int, lane: str = "model") -> dict | None:
+    """Ask the run's Lean session to load the file header into `slots` workers, in parallel, before anything is
+    checked. Builds the candidate file as `run_lean` does (the reference proof stands in for a draft). None when no
+    session is configured; otherwise the daemon's reply (`ok`, `workers`, `seconds`, `failed`)."""
+    from arena import lean_session
+
+    if not lean_session.configured():
+        return None
+    built = candidate_file(row, row.get("src") or row.get("statement") or "", version, commit)
+    payload = {**_session_request(row, built["path"], built["text"], built["head"]), "op": "warm",
+               "protocol": lean_session.PROTOCOL, "slots": slots, "timeout": lean_session.OPEN_TIMEOUT,
+               "lane": lane}
+    return lean_session.request(payload, lean_session.OPEN_TIMEOUT + 120)
+
+
 def compile_version(row: dict, proof: str, version: str, commit: str,
                     measure: bool = False, probe: bool = False,
-                    report_start_line: int | None = None) -> dict:
+                    report_start_line: int | None = None, lane: str = "model") -> dict:
     built = candidate_file(row, proof, version, commit)
     text = built["text"]
     if probe:
@@ -400,10 +477,11 @@ def compile_version(row: dict, proof: str, version: str, commit: str,
     if measure:
         wrapper_start = text[:built["head"]].count("\n") + 1
         text = text[:built["head"]] + HEARTBEAT_WRAPPER + text[built["head"]:]
-    output = run_lean(row, built["path"], text, prefix_end=built["head"])
+    timeout = lean_timeout()
+    output = run_lean(row, built["path"], text, timeout=timeout, prefix_end=built["head"], lane=lane)
     lean_run = last_lean_run()
     if output is None:
-        return {"passed": False, "error": "Lean timed out after 180 seconds", "lean": lean_run}
+        return {"passed": False, "error": f"Lean timed out after {timeout} seconds", "lean": lean_run}
     returncode, output = output
     match = re.search(r"ARENA_HEARTBEATS (\d+)", output) if measure else None
     passed = returncode == 0 and (not measure or match is not None)
@@ -415,11 +493,13 @@ def compile_version(row: dict, proof: str, version: str, commit: str,
     return result
 
 
-def evaluate(name: str, proof: str, mode: str = "fast", known: dict | None = None) -> dict:
+def evaluate(name: str, proof: str, mode: str = "fast", known: dict | None = None,
+             lane: str = "model") -> dict:
     """Compile one proof. `probe` allows `sorry`, checks one version, never scores.
 
     `known` maps versions to compile results already obtained for this exact
     proof (e.g. the fast check), so a later full check only compiles the rest.
+    `lane` "background" keeps harness-side checks off the model's Lean workers.
     """
     if mode not in ("fast", "full", "probe"):
         raise ValueError("mode must be fast, full or probe")
@@ -445,7 +525,7 @@ def evaluate(name: str, proof: str, mode: str = "fast", known: dict | None = Non
             continue
         compat[version] = compile_version(row, proof, version, commit,
                                           measure=(version, commit) == measured_on and not probe,
-                                          probe=probe, report_start_line=primary_start)
+                                          probe=probe, report_start_line=primary_start, lane=lane)
         if mode != "full" and not compat[version]["passed"]:
             break
     primary = compat[targets[0][0]]
