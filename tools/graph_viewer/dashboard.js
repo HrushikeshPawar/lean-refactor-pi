@@ -37,7 +37,7 @@
     const items = [
       ['Best verified', best ? best.proxy : '—', best ? `${best.candidate} · ${best.proxy - data.baseline_proxy >= 0 ? '+' : ''}${(best.proxy - data.baseline_proxy).toFixed(2)} vs ${data.baseline_proxy}` : 'none yet', best && best.proxy > data.baseline_proxy],
       ['Tokens / heartbeats', best ? `${num(best.tokens)} / ${num(best.heartbeats)}` : '—', ref ? `orig ${num(ref.tokens)} / ${num(ref.heartbeats)}` + (best ? ` (${pctOf(best.tokens, ref.tokens)} / ${pctOf(best.heartbeats, ref.heartbeats)})` : '') : ''],
-      ['Spend', money(data.spend.spent_usd), `soft cap $${+(data.spend.soft_cap_usd ?? 0).toFixed(2)} · hard $${data.spend.hard_cap_usd}`],
+      ['Spend', money(data.spend.spent_usd), `limit $${+(data.spend.limit_usd ?? 0).toFixed(2)}`],
       ['Requests', num(cost.requests ?? data.spend.points.length), `${cost.retries ?? 0} retries · ${cost.requests_after_best ?? '—'} after best`],
       ['Post-best spend', money(cost.spent_after_best_usd), `bookkeeping+rejected ${cost.bookkeeping_and_rejected_pct ?? '—'}%`],
       ['Cache hit rate', cache.reuse_pct != null ? cache.reuse_pct + '%' : '—', `recent 10: ${cache.reuse_pct_recent_10 ?? '—'}% · cost savings ${cache.savings_pct ?? '—'}%`],
@@ -97,15 +97,12 @@
                 {sw: 'toptot', label: 'Total', bold: true, cells: [money(p.request_usd), money(sumParts(sums))]}]},
         foot: `cache hit rate ${p.reuse_pct ?? '—'}%${tools.length ? ` · ${tools.slice(0, 3).join(', ')}${tools.length > 3 ? ` +${tools.length - 3}` : ''}` : ''}`})});
     }
-    const grand = sumParts(sums), top = Math.max(grand, sp.soft_cap_usd || 0, 1e-9);
-    const hardVisible = !!sp.hard_cap_usd && sp.hard_cap_usd <= 2.5 * top;
+    const grand = sumParts(sums), top = Math.max(grand, sp.limit_usd || 0, 1e-9);
     const refs = [], notes = [];
-    if (sp.soft_cap_usd) refs.push({y: sp.soft_cap_usd, cls: 'soft', label: 'soft cap ' + money(sp.soft_cap_usd)});
-    if (hardVisible) refs.push({y: sp.hard_cap_usd, cls: 'hard', label: 'hard cap ' + money(sp.hard_cap_usd)});
-    else if (sp.hard_cap_usd && !spark) notes.push({cls: 'hard', text: `hard cap ${money(sp.hard_cap_usd)} is off scale`});
+    if (sp.limit_usd) refs.push({y: sp.limit_usd, cls: 'soft', label: 'limit ' + money(sp.limit_usd)});
     const legend = [['toptot', `Total ${money(grand)}`], ...PARTS.slice().reverse().map(([k, label, cls]) => [cls, `${label} ${money(sums[k])}${grand ? ` (${(100 * sums[k] / grand).toFixed(0)}%)` : ''}`])];
     return C.area(area, PARTS.map(([, label, cls]) => ({cls, label})),
-      {refs, notes, xMin: 0, xMax: Math.max(1, pts.length), yMin: 0, yMax: hardVisible && !spark ? sp.hard_cap_usd * 1.08 : top * 1.15, exact: true, height: spark ? 64 : 360, spark,
+      {refs, notes, xMin: 0, xMax: Math.max(1, pts.length), yMin: 0, yMax: top * 1.15, exact: true, height: spark ? 64 : 360, spark,
        fmtY: C.fmt.money, yLabel: 'cumulative spend (USD)', xLabel: 'API request number', legend, label: 'API spend by component'});
   }
 
@@ -142,9 +139,9 @@
               spark: metricHtml(key, base, key, k === 'tokens' ? 'k3' : 'k5', true), full: metricHtml(key, base, key, k === 'tokens' ? 'k3' : 'k5', false), sup: 'lowest so far',
               modalSub: `${key} per evaluation that compiled; lower is better. Click a point or row to select that candidate in the graph.`, table: evalTable(key)};
     }
-    const soft = sp.soft_cap_usd;
-    return {title: 'API spend', value: money(sp.spent_usd), sub: `${soft ? `${(100 * sp.spent_usd / soft).toFixed(0)}% of soft cap ${money(soft)}` : 'no soft cap'} · ${sp.points.length} requests`, good: false, sup: 'total',
-            spark: spendHtml(true), full: spendHtml(false), modalSub: `${money(sp.spent_usd)} settled · ${money(sp.unresolved_usd)} reserved · cumulative, stacked by billed component`, table: spendTable()};
+    const limit = sp.limit_usd;
+    return {title: 'API spend', value: money(sp.spent_usd), sub: `${limit ? `${(100 * sp.spent_usd / limit).toFixed(0)}% of limit ${money(limit)}` : 'no limit'} · ${sp.points.length} requests`, good: false, sup: 'total',
+            spark: spendHtml(true), full: spendHtml(false), modalSub: `${money(sp.spent_usd)} spent · cumulative, stacked by billed component`, table: spendTable()};
   }
   const WIDGETS = ['score', 'tokens', 'hb', 'spend'];
   function widgets() {
@@ -310,7 +307,7 @@
 
   function folds() {
     const rows = data.controls;
-    $('d-events').innerHTML = rows.length ? `<table><thead><tr><th>t</th><th>event</th><th>details</th></tr></thead><tbody>${rows.map(r => `<tr><td>${dur(r.t)}</td><td>${badge(r.kind, r.kind === 'gate' || r.kind === 'cache_alarm' ? 'bad' : r.kind === 'soft_cap' ? 'mid' : '')} ${esc(r.label)}</td><td class="small"><code>${esc(JSON.stringify(r.detail))}</code></td></tr>`).join('')}</tbody></table>` : '<p class="muted">No finish, control or gate events yet.</p>';
+    $('d-events').innerHTML = rows.length ? `<table><thead><tr><th>t</th><th>event</th><th>details</th></tr></thead><tbody>${rows.map(r => `<tr><td>${dur(r.t)}</td><td>${badge(r.kind, r.kind === 'cache_alarm' ? 'bad' : r.kind === 'limit' ? 'mid' : '')} ${esc(r.label)}</td><td class="small"><code>${esc(JSON.stringify(r.detail))}</code></td></tr>`).join('')}</tbody></table>` : '<p class="muted">No finish or control events yet.</p>';
     $('d-packet').innerHTML = data.packet ? `<p class="muted small">${num(data.packet.length)} characters</p><pre>${esc(data.packet)}</pre>` : '<p class="muted">No packet.txt in this run.</p>';
   }
 

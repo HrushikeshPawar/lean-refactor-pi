@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Launch budgeted runs that differ in exactly one declared factor and compare them.
 
-Every run gets the same theorem, packet, cap and options except the factor under test, so
-differences in the report are attributable to that factor. Use a small cap ($0.10-$0.20).
+Every run gets the same theorem, packet, limit and options except the factor under test, so
+differences in the report are attributable to that factor. Use a small limit ($0.10-$0.20).
 
     python tools/run_experiment_matrix.py --theorem Core.InitsUpdatesComm --prefix think-ab \\
-        --factor thinking --values medium,high --model deepseek-v4.1-flash --cap 0.1
+        --factor thinking --values medium,high --model deepseek-v4.1-flash --limit-usd 0.1
 
 Arguments after `--` are passed to every run (for example `--no-mcp`).
 """
@@ -67,7 +67,7 @@ def plan(factor: str, values: list[str], model: str, thinking: str, prefix: str)
     return specs
 
 
-def command(spec: dict, theorem: str, cap: float, passthrough: list[str]) -> list[str]:
+def command(spec: dict, theorem: str, limit: float, passthrough: list[str]) -> list[str]:
     return [
         sys.executable,
         str(ROOT / "tools/run_pi_budgeted.py"),
@@ -77,8 +77,8 @@ def command(spec: dict, theorem: str, cap: float, passthrough: list[str]) -> lis
         theorem,
         "--run-id",
         spec["run_id"],
-        "--hard-cap-usd",
-        f"{cap:g}",
+        "--limit-usd",
+        f"{limit:g}",
         "--thinking",
         spec["thinking"],
         *(["--no-skill"] if spec["skill"] == "off" else []),
@@ -86,10 +86,10 @@ def command(spec: dict, theorem: str, cap: float, passthrough: list[str]) -> lis
     ]
 
 
-def execute(spec: dict, theorem: str, cap: float, passthrough: list[str], logs: Path) -> dict:
+def execute(spec: dict, theorem: str, limit: float, passthrough: list[str], logs: Path) -> dict:
     with (logs / f"{spec['run_id']}.log").open("w") as log:
         proc = subprocess.run(
-            command(spec, theorem, cap, passthrough), cwd=ROOT, stdout=log, stderr=subprocess.STDOUT, text=True
+            command(spec, theorem, limit, passthrough), cwd=ROOT, stdout=log, stderr=subprocess.STDOUT, text=True
         )
     row = {**spec, "exit_code": proc.returncode}
     directory = run_dir(spec["run_id"])
@@ -113,7 +113,6 @@ def compare(rows: list[dict], expected_packet: str) -> dict:
                 "exit_code": row["exit_code"],
                 "stop_reason": summary.get("stop_reason"),
                 "spent_usd": cost.get("spent_usd"),
-                "unresolved_usd": cost.get("unresolved_usd"),
                 "remaining_usd": cost.get("remaining_usd"),
                 "requests": cost.get("requests"),
                 "evaluations": summary.get("evaluations"),
@@ -163,17 +162,17 @@ def main() -> int:
     )
     parser.add_argument("--thinking", default="high", choices=THINKING_LEVELS)
     parser.add_argument(
-        "--cap",
+        "--limit-usd",
         type=float,
-        default=3.0,
-        help="Spend cap per run in USD (0.10-3.00); below 3 it is a soft cap on actual spend (the last request may overshoot), only 3 is a hard cap",
+        default=0.5,
+        help="Spend limit per run in USD (default 0.50, at most 2.00); the run stops once its actual spend reaches it, so the last call may overshoot",
     )
     parser.add_argument("--parallel", default="1", help="Runs at once: an integer or 'auto' (by free RAM)")
     parser.add_argument("--dry-run", action="store_true")
     args, passthrough = parser.parse_known_args()
     passthrough = [item for item in passthrough if item != "--"]
-    if not 0.1 <= args.cap <= 3:
-        parser.error("--cap must be between 0.10 and 3.00")
+    if not 0 < args.limit_usd <= 2:
+        parser.error("--limit-usd must be above 0 and at most 2.00")
     try:
         specs = plan(args.factor, args.values.split(","), args.model, args.thinking, args.prefix)
         workers = parallelism(args.parallel, len(specs), available_memory_kb())
@@ -183,9 +182,11 @@ def main() -> int:
     if clashes:
         parser.error(f"run IDs already exist: {', '.join(clashes)}")
     expected = __import__("hashlib").sha256(packet(args.theorem).encode()).hexdigest()
-    print(f"{len(specs)} runs varying {args.factor}; packet {expected[:12]}; {workers} at once; cap ${args.cap:g} each")
+    print(
+        f"{len(specs)} runs varying {args.factor}; packet {expected[:12]}; {workers} at once; limit ${args.limit_usd:g} each"
+    )
     for spec in specs:
-        print(" ", " ".join(command(spec, args.theorem, args.cap, passthrough)[1:]))
+        print(" ", " ".join(command(spec, args.theorem, args.limit_usd, passthrough)[1:]))
     if args.dry_run:
         return 0
     blocked = preflight_block([spec["model"] for spec in specs])
@@ -195,10 +196,10 @@ def main() -> int:
     out = ROOT / "runs" / "pi-budget" / f"{args.prefix}-matrix"
     out.mkdir(parents=True)
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        rows = list(pool.map(lambda spec: execute(spec, args.theorem, args.cap, passthrough, out), specs))
+        rows = list(pool.map(lambda spec: execute(spec, args.theorem, args.limit_usd, passthrough, out), specs))
     report = {
         "theorem": args.theorem,
-        "cap_usd": args.cap,
+        "limit_usd": args.limit_usd,
         "expected_packet_sha256": expected,
         **compare(rows, expected),
     }

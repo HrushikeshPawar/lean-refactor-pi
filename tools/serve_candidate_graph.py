@@ -93,7 +93,6 @@ def graph_payload(run_id: str) -> dict:
     payload["worker"] = json.loads(status.read_text()) if status.exists() else None
     charged = 0.0
     pi_embedded = 0.0
-    unresolved: dict[str, float] = {}
     parts = {"input": 0.0, "output": 0.0, "cache_read": 0.0, "cache_write": 0.0}
     names = {"input": "input", "output": "output", "cacheRead": "cache_read", "cacheWrite": "cache_write"}
     costs = []
@@ -101,10 +100,6 @@ def graph_payload(run_id: str) -> dict:
     if journal.exists():
         for line in journal.read_text().splitlines():
             event = json.loads(line)
-            if event.get("kind") == "reserve":
-                unresolved[str(event["id"])] = float(event["usd"])
-            elif event.get("kind") in ("settle", "release"):
-                unresolved.pop(str(event["id"]), None)
             if event.get("kind") != "settle" or event.get("usage_known") is False:
                 continue
             usd = float(event["usd"])
@@ -130,12 +125,11 @@ def graph_payload(run_id: str) -> dict:
                 }
             )
     payload["cost_timeline"] = costs
-    payload["cost"] = {"spent_usd": charged, "unresolved_usd": sum(unresolved.values()), "pi_embedded_usd": pi_embedded}
+    payload["cost"] = {"spent_usd": charged, "pi_embedded_usd": pi_embedded}
     payload["baseline"] = baseline_point(payload)
     give_reference_its_numbers(payload)
     config = directory / "run-config.json"
-    # The run's configured cap (soft; the key keeps its old name for the page): new files say soft_cap_usd.
-    payload["hard_cap_usd"] = configured_cap(json.loads(config.read_text())) if config.exists() else None
+    payload["limit_usd"] = configured_cap(json.loads(config.read_text())) if config.exists() else None
     report = directory / "cost.json"
     payload["cost_report"] = json.loads(report.read_text()) if report.exists() else {}
     if "pi_embedded_estimate" not in payload["cost_report"]:

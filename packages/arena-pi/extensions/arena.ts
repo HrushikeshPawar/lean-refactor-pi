@@ -5,21 +5,20 @@ import { mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from
 import { tmpdir } from "node:os";
 import { dirname, resolve, relative, sep } from "node:path";
 import { Type } from "typebox";
-import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
-import type { AssistantMessage, AssistantMessageEventStream } from "@earendil-works/pi-ai";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
-import type { BudgetModel, PriorRequest } from "./budget.ts";
 import { nearestToolName, normalizeToolArguments, requireToolArguments } from "./toolnames.ts";
 import { DeltaChain } from "./journal.ts";
 import { objectToolArguments, ResultTrimmer } from "./trim.ts";
 import { continuationPush, finishPush, routesText, trimProfile, leanPathViolation, planEvaluate, resolveInlineIdea, planProbe, sinceRefusal, staleNotice } from "./rules.ts";
 import type { RouteStats } from "./rules.ts";
-import { assessFinalPayload, compactionPayload, BUDGET_PROVIDER, budgetLimits, softCapGate, cacheAlarm, catalogPriceProblem, cacheUtilization, finishAllowed, budgetFooter, enforcedMaxTokens, isBudgetModel, maxRequestOutputTokens, MODELS, PROVIDER, priceForUsage, requestShape, sessionEmbeddedCost, sessionSpend, usageCost, usageCostParts } from "./budget.ts";
+import { cacheAlarm, cacheHitPct, callCost, finishAllowed, limitReached, limitUsd, spendFooter, toolsForSpend } from "./spend.ts";
 
 const root = resolve(import.meta.dirname, "../../..");
 const workspaces = resolve(root, "workspaces");
 const SKILL_READ_LIMIT = 24_000;
 const MAX_ERROR_STREAK = 3;
+const FINISH_TOOL = "arena_finish";
 export const LEAN_DIRECT_TOOLS = ["lean_goal", "lean_diagnostic_messages", "lean_multi_attempt",
   "lean_local_search", "lean_hover_info"];
 const LEAN_DISABLED_TOOLS = ["lean_build", "lean_code_actions", "lean_completions", "lean_declaration_file",
@@ -37,91 +36,34 @@ function validObjectJson(raw: string | undefined): boolean {
   }
 }
 
-function guardMalformedToolArguments(source: AssistantMessageEventStream,
-    onFinal?: (message: AssistantMessage) => void): AssistantMessageEventStream {
-  const guarded = createAssistantMessageEventStream();
-  void (async () => {
-    const rawByIndex = new Map<number, string>();
-    const invalidIds = new Set<string>();
-    try {
-      for await (const event of source) {
-        if (event.type === "start") rawByIndex.clear();
-        if (event.type === "toolcall_start") {
-          const block = event.partial.content[event.contentIndex] as unknown as { partialJson?: string } | undefined;
-          if (block?.partialJson !== undefined) rawByIndex.set(event.contentIndex, block.partialJson);
-        }
-        if (event.type === "toolcall_delta") {
-          rawByIndex.set(event.contentIndex, (rawByIndex.get(event.contentIndex) ?? "") + event.delta);
-        }
-        if (event.type === "toolcall_end") {
-          const block = event.partial.content[event.contentIndex] as unknown as { partialJson?: string } | undefined;
-          const raw = rawByIndex.get(event.contentIndex) ?? block?.partialJson;
-          if (!validObjectJson(raw)) {
-            // Pi parses failed JSON as {} before tool validation. `null` is deliberately not an object,
-            // so even argument-free tools fail validation instead of running with invented defaults.
-            (event.toolCall as unknown as { arguments: unknown }).arguments = null;
-            if (block && "arguments" in block) (block as { arguments?: unknown }).arguments = null;
-            invalidIds.add(event.toolCall.id);
-          }
-        }
-        if (event.type === "done" && invalidIds.size) {
-          for (const block of event.message.content) {
-            if (block.type === "toolCall" && invalidIds.has(block.id)) {
-              (block as unknown as { arguments: unknown }).arguments = null;
-            }
-          }
-        }
-        if (event.type === "done") onFinal?.(event.message);
-        if (event.type === "error") onFinal?.(event.error);
-        guarded.push(event);
-      }
-      guarded.end(await source.result());
-    } catch {
-      const result = await source.result();
-      onFinal?.(result);
-      guarded.push({ type: "error", reason: result.stopReason === "aborted" ? "aborted" : "error", error: result });
-    }
-  })();
-  return guarded;
+/** The raw argument JSON of each streamed tool call, in the order Pi's stream delivered it. */
+class RawArguments {
+  private raw = new Map<number, string>();
+  reset() { this.raw.clear(); }
+  start(index: number, partialJson: string | undefined) { if (partialJson !== undefined) this.raw.set(index, partialJson); }
+  delta(index: number, text: string) { this.raw.set(index, (this.raw.get(index) ?? "") + text); }
+  get(index: number) { return this.raw.get(index); }
+}
+
+/**
+ * Pi parses failed JSON as {} before tool validation. A tool call whose streamed arguments were not an
+ * object gets `null` arguments instead (`null` is deliberately not an object, so even argument-free tools
+ * fail validation instead of running with invented defaults). Returns the repaired message, or undefined
+ * when every tool call was fine.
+ */
+function repairMalformedToolArguments(message: AssistantMessage, raw: RawArguments): AssistantMessage | undefined {
+  let changed = false;
+  const content = message.content.map((block, index) => {
+    if (block.type !== "toolCall" || validObjectJson(raw.get(index))) return block;
+    changed = true;
+    return { ...block, arguments: null } as unknown as typeof block;
+  });
+  return changed ? { ...message, content } : undefined;
 }
 
 function inside(path: string, parent: string): boolean {
   const rel = relative(parent, path);
   return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`));
-}
-
-async function consumeBody(body: BodyInit): Promise<{ bytes: Uint8Array; replacement?: BodyInit }> {
-  if (typeof body === "string") return { bytes: Buffer.from(body) };
-  if (body instanceof URLSearchParams) return { bytes: Buffer.from(body.toString()) };
-  if (body instanceof Uint8Array) return { bytes: body };
-  if (body instanceof ArrayBuffer) return { bytes: new Uint8Array(body) };
-  if (typeof Blob !== "undefined" && body instanceof Blob) {
-    const bytes = new Uint8Array(await body.arrayBuffer());
-    return { bytes, replacement: bytes };
-  }
-  if (typeof body === "object" && Symbol.asyncIterator in body) {
-    const chunks: Uint8Array[] = [];
-    for await (const chunk of body as AsyncIterable<Uint8Array>) {
-      chunks.push(chunk instanceof Uint8Array ? chunk : Buffer.from(chunk));
-    }
-    const bytes = Buffer.concat(chunks);
-    return { bytes, replacement: bytes };
-  }
-  // An unread body would leave the request without its byte-exact journal row.
-  throw new Error(`Arena cannot journal a provider request body of type ${Object.prototype.toString.call(body)}`);
-}
-
-async function readRequestBody(input: RequestInfo | URL, init?: RequestInit): Promise<{ bytes: Uint8Array; input: RequestInfo | URL; init?: RequestInit }> {
-  if (init?.body != null) {
-    const read = await consumeBody(init.body);
-    return read.replacement === undefined
-      ? { bytes: read.bytes, input, init }
-      : { bytes: read.bytes, input, init: { ...init, body: read.replacement } };
-  }
-  if (typeof Request !== "undefined" && input instanceof Request) {
-    return { bytes: new Uint8Array(await input.clone().arrayBuffer()), input, init };
-  }
-  return { bytes: new Uint8Array(), input, init };
 }
 
 function deliveredBlocks(content: unknown): Array<Record<string, unknown>> {
@@ -152,24 +94,17 @@ export default function arenaExtension(pi: ExtensionAPI) {
   const runDirectory = runId ? resolve(root, "runs", "pi-budget", runId) : undefined;
   const costJournal = runDirectory ? resolve(runDirectory, "cost-ledger.jsonl") : undefined;
   const traceJournal = runDirectory ? resolve(runDirectory, "trace-journal.jsonl") : undefined;
+  // The one spend rule (spend.ts): each call's actual cost is added once, the run stops at the limit.
+  const limit = limitUsd();
+  const outputLimit = Number(process.env.ARENA_REQUEST_OUTPUT_TOKENS ?? 0);
+  let spentUsd = 0;
+  let settledCalls = 0;
+  let limitHit = false;
+  // The provider request currently open: opened in before_provider_request, closed by the call's settle row.
   let pendingRequest: string | undefined;
-  // Final provider message of each request as the guard stream delivered it. Requests Pi sends
-  // outside an agent turn (compaction summaries) never reach message_end; this is their usage.
-  const finalMessages = new Map<string, AssistantMessage>();
   let openAttempt: string | undefined;
   let previousFailed: string | undefined;
-  // Payload bytes per open request, and the last settled one, for the context bound.
-  const requestBytes = new Map<string, number>();
-  let priorRequest: PriorRequest | undefined;
-  // True from session_before_compact until session_compact / session_compact_failed. Compaction is a
-  // necessary step and always within budget: its summary requests skip the window check and every gate
-  // but are still reserved and settled, so spend stays exact. Agent turns are never affected.
-  let compacting = false;
-  const compactionRequests = new Set<string>();
-  let fixedRequestShape: string | undefined;
-  let gateStopReason: string | undefined;
-  let gateStopCode: "soft_cap_reached" | "actual_usage_cap" | "estimated_request_unaffordable" | undefined;
-  let wireIndex = 0;
+  const rawArguments = new RawArguments();
   let continuations = 0;
   let plateau = 0;
   let errorStreak = 0;
@@ -191,8 +126,6 @@ export default function arenaExtension(pi: ExtensionAPI) {
   const discoveries = new Set<string>();
   // Model-facing trimming of tool results; its record of what the model has seen resets on compaction.
   const trimmer = new ResultTrimmer();
-  let readEntries: (() => SessionEntry[]) | undefined;
-  let modelRegistry: ExtensionContext["modelRegistry"] | undefined;
 
   async function campaign(action: string, args: string[] = []): Promise<Record<string, any>> {
     if (!active || !runId) throw new Error("Arena run is not selected");
@@ -316,20 +249,10 @@ export default function arenaExtension(pi: ExtensionAPI) {
     finally { closeSync(fd); }
     chmodSync(traceJournal, 0o600);
   }
-  // The wire body and the post-hook payload are each stored as a delta against the previous one (see journal.ts),
-  // so the journal grows with what each request adds, not with the whole context every time. Fields that
-  // describe the encoding come before the heavy `body` / `post_hook`, which stay last in the row.
-  const wireChain = new DeltaChain();
+  // The post-hook payload is stored as a delta against the previous one (see journal.ts), so the journal grows
+  // with what each request adds, not with the whole context every time. Fields that describe the encoding come
+  // before the heavy `post_hook`, which stays last in the row.
   const hookChain = new DeltaChain();
-  function recordWire(bytes: Uint8Array) {
-    if (!pendingRequest || !bytes.byteLength) return;
-    const buffer = Buffer.from(bytes);
-    const { sha256, delta } = wireChain.encode(buffer);
-    appendTrace({ kind: "wire", id: pendingRequest, retry_index: wireIndex, sha256,
-      ...(delta ? { encoding: "delta", prefix: delta.prefix, suffix: delta.suffix } : {}),
-      body: delta ? delta.middle : buffer.toString("utf8") });
-    wireIndex += 1;
-  }
   function hookFields(published: unknown) {
     const text = Buffer.from(JSON.stringify(published));
     const { sha256, delta } = hookChain.encode(text);
@@ -337,43 +260,22 @@ export default function arenaExtension(pi: ExtensionAPI) {
       ...(delta ? { post_hook_prefix: delta.prefix, post_hook_suffix: delta.suffix } : {}),
       post_hook: delta ? delta.middle : text.toString("utf8") };
   }
-  function costState() {
-    const reservations = new Map<string, number>();
-    let spent = 0;
-    for (const event of costEvents()) {
-      if (event.kind === "reserve") reservations.set(String(event.id), Number(event.usd));
-      if (event.kind === "settle" || event.kind === "release") {
-        if (!reservations.has(String(event.id))) throw new Error("Unmatched Arena settlement");
-        reservations.delete(String(event.id));
-        // Older journals settled zero-usage transport errors at the reserved
-        // amount. Interpret those as releases without rewriting their history.
-        if (event.kind === "settle" && event.usage_known !== false) spent += Number(event.usd);
-        // Reservations are estimates for audit and crash recovery, not a cap.
-      }
-    }
-    const unresolved = [...reservations.values()].reduce((sum, amount) => sum + amount, 0);
-    const model = process.env.ARENA_MODEL;
-    // Pi can record compaction or direct-call usage outside this provider's
-    // request journal. Its persisted session total is the other audit source.
-    const sessionObserved = readEntries && model && isBudgetModel(model)
-      ? sessionSpend(readEntries(), model) : 0;
-    return { spent: Math.max(spent, sessionObserved), unresolved };
+  // The finish tool is offered to the model only inside the final FINISH_REMAINING_FRACTION of the limit.
+  function applyFinishGate() {
+    const offered = toolsForSpend(pi.getActiveTools(), FINISH_TOOL, finishAllowed(spentUsd, limit).allowed);
+    const current = pi.getActiveTools();
+    if (offered.length !== current.length || offered.some((name, index) => name !== current[index])) pi.setActiveTools(offered);
   }
 
   pi.on("session_start", (_event, ctx) => {
     active = undefined;
-    readEntries = () => ctx.sessionManager.getEntries();
-    modelRegistry = ctx.modelRegistry;
-    const pending = new Set<string>();
-    for (const item of costEvents()) {
-      if (item.kind === "reserve") pending.add(String(item.id));
-      if (item.kind === "settle" || item.kind === "release") pending.delete(String(item.id));
-    }
-    for (const id of pending) {
-      if (!costEvents().some(item => item.kind === "unknown" && String(item.id) === id)) {
-        appendCost({ kind: "unknown", id, reason: "previous_process_ended_before_settlement", usage_known: false });
-      }
-    }
+    // The run total is the sum of the ledger's settle rows, so a resumed run continues from its spend.
+    const settled = costEvents().filter(item => item.kind === "settle" && item.usage_known !== false);
+    spentUsd = settled.reduce((sum, item) => sum + Number(item.usd), 0);
+    settledCalls = settled.length;
+    limitHit = limitReached(spentUsd, limit);
+    pendingRequest = undefined;
+    previousFailed = undefined;
     const latest = costEvents().filter(item => item.kind === "control").at(-1);
     continuations = Number(latest?.continuations ?? 0);
     plateau = Number(latest?.plateau ?? 0);
@@ -399,293 +301,119 @@ export default function arenaExtension(pi: ExtensionAPI) {
     for (const item of costEvents()) if (item.kind === "discovery" && typeof item.signature === "string") {
       discoveries.add(item.signature);
     }
-    fixedRequestShape = undefined;
-    gateStopReason = undefined;
-    gateStopCode = undefined;
+    applyFinishGate();
   });
 
-  // The guard provider owns the final transport callback. Extension hook errors
-  // are swallowed by Pi, so a hook cannot enforce a hard dollar limit.
-  pi.registerProvider("arena-guard", {
-    name: "Arena guarded OpenCode Go",
-    api: "openai-responses", baseUrl: "http://127.0.0.1/arena-guard-unused", apiKey: "guard-routing-only",
-    models: Object.entries(MODELS).map(([id, limits]) => ({
-      id, name: `Arena guarded ${id}`, reasoning: true, input: ["text"],
-      cost: limits.price, contextWindow: limits.contextWindow, maxTokens: limits.requestOutputTokens,
-    })),
-    streamSimple(model, context, options) {
-      if (!isBudgetModel(model.id) || !active || !runDirectory) {
-        throw new Error("Unpriced or unselected Arena model");
-      }
-      const runtime = modelRegistry;
-      if (!runtime) throw new Error("Arena model registry is unavailable");
-      const physical = runtime.find(PROVIDER, model.id);
-      if (!physical) throw new Error(`OpenCode Go model unavailable: ${model.id}`);
-      if (physical.contextWindow > MODELS[model.id].contextWindow ||
-          physical.maxTokens > MODELS[model.id].maxTokens) {
-        throw new Error(`Arena budget reservation is outdated for ${model.id}`);
-      }
-      enforcedMaxTokens(physical, model.id);
-      const priceProblem = catalogPriceProblem(model.id, physical.cost);
-      if (priceProblem) throw new Error(priceProblem);
-      if (!compacting && (finishConfirmed || (process.env.ARENA_AUTOCONTINUE === "1" && noWorkTurns >= 2))) {
-        const stopped = createAssistantMessageEventStream();
-        const zeroCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
-        const message = { role: "assistant" as const, content: [], api: model.api,
-          provider: physical.provider, model: physical.id,
-          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: zeroCost },
-          stopReason: "stop" as const, timestamp: Date.now() };
-        stopped.push({ type: "start", partial: { ...message, content: [] } });
-        stopped.push({ type: "done", reason: "stop", message });
-        stopped.end();
-        return stopped;
-      }
-      const { apiKey: _guardKey, headers: _guardHeaders, env: _guardEnv, ...rest } = options ?? {};
-      const innerFetch = rest.fetch ?? globalThis.fetch;
-      return guardMalformedToolArguments(runtime.streamSimple(physical, context, {
-        ...rest,
-        maxTokens: Math.min(rest.maxTokens ?? maxRequestOutputTokens(model.id), maxRequestOutputTokens(model.id)),
-        fetch: async (input, init) => {
-          if (gateStopReason && !compacting) {
-            throw new Error(`Arena budget stop: ${gateStopReason}`);
-          }
-          // Headers stay on the request. Only the body is journaled, after the SDK
-          // has added stream flags the hook never saw.
-          const captured = await readRequestBody(input, init);
-          recordWire(captured.bytes);
-          return innerFetch(captured.input, captured.init);
-        },
-        onPayload: async payload => {
-          // A request still open here was sent outside an agent turn. When Pi compacts in the middle of a turn
-          // it makes two sequential summary requests (history, then the turn prefix; compaction.js `compact`);
-          // the first is still open when the second starts. Both are real, billed and needed, so this is
-          // bookkeeping of the first one, not a duplicate request. The second closes on session_compact.
-          closeRequest(undefined, "superseded_by_next_request");
-          if (compacting) {
-            // No check and no gate. Reserve a byte-based estimate for the ledger only; actual usage settles on close.
-            const summary = compactionPayload(payload, model.id as BudgetModel);
-            const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-            const published = await options?.onPayload?.(summary.payload, physical) ?? summary.payload;
-            const bytes = Buffer.byteLength(JSON.stringify(published ?? null));
-            appendCost({ kind: "reserve", id, usd: summary.reserve, estimate_usd: summary.reserve, gate: "allow",
-              reason: "compaction summary bypasses the budget guard", purpose: "compaction", model: model.id, bytes });
-            requestBytes.set(id, bytes);
-            compactionRequests.add(id);
-            pendingRequest = id;
-            openAttempt = id;
-            wireIndex = 0;
-            appendTrace({ kind: "request", id, run_id: runId, retry_of: null, model: model.id,
-              estimate_usd: summary.reserve, gate_decision: "bypass_compaction", ...hookFields(published) });
-            return published;
-          }
-          if (gateStopReason) throw new Error(`Arena budget stop: ${gateStopReason}`);
-          // Normalize at a fixed run-wide output limit; never use the remaining
-          // dollars to rewrite the provider request.
-          const softLimits = budgetLimits();
-          const soft = softCapGate(costState().spent, softLimits);
-          if (!soft.allowed) {
-            gateStopCode = soft.stop as typeof gateStopCode;
-            gateStopReason = `settled spend $${costState().spent.toFixed(6)} reached the $${softLimits.stopUsd} cap`;
-            appendCost({ kind: "gate", id: `${Date.now()}-soft`, model: model.id, decision: "refuse",
-              reason: gateStopReason, stop: soft.stop, spent_usd: costState().spent,
-              reserved_usd: costState().unresolved, soft_remaining_usd: 0, soft_overshoot_usd: soft.overshootUsd });
-            appendTrace({ kind: "gate_refusal", run_id: runId, model: model.id, reason: gateStopReason,
-              stop: soft.stop, soft_overshoot_usd: soft.overshootUsd });
-            throw new Error(`Arena budget stop: ${gateStopReason}`);
-          }
-          const bounded = assessFinalPayload(payload, model.id as BudgetModel, costState(), softLimits, priorRequest);
-          const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-          const retryOf = previousFailed ?? null;
-          const shape = requestShape(bounded.payload);
-          if (fixedRequestShape === undefined) fixedRequestShape = shape;
-          const shapeChanged = shape !== fixedRequestShape;
-          const decision = shapeChanged ? {
-            allowed: false, estimateUsd: bounded.reserve, remainingUsd: bounded.remainingUsd,
-            overshootUsd: Math.max(0, bounded.reserve - bounded.remainingUsd),
-            reason: "provider request shape changed during run",
-          } : bounded;
-          const attempt = { kind: "gate", id, model: model.id, estimate_usd: decision.estimateUsd,
-            decision: decision.allowed ? "allow" : "refuse", reason: decision.reason,
-            spent_usd: costState().spent, reserved_usd: costState().unresolved,
-            remaining_usd: decision.remainingUsd, overshoot_usd: decision.overshootUsd,
-            bytes: Buffer.byteLength(JSON.stringify(bounded.payload)) };
-          if (!decision.allowed) {
-            appendCost(attempt);
-            gateStopReason = decision.reason;
-            gateStopCode = "estimated_request_unaffordable";
-            appendTrace({ kind: "gate_refusal", id, run_id: runId, model: model.id,
-              estimate_usd: decision.estimateUsd, reason: decision.reason,
-              remaining_usd: decision.remainingUsd, overshoot_usd: decision.overshootUsd,
-              request_shape: shape });
-            throw new Error(`Arena budget stop: ${decision.reason}; estimated $${decision.estimateUsd.toFixed(6)}, `
-              + `$${decision.remainingUsd.toFixed(6)} remains`);
-          }
-
-          const published = await options?.onPayload?.(bounded.payload, physical) ?? bounded.payload;
-          const publishedShape = requestShape(published as Record<string, unknown>);
-          if (publishedShape !== fixedRequestShape) {
-            gateStopReason = "provider hook changed the fixed request shape";
-            gateStopCode = "estimated_request_unaffordable";
-            appendCost({ ...attempt, decision: "refuse", reason: gateStopReason });
-            appendTrace({ kind: "gate_refusal", id, run_id: runId, model: model.id,
-              estimate_usd: decision.estimateUsd, reason: gateStopReason,
-              remaining_usd: decision.remainingUsd, overshoot_usd: decision.overshootUsd,
-              request_shape: publishedShape });
-            throw new Error(`Arena budget stop: ${gateStopReason}`);
-          }
-          appendCost(attempt);
-          previousFailed = undefined;
-          appendCost({ kind: "reserve", id, usd: bounded.reserve, estimate_usd: decision.estimateUsd,
-            gate: "allow", reason: decision.reason, remaining_usd: decision.remainingUsd,
-            overshoot_usd: decision.overshootUsd, model: model.id,
-            bytes: Buffer.byteLength(JSON.stringify(published)) });
-          requestBytes.set(id, Buffer.byteLength(JSON.stringify(bounded.payload), "utf8"));
-          pendingRequest = id;
-          openAttempt = id;
-          wireIndex = 0;
-          appendTrace({ kind: "request", id, run_id: runId, retry_of: retryOf, model: model.id,
-            estimate_usd: decision.estimateUsd, gate_decision: "allow",
-            remaining_allowance_usd: decision.remainingUsd, ...hookFields(published) });
-          return published;
-        },
-      }), message => { if (pendingRequest) finalMessages.set(pendingRequest, message); });
-    },
+  // Every provider request is journaled here. Pi runs extension hook errors to completion without failing
+  // the request, so nothing in these two hooks can block a call; the spend limit is enforced after the call.
+  pi.on("before_provider_request", (event, ctx) => {
+    if (!active || !runDirectory) return;
+    let payload = event.payload;
+    // A fixed per-request output ceiling for the whole run (models.yaml request_output_tokens).
+    if (outputLimit > 0 && payload && typeof payload === "object" && !Array.isArray(payload)) {
+      const body = payload as Record<string, unknown>;
+      const field = typeof body.max_output_tokens === "number" ? "max_output_tokens"
+        : typeof body.max_tokens === "number" ? "max_tokens" : undefined;
+      if (field && Number(body[field]) > outputLimit) payload = { ...body, [field]: outputLimit };
+    }
+    // A request still open here was sent outside an agent turn: when Pi compacts in the middle of a turn it
+    // makes two sequential summary requests and the first never gets a message_end. The compaction settle row
+    // (session_compact) carries the cost of both, under the id of the last.
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    pendingRequest = id;
+    openAttempt = id;
+    appendTrace({ kind: "request", id, run_id: runId, retry_of: previousFailed ?? null,
+      model: ctx.model?.id ?? process.env.ARENA_MODEL ?? null, ...hookFields(payload) });
+    return payload === event.payload ? undefined : payload;
   });
-
-  for (const id of Object.keys(MODELS)) {
-    if (!isBudgetModel(id)) continue;
-    pi.registerVirtualModel({
-      provider: BUDGET_PROVIDER,
-      id,
-      name: `Arena budgeted ${id}`,
-      thinkingLevels: ["off", "low", "medium", "high"],
-      route(request, ctx) {
-        if (!readEntries) throw new Error("Arena budget session has not started");
-        const physical = ctx.modelRegistry.find(PROVIDER, id);
-        const guarded = ctx.modelRegistry.find("arena-guard", id);
-        if (!physical || !guarded) throw new Error(`OpenCode Go or Arena guard unavailable: ${id}`);
-        const limits = MODELS[id];
-        if (physical.contextWindow > limits.contextWindow || physical.maxTokens > limits.maxTokens) {
-          throw new Error(`Arena budget reservation is outdated for ${id}`);
-        }
-        // Pi resolves each reply's model from the physical catalog (messages carry its provider), so that
-        // entry's maxTokens must be the enforced per-request limit, not the physical one.
-        enforcedMaxTokens(physical, id);
-        const priceProblem = catalogPriceProblem(id, physical.cost);
-        if (priceProblem) throw new Error(priceProblem);
-        return { model: guarded, thinkingLevel: request.thinkingLevel };
-      },
-    });
-  }
+  pi.on("after_provider_response", event => {
+    if (pendingRequest && traceJournal) appendTrace({ kind: "http_response", id: pendingRequest, status: event.status });
+  });
 
   pi.on("before_agent_start", (_event, ctx) => {
-    compacting = false;  // safety: an agent turn never inherits the bypass
+    applyFinishGate();
     if (process.env.ARENA_BUDGET_REQUIRED !== "1") return;
-    if (!active || ctx.model?.provider !== BUDGET_PROVIDER || !isBudgetModel(ctx.model.id)) {
+    if (!active || limitHit || ctx.model?.id !== process.env.ARENA_MODEL) {
       ctx.abort();
-      if (ctx.hasUI) ctx.ui.notify("Select /arena and an arena-budget model before prompting.", "error");
+      if (ctx.hasUI) ctx.ui.notify(limitHit ? "The spend limit is already reached." : "Select /arena and the run's model before prompting.", "error");
     }
   });
 
   // Preserve earlier tool messages byte-for-byte. Rewriting them when a new
   // evaluation arrives invalidates the provider's cached prompt prefix.
 
-  // Close the open request in the ledger: settle with real usage, else unknown/release.
-  // `message` is the agent's assistant message (message_end); without it the request was not an
-  // agent message (compaction summary) and its usage is whatever the guard stream delivered.
-  function closeRequest(agentMessage: AssistantMessage | undefined, orphanReason: string) {
-    if (!pendingRequest) return;
-    const orphan = agentMessage === undefined;
-    const message = agentMessage ?? finalMessages.get(pendingRequest);
-    const event = { message: message ?? ({ role: "assistant", content: [], stopReason: "error",
-      errorMessage: orphanReason, usage: undefined } as unknown as AssistantMessage) };
-    const model = process.env.ARENA_MODEL;
-    if (!model || !isBudgetModel(model)) return;
-    const state = costEvents().findLast(item => item.kind === "reserve" && item.id === pendingRequest);
-    if (!state) throw new Error("Missing Arena reservation");
-    const blocks = deliveredBlocks(event.message.content);
-    const text = blocks.filter(block => block.type === "text").map(block => String(block.text ?? "")).join("");
-    const delivered = { kind: "response", id: pendingRequest, content: blocks, text,
-      stop_reason: event.message.stopReason, response_id: event.message.responseId ?? null,
-      response_model: event.message.responseModel ?? event.message.model,
-      error_message: event.message.errorMessage ?? null,
-      ...(orphan ? { source: "orphan_stream", orphan_reason: orphanReason } : {}) };
-    let usd = 0;
-    let boundViolation = false;
-    if (event.message.usage?.totalTokens) {
-      const usage = event.message.usage;
-      usd = usageCost(usage, model);
-      const bytes = requestBytes.get(pendingRequest);
-      const inputTokens = (usage.input ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
-      // A summary request is not a prefix of the next agent request, so it must not seed the context bound.
-      if (bytes !== undefined && inputTokens > 0 && !compactionRequests.has(pendingRequest)) priorRequest = { bytes, inputTokens };
-      boundViolation = usd > Number(state.usd);
-      const limits = budgetLimits();
-          const ledgerSettled = costEvents().filter(item => item.kind === "settle" && item.usage_known !== false)
-        .reduce((sum, item) => sum + Number(item.usd), 0) + usd;
-      const settledSpend = Math.max(costState().spent, ledgerSettled);
-      const unresolvedAfter = Math.max(0, costState().unresolved - Number(state.usd));
-      const remainingAllowanceUsd = Math.max(0, limits.hardCapUsd - settledSpend - unresolvedAfter);
-      const overshootUsd = Math.max(0, settledSpend - limits.hardCapUsd);
-      const soft = softCapGate(settledSpend, limits);
-      appendCost({ kind: "settle", id: pendingRequest, usd, usage_known: true,
-        ...(orphan ? { source: "orphan_stream", orphan_reason: orphanReason, stop_reason: event.message.stopReason } : {}),
-        bound_violation: boundViolation,
-        estimate_usd: Number(state.usd), remaining_usd: remainingAllowanceUsd,
-        overshoot_usd: overshootUsd,
-        soft_remaining_usd: soft.remainingUsd, soft_overshoot_usd: soft.overshootUsd,
-        tokens: { input: usage.input ?? 0, output: usage.output ?? 0,
-          cache_read: usage.cacheRead ?? 0, cache_write: usage.cacheWrite ?? 0 },
-        ledger_components_usd: usageCostParts(usage, model),
-        pi_embedded_cost_usd: usage.cost?.total ?? null });
-      // Pi prices the same usage from its catalog, which `catalogPriceProblem` keeps equal to
-      // the ledger, except a conservative high price tier, which only the ledger applies.
-      const priceTier = MODELS[model].highPrice && priceForUsage(usage, model) === MODELS[model].highPrice ? "high" : "base";
-      appendTrace({ ...delivered, settled_usd: usd, price_tier: priceTier, pi_cost_usd: usage.cost?.total ?? null,
-        estimate_usd: Number(state.usd), remaining_allowance_usd: remainingAllowanceUsd,
-        overshoot_usd: overshootUsd,
-        soft_remaining_usd: soft.remainingUsd, soft_overshoot_usd: soft.overshootUsd,
-        usage: { input: usage.input ?? 0, output: usage.output ?? 0,
-          cache_read: usage.cacheRead ?? 0, cache_write: usage.cacheWrite ?? 0 } });
-      const alarm = cacheAlarm(usage, costEvents().filter(item => item.kind === "settle" && item.usage_known === true).length);
+  // Add one call's actual cost to the run total and write its settle row. The one place spend changes.
+  // A call with no usage (a request that failed before the provider counted tokens) settles at zero.
+  function settle(id: string, usage: AssistantMessage["usage"] | undefined, extra: Record<string, unknown>, ctx: ExtensionContext) {
+    const known = Boolean(usage?.totalTokens);
+    const usd = known ? callCost(usage) : 0;
+    spentUsd += usd;
+    const cost = usage?.cost;
+    appendCost({ kind: "settle", id, usd, usage_known: known, spent_usd: spentUsd, limit_usd: limit,
+      tokens: { input: usage?.input ?? 0, output: usage?.output ?? 0,
+        cache_read: usage?.cacheRead ?? 0, cache_write: usage?.cacheWrite ?? 0 },
+      ledger_components_usd: { input: cost?.input ?? 0, output: cost?.output ?? 0,
+        cacheRead: cost?.cacheRead ?? 0, cacheWrite: cost?.cacheWrite ?? 0 },
+      ...extra });
+    if (known) settledCalls += 1;
+    if (known && usage && extra.source !== "compaction") {
+      const alarm = cacheAlarm(usage, settledCalls);
       if (alarm) {
-        appendCost({ kind: "cache_alarm", id: pendingRequest, ...alarm });
+        appendCost({ kind: "cache_alarm", id, ...alarm });
         console.error(`[arena-cache-alarm] request ${alarm.request}: wrote ${alarm.write} cache tokens but read ${alarm.read}; the stable prefix was not reused`);
       }
-      console.error(`[arena-cost] settled $${usd.toFixed(6)}; cache read ${usage.cacheRead ?? 0}, write ${usage.cacheWrite ?? 0}; total $${(costState().spent).toFixed(6)}`);
-    } else {
-      const limits = budgetLimits();
-      const spent = costState().spent;
-      const sent = wireIndex > 0;
-      const unresolvedAfter = Math.max(0, costState().unresolved - (sent ? 0 : Number(state.usd)));
-      appendCost({ kind: sent ? "unknown" : "release", id: pendingRequest,
-        reason: sent ? (orphan ? `orphan_request_without_usage:${orphanReason}` : "provider_attempt_without_settled_usage") : event.message.stopReason ?? "not_sent",
-        usage_known: false, estimate_usd: Number(state.usd), remaining_usd: Math.max(0, limits.hardCapUsd - spent - unresolvedAfter),
-        overshoot_usd: Math.max(0, spent - limits.hardCapUsd),
-        soft_remaining_usd: softCapGate(spent, limits).remainingUsd,
-        soft_overshoot_usd: softCapGate(spent, limits).overshootUsd, cache_read_tokens: 0, cache_write_tokens: 0 });
-      appendTrace({ ...delivered, settled_usd: null, pi_cost_usd: null });
-      if (!orphan) previousFailed = pendingRequest;
-      console.error(`[arena-cost] released failed request ${pendingRequest}; no usage returned`);
     }
-    finalMessages.delete(pendingRequest);
-    requestBytes.delete(pendingRequest);
-    compactionRequests.delete(pendingRequest);
-    pendingRequest = undefined;
+    if (known) console.error(`[arena-cost] settled $${usd.toFixed(6)}; cache read ${usage?.cacheRead ?? 0}, write ${usage?.cacheWrite ?? 0}; total $${spentUsd.toFixed(6)}`);
+    applyFinishGate();
+    // Stop the agent at once: no further provider request, no further tool batch. The turn that follows is
+    // closed in agent_before_settle with the limit as the stop reason.
+    if (limitReached(spentUsd, limit) && !limitHit) {
+      limitHit = true;
+      // Recorded here because an aborted run may never reach agent_before_settle.
+      appendCost({ kind: "control", continuations, plateau, no_work_turns: noWorkTurns,
+        error_streak: errorStreak, progress: previousProgress, stop: "limit_reached" });
+      ctx.abort();
+    }
   }
-  pi.on("message_end", event => {
-    if (event.message.role === "assistant") closeRequest(event.message, "");
+
+  pi.on("message_start", event => { if (event.message.role === "assistant") rawArguments.reset(); });
+  pi.on("message_update", event => {
+    const update = event.assistantMessageEvent;
+    if (update.type === "toolcall_start") {
+      rawArguments.start(update.contentIndex, (update.partial.content[update.contentIndex] as unknown as { partialJson?: string } | undefined)?.partialJson);
+    } else if (update.type === "toolcall_delta") rawArguments.delta(update.contentIndex, update.delta);
   });
-  // Compaction summaries are provider requests with no agent message_end.
-  pi.on("session_compact", () => {
-    compacting = false;
-    closeRequest(undefined, "compaction_summary");
+  pi.on("message_end", (event, ctx) => {
+    if (event.message.role !== "assistant") return;
+    const repaired = repairMalformedToolArguments(event.message, rawArguments);
+    const message = repaired ?? event.message;
+    rawArguments.reset();
+    const id = pendingRequest ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    pendingRequest = undefined;
+    const blocks = deliveredBlocks(message.content);
+    const delivered = { kind: "response", id, content: blocks,
+      text: blocks.filter(block => block.type === "text").map(block => String(block.text ?? "")).join(""),
+      stop_reason: message.stopReason, response_id: message.responseId ?? null,
+      response_model: message.responseModel ?? message.model, error_message: message.errorMessage ?? null };
+    const known = Boolean(message.usage?.totalTokens);
+    settle(id, message.usage, {}, ctx);
+    appendTrace({ ...delivered, settled_usd: known ? callCost(message.usage) : null,
+      usage: { input: message.usage?.input ?? 0, output: message.usage?.output ?? 0,
+        cache_read: message.usage?.cacheRead ?? 0, cache_write: message.usage?.cacheWrite ?? 0 } });
+    // The next request of a failed one is its retry.
+    previousFailed = known ? undefined : id;
+    if (!known) console.error(`[arena-cost] request ${id} returned no usage`);
+    return repaired ? { message: repaired } : undefined;
+  });
+  // A compaction's summary requests have no message_end; Pi records their combined usage on the entry.
+  pi.on("session_compact", (event, ctx) => {
+    settle(pendingRequest ?? `${Date.now()}-compaction`, event.compactionEntry.usage, { source: "compaction" }, ctx);
+    pendingRequest = undefined;
     trimmer.forget();
     void injectMemory();
   });
-  pi.on("session_compact_failed", () => { compacting = false; closeRequest(undefined, "compaction_failed"); });
+  pi.on("session_compact_failed", () => { pendingRequest = undefined; });
   pi.on("session_before_compact", event => {
-    compacting = true;
     const fixed = objectToolArguments(event.preparation.messagesToSummarize) + objectToolArguments(event.preparation.turnPrefixMessages);
     if (fixed) appendTrace({ kind: "compaction_repair", null_tool_arguments: fixed });
   });
@@ -696,54 +424,35 @@ export default function arenaExtension(pi: ExtensionAPI) {
   async function injectMemory() {
     if (!active || !runId) return;
     try {
-      const limits = budgetLimits();
-      const result = await campaign("memory", ["--spent-usd", String(costState().spent), "--cap-usd", String(limits.stopUsd)]);
+      const result = await campaign("memory", ["--spent-usd", String(spentUsd), "--cap-usd", String(limit)]);
       if (result.ok === false || typeof result.text !== "string") return;
       appendCost({ kind: "memory", chars: result.text.length });
       pi.sendMessage({ customType: "arena-memory", content: result.text, display: false }, { triggerTurn: false });
     } catch (error) { console.error(`[arena-memory] not injected: ${error}`); }
   }
 
-  function budgetStatus(ctx: ExtensionContext) {
-    const model = ctx.model;
-    if (model?.provider !== BUDGET_PROVIDER || !isBudgetModel(model.id)) return undefined;
-    const state = costState();
-    const limits = budgetLimits();
-    const soft = softCapGate(state.spent, limits);
-    return { spent_usd: state.spent, unresolved_usd: state.unresolved,
-      remaining_usd: soft.remainingUsd,
-      hard_remaining_usd: Math.max(0, limits.hardCapUsd - state.spent - state.unresolved),
-      overshoot_usd: soft.overshootUsd,
-      hard_overshoot_usd: Math.max(0, state.spent - limits.hardCapUsd),
-      can_continue: soft.allowed,
-      cap_is_actual_usage_only: true };
+  // Cache reuse over the agent's assistant messages in the session (compaction summaries excluded).
+  function cacheUtilization(entries: readonly SessionEntry[]) {
+    const usages = entries.flatMap(entry => entry.type === "message" && entry.message.role === "assistant"
+      && entry.message.usage?.totalTokens ? [entry.message.usage] : []);
+    const summarize = (items: typeof usages) => {
+      const sum = (key: "input" | "cacheRead" | "cacheWrite") => items.reduce((total, usage) => total + (usage[key] ?? 0), 0);
+      const read = sum("cacheRead"), write = sum("cacheWrite"), input = sum("input");
+      return { read_tokens: read, write_tokens: write, input_tokens: input,
+        reuse_pct: cacheHitPct({ input, cacheRead: read, cacheWrite: write }) };
+    };
+    return { all: summarize(usages), recent_ten: summarize(usages.slice(-10)) };
   }
 
   pi.on("session_shutdown", async (_event, ctx) => {
     const reportPath = process.env.ARENA_BUDGET_REPORT_PATH;
     if (!reportPath) return;
     const model = ctx.model;
-    let report: Record<string, unknown> = { session_id: ctx.sessionManager.getSessionId(),
-      theorem: active ?? null,
-      price_basis: "OpenCode Go list prices checked 2026-10-06; a high tier, where configured, is chosen from billed prompt tokens" };
-    try {
-      const limits = budgetLimits();
-      if (model?.provider !== BUDGET_PROVIDER || !isBudgetModel(model.id)) {
-        throw new Error("Budgeted model was not selected");
-      }
-      report = { ...report, hard_cap_usd: limits.hardCapUsd, soft_cap_usd: limits.stopUsd, stop_target_usd: limits.stopUsd,
-        provider: PROVIDER, model: model.id, ...budgetStatus(ctx),
-        price_method: "Observed usage priced per request using OpenCode Go list rates; A configured high tier applies only when billed prompt tokens cross its threshold. Neither this nor Pi's embedded estimate is a provider invoice.",
-        configured_usd_per_million_tokens: MODELS[model.id].price,
-        configured_high_tier: MODELS[model.id].highPrice ? {
-          prompt_tokens_over: MODELS[model.id].highContextThreshold,
-          usd_per_million_tokens: MODELS[model.id].highPrice } : null,
-        pi_embedded_estimate: sessionEmbeddedCost(ctx.sessionManager.getEntries()),
-        pi_session_spend_usd: sessionSpend(ctx.sessionManager.getEntries(), model.id),
-        cache_utilization: cacheUtilization(ctx.sessionManager.getEntries(), model.id) };
-    } catch (error) {
-      report = { ...report, error: String(error) };
-    }
+    const report = { session_id: ctx.sessionManager.getSessionId(), theorem: active ?? null,
+      limit_usd: limit, provider: model?.provider ?? null, model: model?.id ?? null,
+      spent_usd: spentUsd, remaining_usd: Math.max(0, limit - spentUsd),
+      overshoot_usd: Math.max(0, spentUsd - limit), can_continue: !limitHit,
+      cache_utilization: cacheUtilization(ctx.sessionManager.getEntries()) };
     await mkdir(dirname(reportPath), { recursive: true });
     await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
   });
@@ -826,7 +535,9 @@ export default function arenaExtension(pi: ExtensionAPI) {
   });
 
   const untrimmed = new Map<string, string>();
-  pi.on("tool_execution_end", event => {
+  pi.on("tool_execution_end", (event, ctx) => {
+    // A confirmed finish ends the run: no provider request follows the tool result.
+    if (event.toolName === FINISH_TOOL && finishConfirmed) ctx.abort();
     const result = event.result as { content?: Array<{ type?: string; text?: string }> } | undefined;
     const payload = payloadFromToolResult(result);
     if (event.toolName === "arena_probe" || event.toolName === "arena_evaluate") {
@@ -875,7 +586,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
     const state = readState();
     const stateText = state && stateLine(state);
     let spend = "";
-    try { spend = budgetFooter(costState().spent, budgetLimits()); } catch { /* the footer is best effort */ }
+    try { spend = spendFooter(spentUsd, limit); } catch { /* the footer is best effort */ }
     const line = spend ? (stateText ? `${stateText} \u00b7 ${spend}` : `[arena] ${spend}`) : stateText;
     if (!line && !changed) return;
     return { content: line ? [...content, { type: "text" as const, text: line }] : content,
@@ -977,7 +688,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
       idea_id: Type.Optional(Type.String()),
       idea: Type.Optional(Type.String({ description: "One-line route title; creates the idea and links this attempt to it" })),
     }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
+    async execute(_id, params) {
       if (!active) throw new Error("Select a theorem with /arena first");
       const plan = planEvaluate(params);
       if (!plan.ok) return reply({ ok: false, error: "usage_error", detail: plan.detail });
@@ -994,7 +705,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
         return campaign("evaluate", args);
       });
       kickAutocheck();
-      return withStaleNotice(reply({ ...result, ...(idea.created ? { idea_id: idea.idea_id } : {}), ...(plan.note ? { note: plan.note } : {}), remaining_usd: Number(budgetStatus(ctx)?.remaining_usd?.toFixed(4)) }));
+      return withStaleNotice(reply({ ...result, ...(idea.created ? { idea_id: idea.idea_id } : {}), ...(plan.note ? { note: plan.note } : {}), remaining_usd: Number(Math.max(0, limit - spentUsd).toFixed(4)) }));
     },
   });
 
@@ -1110,15 +821,14 @@ export default function arenaExtension(pi: ExtensionAPI) {
       ]);
       if (checks.ok === false) return reply(checks);
       if (portfolio.ok === false) return reply(portfolio);
-      const limits = budgetLimits();
-      const spent = costState().spent;
-      const room = finishAllowed(spent, limits);
+      const spent = spentUsd;
+      const room = finishAllowed(spent, limit);
       const idea = portfolio.current_idea ?? null;
       const bestVerified = answer.candidate ? { candidate: answer.candidate, tokens: answer.tokens,
         heartbeats: answer.heartbeats, proxy: answer.proxy, status: "cold verified" } : checks.best;
       // Facts the stop decision depends on: how much of the allowance is left and which routes were tried.
-      const budget = { spent_usd: Number(spent.toFixed(4)), cap_usd: limits.stopUsd,
-        remaining_usd: Number(room.remainingUsd.toFixed(4)), used_pct: Math.round(100 * spent / limits.stopUsd) };
+      const budget = { spent_usd: Number(spent.toFixed(4)), cap_usd: limit,
+        remaining_usd: Number(room.remainingUsd.toFixed(4)), used_pct: Math.round(100 * spent / limit) };
       const ideaRows: any[] = portfolio.ideas ?? [];
       const firstReview = !finishReviewIssued;
       let reminder = false;
@@ -1137,7 +847,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
         const newIdeaProbed = ideaRows.some(row => row.attempts > 0 && !refusalIdeaIds.has(String(row.id)));
         const routeRows: any[] = portfolio.routes ?? [];
         const since = sinceRefusal(routeRows, refusalRouteStats, refusalCredited);
-        const push = finishPush({ usedPct: budget.used_pct, remainingUsd: room.remainingUsd, capUsd: limits.stopUsd,
+        const push = finishPush({ usedPct: budget.used_pct, remainingUsd: room.remainingUsd, capUsd: limit,
           baseline: checks.baseline, best: bestVerified, top: portfolio.top, ideas: ideaRows,
           refusals: finishRefusals, newIdeaProbed, routes: portfolio.routes, sinceRefusal: since });
         finishRefusals += 1;
@@ -1154,16 +864,14 @@ export default function arenaExtension(pi: ExtensionAPI) {
         return reply(dropEmpty({ ok: true, phase: "review", best_verified: bestVerified ?? "none", reminder: reminderText,
           remaining_usd: budget.remaining_usd, used_pct: budget.used_pct,
           routes_tried: routesText(portfolio.routes ?? []),
-          next: `${budget.used_pct}% of the $${limits.stopUsd} allowance is spent ($${budget.remaining_usd} left, within the final 10%). ` +
+          next: `${budget.used_pct}% of the $${limit} allowance is spent ($${budget.remaining_usd} left, within the final 10%). ` +
             "Use this decision turn to try another route if one is worth it, then call arena_finish again to confirm stop." }));
       }
       finishConfirmed = true;
       appendCost({ kind: "finish", phase: "confirmed" });
-      const stop = gateStopReason ? gateStopCode ?? "estimated_request_unaffordable"
-        : softCapGate(costState().spent, budgetLimits()).stop ?? "finished";
+      const stop = limitHit ? "limit_reached" : "finished";
       appendCost({ kind: "control", continuations, plateau, no_work_turns: noWorkTurns,
-        error_streak: errorStreak, progress: previousProgress, stop,
-        ...(gateStopReason ? { gate_stop_reason: gateStopReason } : {}) });
+        error_streak: errorStreak, progress: previousProgress, stop });
       return reply({ ok: true, phase: "confirmed", stop: true, best_verified: bestVerified });
     },
   });
@@ -1245,8 +953,6 @@ export default function arenaExtension(pi: ExtensionAPI) {
 
   pi.on("agent_before_settle", async event => {
     if (process.env.ARENA_AUTOCONTINUE !== "1" || !active || !runId) return;
-    const budget = costState();
-    const limits = budgetLimits();
     const state = await campaign("frontier");
     const progress = JSON.stringify(state.best ?? null);
     // Only a turn that produced a real model response counts as work. Provider or extension
@@ -1269,15 +975,13 @@ export default function arenaExtension(pi: ExtensionAPI) {
       else if (turnHadProofAttempt || turnHadNovelContext || turnHadVerifiedImprovement) noWorkTurns = 0;
       else noWorkTurns += 1;
     }
-    const softStop = softCapGate(budget.spent, limits).stop;
-    const stop = gateStopReason ? gateStopCode ?? "estimated_request_unaffordable"
-      : softStop ? softStop
+    const stop = limitHit ? "limit_reached"
       : finishConfirmed ? "finished"
       : errorStreak >= MAX_ERROR_STREAK ? "error_loop"
       : continuations >= 12 ? "continuation_limit"
       : noWorkTurns >= 2 ? "no_work_fallback"
       // A plateau only ends the run inside the final 10%; earlier the model must try a new route.
-      : continuations >= 4 && plateau >= 4 && finishAllowed(budget.spent, limits).allowed ? "plateau" : null;
+      : continuations >= 4 && plateau >= 4 && finishAllowed(spentUsd, limit).allowed ? "plateau" : null;
     turnHadProofAttempt = false;
     turnHadNovelContext = false;
     turnHadVerifiedImprovement = false;
@@ -1285,8 +989,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
       const latestControl = costEvents().filter(item => item.kind === "control").at(-1);
       if (latestControl?.stop !== stop) {
         appendCost({ kind: "control", continuations, plateau, no_work_turns: noWorkTurns,
-          error_streak: errorStreak, progress, ...activity, stop,
-          ...(gateStopReason ? { gate_stop_reason: gateStopReason } : {}) });
+          error_streak: errorStreak, progress, ...activity, stop });
       }
       return { continue: false };
     }
@@ -1304,12 +1007,12 @@ export default function arenaExtension(pi: ExtensionAPI) {
       .map((idea: any) => `${idea.id} ${idea.title}`);
     const current = readState();
     const status = current ? stateLine(current, true) : `[arena] best verified: ${briefText(state.best)}`;
-    const room = finishAllowed(budget.spent, limits);
+    const room = finishAllowed(spentUsd, limit);
     const checks = !room.allowed ? await campaign("state") : undefined;
     const content = !room.allowed
-      ? continuationPush({ usedPct: Math.round(100 * budget.spent / limits.stopUsd), remainingUsd: room.remainingUsd, capUsd: limits.stopUsd,
+      ? continuationPush({ usedPct: Math.round(100 * spentUsd / limit), remainingUsd: room.remainingUsd, capUsd: limit,
         baseline: checks?.baseline, best: checks?.best, top: state.top, routes: state.routes })
-      : `Continue proof optimization. ${status}. Active ideas: ${ideas.length ? ideas.join("; ") : "none recorded"}. Remaining on the $${limits.stopUsd} cap (actual settled spend): $${softCapGate(budget.spent, limits).remainingUsd.toFixed(4)}.`;
+      : `Continue proof optimization. ${status}. Active ideas: ${ideas.length ? ideas.join("; ") : "none recorded"}. Remaining on the $${limit} limit (actual spend): $${room.remainingUsd.toFixed(4)}.`;
     return { entries: [...event.entries, { type: "custom_message" as const, customType: "arena-continuation",
       content, display: false }], continue: true };
   });

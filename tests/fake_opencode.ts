@@ -7,8 +7,8 @@
  * ARENA_FAKE_LOG receives one JSON line per request: the full message transcript and thinking level.
  *
  * Wire mode: ARENA_FAKE_WIRE_URL points at a local HTTP server (tests/pi_support.py AnthropicWire).
- * The model is then served by Pi's real Anthropic Messages client, so the exact payload Pi and the
- * budget guard build is what the server validates.
+ * The model is then served by Pi's real Anthropic Messages client, so the exact payload Pi builds
+ * is what the server validates.
  */
 import { appendFileSync, readFileSync } from "node:fs";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai/compat";
@@ -26,6 +26,13 @@ type Step = {
 
 // Fixture prices and limits come from models.yaml (via ARENA_MODELS_JSON), as Pi's real catalog must equal them.
 const configured = JSON.parse(process.env.ARENA_MODELS_JSON ?? "{}");
+// The fake bills like Pi does: tokens times the configured price. Cost is what the run's spend rule reads.
+const costOf = (usage: { input: number; output: number; cacheRead: number; cacheWrite: number }) => {
+  const price = configured.models["deepseek-v4.1-flash"].price;
+  const parts = { input: usage.input * price.input / 1e6, output: usage.output * price.output / 1e6,
+    cacheRead: usage.cacheRead * price.cacheRead / 1e6, cacheWrite: usage.cacheWrite * price.cacheWrite / 1e6 };
+  return { ...parts, total: parts.input + parts.output + parts.cacheRead + parts.cacheWrite };
+};
 const catalogModel = (id: string) => {
   const { price, contextWindow, maxTokens } = configured.models[id];
   return { cost: price, contextWindow, maxTokens };
@@ -75,9 +82,10 @@ export default function fakeOpenCode(pi: ExtensionAPI) {
           const input = [...context.messages];
           const padInput = Number(process.env.ARENA_FAKE_PAD_INPUT ?? "0");
           if (padInput > 0) input.push({ role: "user", content: "x".repeat(padInput) } as never);
-          const payload = await options?.onPayload?.({ model: model.id, input,
-            max_output_tokens: options.maxTokens ?? 128_000 });
-          if (!payload || Number((payload as { max_output_tokens?: number }).max_output_tokens) > 64_000) {
+          // Pi's compaction summaries do not go through extension hooks, so only agent requests are held to the ceiling.
+          const raw = { model: model.id, input, max_output_tokens: options?.maxTokens ?? 128_000 };
+          const payload = (await options?.onPayload?.(raw)) ?? (summarizing ? raw : undefined);
+          if (!payload || (!summarizing && Number((payload as { max_output_tokens?: number }).max_output_tokens) > 64_000)) {
             throw new Error("Arena did not enforce the fake provider output ceiling");
           }
           if (process.env.ARENA_FAKE_LOG) {
@@ -103,7 +111,7 @@ export default function fakeOpenCode(pi: ExtensionAPI) {
           const message = { role: "assistant" as const, content: content as never, api: model.api,
             provider: model.provider, model: model.id,
             usage: { ...usage, totalTokens: usage.input + usage.output + usage.cacheRead + usage.cacheWrite,
-              cost: zeroCost },
+              cost: costOf(usage) },
             stopReason: step?.stop_reason ?? (step?.tool_calls?.length ? "toolUse" as const : "stop" as const),
             timestamp: Date.now() };
           stream.push({ type: "start", partial: { ...message, content: [] } });

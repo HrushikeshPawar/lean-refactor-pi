@@ -76,78 +76,46 @@ class LifecycleTests(unittest.TestCase):
         self.assertTrue((run.directory / "summary.txt").read_text().startswith(run.run_id))
         self.assertIn("spent_usd", run.json("cost.json"))
 
-    def test_near_cap_refusal_keeps_request_shape_fixed_and_does_not_send(self):
-        from arena.engine import ROOT
-
-        good = (ROOT / "runs/baseline/Core_InitsUpdatesComm/arena-candidate-126.txt").read_text()
-        run = self.fake(
-            [
-                cheap_tool("arena_evaluate", {"proof": good}, input=100, output=10),
-                {"text": "near-cap response", "usage": {"input": 100, "output": 5_990_000}},
-                {"text": "this response must not be requested"},
-            ],
-            cap="3",
-            env={"ARENA_FAKE_PAD_INPUT": "600000"},
-        ).run()
-        requests = run.requests
-        gates = [row for row in run.jsonl("cost-ledger.jsonl") if row.get("kind") == "gate"]
-        self.assertGreaterEqual(len(gates), 2, run.result.stderr)
-        self.assertEqual(gates[0]["decision"], "allow")
-        self.assertEqual(gates[-1]["decision"], "refuse")
-        self.assertLessEqual(len(requests), len(gates) - 1, "a refused request reached the provider")
-        self.assertEqual(len(requests), 2)
-        self.assertEqual(len({json.dumps(row["request_shape"], sort_keys=True) for row in requests}), 1)
-        self.assertTrue(all(row["request_shape"]["max_output_tokens"] == 64_000 for row in requests))
-        self.assertEqual(run.json("summary.json")["stop_reason"], "estimated_request_unaffordable")
-        self.assertTrue(any(row.get("kind") == "gate_refusal" for row in run.jsonl("trace-journal.jsonl")))
-        submission = run.json("submission.json")
-        self.assertEqual(submission["candidate"], "#2", "refusal must preserve the best verified candidate")
-
-    def test_cap_below_three_is_a_soft_cap_on_actual_spend_and_ignores_the_estimate(self):
-        # The padded payload's worst-case reserve exceeds the $0.10 cap, yet requests are sent
-        # while actual spend is low; the run stops only once settled spend reaches the cap.
+    def test_the_run_stops_after_the_first_call_that_reaches_the_limit_and_never_before(self):
+        # Limit $0.1. After the second call $0.09 is spent: below the limit, so a third call is made.
+        # The third call's actual cost takes the total past the limit; the fourth must never be requested.
         run = self.fake(
             [
                 cheap_tool("arena_state", {}),
-                cheap_tool("arena_state", {}),
-                {"text": "costly response", "usage": {"input": 100, "output": 250_000}},
-                {"text": "must not be requested after the soft cap"},
+                cheap_tool("arena_state", {}, output=SPEND_90_PCT),
+                cheap_tool("arena_state", {}, output=20_000),
+                {"text": "must not be requested after the limit"},
+                {"text": "nor this"},
             ],
-            cap="0.1",
-            env={"ARENA_FAKE_PAD_INPUT": "600000"},
         ).run()
-        gates = [row for row in run.jsonl("cost-ledger.jsonl") if row.get("kind") == "gate"]
-        self.assertTrue(gates, run.result.stderr + run.result.stdout[-2000:])
-        self.assertTrue(all(row["decision"] == "allow" for row in gates), gates)
-        # Only the first request has no prior token count, so only its estimate is the full byte bound; later
-        # requests are bounded by the provider's count for the repeated prefix and are small.
-        self.assertGreater(gates[0]["estimate_usd"], 0.1)
-        self.assertEqual(len(run.requests), 3)
+        self.assertEqual(len(run.requests), 3, run.result.stdout[-1500:] + run.result.stderr[-1500:])
+        settles = [row for row in run.jsonl("cost-ledger.jsonl") if row.get("kind") == "settle" and row["usage_known"]]
+        self.assertEqual(len(settles), 3)
+        self.assertTrue(all(row["spent_usd"] < 0.1 for row in settles[:2]), settles)
+        self.assertGreaterEqual(settles[2]["spent_usd"], 0.1)
+        self.assertAlmostEqual(settles[2]["spent_usd"], sum(row["usd"] for row in settles))
         summary = run.json("summary.json")
-        self.assertEqual(summary["stop_reason"], "soft_cap_reached")
+        self.assertEqual(summary["stop_reason"], "limit_reached")
         cost = summary["cost"]
-        self.assertEqual((cost["hard_cap_usd"], cost["soft_cap_usd"]), (3, 0.1))
-        self.assertGreater(cost["overshoot_usd"], 0)
-        self.assertEqual(cost["remaining_usd"], 0)
-        settles = [row for row in run.jsonl("cost-ledger.jsonl") if row.get("kind") == "settle"]
-        self.assertEqual(settles[0]["soft_overshoot_usd"], 0)
-        self.assertGreater(settles[0]["soft_remaining_usd"], 0)
-        self.assertGreater(settles[-1]["soft_overshoot_usd"], 0)
-        self.assertIn("soft cap (hard $3;", (run.directory / "summary.txt").read_text())
+        self.assertEqual((cost["limit_usd"], cost["remaining_usd"]), (0.1, 0))
+        self.assertAlmostEqual(cost["overshoot_usd"], settles[2]["spent_usd"] - 0.1)
+        self.assertEqual(run.result.returncode, 0, run.result.stderr[-1500:])
 
-    def test_estimate_gate_applies_only_against_the_three_dollar_hard_cap(self):
+    def test_the_finish_tool_is_offered_only_in_the_final_ten_percent(self):
         run = self.fake(
             [
-                {"text": "nearly the hard cap", "usage": {"input": 100, "output": 5_990_000}},
-                {"text": "must not reach provider"},
+                cheap_tool("arena_state", {}),
+                cheap_tool("arena_state", {}, output=SPEND_90_PCT),  # leaves 9.8% of the $0.1 limit
+                cheap_tool("arena_state", {}),
+                {"text": "done"},
+                {"text": "done"},
             ],
-            cap="3",
-            env={"ARENA_FAKE_PAD_INPUT": "600000"},
         ).run()
-        gates = [row for row in run.jsonl("cost-ledger.jsonl") if row.get("kind") == "gate"]
-        self.assertEqual(len(run.requests), 1)
-        self.assertEqual([row["decision"] for row in gates], ["allow", "refuse"], run.result.stderr)
-        self.assertEqual(run.json("summary.json")["stop_reason"], "estimated_request_unaffordable")
+        offered = [offered_tools(request) for request in run.requests]
+        self.assertGreaterEqual(len(offered), 4, run.result.stdout[-1500:])
+        self.assertTrue({"arena_state", "arena_evaluate"} <= set(offered[0]))
+        self.assertEqual([FINISH in tools for tools in offered[:2]], [False, False])
+        self.assertEqual([FINISH in tools for tools in offered[2:]], [True] * (len(offered) - 2))
 
     def test_sigterm_mid_request_still_leaves_cost_json_and_summary(self):
         import signal
@@ -163,6 +131,22 @@ class LifecycleTests(unittest.TestCase):
         summary = run.json("summary.json")
         self.assertGreaterEqual(summary["cost"]["requests"], 1)
         self.assertTrue((run.directory / "summary.txt").exists())
+
+
+FINISH = "arena_finish"
+
+
+def offered_tools(request: dict) -> list[str]:
+    """The tools the model is offered in a request: Pi declares them as additions and removals in system messages."""
+    tools: list[str] = []
+    for message in request["messages"]:
+        if message["role"] != "system":
+            continue
+        removed = {tool if isinstance(tool, str) else tool["name"] for tool in message.get("toolsRemoved") or []}
+        tools = [name for name in tools if name not in removed] + [
+            tool["name"] for tool in message.get("toolsAdded") or []
+        ]
+    return tools
 
 
 def cheap_tool(name: str, arguments: dict, **usage) -> dict:
@@ -343,6 +327,8 @@ ARENA_TOOLS = {
     "arena_source",
     "arena_state",
 }
+# Offered from the first request; arena_finish joins them only in the final 10% of the limit.
+START_TOOLS = ARENA_TOOLS - {FINISH}
 LEAN_TOOLS = {
     f"mcp__arena_lean__{name}"
     for name in ("lean_goal", "lean_diagnostic_messages", "lean_multi_attempt", "lean_local_search", "lean_hover_info")
@@ -491,7 +477,7 @@ class LeanMcpTests(unittest.TestCase):
         # The tool list is complete and identical from the first request: nothing appears later
         # (cache prefix), and Pi's codemode sandbox / tool_search never activate.
         for request in requests:
-            self.assertEqual(declared_tools(request), ARENA_TOOLS | LEAN_TOOLS)
+            self.assertEqual(declared_tools(request), START_TOOLS | LEAN_TOOLS)
         everything = [m for m in requests[-1]["messages"] if m["role"] == "toolResult"]
         results = {m["toolName"]: m for m in everything}  # the later, valid lean_goal call wins
         rejected = next(m for m in everything if m["toolName"] == "mcp__arena_lean__lean_goal")
@@ -545,7 +531,7 @@ class AnthropicWireTests(unittest.TestCase):
             for tool in wire.payloads[0]["tools"]
             if tool["name"].startswith("arena_")
         }
-        self.assertTrue(set(tools) >= ARENA_TOOLS, set(tools))
+        self.assertTrue(set(tools) >= START_TOOLS, set(tools))
         for name, schema in tools.items():
             with self.subTest(tool=name):
                 self.assertEqual(schema["type"], "object")
@@ -581,20 +567,18 @@ class AnthropicWireTests(unittest.TestCase):
         requests = [row for row in journal if row["kind"] == "request"]
         wires = [row for row in journal if row["kind"] == "wire"]
         responses = [row for row in journal if row["kind"] == "response"]
-        ledger = run.jsonl("cost-ledger.jsonl")
         detail = (
             f"session={run.run_id} exit={run.result.returncode} "
             f"wires={len(wires)} raw={len(wire.raw_bodies)} requests={len(requests)} "
             f"wire_sha={[hashlib.sha256(body).hexdigest()[:12] for body in wire.raw_bodies]}"
         )
         self.assertEqual(run.result.returncode, 0, detail + "\n" + run.stdout[-500:])
-        self.assertEqual([row["body"].encode() for row in wires], wire.raw_bodies, detail)
+        self.assertEqual(wires, [], detail)
         self.assertEqual(wire.raw_bodies[0], wire.raw_bodies[1], detail)
-        gates = {row["id"]: row for row in ledger if row.get("kind") == "gate"}
-        reservations = {row["id"] for row in ledger if row.get("kind") == "reserve"}
-        for request in requests:
-            self.assertEqual(gates[request["id"]]["decision"], "allow", detail)
-            self.assertIn(request["id"], reservations, detail)
+        self.assertEqual(
+            [row["post_hook"]["model"] for row in requests], ["deepseek-v4.1-flash"] * len(requests), detail
+        )
+        self.assertIn(200, [row["status"] for row in journal if row["kind"] == "http_response"], detail)
         self.assertGreater(sum(row.get("retry_of") is not None for row in requests), 0, detail)
         self.assertIsNone(requests[0]["retry_of"], detail)
         self.assertEqual(requests[1]["retry_of"], requests[0]["id"], detail)
@@ -617,8 +601,6 @@ class AnthropicWireTests(unittest.TestCase):
         for row in responses:
             if row.get("settled_usd") is not None:
                 self.assertAlmostEqual(row["settled_usd"], settles[row["id"]], msg=detail)
-                # Pi prices from the same catalog the ledger is checked against.
-                self.assertAlmostEqual(row["pi_cost_usd"], row["settled_usd"], places=12, msg=detail)
         journal_text = (run.directory / "trace-journal.jsonl").read_text().lower()
         for marker in ("offline-test", "x-api-key", "authorization"):
             self.assertNotIn(marker, journal_text, f"trace journal contains {marker}; {detail}")
@@ -732,56 +714,6 @@ class ErrorLoopAndContinuationTests(unittest.TestCase):
         self.assertIn("Continue proof optimization", later)
         self.assertNotIn("Do not stop", later)
 
-    def test_finish_is_refused_while_more_than_ten_percent_remains_and_pushes_a_new_route(self):
-        from arena.campaign import problem
-
-        statement = problem(NAME)["statement"]
-        run = self.fake(
-            [
-                cheap_tool("arena_idea", {"title": "Induction route"}),
-                cheap_tool("arena_probe", {"proof": statement + " := by\n  sorry"}),
-                cheap_tool("arena_finish", {}),
-                cheap_tool("arena_finish", {}),
-                {"text": "I am done"},
-                {"text": "really done"},
-                {"text": "still done"},
-                {"text": "must not be requested"},
-            ],
-            env={"ARENA_AUTOCONTINUE": "1"},
-        )
-        refusals = [
-            json.loads(row["text"].splitlines()[0])
-            for row in run.jsonl("trace-journal.jsonl")
-            if row.get("kind") == "tool_result" and row.get("name") == "arena_finish"
-        ]
-        self.assertEqual(len(refusals), 2)
-        first, second = refusals
-        self.assertEqual((first["phase"], first["refused"], first["stop"]), ("review", True, False))
-        self.assertEqual((second["phase"], second["refused"]), ("refused", True))
-        for text in (
-            "Stop refused",
-            "no value",
-            "10% or less",
-            "Routes tried",
-            "fingerprints each attempt's compiled proof term",
-            "tokens saved",
-            "heartbeats saved",
-        ):
-            self.assertIn(text, first["next"])
-        # The push states the credit rule only; it names no strategy (no induction/equational/lemma-family hints).
-        for text in ("structurally NEW", "induction versus equational", "different key lemma family"):
-            self.assertNotIn(text, first["next"])
-        self.assertIn("No attempt was made since the last refusal", second["next"])
-        # The refusal is compact: routes and headroom are in the text, nothing is echoed as JSON as well.
-        self.assertEqual(set(first), {"ok", "phase", "stop", "refused", "remaining_usd", "next"})
-        self.assertIn("Routes tried:", first["next"])
-        phases = [row.get("phase") for row in run.jsonl("cost-ledger.jsonl") if row.get("kind") == "finish"]
-        self.assertEqual((phases.count("refused"), phases.count("confirmed")), (2, 0))
-        # The refusing model still terminates: no new work for two turns ends the run.
-        controls = [row for row in run.jsonl("cost-ledger.jsonl") if row.get("kind") == "control"]
-        self.assertEqual(controls[-1]["stop"], "no_work_fallback")
-        self.assertNotEqual(run.json("summary.json")["stop_reason"], "finished")
-
     def test_state_finish_review_and_confirmation_stop_provider_continuations(self):
         run = self.fake(
             [
@@ -884,13 +816,13 @@ class ErrorLoopAndContinuationTests(unittest.TestCase):
         run = self.fake(
             [
                 cheap_tool("arena_idea", {"title": "Restructure the induction"}),
-                cheap_tool("arena_probe", {"proof": row["statement"] + " := by\n  sorry"}),
+                cheap_tool("arena_probe", {"proof": row["statement"] + " := by\n  sorry"}, output=SPEND_90_PCT),
                 cheap_tool("arena_finish", {}),
                 cheap_tool("arena_finish", {}),
             ]
         )
         review = next(
-            json.loads(row["text"])
+            json.loads(row["text"].splitlines()[0])
             for row in run.jsonl("trace-journal.jsonl")
             if row.get("kind") == "tool_result"
             and row.get("name") == "arena_finish"
@@ -1053,20 +985,19 @@ class CompactionPolicyTests(unittest.TestCase):
             message_text(first["messages"][1]),
             "the summary should replace the old turns, not repeat them",
         )
-        # Compaction summaries are provider requests with no agent message_end. The guard settles
-        # each from the usage its stream delivered, so the ledger matches Pi's session record.
+        # Compaction summaries are provider requests with no agent message_end. Their cost comes from the
+        # compaction entry on session_compact, one settle row per compaction, so the ledger matches Pi's session.
         settles = [e for e in run.jsonl("cost-ledger.jsonl") if e["kind"] == "settle"]
-        orphans = [e for e in settles if e.get("source") == "orphan_stream"]
-        self.assertEqual(len(orphans), len(summaries))
-        self.assertEqual(len(settles) - len(orphans), len(agent))
-        report = run.json("cost.json")
-        self.assertAlmostEqual(sum(e["usd"] for e in settles), report["pi_session_spend_usd"], places=9)
-        self.assertAlmostEqual(report["spent_usd"], report["pi_session_spend_usd"], places=9)
+        compactions = [e for e in settles if e.get("source") == "compaction"]
+        self.assertGreaterEqual(len(compactions), 1)
+        self.assertLessEqual(len(compactions), len(summaries))
+        self.assertTrue(all(e["usage_known"] and e["usd"] > 0 for e in compactions))
+        self.assertEqual(len(settles) - len(compactions), len(agent))
         recon = run.json("summary.json")["cost"]["reconciliation"]
-        self.assertTrue(recon["balanced"], recon)
-        self.assertEqual(recon["open_reserves"], [])
+        self.assertEqual(recon["gap_usd"], 0, recon)
+        self.assertAlmostEqual(run.json("cost.json")["spent_usd"], sum(e["usd"] for e in settles), places=9)
 
-    def test_a_length_stop_leaves_no_request_open_in_the_ledger(self):
+    def test_a_length_stop_settles_its_compaction_in_the_ledger(self):
         steps = [
             {
                 "tool_calls": [{"name": "arena_skill_read", "arguments": {"path": path, "offset": offset}}],
@@ -1085,16 +1016,14 @@ class CompactionPolicyTests(unittest.TestCase):
         summaries = [r for r in requests if not r["messages"][0].get("sections")]
         self.assertTrue(summaries, "a length stop should make Pi compact before retrying")
         events = run.jsonl("cost-ledger.jsonl")
-        reserved = {e["id"] for e in events if e["kind"] == "reserve"}
-        closed = {e["id"] for e in events if e["kind"] in ("settle", "release", "unknown")}
-        self.assertEqual(reserved - closed, set(), "every reserved request must be closed")
-        orphans = [e for e in events if e["kind"] == "settle" and e.get("source") == "orphan_stream"]
-        self.assertEqual(len(orphans), len(summaries))
-        self.assertTrue(all(e["usage_known"] and e["usd"] > 0 for e in orphans))
+        compactions = [e for e in events if e["kind"] == "settle" and e.get("source") == "compaction"]
+        self.assertGreaterEqual(len(compactions), 1)
+        self.assertLessEqual(len(compactions), len(summaries))
+        self.assertTrue(all(e["usage_known"] and e["usd"] > 0 for e in compactions))
         cost = run.json("summary.json")["cost"]
-        self.assertTrue(cost["reconciliation"]["balanced"], cost["reconciliation"])
-        self.assertAlmostEqual(cost["spent_usd"], run.json("cost.json")["pi_session_spend_usd"], places=5)
-        self.assertEqual(cost["by_turn_type"]["compaction"]["requests"], len(summaries))
+        self.assertEqual(cost["reconciliation"]["gap_usd"], 0, cost["reconciliation"])
+        self.assertAlmostEqual(cost["spent_usd"], run.json("cost.json")["spent_usd"], places=5)
+        self.assertEqual(cost["by_turn_type"]["compaction"]["requests"], len(compactions))
 
 
 if __name__ == "__main__":

@@ -84,15 +84,10 @@ class SummaryTests(unittest.TestCase):
         write(
             self.dir / "cost-ledger.jsonl",
             [
-                {"kind": "reserve", "id": "1", "usd": 1},
                 {"kind": "settle", "id": "1", "usd": 0.01, "usage_known": True},
-                {"kind": "reserve", "id": "2", "usd": 1},
                 {"kind": "settle", "id": "2", "usd": 0.02, "usage_known": True},
-                {"kind": "reserve", "id": "3", "usd": 1},
                 {"kind": "settle", "id": "3", "usd": 0.03, "usage_known": True},
-                {"kind": "reserve", "id": "4", "usd": 1},
-                {"kind": "release", "id": "4", "usage_known": False},
-                {"kind": "reserve", "id": "5", "usd": 1},
+                {"kind": "settle", "id": "4", "usd": 0, "usage_known": False},
                 {"kind": "settle", "id": "5", "usd": 0.04, "usage_known": True},
                 {"kind": "cache_alarm", "id": "5"},
                 {"kind": "control", "continuations": 1, "stop": "plateau"},
@@ -288,14 +283,12 @@ class SummaryTests(unittest.TestCase):
     def test_cost_report_is_rebuilt_when_pi_never_wrote_one(self):
         report = summary.cost_report_from_ledger(self.dir)
         self.assertAlmostEqual(report["spent_usd"], 0.10)
-        self.assertEqual(report["unresolved_usd"], 0)
         self.assertEqual(report["written_by"], "runner_ledger_reconstruction")
 
     def test_overshoot_is_reported(self):
         write(
             self.dir / "cost-ledger.jsonl",
             [
-                {"kind": "reserve", "id": "1", "usd": 1},
                 {"kind": "settle", "id": "1", "usd": 0.108, "usage_known": True},
             ],
         )
@@ -303,29 +296,11 @@ class SummaryTests(unittest.TestCase):
         self.assertAlmostEqual(data["cost"]["overshoot_usd"], 0.008)
         self.assertIn("overshoot $0.0080", (self.dir / "summary.txt").read_text())
 
-    def test_unsettled_transport_attempt_is_reported_but_not_charged_to_the_soft_cap(self):
-        (self.dir / "run-config.json").write_text(json.dumps({"hard_cap_usd": 0.1}))
-        write(
-            self.dir / "cost-ledger.jsonl",
-            [
-                {"kind": "reserve", "id": "uncertain", "usd": 0.03},
-                {"kind": "unknown", "id": "uncertain", "usage_known": False},
-            ],
-        )
-        cost = summary.build_summary(self.dir)["cost"]
-        self.assertEqual(cost["unresolved_usd"], 0.03)
-        self.assertEqual(cost["remaining_usd"], 0.1)  # soft cap: actual spend only
-
-    LENGTH_STOP_LEDGER = [
-        {"kind": "reserve", "id": "a", "usd": 0.045},
+    LEDGER = (
         {"kind": "settle", "id": "a", "usd": 0.0100, "usage_known": True},
-        # Pi compacted after the length stop: a paid summary request that no message_end ever settled.
-        {"kind": "reserve", "id": "summary", "usd": 0.0157},
-        {"kind": "reserve", "id": "b", "usd": 0.04},
         {"kind": "settle", "id": "b", "usd": 0.0090, "usage_known": True},
-        {"kind": "reserve", "id": "slow", "usd": 0.04},
-        {"kind": "unknown", "id": "slow", "usage_known": False},
-    ]
+        {"kind": "settle", "id": "slow", "usd": 0, "usage_known": False},
+    )
 
     def session_with_compaction(self, usd: float) -> None:
         (self.dir / "session").mkdir()
@@ -338,48 +313,36 @@ class SummaryTests(unittest.TestCase):
             ],
         )
 
-    def test_a_reserve_left_open_after_a_length_stop_is_reconciled_against_the_session(self):
-        recon = summary.reconcile_spend(self.LENGTH_STOP_LEDGER, 0.0258)
-        self.assertEqual(recon["ledger_settled_usd"], 0.019)
-        self.assertAlmostEqual(recon["gap_usd"], 0.0068)
-        self.assertAlmostEqual(recon["spent_usd"], 0.0258)
-        self.assertEqual([r["id"] for r in recon["open_reserves"]], ["summary"])
-        self.assertEqual([r["id"] for r in recon["unknown_requests"]], ["slow"])
-        # The open reserve is covered by the gap; only the timed-out request stays unresolved.
-        self.assertAlmostEqual(recon["unresolved_usd"], 0.04)
-        self.assertFalse(recon["balanced"])
+    def test_spend_is_the_sum_of_settle_rows_and_never_below_the_session_total(self):
+        spend = summary.ledger_spend(list(self.LEDGER), 0.0258)
+        self.assertEqual(spend["ledger_settled_usd"], 0.019)
+        self.assertAlmostEqual(spend["gap_usd"], 0.0068)
+        self.assertAlmostEqual(spend["spent_usd"], 0.0258)
+        self.assertEqual(summary.ledger_spend(list(self.LEDGER))["spent_usd"], 0.019)
 
-    def test_without_a_session_total_an_open_reserve_stays_unresolved(self):
-        recon = summary.reconcile_spend(self.LENGTH_STOP_LEDGER[:3])
-        self.assertAlmostEqual(recon["unresolved_usd"], 0.0157)
-        self.assertEqual(recon["spent_usd"], 0.01)
-
-    def test_an_orphan_settle_closes_the_request_and_balances(self):
-        ledger = [e for e in self.LENGTH_STOP_LEDGER if e["id"] != "summary"] + [
-            {"kind": "reserve", "id": "summary", "usd": 0.0157},
-            {"kind": "settle", "id": "summary", "usd": 0.0068, "usage_known": True, "source": "orphan_stream"},
+    def test_a_compaction_settle_is_counted_and_closes_the_gap(self):
+        ledger = [
+            *self.LEDGER,
+            {"kind": "settle", "id": "summary", "usd": 0.0068, "usage_known": True, "source": "compaction"},
         ]
-        recon = summary.reconcile_spend(ledger, 0.0258)
-        self.assertEqual(recon["gap_usd"], 0)
-        self.assertEqual(recon["open_reserves"], [])
-        self.assertEqual((recon["orphan_settles"], recon["orphan_settled_usd"]), (1, 0.0068))
+        spend = summary.ledger_spend(ledger, 0.0258)
+        self.assertEqual(spend["gap_usd"], 0)
+        self.assertEqual((spend["compaction_settles"], spend["compaction_settled_usd"]), (1, 0.0068))
 
     def test_summary_spend_and_turns_include_compaction_that_the_ledger_never_settled(self):
-        write(self.dir / "cost-ledger.jsonl", self.LENGTH_STOP_LEDGER)
+        write(self.dir / "cost-ledger.jsonl", list(self.LEDGER))
         (self.dir / "cost.json").unlink(missing_ok=True)
         self.session_with_compaction(0.0068)
         cost = summary.build_summary(self.dir)["cost"]
         self.assertAlmostEqual(cost["spent_usd"], 0.0258)
         self.assertEqual(cost["by_turn_type"]["compaction"], {"requests": 1, "usd": 0.0068})
         self.assertEqual(cost["reconciliation"]["gap_usd"], 0.0068)
-        self.assertEqual(cost["reconciliation"]["open_reserves"], [{"id": "summary", "usd": 0.0157}])
-        self.assertAlmostEqual(cost["unresolved_usd"], 0.04)
         summary.write_summary(self.dir)
-        self.assertIn("SPEND RECONCILIATION", (self.dir / "summary.txt").read_text())
+        self.assertIn("SPEND GAP", (self.dir / "summary.txt").read_text())
 
-    def test_orphan_settles_do_not_shift_the_per_turn_pairing(self):
+    def test_compaction_settles_do_not_shift_the_per_turn_pairing(self):
         settles = [
-            {"kind": "settle", "id": "s", "usd": 0.5, "usage_known": True, "source": "orphan_stream"},
+            {"kind": "settle", "id": "s", "usd": 0.5, "usage_known": True, "source": "compaction"},
             {"kind": "settle", "id": "a", "usd": 0.01, "usage_known": True},
         ]
         turns = summary._turns([assistant([("c1", "arena_state")], 0, 0)], settles)
@@ -401,6 +364,7 @@ class StopReasonTests(unittest.TestCase):
             self.assertEqual(summary.build_summary(directory)["stop_reason"], "model_stopped")
 
     def test_the_cap_is_read_from_the_new_or_the_old_run_config_key(self):
+        self.assertEqual(summary.configured_cap({"limit_usd": 0.5, "soft_cap_usd": 0.4}), 0.5)
         self.assertEqual(summary.configured_cap({"soft_cap_usd": 0.5}), 0.5)
         self.assertEqual(summary.configured_cap({"hard_cap_usd": 0.4}), 0.4)
         self.assertEqual(summary.configured_cap({"soft_cap_usd": 0.5, "hard_cap_usd": 3}), 0.5)

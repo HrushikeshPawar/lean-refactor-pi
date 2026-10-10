@@ -92,7 +92,6 @@ def make_run(root: Path, run_id: str, finished: bool = True, theorem: str = "Cor
     write(
         directory / "cost-ledger.jsonl",
         [
-            {"ts": ms(0.5), "kind": "gate", "id": "a", "decision": "allow"},
             {
                 "ts": ms(5),
                 "kind": "settle",
@@ -102,14 +101,14 @@ def make_run(root: Path, run_id: str, finished: bool = True, theorem: str = "Cor
                 "tokens": {"input": 5, "output": 50, "cache_read": 0, "cache_write": 900},
                 "ledger_components_usd": {"input": 0.001, "output": 0.004, "cacheRead": 0, "cacheWrite": 0.005},
             },
-            {"ts": ms(20), "kind": "gate", "id": "b", "decision": "stop", "reason": "too big"},
             {
                 "ts": ms(25),
                 "kind": "settle",
                 "id": "b",
                 "usd": 0.02,
                 "usage_known": True,
-                "soft_overshoot_usd": 0.01,
+                "spent_usd": 0.03,
+                "limit_usd": 0.025,
                 "tokens": {"input": 5, "output": 50, "cache_read": 900, "cache_write": 100},
                 "ledger_components_usd": {"input": 0.001, "output": 0.004, "cacheRead": 0.005, "cacheWrite": 0.01},
             },
@@ -200,7 +199,7 @@ class DataTests(unittest.TestCase):
         self.assertEqual(row["delta_proxy"], round(60.5 - 33.33, 2))
         self.assertTrue(row["submission_info"]["cold_verified"])
         self.assertEqual((row["spent_usd"], row["requests"], row["tool_errors"]), (0.03, 2, 1))
-        self.assertEqual((row["soft_cap_usd"], row["hard_cap_usd"]), (0.1, 3.0))
+        self.assertEqual(row["limit_usd"], 0.1)
         self.assertEqual(row["started"], T0)
         self.assertAlmostEqual(row["duration_s"], 31.0)
 
@@ -236,7 +235,7 @@ class DataTests(unittest.TestCase):
         self.assertEqual([p["spent_usd"] for p in points], [0.01, 0.03])
         self.assertEqual(points[1]["parts"]["cache_read"], 0.005)
         self.assertEqual(points[1]["reuse_pct"], 89.6)  # 900 / (5 + 900 + 100)
-        self.assertEqual((board["spend"]["soft_cap_usd"], board["spend"]["hard_cap_usd"]), (0.1, 3.0))
+        self.assertEqual(board["spend"]["limit_usd"], 0.1)
         self.assertEqual(
             [(t["name"], t["is_error"], t["duration_s"]) for t in board["tools"]],
             [("arena_evaluate", False, 1.5), ("arena_probe", True, 0.2)],
@@ -247,7 +246,7 @@ class DataTests(unittest.TestCase):
         )
         self.assertEqual(idea["attempts"], [{"candidate": "#2", "parents": ["#1"]}])
         kinds = [c["kind"] for c in board["controls"]]
-        self.assertEqual(kinds, ["gate", "soft_cap", "finish", "control"])
+        self.assertEqual(kinds, ["limit", "finish", "control"])
         self.assertEqual(board["lean"]["paths"]["session"]["runs"], 2)
         self.assertEqual(board["lean"]["paths"]["cold"]["by_check"], {"probe": 1})
         self.assertTrue(board["lean"]["cold_verification"]["confirmed"])

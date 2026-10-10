@@ -59,7 +59,7 @@ def main() -> int:
                 args.theorem,
                 "--run-id",
                 run_id,
-                "--hard-cap-usd",
+                "--limit-usd",
                 "0.10",
                 "--thinking",
                 "off",

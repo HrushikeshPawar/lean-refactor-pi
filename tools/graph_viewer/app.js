@@ -521,7 +521,7 @@
   function capLine(spec,sc,box,label) {
     if(!spec.cap)return '';
     const y=sc.sy(spec.cap).toFixed(1);
-    return `<path class="cap-line" d="M${box.x0} ${y}H${box.x1}"/>${label?`<text class="axis-label cap-label" x="${box.x0+6}" y="${y-5}">hard cap ${esc(money(spec.cap))}</text>`:''}`;
+    return `<path class="cap-line" d="M${box.x0} ${y}H${box.x1}"/>${label?`<text class="axis-label cap-label" x="${box.x0+6}" y="${y-5}">limit ${esc(money(spec.cap))}</text>`:''}`;
   }
   function headValue(spec,value) {
     if(spec.unit==='$')return money(value)+(spec.cap?` / ${money(spec.cap)}`:'');
@@ -644,8 +644,8 @@
       {title:'Proof tokens',rows:rows.filter(r=>r.status!=='fail'),key:'tokens',unit:'',xLabel:'Evaluation',caption:pick,better:'min'},
       {title:'Primary heartbeats',rows:rows.filter(r=>r.status!=='fail'),key:'heartbeat',unit:'',xLabel:'Evaluation',caption:pick,better:'min'},
       {title:'API spend by component',rows:data.cost_timeline||[],key:'spent_usd',unit:'$',xLabel:'API request',
-       stack:true,zero:true,cap:data.hard_cap_usd||null,
-       caption:'Cumulative ledger spend, stacked by price component; the dashed line is the hard cap.'},
+       stack:true,zero:true,cap:data.limit_usd||null,
+       caption:'Cumulative ledger spend, stacked by price component; the dashed line is the spend limit.'},
     ];
     $('charts').innerHTML=chartSpecs.map(chart).join('');
     $('charts').querySelectorAll('[data-chart]').forEach(el=>el.onclick=()=>openChart(Number(el.dataset.chart)));
@@ -669,7 +669,7 @@
     const ledger=data.cost?.spent_usd||0,pi=data.cost?.pi_embedded_usd||0;
     const drift=pi>0&&Math.abs(ledger-pi)>Math.max(1e-6,0.01*ledger);
     $('cost-note').hidden=!drift;
-    if(drift) $('cost-note').innerHTML=`<span class="warning">Pricing drift:</span> ledger <strong>${esc(money(ledger))}</strong> vs Pi's own estimate <strong>${esc(money(pi))}</strong>. The two should agree; check the model price table in budget.ts.`;
+    if(drift) $('cost-note').innerHTML=`<span class="warning">Pricing drift:</span> ledger <strong>${esc(money(ledger))}</strong> vs Pi's own estimate <strong>${esc(money(pi))}</strong>. The two should agree; check the model prices in Pi's catalog.`;
     $('merge-feed').innerHTML=data.merge_checks.slice(-25).reverse().map(c=>`<div class="feed-row">${c.candidate_id?`<button data-go="${esc(c.candidate_id)}">merge ${esc(numberForId(c.candidate_id))}</button>`:`<span class="muted">skip</span>`}<span>${esc(c.parents?.map(numberForId).join(' + '))}</span><span class="muted">${esc(c.reason || (c.full_passed?'3/3 valid':c.fast_passed?'primary valid':'Lean failed'))}</span></div>`).join('')||'<p class="muted">No pair checks yet.</p>';
     $('merge-feed').querySelectorAll('[data-go]').forEach(el=>el.onclick=()=>select(el.dataset.go));
   }

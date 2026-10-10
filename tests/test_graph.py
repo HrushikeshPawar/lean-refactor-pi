@@ -221,16 +221,14 @@ class ViewerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             (directory / "cost-ledger.jsonl").write_text(
-                '{"kind":"reserve","id":"one","usd":0.4}\n'
                 '{"kind":"settle","id":"one","usd":0.1,"pi_embedded_cost_usd":0.1,"ts":1791274568395,'
                 '"tokens":{"input":1,"output":10,"cache_read":0,"cache_write":50},'
                 '"ledger_components_usd":{"input":0.01,"output":0.04,"cacheRead":0,"cacheWrite":0.05}}\n'
-                '{"kind":"reserve","id":"two","usd":0.5}\n'
                 '{"kind":"settle","id":"two","usd":0.2,"pi_embedded_cost_usd":0.2,'
                 '"tokens":{"input":1,"output":20,"cache_read":150,"cache_write":50},'
                 '"ledger_components_usd":{"input":0.01,"output":0.09,"cacheRead":0.08,"cacheWrite":0.02}}\n'
             )
-            (directory / "run-config.json").write_text('{"hard_cap_usd": 0.1}')
+            (directory / "run-config.json").write_text('{"limit_usd": 0.1}')
             with (
                 patch("tools.serve_candidate_graph.graph_state", return_value={}),
                 patch("tools.serve_candidate_graph.run_dir", return_value=directory),
@@ -246,7 +244,7 @@ class ViewerTests(unittest.TestCase):
             self.assertAlmostEqual(timeline[1]["reuse_pct"], 100 * 150 / 201)  # read / (input + read + write)
             self.assertAlmostEqual(timeline[0]["ts"], 1791274568.395)
             self.assertAlmostEqual(payload["cost"]["pi_embedded_usd"], 0.3)
-            self.assertEqual(payload["hard_cap_usd"], 0.1)
+            self.assertEqual(payload["limit_usd"], 0.1)
 
     def test_score_charts_start_from_the_original_proof(self):
         from tools.serve_candidate_graph import baseline_point
@@ -306,7 +304,7 @@ class ViewerTests(unittest.TestCase):
                 if model:
                     (root / name / "ledger.jsonl").write_text('{"kind":"init","theorem":"T"}\n')
                     (root / name / "run-config.json").write_text(
-                        json.dumps({"model": model, "hard_cap_usd": 0.1, "theorem": "Core.InitsUpdatesComm"})
+                        json.dumps({"model": model, "limit_usd": 0.1, "theorem": "Core.InitsUpdatesComm"})
                     )
             (root / "rep-r3-model-b" / "summary.json").write_text('{"stop_reason": "actual_usage_cap"}')
             (root / "rep-r3-model-b" / "state.json").write_text('{"best": {"candidate": "#5", "proxy": 81.76}}')
@@ -358,15 +356,12 @@ class ViewerTests(unittest.TestCase):
         self.assertTrue(Runs(["one", "two"]).hub)
         self.assertTrue(Runs([], "x-*").hub)
 
-    def test_failed_and_legacy_unknown_usage_releases_do_not_raise_spend(self):
+    def test_settles_without_known_usage_do_not_raise_spend(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             (directory / "cost-ledger.jsonl").write_text(
-                '{"kind":"reserve","id":"failed","usd":0.4}\n'
-                '{"kind":"release","id":"failed","usage_known":false}\n'
-                '{"kind":"reserve","id":"legacy","usd":0.3}\n'
+                '{"kind":"settle","id":"failed","usd":0,"usage_known":false}\n'
                 '{"kind":"settle","id":"legacy","usd":0.3,"usage_known":false}\n'
-                '{"kind":"reserve","id":"paid","usd":0.5}\n'
                 '{"kind":"settle","id":"paid","usd":0.12,"usage_known":true}\n'
             )
             with (
@@ -375,7 +370,6 @@ class ViewerTests(unittest.TestCase):
             ):
                 payload = graph_payload("viewer")
             self.assertEqual(payload["cost"]["spent_usd"], 0.12)
-            self.assertEqual(payload["cost"]["unresolved_usd"], 0)
 
     def test_legacy_session_exposes_embedded_cost_total(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -409,16 +403,17 @@ class RunnerTests(unittest.TestCase):
             )
             self.assertTrue(attempt_has_model_error(path, offset))
 
-    def test_budget_stop_and_recovered_transport_error_are_not_fatal(self):
+    def test_the_limit_stop_abort_and_recovered_transport_error_are_not_fatal(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "events.jsonl"
             path.write_text(
                 '{"type":"message_end","message":{"role":"assistant","stopReason":"error","errorMessage":"Connection error."}}\n'
                 '{"type":"auto_retry_end","success":true}\n'
                 '{"type":"message_end","message":{"role":"assistant","stopReason":"stop"}}\n'
-                '{"type":"message_end","message":{"role":"assistant","stopReason":"error","errorMessage":"Arena budget stop: observed usage reached cap"}}\n'
+                '{"type":"message_end","message":{"role":"assistant","stopReason":"aborted"}}\n'
             )
-            self.assertFalse(attempt_has_model_error(path, 0))
+            self.assertFalse(attempt_has_model_error(path, 0, intentional_stop=True))
+            self.assertTrue(attempt_has_model_error(path, 0))
 
 
 if __name__ == "__main__":

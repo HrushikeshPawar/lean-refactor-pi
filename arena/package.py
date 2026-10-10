@@ -20,7 +20,7 @@ from pathlib import Path
 from string import Template
 
 from arena.engine import ROOT, validate_proof
-from arena.summary import reconcile_spend, session_spend
+from arena.summary import ledger_spend, session_spend
 from tools.run_pi_budgeted import MODELS
 
 ELIGIBLE_MODELS = tuple(MODELS)  # closed-track models the competitor has confirmed eligible
@@ -82,21 +82,15 @@ def load_manifest(path: Path = MANIFEST) -> dict[str, dict]:
 
 
 def attempts(directory: Path) -> dict:
-    """Every charged API attempt of one run, joined to the trace journal; plus unresolved reservations."""
+    """Every charged API attempt of one run, joined to the trace journal."""
     cost = _jsonl(directory / "cost-ledger.jsonl")
     journal = _jsonl(directory / "trace-journal.jsonl")
     requests = {row.get("id"): row for row in journal if row.get("kind") == "request"}
     responses = {row.get("id"): row for row in journal if row.get("kind") == "response"}
-    reserved: dict[str, float] = {}
     rows, spent = [], 0.0
     for event in cost:
         key = str(event.get("id"))
-        if event.get("kind") == "reserve":
-            reserved[key] = float(event.get("usd") or 0)
-        elif event.get("kind") == "release":
-            reserved.pop(key, None)
-        elif event.get("kind") == "settle":
-            reserved.pop(key, None)
+        if event.get("kind") == "settle":
             usd = float(event.get("usd") or 0)
             spent += usd
             request = requests.get(event.get("id")) or {}
@@ -116,18 +110,16 @@ def attempts(directory: Path) -> dict:
                     "stop_reason": response.get("stop_reason"),
                 }
             )
-    # Pi also pays for requests no agent message carries (compaction summaries); never report less
-    # than Pi's own session total, and do not count a reserve that total already covers.
+    # Never report less than Pi's own session total.
     session = session_spend(directory)
-    recon = reconcile_spend(cost, session["usd"] if session else None)
-    spent, unresolved = max(spent, recon["spent_usd"]), recon["unresolved_usd"]
+    recon = ledger_spend(cost, session["usd"] if session else None)
+    spent = max(spent, recon["spent_usd"])
     return {
         "settles": rows,
         "spent_usd": spent,
-        "unresolved_usd": unresolved,
         "unsettled_usd": recon["gap_usd"],
         "reconciliation": recon,
-        "total_usd": spent + unresolved,
+        "total_usd": spent,
         "retries": sum(1 for r in rows if r["retry_of"]),
         "journal_requests": len(requests),
     }
@@ -355,7 +347,6 @@ def provenance(selection: dict, budget: dict[str, dict]) -> dict:
                     "selected_run": a["run_id"] == info["run_id"],
                     "discarded": a["run_id"] != info["run_id"],
                     "total_usd": round(a["spend"]["total_usd"], 6),
-                    "unresolved_usd": round(a["spend"]["unresolved_usd"], 6),
                     "retries": a["spend"]["retries"],
                     "attempts": a["spend"]["settles"],
                 }

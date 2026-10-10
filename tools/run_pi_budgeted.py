@@ -27,6 +27,9 @@ from arena.skill import SKILL_DIR, skill_hash, skill_prompt
 from arena.summary import configured_cap, cost_report_from_ledger, render_text, write_summary
 from arena.traces import langfuse_environment, langfuse_extension, plugin_problems
 
+DEFAULT_LIMIT_USD = 0.5
+MAX_LIMIT_USD = 2.0  # keep equal to MAX_LIMIT_USD in packages/arena-pi/extensions/spend.ts
+
 SYSTEM_PROMPT = (
     "You are optimizing one Lean 4 proof for the Lean Refactor Arena. Only the listed tools are "
     "available. Keep replies short; spend effort on proofs, not prose."
@@ -50,8 +53,8 @@ _tool_result_count = 0
 _retry_count = 0
 
 
-def attempt_has_model_error(event_log: Path, offset: int) -> bool:
-    """Ignore intentional cap stops and errors recovered by Pi's retry loop."""
+def attempt_has_model_error(event_log: Path, offset: int, intentional_stop: bool = False) -> bool:
+    """Ignore the abort that ends a run on purpose (spend limit, confirmed finish) and errors Pi's retry loop recovered."""
     pending_error = False
     with event_log.open("rb") as events:
         events.seek(offset)
@@ -60,7 +63,10 @@ def attempt_has_model_error(event_log: Path, offset: int) -> bool:
             if event.get("type") == "message_end":
                 message = event.get("message", {})
                 if message.get("role") == "assistant" and message.get("stopReason") in ("error", "aborted"):
-                    pending_error = not str(message.get("errorMessage", "")).startswith("Arena budget stop:")
+                    aborted = message.get("stopReason") == "aborted" or "aborted" in str(
+                        message.get("errorMessage", "")
+                    )
+                    pending_error = not (intentional_stop and aborted)
                 elif message.get("role") == "assistant" and message.get("stopReason") in ("stop", "toolUse"):
                     pending_error = False
             elif event.get("type") == "auto_retry_end" and event.get("success"):
@@ -229,14 +235,11 @@ def run() -> int:
     parser.add_argument("--prompt-file", type=Path, help="Optional extra instructions appended after the source packet")
     parser.add_argument("--run-id", required=True)
     parser.add_argument(
-        "--hard-cap-usd",
-        "--cap-usd",
-        dest="hard_cap_usd",
+        "--limit-usd",
         type=float,
-        default=3.0,
-        help="Spend cap in USD, 0.10-3.00. Only $3 is a hard cap (worst-case request estimates are "
-        "gated against it); a value below 3 is a soft cap on actual settled spend, so the last "
-        "request may overshoot it",
+        default=DEFAULT_LIMIT_USD,
+        help=f"Spend limit in USD, above 0 and at most {MAX_LIMIT_USD:g} (default {DEFAULT_LIMIT_USD:g}). Each call's actual "
+        "cost is added after the call; the run stops once the total reaches the limit, so the last call may overshoot it",
     )
     parser.add_argument(
         "--thinking",
@@ -293,8 +296,8 @@ def run() -> int:
         args.compact_at_tokens = compaction["at_tokens"]
     if args.compact_keep_tokens is None:
         args.compact_keep_tokens = compaction["keep_recent_tokens"]
-    if not math.isfinite(args.hard_cap_usd) or not 0.1 <= args.hard_cap_usd <= 3:
-        parser.error("--hard-cap-usd must be between 0.10 and 3.00")
+    if not math.isfinite(args.limit_usd) or not 0 < args.limit_usd <= MAX_LIMIT_USD:
+        parser.error(f"--limit-usd must be above 0 and at most {MAX_LIMIT_USD:g}")
 
     if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?", args.run_id):
         parser.error("--run-id must be a Pi-compatible session ID")
@@ -313,9 +316,9 @@ def run() -> int:
         if (config["theorem"], config["model"], configured_cap(config)) != (
             args.theorem,
             args.model,
-            args.hard_cap_usd,
+            args.limit_usd,
         ):
-            parser.error("resume theorem, model, or cap differs from the original run")
+            parser.error("resume theorem, model, or limit differs from the original run")
         if config.get("thinking") not in (None, args.thinking) or (
             config.get("skill") and config["skill"]["sha256"] != (None if args.no_skill else skill_hash())
         ):
@@ -352,7 +355,7 @@ def run() -> int:
         "--thinking",
         args.thinking,
         "--model",
-        f"arena-budget/{args.model}",
+        f"{CONFIG['provider']}/{args.model}",
         "--session-id",
         args.run_id,
         "--session-dir",
@@ -364,7 +367,7 @@ def run() -> int:
         prompt,
     ]
     if args.dry_run:
-        print(f"Validated {args.theorem} with {args.model}; session {args.run_id}; cap ${args.hard_cap_usd:g}")
+        print(f"Validated {args.theorem} with {args.model}; session {args.run_id}; limit ${args.limit_usd:g}")
         print("Pi will write packet, candidate ledger, events, cost, and session under", directory)
         return 0
     if plugin is not None:
@@ -383,7 +386,7 @@ def run() -> int:
                 {
                     "theorem": args.theorem,
                     "model": args.model,
-                    "soft_cap_usd": args.hard_cap_usd,
+                    "limit_usd": args.limit_usd,
                     "packet_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
                     "thinking": args.thinking,
                     "merge_worker": args.merge_worker,
@@ -405,11 +408,11 @@ def run() -> int:
     env["ARENA_RUN_ID"] = args.run_id
     env["ARENA_MODEL"] = args.model
     env["ARENA_MODELS_JSON"] = model_config.pi_json(CONFIG)
-    env["ARENA_HARD_CAP_USD"] = str(args.hard_cap_usd)
+    env["ARENA_LIMIT_USD"] = str(args.limit_usd)
+    env["ARENA_REQUEST_OUTPUT_TOKENS"] = str(CONFIG["models"][args.model]["request_output_tokens"])
     env["ARENA_SKILL_DIR"] = "" if args.no_skill else str(SKILL_DIR)
     if args.no_mcp:
         env["ARENA_NO_MCP"] = "1"
-    env.pop("ARENA_STOP_USD", None)
     env["ARENA_BUDGET_REPORT_PATH"] = str(directory / "cost.json")
     if plugin is not None:
         try:
@@ -440,7 +443,7 @@ def run() -> int:
         worker_log.close()
         print(f"Merge worker pid={worker.pid}; log={directory / 'merge-worker.log'}", flush=True)
     print(
-        f"Pi session={args.run_id}; model={args.model}; actual-usage cap=${args.hard_cap_usd:g}; resume={args.resume_run}",
+        f"Pi session={args.run_id}; model={args.model}; limit=${args.limit_usd:g}; resume={args.resume_run}",
         flush=True,
     )
     status_path = directory / "merge-worker.json"
@@ -467,7 +470,7 @@ def run() -> int:
                     "reserveTokens": max(0, MODEL_WINDOWS[args.model] - args.compact_at_tokens),
                 },
                 # The model gets only declared tools; Pi's codemode sandbox could call any tool and
-                # non-LLM models outside the Arena budget guard.
+                # non-LLM models outside the run's spend accounting.
                 "autoEnableCodemode": False,
                 # Pi's default HTTP idle timeout is 300 s (v6c2 DeepSeek lost a request to it); a silent
                 # request is cut after PROVIDER_TIMEOUT_MS instead. Provider-level retries stay off.
@@ -585,6 +588,18 @@ def stamp_tool_event(line: str) -> str:
     return line
 
 
+def _stopped_on_purpose(directory: Path) -> bool:
+    """True when the cost ledger's last control row says the run ended by its spend limit or a confirmed finish."""
+    controls = []
+    with contextlib.suppress(OSError, ValueError):
+        controls = [
+            row
+            for row in map(json.loads, (directory / "cost-ledger.jsonl").read_text().splitlines())
+            if row.get("kind") == "control"
+        ]
+    return bool(controls) and controls[-1].get("stop") in ("limit_reached", "finished")
+
+
 def kill_group(process: subprocess.Popen, number: int) -> None:
     with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(process.pid, number)
@@ -662,39 +677,22 @@ def finish(
     if report.get("error") or report.get("theorem") != args.theorem:
         print(f"Invalid cost report: {report.get('error', 'theorem mismatch')}", file=sys.stderr)
         return 1
-    if report.get("soft_cap_usd") != args.hard_cap_usd or report.get("hard_cap_usd") != 3:
-        print("Arena cap configuration changed", file=sys.stderr)
+    if report.get("limit_usd") != args.limit_usd:
+        print("Arena limit configuration changed", file=sys.stderr)
         return 1
-    print(
-        f"Ledger-priced observed tokens=${report['spent_usd']:.6f}; unresolved exposure=${report.get('unresolved_usd', 0):.6f}; cap=${args.hard_cap_usd:.2f}",
-        flush=True,
-    )
-    embedded = report.get("pi_embedded_estimate") or {}
-    drift = report["spent_usd"] - embedded.get("usd", 0)
-    if (
-        embedded.get("priced_entries")
-        and not embedded.get("missing_entries")
-        and abs(drift) > max(1e-6, 0.01 * report["spent_usd"])
-    ):
-        print(
-            f"Pricing drift: ledger ${report['spent_usd']:.6f} vs Pi's estimate ${embedded['usd']:.6f}; check the price table in budget.ts",
-            file=sys.stderr,
-            flush=True,
-        )
+    print(f"Spent ${report['spent_usd']:.6f} of the ${args.limit_usd:.2f} limit", flush=True)
     cache = report.get("cache_utilization", {})
     if cache.get("all", {}).get("reuse_pct") is not None:
-        saved = cache["all"].get("savings_pct")
         print(
-            f"Cache hit rate: all={cache['all']['reuse_pct']:.1f}% recent-10={cache['recent_ten']['reuse_pct']:.1f}%"
-            + (f", input-side cost savings {saved:.1f}%" if saved is not None else ""),
+            f"Cache hit rate: all={cache['all']['reuse_pct']:.1f}% recent-10={cache['recent_ten']['reuse_pct']:.1f}%",
             flush=True,
         )
-    if report["spent_usd"] > args.hard_cap_usd:
+    if report["spent_usd"] > args.limit_usd:
         print(
-            f"Observed usage overshot the ${args.hard_cap_usd:g} cap by ${report['spent_usd'] - args.hard_cap_usd:.6f} on the final in-flight request",
+            f"Spend overshot the ${args.limit_usd:g} limit by ${report['spent_usd'] - args.limit_usd:.6f} on the last call",
             file=sys.stderr,
         )
-    if attempt_has_model_error(event_log, event_offset):
+    if attempt_has_model_error(event_log, event_offset, _stopped_on_purpose(directory)):
         print("Pi ended with a model error or abort; inspect events.jsonl", file=sys.stderr)
         return 1
     return 0

@@ -20,13 +20,13 @@ from pathlib import Path
 from arena.routes import progress as route_progress
 from arena.routes import route_table
 from arena.summary import (
-    HARD_CAP_USD,
+    COMPACTION_SOURCES,
     _result_ok,
     _turns,
     build_summary,
     configured_cap,
     hit_rate_pct,
-    reconcile_spend,
+    ledger_spend,
     session_spend,
     trace_rows,
 )
@@ -203,9 +203,7 @@ def hub_row(run_id: str, directory: Path, campaign: str | None = None, now: floa
         "theorem": config.get("theorem"),
         "reference": reference,
         "thinking": config.get("thinking"),
-        "soft_cap_usd": cost.get("soft_cap_usd") or configured_cap(config),
-        "cap_usd": configured_cap(config),
-        "hard_cap_usd": HARD_CAP_USD,
+        "limit_usd": cost.get("limit_usd") or configured_cap(config),
         "spent_usd": round(spent, 6),
         "requests": cost.get("requests") or requests,
         "tool_results": tools.get("results"),
@@ -288,7 +286,7 @@ def score_timeline(ledger: list[dict], start: float | None) -> list[dict]:
     return rows
 
 
-def spend_series(directory: Path, start: float | None, soft_cap: float | None) -> dict:
+def spend_series(directory: Path, start: float | None, limit: float | None) -> dict:
     cost_events = read_jsonl(directory / "cost-ledger.jsonl")
     settles = [e for e in cost_events if e.get("kind") == "settle"]
     try:
@@ -297,13 +295,13 @@ def spend_series(directory: Path, start: float | None, soft_cap: float | None) -
         turns = []
     priced = iter(turns)
     session = session_spend(directory)
-    recon = reconcile_spend(cost_events, session["usd"] if session else None)
+    recon = ledger_spend(cost_events, session["usd"] if session else None)
     names = {"input": "input", "output": "output", "cacheRead": "cache_read", "cacheWrite": "cache_write"}
     points, spent = [], 0.0
     for settle in settles:
         if settle.get("usage_known") is False:
             continue
-        turn = {"kind": "compaction"} if settle.get("source") == "orphan_stream" else next(priced, {})
+        turn = {"kind": "compaction"} if settle.get("source") in COMPACTION_SOURCES else next(priced, {})
         parts = {names[k]: float(v) for k, v in (settle.get("ledger_components_usd") or {}).items() if k in names}
         tokens = settle.get("tokens") or {}
         spent += float(settle.get("usd") or 0)
@@ -325,9 +323,7 @@ def spend_series(directory: Path, start: float | None, soft_cap: float | None) -
     return {
         "points": points,
         "spent_usd": round(max(spent, recon["spent_usd"]), 6),
-        "soft_cap_usd": soft_cap,
-        "hard_cap_usd": HARD_CAP_USD,
-        "unresolved_usd": round(recon["unresolved_usd"], 6),
+        "limit_usd": limit,
         "unsettled_usd": recon["gap_usd"],
         "reconciliation": recon,
     }
@@ -431,7 +427,7 @@ def ideas_view(ledger: list[dict]) -> list[dict]:
 
 def control_events(directory: Path, start: float | None) -> list[dict]:
     rows = []
-    soft_crossed = False
+    limit_reached = False
     for event in read_jsonl(directory / "cost-ledger.jsonl"):
         kind = event.get("kind")
         stamp = _seconds(event.get("ts"))
@@ -455,15 +451,6 @@ def control_events(directory: Path, start: float | None) -> list[dict]:
                     "detail": {k: v for k, v in event.items() if k not in ("ts", "kind")},
                 }
             )
-        elif kind == "gate" and event.get("decision") != "allow":
-            rows.append(
-                {
-                    "t": t,
-                    "kind": "gate",
-                    "label": f"gate {event.get('decision')}",
-                    "detail": {k: event.get(k) for k in ("reason", "estimate_usd", "remaining_usd", "spent_usd")},
-                }
-            )
         elif kind == "cache_alarm":
             rows.append(
                 {
@@ -473,14 +460,19 @@ def control_events(directory: Path, start: float | None) -> list[dict]:
                     "detail": {k: v for k, v in event.items() if k not in ("ts", "kind")},
                 }
             )
-        elif kind == "settle" and not soft_crossed and (event.get("soft_overshoot_usd") or 0) > 0:
-            soft_crossed = True
+        elif (
+            kind == "settle"
+            and not limit_reached
+            and event.get("limit_usd")
+            and (event.get("spent_usd") or 0) >= event["limit_usd"]
+        ):
+            limit_reached = True
             rows.append(
                 {
                     "t": t,
-                    "kind": "soft_cap",
-                    "label": "soft cap crossed",
-                    "detail": {"soft_overshoot_usd": event.get("soft_overshoot_usd")},
+                    "kind": "limit",
+                    "label": "spend limit reached",
+                    "detail": {"spent_usd": event.get("spent_usd"), "limit_usd": event["limit_usd"]},
                 }
             )
     return rows
@@ -509,7 +501,7 @@ def run_dashboard(run_id: str, directory: Path) -> dict:
     ledger = read_jsonl(directory / "ledger.jsonl")
     start, last = _start_end(directory)
     summary = _live_summary(directory)
-    soft = (summary.get("cost") or {}).get("soft_cap_usd") or configured_cap(read_json(directory / "run-config.json"))
+    limit = (summary.get("cost") or {}).get("limit_usd") or configured_cap(read_json(directory / "run-config.json"))
     packet = directory / "packet.txt"
     try:
         packet_text = packet.read_text(errors="replace")
@@ -527,7 +519,7 @@ def run_dashboard(run_id: str, directory: Path) -> dict:
         "reference": _reference(summary.get("theorem")),
         "baseline_proxy": BASELINE_PROXY,
         "scores": score_timeline(ledger, start),
-        "spend": spend_series(directory, start, soft),
+        "spend": spend_series(directory, start, limit),
         "tools": tool_timeline(directory, start),
         "ideas": ideas_view(ledger),
         "routes": (route_rows := route_table(ledger)),

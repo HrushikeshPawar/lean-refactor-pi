@@ -292,11 +292,9 @@ def judge(journal: list[dict], observations: list[dict]) -> list[str]:
     """Problems that mean the Langfuse export is missing, clipped, or cannot join the journal.
 
     Generations pair with requests in time order. A retry resends the same payload, so a
-    single generation must not satisfy two requests. Every request also needs its byte-exact
-    wire row. The ledger's settled cost is authoritative; Pi prices from a catalog that
-    `catalogPriceProblem` holds equal to the ledger, so Langfuse totalCost must match it,
-    except where the ledger applied a conservative high price tier. Tool spans join their
-    journal rows by tool call ID.
+    single generation must not satisfy two requests. A journal that has wire rows needs one
+    for every request. The ledger's settled cost is Pi's own cost for the call, so Langfuse
+    totalCost must match it. Tool spans join their journal rows by tool call ID.
     """
     try:
         journal = expand_journal(journal)
@@ -321,7 +319,9 @@ def judge(journal: list[dict], observations: list[dict]) -> list[str]:
     for row in journal:
         if row.get("kind") == "wire":
             wires.setdefault(row.get("id"), []).append(row.get("retry_index"))
-    for request in requests:
+    # Wire rows exist only in journals written before the arena-guard provider went away; newer ones journal the
+    # post-hook payload (the `request` row) and have none, so a journal without any wire row is not faulted.
+    for request in requests if wires else []:
         indexes = wires.get(request.get("id"))
         if not indexes:
             problems.append(f"missing wire body for request {request.get('id')}")

@@ -17,13 +17,15 @@ from arena.merges import merge_report, merge_text
 from arena.routes import progress as route_progress
 from arena.routes import route_table, routes_detail_text
 
-HARD_CAP_USD = 3.0  # keep equal to MAX_HARD_CAP_USD in packages/arena-pi/extensions/budget.ts
+COMPACTION_SOURCES = (
+    "compaction",
+    "orphan_stream",
+)  # settle rows of Pi's summary requests; the old name is kept for old runs
 
 
 def configured_cap(config: dict) -> float | None:
-    """The run's configured spend cap, a soft cap on settled spend (only HARD_CAP_USD is hard). run-config.json
-    now says `soft_cap_usd`; older files called it `hard_cap_usd`, after the CLI flag."""
-    return config.get("soft_cap_usd") or config.get("hard_cap_usd")
+    """The run's spend limit. run-config.json says `limit_usd`; older files called it `soft_cap_usd` or `hard_cap_usd`."""
+    return config.get("limit_usd") or config.get("soft_cap_usd") or config.get("hard_cap_usd")
 
 
 STOP_FILE = "stop-reason.txt"  # a stop the runner imposed (e.g. "interrupted"); wins over the cost ledger's control row
@@ -131,63 +133,41 @@ def session_spend(directory: Path) -> dict | None:
     return {"usd": usd, "compaction_usd": compaction_usd, "compactions": compactions}
 
 
-def reconcile_spend(cost_events: list[dict], session_usd: float | None = None) -> dict:
-    """One complete spend figure from the cost ledger and Pi's session record, with the gap exposed.
+def ledger_spend(cost_events: list[dict], session_usd: float | None = None) -> dict:
+    """The run's spend: the sum of the cost ledger's settle rows, each one call's actual cost.
 
-    Every reserve should end in a settle, release or unknown. A reserve with no end is `open`; spend
-    Pi recorded that no settle covers is `gap_usd`. The spend never falls below Pi's session total,
-    so a request the ledger lost cannot lower it. Open reserves a gap covers are not also counted
-    as unresolved."""
-    reserved: dict[str, float] = {}
-    unknown: dict[str, float] = {}
-    settled = orphan_settled = 0.0
-    orphan_settles = 0
+    Pi's own session total is a cross-check: the spend never falls below it, so a call the ledger lost
+    cannot lower it, and `gap_usd` exposes the difference."""
+    settled = compaction_settled = 0.0
+    compaction_settles = 0
     for event in cost_events:
-        key, kind = str(event.get("id")), event.get("kind")
-        if kind == "reserve":
-            reserved[key] = float(event.get("usd") or 0.0)
-        elif kind == "unknown" and key in reserved:
-            unknown[key] = reserved.pop(key)
-        elif kind in ("settle", "release") and (key in reserved or key in unknown):
-            reserved.pop(key, None)
-            unknown.pop(key, None)
-            if kind == "settle" and event.get("usage_known") is not False:
-                settled += float(event.get("usd") or 0.0)
-                if event.get("source") == "orphan_stream":
-                    orphan_settled += float(event.get("usd") or 0.0)
-                    orphan_settles += 1
+        if event.get("kind") == "settle" and event.get("usage_known") is not False:
+            settled += float(event.get("usd") or 0.0)
+            if event.get("source") in COMPACTION_SOURCES:
+                compaction_settled += float(event.get("usd") or 0.0)
+                compaction_settles += 1
     gap = max(0.0, session_usd - settled) if session_usd is not None else 0.0
     gap = gap if gap > 1e-9 else 0.0
-    open_usd = sum(reserved.values())
-    unresolved = sum(unknown.values()) + (0.0 if gap else open_usd)
     return {
         "ledger_settled_usd": round(settled, 6),
-        "orphan_settled_usd": round(orphan_settled, 6),
-        "orphan_settles": orphan_settles,
+        "compaction_settled_usd": round(compaction_settled, 6),
+        "compaction_settles": compaction_settles,
         "session_usd": None if session_usd is None else round(session_usd, 6),
         "gap_usd": round(gap, 6),
         "spent_usd": max(settled, session_usd or 0.0),
-        "unresolved_usd": unresolved,
-        "open_reserves": [{"id": k, "usd": round(v, 6)} for k, v in reserved.items()],
-        "open_reserves_usd": round(open_usd, 6),
-        "unknown_requests": [{"id": k, "usd": round(v, 6)} for k, v in unknown.items()],
-        "balanced": not gap and not reserved,
     }
 
 
 def cost_report_from_ledger(directory: Path) -> dict:
     """Reconstruct the cost report from the durable journal when Pi could not write it."""
     session = session_spend(directory)
-    recon = reconcile_spend(_jsonl(directory / "cost-ledger.jsonl"), session["usd"] if session else None)
-    spent, unresolved = recon["spent_usd"], recon["unresolved_usd"]
+    spend = ledger_spend(_jsonl(directory / "cost-ledger.jsonl"), session["usd"] if session else None)
     config = _read_json(directory / "run-config.json")
     return {
         "theorem": config.get("theorem"),
         "model": config.get("model"),
-        "hard_cap_usd": HARD_CAP_USD,
-        "soft_cap_usd": configured_cap(config),
-        "spent_usd": spent,
-        "unresolved_usd": unresolved,
+        "limit_usd": configured_cap(config),
+        "spent_usd": spend["spent_usd"],
         "written_by": "runner_ledger_reconstruction",
     }
 
@@ -206,8 +186,8 @@ def _turns(events: list[dict], settles: list[dict]) -> list[dict]:
         if event.get("type") == "tool_execution_end":
             results[str(event.get("toolCallId"))] = _result_ok(event)
     priced = iter(
-        s for s in settles if s.get("usage_known") is not False and s.get("source") != "orphan_stream"
-    )  # orphans are not agent messages
+        s for s in settles if s.get("usage_known") is not False and s.get("source") not in COMPACTION_SOURCES
+    )  # compaction summaries are not agent messages
     turns = []
     for event in events:
         message = event.get("message") or {}
@@ -358,14 +338,11 @@ def build_summary(directory: Path) -> dict:
     request_events = [event for event in trace if event.get("kind") == "request"]
     retries = sum(event.get("retry_of") is not None for event in request_events)
     session = session_spend(directory)
-    recon = reconcile_spend(cost_events, session["usd"] if session else None)
-    # The complete figure: never below the cost report, the ledger's settles or Pi's session total.
+    recon = ledger_spend(cost_events, session["usd"] if session else None)
+    # The one spend figure: never below the cost report, the ledger's settles or Pi's session total.
     spent = max(float(report.get("spent_usd") or 0.0), recon["spent_usd"])
     recon["cost_report_usd"] = report.get("spent_usd")
-    # Only $3 is a hard cap; the configured cap is a soft cap on actual settled spend (see configured_cap).
-    # Older reports carried the configured cap as hard_cap_usd.
-    cap = report.get("soft_cap_usd") or configured_cap(config) or report.get("hard_cap_usd")
-    unresolved = recon["unresolved_usd"] if cost_events else float(report.get("unresolved_usd") or 0.0)
+    cap = report.get("limit_usd") or configured_cap(config) or report.get("soft_cap_usd") or report.get("hard_cap_usd")
     remaining = max(0.0, float(cap or 0.0) - spent)
     by_kind: dict[str, dict] = {}
     for turn in turns:
@@ -373,10 +350,10 @@ def build_summary(directory: Path) -> dict:
         row["requests"] += 1
         row["usd"] = round(row["usd"] + turn["usd"], 6)
     # Pi's compaction summaries are paid requests that are not agent turns.
-    compaction_usd = recon["orphan_settled_usd"] or (session or {}).get("compaction_usd", 0.0)
+    compaction_usd = recon["compaction_settled_usd"] or (session or {}).get("compaction_usd", 0.0)
     if compaction_usd:
         by_kind["compaction"] = {
-            "requests": recon["orphan_settles"] or (session or {}).get("compactions", 0),
+            "requests": recon["compaction_settles"] or (session or {}).get("compactions", 0),
             "usd": round(compaction_usd, 6),
         }
     evaluations = [e for e in ledger if e.get("kind") == "evaluation"]
@@ -461,9 +438,7 @@ def build_summary(directory: Path) -> dict:
         "lean": lean_stats(ledger, directory, stopped),
         "cost": {
             "spent_usd": round(spent, 6),
-            "unresolved_usd": round(unresolved, 6),
-            "hard_cap_usd": HARD_CAP_USD,
-            "soft_cap_usd": cap,
+            "limit_usd": cap,
             "remaining_usd": round(remaining, 6),
             "overshoot_usd": round(overshoot, 6),
             "requests": len(request_events) if request_events else len(turns),
@@ -615,18 +590,17 @@ def render_text(summary: dict) -> str:
             [
                 f"{summary['run_id']}: {summary['theorem']} · {summary['model']} · thinking {summary['thinking']} · stop {summary['stop_reason']}",
                 (
-                    f"cost ${cost['spent_usd']:.4f} settled + ${cost['unresolved_usd']:.4f} unresolved of ${cost['soft_cap_usd']} soft cap "
-                    f"(hard ${cost['hard_cap_usd']:g}; remaining ${cost['remaining_usd']:.4f}; overshoot ${cost['overshoot_usd']:.4f}) over "
+                    f"cost ${cost['spent_usd']:.4f} of ${cost['limit_usd']} limit "
+                    f"(remaining ${cost['remaining_usd']:.4f}; overshoot ${cost['overshoot_usd']:.4f}) over "
                     f"{cost['requests']} requests / {summary['tools']['results']} tool results "
                     f"({cost['retries']} retries); {kinds}; bookkeeping+rejected {cost['bookkeeping_and_rejected_pct']}%"
                 ),
                 *(
                     [
-                        f"SPEND RECONCILIATION: ledger settled ${cost['reconciliation']['ledger_settled_usd']:.4f}, Pi session "
-                        f"${cost['reconciliation']['session_usd'] or 0:.4f}, gap ${cost['reconciliation']['gap_usd']:.4f}, "
-                        f"{len(cost['reconciliation']['open_reserves'])} reserve(s) still open"
+                        f"SPEND GAP: ledger settled ${cost['reconciliation']['ledger_settled_usd']:.4f}, Pi session "
+                        f"${cost['reconciliation']['session_usd'] or 0:.4f}, gap ${cost['reconciliation']['gap_usd']:.4f}"
                     ]
-                    if not cost["reconciliation"]["balanced"]
+                    if cost["reconciliation"]["gap_usd"]
                     else []
                 ),
                 lean_text(summary.get("lean")),

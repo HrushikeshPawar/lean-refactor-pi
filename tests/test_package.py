@@ -97,10 +97,7 @@ class Fixture(unittest.TestCase):
         cost, trace = [], []
         for i, usd in enumerate(spend):
             rid = f"{run_id}-r{i}"
-            cost += [
-                {"kind": "reserve", "id": rid, "usd": usd * 2},
-                {"kind": "settle", "id": rid, "usd": usd, "usage_known": True, "ts": 10 + i},
-            ]
+            cost.append({"kind": "settle", "id": rid, "usd": usd, "usage_known": True, "ts": 10 + i})
             trace += [
                 {
                     "kind": "request",
@@ -259,13 +256,6 @@ class StageTests(Fixture):
         with self.assertRaisesRegex(package.PackageError, "ceiling"):
             self.stage("a", discover=True)  # opt-in: b is discovered from the runs directory
         self.stage("a")  # default counts only the listed runs
-
-    def test_unresolved_reservation_counts(self):
-        self.run_dir("r", spend=(1.0,))
-        with (self.runs / "r" / "cost-ledger.jsonl").open("a") as handle:
-            handle.write(json.dumps({"kind": "reserve", "id": "dangling", "usd": 2.5}) + "\n")
-        with self.assertRaisesRegex(package.PackageError, "ceiling"):
-            self.stage("r")
 
     def test_ineligible_model(self):
         self.run_dir("bad", model="gpt-5-mystery")

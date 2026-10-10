@@ -289,7 +289,7 @@ class MatrixGateTests(unittest.TestCase):
                 "thinking",
                 "--values",
                 "low,high",
-                "--cap",
+                "--limit-usd",
                 "0.1",
             ],
             cwd=ROOT,

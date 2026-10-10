@@ -18,7 +18,6 @@ def fixture_summary(proxy, spent=0.05, stop="model_stopped", errors=0, ideas=0, 
         "stop_reason": stop,
         "cost": {
             "spent_usd": spent,
-            "unresolved_usd": 0.01,
             "bookkeeping_and_rejected_pct": overhead,
             "requests": 5,
             "retries": 1,
@@ -45,18 +44,28 @@ def write_run(root: Path, run_id: str, proxy_helper: bool):
 
 
 class PlanTests(unittest.TestCase):
-    def test_dry_run_prints_plan_and_worst_case_without_spending(self):
+    def test_dry_run_prints_plan_and_planned_spend_without_spending(self):
         out = io.StringIO()
         with mock.patch("subprocess.run") as run, contextlib.redirect_stdout(out):
             code = rc.main(
-                ["--prefix", "p", "--rows", "A.b,C.d", "--models", "deepseek-v4.1-flash", "--cap", "0.10", "--dry-run"]
+                [
+                    "--prefix",
+                    "p",
+                    "--rows",
+                    "A.b,C.d",
+                    "--models",
+                    "deepseek-v4.1-flash",
+                    "--limit-usd",
+                    "0.10",
+                    "--dry-run",
+                ]
             )
         self.assertEqual(code, 0)
         run.assert_not_called()
         text = out.getvalue()
         self.assertIn("6 runs", text)
-        self.assertIn("worst case $0.60", text)
-        self.assertIn("--hard-cap-usd 0.1", text)
+        self.assertIn("planned spend $0.60", text)
+        self.assertIn("--limit-usd 0.1", text)
 
     def test_replicates_are_sequential_and_ids_distinct(self):
         specs = rc.plan("p", ["A", "B"], ["deepseek-v4.1-flash"], 2)
@@ -125,7 +134,7 @@ class GateTests(unittest.TestCase):
 
 
 class ExecuteAndReportTests(unittest.TestCase):
-    def test_execute_runs_one_subprocess_with_cap_and_reads_summary(self):
+    def test_execute_runs_one_subprocess_with_limit_and_reads_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             spec = rc.plan("p", ["A"], ["deepseek-v4.1-flash"], 1)[0]
@@ -138,7 +147,7 @@ class ExecuteAndReportTests(unittest.TestCase):
                     spec, 0.1, "high", ["--no-mcp"], root, "h", run_fn=fake, summary_fn=lambda d: fixture_summary(70.0)
                 )
             self.assertEqual(len(seen), 1)
-            self.assertIn("--hard-cap-usd", seen[0])
+            self.assertIn("--limit-usd", seen[0])
             self.assertIn("0.1", seen[0])
             self.assertIn("--no-mcp", seen[0])
             self.assertTrue(row["packet_matches"])
@@ -172,7 +181,7 @@ class ExecuteAndReportTests(unittest.TestCase):
         self.assertEqual((group["replicates"], group["verified_runs"]), (3, 2))
         self.assertEqual((group["tool_errors"], group["ideas_never_attempted"]), (3, 3))
         self.assertEqual(group["stop_reasons"], {"cap": 1, "finished": 2})
-        self.assertAlmostEqual(group["all_call_cost_usd"]["total"], 0.05 * 6 + 0.03)
+        self.assertAlmostEqual(group["spent_usd"]["total"], 0.05 * 6)
         self.assertTrue(report["identical_packets"])
         self.assertEqual(group["single_route_runs"], 3)
         text = rc.render(report)

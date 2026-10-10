@@ -6,9 +6,9 @@ passing Langfuse preflight receipt covers every model (run here, or a fresh one)
 packet certifies with its mandatory sections. `--dry-run` prints the plan and worst-case cost.
 
     python tools/run_campaign.py --prefix v6c1 --rows Core.InitsUpdatesComm,fundamental_theorem_of_variational_calculus' \\
-        --models deepseek-v4.1-flash --cap 0.10 --replicates 1
+        --models deepseek-v4.1-flash --limit-usd 0.10 --replicates 1
 
-`--preset v6-matrix` is the standing comparison: the configured models x the Core and PhysLib rows x 3 replicates at a $3 cap.
+`--preset v6-matrix` is the standing comparison: the configured models x the Core and PhysLib rows x 3 replicates at the preset's spend limit.
 
 Arguments after `--` are passed to every run (for example `--no-mcp`).
 """
@@ -37,7 +37,7 @@ from tools.run_pi_budgeted import CONFIG, MODELS, THINKING_LEVELS
 ROOT = Path(__file__).resolve().parents[1]
 RUNS = ROOT / "runs" / "pi-budget"
 RECEIPT_MAX_AGE_HOURS = 12.0
-# Named campaign configurations (models.yaml); explicit --rows/--models/--replicates/--cap override a preset's values.
+# Named campaign configurations (models.yaml); explicit --rows/--models/--replicates/--limit-usd override a preset's values.
 PRESETS = CONFIG.get("presets", {})
 HELPER_DECL = re.compile(r"(?m)^\s*(?:private\s+|protected\s+)?(?:theorem|lemma)\s+\S+")
 
@@ -45,6 +45,7 @@ HELPER_DECL = re.compile(r"(?m)^\s*(?:private\s+|protected\s+)?(?:theorem|lemma)
 MIN_FREE_GB = 8.0  # MemAvailable needed before another run starts (nothing else in flight)
 CLEANUP_WAIT_S = 300.0  # longest wait for finished runs' Lean processes to go and memory to come back
 EVALUATIONS = ROOT / "runs" / "evaluations"
+MAX_LIMIT_USD = 2.0  # keep equal to MAX_LIMIT_USD in packages/arena-pi/extensions/spend.ts
 LEAN_UNHEALTHY_EXIT = 75  # keep equal to arena.lean_health.EXIT_CODE
 
 
@@ -76,11 +77,12 @@ def plan(prefix: str, rows: list[str], models: list[str], replicates: int) -> li
     return specs
 
 
-def worst_case_usd(specs: list[dict], cap: float) -> float:
-    return round(len(specs) * cap, 6)
+def worst_case_usd(specs: list[dict], limit: float) -> float:
+    """The planned spend: every run's limit. A run's last call may overshoot its limit."""
+    return round(len(specs) * limit, 6)
 
 
-def command(spec: dict, cap: float, thinking: str, passthrough: list[str]) -> list[str]:
+def command(spec: dict, limit: float, thinking: str, passthrough: list[str]) -> list[str]:
     return [
         sys.executable,
         str(ROOT / "tools/run_pi_budgeted.py"),
@@ -90,8 +92,8 @@ def command(spec: dict, cap: float, thinking: str, passthrough: list[str]) -> li
         spec["row"],
         "--run-id",
         spec["run_id"],
-        "--hard-cap-usd",
-        f"{cap:g}",
+        "--limit-usd",
+        f"{limit:g}",
         "--thinking",
         thinking,
         *passthrough,
@@ -214,8 +216,6 @@ def run_row(
         "cache_reuse_pct": (summary.get("cache") or {}).get("reuse_pct"),
         "bookkeeping_and_rejected_pct": cost.get("bookkeeping_and_rejected_pct"),
         "spent_usd": cost.get("spent_usd"),
-        "unresolved_usd": cost.get("unresolved_usd"),
-        "all_call_cost_usd": round((cost.get("spent_usd") or 0) + (cost.get("unresolved_usd") or 0), 6),
         "requests": cost.get("requests"),
         "retries": cost.get("retries"),
     }
@@ -260,9 +260,9 @@ def aggregate(runs: list[dict], expected: dict[str, str]) -> dict:
                 "tool_errors": sum(item["tool_errors"] or 0 for item in items),
                 "cache_reuse_pct": _stats([item["cache_reuse_pct"] for item in items]),
                 "bookkeeping_and_rejected_pct": _stats([item["bookkeeping_and_rejected_pct"] for item in items]),
-                "all_call_cost_usd": {
-                    **_stats([item["all_call_cost_usd"] for item in items]),
-                    "total": round(sum(item["all_call_cost_usd"] for item in items), 6),
+                "spent_usd": {
+                    **_stats([item["spent_usd"] or 0 for item in items]),
+                    "total": round(sum(item["spent_usd"] or 0 for item in items), 6),
                 },
                 "stop_reasons": {
                     reason: sum(item["stop_reason"] == reason for item in items)
@@ -276,7 +276,7 @@ def aggregate(runs: list[dict], expected: dict[str, str]) -> dict:
         "expected_packets": expected,
         "groups": table,
         "runs": runs,
-        "total_cost_usd": round(sum(item["all_call_cost_usd"] for item in runs), 6),
+        "total_cost_usd": round(sum(item["spent_usd"] or 0 for item in runs), 6),
     }
 
 
@@ -285,7 +285,7 @@ def render(report: dict) -> str:
         return "none" if not stats else "/".join(fmt.format(stats[key]) for key in ("min", "median", "max"))
 
     lines = [
-        f"campaign: {len(report['runs'])} runs, all-call cost ${report['total_cost_usd']:.4f}; "
+        f"campaign: {len(report['runs'])} runs, spent ${report['total_cost_usd']:.4f}; "
         f"identical packets: {report['identical_packets']}"
     ]
     for g in report["groups"]:
@@ -298,15 +298,14 @@ def render(report: dict) -> str:
             f"new-goal-state share: {span(g['new_state_share'], '{:.2f}')}",
             f"  ideas never attempted: {g['ideas_never_attempted']}; tool errors: {g['tool_errors']}",
             f"  cache reuse %: {span(g['cache_reuse_pct'])}; bookkeeping+rejected %: {span(g['bookkeeping_and_rejected_pct'])}",
-            f"  all-call cost per problem min/median/max: {span(g['all_call_cost_usd'], '${:.4f}')} "
-            f"(total ${g['all_call_cost_usd']['total']:.4f})",
+            f"  spend per problem min/median/max: {span(g['spent_usd'], '${:.4f}')} (total ${g['spent_usd']['total']:.4f})",
             f"  stop reasons: {g['stop_reasons']}",
         ]
     skipped = lean_unhealthy_rows(report["runs"])
     if skipped:
         lines.append(
             f"LEAN UNHEALTHY: {len(skipped)} run(s) stopped lean_unhealthy (skipped or cut short): "
-            + ", ".join(f"{run['run_id']} (${run['all_call_cost_usd']:.4f})" for run in skipped)
+            + ", ".join(f"{run['run_id']} (${run['spent_usd'] or 0:.4f})" for run in skipped)
         )
     alarmed = [run for run in report["runs"] if (run.get("lean") or {}).get("alarm") and run not in skipped]
     if alarmed:
@@ -520,7 +519,7 @@ class Housekeeping:
 
 def execute(
     spec: dict,
-    cap: float,
+    limit: float,
     thinking: str,
     passthrough: list[str],
     logs: Path,
@@ -538,7 +537,7 @@ def execute(
     try:
         with (logs / f"{spec['run_id']}.log").open("w") as log:
             proc = run_fn(
-                command(spec, cap, thinking, passthrough), cwd=ROOT, stdout=log, stderr=subprocess.STDOUT, text=True
+                command(spec, limit, thinking, passthrough), cwd=ROOT, stdout=log, stderr=subprocess.STDOUT, text=True
             )
     finally:
         if housekeeping:
@@ -566,9 +565,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--models", help=f"Comma-separated: {', '.join(MODELS)}")
     parser.add_argument("--replicates", type=int)
     parser.add_argument(
-        "--cap",
+        "--limit-usd",
         type=float,
-        help="Spend cap per run in USD (0.10-3.00); below 3 it is a soft cap on actual spend (the last request may overshoot), only 3 is a hard cap",
+        help="Spend limit per run in USD (default 0.50, at most 2.00); the run stops once its actual spend reaches it, so the last call may overshoot",
     )
     parser.add_argument(
         "--jobs",
@@ -593,14 +592,14 @@ def main(argv: list[str] | None = None) -> int:
     args, passthrough = parser.parse_known_args(argv)
     passthrough = [item for item in passthrough if item != "--"]
     preset = PRESETS[args.preset] if args.preset else {}
-    for name, default in (("rows", None), ("models", None), ("replicates", 3), ("cap", 3.0), ("jobs", 1)):
+    for name, default in (("rows", None), ("models", None), ("replicates", 3), ("limit_usd", 0.5), ("jobs", 1)):
         if getattr(args, name) is None:
-            value = preset.get(name, default)
+            value = preset.get("cap" if name == "limit_usd" else name, default)
             setattr(args, name, ",".join(value) if isinstance(value, list) else value)
     if not args.rows or not args.models:
         parser.error("--rows and --models are required unless --preset supplies them")
-    if not 0.1 <= args.cap <= 3:
-        parser.error("--cap must be between 0.10 and 3.00")
+    if not 0 < args.limit_usd <= MAX_LIMIT_USD:
+        parser.error(f"--limit-usd must be above 0 and at most {MAX_LIMIT_USD:g}")
     if args.jobs < 1:
         parser.error("--jobs must be at least 1")
     rows, models = [r for r in args.rows.split(",") if r], [m for m in args.models.split(",") if m]
@@ -610,10 +609,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(str(error))
     print(
         f"{len(specs)} runs ({len(rows)} rows x {len(models)} models x {args.replicates} replicates, {args.jobs} at a time); "
-        f"cap ${args.cap:g} each; worst case ${worst_case_usd(specs, args.cap):.2f}"
+        f"limit ${args.limit_usd:g} each; planned spend ${worst_case_usd(specs, args.limit_usd):.2f}"
     )
     for spec in specs:
-        print(" ", " ".join(command(spec, args.cap, args.thinking, passthrough)[1:]))
+        print(" ", " ".join(command(spec, args.limit_usd, args.thinking, passthrough)[1:]))
     if args.dry_run:
         return 0
     clashes = [spec["run_id"] for spec in specs if (RUNS / spec["run_id"]).exists()]
@@ -633,13 +632,19 @@ def main(argv: list[str] | None = None) -> int:
         runs = list(
             pool.map(
                 lambda spec: execute(
-                    spec, args.cap, args.thinking, passthrough, out, expected[spec["row"]], housekeeping=housekeeping
+                    spec,
+                    args.limit_usd,
+                    args.thinking,
+                    passthrough,
+                    out,
+                    expected[spec["row"]],
+                    housekeeping=housekeeping,
                 ),
                 specs,
             )
         )
     report = {
-        "cap_usd": args.cap,
+        "limit_usd": args.limit_usd,
         "prefix": args.prefix,
         **aggregate(runs, expected),
         "lean_unhealthy_runs": [run["run_id"] for run in lean_unhealthy_rows(runs)],

@@ -1,8 +1,8 @@
 # Central model configuration: the one place for per-model facts. Edit here, not in code.
-# tools/run_pi_budgeted.py loads this file (arena/models.py) and hands it to the Pi extension
-# as ARENA_MODELS_JSON. Subset of YAML only: nested maps, [a, b] lists, {k: v} maps, # comments.
-# Prices are USD per 1M tokens as OpenCode Go bills them; budget.ts refuses a session whose
-# Pi catalog price differs from `price`.
+# tools/run_pi_budgeted.py loads this file (arena/models.py), selects the real Pi provider/model below
+# and hands the output ceiling to the Pi extension. Subset of YAML only: nested maps, [a, b] lists,
+# {k: v} maps, # comments. Prices are USD per 1M tokens as OpenCode Go bills them; Pi prices each call
+# from its own catalog and the run's spend is the sum of those actual costs.
 
 provider: opencode-go          # Pi catalog provider that serves and bills every model below
 provider_timeout_ms: 120000    # a silent request is cut after this; Pi's own default is 300 s
@@ -17,7 +17,7 @@ presets:
     rows: [Core.InitsUpdatesComm, "fundamental_theorem_of_variational_calculus'"]
     models: [deepseek-v4.1-flash]
     replicates: 3
-    cap: 3.0
+    cap: 0.5
     jobs: 3
 
 # Order here is the order of --model choices and of `arena_preflight` runs.

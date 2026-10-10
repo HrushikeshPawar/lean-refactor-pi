@@ -30,7 +30,7 @@
     return suffix ? `${model} · ${suffix}` : model;
   }
   const statusText = run => run.status === 'finished' ? `done · ${run.stop_reason || 'stopped'}` : run.status;
-  const capShare = run => run.soft_cap_usd ? run.spent_usd / run.soft_cap_usd : null;
+  const capShare = run => run.limit_usd ? run.spent_usd / run.limit_usd : null;
 
   const shortModel = r => String(r.model || '—').replace(/^.*\//, '');
   const pctChange = (v, base) => v == null || !base ? '' : `${v <= base ? '−' : '+'}${Math.abs(100 * (v - base) / base).toFixed(0)}%`;
@@ -45,9 +45,9 @@
       `<div class="l1"><span class="${top ? 'best' : ''}">${r.best.proxy.toFixed(2)}</span> <span class="${r.delta_proxy >= 0 ? 'up' : 'down'}">${r.delta_proxy >= 0 ? '+' : ''}${r.delta_proxy}</span></div><div class="l2">${esc(r.best.candidate || '')}</div>`},
     {k: 'tokens', label: 'Tokens / heartbeats', w: 12, v: r => r.best?.tokens ?? 1e9, h: r => r.best?.tokens == null ? '—' :
       `<div class="l1">${esc(r.best.tokens)} / ${esc(r.best.heartbeats)}</div><div class="l2">${pctChange(r.best.tokens, r.reference?.tokens)} / ${pctChange(r.best.heartbeats, r.reference?.heartbeats)}</div>`},
-    {k: 'spend', label: 'Spend / soft cap', w: 14, v: r => r.spent_usd, h: r => {
+    {k: 'spend', label: 'Spend / limit', w: 14, v: r => r.spent_usd, h: r => {
       const share = capShare(r), kind = share > 1 ? ' over' : share > 0.8 ? ' warn' : '';
-      return `<div class="l1"><span class="bar${kind}"><span data-width="${Math.min(100, 100 * (share || 0)).toFixed(1)}"></span></span>${money(r.spent_usd)}</div><div class="l2">of ${money(r.soft_cap_usd)} · hard ${money(r.hard_cap_usd)}</div>`; }},
+      return `<div class="l1"><span class="bar${kind}"><span data-width="${Math.min(100, 100 * (share || 0)).toFixed(1)}"></span></span>${money(r.spent_usd)}</div><div class="l2">of ${money(r.limit_usd)}</div>`; }},
     {k: 'requests', label: 'Requests · tools · errors', w: 13, v: r => r.requests, h: r => `<div class="l1">${esc(r.requests ?? '—')} req · ${esc(r.tool_results ?? '—')} tools</div><div class="l2">${r.tool_errors ? `<span class="down">${r.tool_errors} errors</span>` : '0 errors'}</div>`},
     {k: 'submission', label: 'Submission', w: 7, v: r => r.submission_info?.cold_verified ? 2 : r.submission ? 1 : 0, h: r =>
       r.submission_info?.cold_verified ? `<span class="badge good" title="cold-verified">✓ ${esc(r.submission)}</span>` : r.submission ? `<span class="badge mid">${esc(r.submission)}</span>` : '<span class="muted">—</span>'},

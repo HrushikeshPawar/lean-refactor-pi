@@ -1,7 +1,7 @@
 """Load and validate the central model configuration, models.yaml.
 
 Only the YAML subset that file uses is parsed (nested maps, flow lists and maps, scalars,
-comments), so the harness needs no YAML dependency. `pi_json` is what the Pi extension reads.
+comments), so the harness needs no YAML dependency. `pi_json` is what the offline test provider reads.
 """
 
 from __future__ import annotations
@@ -176,6 +176,6 @@ def _camelize(value):
 
 
 def pi_json(config: dict | None = None) -> str:
-    """The shape budget.ts reads from ARENA_MODELS_JSON (camelCase keys, models only)."""
+    """The ARENA_MODELS_JSON shape the offline test provider reads (camelCase keys, models only)."""
     config = config or load()
     return json.dumps({"provider": config["provider"], "models": _camelize(config["models"])}, separators=(",", ":"))
