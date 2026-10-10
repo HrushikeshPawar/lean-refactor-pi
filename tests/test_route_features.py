@@ -10,8 +10,13 @@ from tests.slow import slow
 
 class ParsingTests(unittest.TestCase):
     def test_records_are_keyed_by_tag_and_other_output_is_ignored(self):
-        output = "warning: unused\nARENA_ROUTE " + json.dumps({"tag": "a", "ok": True, "lemmas": ["x"]}) + \
-            "\nARENA_ROUTE not json\nARENA_ROUTE " + json.dumps({"tag": "b", "ok": False, "error": "e"}) + "\n"
+        output = (
+            "warning: unused\nARENA_ROUTE "
+            + json.dumps({"tag": "a", "ok": True, "lemmas": ["x"]})
+            + "\nARENA_ROUTE not json\nARENA_ROUTE "
+            + json.dumps({"tag": "b", "ok": False, "error": "e"})
+            + "\n"
+        )
         found = route_features.parse_features(output)
         self.assertEqual(sorted(found), ["a", "b"])
         self.assertEqual(found["a"]["lemmas"], ["x"])
@@ -22,16 +27,21 @@ class ParsingTests(unittest.TestCase):
 
     def test_extract_reports_a_timeout_and_a_missing_record_per_proof(self):
         row = {"name": "T"}
-        with patch.object(route_features, "problem", return_value=row), \
-                patch.object(route_features, "extraction_text", return_value=("p", "text", 0)), \
-                patch.object(route_features, "run_lean", return_value=None):
+        with (
+            patch.object(route_features, "problem", return_value=row),
+            patch.object(route_features, "extraction_text", return_value=("p", "text", 0)),
+            patch.object(route_features, "run_lean", return_value=None),
+        ):
             self.assertEqual(route_features.extract("T", {"a": "x"})["a"]["error"], "timeout")
-        with patch.object(route_features, "problem", return_value=row), \
-                patch.object(route_features, "extraction_text", return_value=("p", "text", 0)), \
-                patch.object(route_features, "run_lean", return_value=(1, "f.lean:1:0: error: boom")):
+        with (
+            patch.object(route_features, "problem", return_value=row),
+            patch.object(route_features, "extraction_text", return_value=("p", "text", 0)),
+            patch.object(route_features, "run_lean", return_value=(1, "f.lean:1:0: error: boom")),
+        ):
             result = route_features.extract("T", {"a": "x"})["a"]
             self.assertFalse(result["ok"])
             self.assertIn("boom", result["error"])
+
 
 @slow
 class LeanTests(unittest.TestCase):
@@ -45,8 +55,10 @@ class LeanTests(unittest.TestCase):
         self.assertTrue(got["orig"]["ok"], got["orig"])
         self.assertIn("rec:Core.UpdateStates", got["orig"]["recursion"])
         from arena import routes
-        score = routes.similarity(routes.fingerprint(row["src"], features=got["orig"]),
-                                  routes.fingerprint(synonym, features=got["syn"]))
+
+        score = routes.similarity(
+            routes.fingerprint(row["src"], features=got["orig"]), routes.fingerprint(synonym, features=got["syn"])
+        )
         self.assertGreaterEqual(score, 0.9)
 
     def test_drafts_with_holes_or_errors_are_read_and_a_parse_error_is_not(self):
@@ -54,18 +66,25 @@ class LeanTests(unittest.TestCase):
         from arena.engine import problem
 
         src = problem("Core.InitsUpdatesComm")["src"]
-        head = src[:src.index(":= by") + 5]
-        drafts = {"skeleton": head + "\n  intro Hup Hinit\n  induction Hup <;> sorry\n",
-                  "failed": head + "\n  intro Hup Hinit\n  induction Hup\n  · simp_all\n  · exact foo\n",
-                  "parse": head + "\n  intro Hup Hinit\n  exact (fun\n", "orig": src}
+        head = src[: src.index(":= by") + 5]
+        drafts = {
+            "skeleton": head + "\n  intro Hup Hinit\n  induction Hup <;> sorry\n",
+            "failed": head + "\n  intro Hup Hinit\n  induction Hup\n  · simp_all\n  · exact foo\n",
+            "parse": head + "\n  intro Hup Hinit\n  exact (fun\n",
+            "orig": src,
+        }
         got = route_features.extract("Core.InitsUpdatesComm", drafts, timeout=600)
-        self.assertEqual((got["skeleton"]["holes"], got["skeleton"]["synthetic"], got["skeleton"]["read"]), (2, 0, True))
+        self.assertEqual(
+            (got["skeleton"]["holes"], got["skeleton"]["synthetic"], got["skeleton"]["read"]), (2, 0, True)
+        )
         self.assertFalse(got["skeleton"]["ok"])
         self.assertEqual((got["failed"]["holes"], got["failed"]["errored"], got["failed"]["read"]), (0, True, True))
         self.assertGreater(got["failed"]["synthetic"], 0)
         self.assertNotIn("read", got["parse"])
         skeleton = routes.fingerprint(drafts["skeleton"], features=got["skeleton"])
-        self.assertGreaterEqual(routes.similarity(skeleton, routes.fingerprint(src, features=got["orig"])), routes.SAME_ROUTE)
+        self.assertGreaterEqual(
+            routes.similarity(skeleton, routes.fingerprint(src, features=got["orig"])), routes.SAME_ROUTE
+        )
 
 
 if __name__ == "__main__":

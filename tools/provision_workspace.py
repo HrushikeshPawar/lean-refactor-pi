@@ -39,12 +39,20 @@ def plan(row: dict) -> list[dict]:
     """One step list per pinned version; the URL falls back to Mathlib for standalone rows."""
     url = row.get("url") or MATHLIB
     repo = WORKSPACES / f"{row['source']}-repo"
-    module = row["file_path"][:-len(".lean")].replace("/", ".") if row.get("file_path") else None
+    module = row["file_path"][: -len(".lean")].replace("/", ".") if row.get("file_path") else None
     steps = []
     for pair in row["version_info"]:
         for version, commit in pair.items():
-            steps.append({"version": version, "commit": commit, "url": url, "repo": repo,
-                          "worktree": WORKSPACES / f"{row['source']}-{version}", "module": module})
+            steps.append(
+                {
+                    "version": version,
+                    "commit": commit,
+                    "url": url,
+                    "repo": repo,
+                    "worktree": WORKSPACES / f"{row['source']}-{version}",
+                    "module": module,
+                }
+            )
     return steps
 
 
@@ -145,16 +153,21 @@ def main() -> int:
     parser.add_argument("--row", required=True, help="Benchmark row name")
     parser.add_argument("--build-timeout", type=int, default=4 * 3600, help="Seconds allowed for one lake build")
     parser.add_argument("--full-cache", action="store_true", help="Fetch the whole Mathlib cache, not only the imports")
-    parser.add_argument("--allow-full-fallback", action="store_true",
-                        help="If the selective cache fetch fails, fetch the whole cache (large download)")
+    parser.add_argument(
+        "--allow-full-fallback",
+        action="store_true",
+        help="If the selective cache fetch fails, fetch the whole cache (large download)",
+    )
     parser.add_argument("--version", action="append", help="Only these versions (default: every listed one)")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     row = row_for(args.row)
     steps = [step for step in plan(row) if not args.version or step["version"] in args.version]
     for step in steps:
-        print(f"{row['source']} {step['version']} {step['commit'][:12]} -> {step['worktree'].relative_to(ROOT)}"
-              f"  build {step['module'] or '(Mathlib cache only)'}")
+        print(
+            f"{row['source']} {step['version']} {step['commit'][:12]} -> {step['worktree'].relative_to(ROOT)}"
+            f"  build {step['module'] or '(Mathlib cache only)'}"
+        )
     if args.dry_run:
         return 0
     LOGS.mkdir(parents=True, exist_ok=True)

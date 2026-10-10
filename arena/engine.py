@@ -18,7 +18,7 @@ import sys
 import tempfile
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from functools import lru_cache
 from pathlib import Path
@@ -26,7 +26,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 BENCHMARK = ROOT / "benchmark/original/warmup.jsonl"
 UPSTREAM_CHECKER = ROOT / "vendor/lean-refactor/lean_refactor/cc_agent/tools/check_proof.py"
-HEARTBEAT_WRAPPER = '''open Lean Elab Command in
+HEARTBEAT_WRAPPER = """open Lean Elab Command in
 elab "arena_measure_heartbeats " cmd:command : command => do
   let t0 ← IO.getNumHeartbeats
   try
@@ -40,7 +40,7 @@ elab "arena_measure_heartbeats " cmd:command : command => do
     logInfo m!"ARENA_HEARTBEATS {(t1 - t0) / 1000}"
 
 arena_measure_heartbeats
-'''
+"""
 WRAPPER_LINES = HEARTBEAT_WRAPPER.count("\n")
 
 
@@ -52,7 +52,7 @@ def _proof_length(proof: str, statement: str | None = None) -> int:
     count. The published denominators count the proof only, so the statement is swapped for a neutral one.
     """
     if statement is not None and proof.startswith(statement):
-        proof = "theorem x : True" + proof[len(statement):]
+        proof = "theorem x : True" + proof[len(statement) :]
     # The pinned checker imports its sibling `heartbeat` module.
     if str(UPSTREAM_CHECKER.parent) not in sys.path:
         sys.path.insert(0, str(UPSTREAM_CHECKER.parent))
@@ -82,18 +82,25 @@ def versions(row: dict) -> list[tuple[str, str]]:
 def validate_proof(row: dict, proof: str, allow_sorry: bool = False) -> int:
     statement = row["statement"]
     if not proof.startswith(statement):
-        at = next((i for i, (a, b) in enumerate(zip(statement, proof)) if a != b), min(len(statement), len(proof)))
+        at = next(
+            (i for i, (a, b) in enumerate(zip(statement, proof, strict=False)) if a != b),
+            min(len(statement), len(proof)),
+        )
         line = statement.count("\n", 0, at) + 1
-        raise ValueError(f"STATEMENT_MODIFIED: candidate must begin with the exact benchmark statement; first "
-                         f"difference on statement line {line}: expected {statement[at:at + 40]!r}, got "
-                         f"{proof[at:at + 40]!r}. Copy the statement from the packet byte for byte.")
-    if not re.match(r"\s*:=", proof[len(statement):]):
-        raise ValueError("STATEMENT_MODIFIED: the statement must be followed directly by `:=`; got "
-                         f"{proof[len(statement):len(statement) + 30]!r}")
+        raise ValueError(
+            f"STATEMENT_MODIFIED: candidate must begin with the exact benchmark statement; first "
+            f"difference on statement line {line}: expected {statement[at : at + 40]!r}, got "
+            f"{proof[at : at + 40]!r}. Copy the statement from the packet byte for byte."
+        )
+    if not re.match(r"\s*:=", proof[len(statement) :]):
+        raise ValueError(
+            "STATEMENT_MODIFIED: the statement must be followed directly by `:=`; got "
+            f"{proof[len(statement) : len(statement) + 30]!r}"
+        )
     from tools.arena_check import FORBIDDEN, remove_comments
 
     clean = remove_comments(proof)
-    if re.search(r"(?m)^(?:theorem|lemma|end|namespace|section|open|set_option)\b", clean[len(statement):]):
+    if re.search(r"(?m)^(?:theorem|lemma|end|namespace|section|open|set_option)\b", clean[len(statement) :]):
         raise ValueError("EXTRA_COMMAND: candidate contains a second top-level command")
     for label, pattern in FORBIDDEN:
         if allow_sorry and label in ("sorry", "admit"):
@@ -150,7 +157,7 @@ def _prefix_combinator(before: str) -> int | None:
         return None
     for back in range(1, min(6, len(lines)) + 1):
         if _COMBINATOR_START.match(lines[-back]):
-            return len("\n".join(lines[:len(lines) - back])) + (1 if back < len(lines) else 0)
+            return len("\n".join(lines[: len(lines) - back])) + (1 if back < len(lines) else 0)
     return None
 
 
@@ -165,11 +172,12 @@ def declaration_head(text: str, offset: int) -> int:
         before = text[:head].rstrip()
         if before.endswith("-/"):
             start = before.rfind("/--")
-            if start == -1 or "/-" in before[start + 3:-2]:
+            if start == -1 or "/-" in before[start + 3 : -2]:
                 return head
             head = start
-        elif re.fullmatch(r"@\[[^\n]*\]", (last := before[before.rfind("\n") + 1:]).strip()) \
-                and not re.search(r"\b(section|namespace)\b", last):
+        elif re.fullmatch(r"@\[[^\n]*\]", (last := before[before.rfind("\n") + 1 :]).strip()) and not re.search(
+            r"\b(section|namespace)\b", last
+        ):
             # Only a whole line that is an attribute list belongs to the declaration; a `]` that
             # ends a `variable` binder, or `@[expose] public section`, does not.
             head = before.rfind("\n") + 1
@@ -211,21 +219,36 @@ def candidate_file(row: dict, proof: str, version: str, commit: str, truncate: b
         header = row.get("header") or ""
         if not row.get("statement") or not header.strip():
             raise ValueError("A standalone row needs its header and statement")
-        return {"path": path, "text": header + body + "\n", "offset": len(header), "head": len(header),
-                "start_line": header.count("\n") + 1, "end_line": header.count("\n") + 1 + body.count("\n")}
+        return {
+            "path": path,
+            "text": header + body + "\n",
+            "offset": len(header),
+            "head": len(header),
+            "start_line": header.count("\n") + 1,
+            "end_line": header.count("\n") + 1 + body.count("\n"),
+        }
     if not row.get("start_line") or not row.get("end_line"):
         raise ValueError("The row does not say where its theorem lives")
     source = subprocess.run(
         ["git", "show", f"{commit}:{row['file_path']}"],
-        cwd=path, text=True, capture_output=True, check=True,
+        cwd=path,
+        text=True,
+        capture_output=True,
+        check=True,
     ).stdout
     offset, end = locate_source(source, row["src"], version)
     text = source[:offset] + body + source[end:]
     if truncate:
-        text = text[:offset + len(body)] + "\n"
+        text = text[: offset + len(body)] + "\n"
     start = source.count("\n", 0, offset) + 1
-    return {"path": path, "text": text, "offset": offset, "head": declaration_head(text, offset),
-            "start_line": start, "end_line": start + body.count("\n")}
+    return {
+        "path": path,
+        "text": text,
+        "offset": offset,
+        "head": declaration_head(text, offset),
+        "start_line": start,
+        "end_line": start + body.count("\n"),
+    }
 
 
 def reconstruct(row: dict, proof: str, version: str, commit: str, truncate: bool = False) -> tuple[Path, str]:
@@ -234,7 +257,9 @@ def reconstruct(row: dict, proof: str, version: str, commit: str, truncate: bool
     return built["path"], built["text"]
 
 
-_HEADER = re.compile(r"^(?P<file>.*?):(?P<line>\d+):(?P<column>\d+): (?P<severity>error|warning|info)(?:: ?|:)?(?P<rest>.*)$")
+_HEADER = re.compile(
+    r"^(?P<file>.*?):(?P<line>\d+):(?P<column>\d+): (?P<severity>error|warning|info)(?:: ?|:)?(?P<rest>.*)$"
+)
 # Lean's command line prints informational messages without a position, so
 # these would otherwise read as continuation lines of the previous diagnostic.
 _UNPOSITIONED_INFO = re.compile(r"^(?:ARENA_[A-Z_]+\b|Try this:)")
@@ -248,8 +273,14 @@ def parse_diagnostics(output: str) -> list[dict]:
     for line in output.splitlines():
         match = _HEADER.match(line)
         if match:
-            found.append({"severity": match["severity"], "line": int(match["line"]),
-                          "column": int(match["column"]), "message": [match["rest"]]})
+            found.append(
+                {
+                    "severity": match["severity"],
+                    "line": int(match["line"]),
+                    "column": int(match["column"]),
+                    "message": [match["rest"]],
+                }
+            )
         elif _UNPOSITIONED_INFO.match(line):
             found.append({"severity": "info", "line": None, "column": None, "message": [line]})
         elif found:
@@ -272,8 +303,14 @@ def map_measured_line(line: int, wrapper_start: int, wrapper_lines: int = WRAPPE
     return line - wrapper_lines, False
 
 
-def structure_diagnostics(output: str, text: str, start_line: int, end_line: int,
-                          wrapper_start: int | None = None, report_start_line: int | None = None) -> dict:
+def structure_diagnostics(
+    output: str,
+    text: str,
+    start_line: int,
+    end_line: int,
+    wrapper_start: int | None = None,
+    report_start_line: int | None = None,
+) -> dict:
     """Return headlines for the target declaration plus a count of the rest.
 
     `text` is the candidate file the diagnostics are about. `report_start_line`
@@ -289,18 +326,23 @@ def structure_diagnostics(output: str, text: str, start_line: int, end_line: int
     for item in parse_diagnostics(output):
         if item["severity"] == "info":
             continue
-        line, in_wrapper = (map_measured_line(item["line"], wrapper_start) if wrapper_start
-                            else (item["line"], False))
+        line, in_wrapper = map_measured_line(item["line"], wrapper_start) if wrapper_start else (item["line"], False)
         if in_wrapper:
             continue
         if start_line <= line <= end_line and item["severity"] != "info":
             message = item["message"]
             if len(message) > _MESSAGE_LIMIT:
                 message = message[:_MESSAGE_LIMIT] + "… [truncated]"
-            inside.append({"severity": item["severity"], "file_line": line + shift,
-                           "proof_line": line - start_line + 1, "column": item["column"],
-                           "message": message,
-                           "source_line_text": lines[line - 1] if 0 < line <= len(lines) else ""})
+            inside.append(
+                {
+                    "severity": item["severity"],
+                    "file_line": line + shift,
+                    "proof_line": line - start_line + 1,
+                    "column": item["column"],
+                    "message": message,
+                    "source_line_text": lines[line - 1] if 0 < line <= len(lines) else "",
+                }
+            )
         elif item["severity"] == "error":
             outside["errors"] += 1
             outside["first_error"] = outside["first_error"] or f"line {line}: {item['message'].splitlines()[0]}"
@@ -308,21 +350,30 @@ def structure_diagnostics(output: str, text: str, start_line: int, end_line: int
             outside["warnings"] += 1
     rank = {"error": 0, "warning": 1}
     ordered = sorted(inside, key=lambda item: (rank[item["severity"]], item["file_line"], item["column"]))
-    return {"diagnostics": ordered[:_DIAGNOSTIC_LIMIT],
-            "diagnostic_counts": {"errors": sum(i["severity"] == "error" for i in inside),
-                                  "warnings": sum(i["severity"] == "warning" for i in inside),
-                                  "omitted": max(0, len(ordered) - _DIAGNOSTIC_LIMIT)},
-            "outside_target": outside, "goals": goals[:12],
-            "error_headlines": [f"line {i['file_line']} (proof line {i['proof_line']}): "
-                                f"{i['message'].splitlines()[0] if i['message'] else ''}"
-                                for i in ordered if i["severity"] == "error"][:_DIAGNOSTIC_LIMIT]}
+    return {
+        "diagnostics": ordered[:_DIAGNOSTIC_LIMIT],
+        "diagnostic_counts": {
+            "errors": sum(i["severity"] == "error" for i in inside),
+            "warnings": sum(i["severity"] == "warning" for i in inside),
+            "omitted": max(0, len(ordered) - _DIAGNOSTIC_LIMIT),
+        },
+        "outside_target": outside,
+        "goals": goals[:12],
+        "error_headlines": [
+            f"line {i['file_line']} (proof line {i['proof_line']}): "
+            f"{i['message'].splitlines()[0] if i['message'] else ''}"
+            for i in ordered
+            if i["severity"] == "error"
+        ][:_DIAGNOSTIC_LIMIT],
+    }
 
 
 # Tactic positions: a line start (after a bullet), `by`, `<;>`, and the `=>` of a match or case arm
 # (`| .inl h => sorry`, `case h => sorry`, `next => sorry`).
 _SORRY_TACTIC = re.compile(
     r"(?m)(^[ \t]*(?:[·.][ \t]*)?|\bby[ \t]+|<;>[ \t]*|"
-    r"(?:\||\bcase\b|\bnext\b)[^\n=]*=>[ \t]*)sorry\b(?![_'])")
+    r"(?:\||\bcase\b|\bnext\b)[^\n=]*=>[ \t]*)sorry\b(?![_'])"
+)
 _GOAL_MARKER = re.compile(r"^ARENA_SORRY (\d+)$")
 
 
@@ -332,9 +383,11 @@ def instrument_sorries(proof: str) -> str:
     Lean's command line prints informational messages without positions, so
     each trace is preceded by a marker naming the proof line.
     """
+
     def replace(match: re.Match) -> str:
         line = proof.count("\n", 0, match.start()) + 1
         return f'{match[1]}(trace "ARENA_SORRY {line}"; trace_state; sorry)'
+
     return _SORRY_TACTIC.sub(replace, proof)
 
 
@@ -346,17 +399,24 @@ def extract_goals(output: str, start_line: int) -> tuple[list[dict], str]:
     for line in output.splitlines():
         marker = _GOAL_MARKER.match(line)
         if marker:
-            current = {"proof_line": int(marker[1]), "file_line": start_line + int(marker[1]) - 1,
-                       "text": []}
+            current = {"proof_line": int(marker[1]), "file_line": start_line + int(marker[1]) - 1, "text": []}
             goals.append(current)
         elif current is not None and not _HEADER.match(line):
             current["text"].append(line)
         else:
             current = None
             rest.append(line)
-    return ([{"file_line": item["file_line"], "proof_line": item["proof_line"],
-              "goals": "\n".join(item["text"]).strip()[:1500]} for item in goals],
-            "\n".join(rest))
+    return (
+        [
+            {
+                "file_line": item["file_line"],
+                "proof_line": item["proof_line"],
+                "goals": "\n".join(item["text"]).strip()[:1500],
+            }
+            for item in goals
+        ],
+        "\n".join(rest),
+    )
 
 
 _FORCE_COLD: ContextVar[bool] = ContextVar("arena_force_cold", default=False)
@@ -439,28 +499,39 @@ def _run_cold(row: dict, project: Path, text: str, timeout: int) -> tuple[int, s
             command, env = [direct[0], str(candidate)], {**os.environ, **direct[1]}
         else:
             command, env = ["lake", "env", "lean", str(candidate)], None
-        proc = subprocess.Popen(command, cwd=project, text=True, env=env,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        proc = subprocess.Popen(
+            command,
+            cwd=project,
+            text=True,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
         try:
             stdout, stderr = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
-            try:
+            with suppress(ProcessLookupError):
                 os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
             proc.communicate()
             return None
     return proc.returncode, (stdout + stderr).replace(str(candidate), source_path(row)).strip()
 
 
 def _session_request(row: dict, project: Path, text: str, prefix_end: int | None) -> dict:
-    return {"project": str(project), "fingerprint": _fingerprint(str(project)), "text": text,
-            "display": source_path(row), "header_end": prefix_end,
-            "prefix_sha": None if prefix_end is None else hashlib.sha256(text[:prefix_end].encode()).hexdigest()[:16]}
+    return {
+        "project": str(project),
+        "fingerprint": _fingerprint(str(project)),
+        "text": text,
+        "display": source_path(row),
+        "header_end": prefix_end,
+        "prefix_sha": None if prefix_end is None else hashlib.sha256(text[:prefix_end].encode()).hexdigest()[:16],
+    }
 
 
-def run_lean(row: dict, project: Path, text: str, timeout: int | None = None,
-             prefix_end: int | None = None, lane: str = "model") -> tuple[int, str] | None:
+def run_lean(
+    row: dict, project: Path, text: str, timeout: int | None = None, prefix_end: int | None = None, lane: str = "model"
+) -> tuple[int, str] | None:
     """Compile `text` as the target's file inside the pinned project; None on timeout.
 
     With a per-run Lean session configured, only the changed part of the file is
@@ -477,16 +548,25 @@ def run_lean(row: dict, project: Path, text: str, timeout: int | None = None,
     started = time.monotonic()
     info: dict = {"path": "cold"}
     if lean_session.configured() and not _FORCE_COLD.get():
-        payload = {**_session_request(row, project, text, prefix_end), "op": "check",
-                   "protocol": lean_session.PROTOCOL, "timeout": timeout, "lane": lane}
+        payload = {
+            **_session_request(row, project, text, prefix_end),
+            "op": "check",
+            "protocol": lean_session.PROTOCOL,
+            "timeout": timeout,
+            "lane": lane,
+        }
         # queue for a worker + header open + the check (+ a restore after a timeout) + slack
         queue = lean_session.MODEL_QUEUE_TIMEOUT if lane == "model" else timeout + lean_session.OPEN_TIMEOUT
         wait = queue + lean_session.OPEN_TIMEOUT + 2 * timeout + 60
         reply = lean_session.request(payload, wait) or {}
         if reply.get("ok"):
-            _LAST.info = {"path": "session", "seconds": round(time.monotonic() - started, 2),
-                          "new_worker": reply.get("new_worker"), "changed_from_line": reply.get("changed_from_line"),
-                          "lane": lane}
+            _LAST.info = {
+                "path": "session",
+                "seconds": round(time.monotonic() - started, 2),
+                "new_worker": reply.get("new_worker"),
+                "changed_from_line": reply.get("changed_from_line"),
+                "lane": lane,
+            }
             if reply.get("header_seconds") is not None:
                 _LAST.info["header_seconds"] = reply["header_seconds"]
             if reply.get("warm_kept"):
@@ -507,24 +587,36 @@ def warm_session(row: dict, version: str, commit: str, slots: int, lane: str = "
     if not lean_session.configured():
         return None
     built = candidate_file(row, row.get("src") or row.get("statement") or "", version, commit)
-    payload = {**_session_request(row, built["path"], built["text"], built["head"]), "op": "warm",
-               "protocol": lean_session.PROTOCOL, "slots": slots, "timeout": lean_session.OPEN_TIMEOUT,
-               "lane": lane}
+    payload = {
+        **_session_request(row, built["path"], built["text"], built["head"]),
+        "op": "warm",
+        "protocol": lean_session.PROTOCOL,
+        "slots": slots,
+        "timeout": lean_session.OPEN_TIMEOUT,
+        "lane": lane,
+    }
     return lean_session.request(payload, lean_session.OPEN_TIMEOUT + 120)
 
 
-def compile_version(row: dict, proof: str, version: str, commit: str,
-                    measure: bool = False, probe: bool = False,
-                    report_start_line: int | None = None, lane: str = "model") -> dict:
+def compile_version(
+    row: dict,
+    proof: str,
+    version: str,
+    commit: str,
+    measure: bool = False,
+    probe: bool = False,
+    report_start_line: int | None = None,
+    lane: str = "model",
+) -> dict:
     built = candidate_file(row, proof, version, commit)
     text = built["text"]
     if probe:
         body = proof.rstrip("\n")
-        text = text[:built["offset"]] + instrument_sorries(body) + text[built["offset"] + len(body):]
+        text = text[: built["offset"]] + instrument_sorries(body) + text[built["offset"] + len(body) :]
     wrapper_start = None
     if measure:
-        wrapper_start = text[:built["head"]].count("\n") + 1
-        text = text[:built["head"]] + HEARTBEAT_WRAPPER + text[built["head"]:]
+        wrapper_start = text[: built["head"]].count("\n") + 1
+        text = text[: built["head"]] + HEARTBEAT_WRAPPER + text[built["head"] :]
     timeout = lean_timeout()
     output = run_lean(row, built["path"], text, timeout=timeout, prefix_end=built["head"], lane=lane)
     lean_run = last_lean_run()
@@ -533,16 +625,21 @@ def compile_version(row: dict, proof: str, version: str, commit: str,
     returncode, output = output
     match = re.search(r"ARENA_HEARTBEATS (\d+)", output) if measure else None
     passed = returncode == 0 and (not measure or match is not None)
-    structured = structure_diagnostics(output, built["text"], built["start_line"],
-                                       built["end_line"], wrapper_start, report_start_line)
-    result = {"passed": passed, "exit_code": returncode,
-              "heartbeats": int(match.group(1)) if match else None,
-              **structured, "raw_output": output, "lean": lean_run}
+    structured = structure_diagnostics(
+        output, built["text"], built["start_line"], built["end_line"], wrapper_start, report_start_line
+    )
+    result = {
+        "passed": passed,
+        "exit_code": returncode,
+        "heartbeats": int(match.group(1)) if match else None,
+        **structured,
+        "raw_output": output,
+        "lean": lean_run,
+    }
     return result
 
 
-def evaluate(name: str, proof: str, mode: str = "fast", known: dict | None = None,
-             lane: str = "model") -> dict:
+def evaluate(name: str, proof: str, mode: str = "fast", known: dict | None = None, lane: str = "model") -> dict:
     """Compile one proof. `probe` allows `sorry`, checks one version, never scores.
 
     `known` maps versions to compile results already obtained for this exact
@@ -571,9 +668,16 @@ def evaluate(name: str, proof: str, mode: str = "fast", known: dict | None = Non
         if known and version in known:
             compat[version] = known[version]
             continue
-        compat[version] = compile_version(row, proof, version, commit,
-                                          measure=(version, commit) == measured_on and not probe,
-                                          probe=probe, report_start_line=primary_start, lane=lane)
+        compat[version] = compile_version(
+            row,
+            proof,
+            version,
+            commit,
+            measure=(version, commit) == measured_on and not probe,
+            probe=probe,
+            report_start_line=primary_start,
+            lane=lane,
+        )
         if mode != "full" and not compat[version]["passed"]:
             break
     primary = compat[targets[0][0]]
@@ -582,9 +686,16 @@ def evaluate(name: str, proof: str, mode: str = "fast", known: dict | None = Non
     if mode == "full" and heartbeat is not None:
         proxy = local_proxy(name, length, heartbeat, compat)
     result = {
-        "ok": True, "name": name, "mode": mode, "tokens": length,
-        "reference_tokens": row["proof_length"], "compat": compat,
-        "heartbeat": heartbeat, "measured_on": measured_on[0], "local_proxy": proxy, "score": None,
+        "ok": True,
+        "name": name,
+        "mode": mode,
+        "tokens": length,
+        "reference_tokens": row["proof_length"],
+        "compat": compat,
+        "heartbeat": heartbeat,
+        "measured_on": measured_on[0],
+        "local_proxy": proxy,
+        "score": None,
         "calibration": "pending official Arena worker comparison",
     }
     if probe:

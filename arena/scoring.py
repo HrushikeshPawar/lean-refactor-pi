@@ -53,22 +53,27 @@ def exchange_rates(name: str, total_versions: int) -> dict:
         "points_per_lost_version": round(per_version, 2),
         "heartbeats_per_token": round(per_token / per_heartbeat),
         "tokens_per_lost_version": round(per_version / per_token),
-        "reference_tokens": tokens, "reference_heartbeats": heartbeats,
+        "reference_tokens": tokens,
+        "reference_heartbeats": heartbeats,
         "versions": total_versions,
     }
 
 
-def metrics(name: str, tokens: int | None, heartbeats: int | None, compat: dict,
-            mode: str, total_versions: int) -> dict:
+def metrics(
+    name: str, tokens: int | None, heartbeats: int | None, compat: dict, mode: str, total_versions: int
+) -> dict:
     """Score breakdown for one evaluation.
 
     Fast and probe evaluations check one toolchain, so their proxy is an
     estimate that assumes every unchecked version also compiles.
     """
     primary_passed = bool(compat) and bool(next(iter(compat.values())).get("passed"))
-    block: dict = {"tokens": tokens, "heartbeats": heartbeats,
-                   "compat": {version: bool(item.get("passed")) for version, item in compat.items()},
-                   "compiled": primary_passed}
+    block: dict = {
+        "tokens": tokens,
+        "heartbeats": heartbeats,
+        "compat": {version: bool(item.get("passed")) for version, item in compat.items()},
+        "compiled": primary_passed,
+    }
     if not primary_passed or tokens is None or heartbeats is None:
         return block
     reference_tokens, reference_heartbeats = reference(name)
@@ -78,25 +83,45 @@ def metrics(name: str, tokens: int | None, heartbeats: int | None, compat: dict,
     passed = sum(bool(item.get("passed")) for item in compat.values())
     compat_pct = round(passed / total_versions * 100, 2) if full else 100.0
     block["axes"] = {
-        "tokens": {"value": tokens, "reference": reference_tokens,
-                   "reduction_pct": token_pct, "contribution": round(token_pct / 3, 2)},
-        "heartbeats": {"value": heartbeats, "reference": reference_heartbeats,
-                       "reduction_pct": heartbeat_pct, "contribution": round(heartbeat_pct / 3, 2)},
-        "compat": {"passed": passed if full else None, "checked": len(compat),
-                   "total": total_versions, "pct": compat_pct,
-                   "contribution": round(compat_pct / 3, 2)},
+        "tokens": {
+            "value": tokens,
+            "reference": reference_tokens,
+            "reduction_pct": token_pct,
+            "contribution": round(token_pct / 3, 2),
+        },
+        "heartbeats": {
+            "value": heartbeats,
+            "reference": reference_heartbeats,
+            "reduction_pct": heartbeat_pct,
+            "contribution": round(heartbeat_pct / 3, 2),
+        },
+        "compat": {
+            "passed": passed if full else None,
+            "checked": len(compat),
+            "total": total_versions,
+            "pct": compat_pct,
+            "contribution": round(compat_pct / 3, 2),
+        },
     }
     value = round((token_pct + heartbeat_pct + compat_pct) / 3, 2)
     reference_proxy = round(100 / 3, 2)
     if full:
         block["proxy"] = local_proxy(name, tokens, heartbeats, compat)
-        block["deltas"] = {"vs_reference": {"tokens": tokens - reference_tokens,
-                                            "heartbeats": heartbeats - reference_heartbeats,
-                                            "proxy": round(block["proxy"] - reference_proxy, 2)}}
+        block["deltas"] = {
+            "vs_reference": {
+                "tokens": tokens - reference_tokens,
+                "heartbeats": heartbeats - reference_heartbeats,
+                "proxy": round(block["proxy"] - reference_proxy, 2),
+            }
+        }
     else:
         block["estimated_proxy"] = value
         block["assumes_full_compat"] = True
-        block["deltas"] = {"vs_reference": {"tokens": tokens - reference_tokens,
-                                            "heartbeats": heartbeats - reference_heartbeats,
-                                            "proxy": round(value - reference_proxy, 2)}}
+        block["deltas"] = {
+            "vs_reference": {
+                "tokens": tokens - reference_tokens,
+                "heartbeats": heartbeats - reference_heartbeats,
+                "proxy": round(value - reference_proxy, 2),
+            }
+        }
     return block

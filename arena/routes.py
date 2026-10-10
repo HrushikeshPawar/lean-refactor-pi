@@ -32,27 +32,113 @@ import math
 import re
 
 SAME_ROUTE = 0.5
-ROUTE_DEPTH = 3     # distinct goal states that make a route explored
-TEXT_EXEMPLAR_MIN = 0.7   # a kernel attempt joins a text-only exemplar's route only this close: text overlap is a weak proxy
-STALE_STREAK = 5    # consecutive attempts leaving an already seen goal state
+ROUTE_DEPTH = 3  # distinct goal states that make a route explored
+TEXT_EXEMPLAR_MIN = (
+    0.7  # a kernel attempt joins a text-only exemplar's route only this close: text overlap is a weak proxy
+)
+STALE_STREAK = 5  # consecutive attempts leaving an already seen goal state
 MAX_SKELETON = 24
 WEIGHTS = {"recursion": 0.25, "lemmas": 0.45, "claims": 0.20, "logic": 0.10}
 PARTS = tuple(WEIGHTS)
 # Logic plumbing that every proof by rewriting or simplification carries, whatever its strategy.
-PLUMBING = frozenset({
-    "Eq.mpr", "Eq.mp", "Eq.rec", "Eq.ndrec", "Eq.recOn", "Eq.casesOn", "Eq.subst", "Eq.substr", "Eq.symm",
-    "Eq.trans", "Eq.refl", "Eq.propIntro", "HEq.refl", "congrArg", "congrFun", "congr", "of_eq_true",
-    "of_eq_false", "eq_self", "eq_true", "eq_false", "id", "rfl", "propext", "True.intro", "Iff.mpr", "Iff.mp",
-    "Iff.intro", "Iff.rfl", "Iff.refl", "Iff.symm", "Iff.trans", "implies_congr", "implies_congr_ctx",
-    "forall_congr", "implies_true", "ne_eq", "not_false_eq_true", "letFun", "inferInstance", "inferInstanceAs",
-    "cast", "Not", "Not.intro", "Unit", "Unit.unit", "outParam", "optParam", "autoParam", "sorryAx",
-    # what `simp`, `decide` and `grind` leave behind whichever lemmas they were given
-    "Ne", "ne_eq", "not_not", "false_and", "true_and", "and_false", "and_true", "or_false", "false_or", "or_true",
-    "true_or", "and_self", "or_self", "not_true_eq_false", "eq_self_iff_true", "Bool.false_eq_true", "Bool.true_eq_false",
-    "ite_cond_eq_true", "ite_cond_eq_false", "ite_true", "ite_false", "dite_true", "dite_false", "if_true", "if_false",
-    "decide_true", "decide_false", "Decidable.decide", "of_decide_eq_true", "of_decide_eq_false", "eq_false'", "eq_true'",
-    "congrFun'", "and_imp", "imp_self", "iff_self", "iff_true", "iff_false", "true_iff", "false_iff", "noConfusion_of_Nat"})
-_AUXILIARY = re.compile(r"\.(congr_simp|ctorIdx|noConfusion|noConfusionType|injEq|inj|inj_iff|sizeOf_spec|eq_\d+|eq_def)$")
+PLUMBING = frozenset(
+    {
+        "Eq.mpr",
+        "Eq.mp",
+        "Eq.rec",
+        "Eq.ndrec",
+        "Eq.recOn",
+        "Eq.casesOn",
+        "Eq.subst",
+        "Eq.substr",
+        "Eq.symm",
+        "Eq.trans",
+        "Eq.refl",
+        "Eq.propIntro",
+        "HEq.refl",
+        "congrArg",
+        "congrFun",
+        "congr",
+        "of_eq_true",
+        "of_eq_false",
+        "eq_self",
+        "eq_true",
+        "eq_false",
+        "id",
+        "rfl",
+        "propext",
+        "True.intro",
+        "Iff.mpr",
+        "Iff.mp",
+        "Iff.intro",
+        "Iff.rfl",
+        "Iff.refl",
+        "Iff.symm",
+        "Iff.trans",
+        "implies_congr",
+        "implies_congr_ctx",
+        "forall_congr",
+        "implies_true",
+        "ne_eq",
+        "not_false_eq_true",
+        "letFun",
+        "inferInstance",
+        "inferInstanceAs",
+        "cast",
+        "Not",
+        "Not.intro",
+        "Unit",
+        "Unit.unit",
+        "outParam",
+        "optParam",
+        "autoParam",
+        "sorryAx",
+        # what `simp`, `decide` and `grind` leave behind whichever lemmas they were given
+        "Ne",
+        "not_not",
+        "false_and",
+        "true_and",
+        "and_false",
+        "and_true",
+        "or_false",
+        "false_or",
+        "or_true",
+        "true_or",
+        "and_self",
+        "or_self",
+        "not_true_eq_false",
+        "eq_self_iff_true",
+        "Bool.false_eq_true",
+        "Bool.true_eq_false",
+        "ite_cond_eq_true",
+        "ite_cond_eq_false",
+        "ite_true",
+        "ite_false",
+        "dite_true",
+        "dite_false",
+        "if_true",
+        "if_false",
+        "decide_true",
+        "decide_false",
+        "Decidable.decide",
+        "of_decide_eq_true",
+        "of_decide_eq_false",
+        "eq_false'",
+        "eq_true'",
+        "congrFun'",
+        "and_imp",
+        "imp_self",
+        "iff_self",
+        "iff_true",
+        "iff_false",
+        "true_iff",
+        "false_iff",
+        "noConfusion_of_Nat",
+    }
+)
+_AUXILIARY = re.compile(
+    r"\.(congr_simp|ctorIdx|noConfusion|noConfusionType|injEq|inj|inj_iff|sizeOf_spec|eq_\d+|eq_def)$"
+)
 _VARIANT_SUFFIX = re.compile(r"_(left|right|symm|mpr|mp)$")
 _NAT_INT = re.compile(r"^(Nat|Int)\.")
 _PRIVATE = re.compile(r"_private\.[^\s@]*?\.0\.")
@@ -60,8 +146,10 @@ _PRIVATE = re.compile(r"_private\.[^\s@]*?\.0\.")
 _COMMENT_BLOCK = re.compile(r"/-.*?-/", re.S)
 _COMMENT_LINE = re.compile(r"--[^\n]*")
 _IDENT = re.compile(r"[A-Za-z_Ͱ-Ͽ][A-Za-z0-9_'.!?₀-₉]*")
-_RECURSION = re.compile(r"(?<![\w.])(induction'?|induct|fun_induction|fun_cases|termination_by|decreasing_by)(?![\w'])"
-                        r"|\.(rec|recOn|casesOn|brecOn)(?![\w'])")
+_RECURSION = re.compile(
+    r"(?<![\w.])(induction'?|induct|fun_induction|fun_cases|termination_by|decreasing_by)(?![\w'])"
+    r"|\.(rec|recOn|casesOn|brecOn)(?![\w'])"
+)
 
 
 def _strip_comments(text: str) -> str:
@@ -78,7 +166,7 @@ def proof_body(proof: str) -> str:
         elif char in ")]}⟩":
             depth = max(0, depth - 1)
         elif char == ":" and depth == 0 and text.startswith(":=", index):
-            return text[index + 2:]
+            return text[index + 2 :]
     return text
 
 
@@ -104,8 +192,12 @@ def _heads(body: str) -> list[str]:
     return heads[:MAX_SKELETON]
 
 
-def fingerprint(proof: str, vocabulary: set[str] | frozenset[str] = frozenset(), theorem: str | None = None,
-                features: dict | None = None) -> dict:
+def fingerprint(
+    proof: str,
+    vocabulary: set[str] | frozenset[str] = frozenset(),
+    theorem: str | None = None,
+    features: dict | None = None,
+) -> dict:
     """Route fingerprint of one proof. `features` is the Lean extractor's record for the compiled proof; without
     a successful one the fingerprint carries text features only. `vocabulary` is the set of lemma names (qualified
     or short) the text features count."""
@@ -145,13 +237,23 @@ def family(name: str) -> str:
 
 def kernel(features: dict) -> dict:
     """The comparable part of the extractor's record: lemma families without plumbing, the other parts as they are."""
+
     def clean(names) -> set[str]:
         return {_PRIVATE.sub("", name) for name in names}  # a private name embeds the module it was compiled in
 
-    lemmas = {family(name) for name in clean(features.get("lemmas", [])) if name not in PLUMBING and not _AUXILIARY.search(name)}
-    return {"recursion": sorted(clean(features.get("recursion", []))), "lemmas": sorted(lemmas),
-            "claims": sorted(set(features.get("claims", []))), "logic": sorted(clean(features.get("logic", []))),
-            "holes": int(features.get("holes") or 0), "synthetic": int(features.get("synthetic") or 0)}
+    lemmas = {
+        family(name)
+        for name in clean(features.get("lemmas", []))
+        if name not in PLUMBING and not _AUXILIARY.search(name)
+    }
+    return {
+        "recursion": sorted(clean(features.get("recursion", []))),
+        "lemmas": sorted(lemmas),
+        "claims": sorted(set(features.get("claims", []))),
+        "logic": sorted(clean(features.get("logic", []))),
+        "holes": int(features.get("holes") or 0),
+        "synthetic": int(features.get("synthetic") or 0),
+    }
 
 
 def incomplete(print_: dict) -> bool:
@@ -212,10 +314,14 @@ def similarity(left: dict, right: dict, weights: dict[str, dict[str, float]] | N
         other = right if partial is left else left
         have = [part for part in PARTS if partial["kernel"][part]]
         if have:
-            return sum(WEIGHTS[part] * _contained(set(partial["kernel"][part]), set(other["kernel"][part]), weights.get(part))
-                       for part in have) / sum(WEIGHTS[part] for part in have)
-    return sum(WEIGHTS[part] * _jaccard(set(left["kernel"][part]), set(right["kernel"][part]), weights.get(part))
-               for part in PARTS)
+            return sum(
+                WEIGHTS[part] * _contained(set(partial["kernel"][part]), set(other["kernel"][part]), weights.get(part))
+                for part in have
+            ) / sum(WEIGHTS[part] for part in have)
+    return sum(
+        WEIGHTS[part] * _jaccard(set(left["kernel"][part]), set(right["kernel"][part]), weights.get(part))
+        for part in PARTS
+    )
 
 
 def exemplars(earlier: list[dict]) -> dict[str, dict]:
@@ -270,7 +376,9 @@ def label(print_: dict, reference: dict | None = None, weights: dict[str, dict[s
     if reference is None:
         return f"{source} fingerprint, first route"
     differ = len(_constants(print_) ^ _constants(reference))
-    holes = int((print_.get("kernel") or {}).get("holes") or 0) + int((print_.get("kernel") or {}).get("synthetic") or 0)
+    holes = int((print_.get("kernel") or {}).get("holes") or 0) + int(
+        (print_.get("kernel") or {}).get("synthetic") or 0
+    )
     return f"{source} fingerprint, {differ} constants differ from r1" + (f", {holes} open holes" if holes else "")
 
 
@@ -284,8 +392,11 @@ def short_label(print_: dict, reference: dict | None = None, weights: dict[str, 
 def vocabulary(context: dict) -> set[str]:
     """Lemma names worth fingerprinting: the file's earlier theorems and defs, and non-library constants of the proof."""
     names = {item["name"] for item in context.get("earlier", []) if item.get("decl") in ("theorem", "def")}
-    names |= {item["name"] for item in context.get("constant", [])
-              if item.get("kind") in ("theorem", "def") and item.get("tag") not in ("core", "generated", "instance", "tactic")}
+    names |= {
+        item["name"]
+        for item in context.get("constant", [])
+        if item.get("kind") in ("theorem", "def") and item.get("tag") not in ("core", "generated", "instance", "tactic")
+    }
     return names
 
 
@@ -320,7 +431,9 @@ def route_table(history: list[dict]) -> list[dict]:
         metrics = (event.get("result") or {}).get("metrics") or {}
         verified = event.get("mode") == "full" and metrics.get("proxy") is not None
         value = metrics.get("proxy") if verified else metrics.get("estimated_proxy")
-        if value is not None and (event["candidate_id"] not in score or (verified, value) > score[event["candidate_id"]]):
+        if value is not None and (
+            event["candidate_id"] not in score or (verified, value) > score[event["candidate_id"]]
+        ):
             score[event["candidate_id"]] = (verified, value)
     results = attempt_results(history)
     table: dict[str, dict] = {}
@@ -333,17 +446,32 @@ def route_table(history: list[dict]) -> list[dict]:
         route = event["route"]
         # Credit is for compiled proofs only: the attempt must be a candidate whose compile passed with no error and no
         # sorry. A draft, a hole-carrying skeleton or a failed compile never opens or credits a route (also in old ledgers).
-        earned = identifier in results and results[identifier][0] == "candidate" and goalstate.closed(results[identifier][1])
+        earned = (
+            identifier in results and results[identifier][0] == "candidate" and goalstate.closed(results[identifier][1])
+        )
         if route not in table:
             credited = event.get("credited")
             if credited is None:  # an event from before credit existed: a kernel route opened by a model attempt
                 credited = bool(event.get("new") and event.get("source") == "kernel" and kind in (None, "model"))
-            table[route] = {"route": route, "label": event.get("label") or route,
-                           "short_label": event.get("short_label") or event.get("label") or route, "original": False, "attempts": 0,
-                            "best_candidate": None, "best_proxy": None, "verified": False,
-                            "depth": 0, "new_states": 0, "min_holes": None, "stale_streak": 0, "compiled": False,
-                            "explored": False, "stale": False, "credited": bool(credited) and earned and kind != "reference",
-                            "skeleton": bool(event.get("skeleton"))}
+            table[route] = {
+                "route": route,
+                "label": event.get("label") or route,
+                "short_label": event.get("short_label") or event.get("label") or route,
+                "original": False,
+                "attempts": 0,
+                "best_candidate": None,
+                "best_proxy": None,
+                "verified": False,
+                "depth": 0,
+                "new_states": 0,
+                "min_holes": None,
+                "stale_streak": 0,
+                "compiled": False,
+                "explored": False,
+                "stale": False,
+                "credited": bool(credited) and earned and kind != "reference",
+                "skeleton": bool(event.get("skeleton")),
+            }
             seen[route] = set()
         row = table[route]
         if kind == "reference":
@@ -355,13 +483,22 @@ def route_table(history: list[dict]) -> list[dict]:
             continue
         if kind == "auto_merge":
             continue
-        if (not row["original"] and event.get("assigned_by", "kernel") == "kernel" and event.get("source") == "kernel"
-                and not event.get("errored") and earned and not event.get("holes") and not event.get("synthetic")):
+        if (
+            not row["original"]
+            and event.get("assigned_by", "kernel") == "kernel"
+            and event.get("source") == "kernel"
+            and not event.get("errored")
+            and earned
+            and not event.get("holes")
+            and not event.get("synthetic")
+        ):
             row["credited"] = True  # a later compiled proof credits a route an uncredited attempt opened
             row["skeleton"] = row["skeleton"] or bool(event.get("skeleton"))
         row["attempts"] += 1
-        if identifier in score and (row["best_proxy"] is None or (score[identifier][0], score[identifier][1]) >
-                                    (row["verified"], row["best_proxy"])):
+        if identifier in score and (
+            row["best_proxy"] is None
+            or (score[identifier][0], score[identifier][1]) > (row["verified"], row["best_proxy"])
+        ):
             row["verified"], row["best_proxy"] = score[identifier]
             row["best_candidate"] = labels.get(identifier)
         if identifier not in results:
@@ -392,8 +529,12 @@ def progress(table: list[dict]) -> dict:
     rows = [row for row in table if row["attempts"]]
     attempts = sum(row["attempts"] for row in rows)
     new = sum(row["new_states"] for row in rows)
-    return {"credited_routes": sum(row["credited"] for row in rows), "explored_routes": sum(row["explored"] for row in rows),
-            "new_state_attempts": new, "new_state_share": round(new / attempts, 3) if attempts else None}
+    return {
+        "credited_routes": sum(row["credited"] for row in rows),
+        "explored_routes": sum(row["explored"] for row in rows),
+        "new_state_attempts": new,
+        "new_state_share": round(new / attempts, 3) if attempts else None,
+    }
 
 
 def routes_text(table: list[dict]) -> str:
@@ -403,11 +544,28 @@ def routes_text(table: list[dict]) -> str:
     for row in table:
         if not row["attempts"] and not row["original"]:
             continue
-        best = f"best proxy {row['best_proxy']} ({row['best_candidate']})" if row["best_proxy"] is not None else "no scored proof"
-        tag = (" (original's route)" if row["original"] else " (credited)" if row.get("credited")
-               else " (not credited)" if "credited" in row or "depth" in row else "")
-        states = f" \u00b7 {row['depth']} goal state{'s' if row['depth'] != 1 else ''}" if row.get("depth") is not None else ""
-        parts.append(f"{row['route']}{tag} \u00b7 {row['attempts']} attempt{'s' if row['attempts'] != 1 else ''}{states} \u00b7 {best}")
+        best = (
+            f"best proxy {row['best_proxy']} ({row['best_candidate']})"
+            if row["best_proxy"] is not None
+            else "no scored proof"
+        )
+        tag = (
+            " (original's route)"
+            if row["original"]
+            else " (credited)"
+            if row.get("credited")
+            else " (not credited)"
+            if "credited" in row or "depth" in row
+            else ""
+        )
+        states = (
+            f" \u00b7 {row['depth']} goal state{'s' if row['depth'] != 1 else ''}"
+            if row.get("depth") is not None
+            else ""
+        )
+        parts.append(
+            f"{row['route']}{tag} \u00b7 {row['attempts']} attempt{'s' if row['attempts'] != 1 else ''}{states} \u00b7 {best}"
+        )
     return "; ".join(parts) if parts else "none"
 
 
@@ -417,7 +575,11 @@ def routes_detail_text(table: list[dict]) -> str:
     for row in table:
         if not row["attempts"] and not row["original"]:
             continue
-        best = f"best proxy {row['best_proxy']} ({row['best_candidate']})" if row["best_proxy"] is not None else "no scored proof"
+        best = (
+            f"best proxy {row['best_proxy']} ({row['best_candidate']})"
+            if row["best_proxy"] is not None
+            else "no scored proof"
+        )
         tag = " [the original proof's route]" if row["original"] else ""
         states = row.get("depth", 0)
         extra = [f"{states} goal state{'s' if states != 1 else ''}"]
@@ -428,12 +590,16 @@ def routes_detail_text(table: list[dict]) -> str:
         extra.append("explored" if row.get("explored") else "opened")
         if row.get("credited"):
             extra.append("credited" + (" (opened by a skeleton)" if row.get("skeleton") else ""))
-        parts.append(f"{row['route']} \"{row['label']}\"{tag}: {row['attempts']} attempt{'s' if row['attempts'] != 1 else ''}, "
-                     f"{', '.join(extra)}, {best}")
+        parts.append(
+            f'{row["route"]} "{row["label"]}"{tag}: {row["attempts"]} attempt{"s" if row["attempts"] != 1 else ""}, '
+            f"{', '.join(extra)}, {best}"
+        )
     return "; ".join(parts) if parts else "none"
 
 
-def file_attempt(earlier: list[dict], proof_id: str, print_: dict, features: dict | None, origin: str | None, probe: bool) -> dict:
+def file_attempt(
+    earlier: list[dict], proof_id: str, print_: dict, features: dict | None, origin: str | None, probe: bool
+) -> dict:
     """The route event for one attempt. `origin` is the candidate's (None for a probe draft). Only an attempt with a
     kernel fingerprint of a complete proof that matches no exemplar opens a credited route. A probe draft, an
     incomplete (holes or errors) or kernel-less attempt joins the route whose text features match best, starts r1 only
@@ -444,18 +610,32 @@ def file_attempt(earlier: list[dict], proof_id: str, print_: dict, features: dic
     route, similarity = found or (assign(earlier, print_) if by_kernel else ("r1", 0.0))
     new = route not in {item["route"] for item in earlier}
     reference = next((item["fingerprint"] for item in earlier if item["route"] == "r1"), None)
-    event = {"kind": "route", "proof_id": proof_id, "route": route, "new": new,
-             "similarity": similarity, "source": print_["source"], "fingerprint": print_,
-             "assigned_by": "kernel" if by_kernel else "text", "attempt_kind": "probe" if probe else "candidate",
-             # Credit is for a compiled, complete proof only: a probe draft, a skeleton with holes or an errored draft
-             # never opens a route (it joins the closest existing one by text, and is never credited).
-             "credited": new and by_kernel and origin == "model",
-             "label": label(print_, reference, idf([item["fingerprint"] for item in earlier] + [print_])) if new else next(
-                 item["label"] for item in earlier if item["route"] == route),
-             "short_label": short_label(print_, reference, idf([item["fingerprint"] for item in earlier] + [print_])) if new else next(
-                 item.get("short_label") or item["label"] for item in earlier if item["route"] == route)}
+    event = {
+        "kind": "route",
+        "proof_id": proof_id,
+        "route": route,
+        "new": new,
+        "similarity": similarity,
+        "source": print_["source"],
+        "fingerprint": print_,
+        "assigned_by": "kernel" if by_kernel else "text",
+        "attempt_kind": "probe" if probe else "candidate",
+        # Credit is for a compiled, complete proof only: a probe draft, a skeleton with holes or an errored draft
+        # never opens a route (it joins the closest existing one by text, and is never credited).
+        "credited": new and by_kernel and origin == "model",
+        "label": label(print_, reference, idf([item["fingerprint"] for item in earlier] + [print_]))
+        if new
+        else next(item["label"] for item in earlier if item["route"] == route),
+        "short_label": short_label(print_, reference, idf([item["fingerprint"] for item in earlier] + [print_]))
+        if new
+        else next(item.get("short_label") or item["label"] for item in earlier if item["route"] == route),
+    }
     if print_["source"] == "kernel":
         kernel_ = print_["kernel"]
-        event.update(holes=kernel_["holes"], synthetic=kernel_["synthetic"], skeleton=kernel_["holes"] > 0,
-                     errored=bool((features or {}).get("errored")))
+        event.update(
+            holes=kernel_["holes"],
+            synthetic=kernel_["synthetic"],
+            skeleton=kernel_["holes"] > 0,
+            errored=bool((features or {}).get("errored")),
+        )
     return event

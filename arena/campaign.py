@@ -2,28 +2,37 @@
 
 from __future__ import annotations
 
-import hashlib
 import base64
+import fcntl
+import hashlib
+import inspect
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
-import fcntl
 import time
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from pathlib import Path
 
-import inspect
-
 from arena import goalstate, lean_health, lean_session
-from arena.engine import (ROOT, candidate_file, evaluate, force_cold, measure_version, problem, source_path,
-                          validate_proof, versions, workspace)
-from arena.profile import heartbeat_floor, profile
+from arena.engine import (
+    ROOT,
+    candidate_file,
+    evaluate,
+    force_cold,
+    measure_version,
+    problem,
+    source_path,
+    validate_proof,
+    versions,
+    workspace,
+)
 from arena.graph import common_base, edit_fingerprint, merge_text, ranked_frontier
+from arena.profile import heartbeat_floor, profile
 
 
 def run_dir(run_id: str) -> Path:
@@ -40,7 +49,7 @@ class AmbiguousDeclaration(ValueError):
         self.candidates = candidates
 
 
-_SESSION: ContextVar["_Session | None"] = ContextVar("arena_source_session", default=None)
+_SESSION: ContextVar[_Session | None] = ContextVar("arena_source_session", default=None)
 
 
 class _Session:
@@ -66,8 +75,12 @@ class _Session:
         process = self.processes.get(str(root))
         if process is None:
             process = self.processes[str(root)] = subprocess.Popen(
-                ["git", "cat-file", "--batch"], cwd=root, stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                ["git", "cat-file", "--batch"],
+                cwd=root,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
         process.stdin.write(spec.encode() + b"\n")
         process.stdin.flush()
         header = process.stdout.readline().split()
@@ -110,8 +123,9 @@ def _git_source(project: Path, commit: str, path: str) -> str:
     session = _SESSION.get()
     if session is not None:
         return session.read(project, commit, path)
-    return subprocess.run(["git", "show", f"{commit}:{path}"], cwd=project,
-                          text=True, capture_output=True, check=True).stdout
+    return subprocess.run(
+        ["git", "show", f"{commit}:{path}"], cwd=project, text=True, capture_output=True, check=True
+    ).stdout
 
 
 def _context(name: str) -> dict:
@@ -133,8 +147,10 @@ MAX_DECLARATION_PAGE_CHARS = 16_000
 def declarations(name: str, items: list[str] | None = None, cursor: str | None = None) -> dict:
     """Resolve a batch of declaration handles against the kickoff's tagged constant index."""
     if bool(items) == bool(cursor):
-        raise ValueError("Pass exactly one of items (a nonempty list of declaration names or handles) "
-                         "or cursor (next_cursor from a previous page)")
+        raise ValueError(
+            "Pass exactly one of items (a nonempty list of declaration names or handles) "
+            "or cursor (next_cursor from a previous page)"
+        )
     with _session():
         return _declarations(name, items, cursor)
 
@@ -157,8 +173,13 @@ def _declarations(name: str, items: list[str] | None, cursor: str | None) -> dic
 
     inventory = _context(name)
     if inventory.get("error"):
-        return {"items": [{"input": item, "kind": "unavailable", "reason": "unavailable",
-                           "detail": inventory["error"]} for item in items[offset:]], "next_cursor": None}
+        return {
+            "items": [
+                {"input": item, "kind": "unavailable", "reason": "unavailable", "detail": inventory["error"]}
+                for item in items[offset:]
+            ],
+            "next_cursor": None,
+        }
     constants = constant_index(inventory)
     locals_by_name = {item["name"]: item for item in inventory.get("local", [])}
     results: list[dict] = []
@@ -169,15 +190,17 @@ def _declarations(name: str, items: list[str] | None, cursor: str | None) -> dic
         query = original[5:] if original.startswith("decl:") else original
         if query in locals_by_name:
             local = locals_by_name[query]
-            result = {"input": original, "kind": "local", "name": query,
-                      "type": local["type"], "scope": local["scope"]}
+            result = {"input": original, "kind": "local", "name": query, "type": local["type"], "scope": local["scope"]}
         else:
             matches = constant_index(inventory, name=query)
             if not matches and "." not in query:
                 matches = [item for item in constants if item["name"].split(".")[-1] == query]
             if len(matches) > 1:
-                result = {"input": original, "kind": "ambiguous",
-                          "suggestions": [item["name"] for item in matches[:12]]}
+                result = {
+                    "input": original,
+                    "kind": "ambiguous",
+                    "suggestions": [item["name"] for item in matches[:12]],
+                }
             elif not matches:
                 found = _source_declaration(name, query)
                 if not found.get("found") and re.search(r"(?:^|\.)_[A-Za-z0-9_']", query):
@@ -186,31 +209,47 @@ def _declarations(name: str, items: list[str] | None, cursor: str | None) -> dic
                 if found.get("ambiguous"):
                     result = {"input": original, "kind": "ambiguous", "suggestions": found["ambiguous"]}
                 elif not found.get("found"):
-                    result = {"input": original, "kind": "error", "error": "not_found",
-                              "hint": found.get("hint"),
-                              "suggestions": _declaration_suggestions(query, constants)}
+                    result = {
+                        "input": original,
+                        "kind": "error",
+                        "error": "not_found",
+                        "hint": found.get("hint"),
+                        "suggestions": _declaration_suggestions(query, constants),
+                    }
                 elif found.get("alternatives"):
-                    result = {"input": original, "kind": "ambiguous",
-                              "suggestions": [found["name"], *found["alternatives"]]}
+                    result = {
+                        "input": original,
+                        "kind": "ambiguous",
+                        "suggestions": [found["name"], *found["alternatives"]],
+                    }
                 elif found.get("source_text"):
                     result = {"input": original, "kind": "declaration", **found}
                 else:
                     entry = {"name": found.get("name", query), "kind": found.get("kind", "generated")}
-                    result = {"input": original, **found, "kind": "unavailable",
-                              "reason": _unavailable_reason(entry, found),
-                              "handle": f"decl:{entry['name']}"}
+                    result = {
+                        "input": original,
+                        **found,
+                        "kind": "unavailable",
+                        "reason": _unavailable_reason(entry, found),
+                        "handle": f"decl:{entry['name']}",
+                    }
             else:
                 entry = matches[0]
                 found = declaration(name, entry["name"])
                 if found.get("source_text"):
                     result = {"input": original, "kind": "declaration", **found, "index": entry}
                 else:
-                    result = {"input": original, "kind": "unavailable",
-                              "reason": _unavailable_reason(entry, found), "name": entry["name"],
-                              "handle": f"decl:{entry['name']}", "index": entry,
-                              "module": found.get("module") or entry.get("module"),
-                              "signature": found.get("signature") or entry.get("sig"),
-                              "location": found.get("source")}
+                    result = {
+                        "input": original,
+                        "kind": "unavailable",
+                        "reason": _unavailable_reason(entry, found),
+                        "name": entry["name"],
+                        "handle": f"decl:{entry['name']}",
+                        "index": entry,
+                        "module": found.get("module") or entry.get("module"),
+                        "signature": found.get("signature") or entry.get("sig"),
+                        "location": found.get("source"),
+                    }
         encoded_size = len(json.dumps(result, ensure_ascii=False))
         if results and size + encoded_size > MAX_DECLARATION_PAGE_CHARS:
             break
@@ -292,10 +331,16 @@ def _source_range(name: str, path: str, first: int | None, last: int | None) -> 
     end = min(wanted, len(lines), first + MAX_SOURCE_LINES - 1)
     if end < first:
         raise ValueError("last must not precede first")
-    return {"source": f"{row['source']}@{commit}:{path}:{first}-{end}", "pin": commit,
-            "path": path, "file_lines": len(lines),
-            "first": first, "last": end, "next_first": end + 1 if end < len(lines) and wanted > end else None,
-            "text": "\n".join(f"{i}: {lines[i-1]}" for i in range(first, end + 1))}
+    return {
+        "source": f"{row['source']}@{commit}:{path}:{first}-{end}",
+        "pin": commit,
+        "path": path,
+        "file_lines": len(lines),
+        "first": first,
+        "last": end,
+        "next_first": end + 1 if end < len(lines) and wanted > end else None,
+        "text": "\n".join(f"{i}: {lines[i - 1]}" for i in range(first, end + 1)),
+    }
 
 
 def find(name: str, queries: list[str], limit: int = 20) -> dict:
@@ -314,8 +359,9 @@ def _find(name: str, queries: list[str], limit: int) -> dict:
 
     inventory = _context(name)
     indexed = constant_index(inventory) if not inventory.get("error") else []
-    entries = indexed + [{**item, "kind": item.get("decl")} for item in inventory.get("source", [])
-                         if not inventory.get("error")]
+    entries = indexed + [
+        {**item, "kind": item.get("decl")} for item in inventory.get("source", []) if not inventory.get("error")
+    ]
     row = problem(name)
     version, commit = measure_version(row)
     project = workspace(row, version, commit)
@@ -323,18 +369,23 @@ def _find(name: str, queries: list[str], limit: int) -> dict:
     needles = [query[5:] if query.startswith("decl:") else query for query in queries]
     named = [bool(re.fullmatch(_LEAN_NAME, needle)) for needle in needles]
     # A name the kickoff index holds exactly resolves without searching the source trees.
-    pending = [needle for needle, is_name in zip(needles, named)
-               if not (is_name and any(item["name"] == needle for item in entries))]
+    pending = [
+        needle
+        for needle, is_name in zip(needles, named, strict=False)
+        if not (is_name and any(item["name"] == needle for item in entries))
+    ]
     hits = _declaration_hits(roots, list(dict.fromkeys(pending))) if pending else []
     per_query = []
-    for query, needle, is_name in zip(queries, needles, named):
+    for query, needle, is_name in zip(queries, needles, named, strict=False):
         exact_only = query.startswith("decl:")
         folded = needle.casefold()
         found: dict[str, dict] = {}
         if is_name:
             for item in entries:
-                if not (item["name"] == needle if exact_only else folded in item["name"].casefold()) \
-                        or item["name"] in found:
+                if (
+                    not (item["name"] == needle if exact_only else folded in item["name"].casefold())
+                    or item["name"] in found
+                ):
                     continue
                 matched = _indexed_row(item, roots, (project, commit, row["file_path"]))
                 if matched is None and item["name"] == needle:
@@ -361,21 +412,40 @@ def _find(name: str, queries: list[str], limit: int) -> dict:
                     elif is_name:
                         matched = folded in qualified.casefold()
                     else:
-                        matched = folded in "\n".join(lines[line_number - 1:end]).casefold()
+                        matched = folded in "\n".join(lines[line_number - 1 : end]).casefold()
                     if matched:
-                        found[qualified] = _declaration_row(pin, path, lines, qualified,
-                                                            _declaration_start(lines, line_number), end)
+                        found[qualified] = _declaration_row(
+                            pin, path, lines, qualified, _declaration_start(lines, line_number), end
+                        )
         if not found:
-            per_query.append({"query": query, "matches": [], "error": "not_found",
-                              "suggestions": _declaration_suggestions(needle, indexed),
-                              "files_scanned": scanned, "files_truncated": files_truncated})
+            per_query.append(
+                {
+                    "query": query,
+                    "matches": [],
+                    "error": "not_found",
+                    "suggestions": _declaration_suggestions(needle, indexed),
+                    "files_scanned": scanned,
+                    "files_truncated": files_truncated,
+                }
+            )
             continue
-        selected = sorted(found.values(), key=lambda item: (
-            0 if item["name"].casefold() == folded else 1 if item["name"].casefold().endswith("." + folded) else 2,
-            item["name"]))[:limit]
-        per_query.append({"query": query, "matches": selected, "distinct_count": len(found),
-                          "truncated": len(found) > len(selected), "files_scanned": scanned,
-                          "files_truncated": files_truncated})
+        selected = sorted(
+            found.values(),
+            key=lambda item: (
+                0 if item["name"].casefold() == folded else 1 if item["name"].casefold().endswith("." + folded) else 2,
+                item["name"],
+            ),
+        )[:limit]
+        per_query.append(
+            {
+                "query": query,
+                "matches": selected,
+                "distinct_count": len(found),
+                "truncated": len(found) > len(selected),
+                "files_scanned": scanned,
+                "files_truncated": files_truncated,
+            }
+        )
     return {"queries": per_query, "pin": commit, "limit": limit}
 
 
@@ -391,9 +461,14 @@ def _indexed_row(item: dict, roots: list[tuple[Path, str, str]], own_file: tuple
         lines, starts = read
         for number, (line_number, qualified) in enumerate(starts):
             if qualified == item["name"] or qualified.endswith("." + item["name"]):
-                return _declaration_row(own_file[1], own_file[2], lines, item["name"],
-                                        _declaration_start(lines, line_number),
-                                        _declaration_end(lines, starts, number))
+                return _declaration_row(
+                    own_file[1],
+                    own_file[2],
+                    lines,
+                    item["name"],
+                    _declaration_start(lines, line_number),
+                    _declaration_end(lines, starts, number),
+                )
         return None
     if "start_line" not in item:
         return None
@@ -407,8 +482,13 @@ def _indexed_row(item: dict, roots: list[tuple[Path, str, str]], own_file: tuple
 
 def _unavailable_row(item: dict) -> dict:
     """An index-only match for a declaration whose source is not in the pinned trees (core, generated)."""
-    matched = {"name": item["name"], "handle": f"decl:{item['name']}", "kind": item.get("kind"),
-               "module": item.get("module"), "source_unavailable": _unavailable_reason(item, item)}
+    matched = {
+        "name": item["name"],
+        "handle": f"decl:{item['name']}",
+        "kind": item.get("kind"),
+        "module": item.get("module"),
+        "source_unavailable": _unavailable_reason(item, item),
+    }
     for key in ("type", "signature"):
         if item.get(key):
             matched[key] = item[key]
@@ -416,19 +496,29 @@ def _unavailable_row(item: dict) -> dict:
 
 
 def _declaration_row(pin: str, path: str, lines: list[str], qualified: str, start: int, end: int) -> dict:
-    return {"name": qualified, "handle": f"decl:{qualified}", "path": path, "line": start,
-            "end_line": end, "pin": pin, "signature": _signature(lines, start, end)}
+    return {
+        "name": qualified,
+        "handle": f"decl:{qualified}",
+        "path": path,
+        "line": start,
+        "end_line": end,
+        "pin": pin,
+        "signature": _signature(lines, start, end),
+    }
 
 
-def _candidate_files(hits: list[tuple[int, str, str, int, str]], needle: str, is_name: bool,
-                     exact_only: bool) -> list[tuple[int, str, str]]:
+def _candidate_files(
+    hits: list[tuple[int, str, str, int, str]], needle: str, is_name: bool, exact_only: bool
+) -> list[tuple[int, str, str]]:
     """Files worth reading for one query, best first: exact leaf names, then prefixes, then substrings."""
     folded = needle.casefold()
     parts = needle.split(".")
     leaf = parts[-1].casefold()
-    namespaced = {(index, path) for index, _, path, _, text in hits
-                  if len(parts) > 1 and re.match(r"^\s*namespace\s", text, re.I)
-                  and parts[-2].casefold() in text.casefold()}
+    namespaced = {
+        (index, path)
+        for index, _, path, _, text in hits
+        if len(parts) > 1 and re.match(r"^\s*namespace\s", text, re.I) and parts[-2].casefold() in text.casefold()
+    }
     ranked: dict[tuple[int, str, str], int] = {}
     for index, pin, path, _, text in hits:
         declared = _DECLARATION_PATTERN.match(text)
@@ -463,7 +553,7 @@ def _split_source_handle(path: str, pin: str) -> tuple[str, int | None, int | No
     if printed:
         if not pin.startswith(printed.group(1)):
             raise ValueError(f"Source handle commit {printed.group(1)[:12]} is not the pinned commit {pin[:8]}")
-        path = path[printed.end():]
+        path = path[printed.end() :]
     return path, first, last
 
 
@@ -472,7 +562,7 @@ STDLIB_ALIAS = ".lean-stdlib/lean/"
 
 def _stdlib_source(version: str, path: str) -> str:
     """Lean's own library source from the measured toolchain, which elan installs read-only per version."""
-    relative = Path(path[len(STDLIB_ALIAS):])
+    relative = Path(path[len(STDLIB_ALIAS) :])
     if relative.is_absolute() or ".." in relative.parts or relative.suffix != ".lean":
         raise ValueError("Only relative .lean paths inside Lean's library are allowed")
     target = Path.home() / ".elan" / "toolchains" / f"leanprover--lean4---{version}" / "src" / "lean" / relative
@@ -485,7 +575,7 @@ def _canonical_source_path(row: dict, path: str) -> str:
     """Normalize documented project aliases to a path inside the pinned checkout."""
     for alias in ("strata", "physlib", "mathlib", "cslib", "arklib"):
         if path.startswith(alias + ":") or path.startswith(alias + "/"):
-            path = path[len(alias) + 1:]
+            path = path[len(alias) + 1 :]
             break
     path = path.removeprefix("./")
     if path.startswith("/") or ".." in Path(path).parts or not path.endswith(".lean"):
@@ -510,23 +600,25 @@ def _package_roots(project: Path) -> list[tuple[Path, str, str]]:
         package = packages / package_name
         if not package.is_dir():
             continue
-        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=package, text=True,
-                              capture_output=True, check=False)
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=package, text=True, capture_output=True, check=False)
         if head.returncode == 0 and head.stdout.strip() == revision:
             roots.append((package, revision, package_name))
     return roots
 
 
-def _source_target(project: Path, commit: str, path: str,
-                   module: str | None = None) -> tuple[Path, str, str]:
+def _source_target(project: Path, commit: str, path: str, module: str | None = None) -> tuple[Path, str, str]:
     """Resolve a canonical project or dependency path to its pinned Git root."""
     if isinstance(project, Path) and (project / path).is_file():
-        exists = subprocess.run(["git", "cat-file", "-e", f"{commit}:{path}"], cwd=project,
-                                capture_output=True, check=False).returncode == 0
+        exists = (
+            subprocess.run(
+                ["git", "cat-file", "-e", f"{commit}:{path}"], cwd=project, capture_output=True, check=False
+            ).returncode
+            == 0
+        )
         if exists:
             return project, commit, path
     module_path = module.replace(".", "/") + ".lean" if module else None
-    for root, pin, package in _package_roots(project):
+    for root, pin, _package in _package_roots(project):
         for candidate in (module_path, path):
             if candidate and (root / candidate).is_file():
                 return root, pin, candidate
@@ -541,13 +633,19 @@ _LEAN_NAME = re.compile(_LEAN_NAME_BODY)
 _DECLARATION_PATTERN = re.compile(
     r"^\s*(?:@\[[^\]]*\]\s*)*(?:(?:private|protected|noncomputable|nonrec|unsafe|partial)\s+)*"
     r"(?:theorem|lemma|def|opaque|example|instance|abbrev|inductive|structure|class|axiom)\s+"
-    r"(" + _LEAN_NAME_BODY + r")")
+    r"(" + _LEAN_NAME_BODY + r")"
+)
 _SCOPE_PATTERN = re.compile(
-    r"^\s*(?:@\[[^\]]*\]\s*)*(?:(?:public|noncomputable|meta)\s+)*(namespace|section)\b(?:\s+(" + _LEAN_NAME_BODY + r"))?\s*$")
+    r"^\s*(?:@\[[^\]]*\]\s*)*(?:(?:public|noncomputable|meta)\s+)*(namespace|section)\b(?:\s+("
+    + _LEAN_NAME_BODY
+    + r"))?\s*$"
+)
 _END_PATTERN = re.compile(r"^\s*end(?:\s+(" + _LEAN_NAME_BODY + r"))?\s*$")
 # The same shape for `git grep -E`, which only needs declaration lines and never body text.
-_DECLARATION_GREP = (r"^[[:space:]]*(@\[[^]]*\][[:space:]]*)*((private|protected|noncomputable|nonrec|unsafe|partial)"
-                     r"[[:space:]]+)*(theorem|lemma|def|opaque|instance|abbrev|inductive|structure|class|axiom)[[:space:]]+")
+_DECLARATION_GREP = (
+    r"^[[:space:]]*(@\[[^]]*\][[:space:]]*)*((private|protected|noncomputable|nonrec|unsafe|partial)"
+    r"[[:space:]]+)*(theorem|lemma|def|opaque|instance|abbrev|inductive|structure|class|axiom)[[:space:]]+"
+)
 MAX_SCAN_FILES = 30
 
 
@@ -559,23 +657,30 @@ def _source_declarations(lines: list[str]) -> list[tuple[int, str]]:
         code = line.split("--", 1)[0]
         scope = _SCOPE_PATTERN.match(code)
         if scope:
-            scopes.append((scope.group(2), scope.group(2) or "") if scope.group(1) == "namespace"
-                          else (scope.group(2) or "", ""))
+            scopes.append(
+                (scope.group(2), scope.group(2) or "") if scope.group(1) == "namespace" else (scope.group(2) or "", "")
+            )
             continue
         closed = _END_PATTERN.match(code)
         if closed:
             label = closed.group(1)
-            index = next((i for i in range(len(scopes) - 1, -1, -1) if label is not None and
-                          (scopes[i][0] == label or (scopes[i][0] or "").endswith("." + label))), None)
+            index = next(
+                (
+                    i
+                    for i in range(len(scopes) - 1, -1, -1)
+                    if label is not None and (scopes[i][0] == label or (scopes[i][0] or "").endswith("." + label))
+                ),
+                None,
+            )
             if label is None or index is None:
                 index = len(scopes) - 1
-            del scopes[max(index, 0):]
+            del scopes[max(index, 0) :]
             continue
         match = _DECLARATION_PATTERN.match(line)
         if match:
             local = match.group(1)
             if local.startswith("_root_."):
-                qualified = local[len("_root_."):]
+                qualified = local[len("_root_.") :]
             else:
                 qualified = ".".join([prefix for _, prefix in scopes if prefix] + [local])
             declarations.append((line_number, qualified))
@@ -588,8 +693,9 @@ def _declaration_start(lines: list[str], line: int) -> int:
     while start > 1 and lines[start - 2].lstrip().startswith("@["):
         start -= 1
     if start > 1 and lines[start - 2].rstrip().endswith("-/"):
-        opener = next((i for i in range(start - 2, max(start - 80, -1), -1)
-                       if lines[i].lstrip().startswith("/--")), None)
+        opener = next(
+            (i for i in range(start - 2, max(start - 80, -1), -1) if lines[i].lstrip().startswith("/--")), None
+        )
         if opener is not None:
             start = opener + 1
     return start
@@ -599,8 +705,12 @@ def _declaration_end(lines: list[str], starts: list[tuple[int, str]], index: int
     """The last line of a declaration: before the next one's docs and attributes, ignoring blank lines."""
     following = starts[index + 1][0] if index + 1 < len(starts) else len(lines) + 1
     end = _declaration_start(lines, following) - 1 if following <= len(lines) else len(lines)
-    while end > starts[index][0] and (not lines[end - 1].strip() or lines[end - 1].lstrip().startswith("--")
-                                      or _SCOPE_PATTERN.match(lines[end - 1]) or _END_PATTERN.match(lines[end - 1])):
+    while end > starts[index][0] and (
+        not lines[end - 1].strip()
+        or lines[end - 1].lstrip().startswith("--")
+        or _SCOPE_PATTERN.match(lines[end - 1])
+        or _END_PATTERN.match(lines[end - 1])
+    ):
         end -= 1
     return end
 
@@ -609,7 +719,7 @@ def _signature(lines: list[str], start: int, end: int) -> str:
     """The first declaration lines after any doc comment and attributes, up to the line that opens the body."""
     shown = []
     keyword = next((i for i in range(start, end + 1) if _DECLARATION_PATTERN.match(lines[i - 1])), start)
-    for text in lines[keyword - 1:min(end, keyword + 5)]:
+    for text in lines[keyword - 1 : min(end, keyword + 5)]:
         shown.append(text.rstrip())
         if ":=" in text or text.rstrip().endswith("where") or text.strip().startswith("|"):
             break
@@ -621,7 +731,7 @@ def _roots(project: Path, commit: str) -> list[tuple[Path, str, str]]:
     key = str(project)
     if session is not None and key in session.roots:
         return session.roots[key]
-    roots = [(project, commit, "")] + _package_roots(project)
+    roots = [(project, commit, ""), *_package_roots(project)]
     if session is not None:
         session.roots[key] = roots
     return roots
@@ -631,7 +741,7 @@ def _module_file(roots: list[tuple[Path, str, str]], module: str) -> tuple[Path,
     """The pinned root that holds module `A.B.C` as `A/B/C.lean`; its own package is tried first."""
     path = module.replace(".", "/") + ".lean"
     head = module.split(".")[0].casefold()
-    for root, pin, package in sorted(roots, key=lambda item: item[2].casefold() != head):
+    for root, pin, _package in sorted(roots, key=lambda item: item[2].casefold() != head):
         try:
             _git_source(root, pin, path)
         except subprocess.CalledProcessError:
@@ -664,13 +774,19 @@ def _declaration_hits(roots: list[tuple[Path, str, str]], needles: list[str]) ->
 
     def grep(entry: tuple[int, tuple[Path, str, str]]) -> list[tuple[int, str, str, int, str]]:
         index, (root, pin, _) = entry
-        result = subprocess.run(["git", "grep", "-n", "-I", "-i", "-E", "-e", pattern, pin, "--", "*.lean"],
-                                cwd=root, text=True, errors="replace", capture_output=True, check=False)
+        result = subprocess.run(
+            ["git", "grep", "-n", "-I", "-i", "-E", "-e", pattern, pin, "--", "*.lean"],
+            cwd=root,
+            text=True,
+            errors="replace",
+            capture_output=True,
+            check=False,
+        )
         if result.returncode not in (0, 1):
             raise RuntimeError(result.stderr.strip() or "Pinned source search failed")
         hits = []
         for raw in result.stdout.splitlines():
-            parts = raw[len(pin) + 1:].split(":", 2)
+            parts = raw[len(pin) + 1 :].split(":", 2)
             if len(parts) == 3 and parts[1].isdigit():
                 hits.append((index, pin, parts[0], int(parts[1]), parts[2]))
         return hits
@@ -694,8 +810,9 @@ def _scan(root: Path, pin: str, path: str) -> tuple[list[str], list[tuple[int, s
     return scanned
 
 
-def _resolve_declaration_source(name: str, symbol: str, module: str | None = None,
-                                span: tuple[int, int] | None = None) -> dict:
+def _resolve_declaration_source(
+    name: str, symbol: str, module: str | None = None, span: tuple[int, int] | None = None
+) -> dict:
     """Find one declaration's pinned file and lines, excluding scratch copies.
 
     `module` and `span` come from the kickoff index and resolve the declaration exactly with no
@@ -715,14 +832,20 @@ def _resolve_declaration_source(name: str, symbol: str, module: str | None = Non
     elif module:
         located = _module_file(roots, module)
         if located is None:
-            raise ValueError(f"{symbol} is defined in {module}, which is not in the pinned project or its dependency roots")
+            raise ValueError(
+                f"{symbol} is defined in {module}, which is not in the pinned project or its dependency roots"
+            )
         files = [located]
     else:
         hits = _declaration_hits(roots, [symbol])
         files = []
         for index, pin, path, _, text in hits:
             declared = _DECLARATION_PATTERN.match(text)
-            if declared and leaf.casefold() in declared.group(1).casefold() and (roots[index][0], pin, path) not in files:
+            if (
+                declared
+                and leaf.casefold() in declared.group(1).casefold()
+                and (roots[index][0], pin, path) not in files
+            ):
                 files.append((roots[index][0], pin, path))
     scanned = 0
     found: dict[str, dict] = {}
@@ -734,15 +857,35 @@ def _resolve_declaration_source(name: str, symbol: str, module: str | None = Non
         if read is None:
             continue
         lines, starts = read
-        if span is not None and 1 <= span[0] <= span[1] <= len(lines) and leaf in "\n".join(lines[span[0] - 1:span[1]]):
-            return {"root": root, "pin": pin, "path": path, "line": span[0], "end": span[1],
-                    "qualified": symbol, "file_lines": len(lines)}
+        if (
+            span is not None
+            and 1 <= span[0] <= span[1] <= len(lines)
+            and leaf in "\n".join(lines[span[0] - 1 : span[1]])
+        ):
+            return {
+                "root": root,
+                "pin": pin,
+                "path": path,
+                "line": span[0],
+                "end": span[1],
+                "qualified": symbol,
+                "file_lines": len(lines),
+            }
         for index, (line_number, qualified) in enumerate(starts):
             if qualified == symbol or qualified.endswith("." + symbol):
                 start = _declaration_start(lines, line_number)
-                found.setdefault(qualified, {"root": root, "pin": pin, "path": path, "line": start,
-                                             "end": _declaration_end(lines, starts, index),
-                                             "qualified": qualified, "file_lines": len(lines)})
+                found.setdefault(
+                    qualified,
+                    {
+                        "root": root,
+                        "pin": pin,
+                        "path": path,
+                        "line": start,
+                        "end": _declaration_end(lines, starts, index),
+                        "qualified": qualified,
+                        "file_lines": len(lines),
+                    },
+                )
     if symbol in found:
         return found[symbol]
     if len(found) > 1:
@@ -806,17 +949,30 @@ def _source_declaration(name: str, symbol: str) -> dict:
     if located is not None:
         lines = _git_source(located["root"], located["pin"], located["path"]).splitlines()
         qualified = located["qualified"] if module is None else symbol
-        return {"symbol": symbol, "handle": f"decl:{qualified}", "name": qualified, "found": True,
-                "pin": located["pin"], "path": located["path"], "line": located["line"],
-                "end_line": located["end"], "file_lines": located["file_lines"],
-                "source_text": "\n".join(lines[located["line"] - 1:located["end"]])}
+        return {
+            "symbol": symbol,
+            "handle": f"decl:{qualified}",
+            "name": qualified,
+            "found": True,
+            "pin": located["pin"],
+            "path": located["path"],
+            "line": located["line"],
+            "end_line": located["end"],
+            "file_lines": located["file_lines"],
+            "source_text": "\n".join(lines[located["line"] - 1 : located["end"]]),
+        }
     entry = _indexed_entry(name, symbol)
     if entry is not None and module not in (None, "this file"):
         # Indexed, but no pinned source root holds its module (for example the Lean toolchain).
-        return {"symbol": symbol, "found": True, "name": symbol, "kind": entry.get("kind"),
-                "module": module, "signature": entry.get("sig")}
-    return {"symbol": symbol, "found": False,
-            "hint": "No pinned source declaration matched this name."}
+        return {
+            "symbol": symbol,
+            "found": True,
+            "name": symbol,
+            "kind": entry.get("kind"),
+            "module": module,
+            "signature": entry.get("sig"),
+        }
+    return {"symbol": symbol, "found": False, "hint": "No pinned source declaration matched this name."}
 
 
 def _declaration_in_lean(name: str, symbol: str) -> dict:
@@ -827,20 +983,29 @@ def _declaration_in_lean(name: str, symbol: str) -> dict:
     version, commit = measure_version(row)
     built = candidate_file(row, row["src"], version, commit)
     inserted = (Path(__file__).with_name("lean") / "declaration.lean").read_text() + f"arena_decl {symbol}\n\n"
-    text = built["text"][:built["head"]] + inserted + built["text"][built["head"]:]
+    text = built["text"][: built["head"]] + inserted + built["text"][built["head"] :]
     ran = run_lean(row, built["path"], text, prefix_end=built["head"])
     if ran is None:
         raise ValueError("Lean timed out while resolving the name")
     records = [json.loads(raw) for raw in re.findall(r"^ARENA_DECL (\{.*\})$", ran[1], re.M)]
     found = [item for item in records if item.get("found")]
     if not found:
-        return {"symbol": symbol, "found": False,
-                "hint": "No declaration of that name is visible where the theorem is stated; try the full name or a prefix."}
+        return {
+            "symbol": symbol,
+            "found": False,
+            "hint": "No declaration of that name is visible where the theorem is stated; try the full name or a prefix.",
+        }
     best = found[0]
-    return {"symbol": symbol, "found": True, "name": best["name"], "kind": best["kind"], "module": best["module"],
-            "source": f"{best['module']}" + (f":{best['line']}" if best.get("line") else ""),
-            "signature": best["signature"],
-            **({"alternatives": [item["name"] for item in found[1:]]} if len(found) > 1 else {})}
+    return {
+        "symbol": symbol,
+        "found": True,
+        "name": best["name"],
+        "kind": best["kind"],
+        "module": best["module"],
+        "source": f"{best['module']}" + (f":{best['line']}" if best.get("line") else ""),
+        "signature": best["signature"],
+        **({"alternatives": [item["name"] for item in found[1:]]} if len(found) > 1 else {}),
+    }
 
 
 def packet(name: str) -> str:
@@ -855,8 +1020,7 @@ def _append(directory: Path, event: dict) -> None:
     fd = os.open(directory / "ledger.jsonl", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
-        data = (json.dumps({"ts": time.time(), **event}, ensure_ascii=False,
-                           separators=(",", ":")) + "\n").encode()
+        data = (json.dumps({"ts": time.time(), **event}, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
         os.write(fd, data)
         os.fsync(fd)
     finally:
@@ -909,11 +1073,15 @@ def _record_route_later(directory: Path, name: str, proof_id: str, proof: str) -
     if _worker_running(directory):
         return  # it re-reads the queue before exiting, so this entry is not stranded
     code = "import sys; from pathlib import Path; from arena.campaign import _route_worker; _route_worker(Path(sys.argv[1]))"
-    try:
-        subprocess.Popen([sys.executable, "-c", code, str(directory)], cwd=ROOT, stdin=subprocess.DEVNULL,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-    except OSError:
-        pass
+    with suppress(OSError):
+        subprocess.Popen(
+            [sys.executable, "-c", code, str(directory)],
+            cwd=ROOT,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
 
 
 def _worker_running(directory: Path) -> bool:
@@ -939,8 +1107,11 @@ def _route_queue(directory: Path) -> list[dict]:
         if entry["proof_id"] not in filed and entry["proof_id"] not in seen:
             seen.add(entry["proof_id"])
             pending.append(entry)
-    references = {item["candidate_id"] for item in events(directory)
-                  if item.get("kind") == "candidate" and item.get("origin") == "reference"}
+    references = {
+        item["candidate_id"]
+        for item in events(directory)
+        if item.get("kind") == "candidate" and item.get("origin") == "reference"
+    }
     return sorted(pending, key=lambda entry: entry["proof_id"] not in references)  # stable
 
 
@@ -969,7 +1140,8 @@ def _route_worker(directory: Path) -> None:
                 filed = _record_route(directory, entry["name"], entry["proof_id"], proof)
                 failed[entry["proof_id"]] = failed.get(entry["proof_id"], 0) + 1
                 if filed is not None or failed[entry["proof_id"]] >= (
-                        REFERENCE_ROUNDS if _origin(directory, entry["proof_id"]) == "reference" else 1):
+                    REFERENCE_ROUNDS if _origin(directory, entry["proof_id"]) == "reference" else 1
+                ):
                     tried.add(entry["proof_id"])
         # Released: an entry queued while the lock was held saw a running worker, so look once more.
         if not [entry for entry in _route_queue(directory) if entry["proof_id"] not in tried]:
@@ -977,16 +1149,22 @@ def _route_worker(directory: Path) -> None:
 
 
 ROUTE_SLOTS = 2
-ROUTE_EXTRACT_GB = 2.0      # one cold Lean process with the theorem's imports
+ROUTE_EXTRACT_GB = 2.0  # one cold Lean process with the theorem's imports
 ROUTE_WAIT_SECONDS = 180.0
-REFERENCE_TRIES = 3         # kernel extractions of the reference proof per _record_route call
-REFERENCE_ROUNDS = 3        # worker passes over a reference that still has no kernel print
+REFERENCE_TRIES = 3  # kernel extractions of the reference proof per _record_route call
+REFERENCE_ROUNDS = 3  # worker passes over a reference that still has no kernel print
 REFERENCE_RETRY_SECONDS = 20.0
 
 
 def _origin(directory: Path, proof_id: str) -> str | None:
-    return next((item.get("origin", "model") for item in events(directory)
-                 if item.get("kind") == "candidate" and item["candidate_id"] == proof_id), None)
+    return next(
+        (
+            item.get("origin", "model")
+            for item in events(directory)
+            if item.get("kind") == "candidate" and item["candidate_id"] == proof_id
+        ),
+        None,
+    )
 
 
 def _yield_to_lean_session(directory: Path) -> None:
@@ -1029,7 +1207,10 @@ def _record_route(directory: Path, name: str, proof_id: str, proof: str) -> dict
             return None
         # Each probe draft is now fingerprinted, and one extraction is a cold Lean process of 1-2 GB: one at a time
         # per run, and at most ROUTE_SLOTS across the parallel runs of a campaign.
-        slot = directory.parent / f".route-extract-{int(proof_id[:8], 16) % ROUTE_SLOTS if re.fullmatch(r'[0-9a-f]{8}.*', proof_id) else 0}.lock"
+        slot = (
+            directory.parent
+            / f".route-extract-{int(proof_id[:8], 16) % ROUTE_SLOTS if re.fullmatch(r'[0-9a-f]{8}.*', proof_id) else 0}.lock"
+        )
         # The reference proof is every route's yardstick: it is never filed from text. Without a kernel print it
         # stays unfiled (the worker tries again later) rather than become an exemplar that absorbs kernel attempts.
         reference = _origin(directory, proof_id) == "reference"
@@ -1058,8 +1239,14 @@ def _record_route(directory: Path, name: str, proof_id: str, proof: str) -> dict
                 return None
             context = cached_context(name)
             print_ = routes.fingerprint(proof, routes.vocabulary(context), name, features)
-            origin = next((item.get("origin", "model") for item in history
-                           if item.get("kind") == "candidate" and item["candidate_id"] == proof_id), None)
+            origin = next(
+                (
+                    item.get("origin", "model")
+                    for item in history
+                    if item.get("kind") == "candidate" and item["candidate_id"] == proof_id
+                ),
+                None,
+            )
             probe = routes.attempt_results(history).get(proof_id, ("candidate",))[0] == "probe"
             event = routes.file_attempt(earlier, proof_id, print_, features, origin, probe)
             _append(directory, event)
@@ -1128,8 +1315,11 @@ def _copy_tracked(project: Path, shadow: Path) -> None:
     Shared workspaces accumulate untracked candidate files from earlier compiles (other runs' proofs);
     copying the directory would let a new run find them with lean_local_search.
     """
-    listed = subprocess.run(["git", "-C", str(project), "ls-files", "-z"], check=True,
-                            capture_output=True).stdout.decode().split("\0")
+    listed = (
+        subprocess.run(["git", "-C", str(project), "ls-files", "-z"], check=True, capture_output=True)
+        .stdout.decode()
+        .split("\0")
+    )
     for relative in filter(None, listed):
         source = project / relative
         if not source.is_file():
@@ -1142,8 +1332,9 @@ def _copy_tracked(project: Path, shadow: Path) -> None:
 def init(name: str, run_id: str, extra: str = "") -> dict:
     directory = run_dir(run_id)
     # The runner may already have started the run's Lean session here; nothing else counts as a run.
-    if directory.exists() and any(item.name not in lean_session.SESSION_FILES and item.name != "lean-session.log"
-                                  for item in directory.iterdir()):
+    if directory.exists() and any(
+        item.name not in lean_session.SESSION_FILES and item.name != "lean-session.log" for item in directory.iterdir()
+    ):
         raise ValueError(f"Run ID already exists: {directory}")
     row = problem(name)
     version, commit = versions(row)[0]
@@ -1154,20 +1345,39 @@ def init(name: str, run_id: str, extra: str = "") -> dict:
     shadow = directory / "scratch" / "project"
     _copy_tracked(project, shadow)
     (shadow / ".lake").symlink_to(project / ".lake", target_is_directory=True)
-    _append(directory, {"kind": "init", "theorem": name, "version": version, "commit": commit,
-                        "versions": versions(row),
-                        "packet_sha256": hashlib.sha256(text.encode()).hexdigest()})
+    _append(
+        directory,
+        {
+            "kind": "init",
+            "theorem": name,
+            "version": version,
+            "commit": commit,
+            "versions": versions(row),
+            "packet_sha256": hashlib.sha256(text.encode()).hexdigest(),
+        },
+    )
     reference_id = hashlib.sha256((name + "\0" + row["src"]).encode()).hexdigest()
     _snapshot(directory, reference_id, row["src"])
-    _append(directory, {"kind": "candidate", "candidate_id": reference_id, "parents": [],
-                        "hypothesis": "Pinned original reference proof", "origin": "reference",
-                        "source_versions": versions(row),
-                        "evaluator_sha256": hashlib.sha256(Path(__file__).with_name("engine.py").read_bytes()).hexdigest()})
+    _append(
+        directory,
+        {
+            "kind": "candidate",
+            "candidate_id": reference_id,
+            "parents": [],
+            "hypothesis": "Pinned original reference proof",
+            "origin": "reference",
+            "source_versions": versions(row),
+            "evaluator_sha256": hashlib.sha256(Path(__file__).with_name("engine.py").read_bytes()).hexdigest(),
+        },
+    )
     materialize(name, run_id, row["src"])
     _append(directory, {"kind": "current", "candidate_id": reference_id})
     _record_route_later(directory, name, reference_id, row["src"])
-    return {"packet": str(directory / "packet.txt"), "shadow": str(shadow),
-            "candidate_path": str(shadow / source_path(row))}
+    return {
+        "packet": str(directory / "packet.txt"),
+        "shadow": str(shadow),
+        "candidate_path": str(shadow / source_path(row)),
+    }
 
 
 def _externalize_output(directory: Path, key: str, result: dict) -> dict:
@@ -1251,8 +1461,14 @@ def resolve_parent_ref(history: list[dict], reference: str) -> str:
     """A parent given as a candidate (#N) or as a probe (pN); a probe stands for the candidate it was built on."""
     if re.fullmatch(r"\s*[pP][1-9][0-9]*\s*", reference):
         proof_id = resolve_probe_ref(history, reference)
-        parent = next((item.get("parent") for item in reversed(history)
-                       if item.get("kind") == "probe" and item["proof_id"] == proof_id), None)
+        parent = next(
+            (
+                item.get("parent")
+                for item in reversed(history)
+                if item.get("kind") == "probe" and item["proof_id"] == proof_id
+            ),
+            None,
+        )
         if parent:
             return parent
         raise ValueError(f"Probe {reference.strip()} has no recorded parent candidate")
@@ -1281,9 +1497,16 @@ def _region(text: str) -> list[int] | str:
     return [min(numbers), max(numbers)]
 
 
-def record_idea(run_id: str, title: str | None = None, hypothesis: str = "", region: str | None = None,
-                expected_effect: dict | None = None, idea_id: str | None = None,
-                status: str | None = None, reason: str = "") -> dict:
+def record_idea(
+    run_id: str,
+    title: str | None = None,
+    hypothesis: str = "",
+    region: str | None = None,
+    expected_effect: dict | None = None,
+    idea_id: str | None = None,
+    status: str | None = None,
+    reason: str = "",
+) -> dict:
     """Create or update a model-owned idea. The harness never authors or schedules ideas."""
     directory = run_dir(run_id)
     history = events(directory)
@@ -1293,32 +1516,47 @@ def record_idea(run_id: str, title: str | None = None, hypothesis: str = "", reg
         raise ValueError(f"status must be one of {', '.join(IDEA_STATUSES)}")
     if status in ("parked", "abandoned", "succeeded") and not reason.strip():
         raise ValueError(f"Give a one-line reason when marking an idea {status}")
-    effect = {str(k): str(v)[:80] for k, v in (expected_effect or {}).items()
-              if k in ("tokens", "heartbeats", "compat")}
+    effect = {
+        str(k): str(v)[:80] for k, v in (expected_effect or {}).items() if k in ("tokens", "heartbeats", "compat")
+    }
     span = _region(region) if region and region.strip() else None
     known = {item["id"]: item for item in history if item.get("kind") == "idea"}
     if idea_id:
         idea_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", idea_id.strip())[:40] or None
     if idea_id and idea_id not in known and not (title and title.strip()):
-        raise ValueError(f"Unknown idea {idea_id}; give a title to create it "
-                         f"(recorded ideas: {', '.join(known) or 'none yet'})")
+        raise ValueError(
+            f"Unknown idea {idea_id}; give a title to create it (recorded ideas: {', '.join(known) or 'none yet'})"
+        )
     if idea_id and idea_id in known:
         update = {"kind": "idea_update", "id": idea_id}
-        if title: update["title"] = title.strip()[:120]
-        if hypothesis: update["hypothesis"] = hypothesis.strip()[:600]
-        if span: update["region"] = span
-        if effect: update["expected_effect"] = effect
-        if status: update["status"] = status
-        if reason.strip(): update["reason"] = reason.strip()[:300]
+        if title:
+            update["title"] = title.strip()[:120]
+        if hypothesis:
+            update["hypothesis"] = hypothesis.strip()[:600]
+        if span:
+            update["region"] = span
+        if effect:
+            update["expected_effect"] = effect
+        if status:
+            update["status"] = status
+        if reason.strip():
+            update["reason"] = reason.strip()[:300]
         _append(directory, update)
         return {"ok": True, **{k: v for k, v in update.items() if k != "kind"}}
     if not title or not title.strip():
         raise ValueError("A new idea needs a title")
     # Models often name their own ideas; keep that name so later updates by it work.
     identifier = idea_id or next(f"i{n}" for n in range(len(known) + 1, len(known) + 1000) if f"i{n}" not in known)
-    item = {"kind": "idea", "id": identifier, "title": title.strip()[:120],
-            "hypothesis": hypothesis.strip()[:600], "region": span, "expected_effect": effect,
-            "status": status or "active", "reason": reason.strip()[:300]}
+    item = {
+        "kind": "idea",
+        "id": identifier,
+        "title": title.strip()[:120],
+        "hypothesis": hypothesis.strip()[:600],
+        "region": span,
+        "expected_effect": effect,
+        "status": status or "active",
+        "reason": reason.strip()[:300],
+    }
     _append(directory, item)
     return {"ok": True, **{k: v for k, v in item.items() if k != "kind"}}
 
@@ -1343,46 +1581,75 @@ def _summaries(history: list[dict]) -> list[dict]:
     rows: dict[str, dict] = {}
     for item in history:
         if item.get("kind") == "candidate":
-            rows[item["candidate_id"]] = {"id": item["candidate_id"], "n": len(rows) + 1,
-                "idea_id": item.get("idea_id"), "origin": item.get("origin", "model"),
-                "parents": item.get("parents", []), "evaluations": []}
+            rows[item["candidate_id"]] = {
+                "id": item["candidate_id"],
+                "n": len(rows) + 1,
+                "idea_id": item.get("idea_id"),
+                "origin": item.get("origin", "model"),
+                "parents": item.get("parents", []),
+                "evaluations": [],
+            }
         elif item.get("kind") == "evaluation" and item["candidate_id"] in rows:
             result = item["result"]
-            rows[item["candidate_id"]]["evaluations"].append({
-                "mode": item["mode"], "status": _evaluation_status(result, item["mode"], total),
-                "result": result, "score": _metric_score(result.get("metrics"))})
+            rows[item["candidate_id"]]["evaluations"].append(
+                {
+                    "mode": item["mode"],
+                    "status": _evaluation_status(result, item["mode"], total),
+                    "result": result,
+                    "score": _metric_score(result.get("metrics")),
+                }
+            )
     for row in rows.values():
         full = [e for e in row["evaluations"] if e["status"] == "full"]
         primary = [e for e in row["evaluations"] if e["status"] == "primary"]
-        chosen = (max(full, key=lambda e: e["score"] or -1) if full else
-                  max(primary, key=lambda e: e["score"] or -1) if primary else
-                  (row["evaluations"][-1] if row["evaluations"] else None))
+        chosen = (
+            max(full, key=lambda e: e["score"] or -1)
+            if full
+            else max(primary, key=lambda e: e["score"] or -1)
+            if primary
+            else (row["evaluations"][-1] if row["evaluations"] else None)
+        )
         row["status"] = chosen["status"] if chosen else "unevaluated"
         result = chosen["result"] if chosen else {}
-        row.update(tokens=result.get("tokens"), heartbeats=result.get("heartbeat"),
-                   score=chosen["score"] if chosen else None,
-                   verified=bool(full), metrics=result.get("metrics"), evaluated=chosen is not None)
+        row.update(
+            tokens=result.get("tokens"),
+            heartbeats=result.get("heartbeat"),
+            score=chosen["score"] if chosen else None,
+            verified=bool(full),
+            metrics=result.get("metrics"),
+            evaluated=chosen is not None,
+        )
     return list(rows.values())
 
 
 def _brief(row: dict | None) -> dict | None:
     if not row:
         return None
-    return {"candidate": f"#{row['n']}", "tokens": row["tokens"], "heartbeats": row["heartbeats"],
-            ("proxy" if row["verified"] else "estimated_proxy"): row["score"], "status": row["status"]}
+    return {
+        "candidate": f"#{row['n']}",
+        "tokens": row["tokens"],
+        "heartbeats": row["heartbeats"],
+        ("proxy" if row["verified"] else "estimated_proxy"): row["score"],
+        "status": row["status"],
+    }
 
 
 def _best(rows: list[dict], exclude: str | None = None) -> dict | None:
-    pool = [r for r in rows if r["id"] != exclude and r["score"] is not None
-            and r["status"] in ("full", "primary") and r["origin"] != "reference"]
+    pool = [
+        r
+        for r in rows
+        if r["id"] != exclude
+        and r["score"] is not None
+        and r["status"] in ("full", "primary")
+        and r["origin"] != "reference"
+    ]
     return max(pool, key=lambda r: (r["verified"], r["score"]), default=None)
 
 
 def _delta(current: dict, other: dict | None) -> dict | None:
     if not other or other.get("tokens") is None or other.get("heartbeats") is None:
         return None
-    out = {"tokens": current["tokens"] - other["tokens"],
-           "heartbeats": current["heartbeats"] - other["heartbeats"]}
+    out = {"tokens": current["tokens"] - other["tokens"], "heartbeats": current["heartbeats"] - other["heartbeats"]}
     if current.get("score") is not None and other.get("score") is not None:
         out["proxy"] = round(current["score"] - other["score"], 2)
     return out
@@ -1404,6 +1671,7 @@ def _advisory(rows: list[dict], window: int = 4) -> str | None:
                 found.add(parent)
                 stack.extend(by_id[parent]["parents"])
         return found
+
     recent = model[-window:]
     shared = set.intersection(*(lineage(r) for r in recent)) - {r["id"] for r in rows if r["origin"] == "reference"}
     if not shared:
@@ -1412,15 +1680,38 @@ def _advisory(rows: list[dict], window: int = 4) -> str | None:
     base = by_id[root]["score"]
     if any(r["score"] is not None and (base is None or r["score"] > base) for r in recent):
         return None
-    return (f"The last {window} candidates (#{recent[0]['n']}-#{recent[-1]['n']}) all descend from "
-            f"#{by_id[root]['n']} and none improved on its score" + (f" of {base}." if base is not None else "."))
+    return (
+        f"The last {window} candidates (#{recent[0]['n']}-#{recent[-1]['n']}) all descend from "
+        f"#{by_id[root]['n']} and none improved on its score" + (f" of {base}." if base is not None else ".")
+    )
 
 
 def _model_view(result: dict) -> dict:
     """Compact, non-duplicated payload for the model; the ledger keeps the full result."""
-    view = {key: result[key] for key in ("ok", "mode", "candidate", "probe", "tokens", "heartbeat",
-            "idea_id", "cached", "candidate_path", "start_line", "end_line", "error", "notes",
-            "full_check", "advisory", "scored", "contains_sorry", "goals") if result.get(key) not in (None, [], "")}
+    view = {
+        key: result[key]
+        for key in (
+            "ok",
+            "mode",
+            "candidate",
+            "probe",
+            "tokens",
+            "heartbeat",
+            "idea_id",
+            "cached",
+            "candidate_path",
+            "start_line",
+            "end_line",
+            "error",
+            "notes",
+            "full_check",
+            "advisory",
+            "scored",
+            "contains_sorry",
+            "goals",
+        )
+        if result.get(key) not in (None, [], "")
+    }
     # `ok` says the tool ran; `compiled` says whether the draft compiled. On a failed compile the
     # heartbeat is only the work done before the error, not a cost of the draft.
     failed = any(not info.get("passed") for info in (result.get("compat") or {}).values())
@@ -1429,10 +1720,12 @@ def _model_view(result: dict) -> dict:
         view["compiled"] = False
     metrics = result.get("metrics")
     if metrics and metrics.get("axes"):
-        view["metrics"] = {key: metrics[key] for key in ("proxy", "estimated_proxy", "assumes_full_compat",
-                                                         "deltas") if key in metrics}
-        view["metrics"]["axes"] = {axis: {k: v for k, v in info.items() if k != "reference"}
-                                   for axis, info in metrics["axes"].items()}
+        view["metrics"] = {
+            key: metrics[key] for key in ("proxy", "estimated_proxy", "assumes_full_compat", "deltas") if key in metrics
+        }
+        view["metrics"]["axes"] = {
+            axis: {k: v for k, v in info.items() if k != "reference"} for axis, info in metrics["axes"].items()
+        }
     elif metrics is not None and not metrics.get("compiled"):
         view["metrics"] = {"compiled": False}
     compat = {}
@@ -1466,15 +1759,28 @@ def _compiled_versions(history: list[dict], candidate_id: str, row: dict) -> dic
     """Passing per-version results of this evaluator's fast check of a candidate, for reuse."""
     key = _evaluation_key(candidate_id, "fast", row)
     fast = next((item for item in history if item.get("kind") == "evaluation" and item.get("key") == key), None)
-    return {version: info for version, info in ((fast or {}).get("result", {}).get("compat") or {}).items()
-            if info.get("passed")}
+    return {
+        version: info
+        for version, info in ((fast or {}).get("result", {}).get("compat") or {}).items()
+        if info.get("passed")
+    }
 
 
-def record_evaluation(name: str, run_id: str, proof: str, mode: str,
-                      parents: list[str] | None = None, hypothesis: str = "",
-                      origin: str = "model", merge: dict | None = None,
-                      materialize_live: bool = True, idea_id: str | None = None,
-                      lane: str = "model", trigger: str = "model", precomputed: dict | None = None) -> dict:
+def record_evaluation(
+    name: str,
+    run_id: str,
+    proof: str,
+    mode: str,
+    parents: list[str] | None = None,
+    hypothesis: str = "",
+    origin: str = "model",
+    merge: dict | None = None,
+    materialize_live: bool = True,
+    idea_id: str | None = None,
+    lane: str = "model",
+    trigger: str = "model",
+    precomputed: dict | None = None,
+) -> dict:
     """Record a candidate and its evaluation. `precomputed` is a result the caller already
     compiled for this exact proof and mode; `trigger` says whether the model or the
     harness asked for it."""
@@ -1510,27 +1816,53 @@ def record_evaluation(name: str, run_id: str, proof: str, mode: str,
         lineage = explicit or ([_current(history)] if candidate_id not in known and _current(history) else [])
         lineage = [parent for parent in lineage if parent != candidate_id]
         if candidate_id in known and idea_id is None:
-            idea_id = next(item.get("idea_id") for item in history
-                           if item.get("kind") == "candidate" and item["candidate_id"] == candidate_id)
+            idea_id = next(
+                item.get("idea_id")
+                for item in history
+                if item.get("kind") == "candidate" and item["candidate_id"] == candidate_id
+            )
         if idea_id and idea_id not in {item["id"] for item in history if item.get("kind") == "idea"}:
             notes.append(f"idea_id {idea_id} is not a recorded idea; kept as a label")
         _snapshot(directory, candidate_id, proof)
         if candidate_id not in known:
-            _append(directory, {"kind": "candidate", "candidate_id": candidate_id,
-                                "parents": lineage, "hypothesis": hypothesis,
-                                "origin": origin, "merge": merge, "idea_id": idea_id,
-                                "source_versions": versions(row),
-                                "evaluator_sha256": _evaluator_sha()})
-        elif explicit and not any(item.get("kind") == "derivation"
-                                  and item.get("candidate_id") == candidate_id
-                                  and item.get("parents") == explicit for item in history):
-            original = next(item for item in history if item.get("kind") == "candidate"
-                            and item["candidate_id"] == candidate_id)
+            _append(
+                directory,
+                {
+                    "kind": "candidate",
+                    "candidate_id": candidate_id,
+                    "parents": lineage,
+                    "hypothesis": hypothesis,
+                    "origin": origin,
+                    "merge": merge,
+                    "idea_id": idea_id,
+                    "source_versions": versions(row),
+                    "evaluator_sha256": _evaluator_sha(),
+                },
+            )
+        elif explicit and not any(
+            item.get("kind") == "derivation"
+            and item.get("candidate_id") == candidate_id
+            and item.get("parents") == explicit
+            for item in history
+        ):
+            original = next(
+                item for item in history if item.get("kind") == "candidate" and item["candidate_id"] == candidate_id
+            )
             if original.get("parents", []) != explicit:
-                _append(directory, {"kind": "derivation", "candidate_id": candidate_id,
-                                    "parents": explicit, "origin": origin, "merge": merge})
+                _append(
+                    directory,
+                    {
+                        "kind": "derivation",
+                        "candidate_id": candidate_id,
+                        "parents": explicit,
+                        "origin": origin,
+                        "merge": merge,
+                    },
+                )
         key = _evaluation_key(candidate_id, mode, row)
-        prior = next((item for item in reversed(history) if item.get("kind") == "evaluation" and item["key"] == key), None)
+        prior = next(
+            (item for item in reversed(history) if item.get("kind") == "evaluation" and item["key"] == key), None
+        )
         if prior:
             result = json.loads(json.dumps(prior["result"]))
         elif precomputed is not None:
@@ -1538,17 +1870,39 @@ def record_evaluation(name: str, run_id: str, proof: str, mode: str,
         else:
             try:
                 with lean_lock(directory, lane):
-                    result = _evaluate(name, proof, mode, known=_compiled_versions(history, candidate_id, row)
-                                       if mode == "full" else None, lane=lane)
+                    result = _evaluate(
+                        name,
+                        proof,
+                        mode,
+                        known=_compiled_versions(history, candidate_id, row) if mode == "full" else None,
+                        lane=lane,
+                    )
             except (ValueError, FileNotFoundError) as error:
-                result = {"ok": False, "name": name, "mode": mode, "error": str(error),
-                          "compat": {}, "tokens": None, "heartbeat": None, "local_proxy": None}
+                result = {
+                    "ok": False,
+                    "name": name,
+                    "mode": mode,
+                    "error": str(error),
+                    "compat": {},
+                    "tokens": None,
+                    "heartbeat": None,
+                    "local_proxy": None,
+                }
                 if isinstance(error, FileNotFoundError):
                     result["lean_unavailable"] = True  # Lean (or the workspace) could not run: counts for the breaker
         if not prior:
             _externalize_output(directory, candidate_id, result)
-            _append(directory, {"kind": "evaluation", "candidate_id": candidate_id, "key": key,
-                                "mode": mode, "trigger": trigger, "result": result})
+            _append(
+                directory,
+                {
+                    "kind": "evaluation",
+                    "candidate_id": candidate_id,
+                    "key": key,
+                    "mode": mode,
+                    "trigger": trigger,
+                    "result": result,
+                },
+            )
     if lane == "model" and trigger == "model" and not prior:
         _check_breaker(directory)
     if result.get("tokens") is not None and goalstate.closed(result):
@@ -1563,8 +1917,11 @@ def record_evaluation(name: str, run_id: str, proof: str, mode: str,
     result.setdefault("metrics", None)
     if me and result["metrics"] and result["metrics"].get("axes"):
         deltas = result["metrics"].setdefault("deltas", {})
-        current = {"tokens": result["tokens"], "heartbeats": result["heartbeat"],
-                   "score": _metric_score(result["metrics"])}
+        current = {
+            "tokens": result["tokens"],
+            "heartbeats": result["heartbeat"],
+            "score": _metric_score(result["metrics"]),
+        }
         first_parent = next((r for r in rows if r["id"] == (explicit or lineage or [None])[0]), None)
         if first_parent and first_parent["evaluated"]:
             deltas["vs_parent"] = {"candidate": f"#{first_parent['n']}", **(_delta(current, first_parent) or {})}
@@ -1576,15 +1933,31 @@ def record_evaluation(name: str, run_id: str, proof: str, mode: str,
     best_line = {"verified": _brief(verified)}
     if fast and (not verified or (fast["score"] or 0) > (verified["score"] or 0)):
         best_line["fast_only"] = _brief(fast)
-    return {**result, "candidate_id": candidate_id, "candidate": _label(history, candidate_id),
-            "node_number": _candidate_ids(history).index(candidate_id) + 1,
-            "idea_id": idea_id, "cached": prior is not None, "notes": notes,
-            "best_so_far": best_line, "advisory": _advisory(rows), **location}
+    return {
+        **result,
+        "candidate_id": candidate_id,
+        "candidate": _label(history, candidate_id),
+        "node_number": _candidate_ids(history).index(candidate_id) + 1,
+        "idea_id": idea_id,
+        "cached": prior is not None,
+        "notes": notes,
+        "best_so_far": best_line,
+        "advisory": _advisory(rows),
+        **location,
+    }
 
 
-def evaluate_request(name: str, run_id: str, proof: str | None = None, mode: str = "fast",
-                     parents: list[str] | None = None, hypothesis: str = "", idea_id: str | None = None,
-                     candidate_ref: str | None = None, from_probe: str | None = None) -> dict:
+def evaluate_request(
+    name: str,
+    run_id: str,
+    proof: str | None = None,
+    mode: str = "fast",
+    parents: list[str] | None = None,
+    hypothesis: str = "",
+    idea_id: str | None = None,
+    candidate_ref: str | None = None,
+    from_probe: str | None = None,
+) -> dict:
     """Entry for the model: evaluate a proof, an existing `#N`, or a probe by ID."""
     if proof is not None and not proof.strip():
         proof = None
@@ -1599,8 +1972,9 @@ def evaluate_request(name: str, run_id: str, proof: str | None = None, mode: str
         proof = (directory / "proofs" / f"{candidate_id}.lean").read_text()
     elif from_probe:
         proof_id = resolve_probe_ref(history, from_probe)
-        source = next(item for item in reversed(history)
-                      if item.get("kind") == "probe" and item["proof_id"] == proof_id)
+        source = next(
+            item for item in reversed(history) if item.get("kind") == "probe" and item["proof_id"] == proof_id
+        )
         proof = (directory / "proofs" / f"{proof_id}.lean").read_text()
         idea_id = idea_id or source.get("idea_id")
         parents = parents or ([source["parent"]] if source.get("parent") else None)
@@ -1659,8 +2033,13 @@ def _compile_probe(name: str, row: dict, proof: str) -> dict:
     try:
         return evaluate(name, proof, "fast" if complete else "probe")
     except (ValueError, FileNotFoundError) as error:
-        return {"ok": False, "mode": "probe", "error": str(error), "compat": {},
-                **({"lean_unavailable": True} if isinstance(error, FileNotFoundError) else {})}
+        return {
+            "ok": False,
+            "mode": "probe",
+            "error": str(error),
+            "compat": {},
+            **({"lean_unavailable": True} if isinstance(error, FileNotFoundError) else {}),
+        }
 
 
 def _compile_probes(name: str, directory: Path, drafts: list[str]) -> dict[str, dict]:
@@ -1685,14 +2064,13 @@ def _compile_probes(name: str, directory: Path, drafts: list[str]) -> dict[str, 
     if not pending:
         return {}
     compiled: dict[str, dict] = {}
-    with lean_lock(directory):
-        with ThreadPoolExecutor(max_workers=_probe_workers(len(pending))) as pool:
-            futures = {proof: pool.submit(_compile_probe, name, row, proof) for proof in pending}
-            for proof, future in futures.items():
-                try:
-                    compiled[proof] = future.result()
-                except Exception:
-                    continue  # `probe` recompiles this one on its own
+    with lean_lock(directory), ThreadPoolExecutor(max_workers=_probe_workers(len(pending))) as pool:
+        futures = {proof: pool.submit(_compile_probe, name, row, proof) for proof in pending}
+        for proof, future in futures.items():
+            try:
+                compiled[proof] = future.result()
+            except Exception:
+                continue  # `probe` recompiles this one on its own
     return compiled
 
 
@@ -1714,8 +2092,9 @@ def probe(name: str, run_id: str, proof: str, idea_id: str | None = None, parent
     proof_id = hashlib.sha256((name + "\0" + proof).encode()).hexdigest()
     if proof_id in set(_candidate_ids(history)):
         return evaluate_request(name, run_id, proof, idea_id=idea_id, parents=[parent] if parent else None)
-    earlier = next((item for item in reversed(history)
-                    if item.get("kind") == "probe" and item["proof_id"] == proof_id), None)
+    earlier = next(
+        (item for item in reversed(history) if item.get("kind") == "probe" and item["proof_id"] == proof_id), None
+    )
     idea_id = idea_id or (earlier or {}).get("idea_id") or _current_active_idea(history)
     if earlier:
         result = earlier["result"]
@@ -1727,22 +2106,37 @@ def probe(name: str, run_id: str, proof: str, idea_id: str | None = None, parent
             with lean_lock(directory):
                 result = _compile_probe(name, row, proof)
         if complete and next(iter((result.get("compat") or {}).values()), {}).get("passed"):
-            recorded = record_evaluation(name, run_id, proof, "fast", [parent] if parent else None,
-                                         idea_id=idea_id, precomputed=result)
-            view = _model_view({**recorded, "full_check": _full_check_status(events(directory), recorded["candidate_id"])})
-            view.setdefault("notes", []).append(f"complete draft compiled, recorded as candidate {recorded['candidate']}")
+            recorded = record_evaluation(
+                name, run_id, proof, "fast", [parent] if parent else None, idea_id=idea_id, precomputed=result
+            )
+            view = _model_view(
+                {**recorded, "full_check": _full_check_status(events(directory), recorded["candidate_id"])}
+            )
+            view.setdefault("notes", []).append(
+                f"complete draft compiled, recorded as candidate {recorded['candidate']}"
+            )
             return view
         result = {**result, "mode": "probe", "scored": False}
         _externalize_output(directory, proof_id, result)
         _snapshot(directory, proof_id, proof)
-        _append(directory, {"kind": "probe", "proof_id": proof_id, "idea_id": idea_id,
-                            "parent": parent_id, "result": result})
+        _append(
+            directory,
+            {"kind": "probe", "proof_id": proof_id, "idea_id": idea_id, "parent": parent_id, "result": result},
+        )
         _check_breaker(directory)
         # A draft (holes, errors or a failed compile) never opens a route, so it is not queued for extraction.
     location = materialize(name, run_id, proof) if result.get("tokens") is not None else {}
     label = _probe_numbers(events(directory))[proof_id]
-    return _model_view({**result, "probe": label, "idea_id": idea_id or (earlier or {}).get("idea_id"),
-                        "cached": earlier is not None, "notes": notes, **location})
+    return _model_view(
+        {
+            **result,
+            "probe": label,
+            "idea_id": idea_id or (earlier or {}).get("idea_id"),
+            "cached": earlier is not None,
+            "notes": notes,
+            **location,
+        }
+    )
 
 
 def normalize_draft(name: str, draft: str) -> str:
@@ -1764,8 +2158,9 @@ def normalize_draft(name: str, draft: str) -> str:
     return statement + " := by\n" + block
 
 
-def probe_batch(name: str, run_id: str, drafts: list[str], idea_id: str | None = None,
-                parent: str | None = None) -> dict:
+def probe_batch(
+    name: str, run_id: str, drafts: list[str], idea_id: str | None = None, parent: str | None = None
+) -> dict:
     """Probe one to four drafts in order, keeping their parent fixed across promotions."""
     if not isinstance(drafts, list) or not 1 <= len(drafts) <= 4:
         raise ValueError("Pass between one and four drafts")
@@ -1792,11 +2187,14 @@ def candidate(name: str, run_id: str, reference: str) -> dict:
     if re.fullmatch(r"p[0-9]+", reference.strip().lower()):
         proof_id = resolve_probe_ref(history, reference)
         proof = (directory / "proofs" / f"{proof_id}.lean").read_text()
-        entry = next(item for item in reversed(history)
-                     if item.get("kind") == "probe" and item["proof_id"] == proof_id)
-        return {"ok": True, "probe": reference.strip().lower(), "proof": proof,
-                "last_result": _model_view({**entry["result"], "probe": reference}),
-                **materialize(name, run_id, proof)}
+        entry = next(item for item in reversed(history) if item.get("kind") == "probe" and item["proof_id"] == proof_id)
+        return {
+            "ok": True,
+            "probe": reference.strip().lower(),
+            "proof": proof,
+            "last_result": _model_view({**entry["result"], "probe": reference}),
+            **materialize(name, run_id, proof),
+        }
     candidate_id = resolve_candidate_ref(history, reference)
     proof_path = directory / "proofs" / f"{candidate_id}.lean"
     if not proof_path.exists():
@@ -1805,11 +2203,23 @@ def candidate(name: str, run_id: str, reference: str) -> dict:
     location = materialize(name, run_id, proof)
     _append(directory, {"kind": "current", "candidate_id": candidate_id})
     row = next((r for r in _summaries(events(directory)) if r["id"] == candidate_id), None)
-    return {"ok": True, "candidate": _label(history, candidate_id), "proof": proof,
-            "idea_id": row and row["idea_id"],
-            "evaluations": [{"mode": e["mode"], "status": e["status"], "tokens": e["result"].get("tokens"),
-                             "heartbeats": e["result"].get("heartbeat"), "score": e["score"]}
-                            for e in (row["evaluations"] if row else [])], **location}
+    return {
+        "ok": True,
+        "candidate": _label(history, candidate_id),
+        "proof": proof,
+        "idea_id": row and row["idea_id"],
+        "evaluations": [
+            {
+                "mode": e["mode"],
+                "status": e["status"],
+                "tokens": e["result"].get("tokens"),
+                "heartbeats": e["result"].get("heartbeat"),
+                "score": e["score"],
+            }
+            for e in (row["evaluations"] if row else [])
+        ],
+        **location,
+    }
 
 
 def profile_request(name: str, run_id: str, reference: str | None = None, proof: str | None = None) -> dict:
@@ -1833,12 +2243,21 @@ def profile_request(name: str, run_id: str, reference: str | None = None, proof:
             label = _label(history, proof_id)
         proof = (directory / "proofs" / f"{proof_id}.lean").read_text()
     proof_id = hashlib.sha256((name + "\0" + proof).encode()).hexdigest()
-    cached = next((item for item in reversed(history)
-                   if item.get("kind") == "profile" and item["proof_id"] == proof_id), None)
+    cached = next(
+        (item for item in reversed(history) if item.get("kind") == "profile" and item["proof_id"] == proof_id), None
+    )
     if cached:
         return {**cached["result"], "target": label, "cached": True}
-    measured = next((e["result"].get("heartbeat") for row in _summaries(history) if row["id"] == proof_id
-                     for e in row["evaluations"] if e["result"].get("heartbeat") is not None), None)
+    measured = next(
+        (
+            e["result"].get("heartbeat")
+            for row in _summaries(history)
+            if row["id"] == proof_id
+            for e in row["evaluations"]
+            if e["result"].get("heartbeat") is not None
+        ),
+        None,
+    )
     with lean_lock(directory):
         result = profile(name, proof, measured)
         result["statement_floor_hb"] = heartbeat_floor(name)["heartbeats"]
@@ -1851,8 +2270,7 @@ def set_decision(run_id: str, candidate_id: str, decision: str, reason: str) -> 
         raise ValueError("Decision must be pursue or park with a reason")
     directory = run_dir(run_id)
     candidate_id = resolve_candidate_ref(events(directory), candidate_id)
-    record = {"kind": "decision", "candidate_id": candidate_id,
-              "decision": decision, "reason": reason.strip()}
+    record = {"kind": "decision", "candidate_id": candidate_id, "decision": decision, "reason": reason.strip()}
     _append(directory, record)
     return record
 
@@ -1861,8 +2279,7 @@ def graph_state(run_id: str) -> dict:
     directory = run_dir(run_id)
     history = events(directory)
     if not history:
-        return {"run_id": run_id, "nodes": [], "evaluations": 0, "merge_checks": [],
-                "milestones": [], "frontier": []}
+        return {"run_id": run_id, "nodes": [], "evaluations": 0, "merge_checks": [], "milestones": [], "frontier": []}
     theorem = history[0]["theorem"]
     total_versions = len(history[0].get("versions") or versions(problem(theorem)))
     nodes: dict[str, dict] = {}
@@ -1874,39 +2291,65 @@ def graph_state(run_id: str) -> dict:
     for event in history:
         kind = event.get("kind")
         if kind == "idea":
-            ideas.append({key: event.get(key) for key in ("id", "title", "hypothesis", "region",
-                                                          "expected_effect", "status", "reason")})
+            ideas.append(
+                {
+                    key: event.get(key)
+                    for key in ("id", "title", "hypothesis", "region", "expected_effect", "status", "reason")
+                }
+            )
         elif kind == "idea_update":
             target = next((i for i in ideas if i["id"] == event["id"]), None)
             if target:
                 target.update({k: v for k, v in event.items() if k not in ("kind", "id", "ts")})
         elif kind == "probe":
-            probes.append({"proof_id": event["proof_id"], "idea_id": event.get("idea_id"),
-                           "parent": event.get("parent"), "result": event["result"], "ts": event.get("ts")})
+            probes.append(
+                {
+                    "proof_id": event["proof_id"],
+                    "idea_id": event.get("idea_id"),
+                    "parent": event.get("parent"),
+                    "result": event["result"],
+                    "ts": event.get("ts"),
+                }
+            )
         elif kind == "candidate":
             identifier = event["candidate_id"]
-            nodes[identifier] = {"id": identifier, "index": len(order) + 1,
-                                 "parents": event.get("parents", []),
-                                 "derivations": [event], "origin": event.get("origin", "model"),
-                                 "hypothesis": event.get("hypothesis", ""),
-                                 "idea_id": event.get("idea_id"),
-                                 "merge": event.get("merge"), "evaluations": [],
-                                 "source_versions": event.get("source_versions", []),
-                                 "evaluator_sha256": event.get("evaluator_sha256"),
-                                 "proof": (directory / "proofs" / f"{identifier}.lean").read_text(),
-                                 "children": [], "decision": "pursue", "route": None}
+            nodes[identifier] = {
+                "id": identifier,
+                "index": len(order) + 1,
+                "parents": event.get("parents", []),
+                "derivations": [event],
+                "origin": event.get("origin", "model"),
+                "hypothesis": event.get("hypothesis", ""),
+                "idea_id": event.get("idea_id"),
+                "merge": event.get("merge"),
+                "evaluations": [],
+                "source_versions": event.get("source_versions", []),
+                "evaluator_sha256": event.get("evaluator_sha256"),
+                "proof": (directory / "proofs" / f"{identifier}.lean").read_text(),
+                "children": [],
+                "decision": "pursue",
+                "route": None,
+            }
             order.append(identifier)
         elif kind == "derivation" and event["candidate_id"] in nodes:
             nodes[event["candidate_id"]]["derivations"].append(event)
         elif kind == "evaluation" and event["candidate_id"] in nodes:
             index = len(timeline) + 1
             nodes[event["candidate_id"]]["evaluations"].append(
-                {"number": index, "mode": event["mode"], "result": event["result"]})
+                {"number": index, "mode": event["mode"], "result": event["result"]}
+            )
             result = event["result"]
-            timeline.append({"number": index, "candidate_id": event["candidate_id"],
-                             "mode": event["mode"], "tokens": result.get("tokens"),
-                             "heartbeat": result.get("heartbeat"),
-                             "local_proxy": result.get("local_proxy"), "ts": event.get("ts")})
+            timeline.append(
+                {
+                    "number": index,
+                    "candidate_id": event["candidate_id"],
+                    "mode": event["mode"],
+                    "tokens": result.get("tokens"),
+                    "heartbeat": result.get("heartbeat"),
+                    "local_proxy": result.get("local_proxy"),
+                    "ts": event.get("ts"),
+                }
+            )
         elif kind == "merge_check":
             checks.append(event)
         elif kind == "route" and event["proof_id"] in nodes:
@@ -1920,9 +2363,13 @@ def graph_state(run_id: str) -> dict:
         evaluation = next(e for e in node["evaluations"] if e["number"] == row["number"])
         result = evaluation["result"]
         compat = result.get("compat", {})
-        row["status"] = "full" if evaluation["mode"] == "full" and len(compat) == total_versions and all(
-            version.get("passed") for version in compat.values()) else (
-            "primary" if next(iter(compat.values()), {}).get("passed") else "fail")
+        row["status"] = (
+            "full"
+            if evaluation["mode"] == "full"
+            and len(compat) == total_versions
+            and all(version.get("passed") for version in compat.values())
+            else ("primary" if next(iter(compat.values()), {}).get("passed") else "fail")
+        )
         if row["status"] == "full" and row["local_proxy"] is not None and row["local_proxy"] > best_proxy:
             best_proxy = row["local_proxy"]
             milestones.append(row.copy())
@@ -1932,34 +2379,56 @@ def graph_state(run_id: str) -> dict:
         for parent in node["parents"]:
             if parent in nodes:
                 nodes[parent]["children"].append(identifier)
-        full = [e for e in node["evaluations"] if next(
-            (row["status"] for row in timeline if row["number"] == e["number"]), "fail") == "full"]
-        primary = [e for e in node["evaluations"] if next(
-            (row["status"] for row in timeline if row["number"] == e["number"]), "fail") == "primary"]
-        selected = max(full, key=lambda e: e["result"].get("local_proxy") or -1) if full else (
-            min(primary, key=lambda e: e["result"].get("tokens") or 10**9) if primary else
-            (node["evaluations"][-1] if node["evaluations"] else None))
+        full = [
+            e
+            for e in node["evaluations"]
+            if next((row["status"] for row in timeline if row["number"] == e["number"]), "fail") == "full"
+        ]
+        primary = [
+            e
+            for e in node["evaluations"]
+            if next((row["status"] for row in timeline if row["number"] == e["number"]), "fail") == "primary"
+        ]
+        selected = (
+            max(full, key=lambda e: e["result"].get("local_proxy") or -1)
+            if full
+            else (
+                min(primary, key=lambda e: e["result"].get("tokens") or 10**9)
+                if primary
+                else (node["evaluations"][-1] if node["evaluations"] else None)
+            )
+        )
         result = selected["result"] if selected else {}
         node["status"] = "full" if full else "primary" if primary else "fail" if selected else "unevaluated"
         node["tokens"] = result.get("tokens")
         node["heartbeat"] = result.get("heartbeat")
         node["local_proxy"] = result.get("local_proxy") if full else None
         parent_attempts = [nodes[p].get("attempts_since_gain", 0) for p in node["parents"] if p in nodes]
-        node["attempts_since_gain"] = 0 if node["status"] == "full" and any(
-            m["candidate_id"] == identifier for m in milestones) else 1 + (min(parent_attempts) if parent_attempts else 0)
+        node["attempts_since_gain"] = (
+            0
+            if node["status"] == "full" and any(m["candidate_id"] == identifier for m in milestones)
+            else 1 + (min(parent_attempts) if parent_attempts else 0)
+        )
         first_parent = nodes.get(node["parents"][0]) if node["parents"] else None
         fingerprint = edit_fingerprint(first_parent["proof"], node["proof"]) if first_parent else {node["proof"]}
-        node["novelty"] = 1.0 - max((len(fingerprint & earlier) / len(fingerprint | earlier)
-                                     for earlier in fingerprints.values() if fingerprint | earlier), default=0.0)
+        node["novelty"] = 1.0 - max(
+            (
+                len(fingerprint & earlier) / len(fingerprint | earlier)
+                for earlier in fingerprints.values()
+                if fingerprint | earlier
+            ),
+            default=0.0,
+        )
         fingerprints[identifier] = fingerprint
         node["merge_partners"] = 0
     checked_pairs = {tuple(sorted(check["parents"])) for check in checks}
-    open_nodes = [node for node in nodes.values() if node["status"] in ("full", "primary")
-                  and node["decision"] != "park"]
+    open_nodes = [
+        node for node in nodes.values() if node["status"] in ("full", "primary") and node["decision"] != "park"
+    ]
     ancestry = {node["id"]: node["parents"] for node in nodes.values()}
     reference = next((node for node in nodes.values() if node["origin"] == "reference"), None)
     for index, left in enumerate(open_nodes):
-        for right in open_nodes[index + 1:]:
+        for right in open_nodes[index + 1 :]:
             if tuple(sorted((left["id"], right["id"]))) in checked_pairs:
                 continue
             common = common_base(left["id"], right["id"], ancestry)
@@ -1973,10 +2442,21 @@ def graph_state(run_id: str) -> dict:
         idea["attempts"] = sum(1 for node in rows if node["idea_id"] == idea["id"] and node["origin"] == "model")
         idea["probes"] = sum(1 for item in probes if item["idea_id"] == idea["id"])
     idea_rows = ideas
-    return {"run_id": run_id, "theorem": theorem, "nodes": rows, "ledger_events": len(history), "evaluations": len(timeline),
-            "timeline": timeline, "merge_checks": checks, "milestones": milestones,
-            "frontier": ranked, "ideas": idea_rows, "probes": probes, "routes": (route_rows := route_table(history)),
-            "route_progress": _route_progress(route_rows)}
+    return {
+        "run_id": run_id,
+        "theorem": theorem,
+        "nodes": rows,
+        "ledger_events": len(history),
+        "evaluations": len(timeline),
+        "timeline": timeline,
+        "merge_checks": checks,
+        "milestones": milestones,
+        "frontier": ranked,
+        "ideas": idea_rows,
+        "probes": probes,
+        "routes": (route_rows := route_table(history)),
+        "route_progress": _route_progress(route_rows),
+    }
 
 
 def merge_once(run_id: str, graph: dict | None = None) -> dict | None:
@@ -1986,8 +2466,7 @@ def merge_once(run_id: str, graph: dict | None = None) -> dict | None:
         return None
     directory = run_dir(run_id)
     nodes = {node["id"]: node for node in graph["nodes"]}
-    good = [node for node in graph["nodes"] if node["status"] in ("full", "primary")
-            and node["decision"] != "park"]
+    good = [node for node in graph["nodes"] if node["status"] in ("full", "primary") and node["decision"] != "park"]
     checked = {tuple(sorted(check["parents"])) for check in graph["merge_checks"]}
     ancestry = {node["id"]: node["parents"] for node in graph["nodes"]}
     reference = next((node for node in graph["nodes"] if node["origin"] == "reference"), None)
@@ -2008,28 +2487,45 @@ def merge_once(run_id: str, graph: dict | None = None) -> dict | None:
             if base["base"] is None:
                 outcome["reason"] = base["reason"]
             else:
-                merged = merge_text(nodes[base["base"]]["proof"], nodes[pair[0]]["proof"],
-                                    nodes[pair[1]]["proof"])
+                merged = merge_text(nodes[base["base"]]["proof"], nodes[pair[0]]["proof"], nodes[pair[1]]["proof"])
                 outcome["edits"] = {"left": merged["left_edits"], "right": merged["right_edits"]}
                 if merged["text"] is None:
                     outcome["reason"] = merged["reason"]
                 else:
-                    recorded = record_evaluation(graph["theorem"], run_id, merged["text"], "fast",
-                                                 pair, "Deterministic combination of disjoint edits",
-                                                 origin="auto_merge", merge={"base": base["base"],
-                                                                               "base_inferred_from_reference": inferred,
-                                                                               "edits": outcome["edits"]},
-                                                 materialize_live=False)
+                    recorded = record_evaluation(
+                        graph["theorem"],
+                        run_id,
+                        merged["text"],
+                        "fast",
+                        pair,
+                        "Deterministic combination of disjoint edits",
+                        origin="auto_merge",
+                        merge={
+                            "base": base["base"],
+                            "base_inferred_from_reference": inferred,
+                            "edits": outcome["edits"],
+                        },
+                        materialize_live=False,
+                    )
                     outcome["candidate_id"] = recorded["candidate_id"]
                     outcome["node_number"] = recorded["node_number"]
                     outcome["fast_passed"] = any(v.get("passed") for v in recorded.get("compat", {}).values())
                     if outcome["fast_passed"]:
-                        full = record_evaluation(graph["theorem"], run_id, merged["text"], "full",
-                                                 pair, "Deterministic combination of disjoint edits",
-                                                 origin="auto_merge", merge={"base": base["base"],
-                                                                               "base_inferred_from_reference": inferred,
-                                                                               "edits": outcome["edits"]},
-                                                 materialize_live=False)
+                        full = record_evaluation(
+                            graph["theorem"],
+                            run_id,
+                            merged["text"],
+                            "full",
+                            pair,
+                            "Deterministic combination of disjoint edits",
+                            origin="auto_merge",
+                            merge={
+                                "base": base["base"],
+                                "base_inferred_from_reference": inferred,
+                                "edits": outcome["edits"],
+                            },
+                            materialize_live=False,
+                        )
                         outcome["full_passed"] = all(v.get("passed") for v in full.get("compat", {}).values())
             _append(directory, outcome)
             graph["merge_checks"].append(outcome)
@@ -2079,8 +2575,13 @@ def _check_text(number: int, result: dict, total: int) -> str:
 def _autocheck_jobs(rows: list[dict]) -> list[dict]:
     """Candidates that compile on the primary version but were never checked on every version,
     most promising first."""
-    jobs = [r for r in rows if r["origin"] != "reference" and r["status"] == "primary"
-            and not any(e["mode"] == "full" for e in r["evaluations"])]
+    jobs = [
+        r
+        for r in rows
+        if r["origin"] != "reference"
+        and r["status"] == "primary"
+        and not any(e["mode"] == "full" for e in r["evaluations"])
+    ]
     return sorted(jobs, key=lambda r: (r["score"] if r["score"] is not None else float("-inf"), r["n"]), reverse=True)
 
 
@@ -2106,16 +2607,28 @@ def autocheck(name: str, run_id: str, max_seconds: float | None = None) -> dict:
             job = jobs[0]
             try:
                 proof = (directory / "proofs" / f"{job['id']}.lean").read_text()
-                record_evaluation(name, run_id, proof, "full", materialize_live=False,
-                                  lane="background", trigger="auto")
+                record_evaluation(
+                    name, run_id, proof, "full", materialize_live=False, lane="background", trigger="auto"
+                )
             except Exception as error:  # record the failure so the queue moves on
-                _append(directory, {"kind": "evaluation", "candidate_id": job["id"], "key": f"auto-error-{job['id']}",
-                                    "mode": "full", "trigger": "auto",
-                                    "result": {"ok": False, "mode": "full", "error": str(error)[:300], "compat": {}}})
+                _append(
+                    directory,
+                    {
+                        "kind": "evaluation",
+                        "candidate_id": job["id"],
+                        "key": f"auto-error-{job['id']}",
+                        "mode": "full",
+                        "trigger": "auto",
+                        "result": {"ok": False, "mode": "full", "error": str(error)[:300], "compat": {}},
+                    },
+                )
             checked.append(f"#{job['n']}")
             write_state(run_id)
-    return {"ok": True, "checked": checked,
-            "remaining": [f"#{r['n']}" for r in _autocheck_jobs(_summaries(events(directory)))]}
+    return {
+        "ok": True,
+        "checked": checked,
+        "remaining": [f"#{r['n']}" for r in _autocheck_jobs(_summaries(events(directory)))],
+    }
 
 
 def state(run_id: str) -> dict:
@@ -2129,26 +2642,42 @@ def state(run_id: str) -> dict:
     numbers = {r["id"]: r["n"] for r in rows}
     verified = _best([r for r in rows if r["verified"]])
     unverified = _best([r for r in rows if not r["verified"]])
-    leading = unverified if unverified and (not verified or (unverified["score"] or 0) > (verified["score"] or 0)) else None
-    updates = [{"seq": seq, "text": _check_text(numbers[item["candidate_id"]], item["result"], total)}
-               for seq, item in enumerate(history)
-               if item.get("kind") == "evaluation" and item.get("trigger") == "auto" and item["candidate_id"] in numbers]
+    leading = (
+        unverified if unverified and (not verified or (unverified["score"] or 0) > (verified["score"] or 0)) else None
+    )
+    updates = [
+        {"seq": seq, "text": _check_text(numbers[item["candidate_id"]], item["result"], total)}
+        for seq, item in enumerate(history)
+        if item.get("kind") == "evaluation" and item.get("trigger") == "auto" and item["candidate_id"] in numbers
+    ]
     reference_row = next((r for r in rows if r["origin"] == "reference"), None)
     baseline = None
     if reference_row:
         from arena.scoring import reference
+
         try:
             tokens, heartbeats = reference(history[0]["theorem"])
         except ValueError:
             # Synthetic protocol tests and imported legacy runs may have no published denominator.
             pass
         else:
-            baseline = {"candidate": "#1", "tokens": tokens, "heartbeats": heartbeats,
-                        "proxy": round(100 / 3, 2), "status": "pinned original baseline"}
-    return {"ok": True, "seq": len(history), "versions": total, "best": _brief(verified),
-            "baseline": baseline,
-            "leading_unverified": _brief(leading), "checking": [f"#{r['n']}" for r in _autocheck_jobs(rows)],
-            "updates": updates[-10:]}
+            baseline = {
+                "candidate": "#1",
+                "tokens": tokens,
+                "heartbeats": heartbeats,
+                "proxy": round(100 / 3, 2),
+                "status": "pinned original baseline",
+            }
+    return {
+        "ok": True,
+        "seq": len(history),
+        "versions": total,
+        "best": _brief(verified),
+        "baseline": baseline,
+        "leading_unverified": _brief(leading),
+        "checking": [f"#{r['n']}" for r in _autocheck_jobs(rows)],
+        "updates": updates[-10:],
+    }
 
 
 def write_state(run_id: str) -> None:
@@ -2167,8 +2696,9 @@ def _used_session(row: dict) -> bool:
     """Whether the evaluation that made this candidate verified relied on a Lean session."""
     full = [e for e in row["evaluations"] if e["status"] == "full"]
     chosen = max(full, key=lambda e: e["score"] or -1, default=None)
-    return chosen is not None and any((info.get("lean") or {}).get("path") == "session"
-                                      for info in (chosen["result"].get("compat") or {}).values())
+    return chosen is not None and any(
+        (info.get("lean") or {}).get("path") == "session" for info in (chosen["result"].get("compat") or {}).values()
+    )
 
 
 def cold_verify(run_id: str, row: dict) -> dict:
@@ -2179,15 +2709,26 @@ def cold_verify(run_id: str, row: dict) -> dict:
     """
     directory = run_dir(run_id)
     history = events(directory)
-    done = next((item for item in reversed(history) if item.get("kind") == "cold_verification"
-                 and item["candidate_id"] == row["id"]), None)
+    done = next(
+        (
+            item
+            for item in reversed(history)
+            if item.get("kind") == "cold_verification" and item["candidate_id"] == row["id"]
+        ),
+        None,
+    )
     if done:
         return done
     if lean_health.tripped(directory):
         # Paused, not recorded: the verification can still run once Lean is healthy again.
-        return {"kind": "cold_verification", "candidate_id": row["id"], "confirmed": False,
-                "error": "Lean unhealthy; cold verification paused", "recorded_heartbeats": row["heartbeats"],
-                "paused": True}
+        return {
+            "kind": "cold_verification",
+            "candidate_id": row["id"],
+            "confirmed": False,
+            "error": "Lean unhealthy; cold verification paused",
+            "recorded_heartbeats": row["heartbeats"],
+            "paused": True,
+        }
     name = history[0]["theorem"]
     proof = (directory / "proofs" / f"{row['id']}.lean").read_text()
     try:
@@ -2197,14 +2738,28 @@ def cold_verify(run_id: str, row: dict) -> dict:
         passed = {version: bool(info.get("passed")) for version, info in compat.items()}
         total = len(history[0].get("versions") or [1])
         recorded, measured = row["heartbeats"], cold.get("heartbeat")
-        close = (recorded is not None and measured is not None
-                 and abs(measured - recorded) <= COLD_TOLERANCE * max(recorded, 1))
+        close = (
+            recorded is not None
+            and measured is not None
+            and abs(measured - recorded) <= COLD_TOLERANCE * max(recorded, 1)
+        )
         confirmed = len(passed) == total and all(passed.values()) and close
-        event = {"kind": "cold_verification", "candidate_id": row["id"], "confirmed": confirmed,
-                 "passed": passed, "recorded_heartbeats": recorded, "cold_heartbeats": measured}
+        event = {
+            "kind": "cold_verification",
+            "candidate_id": row["id"],
+            "confirmed": confirmed,
+            "passed": passed,
+            "recorded_heartbeats": recorded,
+            "cold_heartbeats": measured,
+        }
     except Exception as error:  # an unverifiable candidate must not be submitted
-        event = {"kind": "cold_verification", "candidate_id": row["id"], "confirmed": False,
-                 "error": str(error)[:300], "recorded_heartbeats": row["heartbeats"]}
+        event = {
+            "kind": "cold_verification",
+            "candidate_id": row["id"],
+            "confirmed": False,
+            "error": str(error)[:300],
+            "recorded_heartbeats": row["heartbeats"],
+        }
     _append(directory, event)
     return event
 
@@ -2219,8 +2774,18 @@ def submission(run_id: str) -> dict:
     history = events(directory)
     rows = _summaries(history)
     # Harness-combined proofs (auto_merge) are reported by arena.merges but never submitted: the answer is model-written.
-    pool = sorted((r for r in rows if r["verified"] and r["score"] is not None and r["status"] == "full"
-                   and r["origin"] not in ("reference", "auto_merge")), key=lambda r: (r["score"], -r["n"]), reverse=True)
+    pool = sorted(
+        (
+            r
+            for r in rows
+            if r["verified"]
+            and r["score"] is not None
+            and r["status"] == "full"
+            and r["origin"] not in ("reference", "auto_merge")
+        ),
+        key=lambda r: (r["score"], -r["n"]),
+        reverse=True,
+    )
     best, rejected, cold = None, [], None
     for row in pool:
         if not _used_session(row):
@@ -2230,21 +2795,36 @@ def submission(run_id: str) -> dict:
         if cold["confirmed"]:
             best = row
             break
-        rejected.append({"candidate": f"#{row['n']}", "recorded_heartbeats": cold.get("recorded_heartbeats"),
-                         "cold_heartbeats": cold.get("cold_heartbeats"), "passed": cold.get("passed"),
-                         "error": cold.get("error")})
+        rejected.append(
+            {
+                "candidate": f"#{row['n']}",
+                "recorded_heartbeats": cold.get("recorded_heartbeats"),
+                "cold_heartbeats": cold.get("cold_heartbeats"),
+                "passed": cold.get("passed"),
+                "error": cold.get("error"),
+            }
+        )
     if best is None:
-        answer = {"ok": True, "candidate": None,
-                  "reason": "no model candidate passed every version; the original proof stands"}
+        answer = {
+            "ok": True,
+            "candidate": None,
+            "reason": "no model candidate passed every version; the original proof stands",
+        }
         if rejected:
             answer["reason"] = "no candidate that passed in the Lean session also passed a clean cold compile"
     else:
         proof = (directory / "proofs" / f"{best['id']}.lean").read_text()
         (directory / "submission.lean").write_text(proof)
-        answer = {"ok": True, "candidate": f"#{best['n']}", "candidate_id": best["id"],
-                  "tokens": best["tokens"], "heartbeats": best["heartbeats"], "proxy": best["score"],
-                  "proof_file": "submission.lean",
-                  "verified_by": "cold compile" if cold and cold["confirmed"] else "cold compile (no session used)"}
+        answer = {
+            "ok": True,
+            "candidate": f"#{best['n']}",
+            "candidate_id": best["id"],
+            "tokens": best["tokens"],
+            "heartbeats": best["heartbeats"],
+            "proxy": best["score"],
+            "proof_file": "submission.lean",
+            "verified_by": "cold compile" if cold and cold["confirmed"] else "cold compile (no session used)",
+        }
         if cold and cold["confirmed"]:
             # The clean compile is the certified measurement; the session figure is kept for audit.
             answer["session_heartbeats"] = best["heartbeats"]
@@ -2276,8 +2856,12 @@ def frontier(run_id: str) -> dict:
     ideas: dict[str, dict] = {}
     for item in history:
         if item.get("kind") == "idea":
-            ideas[item["id"]] = {"id": item["id"], "title": item["title"], "status": item["status"],
-                                 "reason": item.get("reason") or None}
+            ideas[item["id"]] = {
+                "id": item["id"],
+                "title": item["title"],
+                "status": item["status"],
+                "reason": item.get("reason") or None,
+            }
         elif item.get("kind") == "idea_update" and item["id"] in ideas:
             ideas[item["id"]].update({k: item[k] for k in ("title", "status", "reason") if k in item})
     probe_numbers = _probe_numbers(history)
@@ -2293,23 +2877,42 @@ def frontier(run_id: str) -> dict:
         idea["last_failure"] = (f"#{last['n']}: " + _failure_text(last["evaluations"][-1]["result"])) if last else None
     for row in rows:
         if row["status"] == "fail" and row["evaluations"]:
-            failures.append({"ref": f"#{row['n']}", "idea_id": row["idea_id"],
-                             "error": _failure_text(row["evaluations"][-1]["result"])})
+            failures.append(
+                {
+                    "ref": f"#{row['n']}",
+                    "idea_id": row["idea_id"],
+                    "error": _failure_text(row["evaluations"][-1]["result"]),
+                }
+            )
     for item in history:
         if item.get("kind") == "probe" and _probe_failed(item["result"]):
-            failures.append({"ref": probe_numbers[item["proof_id"]], "idea_id": item.get("idea_id"),
-                             "error": _failure_text(item["result"])})
-    top = sorted((r for r in rows if r["status"] in ("full", "primary") and r["origin"] != "reference"),
-                 key=lambda r: (r["verified"], r["score"] or -1), reverse=True)[:5]
+            failures.append(
+                {
+                    "ref": probe_numbers[item["proof_id"]],
+                    "idea_id": item.get("idea_id"),
+                    "error": _failure_text(item["result"]),
+                }
+            )
+    top = sorted(
+        (r for r in rows if r["status"] in ("full", "primary") and r["origin"] != "reference"),
+        key=lambda r: (r["verified"], r["score"] or -1),
+        reverse=True,
+    )[:5]
     evaluations = sum(len(r["evaluations"]) for r in rows)
     current_id = _current_active_idea(history)
     current_idea = next((idea for idea in ideas.values() if idea["id"] == current_id), None)
-    return {"best": _brief(_best(rows)), "top": [_brief(r) | {"idea_id": r["idea_id"]} for r in top],
-            "ideas": list(ideas.values()), "recent_failures": failures[-3:],
-            "current_idea": current_idea,
-            "candidates": len(rows), "evaluations": evaluations,
-            "probes": len(probe_numbers), "advisory": _advisory(rows),
-            "routes": route_table(history)}
+    return {
+        "best": _brief(_best(rows)),
+        "top": [_brief(r) | {"idea_id": r["idea_id"]} for r in top],
+        "ideas": list(ideas.values()),
+        "recent_failures": failures[-3:],
+        "current_idea": current_idea,
+        "candidates": len(rows),
+        "evaluations": evaluations,
+        "probes": len(probe_numbers),
+        "advisory": _advisory(rows),
+        "routes": route_table(history),
+    }
 
 
 def _probe_failed(result: dict) -> bool:

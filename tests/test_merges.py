@@ -18,17 +18,32 @@ PROXY = {BASE: 40.0, LEFT: 60.0, RIGHT: 55.0, MERGED: 80.0}
 def fake_eval(_name, proof, mode, known=None):
     compat = {"v1": {"passed": True}}
     score = PROXY[proof]
-    return {"ok": True, "mode": mode, "tokens": len(proof), "heartbeat": 3, "compat": compat, "local_proxy": None,
-            "metrics": {"tokens": len(proof), "heartbeats": 3, "compiled": True, "proxy": score if mode == "full" else None,
-                        "estimated_proxy": score}}
+    return {
+        "ok": True,
+        "mode": mode,
+        "tokens": len(proof),
+        "heartbeat": 3,
+        "compat": compat,
+        "local_proxy": None,
+        "metrics": {
+            "tokens": len(proof),
+            "heartbeats": 3,
+            "compiled": True,
+            "proxy": score if mode == "full" else None,
+            "estimated_proxy": score,
+        },
+    }
 
 
 class MergeReportTests(unittest.TestCase):
     def run_merge(self):
-        stack = [patch.object(campaign, "problem", return_value={"name": "T"}), patch.object(campaign, "validate_proof"),
-                 patch.object(campaign, "versions", return_value=[("v1", "a")]),
-                 patch.object(campaign, "evaluate", side_effect=fake_eval),
-                 patch.object(campaign, "materialize")]
+        stack = [
+            patch.object(campaign, "problem", return_value={"name": "T"}),
+            patch.object(campaign, "validate_proof"),
+            patch.object(campaign, "versions", return_value=[("v1", "a")]),
+            patch.object(campaign, "evaluate", side_effect=fake_eval),
+            patch.object(campaign, "materialize"),
+        ]
         for item in stack:
             item.start()
             self.addCleanup(item.stop)
@@ -59,6 +74,7 @@ class MergeReportTests(unittest.TestCase):
         answer = campaign.submission("m")
         self.assertEqual(answer["candidate"], "#2", "the best model-written candidate, not the 80.0 combination")
         self.assertEqual((directory / "submission.lean").read_text(), LEFT)
+
 
 if __name__ == "__main__":
     unittest.main()

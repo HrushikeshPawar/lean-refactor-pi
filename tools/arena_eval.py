@@ -17,8 +17,7 @@ def main() -> int:
     try:
         result = evaluate(args.name, args.proof_file.read_text(), args.mode)
     except (ValueError, FileNotFoundError) as exc:
-        print(json.dumps({"ok": False, "name": args.name, "mode": args.mode,
-                          "error": str(exc)}, ensure_ascii=False))
+        print(json.dumps({"ok": False, "name": args.name, "mode": args.mode, "error": str(exc)}, ensure_ascii=False))
         return 2
     print(json.dumps(result, ensure_ascii=False))
     return 0

@@ -59,20 +59,29 @@ def slim_probes(payload: dict, history: list[dict]) -> list[dict]:
         passed = bool(compat) and all(v.get("passed") for v in compat.values())
         goals = first.get("goals") or []
         counts = first.get("diagnostic_counts")
-        headlines = first.get("error_headlines") or [d.get("message") for d in diagnostics
-                                                      if isinstance(d, dict) and d.get("severity") == "error"]
-        rows.append({
-            "proof_id": identifier, "idea_id": probe.get("idea_id"), "parent": probe.get("parent"),
-            "ts": probe.get("ts"), "route": routes.get(identifier),
-            "status": "skeleton" if passed and sorry else "pass" if passed else "fail",
-            "tokens": result.get("tokens"), "heartbeat": first.get("heartbeats"),
-            "goals": len(goals),
-            "first_goal": _clip(goals[0].get("goals") if goals and isinstance(goals[0], dict) else "", 600),
-            "errors": counts.get("errors") if isinstance(counts, dict) else None,
-            "headlines": [_clip(h, 220) for h in headlines[:3]],
-            "result": {"tokens": result.get("tokens"),
-                       "compat": {v: {"passed": bool(r.get("passed"))} for v, r in compat.items()}},
-        })
+        headlines = first.get("error_headlines") or [
+            d.get("message") for d in diagnostics if isinstance(d, dict) and d.get("severity") == "error"
+        ]
+        rows.append(
+            {
+                "proof_id": identifier,
+                "idea_id": probe.get("idea_id"),
+                "parent": probe.get("parent"),
+                "ts": probe.get("ts"),
+                "route": routes.get(identifier),
+                "status": "skeleton" if passed and sorry else "pass" if passed else "fail",
+                "tokens": result.get("tokens"),
+                "heartbeat": first.get("heartbeats"),
+                "goals": len(goals),
+                "first_goal": _clip(goals[0].get("goals") if goals and isinstance(goals[0], dict) else "", 600),
+                "errors": counts.get("errors") if isinstance(counts, dict) else None,
+                "headlines": [_clip(h, 220) for h in headlines[:3]],
+                "result": {
+                    "tokens": result.get("tokens"),
+                    "compat": {v: {"passed": bool(r.get("passed"))} for v, r in compat.items()},
+                },
+            }
+        )
     return rows
 
 
@@ -108,14 +117,20 @@ def graph_payload(run_id: str) -> dict:
             # Cache hit rate: cache_read over every prompt token (input + cache_read + cache_write).
             prompt = tokens.get("input", 0) + tokens.get("cache_read", 0) + tokens.get("cache_write", 0)
             ts = event.get("ts")
-            costs.append({"number": len(costs) + 1, "spent_usd": charged, "request_usd": usd,
-                          "parts": dict(parts), "tokens": tokens,
-                          "reuse_pct": 100 * tokens.get("cache_read", 0) / prompt if prompt else None,
-                          # The cost journal stamps milliseconds; the candidate ledger uses seconds.
-                          "ts": ts / 1000 if ts and ts > 1e11 else ts})
+            costs.append(
+                {
+                    "number": len(costs) + 1,
+                    "spent_usd": charged,
+                    "request_usd": usd,
+                    "parts": dict(parts),
+                    "tokens": tokens,
+                    "reuse_pct": 100 * tokens.get("cache_read", 0) / prompt if prompt else None,
+                    # The cost journal stamps milliseconds; the candidate ledger uses seconds.
+                    "ts": ts / 1000 if ts and ts > 1e11 else ts,
+                }
+            )
     payload["cost_timeline"] = costs
-    payload["cost"] = {"spent_usd": charged, "unresolved_usd": sum(unresolved.values()),
-                       "pi_embedded_usd": pi_embedded}
+    payload["cost"] = {"spent_usd": charged, "unresolved_usd": sum(unresolved.values()), "pi_embedded_usd": pi_embedded}
     payload["baseline"] = baseline_point(payload)
     give_reference_its_numbers(payload)
     config = directory / "run-config.json"
@@ -140,8 +155,10 @@ def graph_payload(run_id: str) -> dict:
                 else:
                     missing_entries += 1
         payload["cost_report"]["pi_embedded_estimate"] = {
-            "usd": embedded_total, "priced_entries": priced_entries,
-            "missing_entries": missing_entries}
+            "usd": embedded_total,
+            "priced_entries": priced_entries,
+            "missing_entries": missing_entries,
+        }
     return payload
 
 
@@ -153,11 +170,20 @@ def baseline_point(payload: dict) -> dict | None:
         return None
     try:
         from arena.scoring import reference as published
+
         tokens, heartbeats = published(payload["theorem"])
     except (ValueError, ImportError, KeyError):
         return None
-    return {"number": 0, "candidate_id": reference["id"], "mode": "reference", "status": "full",
-            "tokens": tokens, "heartbeat": heartbeats, "local_proxy": round(100 / 3, 2), "is_reference": True}
+    return {
+        "number": 0,
+        "candidate_id": reference["id"],
+        "mode": "reference",
+        "status": "full",
+        "tokens": tokens,
+        "heartbeat": heartbeats,
+        "local_proxy": round(100 / 3, 2),
+        "is_reference": True,
+    }
 
 
 def give_reference_its_numbers(payload: dict) -> None:
@@ -167,23 +193,33 @@ def give_reference_its_numbers(payload: dict) -> None:
     node = next((n for n in payload.get("nodes", []) if n.get("origin") == "reference"), None)
     if not point or not node or node.get("tokens") is not None:
         return
-    node.update({"status": "full", "tokens": point["tokens"], "heartbeat": point["heartbeat"],
-                 "local_proxy": point["local_proxy"]})
+    node.update(
+        {
+            "status": "full",
+            "tokens": point["tokens"],
+            "heartbeat": point["heartbeat"],
+            "local_proxy": point["local_proxy"],
+        }
+    )
 
 
-VIEWER_FILES = {"": ("index.html", "text/html; charset=utf-8"),
-                "index.html": ("index.html", "text/html; charset=utf-8"),
-                "app.js": ("app.js", "text/javascript; charset=utf-8"),
-                "highlight.js": ("highlight.js", "text/javascript; charset=utf-8"),
-                "style.css": ("style.css", "text/css; charset=utf-8"),
-                "dashboard.html": ("dashboard.html", "text/html; charset=utf-8"),
-                "dashboard.js": ("dashboard.js", "text/javascript; charset=utf-8"),
-                "charts.js": ("charts.js", "text/javascript; charset=utf-8"),
-                "dashboard.css": ("dashboard.css", "text/css; charset=utf-8")}
-HUB_FILES = {"": ("hub.html", "text/html; charset=utf-8"),
-             "index.html": ("hub.html", "text/html; charset=utf-8"),
-             "hub.js": ("hub.js", "text/javascript; charset=utf-8"),
-             "hub.css": ("hub.css", "text/css; charset=utf-8")}
+VIEWER_FILES = {
+    "": ("index.html", "text/html; charset=utf-8"),
+    "index.html": ("index.html", "text/html; charset=utf-8"),
+    "app.js": ("app.js", "text/javascript; charset=utf-8"),
+    "highlight.js": ("highlight.js", "text/javascript; charset=utf-8"),
+    "style.css": ("style.css", "text/css; charset=utf-8"),
+    "dashboard.html": ("dashboard.html", "text/html; charset=utf-8"),
+    "dashboard.js": ("dashboard.js", "text/javascript; charset=utf-8"),
+    "charts.js": ("charts.js", "text/javascript; charset=utf-8"),
+    "dashboard.css": ("dashboard.css", "text/css; charset=utf-8"),
+}
+HUB_FILES = {
+    "": ("hub.html", "text/html; charset=utf-8"),
+    "index.html": ("hub.html", "text/html; charset=utf-8"),
+    "hub.js": ("hub.js", "text/javascript; charset=utf-8"),
+    "hub.css": ("hub.css", "text/css; charset=utf-8"),
+}
 
 
 class Runs:
@@ -202,8 +238,11 @@ class Runs:
         if self.pattern:
             root = run_dir("x").parent
             for path in sorted(root.iterdir()) if root.is_dir() else []:
-                if (fnmatch.fnmatchcase(path.name, self.pattern) and path.name not in found
-                        and (path / "ledger.jsonl").exists()):
+                if (
+                    fnmatch.fnmatchcase(path.name, self.pattern)
+                    and path.name not in found
+                    and (path / "ledger.jsonl").exists()
+                ):
                     found.append(path.name)
         return found
 
@@ -218,6 +257,7 @@ def run_card(run_id: str, langfuse: Langfuse | None = None) -> dict:
 
 def run_dashboard_start(run_id: str) -> float | None:
     from arena.viewer_data import _start_end
+
     return _start_end(run_dir(run_id))[0]
 
 
@@ -240,23 +280,32 @@ def handler_for(runs: Runs | str, langfuse: Langfuse | None = None):
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Assets-Version", assets_version())
             self.send_header("X-Content-Type-Options", "nosniff")
-            self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; "
-                             "connect-src 'self'; frame-src 'self'; frame-ancestors 'self'")
+            self.send_header(
+                "Content-Security-Policy",
+                "default-src 'self'; script-src 'self'; style-src 'self'; "
+                "connect-src 'self'; frame-src 'self'; frame-ancestors 'self'",
+            )
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
 
         def viewer(self, run_id: str, rest: str) -> None:
             if rest == "graph.json":
-                self.send(json.dumps(graph_payload(run_id), ensure_ascii=False).encode(),
-                          "application/json; charset=utf-8")
+                self.send(
+                    json.dumps(graph_payload(run_id), ensure_ascii=False).encode(), "application/json; charset=utf-8"
+                )
             elif rest == "dashboard.json":
-                self.send(json.dumps(run_dashboard(run_id, run_dir(run_id)), ensure_ascii=False).encode(),
-                          "application/json; charset=utf-8")
+                self.send(
+                    json.dumps(run_dashboard(run_id, run_dir(run_id)), ensure_ascii=False).encode(),
+                    "application/json; charset=utf-8",
+                )
             elif rest == "langfuse.json":
                 started = run_dashboard_start(run_id)
-                body = (langfuse.session(run_id, started, refresh="refresh=1" in self.path) if langfuse else
-                        {"available": False, "error": "Langfuse is not configured for this server", "run_id": run_id})
+                body = (
+                    langfuse.session(run_id, started, refresh="refresh=1" in self.path)
+                    if langfuse
+                    else {"available": False, "error": "Langfuse is not configured for this server", "run_id": run_id}
+                )
                 self.send(json.dumps(body, ensure_ascii=False).encode(), "application/json; charset=utf-8")
             elif rest in VIEWER_FILES:
                 filename, content_type = VIEWER_FILES[rest]
@@ -271,8 +320,10 @@ def handler_for(runs: Runs | str, langfuse: Langfuse | None = None):
                     self.viewer(runs.ids()[0], path.lstrip("/"))
                     return
                 if path == "/runs.json":
-                    self.send(json.dumps([run_card(run_id, langfuse) for run_id in runs.ids()], ensure_ascii=False).encode(),
-                              "application/json; charset=utf-8")
+                    self.send(
+                        json.dumps([run_card(run_id, langfuse) for run_id in runs.ids()], ensure_ascii=False).encode(),
+                        "application/json; charset=utf-8",
+                    )
                     return
                 match = re.fullmatch(r"/run/([A-Za-z0-9._-]+)(/(.*))?", path)
                 if match:
@@ -320,8 +371,11 @@ def main() -> None:
     # Open browser connections must not keep the process alive after Ctrl+C.
     server.daemon_threads = True
     kind = "hub" if runs.hub else "viewer"
-    print(f"Arena graph {kind}: http://127.0.0.1:{server.server_port}/ ({len(runs.ids())} run(s) now); "
-          "press Ctrl+C to stop", flush=True)
+    print(
+        f"Arena graph {kind}: http://127.0.0.1:{server.server_port}/ ({len(runs.ids())} run(s) now); "
+        "press Ctrl+C to stop",
+        flush=True,
+    )
 
     def stop(_signum, _frame):
         raise KeyboardInterrupt

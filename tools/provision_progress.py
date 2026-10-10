@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Live progress of workspace provisioning, read from runs/provision/<source>-<version>.log.
 
-    python tools/provision_progress.py                 # once
-    python tools/provision_progress.py --watch         # refresh every 3 s until everything is done
-    python tools/provision_progress.py --only cslib-v4.32.0 physlib-v4.32.0
+python tools/provision_progress.py                 # once
+python tools/provision_progress.py --watch         # refresh every 3 s until everything is done
+python tools/provision_progress.py --only cslib-v4.32.0 physlib-v4.32.0
 """
 
 from __future__ import annotations
@@ -16,9 +16,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 LOGS = ROOT / "runs" / "provision"
 # Stages in order, with the share of total time each usually takes.
-STAGES = [("clone", "git clone", 0.05), ("checkout", "git worktree add --detach", 0.05),
-          ("seed Mathlib", "remote.origin.url", 0.05), ("Mathlib cache", "lake exe cache get", 0.35),
-          ("build", "lake build", 0.50)]
+STAGES = [
+    ("clone", "git clone", 0.05),
+    ("checkout", "git worktree add --detach", 0.05),
+    ("seed Mathlib", "remote.origin.url", 0.05),
+    ("Mathlib cache", "lake exe cache get", 0.35),
+    ("build", "lake build", 0.50),
+]
 DEFAULT = ["cslib-v4.33.0-rc2", "cslib-v4.32.0", "cslib-v4.31.0", "physlib-v4.32.0"]
 BAR = 28
 
@@ -30,12 +34,12 @@ def status(name: str) -> tuple[float, str, bool, bool]:
         return 0.0, "waiting to start", False, False
     text = log.read_text(errors="ignore")
     # Only the latest attempt counts; earlier, interrupted attempts stay in the log above it.
-    text = text[text.rfind("=== provisioning"):] if "=== provisioning" in text else text
-    commands = [m for m in re.finditer(r"^\$ (.*)$", text, re.M)]
+    text = text[text.rfind("=== provisioning") :] if "=== provisioning" in text else text
+    commands = list(re.finditer(r"^\$ (.*)$", text, re.M))
     if not commands:
         return 0.0, "starting", False, False
     last = commands[-1]
-    tail = text[last.end():]
+    tail = text[last.end() :]
     stage_index = max((i for i, (_, marker, _) in enumerate(STAGES) if marker in last[1]), default=0)
     done_share = sum(share for _, _, share in STAGES[:stage_index])
     share = STAGES[stage_index][2]
@@ -75,8 +79,10 @@ def render(names: list[str]) -> tuple[str, bool]:
         lines.append(f"{mark} {name:20} [{'█' * filled}{'·' * (BAR - filled)}] {100 * fraction:3.0f}%  {what}")
     overall /= max(1, len(names))
     filled = int(BAR * overall)
-    lines.append(f"\n  {'overall':20} [{'█' * filled}{'·' * (BAR - filled)}] {100 * overall:3.0f}%  "
-                 f"({time.strftime('%H:%M:%S')})")
+    lines.append(
+        f"\n  {'overall':20} [{'█' * filled}{'·' * (BAR - filled)}] {100 * overall:3.0f}%  "
+        f"({time.strftime('%H:%M:%S')})"
+    )
     return "\n".join(lines), finished
 
 

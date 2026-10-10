@@ -15,8 +15,6 @@ from arena.engine import ROOT
 from arena.traces import (
     ORIG_PLUGIN,
     PATCH_SHA256,
-    JournalError,
-    expand_journal,
     judge,
     plugin_problems,
     preflight_block,
@@ -28,47 +26,97 @@ from tests.pi_support import LIVE_LANGFUSE, NAME
 
 
 def _request(identifier: str, payload: dict, ts: int, retry_of: str | None = None) -> dict:
-    return {"kind": "request", "id": identifier, "ts": ts, "model": "deepseek-v4.1-flash",
-            "retry_of": retry_of, "post_hook": payload}
+    return {
+        "kind": "request",
+        "id": identifier,
+        "ts": ts,
+        "model": "deepseek-v4.1-flash",
+        "retry_of": retry_of,
+        "post_hook": payload,
+    }
 
 
 def _wire(identifier: str, payload: dict, index: int = 0) -> dict:
     return {"kind": "wire", "id": identifier, "retry_index": index, "body": json.dumps(payload)}
 
 
-def _generation(payload: dict, text: str, start: str, cost: float = 0.01,
-                tool_calls: list[dict] | None = None) -> dict:
-    output = {"role": "assistant", **({"content": text} if text else {}),
-              **({"tool_calls": tool_calls} if tool_calls else {})}
-    return {"type": "GENERATION", "name": "LLM Call", "id": f"obs-{start}", "traceId": "trace-1",
-            "startTime": start, "sessionId": "run-1", "input": json.dumps(payload),
-            "output": json.dumps(output),
-            "usageDetails": {"input": 300, "output": 40, "cache_read_input_tokens": 4000,
-                             "cache_creation_input_tokens": 100},
-            "totalCost": cost,
-            "metadata": {"assistant_text_meta": {"truncated": False, "orig_len": len(text)}}}
+def _generation(payload: dict, text: str, start: str, cost: float = 0.01, tool_calls: list[dict] | None = None) -> dict:
+    output = {
+        "role": "assistant",
+        **({"content": text} if text else {}),
+        **({"tool_calls": tool_calls} if tool_calls else {}),
+    }
+    return {
+        "type": "GENERATION",
+        "name": "LLM Call",
+        "id": f"obs-{start}",
+        "traceId": "trace-1",
+        "startTime": start,
+        "sessionId": "run-1",
+        "input": json.dumps(payload),
+        "output": json.dumps(output),
+        "usageDetails": {
+            "input": 300,
+            "output": 40,
+            "cache_read_input_tokens": 4000,
+            "cache_creation_input_tokens": 100,
+        },
+        "totalCost": cost,
+        "metadata": {"assistant_text_meta": {"truncated": False, "orig_len": len(text)}},
+    }
 
 
 def _joined(payload: dict | None = None, text: str = "done") -> tuple[list[dict], list[dict]]:
     """One tool-call turn and one text turn, as the patched plugin exports them."""
-    payload = payload or {"model": "deepseek-v4.1-flash", "max_tokens": 2048, "messages": [{"role": "user", "content": "hi"}]}
+    payload = payload or {
+        "model": "deepseek-v4.1-flash",
+        "max_tokens": 2048,
+        "messages": [{"role": "user", "content": "hi"}],
+    }
     usage = {"input": 300, "output": 40, "cache_read": 4000, "cache_write": 100}
     call = {"type": "toolCall", "id": "c1", "name": "arena_skill_read", "arguments": {"page": 1}}
     journal = [
-        _request("a", payload, 1), _wire("a", payload),
-        {"kind": "response", "id": "a", "text": "", "content": [call], "stop_reason": "toolUse",
-         "usage": dict(usage), "settled_usd": 0.01, "price_tier": "base", "pi_cost_usd": 0.01},
+        _request("a", payload, 1),
+        _wire("a", payload),
+        {
+            "kind": "response",
+            "id": "a",
+            "text": "",
+            "content": [call],
+            "stop_reason": "toolUse",
+            "usage": dict(usage),
+            "settled_usd": 0.01,
+            "price_tier": "base",
+            "pi_cost_usd": 0.01,
+        },
         {"kind": "tool_call", "id": "a", "tool_call_id": "c1", "name": "arena_skill_read", "args": {"page": 1}},
         {"kind": "tool_result", "id": "a", "tool_call_id": "c1", "name": "arena_skill_read", "text": "SKILL.md"},
-        _request("b", payload, 2), _wire("b", payload),
-        {"kind": "response", "id": "b", "text": text, "content": [{"type": "text", "text": text}],
-         "stop_reason": "stop", "usage": dict(usage), "settled_usd": 0.01, "price_tier": "base", "pi_cost_usd": 0.01},
+        _request("b", payload, 2),
+        _wire("b", payload),
+        {
+            "kind": "response",
+            "id": "b",
+            "text": text,
+            "content": [{"type": "text", "text": text}],
+            "stop_reason": "stop",
+            "usage": dict(usage),
+            "settled_usd": 0.01,
+            "price_tier": "base",
+            "pi_cost_usd": 0.01,
+        },
     ]
     observations = [
         _generation(payload, "", "2026-10-07T00:00:01Z", tool_calls=[{"id": "c1", "name": "arena_skill_read"}]),
-        {"type": "TOOL", "name": "Tool: arena_skill_read", "id": "tool-1", "traceId": "trace-1",
-         "startTime": "2026-10-07T00:00:02Z", "input": json.dumps({"page": 1}), "output": json.dumps("SKILL.md"),
-         "metadata": {"tool_id": "c1", "tool_name": "arena_skill_read"}},
+        {
+            "type": "TOOL",
+            "name": "Tool: arena_skill_read",
+            "id": "tool-1",
+            "traceId": "trace-1",
+            "startTime": "2026-10-07T00:00:02Z",
+            "input": json.dumps({"page": 1}),
+            "output": json.dumps("SKILL.md"),
+            "metadata": {"tool_id": "c1", "tool_name": "arena_skill_read"},
+        },
         _generation(payload, text, "2026-10-07T00:00:03Z"),
     ]
     return journal, observations
@@ -87,16 +135,25 @@ class JudgeTests(unittest.TestCase):
 
     def test_identical_retries_need_one_generation_each(self):
         payload = {"model": "deepseek-v4.1-flash", "max_tokens": 16000}
-        journal = [_request("a", payload, 1), _wire("a", payload),
-                   {"kind": "response", "id": "a", "text": "", "stop_reason": "error", "settled_usd": None},
-                   _request("b", payload, 2, retry_of="a"), _wire("b", payload),
-                   {"kind": "response", "id": "b", "text": "ok",
-                    "usage": {"input": 300, "output": 40, "cache_read": 4000, "cache_write": 100},
-                    "settled_usd": 0.01, "price_tier": "base", "pi_cost_usd": 0.01}]
+        journal = [
+            _request("a", payload, 1),
+            _wire("a", payload),
+            {"kind": "response", "id": "a", "text": "", "stop_reason": "error", "settled_usd": None},
+            _request("b", payload, 2, retry_of="a"),
+            _wire("b", payload),
+            {
+                "kind": "response",
+                "id": "b",
+                "text": "ok",
+                "usage": {"input": 300, "output": 40, "cache_read": 4000, "cache_write": 100},
+                "settled_usd": 0.01,
+                "price_tier": "base",
+                "pi_cost_usd": 0.01,
+            },
+        ]
         one = [_generation(payload, "ok", "2026-10-07T00:00:02Z")]
         self.assertTrue(any("unjoinable" in item or "missing" in item for item in judge(journal, one)))
-        both = [_generation(payload, "", "2026-10-07T00:00:01Z"),
-                _generation(payload, "ok", "2026-10-07T00:00:02Z")]
+        both = [_generation(payload, "", "2026-10-07T00:00:01Z"), _generation(payload, "ok", "2026-10-07T00:00:02Z")]
         self.assertEqual(judge(journal, both), [])
 
     def test_a_request_without_its_wire_body_fails(self):
@@ -109,7 +166,9 @@ class JudgeTests(unittest.TestCase):
 
     def test_a_tool_call_only_turn_is_still_compared(self):
         journal, observations = _joined()
-        observations[0]["output"] = json.dumps({"role": "assistant", "tool_calls": [{"id": "c9", "name": "arena_skill_read"}]})
+        observations[0]["output"] = json.dumps(
+            {"role": "assistant", "tool_calls": [{"id": "c9", "name": "arena_skill_read"}]}
+        )
         self.assertTrue(any("tool calls do not match" in item for item in judge(journal, observations)))
         journal, observations = _joined()
         observations[0]["output"] = json.dumps({"role": "assistant", "content": "stray"})
@@ -145,21 +204,28 @@ class JudgeTests(unittest.TestCase):
 
         journal, observations = _joined()
         journal[-1]["usage"]["output"] = 41
-        observations[2]["usageDetails"] = {"input": 300, "output": 24, "output_reasoning_tokens": 17,
-                                           "cache_read_input_tokens": 4000, "cache_creation_input_tokens": 100}
+        observations[2]["usageDetails"] = {
+            "input": 300,
+            "output": 24,
+            "output_reasoning_tokens": 17,
+            "cache_read_input_tokens": 4000,
+            "cache_creation_input_tokens": 100,
+        }
         self.assertEqual(judge(journal, observations), [])
 
     def test_a_text_only_preflight_is_missing_its_tool_span(self):
         journal, observations = _joined()
         journal = [row for row in journal if row["id"] != "a"]
-        observations = [item for item in observations[2:]]
+        observations = list(observations[2:])
         self.assertEqual(judge(journal, observations), [])
         self.assertTrue(any("tool" in item for item in preflight_problems(journal, observations)))
         self.assertEqual(preflight_problems(*_joined()), [])
 
 
-@unittest.skipUnless(ORIG_PLUGIN.joinpath("src/index.ts").is_file(),
-                     "needs the original Langfuse plugin 0.1.2 backup under ~/.pi/agent/patches")
+@unittest.skipUnless(
+    ORIG_PLUGIN.joinpath("src/index.ts").is_file(),
+    "needs the original Langfuse plugin 0.1.2 backup under ~/.pi/agent/patches",
+)
 class PluginTests(unittest.TestCase):
     @unittest.skipUnless(LIVE_LANGFUSE, "set ARENA_LIVE_LANGFUSE=1 to check the installed plugin")
     def test_vendored_patch_reproduces_the_installed_plugin(self):
@@ -182,8 +248,14 @@ class ReceiptTests(unittest.TestCase):
     def test_receipt_is_owner_only_and_blocks_a_model_it_does_not_cover(self):
         path = Path(tempfile.mkdtemp()) / "preflight.json"
         self.addCleanup(shutil.rmtree, path.parent, True)
-        write_receipt({"status": "pass", "patch_sha256": PATCH_SHA256,
-                       "models": {"deepseek-v4.1-flash": {"session_id": "s", "trace_ids": ["t"]}}}, path)
+        write_receipt(
+            {
+                "status": "pass",
+                "patch_sha256": PATCH_SHA256,
+                "models": {"deepseek-v4.1-flash": {"session_id": "s", "trace_ids": ["t"]}},
+            },
+            path,
+        )
         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
         previous = os.environ.get("ARENA_PREFLIGHT_RECEIPT")
         os.environ["ARENA_PREFLIGHT_RECEIPT"] = str(path)
@@ -206,9 +278,26 @@ class MatrixGateTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, missing.parent, True)
         env = {**os.environ, "ARENA_PREFLIGHT_RECEIPT": str(missing)}
         proc = subprocess.run(
-            [sys.executable, "tools/run_experiment_matrix.py", "--theorem", NAME, "--prefix", prefix,
-             "--factor", "thinking", "--values", "low,high", "--cap", "0.1"],
-            cwd=ROOT, env=env, text=True, capture_output=True, timeout=30)
+            [
+                sys.executable,
+                "tools/run_experiment_matrix.py",
+                "--theorem",
+                NAME,
+                "--prefix",
+                prefix,
+                "--factor",
+                "thinking",
+                "--values",
+                "low,high",
+                "--cap",
+                "0.1",
+            ],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=30,
+        )
         self.assertNotEqual(proc.returncode, 0, proc.stdout)
         self.assertIn("preflight", proc.stderr.lower())
         self.assertFalse((ROOT / "runs" / "pi-budget" / f"{prefix}-matrix").exists())
@@ -219,8 +308,24 @@ class MatrixGateTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, missing.parent, True)
         env = {**os.environ, "ARENA_PREFLIGHT_RECEIPT": str(missing)}
         proc = subprocess.run(
-            [sys.executable, "tools/run_experiment_matrix.py", "--theorem", NAME, "--prefix", prefix,
-             "--factor", "thinking", "--values", "low,high", "--dry-run"],
-            cwd=ROOT, env=env, text=True, capture_output=True, timeout=30)
+            [
+                sys.executable,
+                "tools/run_experiment_matrix.py",
+                "--theorem",
+                NAME,
+                "--prefix",
+                prefix,
+                "--factor",
+                "thinking",
+                "--values",
+                "low,high",
+                "--dry-run",
+            ],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=30,
+        )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn(prefix, proc.stdout)

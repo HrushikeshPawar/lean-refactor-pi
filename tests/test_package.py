@@ -1,4 +1,5 @@
 """Offline tests for the submission packager: fixture run directories, no Pi, Lean or network."""
+
 import json
 import subprocess
 import tarfile
@@ -22,35 +23,73 @@ class Fixture(unittest.TestCase):
         self.root = Path(self._tmp.name)
         self.runs = self.root / "runs"
         self.manifest = self.root / "warmup.jsonl"
-        self.manifest.write_text("\n".join(json.dumps({"name": n, "source": "s", "statement": s})
-                                           for n, s in STATEMENTS.items()) + "\n")
+        self.manifest.write_text(
+            "\n".join(json.dumps({"name": n, "source": "s", "statement": s}) for n, s in STATEMENTS.items()) + "\n"
+        )
 
-    def run_dir(self, run_id, theorem="A.one", model="deepseek-v4.1-flash", proof=None, origin="model", spend=(0.5,),
-                verified_by="cold compile", journal=True, candidate=True, passed=True, retry=False,
-                config=None, proxy=70.0, cold=None):
+    def run_dir(
+        self,
+        run_id,
+        theorem="A.one",
+        model="deepseek-v4.1-flash",
+        proof=None,
+        origin="model",
+        spend=(0.5,),
+        verified_by="cold compile",
+        journal=True,
+        candidate=True,
+        passed=True,
+        retry=False,
+        config=None,
+        proxy=70.0,
+        cold=None,
+    ):
         d = self.runs / run_id
         d.mkdir(parents=True)
         statement = STATEMENTS[theorem]
         proof = proof if proof is not None else statement + " := by\n  rfl\n"
         cid = sha(theorem + "\0" + proof)
-        (d / "run-config.json").write_text(json.dumps({"theorem": theorem, "model": model, "thinking": "high",
-                                                       "packet_sha256": "p" * 64, **(config or {})}))
+        (d / "run-config.json").write_text(
+            json.dumps(
+                {"theorem": theorem, "model": model, "thinking": "high", "packet_sha256": "p" * 64, **(config or {})}
+            )
+        )
         versions = [["v4.29.1", "c" * 40]]
-        ledger = [{"ts": 1.0, "kind": "init", "theorem": theorem, "versions": versions},
-                  {"ts": 2.0, "kind": "candidate", "candidate_id": cid, "origin": origin,
-                   "source_versions": versions, "evaluator_sha256": "e" * 64},
-                  {"ts": 3.0, "kind": "candidate", "candidate_id": "x" * 64, "origin": "model",
-                   "source_versions": versions},
-                  {"ts": 4.0, "kind": "evaluation", "candidate_id": cid, "mode": "full",
-                   "result": {"metrics": {"score": proxy},
-                              "compat": {"v4.29.1": {"passed": passed, "lean": {"path": "cold"}}}}}]
+        ledger = [
+            {"ts": 1.0, "kind": "init", "theorem": theorem, "versions": versions},
+            {
+                "ts": 2.0,
+                "kind": "candidate",
+                "candidate_id": cid,
+                "origin": origin,
+                "source_versions": versions,
+                "evaluator_sha256": "e" * 64,
+            },
+            {"ts": 3.0, "kind": "candidate", "candidate_id": "x" * 64, "origin": "model", "source_versions": versions},
+            {
+                "ts": 4.0,
+                "kind": "evaluation",
+                "candidate_id": cid,
+                "mode": "full",
+                "result": {
+                    "metrics": {"score": proxy},
+                    "compat": {"v4.29.1": {"passed": passed, "lean": {"path": "cold"}}},
+                },
+            },
+        ]
         if cold is not None:
             ledger.append({"ts": 5.0, "kind": "cold_verification", "candidate_id": cid, "confirmed": cold})
         (d / "ledger.jsonl").write_text("\n".join(map(json.dumps, ledger)) + "\n")
         answer = {"ok": True, "candidate": "#2" if candidate else None}
         if candidate:
-            answer |= {"candidate_id": cid, "tokens": 10, "heartbeats": 5, "proxy": proxy,
-                       "proof_file": "submission.lean", "verified_by": verified_by}
+            answer |= {
+                "candidate_id": cid,
+                "tokens": 10,
+                "heartbeats": 5,
+                "proxy": proxy,
+                "proof_file": "submission.lean",
+                "verified_by": verified_by,
+            }
             (d / "submission.lean").write_text(proof)
             (d / "proofs").mkdir()
             (d / "proofs" / f"{cid}.lean").write_text(proof)
@@ -58,11 +97,20 @@ class Fixture(unittest.TestCase):
         cost, trace = [], []
         for i, usd in enumerate(spend):
             rid = f"{run_id}-r{i}"
-            cost += [{"kind": "reserve", "id": rid, "usd": usd * 2},
-                     {"kind": "settle", "id": rid, "usd": usd, "usage_known": True, "ts": 10 + i}]
-            trace += [{"kind": "request", "id": rid, "model": model,
-                       "retry_of": f"{run_id}-r0" if retry and i else None, "trace_id": f"trace-{run_id}"},
-                      {"kind": "response", "id": rid, "response_model": model + "-2026"}]
+            cost += [
+                {"kind": "reserve", "id": rid, "usd": usd * 2},
+                {"kind": "settle", "id": rid, "usd": usd, "usage_known": True, "ts": 10 + i},
+            ]
+            trace += [
+                {
+                    "kind": "request",
+                    "id": rid,
+                    "model": model,
+                    "retry_of": f"{run_id}-r0" if retry and i else None,
+                    "trace_id": f"trace-{run_id}",
+                },
+                {"kind": "response", "id": rid, "response_model": model + "-2026"},
+            ]
         (d / "cost-ledger.jsonl").write_text("\n".join(map(json.dumps, cost)) + "\n")
         if journal:
             (d / "trace-journal.jsonl").write_text("\n".join(map(json.dumps, trace)) + "\n")
@@ -145,17 +193,30 @@ class StageTests(Fixture):
         repo.mkdir()
         (repo / "packages").mkdir()
         (repo / "packages" / "app.py").write_text("print(1)\n")
-        (repo / ".gitmodules").write_text("[submodule \"x\"]\n")
-        run = lambda *a: subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", *a],
-                                        check=True, capture_output=True)
+        (repo / ".gitmodules").write_text('[submodule "x"]\n')
+
+        def run(*a):
+            return subprocess.run(
+                ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", *a],
+                check=True,
+                capture_output=True,
+            )
+
         run("init", "-q")
         run("add", ".")
         run("commit", "-qm", "init")
         return repo
 
     def stage(self, *ids, **kw):
-        return package.stage("test-pack", list(ids), runs_root=self.runs, manifest_path=self.manifest,
-                             output_root=self.root / "out", repo=self.repo(), **kw)
+        return package.stage(
+            "test-pack",
+            list(ids),
+            runs_root=self.runs,
+            manifest_path=self.manifest,
+            output_root=self.root / "out",
+            repo=self.repo(),
+            **kw,
+        )
 
     def test_stage_outputs_provenance_archive_report(self):
         cid, proof = self.run_dir("good", spend=(0.4, 0.3), retry=True)
@@ -219,6 +280,7 @@ class StageTests(Fixture):
     def test_pluggable_template(self):
         self.run_dir("g")
         from string import Template
+
         out = self.stage("g", template=Template("T:$title|$approach|$models|$budget|$reproduction"))
         self.assertTrue((out / "report.md").read_text().startswith("T:Arena submission report: test-pack"))
 

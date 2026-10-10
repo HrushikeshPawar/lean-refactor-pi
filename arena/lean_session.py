@@ -23,7 +23,6 @@ import fcntl
 import hashlib
 import json
 import os
-import re
 import signal
 import socket
 import socketserver
@@ -31,10 +30,10 @@ import subprocess
 import sys
 import threading
 import time
-from contextlib import contextmanager, nullcontext
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, nullcontext, suppress
 from functools import lru_cache
 from pathlib import Path
-from typing import Callable, Iterator
 
 ROOT = Path(__file__).resolve().parents[1]
 ENV = "ARENA_LEAN_SESSION"
@@ -42,21 +41,29 @@ PROTOCOL = 1
 SOCKET_NAME = "lean-session.sock"
 INFO_NAME = "lean-session.json"
 SESSION_FILES = (SOCKET_NAME, INFO_NAME, "lean-session", "lean-session.waiting")
-MAX_SLOTS = 4            # concurrent documents (workers) per toolchain
-MAX_WORKERS = 6          # across toolchains, one daemon
-BACKGROUND_SLOTS = 1     # per toolchain entry: its own warm background worker, which model requests never take (and that never takes theirs)
-BACKGROUND_TOKENS = 64   # token files kept past the machine limit for the background workers (one per toolchain a live session checks)
+MAX_SLOTS = 4  # concurrent documents (workers) per toolchain
+MAX_WORKERS = 6  # across toolchains, one daemon
+BACKGROUND_SLOTS = 1  # per toolchain entry: its own warm background worker, which model requests never take (and that never takes theirs)
+BACKGROUND_TOKENS = (
+    64  # token files kept past the machine limit for the background workers (one per toolchain a live session checks)
+)
 BACKGROUND_IDLE_S = 900  # a background worker nobody asked for in this long is closed
-MODEL_QUEUE_TIMEOUT = float(os.environ.get("ARENA_LEAN_QUEUE_TIMEOUT", "900"))  # a model request may wait this long for a free worker; not charged to its check timeout
-QUEUE_LOG_S = 30         # waits for a worker longer than this are logged
-OPEN_TIMEOUT = 900       # a fresh worker's header (imports) may take this long; not charged to a request's timeout
-MACHINE_MAX_WORKERS = int(os.environ.get("ARENA_MACHINE_MAX_WORKERS", "8"))  # model workers across every daemon on the machine (background workers are extra)
+MODEL_QUEUE_TIMEOUT = float(
+    os.environ.get("ARENA_LEAN_QUEUE_TIMEOUT", "900")
+)  # a model request may wait this long for a free worker; not charged to its check timeout
+QUEUE_LOG_S = 30  # waits for a worker longer than this are logged
+OPEN_TIMEOUT = 900  # a fresh worker's header (imports) may take this long; not charged to a request's timeout
+MACHINE_MAX_WORKERS = int(
+    os.environ.get("ARENA_MACHINE_MAX_WORKERS", "8")
+)  # model workers across every daemon on the machine (background workers are extra)
 TOKEN_DIR_NAME = "arena-lean-workers"
-OPENING_NAME = "opening.lock"  # held by whichever worker on the machine is loading its imports (see WorkerBudget.opening)
-WORKER_GB = 3.0          # planning figure until a real worker has been measured
-RESERVE_GB = 5.0         # memory that must stay available after opening another worker
-IDLE_SECONDS = 600       # a toolchain nobody asked for in this long is closed
-SOCKET_LIMIT = 100       # sun_path is 108 bytes
+OPENING_NAME = (
+    "opening.lock"  # held by whichever worker on the machine is loading its imports (see WorkerBudget.opening)
+)
+WORKER_GB = 3.0  # planning figure until a real worker has been measured
+RESERVE_GB = 5.0  # memory that must stay available after opening another worker
+IDLE_SECONDS = 600  # a toolchain nobody asked for in this long is closed
+SOCKET_LIMIT = 100  # sun_path is 108 bytes
 # The server asks `lake setup-file` for the file's options and imports. Those options (a lakefile's
 # `leanOptions`, such as warnings as errors) are not what `lake env lean <file>` compiles with, so
 # the session must not receive them: `lake env` supplies LEAN_PATH, and pointing LAKE at nothing
@@ -87,8 +94,9 @@ def server_lean_path(project: str) -> str | None:
     """The reordered LEAN_PATH the language server should run with (computed once per project), or None when
     `lake env printenv LEAN_PATH` fails: the server then runs with lake's own order."""
     try:
-        done = subprocess.run(["lake", "env", "printenv", "LEAN_PATH"], cwd=project, capture_output=True,
-                              text=True, timeout=120)
+        done = subprocess.run(
+            ["lake", "env", "printenv", "LEAN_PATH"], cwd=project, capture_output=True, text=True, timeout=120
+        )
         value = done.stdout.strip()
         if done.returncode != 0 or not value:
             return None
@@ -100,10 +108,8 @@ def server_lean_path(project: str) -> str | None:
 def _log(message: str) -> None:
     """One timestamped line on stderr, which `start_daemon` points at lean-session.log: the only record of why
     a probe went cold (worker refused, evicted, timed out) once the run is over."""
-    try:
+    with suppress(OSError, ValueError):
         print(f"{time.strftime('%H:%M:%S')} {message}", file=sys.stderr, flush=True)
-    except (OSError, ValueError):
-        pass
 
 
 def memory_pressure(directory: Path, within: float = WAITING_SECONDS) -> bool:
@@ -272,6 +278,7 @@ def code_sha() -> str:
 
 def fingerprint(project: Path) -> dict:
     """What a session's elaborated state depends on besides the file text."""
+
     def read(name: str) -> str:
         try:
             return (project / name).read_text()
@@ -279,9 +286,12 @@ def fingerprint(project: Path) -> dict:
             return ""
 
     head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=project, text=True, capture_output=True).stdout.strip()
-    return {"toolchain": read("lean-toolchain").strip(), "pin": head,
-            "manifest": hashlib.sha256(read("lake-manifest.json").encode()).hexdigest()[:16],
-            "code": code_sha()}
+    return {
+        "toolchain": read("lean-toolchain").strip(),
+        "pin": head,
+        "manifest": hashlib.sha256(read("lake-manifest.json").encode()).hexdigest()[:16],
+        "code": code_sha(),
+    }
 
 
 # -- rendering ---------------------------------------------------------------------------------
@@ -369,14 +379,25 @@ class LeanServer:
         self.log.parent.mkdir(parents=True, exist_ok=True)
         errors = self.log.open("ab")
         self.process = subprocess.Popen(
-            self.command(), cwd=self.project, stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE, stderr=errors, start_new_session=True)
+            self.command(),
+            cwd=self.project,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=errors,
+            start_new_session=True,
+        )
         errors.close()
         threading.Thread(target=self._read, daemon=True, name="lean-reader").start()
-        reply = self._request("initialize", {
-            "processId": os.getpid(), "rootUri": self.project.as_uri(),
-            "capabilities": {"textDocument": {}},
-            "initializationOptions": {}}, timeout)
+        reply = self._request(
+            "initialize",
+            {
+                "processId": os.getpid(),
+                "rootUri": self.project.as_uri(),
+                "capabilities": {"textDocument": {}},
+                "initializationOptions": {},
+            },
+            timeout,
+        )
         if "error" in reply:
             raise SessionError(f"Lean server rejected initialize: {reply['error']}")
         self._send({"jsonrpc": "2.0", "method": "initialized", "params": {}})
@@ -396,10 +417,8 @@ class LeanServer:
         if process is None:
             return
         tree = process_tree(process.pid)
-        try:
+        with suppress(OSError):
             process.stdin.close()
-        except OSError:
-            pass
         for number in (signal.SIGTERM, signal.SIGKILL):
             try:
                 os.killpg(process.pid, number)
@@ -411,10 +430,8 @@ class LeanServer:
             except subprocess.TimeoutExpired:
                 continue
         for pid in tree + process_tree(process.pid):  # workers have groups of their own
-            try:
+            with suppress(ProcessLookupError, PermissionError):
                 os.kill(pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
 
     # wire
     def _send(self, message: dict) -> None:
@@ -481,10 +498,8 @@ class LeanServer:
         method = message.get("method")
         if method is not None and "id" in message:
             # The server asks the client to refresh editor state; acknowledge so it stops asking.
-            try:
+            with suppress(SessionError):
                 self._send({"jsonrpc": "2.0", "id": message["id"], "result": None})
-            except SessionError:
-                pass
         elif method == "textDocument/publishDiagnostics":
             params = message["params"]
             doc = self.docs.get(params["uri"])
@@ -507,11 +522,26 @@ class LeanServer:
         version = doc.version
         doc.diagnostics = None
         if doc.text is None:
-            self._send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {"textDocument": {
-                "uri": doc.uri, "languageId": "lean4", "version": version, "text": text}}})
+            self._send(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "textDocument/didOpen",
+                    "params": {
+                        "textDocument": {"uri": doc.uri, "languageId": "lean4", "version": version, "text": text}
+                    },
+                }
+            )
         else:
-            self._send({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
-                "textDocument": {"uri": doc.uri, "version": version}, "contentChanges": [{"text": text}]}})
+            self._send(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "textDocument/didChange",
+                    "params": {
+                        "textDocument": {"uri": doc.uri, "version": version},
+                        "contentChanges": [{"text": text}],
+                    },
+                }
+            )
         doc.text = text
         doc.result = None
         return version
@@ -537,8 +567,9 @@ class LeanServer:
             raise SessionError(f"waitForDiagnostics failed: {reply['error'].get('message', reply['error'])[:200]}")
         return round(time.monotonic() - started, 3)
 
-    def check(self, doc: _Doc, text: str, timeout: float, header_end: int | None = None,
-              open_timeout: float = OPEN_TIMEOUT) -> dict:
+    def check(
+        self, doc: _Doc, text: str, timeout: float, header_end: int | None = None, open_timeout: float = OPEN_TIMEOUT
+    ) -> dict:
         """Make `doc` hold `text`; return its diagnostics once Lean has elaborated all of it.
 
         The caller holds the document exclusively. With `header_end`, a fresh document is first opened with
@@ -588,8 +619,11 @@ class LeanServer:
         if published is None or published.get("version") != version:
             self.close_doc(doc)
             raise SessionError("Lean server published no diagnostics for the new text")
-        result = {"diagnostics": published["diagnostics"], "seconds": round(time.monotonic() - started, 3),
-                  "changed_from_line": _first_difference(before, text)}
+        result = {
+            "diagnostics": published["diagnostics"],
+            "seconds": round(time.monotonic() - started, 3),
+            "changed_from_line": _first_difference(before, text),
+        }
         if header_seconds is not None:
             result["header_seconds"] = header_seconds
         if header is not None:
@@ -599,11 +633,10 @@ class LeanServer:
 
     def close_doc(self, doc: _Doc) -> None:
         if doc.text is not None:
-            try:
-                self._send({"jsonrpc": "2.0", "method": "textDocument/didClose",
-                            "params": {"textDocument": {"uri": doc.uri}}})
-            except SessionError:
-                pass
+            with suppress(SessionError):
+                self._send(
+                    {"jsonrpc": "2.0", "method": "textDocument/didClose", "params": {"textDocument": {"uri": doc.uri}}}
+                )
         doc.text = None
         doc.result = None
         doc.header = None
@@ -692,7 +725,10 @@ class _Entry:
         self.growing = False
         self.prefixes: dict[str, str] = {}  # file -> hash of the text before the target declaration
         self.last_header_end: int | None = None
-        self.queues: dict[str, list[object]] = {"model": [], "background": []}  # waiters per lane, first come first served
+        self.queues: dict[str, list[object]] = {
+            "model": [],
+            "background": [],
+        }  # waiters per lane, first come first served
 
     def lane_slots(self, lane: str) -> list[_Doc]:
         return [slot for slot in self.slots if slot.lane == lane]
@@ -790,7 +826,7 @@ class Session:
         else:
             if len(entry.lane_slots("model")) >= self.max_slots:
                 return "slots"
-            share, live = self._share()
+            share, _live = self._share()
             if self._model_total() >= share - 1:
                 return "share"
         free = _available_gb()
@@ -844,8 +880,10 @@ class Session:
                             if slot is not None:
                                 opened = (len(entry.lane_slots(lane)), self._workers())
                         if slot is not None:
-                            _log(f"worker open {entry.project.name} slot {opened[0]}, {opened[1]} workers total"
-                                 + (f" ({lane} lane)" if lane != "model" else ""))
+                            _log(
+                                f"worker open {entry.project.name} slot {opened[0]}, {opened[1]} workers total"
+                                + (f" ({lane} lane)" if lane != "model" else "")
+                            )
                             self._waited(entry, lane, started)
                             return slot
                         if blocked != "slots" and not mine:
@@ -859,8 +897,11 @@ class Session:
                     left = deadline - time.monotonic()
                     if left <= 0:
                         _log(f"timeout {entry.project.name}: no {lane} worker free within {timeout:.0f} s")
-                        raise SessionError("every Lean worker was busy for too long" if lane == "model"
-                                           else "the background Lean worker was busy for too long")
+                        raise SessionError(
+                            "every Lean worker was busy for too long"
+                            if lane == "model"
+                            else "the background Lean worker was busy for too long"
+                        )
                     entry.condition.wait(min(left, 1.0))
             finally:
                 queue.remove(ticket)
@@ -875,17 +916,20 @@ class Session:
     def _refused(self, entry: _Entry, blocked: str) -> None:
         _log(f"refused {entry.project.name}: no room for a Lean worker: {blocked}; {self._workers()} workers open")
         if blocked.startswith("memory"):
-            try:
+            with suppress(OSError):
                 (self.directory / WAITING_NAME).touch()
-            except OSError:
-                pass
 
     def _evict_idle(self, keep: _Entry) -> bool:
         """Close the longest-idle model worker of another toolchain to make room for another model request (never for
         background work, never a background worker); False if none is idle."""
         with self.lock:
-            idle = [(slot.used, other, slot) for other in self.entries.values() if other is not keep
-                    for slot in other.slots if not slot.busy and slot.text is not None and slot.lane == "model"]
+            idle = [
+                (slot.used, other, slot)
+                for other in self.entries.values()
+                if other is not keep
+                for slot in other.slots
+                if not slot.busy and slot.text is not None and slot.lane == "model"
+            ]
             if not idle:
                 return False
             _, other, slot = min(idle, key=lambda item: item[0])
@@ -909,7 +953,12 @@ class Session:
         A batch of drafts needs one warm document each; opening them while the model is thinking
         means the first batch is as fast as the later ones. Memory decides how many fit."""
         with entry.condition:
-            if entry.growing or self.closing or len(entry.lane_slots("model")) >= self.max_slots or entry.last_text is None:
+            if (
+                entry.growing
+                or self.closing
+                or len(entry.lane_slots("model")) >= self.max_slots
+                or entry.last_text is None
+            ):
                 return
             entry.growing = True
         threading.Thread(target=self._grow_all, args=(entry,), daemon=True, name="lean-grow").start()
@@ -922,13 +971,14 @@ class Session:
                     if not entry.server.alive():
                         break
                     with self.lock:
-                        slot, blocked = self._new_slot(entry, "model")
+                        slot, _blocked = self._new_slot(entry, "model")
                         if slot is None:
                             break
                         text, header_end = entry.last_text, entry.last_header_end
                         _log(f"worker open {entry.project.name} slot {len(entry.lane_slots('model'))} (pre-warm)")
-                worker = threading.Thread(target=self._warm, args=(entry, slot, text, header_end), daemon=True,
-                                          name="lean-warm")
+                worker = threading.Thread(
+                    target=self._warm, args=(entry, slot, text, header_end), daemon=True, name="lean-warm"
+                )
                 worker.start()
                 workers.append(worker)
             for worker in workers:
@@ -983,10 +1033,16 @@ class Session:
         finally:
             self._release(entry, slot)
         if outcome.get("timeout"):
-            _log(f"timeout {entry.project.name}: check ran past {timeout:.1f} s ({lane} lane"
-                 + (", worker kept warm)" if outcome.get("warm_kept") else ", worker closed)"))
-            return {"ok": True, "timeout": True, "warm_kept": bool(outcome.get("warm_kept")),
-                    "header_seconds": outcome.get("header_seconds")}
+            _log(
+                f"timeout {entry.project.name}: check ran past {timeout:.1f} s ({lane} lane"
+                + (", worker kept warm)" if outcome.get("warm_kept") else ", worker closed)")
+            )
+            return {
+                "ok": True,
+                "timeout": True,
+                "warm_kept": bool(outcome.get("warm_kept")),
+                "header_seconds": outcome.get("header_seconds"),
+            }
         returncode, text = render(outcome["diagnostics"], request["text"], request["display"])
         self._measure(entry)
         if lane == "model":
@@ -994,12 +1050,18 @@ class Session:
             entry.last_header_end = header_end
             if str(project) == self.primary:
                 self._grow(entry)
-        return {"ok": True, "returncode": returncode, "output": text,
-                "seconds": outcome["seconds"], "new_worker": fresh,
-                "header_seconds": outcome.get("header_seconds"), "lane": lane,
-                "changed_from_line": outcome.get("changed_from_line"),
-                "unchanged": bool(outcome.get("unchanged")),
-                "messages": len(outcome["diagnostics"])}
+        return {
+            "ok": True,
+            "returncode": returncode,
+            "output": text,
+            "seconds": outcome["seconds"],
+            "new_worker": fresh,
+            "header_seconds": outcome.get("header_seconds"),
+            "lane": lane,
+            "changed_from_line": outcome.get("changed_from_line"),
+            "unchanged": bool(outcome.get("unchanged")),
+            "messages": len(outcome["diagnostics"]),
+        }
 
     def warm(self, request: dict) -> dict:
         """Open up to `slots` model-lane workers on one project, each loaded with the header only, in parallel.
@@ -1023,11 +1085,8 @@ class Session:
         except OSError as error:
             return {"ok": False, "reason": f"cannot start Lean: {error}"}
         lane = "background" if request.get("lane") == "background" else "model"
-        share, live = self._share()
-        if lane == "background":
-            allowed = BACKGROUND_SLOTS
-        else:
-            allowed = max(0, min(MAX_SLOTS, self.max_slots, share - 1))
+        share, _live = self._share()
+        allowed = BACKGROUND_SLOTS if lane == "background" else max(0, min(MAX_SLOTS, self.max_slots, share - 1))
         wanted = max(0, min(int(request.get("slots", 1)), allowed))
         if lane == "model":
             entry.last_text, entry.last_header_end = text, header_end
@@ -1072,8 +1131,13 @@ class Session:
                 thread.start()
         for thread in threads:
             thread.join()
-        return {"ok": True, "workers": ready + len(seconds), "seconds": sorted(seconds), "failed": failed,
-                "allowed": allowed}
+        return {
+            "ok": True,
+            "workers": ready + len(seconds),
+            "seconds": sorted(seconds),
+            "failed": failed,
+            "allowed": allowed,
+        }
 
     def _measure(self, entry: _Entry) -> None:
         opened = len([s for s in entry.slots if s.text is not None])
@@ -1084,10 +1148,22 @@ class Session:
 
     def status(self) -> dict:
         with self.lock:
-            return {"pid": os.getpid(), "protocol": PROTOCOL, "code": code_sha(), "servers": [
-                {"project": str(e.project), "workers": len([s for s in e.slots if s.text is not None]),
-                 "busy": len([s for s in e.slots if s.busy]), "gb": round(tree_pss_gb(e.server.pgid), 2),
-                 "pgid": e.server.pgid, "pids": process_tree(e.server.pgid)} for e in self.entries.values()]}
+            return {
+                "pid": os.getpid(),
+                "protocol": PROTOCOL,
+                "code": code_sha(),
+                "servers": [
+                    {
+                        "project": str(e.project),
+                        "workers": len([s for s in e.slots if s.text is not None]),
+                        "busy": len([s for s in e.slots if s.busy]),
+                        "gb": round(tree_pss_gb(e.server.pgid), 2),
+                        "pgid": e.server.pgid,
+                        "pids": process_tree(e.server.pgid),
+                    }
+                    for e in self.entries.values()
+                ],
+            }
 
     def reap_idle(self) -> None:
         with self.lock:
@@ -1127,10 +1203,8 @@ class Session:
             self._stop_entry(entry)
         registration, self.registration = self.registration, None
         if registration is not None:
-            try:
+            with suppress(OSError):
                 (self.budget.directory / registration.name).unlink()
-            except OSError:
-                pass
             registration.release()
 
 
@@ -1156,10 +1230,8 @@ class _Handler(socketserver.StreamRequestHandler):
                 reply = {"ok": False, "reason": f"unknown operation {op!r}"}
         except Exception as error:  # a bug here must degrade to the cold path, never to a wrong answer
             reply = {"ok": False, "reason": f"session error: {type(error).__name__}: {error}"[:300]}
-        try:
+        with suppress(OSError):
             self.wfile.write(json.dumps(reply).encode() + b"\n")
-        except OSError:
-            pass
 
 
 class _Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
@@ -1186,8 +1258,19 @@ def serve(directory: Path, parent: int | None, max_slots: int) -> int:
     info = directory / INFO_NAME
 
     def write_info() -> None:
-        info.write_text(json.dumps({"pid": os.getpid(), "socket": str(path), "code": code_sha(),
-                                    "parent": parent, "pgids": session.pgids(), "pids": session.pids()}) + "\n")
+        info.write_text(
+            json.dumps(
+                {
+                    "pid": os.getpid(),
+                    "socket": str(path),
+                    "code": code_sha(),
+                    "parent": parent,
+                    "pgids": session.pgids(),
+                    "pids": session.pids(),
+                }
+            )
+            + "\n"
+        )
 
     def stop(*_args) -> None:
         threading.Thread(target=server.shutdown, daemon=True).start()
@@ -1209,10 +1292,8 @@ def serve(directory: Path, parent: int | None, max_slots: int) -> int:
             session.reap_idle()
             if (session.pgids(), session.pids()) != last:
                 last = (session.pgids(), session.pids())
-                try:
+                with suppress(OSError):
                     write_info()
-                except OSError:
-                    pass
             time.sleep(1.0)
 
     _log(f"session up (pid {os.getpid()}, max slots {max_slots}, reserve {RESERVE_GB} GB)")
@@ -1252,17 +1333,33 @@ def configured() -> bool:
     return bool(os.environ.get(ENV))
 
 
-def start_daemon(directory: Path, parent: int | None = None, max_slots: int = MAX_SLOTS,
-                 wait: float = 15.0) -> subprocess.Popen:
+def start_daemon(
+    directory: Path, parent: int | None = None, max_slots: int = MAX_SLOTS, wait: float = 15.0
+) -> subprocess.Popen:
     """Start the run's daemon in its own session and wait for its socket. Used by the runner."""
     directory.mkdir(parents=True, exist_ok=True)
     path = socket_path(directory)
     path.unlink(missing_ok=True)
     log = (directory / "lean-session.log").open("ab")
     process = subprocess.Popen(
-        [sys.executable, "-m", "arena.lean_session", "serve", "--run-dir", str(directory),
-         "--parent-pid", str(parent if parent is not None else os.getpid()), "--max-slots", str(max_slots)],
-        cwd=ROOT, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        [
+            sys.executable,
+            "-m",
+            "arena.lean_session",
+            "serve",
+            "--run-dir",
+            str(directory),
+            "--parent-pid",
+            str(parent if parent is not None else os.getpid()),
+            "--max-slots",
+            str(max_slots),
+        ],
+        cwd=ROOT,
+        stdin=subprocess.DEVNULL,
+        stdout=log,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
     log.close()
     deadline = time.monotonic() + wait
     while time.monotonic() < deadline:
@@ -1294,10 +1391,8 @@ def stop_daemon(directory: Path, process: subprocess.Popen | None, grace: float 
             process.kill()
             process.wait()
     for pgid in pgids:  # only matters if the daemon died without cleaning up
-        try:
+        with suppress(ProcessLookupError, PermissionError):
             os.killpg(pgid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
     for pid in pids:
         try:  # a recorded pid may have been reused by now; only ever kill Lean
             if "lean" in Path(f"/proc/{pid}/cmdline").read_text().split("\0")[0]:

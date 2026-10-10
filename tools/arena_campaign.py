@@ -9,14 +9,44 @@ import json
 import subprocess
 from pathlib import Path
 
-from arena.campaign import (autocheck, candidate, declarations, evaluate_request, find, frontier, init, probe,
-                            probe_batch,
-                            profile_request, record_idea, run_dir, set_decision, source_range,
-                            state, submission, write_state)
+from arena.campaign import (
+    autocheck,
+    candidate,
+    declarations,
+    evaluate_request,
+    find,
+    frontier,
+    init,
+    probe,
+    probe_batch,
+    profile_request,
+    record_idea,
+    run_dir,
+    set_decision,
+    source_range,
+    state,
+    submission,
+    write_state,
+)
 from arena.memory import memory
 
-ACTIONS = ("init", "evaluate", "probe", "idea", "frontier", "candidate", "decision", "source",
-           "declarations", "find", "profile", "autocheck", "state", "submission", "memory")
+ACTIONS = (
+    "init",
+    "evaluate",
+    "probe",
+    "idea",
+    "frontier",
+    "candidate",
+    "decision",
+    "source",
+    "declarations",
+    "find",
+    "profile",
+    "autocheck",
+    "state",
+    "submission",
+    "memory",
+)
 
 
 def run(args: argparse.Namespace) -> dict:
@@ -24,22 +54,39 @@ def run(args: argparse.Namespace) -> dict:
         return init(args.theorem, args.run_id)
     if args.action == "evaluate":
         proof = args.proof_file.read_text() if args.proof_file else None
-        return evaluate_request(args.theorem, args.run_id, proof, args.mode, args.parent,
-                                args.hypothesis, args.idea_id, args.candidate, args.from_probe)
+        return evaluate_request(
+            args.theorem,
+            args.run_id,
+            proof,
+            args.mode,
+            args.parent,
+            args.hypothesis,
+            args.idea_id,
+            args.candidate,
+            args.from_probe,
+        )
     if args.action == "probe":
         parent = args.parent[0] if args.parent else None
         if args.draft_file:
             if args.proof_file:
                 raise ValueError("Use proof-file or draft-file, not both")
-            return probe_batch(args.theorem, args.run_id, [path.read_text() for path in args.draft_file],
-                               args.idea_id, parent)
+            return probe_batch(
+                args.theorem, args.run_id, [path.read_text() for path in args.draft_file], args.idea_id, parent
+            )
         if args.proof_file:
             return probe(args.theorem, args.run_id, args.proof_file.read_text(), args.idea_id, parent)
         raise ValueError("Pass proof-file or one to four draft-file values")
     if args.action == "idea":
-        return record_idea(args.run_id, args.title, args.hypothesis, args.region,
-                           json.loads(args.expected_effect) if args.expected_effect else None,
-                           args.idea_id, args.status, args.reason)
+        return record_idea(
+            args.run_id,
+            args.title,
+            args.hypothesis,
+            args.region,
+            json.loads(args.expected_effect) if args.expected_effect else None,
+            args.idea_id,
+            args.status,
+            args.reason,
+        )
     if args.action == "frontier":
         return frontier(args.run_id)
     if args.action == "candidate":
@@ -47,8 +94,9 @@ def run(args: argparse.Namespace) -> dict:
     if args.action == "decision":
         return set_decision(args.run_id, args.candidate, args.decision, args.reason)
     if args.action == "profile":
-        return profile_request(args.theorem, args.run_id, args.candidate,
-                               args.proof_file.read_text() if args.proof_file else None)
+        return profile_request(
+            args.theorem, args.run_id, args.candidate, args.proof_file.read_text() if args.proof_file else None
+        )
     if args.action == "autocheck":
         return autocheck(args.theorem, args.run_id, args.max_seconds)
     if args.action == "state":

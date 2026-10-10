@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Check or reapply the vendored Langfuse Pi plugin patch.
 
-    python tools/langfuse_plugin.py --check
-    python tools/langfuse_plugin.py --apply
+python tools/langfuse_plugin.py --check
+python tools/langfuse_plugin.py --apply
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from arena.traces import apply_plugin, plugin_problems  # noqa: E402
+from arena.traces import apply_plugin, plugin_problems
 
 
 def main() -> int:

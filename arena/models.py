@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import re
-from functools import lru_cache
+from functools import cache
 from pathlib import Path
 
 PATH = Path(__file__).resolve().parents[1] / "models.yaml"
@@ -75,8 +75,9 @@ def _strip_comment(line: str) -> str:
 
 
 def parse(text: str) -> dict:
-    lines = [(len(raw) - len(raw.lstrip(" ")), raw.strip())
-             for raw in map(_strip_comment, text.splitlines()) if raw.strip()]
+    lines = [
+        (len(raw) - len(raw.lstrip(" ")), raw.strip()) for raw in map(_strip_comment, text.splitlines()) if raw.strip()
+    ]
     root: dict = {}
     stack = [(-1, root)]
     for index, (indent, line) in enumerate(lines):
@@ -100,7 +101,9 @@ def parse(text: str) -> dict:
 def _number(owner: str, key: str, value, integer: bool = False) -> None:
     ok = isinstance(value, int) if integer else isinstance(value, (int, float))
     if isinstance(value, bool) or not ok or value <= 0:
-        raise ModelConfigError(f"models.yaml: {owner}.{key} must be a positive {'integer' if integer else 'number'}, got {value!r}")
+        raise ModelConfigError(
+            f"models.yaml: {owner}.{key} must be a positive {'integer' if integer else 'number'}, got {value!r}"
+        )
 
 
 def _price(owner: str, price) -> None:
@@ -149,7 +152,7 @@ def validate(config: dict) -> dict:
     return config
 
 
-@lru_cache(maxsize=None)
+@cache
 def load(path: Path = PATH) -> dict:
     try:
         return validate(parse(path.read_text()))
@@ -175,5 +178,4 @@ def _camelize(value):
 def pi_json(config: dict | None = None) -> str:
     """The shape budget.ts reads from ARENA_MODELS_JSON (camelCase keys, models only)."""
     config = config or load()
-    return json.dumps({"provider": config["provider"], "models": _camelize(config["models"])},
-                      separators=(",", ":"))
+    return json.dumps({"provider": config["provider"], "models": _camelize(config["models"])}, separators=(",", ":"))

@@ -19,8 +19,10 @@ def build_snapshot(run_id: str, output: Path) -> Path:
     script = (ASSETS / "app.js").read_text()
     markup = markup.replace('<link rel="stylesheet" href="style.css">', f"<style>{style}</style>")
     embedded = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
-    markup = markup.replace('<script src="app.js" defer></script>',
-                            f"<script>window.GRAPH_SNAPSHOT={embedded};</script>\n<script>{script}</script>")
+    markup = markup.replace(
+        '<script src="app.js" defer></script>',
+        f"<script>window.GRAPH_SNAPSHOT={embedded};</script>\n<script>{script}</script>",
+    )
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_suffix(".tmp")
     temporary.write_text(markup)

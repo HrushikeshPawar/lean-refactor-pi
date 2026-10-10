@@ -107,7 +107,7 @@ def main() -> int:
         )
         return 2
 
-    original_stem = temp_file.stem[:-len(expected_suffix)]
+    original_stem = temp_file.stem[: -len(expected_suffix)]
     original_file = temp_file.with_name(original_stem + ".lean")
 
     if not temp_file.is_file():
@@ -138,9 +138,12 @@ def main() -> int:
     cmd = [
         sys.executable,
         args.upstream_checker,
-        "--proof-name", args.proof_name,
-        "--temp-file-path", args.temp_file_path,
-        "--task-dir", args.task_dir,
+        "--proof-name",
+        args.proof_name,
+        "--temp-file-path",
+        args.temp_file_path,
+        "--task-dir",
+        args.task_dir,
     ]
     proc = subprocess.run(
         cmd,
@@ -173,10 +176,7 @@ def main() -> int:
     if "IMPROVED:" in output or "NOT_IMPROVED:" in output:
         return 0
 
-    print(
-        "ARENA_CHECK_ERROR: upstream checker returned no recognized "
-        "accept/reject status"
-    )
+    print("ARENA_CHECK_ERROR: upstream checker returned no recognized accept/reject status")
     return 2
 
 

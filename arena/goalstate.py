@@ -83,8 +83,10 @@ def closed(result: dict | None) -> bool:
     primary = next(iter(compat.values()), {}) if compat else {}
     if not primary.get("passed") or (result or {}).get("contains_sorry"):
         return False
-    return not any(item.get("severity") == "error" or "`sorry`" in item.get("message", "")
-                   for item in primary.get("diagnostics") or [])
+    return not any(
+        item.get("severity") == "error" or "`sorry`" in item.get("message", "")
+        for item in primary.get("diagnostics") or []
+    )
 
 
 def signature(result: dict | None) -> str:

@@ -65,6 +65,8 @@ def extract(name: str, proofs: dict[str, str], timeout: int = TIMEOUT) -> dict[s
         return {tag: {"tag": tag, "ok": False, "error": "timeout"} for tag in proofs}
     _, output = ran
     found = parse_features(output)
-    reason = next((line for line in output.splitlines() if "error" in line and not line.startswith("ARENA_ROUTE")),
-                  "no feature record")[:200]
+    reason = next(
+        (line for line in output.splitlines() if "error" in line and not line.startswith("ARENA_ROUTE")),
+        "no feature record",
+    )[:200]
     return {tag: found.get(tag, {"tag": tag, "ok": False, "error": reason}) for tag in proofs}

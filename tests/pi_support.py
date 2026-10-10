@@ -26,28 +26,51 @@ LIVE_LANGFUSE = os.environ.get("ARENA_LIVE_LANGFUSE") == "1"
 class FakeRun:
     """One scripted run. `steps` are provider responses; see tests/fake_opencode.ts."""
 
-    def __init__(self, steps: list[dict], *extra: str, cap: str = "0.1", env: dict | None = None,
-                 run_id: str | None = None, timeout: int = 240, model: str = "deepseek-v4.1-flash",
-                 langfuse: bool = False, session: bool = False, theorem: str = NAME):
+    def __init__(
+        self,
+        steps: list[dict],
+        *extra: str,
+        cap: str = "0.1",
+        env: dict | None = None,
+        run_id: str | None = None,
+        timeout: int = 240,
+        model: str = "deepseek-v4.1-flash",
+        langfuse: bool = False,
+        session: bool = False,
+        theorem: str = NAME,
+    ):
         self.run_id = run_id or f"test-{uuid.uuid4().hex[:10]}"
         self.directory = run_dir(self.run_id)
         self.work = Path(tempfile.mkdtemp())
         self.script = self.work / "script.json"
         self.script.write_text(json.dumps(steps))
         self.log = self.work / "requests.jsonl"
-        self.command = [sys.executable, "tools/run_pi_budgeted.py", "--model", model,
-                        "--theorem", theorem, "--run-id", self.run_id, "--hard-cap-usd", cap,
-                        "--no-mcp", "--test-extension", str(FAKE),
-                        *([] if langfuse else ["--no-langfuse"]), *([] if session else ["--no-lean-session"]),
-                        *extra]
-        self.env = {**os.environ, "ARENA_FAKE_SCRIPT": str(self.script), "ARENA_FAKE_LOG": str(self.log),
-                    **(env or {})}
+        self.command = [
+            sys.executable,
+            "tools/run_pi_budgeted.py",
+            "--model",
+            model,
+            "--theorem",
+            theorem,
+            "--run-id",
+            self.run_id,
+            "--hard-cap-usd",
+            cap,
+            "--no-mcp",
+            "--test-extension",
+            str(FAKE),
+            *([] if langfuse else ["--no-langfuse"]),
+            *([] if session else ["--no-lean-session"]),
+            *extra,
+        ]
+        self.env = {**os.environ, "ARENA_FAKE_SCRIPT": str(self.script), "ARENA_FAKE_LOG": str(self.log), **(env or {})}
         self.timeout = timeout
         self.result: subprocess.CompletedProcess | None = None
 
-    def run(self, *extra: str) -> "FakeRun":
-        self.result = subprocess.run([*self.command, *extra], cwd=ROOT, env=self.env, text=True,
-                                     capture_output=True, timeout=self.timeout)
+    def run(self, *extra: str) -> FakeRun:
+        self.result = subprocess.run(
+            [*self.command, *extra], cwd=ROOT, env=self.env, text=True, capture_output=True, timeout=self.timeout
+        )
         return self
 
     def start(self, *extra: str, own_group: bool = False) -> subprocess.Popen:
@@ -56,9 +79,15 @@ class FakeRun:
         `own_group` puts the runner in a fresh process group, like a terminal
         foreground job, so a test can deliver Ctrl+C to the whole group.
         """
-        self.process = subprocess.Popen([*self.command, *extra], cwd=ROOT, env=self.env, text=True,
-                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                        start_new_session=own_group)
+        self.process = subprocess.Popen(
+            [*self.command, *extra],
+            cwd=ROOT,
+            env=self.env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=own_group,
+        )
         return self.process
 
     def wait_for_requests(self, count: int, timeout: float = 60.0) -> bool:
@@ -89,6 +118,7 @@ class FakeRun:
         rows = [json.loads(line) for line in path.read_text().splitlines() if line] if path.exists() else []
         if name == "trace-journal.jsonl":  # the extension stores payloads as deltas
             from arena.traces import expand_journal
+
             return expand_journal(rows)
         return rows
 
@@ -101,8 +131,9 @@ def message_text(message: dict) -> str:
     """Plain text of a transcript message: content blocks plus any system sections."""
     content = message.get("content", "")
     if isinstance(content, list):
-        content = "\n".join(block.get("text") or json.dumps(block, ensure_ascii=False)
-                            for block in content if isinstance(block, dict))
+        content = "\n".join(
+            block.get("text") or json.dumps(block, ensure_ascii=False) for block in content if isinstance(block, dict)
+        )
     sections = message.get("sections") or {}
     return "\n".join([str(content)] + [str(value) for value in sections.values()])
 
@@ -137,8 +168,9 @@ class AnthropicWire:
                 wire.payloads.append(body)
                 if wire.fail_first:
                     wire.fail_first -= 1
-                    data = json.dumps({"type": "error", "error": {"type": "api_error",
-                                                                 "message": "internal server error 500"}})
+                    data = json.dumps(
+                        {"type": "error", "error": {"type": "api_error", "message": "internal server error 500"}}
+                    )
                     self.send_response(500)
                     self.send_header("Content-Type", "application/json")
                     self.send_header("Content-Length", str(len(data)))
@@ -185,31 +217,73 @@ class AnthropicWire:
 
     @staticmethod
     def events(body: dict, reply: dict) -> list[dict]:
-        usage = {"input_tokens": 300, "output_tokens": 1, "cache_read_input_tokens": 4000,
-                 "cache_creation_input_tokens": 100}
-        events = [{"type": "message_start", "message": {"id": "msg_offline", "type": "message", "role": "assistant",
-                   "model": body.get("model"), "content": [], "stop_reason": None, "stop_sequence": None,
-                   "usage": usage}}]
+        usage = {
+            "input_tokens": 300,
+            "output_tokens": 1,
+            "cache_read_input_tokens": 4000,
+            "cache_creation_input_tokens": 100,
+        }
+        events = [
+            {
+                "type": "message_start",
+                "message": {
+                    "id": "msg_offline",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": body.get("model"),
+                    "content": [],
+                    "stop_reason": None,
+                    "stop_sequence": None,
+                    "usage": usage,
+                },
+            }
+        ]
         index = 0
         if reply.get("redacted"):
-            events += [{"type": "content_block_start", "index": index, "content_block": {
-                           "type": "redacted_thinking", "data": reply["redacted"]}},
-                       {"type": "content_block_stop", "index": index}]
+            events += [
+                {
+                    "type": "content_block_start",
+                    "index": index,
+                    "content_block": {"type": "redacted_thinking", "data": reply["redacted"]},
+                },
+                {"type": "content_block_stop", "index": index},
+            ]
             index += 1
         if "tool" in reply:
-            events += [{"type": "content_block_start", "index": index, "content_block": {
-                           "type": "tool_use", "id": f"toolu_{uuid.uuid4().hex[:12]}", "name": reply["tool"], "input": {}}},
-                       {"type": "content_block_delta", "index": index,
-                        "delta": {"type": "input_json_delta", "partial_json": json.dumps(reply["input"])}}]
+            events += [
+                {
+                    "type": "content_block_start",
+                    "index": index,
+                    "content_block": {
+                        "type": "tool_use",
+                        "id": f"toolu_{uuid.uuid4().hex[:12]}",
+                        "name": reply["tool"],
+                        "input": {},
+                    },
+                },
+                {
+                    "type": "content_block_delta",
+                    "index": index,
+                    "delta": {"type": "input_json_delta", "partial_json": json.dumps(reply["input"])},
+                },
+            ]
             stop = "tool_use"
         else:
-            events += [{"type": "content_block_start", "index": index, "content_block": {"type": "text", "text": ""}},
-                       {"type": "content_block_delta", "index": index, "delta": {"type": "text_delta", "text": reply["text"]}}]
+            events += [
+                {"type": "content_block_start", "index": index, "content_block": {"type": "text", "text": ""}},
+                {"type": "content_block_delta", "index": index, "delta": {"type": "text_delta", "text": reply["text"]}},
+            ]
             stop = "end_turn"
-        return events + [{"type": "content_block_stop", "index": index},
-                         {"type": "message_delta", "delta": {"stop_reason": stop, "stop_sequence": None},
-                          "usage": {"output_tokens": 40}},
-                         {"type": "message_stop"}]
+        return [
+            *events,
+            {"type": "content_block_stop", "index": index},
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": stop, "stop_sequence": None},
+                "usage": {"output_tokens": 40},
+            },
+            {"type": "message_stop"},
+        ]
 
     def close(self) -> None:
         self.server.shutdown()

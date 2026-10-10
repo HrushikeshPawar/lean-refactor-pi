@@ -26,6 +26,8 @@ Session API assumed beyond the current one (guarded; the report says which parts
 from __future__ import annotations
 
 import argparse
+import contextlib
+import hashlib
 import json
 import os
 import random
@@ -33,7 +35,6 @@ import signal
 import sys
 import threading
 import time
-import hashlib
 from datetime import datetime
 from pathlib import Path
 
@@ -130,10 +131,19 @@ def summarise(records: list[dict]) -> list[dict]:
     rows = []
     for (kind, lane, version), items in sorted(groups.items()):
         seconds = [r["seconds"] for r in items]
-        rows.append({"kind": kind, "lane": lane, "version": version, "n": len(items),
-                     "p50": percentile(seconds, 50), "p95": percentile(seconds, 95), "max": max(seconds),
-                     "timeouts": sum(1 for r in items if r.get("timed_out")),
-                     "failed": sum(1 for r in items if not r.get("ok"))})
+        rows.append(
+            {
+                "kind": kind,
+                "lane": lane,
+                "version": version,
+                "n": len(items),
+                "p50": percentile(seconds, 50),
+                "p95": percentile(seconds, 95),
+                "max": max(seconds),
+                "timeouts": sum(1 for r in items if r.get("timed_out")),
+                "failed": sum(1 for r in items if not r.get("ok")),
+            }
+        )
     return rows
 
 
@@ -143,40 +153,64 @@ def evaluate(records: list[dict], runs: list[dict], samples: list[dict], orphans
     unexpected = [r for r in records if r["kind"] != "slow" and (r.get("timed_out") or not r.get("ok"))]
     timeouts = [r for r in unexpected if r.get("timed_out")]
     reasons = sorted({str(r.get("reason") or "failed")[:60] for r in unexpected if not r.get("timed_out")})
-    results.append({"name": "1 no timeouts or failures except the deliberate slow kind",
-                    "ok": not unexpected,
-                    "detail": f"{len(timeouts)} timeouts, {len(unexpected) - len(timeouts)} other failures"
-                              + (f" ({'; '.join(reasons[:3])})" if reasons else "")})
+    results.append(
+        {
+            "name": "1 no timeouts or failures except the deliberate slow kind",
+            "ok": not unexpected,
+            "detail": f"{len(timeouts)} timeouts, {len(unexpected) - len(timeouts)} other failures"
+            + (f" ({'; '.join(reasons[:3])})" if reasons else ""),
+        }
+    )
 
     probes = [r["seconds"] for r in records if r.get("after_timeout")]
     p95 = percentile(probes, 95)
     slow_timeouts = sum(1 for r in records if r["kind"] == "slow" and r.get("timed_out"))
-    results.append({"name": f"2 post-timeout probe p95 < {PROBE_P95_LIMIT:.0f} s",
-                    "ok": bool(probes) and p95 is not None and p95 < PROBE_P95_LIMIT,
-                    "detail": (f"n={len(probes)}, p95={p95:.1f} s" if probes else "no probes measured")
-                              + f"; {slow_timeouts} slow checks timed out"})
+    results.append(
+        {
+            "name": f"2 post-timeout probe p95 < {PROBE_P95_LIMIT:.0f} s",
+            "ok": bool(probes) and p95 is not None and p95 < PROBE_P95_LIMIT,
+            "detail": (f"n={len(probes)}, p95={p95:.1f} s" if probes else "no probes measured")
+            + f"; {slow_timeouts} slow checks timed out",
+        }
+    )
 
-    warm = [r["seconds"] for r in records
-            if r["lane"] == "model" and r["kind"] != "slow" and r.get("post_warm")]
+    warm = [r["seconds"] for r in records if r["lane"] == "model" and r["kind"] != "slow" and r.get("post_warm")]
     p95 = percentile(warm, 95)
-    results.append({"name": f"3 model-lane non-slow p95 < {MODEL_P95_LIMIT:.0f} s after warm-up",
-                    "ok": bool(warm) and p95 is not None and p95 < MODEL_P95_LIMIT,
-                    "detail": f"n={len(warm)}, p95={p95:.1f} s" if warm else "no checks measured"})
+    results.append(
+        {
+            "name": f"3 model-lane non-slow p95 < {MODEL_P95_LIMIT:.0f} s after warm-up",
+            "ok": bool(warm) and p95 is not None and p95 < MODEL_P95_LIMIT,
+            "detail": f"n={len(warm)}, p95={p95:.1f} s" if warm else "no checks measured",
+        }
+    )
 
     fresh = [r for r in records if r.get("post_warm") and r.get("new_worker")]
     crashes = sum(run.get("crashes", 0) for run in runs)
-    results.append({"name": "4 zero fresh worker opens after warm-up (except after a crash)",
-                    "ok": not fresh or crashes > 0,
-                    "detail": f"{len(fresh)} fresh opens, {crashes} crashes logged"})
+    results.append(
+        {
+            "name": "4 zero fresh worker opens after warm-up (except after a crash)",
+            "ok": not fresh or crashes > 0,
+            "detail": f"{len(fresh)} fresh opens, {crashes} crashes logged",
+        }
+    )
 
-    results.append({"name": "5 zero orphan Lean/lake processes", "ok": not orphans,
-                    "detail": f"{len(orphans)} orphans" + (f": {orphans}" if orphans else "")})
+    results.append(
+        {
+            "name": "5 zero orphan Lean/lake processes",
+            "ok": not orphans,
+            "detail": f"{len(orphans)} orphans" + (f": {orphans}" if orphans else ""),
+        }
+    )
 
     available = [s["mem_available_gb"] for s in samples if s.get("mem_available_gb") is not None]
     low = min(available) if available else None
-    results.append({"name": f"6 MemAvailable never below {MIN_AVAILABLE_GB:.0f} GB",
-                    "ok": low is not None and low >= MIN_AVAILABLE_GB,
-                    "detail": f"min {low:.2f} GB" if low is not None else "no samples"})
+    results.append(
+        {
+            "name": f"6 MemAvailable never below {MIN_AVAILABLE_GB:.0f} GB",
+            "ok": low is not None and low >= MIN_AVAILABLE_GB,
+            "detail": f"min {low:.2f} GB" if low is not None else "no samples",
+        }
+    )
     return results
 
 
@@ -184,35 +218,61 @@ def _fmt(value: float | None) -> str:
     return "-" if value is None else f"{value:.1f}"
 
 
-def render_report(config: dict, results: list[dict], records: list[dict], runs: list[dict],
-                  samples: list[dict], orphans: list[int]) -> str:
+def render_report(
+    config: dict, results: list[dict], records: list[dict], runs: list[dict], samples: list[dict], orphans: list[int]
+) -> str:
     verdict = "PASS" if all(r["ok"] for r in results) else "FAIL"
     lines = [f"# Lean load test: {verdict}", "", "## Criteria", ""]
     lines += [f"- {'PASS' if r['ok'] else 'FAIL'}  {r['name']}: {r['detail']}" for r in results]
-    lines += ["", "## Configuration", "", "```json", json.dumps(config, indent=2, default=str), "```", "",
-              "## Warm-up per run", "", "| run | warm op | warm-up s | ok | note |", "|---|---|---|---|---|"]
+    lines += [
+        "",
+        "## Configuration",
+        "",
+        "```json",
+        json.dumps(config, indent=2, default=str),
+        "```",
+        "",
+        "## Warm-up per run",
+        "",
+        "| run | warm op | warm-up s | ok | note |",
+        "|---|---|---|---|---|",
+    ]
     for run in runs:
-        lines.append(f"| {run['run']} | {run.get('warm_mode', '-')} | {_fmt(run.get('warm_seconds'))} "
-                     f"| {run.get('warm_ok')} | {run.get('warm_note', '')} |")
-    lines += ["", "## Latency by kind, lane and version (seconds)", "",
-              "| kind | lane | version | n | p50 | p95 | max | timeouts | failed |", "|---|---|---|---|---|---|---|---|---|"]
+        lines.append(
+            f"| {run['run']} | {run.get('warm_mode', '-')} | {_fmt(run.get('warm_seconds'))} "
+            f"| {run.get('warm_ok')} | {run.get('warm_note', '')} |"
+        )
+    lines += [
+        "",
+        "## Latency by kind, lane and version (seconds)",
+        "",
+        "| kind | lane | version | n | p50 | p95 | max | timeouts | failed |",
+        "|---|---|---|---|---|---|---|---|---|",
+    ]
     for row in summarise(records):
-        lines.append(f"| {row['kind']} | {row['lane']} | {row['version']} | {row['n']} | {_fmt(row['p50'])} "
-                     f"| {_fmt(row['p95'])} | {_fmt(row['max'])} | {row['timeouts']} | {row['failed']} |")
+        lines.append(
+            f"| {row['kind']} | {row['lane']} | {row['version']} | {row['n']} | {_fmt(row['p50'])} "
+            f"| {_fmt(row['p95'])} | {_fmt(row['max'])} | {row['timeouts']} | {row['failed']} |"
+        )
     probes = [r["seconds"] for r in records if r.get("after_timeout")]
     fresh = [r for r in records if r.get("post_warm") and r.get("new_worker")]
     available = [s["mem_available_gb"] for s in samples if s.get("mem_available_gb") is not None]
     lean = [s["lean_processes"] for s in samples if s.get("lean_processes") is not None]
     cpu = [s["ntfs_cpu_percent"] for s in samples if s.get("ntfs_cpu_percent") is not None]
-    lines += ["", "## Key metrics", "",
-              f"- post-timeout probes: n={len(probes)}, p50={_fmt(percentile(probes, 50))} s, "
-              f"p95={_fmt(percentile(probes, 95))} s, max={_fmt(max(probes) if probes else None)} s",
-              f"- fresh worker opens after warm-up: {len(fresh)}",
-              f"- min MemAvailable: {_fmt(min(available) if available else None)} GB "
-              f"(start {_fmt(available[0] if available else None)} GB)",
-              f"- peak Lean/lake processes: {max(lean) if lean else '-'}",
-              f"- peak mount.ntfs CPU: {_fmt(max(cpu) if cpu else None)} %",
-              f"- orphans: {orphans or 'none'}", f"- requests: {len(records)}"]
+    lines += [
+        "",
+        "## Key metrics",
+        "",
+        f"- post-timeout probes: n={len(probes)}, p50={_fmt(percentile(probes, 50))} s, "
+        f"p95={_fmt(percentile(probes, 95))} s, max={_fmt(max(probes) if probes else None)} s",
+        f"- fresh worker opens after warm-up: {len(fresh)}",
+        f"- min MemAvailable: {_fmt(min(available) if available else None)} GB "
+        f"(start {_fmt(available[0] if available else None)} GB)",
+        f"- peak Lean/lake processes: {max(lean) if lean else '-'}",
+        f"- peak mount.ntfs CPU: {_fmt(max(cpu) if cpu else None)} %",
+        f"- orphans: {orphans or 'none'}",
+        f"- requests: {len(records)}",
+    ]
     return "\n".join(lines) + "\n"
 
 
@@ -284,11 +344,14 @@ class Sampler(threading.Thread):
             used = sum(max(0, t - self._ticks.get(pid, t)) for pid, t in ticks.items() if t is not None)
             self._ticks = {pid: t for pid, t in ticks.items() if t is not None}
             self._last = now
-            sample = {"event": "sample", "t": round(time.time() - self.t0, 1),
-                      "mem_available_gb": mem_available_gb(),
-                      "lean_processes": len(processes_named(LEAN_NAMES)),
-                      "ntfs_cpu_percent": round(100.0 * used / hertz / elapsed, 1) if ntfs else None,
-                      "status": {}}
+            sample = {
+                "event": "sample",
+                "t": round(time.time() - self.t0, 1),
+                "mem_available_gb": mem_available_gb(),
+                "lean_processes": len(processes_named(LEAN_NAMES)),
+                "ntfs_cpu_percent": round(100.0 * used / hertz / elapsed, 1) if ntfs else None,
+                "status": {},
+            }
             for run, path in list(self.sessions.items()):
                 reply = lean_session.request({"op": "status"}, 10, path)
                 if reply and reply.get("ok"):
@@ -374,16 +437,23 @@ class SimRun:
             self.budget -= 1
             return True
 
-    def payload(self, version: str, proof: str, timeout: float, lane: str | None, op: str = "check",
-                slots: int | None = None) -> dict:
+    def payload(
+        self, version: str, proof: str, timeout: float, lane: str | None, op: str = "check", slots: int | None = None
+    ) -> dict:
         from arena import engine, lean_session
 
         built = engine.candidate_file(self.row, proof, version, self.commits[version])
-        message = {"op": op, "protocol": lean_session.PROTOCOL, "project": str(built["path"]),
-                   "fingerprint": engine._fingerprint(str(built["path"])), "text": built["text"],
-                   "display": engine.source_path(self.row), "timeout": timeout,
-                   "header_end": built["head"],
-                   "prefix_sha": hashlib.sha256(built["text"][:built["head"]].encode()).hexdigest()[:16]}
+        message = {
+            "op": op,
+            "protocol": lean_session.PROTOCOL,
+            "project": str(built["path"]),
+            "fingerprint": engine._fingerprint(str(built["path"])),
+            "text": built["text"],
+            "display": engine.source_path(self.row),
+            "timeout": timeout,
+            "header_end": built["head"],
+            "prefix_sha": hashlib.sha256(built["text"][: built["head"]].encode()).hexdigest()[:16],
+        }
         if lane:
             message["lane"] = lane
         if slots:
@@ -401,12 +471,24 @@ class SimRun:
         try:
             budget = float(getattr(lean_session, "OPEN_TIMEOUT", WARM_BUDGET))
             slots = int(self.config.get("slots") or getattr(lean_session, "MAX_SLOTS", 4))
-            reply = lean_session.request(self.payload(version, split_proof(self.row)[1], budget, "model", "warm", slots),
-                                         budget + 120, self.socket) or {}
+            reply = (
+                lean_session.request(
+                    self.payload(version, split_proof(self.row)[1], budget, "model", "warm", slots),
+                    budget + 120,
+                    self.socket,
+                )
+                or {}
+            )
             if not reply.get("ok") and "unknown operation" in str(reply.get("reason")):
                 mode, note = "fallback-check (no warm op)", "session has no warm op"
-                reply = lean_session.request(self.payload(version, split_proof(self.row)[1], WARM_BUDGET, "model"),
-                                             WARM_BUDGET + 120, self.socket) or {}
+                reply = (
+                    lean_session.request(
+                        self.payload(version, split_proof(self.row)[1], WARM_BUDGET, "model"),
+                        WARM_BUDGET + 120,
+                        self.socket,
+                    )
+                    or {}
+                )
                 budget = WARM_BUDGET
             ok = bool(reply.get("ok")) and not reply.get("timeout")
             if ok and reply.get("failed"):
@@ -415,8 +497,14 @@ class SimRun:
             # warm background worker, so compatibility checks and route extraction do not start cold.
             if ok and mode == "warm" and self.config.get("background"):
                 for other in self.versions:
-                    extra = lean_session.request(self.payload(other, split_proof(self.row)[1], budget, "background",
-                                                              "warm", 1), budget + 120, self.socket) or {}
+                    extra = (
+                        lean_session.request(
+                            self.payload(other, split_proof(self.row)[1], budget, "background", "warm", 1),
+                            budget + 120,
+                            self.socket,
+                        )
+                        or {}
+                    )
                     if not extra.get("ok") or extra.get("failed"):
                         ok, note = False, f"background warm {other}: {extra.get('failed') or extra.get('reason')}"
                         break
@@ -425,8 +513,13 @@ class SimRun:
         except Exception as error:
             note = f"{type(error).__name__}: {error}"
         self.warm_done_at = time.time()
-        self.info.update(warm_mode=mode, warm_seconds=round(time.monotonic() - started, 2), warm_ok=ok,
-                         warm_note=note[:200], warm_reply={k: v for k, v in (reply or {}).items() if k != "output"})
+        self.info.update(
+            warm_mode=mode,
+            warm_seconds=round(time.monotonic() - started, 2),
+            warm_ok=ok,
+            warm_note=note[:200],
+            warm_reply={k: v for k, v in (reply or {}).items() if k != "output"},
+        )
         self.recorder.write({"event": "warm", **self.info})
 
     def check(self, kind: str, lane: str, version: str, proof: str, after_timeout: bool = False) -> dict:
@@ -435,9 +528,15 @@ class SimRun:
         timeout = self.config["timeout"]
         started_wall = time.time()
         started = time.monotonic()
-        record = {"run": self.index, "kind": kind, "lane": lane, "version": version,
-                  "t": round(started_wall - self.t0, 2), "after_timeout": after_timeout,
-                  "post_warm": self.warm_done_at is not None and started_wall >= self.warm_done_at}
+        record = {
+            "run": self.index,
+            "kind": kind,
+            "lane": lane,
+            "version": version,
+            "t": round(started_wall - self.t0, 2),
+            "after_timeout": after_timeout,
+            "post_warm": self.warm_done_at is not None and started_wall >= self.warm_done_at,
+        }
         try:
             wait = 2 * timeout + 60 + float(getattr(lean_session, "OPEN_TIMEOUT", 0))
             reply = lean_session.request(self.payload(version, proof, timeout, lane), wait, self.socket) or {}
@@ -462,8 +561,9 @@ class SimRun:
             kind = pick_kind(rng, weights)
             self.check(kind, "model", version, make_proof(kind, self.row, self.next_serial(), self.config["timeout"]))
             if kind == "slow" and self.take_budget():  # the metric: is the worker still warm right after
-                self.check("probe", "model", version, make_proof("sorry", self.row, self.next_serial(), 0),
-                           after_timeout=True)
+                self.check(
+                    "probe", "model", version, make_proof("sorry", self.row, self.next_serial(), 0), after_timeout=True
+                )
             time.sleep(rng.uniform(0, self.config["think"]))
 
     def background_worker(self, seed: int) -> None:
@@ -518,15 +618,27 @@ def simulate(config: dict) -> int:
         for thread in warmers:
             thread.join()
         for run in runs:
-            log(f"run {run.index}: warm-up {run.info.get('warm_seconds')} s ok={run.info.get('warm_ok')} {run.info.get('warm_note', '')}")
+            log(
+                f"run {run.index}: warm-up {run.info.get('warm_seconds')} s ok={run.info.get('warm_ok')} {run.info.get('warm_note', '')}"
+            )
         deadline = time.time() + config["minutes"] * 60
         threads = []
         for run in runs:
             run.deadline = deadline
             for n in range(config["concurrency"]):
-                threads.append(threading.Thread(target=run.model_worker, args=(config["seed"] * 1000 + run.index * 100 + n,), daemon=True))
+                threads.append(
+                    threading.Thread(
+                        target=run.model_worker, args=(config["seed"] * 1000 + run.index * 100 + n,), daemon=True
+                    )
+                )
             for n in range(config["background"]):
-                threads.append(threading.Thread(target=run.background_worker, args=(config["seed"] * 1000 + run.index * 100 + 50 + n,), daemon=True))
+                threads.append(
+                    threading.Thread(
+                        target=run.background_worker,
+                        args=(config["seed"] * 1000 + run.index * 100 + 50 + n,),
+                        daemon=True,
+                    )
+                )
         log(f"load: {len(threads)} worker threads for {config['minutes']} min")
         for thread in threads:
             thread.start()
@@ -557,16 +669,20 @@ def simulate(config: dict) -> int:
         time.sleep(2)
         orphans = find_orphans(recorded_pids, recorded_pgids, baseline)
         for pid in orphans:  # only processes recorded as ours; kill by PID
-            try:
+            with contextlib.suppress(OSError):
                 os.kill(pid, signal.SIGKILL)
-            except OSError:
-                pass
         for run in runs:
             run.info["crashes"] = crash_count(run.directory)
     samples = sampler.samples if sampler else []
     results = evaluate(recorder.records, [run.info for run in runs], samples, orphans)
-    report = render_report({k: v for k, v in config.items() if k != "out"} | {"out": str(out)},
-                           results, recorder.records, [run.info for run in runs], samples, orphans)
+    report = render_report(
+        {k: v for k, v in config.items() if k != "out"} | {"out": str(out)},
+        results,
+        recorder.records,
+        [run.info for run in runs],
+        samples,
+        orphans,
+    )
     (out / "report.md").write_text(report, encoding="utf-8")
     recorder.write({"event": "end", "orphans": orphans, "results": results})
     print("\n".join(line for line in report.splitlines()[:12]))
@@ -576,14 +692,22 @@ def simulate(config: dict) -> int:
 
 def parse_args(argv: list[str] | None = None) -> dict:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--rows", nargs="+", default=["putnam_1964_a4"], help="benchmark rows (the first one is simulated)")
+    parser.add_argument(
+        "--rows", nargs="+", default=["putnam_1964_a4"], help="benchmark rows (the first one is simulated)"
+    )
     parser.add_argument("--runs", type=int, default=3, help="simulated concurrent runs (the campaign uses 2)")
     parser.add_argument("--concurrency", type=int, default=6, help="concurrent model-lane checks per run")
     parser.add_argument("--background", type=int, default=2, help="concurrent background-lane checks per run")
     parser.add_argument("--minutes", type=float, default=20)
-    parser.add_argument("--slots", type=int, default=None, help="workers the warm op opens (default lean_session.MAX_SLOTS)")
-    parser.add_argument("--timeout", type=float, default=float(os.environ.get("ARENA_LEAN_TIMEOUT") or 180),
-                        help="per-check seconds (default ARENA_LEAN_TIMEOUT or 180)")
+    parser.add_argument(
+        "--slots", type=int, default=None, help="workers the warm op opens (default lean_session.MAX_SLOTS)"
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=float(os.environ.get("ARENA_LEAN_TIMEOUT") or 180),
+        help="per-check seconds (default ARENA_LEAN_TIMEOUT or 180)",
+    )
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--weights", default=None, help="kinds and weights, e.g. sorry=3,slow=1 (default: all)")
@@ -591,9 +715,20 @@ def parse_args(argv: list[str] | None = None) -> dict:
     parser.add_argument("--think", type=float, default=1.0, help="max random pause between a worker's checks, seconds")
     args = parser.parse_args(argv)
     out = args.out or ROOT / "runs/analysis/loadtest" / datetime.now().strftime("%Y%m%d-%H%M%S")
-    return {"rows": args.rows, "runs": args.runs, "concurrency": args.concurrency, "background": args.background,
-            "minutes": args.minutes, "timeout": args.timeout, "out": out, "seed": args.seed,
-            "weights": parse_weights(args.weights), "max_checks": args.max_checks, "think": args.think, "slots": args.slots}
+    return {
+        "rows": args.rows,
+        "runs": args.runs,
+        "concurrency": args.concurrency,
+        "background": args.background,
+        "minutes": args.minutes,
+        "timeout": args.timeout,
+        "out": out,
+        "seed": args.seed,
+        "weights": parse_weights(args.weights),
+        "max_checks": args.max_checks,
+        "think": args.think,
+        "slots": args.slots,
+    }
 
 
 def main(argv: list[str] | None = None) -> int:

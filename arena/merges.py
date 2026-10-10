@@ -36,10 +36,17 @@ def merge_report(history: list[dict]) -> list[dict]:
         parents = [parent for parent in event.get("parents", []) if parent in labels]
         parent_best = [best[parent] for parent in parents if parent in best]
         combined = best.get(merged) if event.get("full_passed") else None
-        rows.append({"candidate": labels.get(merged), "parents": [labels[parent] for parent in parents],
-                     "parent_proxies": parent_best, "verified": bool(event.get("full_passed")), "proxy": combined,
-                     "beats_parents": combined is not None and bool(parent_best) and combined > max(parent_best),
-                     "submitted": False})
+        rows.append(
+            {
+                "candidate": labels.get(merged),
+                "parents": [labels[parent] for parent in parents],
+                "parent_proxies": parent_best,
+                "verified": bool(event.get("full_passed")),
+                "proxy": combined,
+                "beats_parents": combined is not None and bool(parent_best) and combined > max(parent_best),
+                "submitted": False,
+            }
+        )
     return rows
 
 
@@ -48,6 +55,13 @@ def merge_text(rows: list[dict]) -> str:
     useful = [row for row in rows if row["beats_parents"]]
     if not rows:
         return "none checked"
-    return (f"{len(rows)} combined proof(s) compiled, {len(useful)} verified above both parents"
-            + (": " + "; ".join(f"{row['candidate']} = {' + '.join(row['parents'])} proxy {row['proxy']}" for row in useful) if useful else "")
-            + " (report only, never submitted: submissions are model-written)")
+    return (
+        f"{len(rows)} combined proof(s) compiled, {len(useful)} verified above both parents"
+        + (
+            ": "
+            + "; ".join(f"{row['candidate']} = {' + '.join(row['parents'])} proxy {row['proxy']}" for row in useful)
+            if useful
+            else ""
+        )
+        + " (report only, never submitted: submissions are model-written)"
+    )

@@ -60,7 +60,8 @@ def resolve(source: str, version: str, commit: str, root: Path | None = None) ->
         return (preferred or candidates)[0]
     raise FileNotFoundError(
         f"Environment is not provisioned: {source} {version} at {commit[:12]}. Provide a checkout of that "
-        f"commit under {root} (or list it in {REGISTRY_FILE}); see benchmark/derived/workspaces.tsv")
+        f"commit under {root} (or list it in {REGISTRY_FILE}); see benchmark/derived/workspaces.tsv"
+    )
 
 
 def provisioned(row: dict, root: Path | None = None) -> list[tuple[str, str, Path | None]]:

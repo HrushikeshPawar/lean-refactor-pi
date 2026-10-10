@@ -9,8 +9,16 @@ ROW = {"statement": "theorem t\n(x : Nat)\n: x = x", "src": "theorem t\n(x : Nat
 
 
 def rec(kind="sorry", lane="model", seconds=1.0, **extra):
-    return {"kind": kind, "lane": lane, "version": "v1", "seconds": seconds, "ok": True, "timed_out": False,
-            "post_warm": True, **extra}
+    return {
+        "kind": kind,
+        "lane": lane,
+        "version": "v1",
+        "seconds": seconds,
+        "ok": True,
+        "timed_out": False,
+        "post_warm": True,
+        **extra,
+    }
 
 
 class Stats(unittest.TestCase):
@@ -48,7 +56,9 @@ class Workload(unittest.TestCase):
         weights = llt.parse_weights(None)
         a = [llt.pick_kind(random.Random(3), weights) for _ in range(5)]
         rng1, rng2 = random.Random(9), random.Random(9)
-        self.assertEqual([llt.pick_kind(rng1, weights) for _ in range(50)], [llt.pick_kind(rng2, weights) for _ in range(50)])
+        self.assertEqual(
+            [llt.pick_kind(rng1, weights) for _ in range(50)], [llt.pick_kind(rng2, weights) for _ in range(50)]
+        )
         self.assertEqual(len(a), 5)
 
     def test_weights(self):
@@ -77,30 +87,34 @@ class Criteria(unittest.TestCase):
         return [r["ok"] for r in llt.evaluate(records, list(runs), samples or self.samples, list(orphans))]
 
     def healthy(self):
-        return [rec(seconds=0.5), rec("slow", seconds=180, timed_out=True), rec("probe", seconds=0.6, after_timeout=True)]
+        return [
+            rec(seconds=0.5),
+            rec("slow", seconds=180, timed_out=True),
+            rec("probe", seconds=0.6, after_timeout=True),
+        ]
 
     def test_pass(self):
         self.assertEqual(self.verdicts(self.healthy()), [True] * 6)
 
     def test_timeout_outside_slow_fails_1_2_3(self):
-        records = self.healthy() + [rec("probe", seconds=180, timed_out=True, after_timeout=True)]
+        records = [*self.healthy(), rec("probe", seconds=180, timed_out=True, after_timeout=True)]
         verdicts = self.verdicts(records)
         self.assertEqual(verdicts[:3], [False, False, False])
 
     def test_failed_request_fails_1(self):
-        self.assertFalse(self.verdicts(self.healthy() + [rec(ok=False, reason="x")])[0])
+        self.assertFalse(self.verdicts([*self.healthy(), rec(ok=False, reason="x")])[0])
 
     def test_slow_background_ignored_for_3(self):
-        records = self.healthy() + [rec("compat", "background", seconds=120)]
+        records = [*self.healthy(), rec("compat", "background", seconds=120)]
         self.assertTrue(self.verdicts(records)[2])
 
     def test_fresh_open_fails_4_unless_crash(self):
-        records = self.healthy() + [rec(new_worker=True)]
+        records = [*self.healthy(), rec(new_worker=True)]
         self.assertFalse(self.verdicts(records)[3])
         self.assertTrue(self.verdicts(records, runs=({"crashes": 1},))[3])
 
     def test_fresh_open_before_warm_is_fine(self):
-        self.assertTrue(self.verdicts(self.healthy() + [rec(new_worker=True, post_warm=False)])[3])
+        self.assertTrue(self.verdicts([*self.healthy(), rec(new_worker=True, post_warm=False)])[3])
 
     def test_orphans_and_memory(self):
         self.assertFalse(self.verdicts(self.healthy(), orphans=[123])[4])
@@ -112,7 +126,11 @@ class Criteria(unittest.TestCase):
 
 class Report(unittest.TestCase):
     def test_render(self):
-        records = [rec(seconds=0.5), rec("slow", seconds=180, timed_out=True), rec("probe", seconds=0.6, after_timeout=True)]
+        records = [
+            rec(seconds=0.5),
+            rec("slow", seconds=180, timed_out=True),
+            rec("probe", seconds=0.6, after_timeout=True),
+        ]
         runs = [{"run": 0, "warm_mode": "warm", "warm_seconds": 12.3, "warm_ok": True, "crashes": 0}]
         samples = [{"mem_available_gb": 9.0, "lean_processes": 4, "ntfs_cpu_percent": 55.0}]
         results = llt.evaluate(records, runs, samples, [])
@@ -121,7 +139,9 @@ class Report(unittest.TestCase):
         for needle in ("| probe | model | v1 |", "post-timeout probes: n=1", "12.3", "orphans: none"):
             self.assertIn(needle, text)
         failing = llt.evaluate(records, runs, samples, [9])
-        self.assertTrue(llt.render_report({}, failing, records, runs, samples, [9]).startswith("# Lean load test: FAIL"))
+        self.assertTrue(
+            llt.render_report({}, failing, records, runs, samples, [9]).startswith("# Lean load test: FAIL")
+        )
 
 
 if __name__ == "__main__":

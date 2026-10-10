@@ -1,22 +1,20 @@
 """Persistent Lean session: equivalence with cold compiles, fallback, and process lifecycle."""
 
+import contextlib
 import json
 import os
 import shutil
 import signal
 import subprocess
-import sys
 import tempfile
 import time
 import unittest
-import uuid
 from pathlib import Path
 from unittest.mock import patch
 
-from tests.slow import slow
 from arena import campaign, engine, lean_session
-from arena.engine import (ROOT, compile_version, force_cold, instrument_sorries, last_lean_run, problem,
-                          versions)
+from arena.engine import ROOT, compile_version, force_cold, last_lean_run, problem, versions
+from tests.slow import slow
 
 CORE = "Core.InitsUpdatesComm"
 PHYSLIB = "fundamental_theorem_of_variational_calculus'"
@@ -44,14 +42,20 @@ class RenderTests(unittest.TestCase):
         text = "a\nlemma x := by\n  simp\n"
         found = [
             {"severity": 3, "message": "ARENA_HEARTBEATS 7", "range": {"start": {"line": 0, "character": 0}}},
-            {"severity": 1, "message": "unsolved goals\n⊢ False",
-             "range": {"start": {"line": 2, "character": 2}}},
+            {"severity": 1, "message": "unsolved goals\n⊢ False", "range": {"start": {"line": 2, "character": 2}}},
             {"severity": 2, "message": "unused variable", "range": {"start": {"line": 1, "character": 6}}},
         ]
         code, output = lean_session.render(found, text, "A/B.lean")
         self.assertEqual(code, 1)
-        self.assertEqual(output.splitlines(), ["ARENA_HEARTBEATS 7", "A/B.lean:3:2: error: unsolved goals",
-                                               "⊢ False", "A/B.lean:2:6: warning: unused variable"])
+        self.assertEqual(
+            output.splitlines(),
+            [
+                "ARENA_HEARTBEATS 7",
+                "A/B.lean:3:2: error: unsolved goals",
+                "⊢ False",
+                "A/B.lean:2:6: warning: unused variable",
+            ],
+        )
         self.assertEqual(lean_session.render(found[:1] + found[2:], text, "A/B.lean")[0], 0)
 
     def test_columns_count_code_points_not_utf16_units(self):
@@ -61,12 +65,15 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(lean_session.render(found, text, "f.lean")[1], "f.lean:1:6: error: boom")
 
     def test_parsed_output_is_what_the_cold_path_parses(self):
-        found = [{"severity": 1, "message": "Type mismatch\n  rfl", "range": {"start": {"line": 4, "character": 3}}},
-                 {"severity": 3, "message": "ARENA_HEARTBEATS 9", "range": {"start": {"line": 0, "character": 0}}}]
+        found = [
+            {"severity": 1, "message": "Type mismatch\n  rfl", "range": {"start": {"line": 4, "character": 3}}},
+            {"severity": 3, "message": "ARENA_HEARTBEATS 9", "range": {"start": {"line": 0, "character": 0}}},
+        ]
         _, output = lean_session.render(found, "\n" * 4 + "abcdef\n", "f.lean")
         parsed = engine.parse_diagnostics(output)
-        self.assertEqual([(d["severity"], d["line"], d["column"]) for d in parsed],
-                         [("error", 5, 3), ("info", None, None)])
+        self.assertEqual(
+            [(d["severity"], d["line"], d["column"]) for d in parsed], [("error", 5, 3), ("info", None, None)]
+        )
 
 
 class FallbackTests(unittest.TestCase):
@@ -76,10 +83,12 @@ class FallbackTests(unittest.TestCase):
         self.row = {"name": "T", "file_path": "A/B.lean"}
 
     def run_lean(self, reply, **env):
-        with patch.dict(os.environ, {lean_session.ENV: "/nonexistent.sock", **env}, clear=False), \
-                patch.object(lean_session, "request", return_value=reply), \
-                patch.object(engine, "_fingerprint", return_value={"code": "x"}), \
-                patch.object(engine, "_run_cold", return_value=(0, "cold output")):
+        with (
+            patch.dict(os.environ, {lean_session.ENV: "/nonexistent.sock", **env}, clear=False),
+            patch.object(lean_session, "request", return_value=reply),
+            patch.object(engine, "_fingerprint", return_value={"code": "x"}),
+            patch.object(engine, "_run_cold", return_value=(0, "cold output")),
+        ):
             return engine.run_lean(self.row, Path("/p"), "text"), last_lean_run()
 
     def test_unconfigured_runs_are_cold_without_a_reason(self):
@@ -90,8 +99,12 @@ class FallbackTests(unittest.TestCase):
         self.assertEqual(last_lean_run()["path"], "cold")
 
     def test_unavailable_stale_or_crashed_sessions_fall_back_and_say_why(self):
-        for reason in ("session unreachable: FileNotFoundError", "stale session: toolchain changed",
-                       "Lean server crashed", "no room for a Lean worker: memory (2.0 GB available)"):
+        for reason in (
+            "session unreachable: FileNotFoundError",
+            "stale session: toolchain changed",
+            "Lean server crashed",
+            "no room for a Lean worker: memory (2.0 GB available)",
+        ):
             result, info = self.run_lean({"ok": False, "reason": reason})
             self.assertEqual(result, (0, "cold output"))
             self.assertEqual((info["path"], info["reason"]), ("cold-fallback", reason))
@@ -102,34 +115,35 @@ class FallbackTests(unittest.TestCase):
         self.assertEqual(info["path"], "session")
 
     def test_force_cold_ignores_a_configured_session(self):
-        with patch.dict(os.environ, {lean_session.ENV: "/nonexistent.sock"}), \
-                patch.object(lean_session, "request", side_effect=AssertionError("asked the session")), \
-                patch.object(engine, "_run_cold", return_value=(0, "cold")):
-            with force_cold():
-                self.assertEqual(engine.run_lean(self.row, Path("/p"), "text"), (0, "cold"))
+        with (
+            patch.dict(os.environ, {lean_session.ENV: "/nonexistent.sock"}),
+            patch.object(lean_session, "request", side_effect=AssertionError("asked the session")),
+            patch.object(engine, "_run_cold", return_value=(0, "cold")),
+            force_cold(),
+        ):
+            self.assertEqual(engine.run_lean(self.row, Path("/p"), "text"), (0, "cold"))
         self.assertEqual(last_lean_run()["path"], "cold")
 
     def test_model_view_reports_the_path_only_when_it_is_not_plain_cold(self):
-        compat = {"v1": {"passed": True, "lean": {"path": "session"}},
-                  "v2": {"passed": True, "lean": {"path": "cold-fallback", "reason": "stale session: wrapper changed"}},
-                  "v3": {"passed": True, "lean": {"path": "cold"}}}
+        compat = {
+            "v1": {"passed": True, "lean": {"path": "session"}},
+            "v2": {"passed": True, "lean": {"path": "cold-fallback", "reason": "stale session: wrapper changed"}},
+            "v3": {"passed": True, "lean": {"path": "cold"}},
+        }
         view = campaign._model_view({"ok": True, "compat": compat})["compat"]
         self.assertEqual(view["v1"]["lean"], "session")
         self.assertEqual(view["v2"]["lean"], "cold (session unavailable: stale session: wrapper changed)")
         self.assertNotIn("lean", view["v3"])
 
-
     def test_model_view_labels_a_failed_draft_heartbeat_and_marks_it_not_compiled(self):
-        failed = {"ok": True, "heartbeat": 6834, "tokens": 42,
-                  "compat": {"v1": {"passed": False, "heartbeats": 6834}}}
+        failed = {"ok": True, "heartbeat": 6834, "tokens": 42, "compat": {"v1": {"passed": False, "heartbeats": 6834}}}
         view = campaign._model_view(failed)
         self.assertIs(view["compiled"], False)
         self.assertTrue(view["ok"])
         self.assertEqual(view["heartbeat_to_failure"], 6834)
         self.assertNotIn("heartbeat", view)
         self.assertEqual(view["compat"]["v1"], {"passed": False, "heartbeats_to_failure": 6834})
-        good = campaign._model_view({"ok": True, "heartbeat": 10,
-                                     "compat": {"v1": {"passed": True, "heartbeats": 10}}})
+        good = campaign._model_view({"ok": True, "heartbeat": 10, "compat": {"v1": {"passed": True, "heartbeats": 10}}})
         self.assertEqual(good["heartbeat"], 10)
         self.assertEqual(good["compat"]["v1"]["heartbeats"], 10)
         self.assertNotIn("compiled", good)
@@ -170,10 +184,19 @@ class DaemonTests(unittest.TestCase):
     def test_a_stale_evaluator_gets_a_stale_answer_not_a_compile(self):
         process = lean_session.start_daemon(self.directory)
         try:
-            reply = lean_session.request({
-                "op": "check", "protocol": lean_session.PROTOCOL, "project": str(self.directory),
-                "fingerprint": {"code": "not-the-running-evaluator"}, "text": "x", "display": "f.lean",
-                "timeout": 5}, 10, str(lean_session.socket_path(self.directory)))
+            reply = lean_session.request(
+                {
+                    "op": "check",
+                    "protocol": lean_session.PROTOCOL,
+                    "project": str(self.directory),
+                    "fingerprint": {"code": "not-the-running-evaluator"},
+                    "text": "x",
+                    "display": "f.lean",
+                    "timeout": 5,
+                },
+                10,
+                str(lean_session.socket_path(self.directory)),
+            )
             self.assertEqual((reply["ok"], reply["stale"]), (False, True))
             self.assertIn("evaluator changed", reply["reason"])
         finally:
@@ -200,10 +223,8 @@ class DaemonTests(unittest.TestCase):
             self.assertEqual(lean_session.tree_pss_gb(2**30), 0)
         finally:
             for pid in lean_session.process_tree(parent.pid):
-                try:
+                with contextlib.suppress(ProcessLookupError):
                     os.kill(pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
             parent.wait()
 
 
@@ -218,19 +239,22 @@ class SubmissionColdVerificationTests(unittest.TestCase):
         self.cold_only = False
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        patches = [patch.object(campaign, "ROOT", Path(self.temporary.name)),
-                   patch.object(campaign, "problem", return_value={"name": "T"}),
-                   patch.object(campaign, "validate_proof"),
-                   patch.object(campaign, "versions", return_value=[("v1", "a"), ("v2", "b")]),
-                   patch.object(campaign, "materialize", return_value={"candidate_path": "s.lean"}),
-                   patch.object(campaign, "evaluate", side_effect=self.fake_eval)]
+        patches = [
+            patch.object(campaign, "ROOT", Path(self.temporary.name)),
+            patch.object(campaign, "problem", return_value={"name": "T"}),
+            patch.object(campaign, "validate_proof"),
+            patch.object(campaign, "versions", return_value=[("v1", "a"), ("v2", "b")]),
+            patch.object(campaign, "materialize", return_value={"candidate_path": "s.lean"}),
+            patch.object(campaign, "evaluate", side_effect=self.fake_eval),
+        ]
         for item in patches:
             item.start()
             self.addCleanup(item.stop)
         self.directory = campaign.run_dir("cold")
         campaign._append(self.directory, {"kind": "init", "theorem": "T", "versions": [["v1", "a"], ["v2", "b"]]})
-        reference = campaign.record_evaluation("T", "cold", "theorem t := by\n  ref", "fast",
-                                               origin="reference", materialize_live=False)
+        reference = campaign.record_evaluation(
+            "T", "cold", "theorem t := by\n  ref", "fast", origin="reference", materialize_live=False
+        )
         campaign._append(self.directory, {"kind": "current", "candidate_id": reference["candidate_id"]})
 
     def fake_eval(self, _name, proof, mode, known=None):
@@ -241,11 +265,23 @@ class SubmissionColdVerificationTests(unittest.TestCase):
         passed = (self.cold_passes and not proof.endswith("  q")) or path == "session"
         compat = {version: {"passed": passed, "lean": {"path": path}} for version in ("v1", "v2")}
         tokens = len(proof)
-        metrics = {"tokens": tokens, "heartbeats": heartbeats, "compiled": True,
-                   "axes": {"tokens": {"value": tokens}}, "proxy": round(100 - tokens, 2) if mode == "full" else None,
-                   "estimated_proxy": round(100 - tokens, 2)}
-        return {"ok": True, "mode": mode, "tokens": tokens, "heartbeat": heartbeats, "compat": compat,
-                "local_proxy": None, "metrics": metrics}
+        metrics = {
+            "tokens": tokens,
+            "heartbeats": heartbeats,
+            "compiled": True,
+            "axes": {"tokens": {"value": tokens}},
+            "proxy": round(100 - tokens, 2) if mode == "full" else None,
+            "estimated_proxy": round(100 - tokens, 2),
+        }
+        return {
+            "ok": True,
+            "mode": mode,
+            "tokens": tokens,
+            "heartbeat": heartbeats,
+            "compat": compat,
+            "local_proxy": None,
+            "metrics": metrics,
+        }
 
     def verified(self, text):
         campaign.evaluate_request("T", "cold", text, "full")
@@ -321,19 +357,30 @@ class SessionHarness:
         return via_session, cold
 
     def assertSameResult(self, session: dict, cold: dict):
-        for key in ("passed", "exit_code", "diagnostics", "diagnostic_counts", "outside_target", "goals",
-                    "error_headlines"):
+        for key in (
+            "passed",
+            "exit_code",
+            "diagnostics",
+            "diagnostic_counts",
+            "outside_target",
+            "goals",
+            "error_headlines",
+        ):
             self.assertEqual(session[key], cold[key], key)
         if cold.get("heartbeats") is not None:
             self.assertIsNotNone(session["heartbeats"])
-            self.assertLessEqual(abs(session["heartbeats"] - cold["heartbeats"]),
-                                 max(5, TOLERANCE * cold["heartbeats"]), (session["heartbeats"], cold["heartbeats"]))
+            self.assertLessEqual(
+                abs(session["heartbeats"] - cold["heartbeats"]),
+                max(5, TOLERANCE * cold["heartbeats"]),
+                (session["heartbeats"], cold["heartbeats"]),
+            )
         else:
             self.assertIsNone(session["heartbeats"])
 
         # The text the model never sees must agree too, apart from the measured heartbeat count.
         def strip(output: str) -> str:
             return "\n".join(line for line in output.splitlines() if not line.startswith("ARENA_HEARTBEATS"))
+
         self.assertEqual(strip(session["raw_output"]), strip(cold["raw_output"]))
 
     def drafts(self) -> dict[str, tuple[str, dict]]:
@@ -364,13 +411,15 @@ class CoreSessionTests(SessionHarness, unittest.TestCase):
     def test_only_the_changed_theorem_is_reelaborated(self):
         statement = self.row["statement"]
         compile_version(self.row, statement + " := by\n  intros\n  sorry", self.version, self.commit, probe=True)
-        again = compile_version(self.row, statement + " := by\n  intros\n  constructor\n  sorry",
-                                self.version, self.commit, probe=True)
+        again = compile_version(
+            self.row, statement + " := by\n  intros\n  constructor\n  sorry", self.version, self.commit, probe=True
+        )
         info = again["lean"]
         self.assertEqual(info["path"], "session")
         self.assertFalse(info["new_worker"])
-        self.assertGreaterEqual(info["changed_from_line"], self.row["start_line"],
-                                "nothing above the theorem may be re-elaborated")
+        self.assertGreaterEqual(
+            info["changed_from_line"], self.row["start_line"], "nothing above the theorem may be re-elaborated"
+        )
 
     def test_the_server_reports_what_it_holds_and_memory_stays_bounded(self):
         compile_version(self.row, self.row["src"], self.version, self.commit, measure=True)
@@ -386,7 +435,9 @@ class CoreSessionTests(SessionHarness, unittest.TestCase):
         statement = self.row["statement"]
         proofs = [statement + f" := by\n  intros\n  sorry\n  -- {n}" for n in range(3)]
         with ThreadPoolExecutor(3) as pool:
-            results = list(pool.map(lambda p: compile_version(self.row, p, self.version, self.commit, probe=True), proofs))
+            results = list(
+                pool.map(lambda p: compile_version(self.row, p, self.version, self.commit, probe=True), proofs)
+            )
         self.assertTrue(all(r["lean"]["path"] == "session" for r in results))
         self.assertTrue(all(r["goals"] for r in results))
         status = lean_session.request({"op": "status"}, 5, self.socket)
@@ -402,11 +453,15 @@ class CoreSessionTests(SessionHarness, unittest.TestCase):
         def workers() -> int:
             return lean_session.request({"op": "status"}, 5, self.socket)["servers"][0]["workers"]
 
-        self.assertTrue(wait_until(lambda: workers() >= lean_session.MAX_SLOTS, 120),
-                        "the session did not open its remaining documents")
+        self.assertTrue(
+            wait_until(lambda: workers() >= lean_session.MAX_SLOTS, 120),
+            "the session did not open its remaining documents",
+        )
         proofs = [statement + f" := by\n  intros\n  sorry\n  -- batch {n}" for n in range(4)]
         with ThreadPoolExecutor(4) as pool:
-            results = list(pool.map(lambda p: compile_version(self.row, p, self.version, self.commit, probe=True), proofs))
+            results = list(
+                pool.map(lambda p: compile_version(self.row, p, self.version, self.commit, probe=True), proofs)
+            )
         self.assertFalse(any(r["lean"]["new_worker"] for r in results), [r["lean"] for r in results])
 
     def test_a_changed_pin_or_toolchain_is_stale_and_runs_cold(self):
@@ -438,13 +493,14 @@ class CoreSessionTests(SessionHarness, unittest.TestCase):
 
     def test_a_crashed_server_falls_back_then_recovers(self):
         compile_version(self.row, self.row["src"], self.version, self.commit, measure=True)
-        victims = [pid for server in lean_session.request({"op": "status"}, 5, self.socket)["servers"]
-                   for pid in server["pids"]]
+        victims = [
+            pid
+            for server in lean_session.request({"op": "status"}, 5, self.socket)["servers"]
+            for pid in server["pids"]
+        ]
         for pid in victims:
-            try:
+            with contextlib.suppress(ProcessLookupError):
                 os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
         self.assertTrue(wait_until(lambda: not any(alive(pid) for pid in victims), 10))
         first = compile_version(self.row, self.row["src"], self.version, self.commit, measure=True)
         self.assertTrue(first["passed"])
@@ -455,10 +511,19 @@ class CoreSessionTests(SessionHarness, unittest.TestCase):
 
     def test_a_timeout_frees_the_worker(self):
         project = engine.workspace(self.row, self.version, self.commit)
-        reply = lean_session.request({
-            "op": "check", "protocol": lean_session.PROTOCOL, "project": str(project),
-            "fingerprint": engine._fingerprint(str(project)), "display": "x.lean", "timeout": 0.01,
-            "text": "import Strata\n" + "example : True := by\n  trivial\n"}, 30, self.socket)
+        reply = lean_session.request(
+            {
+                "op": "check",
+                "protocol": lean_session.PROTOCOL,
+                "project": str(project),
+                "fingerprint": engine._fingerprint(str(project)),
+                "display": "x.lean",
+                "timeout": 0.01,
+                "text": "import Strata\n" + "example : True := by\n  trivial\n",
+            },
+            30,
+            self.socket,
+        )
         self.assertTrue(reply["ok"] and reply.get("timeout"), reply)
         ok = compile_version(self.row, self.row["src"], self.version, self.commit, measure=True)
         self.assertTrue(ok["passed"])
@@ -493,18 +558,29 @@ class LifecycleTests(unittest.TestCase):
         row = problem(CORE)
         version, commit = versions(row)[0]
         project = engine.workspace(row, version, commit)
-        reply = lean_session.request({
-            "op": "check", "protocol": lean_session.PROTOCOL, "project": str(project),
-            "fingerprint": engine._fingerprint(str(project)), "display": "x.lean", "timeout": 120,
-            "text": "example : True := by\n  trivial\n"}, 180, socket_)
+        reply = lean_session.request(
+            {
+                "op": "check",
+                "protocol": lean_session.PROTOCOL,
+                "project": str(project),
+                "fingerprint": engine._fingerprint(str(project)),
+                "display": "x.lean",
+                "timeout": 120,
+                "text": "example : True := by\n  trivial\n",
+            },
+            180,
+            socket_,
+        )
         self.assertTrue(reply["ok"], reply)
         servers = lean_session.request({"op": "status"}, 5, socket_)["servers"]
         self.assertEqual(len(servers), 1)
         pids = servers[0]["pids"]
         self.assertGreaterEqual(len(pids), 2, "expected the server and a worker")
         info = self.directory / lean_session.INFO_NAME
-        self.assertTrue(wait_until(lambda: set(pids) <= set(json.loads(info.read_text())["pids"]), 10),
-                        "the daemon did not record its Lean processes")
+        self.assertTrue(
+            wait_until(lambda: set(pids) <= set(json.loads(info.read_text())["pids"]), 10),
+            "the daemon did not record its Lean processes",
+        )
         return process, pids
 
     @unittest.skipUnless(CORE_READY, "Strata fixture environment is not provisioned")
@@ -512,7 +588,9 @@ class LifecycleTests(unittest.TestCase):
         process, pids = self.start_with_server()
         self.assertTrue(all(alive(pid) for pid in pids))
         lean_session.stop_daemon(self.directory, process)
-        self.assertTrue(wait_until(lambda: not any(alive(pid) for pid in pids), 10), "Lean processes survived the daemon")
+        self.assertTrue(
+            wait_until(lambda: not any(alive(pid) for pid in pids), 10), "Lean processes survived the daemon"
+        )
 
     @unittest.skipUnless(CORE_READY, "Strata fixture environment is not provisioned")
     def test_a_killed_runner_takes_the_session_with_it(self):
@@ -521,8 +599,10 @@ class LifecycleTests(unittest.TestCase):
             process, pids = self.start_with_server(parent=parent.pid)
             parent.kill()
             parent.wait()
-            self.assertTrue(wait_until(lambda: process.poll() is not None and not any(alive(pid) for pid in pids), 20),
-                            "daemon or Lean outlived the killed runner")
+            self.assertTrue(
+                wait_until(lambda: process.poll() is not None and not any(alive(pid) for pid in pids), 20),
+                "daemon or Lean outlived the killed runner",
+            )
         finally:
             parent.kill()
             lean_session.stop_daemon(self.directory, None)
@@ -532,8 +612,10 @@ class LifecycleTests(unittest.TestCase):
         process, pids = self.start_with_server()
         process.kill()
         process.wait()
-        self.assertTrue(wait_until(lambda: not any(alive(pid) for pid in pids), 30),
-                        "Lean kept running after its owner died and nothing swept it")
+        self.assertTrue(
+            wait_until(lambda: not any(alive(pid) for pid in pids), 30),
+            "Lean kept running after its owner died and nothing swept it",
+        )
 
 
 @slow
@@ -552,9 +634,12 @@ class RunnerSessionTests(unittest.TestCase):
         from tests.pi_support import FakeRun
 
         statement = problem(CORE)["statement"]
-        call = {"tool_calls": [{"name": "arena_probe", "arguments": {
-            "proof": statement + " := by\n  intros Hup Hinit\n  sorry"}}],
-            "usage": {"input": 300, "output": 40, "cacheRead": 4000, "cacheWrite": 100}}
+        call = {
+            "tool_calls": [
+                {"name": "arena_probe", "arguments": {"proof": statement + " := by\n  intros Hup Hinit\n  sorry"}}
+            ],
+            "usage": {"input": 300, "output": 40, "cacheRead": 4000, "cacheWrite": 100},
+        }
         return call, FakeRun
 
     def test_tool_calls_run_in_the_session_and_nothing_is_left_after_the_run(self):
@@ -577,15 +662,19 @@ class RunnerSessionTests(unittest.TestCase):
         process = run.start(own_group=True)
         self.assertTrue(run.wait_for_requests(2, 180), "the probe never finished")
         info = json.loads((run.directory / lean_session.INFO_NAME).read_text())
-        self.assertTrue(wait_until(lambda: len(json.loads((run.directory / lean_session.INFO_NAME).read_text())["pids"]) >= 2, 20))
+        self.assertTrue(
+            wait_until(lambda: len(json.loads((run.directory / lean_session.INFO_NAME).read_text())["pids"]) >= 2, 20)
+        )
         info = json.loads((run.directory / lean_session.INFO_NAME).read_text())
         os.killpg(process.pid, signal.SIGINT)
         _, stderr = process.communicate(timeout=120)
         self.assertEqual(process.returncode, 128 + signal.SIGINT, stderr)
         self.assertNotEqual(run.json("cost.json").get("written_by"), "runner_ledger_reconstruction", stderr)
         self.assertEqual(run.json("summary.json")["stop_reason"], "interrupted")
-        self.assertTrue(wait_until(lambda: not any(alive(p) for p in info["pids"] + [info["pid"]]), 15),
-                        "Lean or the session daemon survived Ctrl+C")
+        self.assertTrue(
+            wait_until(lambda: not any(alive(p) for p in info["pids"] + [info["pid"]]), 15),
+            "Lean or the session daemon survived Ctrl+C",
+        )
 
     def test_a_killed_runner_leaves_no_lean_processes(self):
         call, FakeRun = self.probe()
@@ -593,17 +682,22 @@ class RunnerSessionTests(unittest.TestCase):
         self.runs.append(run)
         process = run.start(own_group=True)
         self.assertTrue(run.wait_for_requests(2, 180), "the probe never finished")
-        self.assertTrue(wait_until(lambda: len(json.loads((run.directory / lean_session.INFO_NAME).read_text())["pids"]) >= 2, 20))
+        self.assertTrue(
+            wait_until(lambda: len(json.loads((run.directory / lean_session.INFO_NAME).read_text())["pids"]) >= 2, 20)
+        )
         info = json.loads((run.directory / lean_session.INFO_NAME).read_text())
         process.kill()  # a crash: no handler runs
         process.wait()
         subprocess.run(["pkill", "-9", "-f", run.run_id])  # Pi and its tools; the daemon has its own session
-        self.assertTrue(wait_until(lambda: not any(alive(p) for p in info["pids"] + [info["pid"]]), 30),
-                        "Lean or the session daemon survived a crashed runner")
+        self.assertTrue(
+            wait_until(lambda: not any(alive(p) for p in info["pids"] + [info["pid"]]), 30),
+            "Lean or the session daemon survived a crashed runner",
+        )
 
 
 if __name__ == "__main__":
     unittest.main()
+
 
 class SessionLogTests(unittest.TestCase):
     """The daemon's decisions are logged, and a memory refusal leaves a marker background work yields to."""
@@ -611,8 +705,10 @@ class SessionLogTests(unittest.TestCase):
     class FakeServer:
         def __init__(self):
             self.opened = 0
+
         def alive(self):
             return True
+
         def doc(self, uri):
             self.opened += 1
             return lean_session._Doc(uri)
@@ -633,12 +729,13 @@ class SessionLogTests(unittest.TestCase):
             self.assertFalse(lean_session.memory_pressure(self.directory))
             other = lean_session._Entry(self.directory / "other", {}, self.FakeServer())
             self.session.entries[str(other.project)] = other
-            with patch.object(lean_session, "_available_gb", return_value=4.0), \
-                    self.assertRaises(lean_session.SessionError):
+            with (
+                patch.object(lean_session, "_available_gb", return_value=4.0),
+                self.assertRaises(lean_session.SessionError),
+            ):
                 self.session._acquire(other, 1)
         self.assertTrue(any(line.startswith("worker open proj") for line in lines), lines)
         self.assertTrue(any("no room for a Lean worker: memory (4.0 GB available)" in line for line in lines), lines)
         self.assertTrue(lean_session.memory_pressure(self.directory))
         self.assertFalse(lean_session.memory_pressure(self.directory, within=0))
         self.assertIn(lean_session.WAITING_NAME, lean_session.SESSION_FILES)
-

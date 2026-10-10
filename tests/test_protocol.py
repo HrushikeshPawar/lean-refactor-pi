@@ -12,19 +12,24 @@ import uuid
 from pathlib import Path
 from unittest.mock import patch
 
-from tests.slow import slow
 from arena import campaign
 from arena.engine import ROOT
+from tests.slow import slow
 
 NAME = "Core.InitsUpdatesComm"
 FIXTURE = ROOT / "runs/baseline/Core_InitsUpdatesComm/arena-candidate-126.txt"
-LEAN = unittest.skipUnless((ROOT / "workspaces/strata-v4.29.1").is_dir() and FIXTURE.exists(),
-                           "Strata fixture environment is not provisioned")
+LEAN = unittest.skipUnless(
+    (ROOT / "workspaces/strata-v4.29.1").is_dir() and FIXTURE.exists(), "Strata fixture environment is not provisioned"
+)
 
 
 def cli(run_id: str, action: str, *args: str, theorem: str = NAME) -> dict:
-    proc = subprocess.run([sys.executable, "-m", "tools.arena_campaign", action, "--theorem", theorem,
-                           "--run-id", run_id, *args], cwd=ROOT, text=True, capture_output=True)
+    proc = subprocess.run(
+        [sys.executable, "-m", "tools.arena_campaign", action, "--theorem", theorem, "--run-id", run_id, *args],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
     assert "Traceback" not in proc.stderr + proc.stdout, proc.stderr
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
@@ -63,8 +68,9 @@ class CampaignCliTests(unittest.TestCase):
 
     def test_02_arbitrary_idea_and_unknown_parent_never_reject(self):
         variant = self.good + "\n  -- annotated"
-        result = cli(self.run_id, "evaluate", "--proof-file", self.proof(variant),
-                     "--idea-id", "whatever", "--parent", "#99")
+        result = cli(
+            self.run_id, "evaluate", "--proof-file", self.proof(variant), "--idea-id", "whatever", "--parent", "#99"
+        )
         self.assertTrue(result["ok"], result)
         self.assertTrue(any("parent #99 ignored" in note for note in result["notes"]))
         self.assertTrue(any("idea_id whatever" in note for note in result["notes"]))
@@ -72,8 +78,7 @@ class CampaignCliTests(unittest.TestCase):
     def test_04_probe_with_sorry_reports_goals_and_cannot_be_promoted(self):
         statement = campaign.problem(NAME)["statement"]
         before = len(campaign.frontier(self.run_id)["top"]), campaign.frontier(self.run_id)["candidates"]
-        probe = cli(self.run_id, "probe", "--proof-file",
-                    self.proof(statement + " := by\n  intros Hup Hinit\n  sorry"))
+        probe = cli(self.run_id, "probe", "--proof-file", self.proof(statement + " := by\n  intros Hup Hinit\n  sorry"))
         self.assertEqual(probe["probe"], "p1")
         self.assertEqual(len(probe["goals"]), 1)
         self.assertIn("Hup", probe["goals"][0]["goals"])
@@ -117,14 +122,19 @@ class CampaignCliTests(unittest.TestCase):
         self.assertIn(fresh["candidate"], drained["checked"])
         self.assertEqual(drained["remaining"], [])
         published = json.loads((campaign.run_dir(self.run_id) / "state.json").read_text())
-        self.assertTrue(any(item["text"].startswith(f"{fresh['candidate']} passes all 3 versions")
-                            for item in published["updates"]), published)
+        self.assertTrue(
+            any(
+                item["text"].startswith(f"{fresh['candidate']} passes all 3 versions") for item in published["updates"]
+            ),
+            published,
+        )
         self.assertEqual(published["checking"], [])
         self.assertIsNotNone(published["best"]["proxy"])
         answer = cli(self.run_id, "submission")
         self.assertEqual(answer["candidate"], published["best"]["candidate"])
-        self.assertEqual((campaign.run_dir(self.run_id) / "submission.lean").read_text().split(":=")[0],
-                         self.good.split(":=")[0])
+        self.assertEqual(
+            (campaign.run_dir(self.run_id) / "submission.lean").read_text().split(":=")[0], self.good.split(":=")[0]
+        )
 
     def test_10_blank_proof_next_to_a_candidate_is_ignored(self):
         empty = self.proof(" ")
@@ -145,8 +155,9 @@ class CampaignCliTests(unittest.TestCase):
         self.assertEqual(campaign.normalize_draft(NAME, complete), complete)
         self.assertEqual(campaign.normalize_draft(NAME, "\n" + complete), complete)
         self.assertEqual(campaign.normalize_draft(NAME, "simp\nomega"), statement + " := by\n  simp\n  omega")
-        self.assertEqual(campaign.normalize_draft(NAME, "  intro h\n  exact h\n"),
-                         statement + " := by\n  intro h\n  exact h")
+        self.assertEqual(
+            campaign.normalize_draft(NAME, "  intro h\n  exact h\n"), statement + " := by\n  intro h\n  exact h"
+        )
         with self.assertRaises(ValueError):
             campaign.normalize_draft(NAME, "  \n")
 
@@ -158,11 +169,18 @@ class CampaignCliTests(unittest.TestCase):
             seen.append((proof, parent))
             return {"ok": True, "candidate": f"#{len(seen) + 1}"}
 
-        with patch("arena.campaign.events", return_value=[{"kind": "candidate", "candidate_id": candidate_id},
-                                                            {"kind": "current", "candidate_id": candidate_id}]), \
-             patch("arena.campaign.run_dir", return_value=Path("unused")), \
-             patch("arena.campaign._compile_probes", return_value={}), \
-             patch("arena.campaign.probe", side_effect=fake_probe):
+        with (
+            patch(
+                "arena.campaign.events",
+                return_value=[
+                    {"kind": "candidate", "candidate_id": candidate_id},
+                    {"kind": "current", "candidate_id": candidate_id},
+                ],
+            ),
+            patch("arena.campaign.run_dir", return_value=Path("unused")),
+            patch("arena.campaign._compile_probes", return_value={}),
+            patch("arena.campaign.probe", side_effect=fake_probe),
+        ):
             result = campaign.probe_batch(NAME, "unused", ["by exact", "by simp", "by assumption", "by aesop"])
 
         self.assertEqual([item[1] for item in seen], [candidate_id] * 4)
@@ -177,9 +195,11 @@ class CampaignCliTests(unittest.TestCase):
             compiled.append(proof)
             return {"ok": True, "mode": "probe", "tokens": 1, "compat": {"v": {"passed": False}}}
 
-        with patch("arena.campaign._compile_probe", side_effect=fake_compile), \
-             patch("arena.campaign._probe_workers", return_value=4), \
-             patch("arena.campaign.lean_lock") as lock:
+        with (
+            patch("arena.campaign._compile_probe", side_effect=fake_compile),
+            patch("arena.campaign._probe_workers", return_value=4),
+            patch("arena.campaign.lean_lock") as lock,
+        ):
             results = campaign._compile_probes(NAME, Path("unused"), ["by exact", "by simp", " by exact", "by exact"])
         self.assertEqual(len(compiled), 2)
         self.assertEqual(len(results), 2)
@@ -198,10 +218,14 @@ class CampaignCliTests(unittest.TestCase):
         big = cli(self.run_id, "source", "--handle", path, "--first", "1", "--last", "5000")
         self.assertEqual(len(big["text"].splitlines()), 400)
         self.assertEqual(big["next_first"], 401)
-        beyond = cli(self.run_id, "source", "--handle", path, "--first", str(big["file_lines"] + 5), "--last", "9999999")
+        beyond = cli(
+            self.run_id, "source", "--handle", path, "--first", str(big["file_lines"] + 5), "--last", "9999999"
+        )
         self.assertFalse(beyond["ok"])
         self.assertIn(f"has {big['file_lines']} lines", beyond["error"])
-        clamped = cli(self.run_id, "source", "--handle", path, "--first", str(big["file_lines"] - 2), "--last", "9999999")
+        clamped = cli(
+            self.run_id, "source", "--handle", path, "--first", str(big["file_lines"] - 2), "--last", "9999999"
+        )
         self.assertEqual(clamped["last"], big["file_lines"])
         outside = cli(self.run_id, "source", "--handle", "../secrets.lean", "--first", "1", "--last", "2")
         self.assertFalse(outside["ok"])
@@ -231,7 +255,9 @@ class ProfileCliTests(unittest.TestCase):
         self.assertTrue(profile["ok"], profile)
         self.assertEqual(profile["granularity"], "tactic")
         self.assertTrue(4000 <= profile["measured_total"] <= 4500, profile["measured_total"])
-        self.assertAlmostEqual(profile["profiled_total"], profile["measured_total"], delta=0.1 * profile["measured_total"])
+        self.assertAlmostEqual(
+            profile["profiled_total"], profile["measured_total"], delta=0.1 * profile["measured_total"]
+        )
         self.assertEqual(profile["unattributed"], profile["measured_total"] - profile["profiled_total"])
         self.assertGreater(len(profile["entries"]), 10)
         self.assertEqual(profile["entries"][0]["lines"], "10")
@@ -246,8 +272,7 @@ class ProfileCliTests(unittest.TestCase):
         self.assertTrue(costly)
         self.assertTrue(all(e["hb"] > 0 for e in costly))
         top = self.reference["top_self_cost"]
-        self.assertEqual([t["cumulative_share_pct"] for t in top],
-                         sorted(t["cumulative_share_pct"] for t in top))
+        self.assertEqual([t["cumulative_share_pct"] for t in top], sorted(t["cumulative_share_pct"] for t in top))
         self.assertGreater(top[-1]["cumulative_share_pct"], 50)
 
     def test_profile_of_a_candidate_and_cached_repeat(self):
@@ -280,8 +305,9 @@ class DeclarationTests(unittest.TestCase):
         self.assertEqual(found["kind"], "declaration")
         self.assertIn("List.length ks = List.length vs", found["source_text"])
         library = campaign.declarations(NAME, ["List.unzip_zip"])["items"][0]
-        self.assertEqual((library["kind"], library["reason"], library["module"]),
-                         ("unavailable", "external", "Init.Data.List.Zip"))
+        self.assertEqual(
+            (library["kind"], library["reason"], library["module"]), ("unavailable", "external", "Init.Data.List.Zip")
+        )
         constructor = campaign.declarations(NAME, ["Core.UpdateStates.update_some"])["items"][0]
         self.assertEqual(constructor["kind"], "declaration")
         self.assertIn("update_some", constructor["source_text"])
@@ -306,7 +332,9 @@ class TruncationEquivalenceTests(unittest.TestCase):
         full = candidate_file(row, proof, version, commit, truncate=False)
         self.assertGreater(len(full["text"]), len(short["text"]))
         self.assertTrue(full["text"].startswith(short["text"].rstrip("\n")))
-        code, output = run_lean(row, full["path"], full["text"][:full["offset"]] + HEARTBEAT_WRAPPER + full["text"][full["offset"]:])
+        code, output = run_lean(
+            row, full["path"], full["text"][: full["offset"]] + HEARTBEAT_WRAPPER + full["text"][full["offset"] :]
+        )
         untruncated = int(__import__("re").search(r"ARENA_HEARTBEATS (\d+)", output)[1])
         result = evaluate(NAME, proof, "fast")
         self.assertEqual((code, result["compat"][version]["passed"]), (0, True))
@@ -329,8 +357,11 @@ class ProtocolLogicTests(unittest.TestCase):
 
     def test_probe_label_as_parent_resolves_to_the_candidate_it_was_built_on(self):
         first, second = "a" * 64, "b" * 64
-        history = [{"kind": "candidate", "candidate_id": first}, {"kind": "candidate", "candidate_id": second},
-                   {"kind": "probe", "proof_id": "c" * 64, "parent": second, "result": {}}]
+        history = [
+            {"kind": "candidate", "candidate_id": first},
+            {"kind": "candidate", "candidate_id": second},
+            {"kind": "probe", "proof_id": "c" * 64, "parent": second, "result": {}},
+        ]
         self.assertEqual(campaign.resolve_parent_ref(history, "p1"), second)
         self.assertEqual(campaign.resolve_parent_ref(history, "#1"), first)
         with self.assertRaisesRegex(ValueError, "Unknown probe"):
@@ -339,19 +370,22 @@ class ProtocolLogicTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        patches = [patch.object(campaign, "ROOT", Path(self.temporary.name)),
-                   patch.object(campaign, "problem", return_value={"name": "T"}),
-                   patch.object(campaign, "validate_proof"),
-                   patch.object(campaign, "versions", return_value=[("v1", "a"), ("v2", "b")]),
-                   patch.object(campaign, "materialize", return_value={"candidate_path": "s.lean"}),
-                   patch.object(campaign, "evaluate", side_effect=self.fake_eval)]
+        patches = [
+            patch.object(campaign, "ROOT", Path(self.temporary.name)),
+            patch.object(campaign, "problem", return_value={"name": "T"}),
+            patch.object(campaign, "validate_proof"),
+            patch.object(campaign, "versions", return_value=[("v1", "a"), ("v2", "b")]),
+            patch.object(campaign, "materialize", return_value={"candidate_path": "s.lean"}),
+            patch.object(campaign, "evaluate", side_effect=self.fake_eval),
+        ]
         for item in patches:
             item.start()
             self.addCleanup(item.stop)
         self.directory = campaign.run_dir("logic")
         campaign._append(self.directory, {"kind": "init", "theorem": "T", "versions": [["v1", "a"], ["v2", "b"]]})
-        reference = campaign.record_evaluation("T", "logic", "theorem t := by\n  ref", "fast",
-                                               origin="reference", materialize_live=False)
+        reference = campaign.record_evaluation(
+            "T", "logic", "theorem t := by\n  ref", "fast", origin="reference", materialize_live=False
+        )
         campaign._append(self.directory, {"kind": "current", "candidate_id": reference["candidate_id"]})
 
     calls: list = []
@@ -362,16 +396,25 @@ class ProtocolLogicTests(unittest.TestCase):
         tokens = len(proof)
         compat = {"v1": (known or {}).get("v1") or {"passed": "bad" not in proof}}
         if mode == "full":
-            compat["v2"] = {"passed": "bad" not in proof and "old" not in proof,
-                            "error_headlines": [] if "old" not in proof else ["line 3 (proof line 2): unknown tactic"]}
+            compat["v2"] = {
+                "passed": "bad" not in proof and "old" not in proof,
+                "error_headlines": [] if "old" not in proof else ["line 3 (proof line 2): unknown tactic"],
+            }
         score = round(100 - tokens, 2)
         metrics = {"tokens": tokens, "heartbeats": 10, "compiled": "bad" not in proof}
         if metrics["compiled"]:
             metrics["axes"] = {"tokens": {"value": tokens}}
             metrics["proxy" if mode == "full" else "estimated_proxy"] = score
             metrics["deltas"] = {}
-        return {"ok": True, "mode": mode, "tokens": tokens, "heartbeat": 10, "compat": compat,
-                "local_proxy": score if mode == "full" else None, "metrics": metrics}
+        return {
+            "ok": True,
+            "mode": mode,
+            "tokens": tokens,
+            "heartbeat": 10,
+            "compat": compat,
+            "local_proxy": score if mode == "full" else None,
+            "metrics": metrics,
+        }
 
     def evaluate(self, text, **kwargs):
         return campaign.evaluate_request("T", "logic", text, kwargs.pop("mode", "fast"), **kwargs)
@@ -388,7 +431,9 @@ class ProtocolLogicTests(unittest.TestCase):
         self.evaluate("theorem t := by\n  a")
         again = self.evaluate("theorem t := by\n  a", parents=["#2"], mode="full")
         self.assertTrue(again["ok"])
-        self.assertEqual(campaign.graph_state("logic")["nodes"][1]["parents"], [campaign.graph_state("logic")["nodes"][0]["id"]])
+        self.assertEqual(
+            campaign.graph_state("logic")["nodes"][1]["parents"], [campaign.graph_state("logic")["nodes"][0]["id"]]
+        )
 
     def test_deltas_against_parent_and_best(self):
         self.evaluate("theorem t := by\n  aaaa")
@@ -410,8 +455,9 @@ class ProtocolLogicTests(unittest.TestCase):
     def test_idea_lifecycle_and_validation(self):
         with self.assertRaisesRegex(ValueError, "needs a title"):
             campaign.record_idea("logic")
-        created = campaign.record_idea("logic", "Factor repeated cases", "share lemma", "3-9",
-                                       {"tokens": "-30", "bogus": "x"})
+        created = campaign.record_idea(
+            "logic", "Factor repeated cases", "share lemma", "3-9", {"tokens": "-30", "bogus": "x"}
+        )
         self.assertEqual(created["expected_effect"], {"tokens": "-30"})
         with self.assertRaisesRegex(ValueError, "reason"):
             campaign.record_idea("logic", idea_id="i1", status="abandoned")
@@ -429,9 +475,12 @@ class ProtocolLogicTests(unittest.TestCase):
     def test_only_a_compiled_candidate_is_queued_for_a_route(self):
         # Route credit is for compiled proofs only: probe drafts and failed compiles are never fingerprinted.
         compiled = {"ok": True, "tokens": 5, "compat": {"v1": {"passed": False}}}
-        with patch.object(campaign, "normalize_draft", side_effect=lambda name, text: text), \
-                patch.object(campaign, "validate_proof"), patch.object(campaign, "materialize", return_value={}), \
-                patch.object(campaign, "_record_route_later") as filed:
+        with (
+            patch.object(campaign, "normalize_draft", side_effect=lambda name, text: text),
+            patch.object(campaign, "validate_proof"),
+            patch.object(campaign, "materialize", return_value={}),
+            patch.object(campaign, "_record_route_later") as filed,
+        ):
             with patch.object(campaign, "_compile_probe", return_value=compiled):
                 campaign.probe("T", "logic", "theorem t := by\n  sorry")
             self.assertEqual(filed.call_count, 0)
@@ -446,9 +495,11 @@ class ProtocolLogicTests(unittest.TestCase):
         first = self.evaluate("theorem t := by\n  a")
         self.assertEqual(first["idea_id"], "i1")
 
-        with patch.object(campaign, "normalize_draft", return_value="theorem t := by\n  sorry"), \
-                patch.object(campaign, "validate_proof"), \
-                patch.object(campaign, "_compile_probe", return_value={"ok": False, "compat": {"v1": {"passed": False}}}):
+        with (
+            patch.object(campaign, "normalize_draft", return_value="theorem t := by\n  sorry"),
+            patch.object(campaign, "validate_proof"),
+            patch.object(campaign, "_compile_probe", return_value={"ok": False, "compat": {"v1": {"passed": False}}}),
+        ):
             draft = campaign.probe("T", "logic", "by\n  sorry")
         self.assertEqual(draft["idea_id"], "i1")
 
@@ -474,8 +525,15 @@ class ProtocolLogicTests(unittest.TestCase):
         self.assertEqual(campaign.record_idea("logic", "Odd id", idea_id="has space/slash")["id"], "has_space_slash")
 
     def test_region_accepts_common_spellings_and_never_rejects(self):
-        spans = {"12-30": [12, 30], "12–30": [12, 30], "lines 12-30": [12, 30], "L12-L30": [12, 30],
-                 "12..30": [12, 30], "line 7": [7, 7], "30-12": [12, 30]}
+        spans = {
+            "12-30": [12, 30],
+            "12–30": [12, 30],
+            "lines 12-30": [12, 30],
+            "L12-L30": [12, 30],
+            "12..30": [12, 30],
+            "line 7": [7, 7],
+            "30-12": [12, 30],
+        }
         for text, span in spans.items():
             self.assertEqual(campaign.record_idea("logic", f"r {text}", region=text)["region"], span, text)
         free = campaign.record_idea("logic", "free", region="the induction step")
@@ -499,8 +557,10 @@ class ProtocolLogicTests(unittest.TestCase):
         state = campaign.state("logic")
         self.assertEqual(state["best"]["candidate"], "#3")
         self.assertIsNone(state["leading_unverified"])
-        self.assertEqual([u["text"].split(":")[0] for u in state["updates"]],
-                         ["#3 passes all 2 versions", "#2 passes all 2 versions"])
+        self.assertEqual(
+            [u["text"].split(":")[0] for u in state["updates"]],
+            ["#3 passes all 2 versions", "#2 passes all 2 versions"],
+        )
         self.assertEqual(campaign.autocheck("T", "logic")["checked"], [])
 
     def test_failed_transfer_is_reported_with_its_headline_and_not_submitted(self):
@@ -516,6 +576,7 @@ class ProtocolLogicTests(unittest.TestCase):
 
     def test_only_one_checker_runs_per_run(self):
         import fcntl
+
         self.evaluate("theorem t := by\n  a")
         with (self.directory / "autocheck.lock").open("a") as handle:
             fcntl.flock(handle, fcntl.LOCK_EX)
@@ -549,6 +610,7 @@ class LockTests(unittest.TestCase):
                     time.sleep(0.05)
                     with lock:
                         active[0] -= 1
+
             threads = [threading.Thread(target=job) for _ in range(4)]
             [t.start() for t in threads]
             [t.join() for t in threads]

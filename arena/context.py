@@ -24,11 +24,29 @@ LEAN_FILE = Path(__file__).with_name("lean") / "context.lean"
 _RECORD = re.compile(r"^ARENA_CTX (\{.*\})$", re.M)
 MAX_PACKET_CHARS = 40_000
 CONTEXT_TIMEOUT = 360  # seconds; the library scan adds about 20-40 s to the largest environments
-LIMITS = {"goals": 40, "goal_chars": 700, "used": 5, "used_chars": 320, "earlier": 60, "earlier_budget": 12_000,
-          "earlier_chars": 240, "types": 8, "type_chars": 700, "profile_entries": 24,
-          "scope": 25, "scope_chars": 600, "library": 20, "library_budget": 7_000, "library_chars": 340}
-REQUIRED_SECTIONS = ("Pinned environment and candidate", "Source-named declarations",
-                     "Elaborated proof dependencies", "Reference proof")
+LIMITS = {
+    "goals": 40,
+    "goal_chars": 700,
+    "used": 5,
+    "used_chars": 320,
+    "earlier": 60,
+    "earlier_budget": 12_000,
+    "earlier_chars": 240,
+    "types": 8,
+    "type_chars": 700,
+    "profile_entries": 24,
+    "scope": 25,
+    "scope_chars": 600,
+    "library": 20,
+    "library_budget": 7_000,
+    "library_chars": 340,
+}
+REQUIRED_SECTIONS = (
+    "Pinned environment and candidate",
+    "Source-named declarations",
+    "Elaborated proof dependencies",
+    "Reference proof",
+)
 
 
 def _cache(kind: str, name: str, commit: str, salt: str) -> Path:
@@ -46,9 +64,20 @@ def _lean_name(name: str) -> str:
 
 def parse_context(output: str, shift: int, start_line: int, proof_boundary: tuple[int, int] | None = None) -> dict:
     """Group the wrapper's JSON records. `shift` is the instrumentation's line count."""
-    groups: dict[str, list[dict]] = {"goal": [], "used": [], "source": [], "dependency": [], "constant": [],
-                                    "local": [], "failure": [],
-                                    "type": [], "earlier": [], "target": [], "library": [], "library_scan": []}
+    groups: dict[str, list[dict]] = {
+        "goal": [],
+        "used": [],
+        "source": [],
+        "dependency": [],
+        "constant": [],
+        "local": [],
+        "failure": [],
+        "type": [],
+        "earlier": [],
+        "target": [],
+        "library": [],
+        "library_scan": [],
+    }
     complete = False
     for raw in _RECORD.findall(output):
         record = json.loads(raw)
@@ -67,7 +96,7 @@ def parse_context(output: str, shift: int, start_line: int, proof_boundary: tupl
         if proof_boundary is None:
             item.setdefault("origin", "unknown")  # no top-level `:=` (e.g. equation-compiler proofs): do not guess
         else:
-            item["origin"] = ("proof" if (item["proof_line"], item.get("column", 0)) >= proof_boundary else "statement")
+            item["origin"] = "proof" if (item["proof_line"], item.get("column", 0)) >= proof_boundary else "statement"
     for item in groups["dependency"]:
         item["origin"] = "elaborated-proof"
     for item in groups["constant"]:
@@ -77,14 +106,19 @@ def parse_context(output: str, shift: int, start_line: int, proof_boundary: tupl
     return {"complete": complete and not groups["failure"], **groups}
 
 
-def constant_index(context: dict, name: str | None = None, kind: str | None = None,
-                   origin: str | None = None, tag: str | None = None) -> list[dict]:
+def constant_index(
+    context: dict, name: str | None = None, kind: str | None = None, origin: str | None = None, tag: str | None = None
+) -> list[dict]:
     """Query the full elaborated constant inventory by qualified name, kind, origin and tag."""
     items = context.get("constant", [])
-    return [item for item in items if (name is None or item["name"] == name)
-            and (kind is None or item["kind"] == kind)
-            and (origin is None or item["origin"] == origin)
-            and (tag is None or item.get("tag") == tag)]
+    return [
+        item
+        for item in items
+        if (name is None or item["name"] == name)
+        and (kind is None or item["kind"] == kind)
+        and (origin is None or item["origin"] == origin)
+        and (tag is None or item.get("tag") == tag)
+    ]
 
 
 def _proof_boundary(source: str, start_line: int) -> tuple[int, int] | None:
@@ -142,19 +176,23 @@ def lean_context(name: str) -> dict:
     cache = _cache("context", name, commit, source + row["src"])
     if cache.exists():
         return json.loads(cache.read_text())
-    roots = "" if is_standalone(row) else ", ".join(json.dumps(part) for part in sorted({row["file_path"].split("/")[0]}))
+    roots = (
+        "" if is_standalone(row) else ", ".join(json.dumps(part) for part in sorted({row["file_path"].split("/")[0]}))
+    )
     inserted = source.replace("@@ROOTS@@", roots).replace("@@TARGET@@", _lean_name(name))
     built = candidate_file(row, row["src"], version, commit)
-    text = built["text"][:built["head"]] + inserted + built["text"][built["head"]:]
+    text = built["text"][: built["head"]] + inserted + built["text"][built["head"] :]
     ran = run_lean(row, built["path"], text, timeout=CONTEXT_TIMEOUT, prefix_end=built["head"])
     if ran is None:
         return {"error": "Lean timed out while collecting context"}
-    returncode, output = ran
-    parsed = parse_context(output, inserted.count("\n"), built["start_line"],
-                           _proof_boundary(row["src"], 1))
+    _returncode, output = ran
+    parsed = parse_context(output, inserted.count("\n"), built["start_line"], _proof_boundary(row["src"], 1))
     if not parsed["complete"]:
-        reason = (parsed["failure"][0].get("message") if parsed["failure"] else
-                  next((line for line in output.splitlines() if "error" in line), "no context records"))
+        reason = (
+            parsed["failure"][0].get("message")
+            if parsed["failure"]
+            else next((line for line in output.splitlines() if "error" in line), "no context records")
+        )
         return {"error": reason[:200]}
     cache.parent.mkdir(parents=True, exist_ok=True)
     cache.write_text(json.dumps(parsed, ensure_ascii=False, indent=1))
@@ -165,7 +203,7 @@ def cached_context(name: str) -> dict:
     """The kickoff context if it is already cached, else {}; never starts Lean."""
     try:
         row = problem(name)
-        version, commit = measure_version(row)
+        _version, commit = measure_version(row)
         cache = _cache("context", name, commit, LEAN_FILE.read_text() + row["src"])
         return json.loads(cache.read_text()) if cache.exists() else {}
     except (ValueError, OSError, KeyError):
@@ -175,9 +213,13 @@ def cached_context(name: str) -> dict:
 def reference_profile(name: str) -> dict:
     """Heartbeat profile of the reference proof, cached like the context."""
     row = problem(name)
-    version, commit = measure_version(row)
-    salt = ((Path(__file__).with_name("lean") / "profile.lean").read_text() + row["src"] +
-            str(MAX_DEPTH) + "profile-schema-v3-innermost-span-token-hotspots")
+    _version, commit = measure_version(row)
+    salt = (
+        (Path(__file__).with_name("lean") / "profile.lean").read_text()
+        + row["src"]
+        + str(MAX_DEPTH)
+        + "profile-schema-v3-innermost-span-token-hotspots"
+    )
     cache = _cache("profile", name, commit, salt)
     if cache.exists():
         return json.loads(cache.read_text())
@@ -210,20 +252,25 @@ SCORING_FACTS = (
     "`.`, `_`, `'` is one token whatever its length, every other non-space character is one token (so `⟨a, b⟩` "
     "is 5), except the operators `:= != && -. -> ← .. ... :: :> <;> ;; == || => <= >= ⁻¹ ?_`, which count once. "
     "Spaces and line breaks are free; a tab counts as a token. `_` can replace any argument or term Lean infers; "
-    "restating it, such as a lambda, costs tokens.")
+    "restating it, such as a lambda, costs tokens."
+)
 
 
 def _rates(name: str, total_versions: int) -> str:
     rates = exchange_rates(name, total_versions)
-    return (f"Exchange rates for this problem (score points): 1 token = {rates['points_per_token']} pt "
-            f"(about {rates['heartbeats_per_token']} heartbeats); 100 heartbeats = "
-            f"{rates['points_per_100_heartbeats']} pt; one lost toolchain version = "
-            f"{rates['points_per_lost_version']} pt (about {rates['tokens_per_lost_version']} tokens). "
-            f"Reference: {rates['reference_tokens']} tokens, {rates['reference_heartbeats']} heartbeats.")
+    return (
+        f"Exchange rates for this problem (score points): 1 token = {rates['points_per_token']} pt "
+        f"(about {rates['heartbeats_per_token']} heartbeats); 100 heartbeats = "
+        f"{rates['points_per_100_heartbeats']} pt; one lost toolchain version = "
+        f"{rates['points_per_lost_version']} pt (about {rates['tokens_per_lost_version']} tokens). "
+        f"Reference: {rates['reference_tokens']} tokens, {rates['reference_heartbeats']} heartbeats."
+    )
 
 
-_SCOPE = re.compile(r"^(?:@\[[^\]]*\]\s*)?(?:public\s+|private\s+)?(?:noncomputable\s+)?"
-                    r"(namespace|section|end|open|variable|universe|include|omit)\b(.*)$")
+_SCOPE = re.compile(
+    r"^(?:@\[[^\]]*\]\s*)?(?:public\s+|private\s+)?(?:noncomputable\s+)?"
+    r"(namespace|section|end|open|variable|universe|include|omit)\b(.*)$"
+)
 _PRIVATE = re.compile(r"_private\.(?:[^.\s]+\.)*?\d+\.")
 
 
@@ -242,7 +289,7 @@ def _scope_section(row: dict) -> list[str]:
         source = row.get("header") or ""
     else:
         built = candidate_file(row, row["src"], *measure_version(row))
-        source = built["text"][:built["head"]]
+        source = built["text"][: built["head"]]
     return scope_lines(source)
 
 
@@ -281,25 +328,32 @@ def scope_lines(source: str) -> list[str]:
         active.append((len(stack), tail[-1].rstrip()))
     namespace = ".".join(name for kind, name in stack if kind == "namespace" and name)
     body = [f"namespace {namespace}" if namespace else "(root namespace)"] + [text for _, text in active]
-    return [_clip(line, LIMITS["scope_chars"]) for line in body][:LIMITS["scope"]]
+    return [_clip(line, LIMITS["scope_chars"]) for line in body][: LIMITS["scope"]]
 
 
 def _types_section(context: dict) -> list[str]:
     lines = []
-    for item in context.get("type", [])[:LIMITS["types"]]:
+    for item in context.get("type", [])[: LIMITS["types"]]:
         if item["decl"] in ("inductive", "structure"):
             body = "\n".join(f"  | {_clip(c, LIMITS['type_chars'])}" for c in item["ctors"])
-            lines.append(f"decl:{item['name']} [{item['decl']}] {_clip(_readable(item['sig']), LIMITS['type_chars'])}\n{_readable(body)}")
+            lines.append(
+                f"decl:{item['name']} [{item['decl']}] {_clip(_readable(item['sig']), LIMITS['type_chars'])}\n{_readable(body)}"
+            )
         else:
-            lines.append(f"decl:{item['name']} [def] {_clip(item['sig'], LIMITS['type_chars'])}\n  := {_clip(item.get('value', ''), LIMITS['type_chars'])}")
+            lines.append(
+                f"decl:{item['name']} [def] {_clip(item['sig'], LIMITS['type_chars'])}\n  := {_clip(item.get('value', ''), LIMITS['type_chars'])}"
+            )
     return lines
 
 
 def _goal_section(context: dict) -> list[str]:
     lines = []
-    for item in context.get("goal", [])[:LIMITS["goals"]]:
-        span = (str(item["proof_line"]) if item["proof_line"] == item["end_proof_line"]
-                else f"{item['proof_line']}-{item['end_proof_line']}")
+    for item in context.get("goal", [])[: LIMITS["goals"]]:
+        span = (
+            str(item["proof_line"])
+            if item["proof_line"] == item["end_proof_line"]
+            else f"{item['proof_line']}-{item['end_proof_line']}"
+        )
         lines.append(f"-- before proof line {span}\n{_clip(item['text'], LIMITS['goal_chars'])}")
     return lines
 
@@ -331,7 +385,9 @@ def _extra_dependencies(context: dict) -> tuple[list[dict], dict[str, int], int]
 
 def _preview(items: list[dict], root: str) -> list[dict]:
     """Up to LIMITS['used'] helper declarations in display order; never generated, instance, axiom, tactic or core glue."""
-    return sorted((i for i in items if i.get("tag", "helper") == "helper"), key=lambda i: _rank(i, root))[:LIMITS["used"]]
+    return sorted((i for i in items if i.get("tag", "helper") == "helper"), key=lambda i: _rank(i, root))[
+        : LIMITS["used"]
+    ]
 
 
 def _used_section(context: dict) -> list[str]:
@@ -339,34 +395,58 @@ def _used_section(context: dict) -> list[str]:
     for item in context.get("source", []):
         occurrences.setdefault(item["name"], []).append(item)
     ordered = sorted(occurrences.items())
-    lines = ["Qualified name [kind] S:statement lines P:proof lines U:lines whose position could not be placed "
-             "(no top-level `:=` found); use `decl:<name>` as its source handle."]
+    lines = [
+        "Qualified name [kind] S:statement lines P:proof lines U:lines whose position could not be placed "
+        "(no top-level `:=` found); use `decl:<name>` as its source handle."
+    ]
     for name, items in ordered:
+
         def at(origin: str) -> str:
             return ",".join(str(i["proof_line"]) for i in items if i.get("origin") == origin)
+
         unknown = at("unknown")
-        lines.append(f"decl:{name} [{items[0]['decl']}] S:{at('statement') or '-'} P:{at('proof') or '-'}"
-                     + (f" U:{unknown}" if unknown else ""))
+        lines.append(
+            f"decl:{name} [{items[0]['decl']}] S:{at('statement') or '-'} P:{at('proof') or '-'}"
+            + (f" U:{unknown}" if unknown else "")
+        )
     preview = _preview([items[0] for _, items in ordered], context.get("root", ""))
-    lines.extend(["", f"Signature preview: {sum(bool(i.get('sig')) for i in preview)} shown of {len(ordered)} distinct source names; "
-                  f"{sum(not bool(items[0].get('sig')) for _, items in ordered)} unavailable."])
-    lines.extend(f"[decl:{i['name']} · {i['decl']} · {i['module']}] {_clip(_readable(_one_line(i['sig'])), LIMITS['used_chars'])}"
-                 for i in preview if i.get("sig"))
+    lines.extend(
+        [
+            "",
+            f"Signature preview: {sum(bool(i.get('sig')) for i in preview)} shown of {len(ordered)} distinct source names; "
+            f"{sum(not bool(items[0].get('sig')) for _, items in ordered)} unavailable.",
+        ]
+    )
+    lines.extend(
+        f"[decl:{i['name']} · {i['decl']} · {i['module']}] {_clip(_readable(_one_line(i['sig'])), LIMITS['used_chars'])}"
+        for i in preview
+        if i.get("sig")
+    )
     return lines
 
 
 def _dependency_section(context: dict) -> list[str]:
     helpers, counts, named = _extra_dependencies(context)
-    lines = ["Qualified helper theorem name (project/this file first); origin: direct elaborated-proof use; "
-             "source handle: `decl:<name>`."]
+    lines = [
+        "Qualified helper theorem name (project/this file first); origin: direct elaborated-proof use; "
+        "source handle: `decl:<name>`."
+    ]
     lines.extend(f"decl:{i['name']}" for i in helpers)
-    lines += ["", f"Tagged, not listed: {', '.join(f'{tag} {n}' for tag, n in counts.items())}; also source-named: {named}. "
-              "Query the constant index or declaration lookup for these."]
+    lines += [
+        "",
+        f"Tagged, not listed: {', '.join(f'{tag} {n}' for tag, n in counts.items())}; also source-named: {named}. "
+        "Query the constant index or declaration lookup for these.",
+    ]
     preview = _preview(helpers, context.get("root", ""))
-    lines += [f"Signature preview: {sum(bool(i.get('sig')) for i in preview)} shown of {len(helpers)} helpers; "
-              f"{sum(not bool(i.get('sig')) for i in helpers)} unavailable."]
-    lines.extend(f"[decl:{i['name']} · {i['decl']} · {i['module']}] {_clip(_readable(_one_line(i['sig'])), LIMITS['used_chars'])}"
-                 for i in preview if i.get("sig"))
+    lines += [
+        f"Signature preview: {sum(bool(i.get('sig')) for i in preview)} shown of {len(helpers)} helpers; "
+        f"{sum(not bool(i.get('sig')) for i in helpers)} unavailable."
+    ]
+    lines.extend(
+        f"[decl:{i['name']} · {i['decl']} · {i['module']}] {_clip(_readable(_one_line(i['sig'])), LIMITS['used_chars'])}"
+        for i in preview
+        if i.get("sig")
+    )
     return lines
 
 
@@ -377,8 +457,10 @@ def _local_section(context: dict) -> list[str]:
     if not scopes:
         return []
     lines = ["Local variable name : type; lines are where the Lean local context exposes the variable."]
-    lines.extend(f"{name} : {_clip(_one_line(ty), 320)} [scope: {scope}; lines: {','.join(map(str, sorted(locations)))}]"
-                 for (name, ty, scope), locations in sorted(scopes.items()))
+    lines.extend(
+        f"{name} : {_clip(_one_line(ty), 320)} [scope: {scope}; lines: {','.join(map(str, sorted(locations)))}]"
+        for (name, ty, scope), locations in sorted(scopes.items())
+    )
     return lines
 
 
@@ -393,25 +475,29 @@ def _imports(row: dict) -> list[str]:
         source = row.get("header") or ""
     else:
         built = candidate_file(row, row["src"], *measure_version(row))
-        source = built["text"][:built["head"]]
+        source = built["text"][: built["head"]]
     return [match.group(0).strip() for match in re.finditer(r"(?m)^\s*import\s+[^\n]+", source)]
 
 
 def packet_manifest(parts: list[tuple[str, list[str]]], inventory: dict) -> dict:
     present = {title for title, body in parts if body}
-    sections = {title: {"expected": True, "present": any(p.startswith(title) for p in present)}
-                for title in REQUIRED_SECTIONS}
-    return {"schema": "arena-kickoff-manifest/v1", "sections": sections,
-            "source_inventory": len(inventory.get("source", [])),
-            "dependency_helpers": len(_extra_dependencies(inventory)[0]),
-            "dependency_tags": _extra_dependencies(inventory)[1],
-            "complete": bool(inventory.get("complete"))}
+    sections = {
+        title: {"expected": True, "present": any(p.startswith(title) for p in present)} for title in REQUIRED_SECTIONS
+    }
+    return {
+        "schema": "arena-kickoff-manifest/v1",
+        "sections": sections,
+        "source_inventory": len(inventory.get("source", [])),
+        "dependency_helpers": len(_extra_dependencies(inventory)[0]),
+        "dependency_tags": _extra_dependencies(inventory)[1],
+        "complete": bool(inventory.get("complete")),
+    }
 
 
 def certify_manifest(manifest: dict, expected: list[str] | None = None) -> dict:
     required = expected or list(REQUIRED_SECTIONS)
     missing = [name for name in required if not manifest.get("sections", {}).get(name, {}).get("present")]
-    reasons = (["context extraction incomplete"] if not manifest.get("complete") else [])
+    reasons = ["context extraction incomplete"] if not manifest.get("complete") else []
     if missing:
         reasons.append("required sections absent: " + ", ".join(missing))
     return {"certified": not reasons, "reasons": reasons}
@@ -461,23 +547,31 @@ def score_earlier(context: dict) -> list[dict]:
     core = {name for item in earlier for name in item.get("core_consts", [])}
     core |= {name for g in context.get("goal", []) for name in g.get("core_consts", [])}
     core |= set((context.get("target") or [{}])[0].get("core_consts", []))
-    core |= {c["name"] for c in context.get("constant", [])
-             if c.get("tag") == "core" or c.get("module", "").split(".")[0] in ("Init", "Std", "Lean")}
+    core |= {
+        c["name"]
+        for c in context.get("constant", [])
+        if c.get("tag") == "core" or c.get("module", "").split(".")[0] in ("Init", "Std", "Lean")
+    }
+
     def idf(name: str) -> float:
         seen = frequency.get(name, 0)
         if seen > GENERIC_SHARE * count:
             return 0.0
         return (CORE_FACTOR if name in core else 1.0) * math.log((count + 1) / (seen + 0.5))
+
     target = (context.get("target") or [{}])[0]
     wanted: dict[str, float] = {}
-    for name in ([c["name"] for c in context.get("constant", [])] +
-                 [n for g in context.get("goal", []) for n in g.get("consts", []) + g.get("core_consts", [])]):
+    for name in [c["name"] for c in context.get("constant", [])] + [
+        n for g in context.get("goal", []) for n in g.get("consts", []) + g.get("core_consts", [])
+    ]:
         wanted[name] = 0.7
     for name in target.get("consts", []) + target.get("core_consts", []):
         wanted[name] = 1.0
     goal_heads = {head for g in context.get("goal", []) for head in _key_heads(g) | {g.get("concl_head", "")} if head}
+
     def shared(item: dict) -> dict[str, float]:
         return {n: wanted[n] * idf(n) for n in _stated(item) if n in wanted and idf(n) > 0}
+
     statement = set(target.get("consts", [])) | set(target.get("core_consts", []))
     overlap_mass = {item["name"]: sum(wanted[n] * idf(n) for n in _stated(item) & statement) for item in earlier}
     relevant_users = {item["name"]: min(1.0, overlap_mass[item["name"]] / 3.0) for item in earlier}
@@ -510,8 +604,9 @@ def score_earlier(context: dict) -> list[dict]:
             tags.append("rw-ready")
         if co:
             tags.append("used by related lemmas")
-        ranked.append({"item": item, "score": round(score, 3), "relevance": round(relevance, 3),
-                       "reason": " · ".join(tags)})
+        ranked.append(
+            {"item": item, "score": round(score, 3), "relevance": round(relevance, 3), "reason": " · ".join(tags)}
+        )
     return sorted(ranked, key=lambda r: (-r["score"], r["item"]["name"]))
 
 
@@ -525,8 +620,10 @@ def _earlier_section(context: dict) -> list[str]:
             if filler > 5:
                 continue
         tag = f" · {entry['reason']}" if entry["reason"] else ""
-        line = (f"line {item['line']} [decl:{item['name']} · {item['decl']}{tag}] "
-                f"{_clip(_readable(_one_line(item['sig'])), LIMITS['earlier_chars'])}")
+        line = (
+            f"line {item['line']} [decl:{item['name']} · {item['decl']}{tag}] "
+            f"{_clip(_readable(_one_line(item['sig'])), LIMITS['earlier_chars'])}"
+        )
         if used + len(line) > LIMITS["earlier_budget"] or len(lines) >= LIMITS["earlier"]:
             break
         lines.append(line)
@@ -543,17 +640,23 @@ LIBRARY_TITLE = "Imported library lemmas matching the statement and goals (ranke
 def _library_section(context: dict) -> list[str]:
     """Imported theorems ranked by the wrapper (rare constants shared with the statement, the goals and the
     lemmas the source names), minus those the reference proof already uses; fixed line and character budget."""
-    known = {item["name"] for item in context.get("source", [])} | {item["name"] for item in context.get("dependency", [])}
+    known = {item["name"] for item in context.get("source", [])} | {
+        item["name"] for item in context.get("dependency", [])
+    }
     records = [item for item in context.get("library", []) if item["name"] not in known and item.get("sig")]
     if not records:
         return []
-    lines = ["Rank by IDF over the imported environment of the constants shared with the theorem statement, its goals "
-             "and the lemmas its source names; not already used by the reference proof. `mentions` lists the shared constants."]
+    lines = [
+        "Rank by IDF over the imported environment of the constants shared with the theorem statement, its goals "
+        "and the lemmas its source names; not already used by the reference proof. `mentions` lists the shared constants."
+    ]
     used = 0
-    for rank, item in enumerate(records[:LIMITS["library"]], 1):
+    for rank, item in enumerate(records[: LIMITS["library"]], 1):
         shared = ", ".join(_short(name) for name in item.get("shared", [])[:3])
-        line = (f"{rank}. [decl:{item['name']} · {item['module']}{' · mentions ' + shared if shared else ''}] "
-                f"{_clip(_readable(_one_line(item['sig'])), LIMITS['library_chars'])}")
+        line = (
+            f"{rank}. [decl:{item['name']} · {item['module']}{' · mentions ' + shared if shared else ''}] "
+            f"{_clip(_readable(_one_line(item['sig'])), LIMITS['library_chars'])}"
+        )
         if used + len(line) + 1 > LIMITS["library_budget"]:
             break
         lines.append(line)
@@ -564,33 +667,48 @@ def _library_section(context: dict) -> list[str]:
 def _profile_section(prof: dict) -> list[str]:
     if prof.get("error"):
         return [f"(profile unavailable: {_clip(prof['error'], 160)})"]
-    rows = [f"Profile granularity: {prof['granularity']}",
-            f"proof lines | file lines | heartbeats (incl.) | self | share | tactic"]
+    rows = [
+        f"Profile granularity: {prof['granularity']}",
+        "proof lines | file lines | heartbeats (incl.) | self | share | tactic",
+    ]
     kept = [e for e in prof["entries"] if e["share_pct"] >= 1.5 or e["depth"] == 0]
-    for entry in kept[:LIMITS["profile_entries"]]:
-        file_span = (str(entry["file_line"]) if entry["end_file_line"] == entry["file_line"]
-                     else f"{entry['file_line']}-{entry['end_file_line']}")
-        rows.append(f"{entry['lines']} | {file_span} | {entry['hb']} | {entry['self_hb']} | {entry['share_pct']}% | "
-                    f"{'  ' * entry['depth']}{_clip(entry['text'], 60)}")
+    for entry in kept[: LIMITS["profile_entries"]]:
+        file_span = (
+            str(entry["file_line"])
+            if entry["end_file_line"] == entry["file_line"]
+            else f"{entry['file_line']}-{entry['end_file_line']}"
+        )
+        rows.append(
+            f"{entry['lines']} | {file_span} | {entry['hb']} | {entry['self_hb']} | {entry['share_pct']}% | "
+            f"{'  ' * entry['depth']}{_clip(entry['text'], 60)}"
+        )
     rows.append("Top-ten starting lines by score-equivalent baseline cost (not predicted savings):")
     if not prof.get("token_attribution_available"):
         rows.append("(unavailable: proof-line tokens did not reconcile with the competition tokenizer)")
     else:
         for item in prof["hotspots"]:
-            spans = ", ".join(f"proof {span['proof_line']}-{span['end_proof_line']} / "
-                               f"file {span['file_line']}-{span['end_file_line']} (depth {span['depth']})"
-                               for span in item["tactic_spans"])
-            rows.append(f"proof {item['proof_line']}-{item['end_proof_line']} / file {item['file_line']}-{item['end_file_line']}"
-                        f" (tactic spans: {_clip(spans, 180)}): {item['self_hb']} self hb, "
-                        f"{item['tokens']} tokens, {item['baseline_cost_points']} baseline points")
-    top = ", ".join(f"{t['lines']} ({t['self_hb']} hb, cum. {t['cumulative_share_pct']}%)" for t in prof["top_self_cost"])
+            spans = ", ".join(
+                f"proof {span['proof_line']}-{span['end_proof_line']} / "
+                f"file {span['file_line']}-{span['end_file_line']} (depth {span['depth']})"
+                for span in item["tactic_spans"]
+            )
+            rows.append(
+                f"proof {item['proof_line']}-{item['end_proof_line']} / file {item['file_line']}-{item['end_file_line']}"
+                f" (tactic spans: {_clip(spans, 180)}): {item['self_hb']} self hb, "
+                f"{item['tokens']} tokens, {item['baseline_cost_points']} baseline points"
+            )
+    top = ", ".join(
+        f"{t['lines']} ({t['self_hb']} hb, cum. {t['cumulative_share_pct']}%)" for t in prof["top_self_cost"]
+    )
     rows.append(f"Top self costs: {top}")
     measured = prof.get("measured_total")
     profiled = prof.get("profiled_total")
     coverage = round(100 * profiled / measured, 1) if measured else None
-    rows.append(f"Measured whole-proof heartbeats: {measured}; attributed tactic heartbeats: {profiled} "
-                f"({coverage}% coverage); statement floor: {prof.get('statement_floor_hb')}; "
-                f"unattributed remainder: {prof.get('unattributed')}.")
+    rows.append(
+        f"Measured whole-proof heartbeats: {measured}; attributed tactic heartbeats: {profiled} "
+        f"({coverage}% coverage); statement floor: {prof.get('statement_floor_hb')}; "
+        f"unattributed remainder: {prof.get('unattributed')}."
+    )
     if prof.get("note"):
         rows.append(_clip(prof["note"], 180))
     return rows
@@ -599,8 +717,10 @@ def _profile_section(prof: dict) -> list[str]:
 def _fit(parts: list[tuple[str, list[str]]], limit: int) -> str:
     """Join sections; if over budget drop entries from the end of the lowest-priority sections."""
     sections = [(title, list(body)) for title, body in parts]
+
     def render() -> str:
         return "\n\n".join((f"{title}\n" if title else "") + "\n".join(body) for title, body in sections if body)
+
     # Shed order: earlier-lemma lines, then goals beyond the first few (later goals mostly repeat the same
     # hypotheses), then library lines, then local-variable lines past a floor (every hypothesis already
     # appears in the goals), then the remaining goals down to one.
@@ -645,14 +765,22 @@ def render_packet(name: str) -> str:
     note = "" if not context.get("error") else f"(elaboration context unavailable: {_clip(context['error'], 160)})"
     parts: list[tuple[str, list[str]]] = [
         ("", task),
-        ("Pinned environment and candidate", [f"Source: {row['source']} standalone problem (file = header + statement + proof)" if is_standalone(row)
-                                               else f"Source: {row['source']}:{row['file_path']}:{row['start_line']}-{row['end_line']}",
-                                               f"Lean toolchain and source revisions: {pins}",
-                                               f"Original proof: candidate #1",
-                                               f"Available imports: {', '.join(_imports(row)) or '(none reported)'}"]),
+        (
+            "Pinned environment and candidate",
+            [
+                f"Source: {row['source']} standalone problem (file = header + statement + proof)"
+                if is_standalone(row)
+                else f"Source: {row['source']}:{row['file_path']}:{row['start_line']}-{row['end_line']}",
+                f"Lean toolchain and source revisions: {pins}",
+                "Original proof: candidate #1",
+                f"Available imports: {', '.join(_imports(row)) or '(none reported)'}",
+            ],
+        ),
         ("Definitions of project types and predicates in the statement", _types_section(context)),
-        ("Scope at the theorem (namespace, open, variable, universe in effect before the statement)",
-         _scope_section(row)),
+        (
+            "Scope at the theorem (namespace, open, variable, universe in effect before the statement)",
+            _scope_section(row),
+        ),
         (f"Reference proof ({row['proof_length']} tokens)", [f"```lean\n{row['src']}\n```"]),
         ("Heartbeat profile of the reference proof", _profile_section(prof)),
         ("Goal before each top-level tactic of the reference proof", _goal_section(context)),
@@ -670,14 +798,21 @@ def render_packet(name: str) -> str:
         raise ValueError("Kickoff packet is not certifiable: " + "; ".join(result["reasons"]))
     root = context.get("root", "")
     helpers, tags, named = _extra_dependencies(context)
-    parts.append(("Kickoff inventory manifest", [
-        f"Source names: {len(context.get('source', []))} occurrences; "
-        f"{len(_source_names(context))} distinct; signature preview "
-        f"{_signature_counts(list(_source_names(context).values()), root)[0]}; "
-        f"unavailable {_signature_counts(list(_source_names(context).values()), root)[1]}.",
-        f"Extra direct theorem/lemma dependencies: {len(helpers)} helpers shown; tagged and not listed: "
-        f"{', '.join(f'{tag} {n}' for tag, n in tags.items())}; already source-named: {named}; "
-        f"signature preview {_signature_counts(helpers, root)[0]}; unavailable {_signature_counts(helpers, root)[1]}.",
-        "Required sections: " + ", ".join(name for name, state in manifest["sections"].items() if state["present"]) + "."
-    ]))
+    parts.append(
+        (
+            "Kickoff inventory manifest",
+            [
+                f"Source names: {len(context.get('source', []))} occurrences; "
+                f"{len(_source_names(context))} distinct; signature preview "
+                f"{_signature_counts(list(_source_names(context).values()), root)[0]}; "
+                f"unavailable {_signature_counts(list(_source_names(context).values()), root)[1]}.",
+                f"Extra direct theorem/lemma dependencies: {len(helpers)} helpers shown; tagged and not listed: "
+                f"{', '.join(f'{tag} {n}' for tag, n in tags.items())}; already source-named: {named}; "
+                f"signature preview {_signature_counts(helpers, root)[0]}; unavailable {_signature_counts(helpers, root)[1]}.",
+                "Required sections: "
+                + ", ".join(name for name, state in manifest["sections"].items() if state["present"])
+                + ".",
+            ],
+        )
+    )
     return _fit(parts, MAX_PACKET_CHARS) + "\n"

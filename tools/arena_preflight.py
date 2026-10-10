@@ -8,18 +8,24 @@ belongs to a later ticket, so the harmless model-visible tool is the skill listi
 from __future__ import annotations
 
 import argparse
-import json
 import subprocess
 import sys
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from arena.campaign import run_dir  # noqa: E402
-from arena.traces import PATCH_SHA256, list_observations, plugin_problems, preflight_problems, read_journal, write_receipt  # noqa: E402
-from tools.run_pi_budgeted import MODELS  # noqa: E402
+from arena.campaign import run_dir
+from arena.traces import (
+    PATCH_SHA256,
+    list_observations,
+    plugin_problems,
+    preflight_problems,
+    read_journal,
+    write_receipt,
+)
+from tools.run_pi_budgeted import MODELS
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -42,17 +48,37 @@ def main() -> int:
     failed = False
     for model in models:
         run_id = f"preflight-{model.replace('.', '-')}-{uuid.uuid4().hex[:8]}"
-        started = datetime.now(timezone.utc)
+        started = datetime.now(UTC)
         proc = subprocess.run(
-            [sys.executable, str(ROOT / "tools/run_pi_budgeted.py"), "--model", model, "--theorem", args.theorem,
-             "--run-id", run_id, "--hard-cap-usd", "0.10", "--thinking", "off", "--no-mcp", "--preflight"],
-            cwd=ROOT, text=True, capture_output=True, timeout=300)
+            [
+                sys.executable,
+                str(ROOT / "tools/run_pi_budgeted.py"),
+                "--model",
+                model,
+                "--theorem",
+                args.theorem,
+                "--run-id",
+                run_id,
+                "--hard-cap-usd",
+                "0.10",
+                "--thinking",
+                "off",
+                "--no-mcp",
+                "--preflight",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            timeout=300,
+        )
         directory = run_dir(run_id)
         journal_path = directory / "trace-journal.jsonl"
         journal = read_journal(journal_path)
         observations, problems = _wait(run_id, started, journal)
         trace_ids = sorted({row.get("traceId") for row in observations if row.get("traceId")})
-        print(f"{model} session={run_id} exit={proc.returncode} observations={len(observations)} traces={','.join(trace_ids)}")
+        print(
+            f"{model} session={run_id} exit={proc.returncode} observations={len(observations)} traces={','.join(trace_ids)}"
+        )
         if proc.returncode != 0 or problems:
             failed = True
             print(proc.stderr[-1500:], file=sys.stderr)
@@ -61,10 +87,16 @@ def main() -> int:
             continue
         # The journal is opened 0600, but a filesystem that ignores chmod (fuseblk) keeps its own
         # mode; record what the file really has rather than claim owner-only access.
-        covered[model] = {"session_id": run_id, "trace_ids": trace_ids,
-                          "journal_mode": oct(journal_path.stat().st_mode & 0o777)}
-    receipt = {"status": "pass" if covered and not failed and set(covered) == set(models) else "fail",
-               "patch_sha256": PATCH_SHA256, "models": covered}
+        covered[model] = {
+            "session_id": run_id,
+            "trace_ids": trace_ids,
+            "journal_mode": oct(journal_path.stat().st_mode & 0o777),
+        }
+    receipt = {
+        "status": "pass" if covered and not failed and set(covered) == set(models) else "fail",
+        "patch_sha256": PATCH_SHA256,
+        "models": covered,
+    }
     write_receipt(receipt)
     if receipt["status"] != "pass":
         print("preflight failed", file=sys.stderr)

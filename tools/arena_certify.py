@@ -18,10 +18,10 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from arena import environments  # noqa: E402
-from arena.context import render_packet  # noqa: E402
-from arena.engine import BENCHMARK, evaluate, problem  # noqa: E402
-from arena.scoring import reference  # noqa: E402
+from arena import environments
+from arena.context import render_packet
+from arena.engine import BENCHMARK, evaluate, problem
+from arena.scoring import reference
 
 
 def all_rows() -> list[str]:
@@ -57,15 +57,22 @@ def certify(name: str, tolerance: float = 0.05) -> dict:
         reasons.append("heartbeats were not measured")
     elif drift > tolerance:
         reasons.append(f"heartbeats {heartbeats} drift {drift:.1%} from the published {published_heartbeats}")
-    return {"name": name, "status": "failed" if reasons else "certified", "reasons": reasons,
-            "tokens": {"local": full["tokens"], "published": published_tokens},
-            "heartbeats": {"local": heartbeats, "published": published_heartbeats,
-                           "drift_pct": None if drift is None else round(100 * drift, 2),
-                           "measured_on": full.get("measured_on")},
-            "compat": {version: bool(info.get("passed")) for version, info in full["compat"].items()},
-            "packet_chars": packet_chars,
-            "fast_matches_full_heartbeats": fast.get("heartbeat") == heartbeats,
-            "reference_proxy": full.get("local_proxy")}
+    return {
+        "name": name,
+        "status": "failed" if reasons else "certified",
+        "reasons": reasons,
+        "tokens": {"local": full["tokens"], "published": published_tokens},
+        "heartbeats": {
+            "local": heartbeats,
+            "published": published_heartbeats,
+            "drift_pct": None if drift is None else round(100 * drift, 2),
+            "measured_on": full.get("measured_on"),
+        },
+        "compat": {version: bool(info.get("passed")) for version, info in full["compat"].items()},
+        "packet_chars": packet_chars,
+        "fast_matches_full_heartbeats": fast.get("heartbeat") == heartbeats,
+        "reference_proxy": full.get("local_proxy"),
+    }
 
 
 def render(results: list[dict]) -> str:
@@ -78,20 +85,28 @@ def render(results: list[dict]) -> str:
             lines.append(f"{'FAILED':>13}  {item['name']}  {'; '.join(item['reasons'])}")
         else:
             beats, tokens = item["heartbeats"], item["tokens"]
-            lines.append(f"{item['status'].upper():>13}  {item['name']}  tokens {tokens['local']}/{tokens['published']}  "
-                         f"hb {beats['local']}/{beats['published']} ({beats['drift_pct']}%)  "
-                         f"compat {sum(item['compat'].values())}/{len(item['compat'])}  packet {item['packet_chars']}"
-                         + (f"  — {'; '.join(item['reasons'])}" if item["reasons"] else ""))
-    counts = {status: sum(1 for item in results if item["status"] == status)
-              for status in ("certified", "failed", "unprovisioned")}
-    return "\n".join(lines) + f"\n{counts['certified']} certified, {counts['failed']} failed, " \
-                              f"{counts['unprovisioned']} unprovisioned\n"
+            lines.append(
+                f"{item['status'].upper():>13}  {item['name']}  tokens {tokens['local']}/{tokens['published']}  "
+                f"hb {beats['local']}/{beats['published']} ({beats['drift_pct']}%)  "
+                f"compat {sum(item['compat'].values())}/{len(item['compat'])}  packet {item['packet_chars']}"
+                + (f"  — {'; '.join(item['reasons'])}" if item["reasons"] else "")
+            )
+    counts = {
+        status: sum(1 for item in results if item["status"] == status)
+        for status in ("certified", "failed", "unprovisioned")
+    }
+    return (
+        "\n".join(lines) + f"\n{counts['certified']} certified, {counts['failed']} failed, "
+        f"{counts['unprovisioned']} unprovisioned\n"
+    )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--rows", help="Comma-separated row names (default: every row)")
-    parser.add_argument("--tolerance", type=float, default=0.05, help="Allowed heartbeat drift from the published value")
+    parser.add_argument(
+        "--tolerance", type=float, default=0.05, help="Allowed heartbeat drift from the published value"
+    )
     parser.add_argument("--json", type=Path, help="Write the full results here")
     parser.add_argument("--require-all", action="store_true", help="Treat unprovisioned rows as failures")
     args = parser.parse_args()
@@ -100,8 +115,9 @@ def main() -> int:
     print(render(results), end="")
     if args.json:
         args.json.write_text(json.dumps(results, indent=2, ensure_ascii=False) + "\n")
-    bad = any(item["status"] == "failed" or (args.require_all and item["status"] == "unprovisioned")
-              for item in results)
+    bad = any(
+        item["status"] == "failed" or (args.require_all and item["status"] == "unprovisioned") for item in results
+    )
     return 1 if bad else 0
 
 

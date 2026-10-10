@@ -21,10 +21,10 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from arena.campaign import packet, run_dir  # noqa: E402
-from arena.summary import build_summary  # noqa: E402
-from arena.traces import preflight_block  # noqa: E402
-from tools.run_pi_budgeted import MODELS, THINKING_LEVELS  # noqa: E402
+from arena.campaign import packet, run_dir
+from arena.summary import build_summary
+from arena.traces import preflight_block
+from tools.run_pi_budgeted import MODELS, THINKING_LEVELS
 
 ROOT = Path(__file__).resolve().parents[1]
 FACTORS = ("model", "thinking", "skill")
@@ -68,15 +68,29 @@ def plan(factor: str, values: list[str], model: str, thinking: str, prefix: str)
 
 
 def command(spec: dict, theorem: str, cap: float, passthrough: list[str]) -> list[str]:
-    return [sys.executable, str(ROOT / "tools/run_pi_budgeted.py"), "--model", spec["model"],
-            "--theorem", theorem, "--run-id", spec["run_id"], "--hard-cap-usd", f"{cap:g}",
-            "--thinking", spec["thinking"], *(["--no-skill"] if spec["skill"] == "off" else []), *passthrough]
+    return [
+        sys.executable,
+        str(ROOT / "tools/run_pi_budgeted.py"),
+        "--model",
+        spec["model"],
+        "--theorem",
+        theorem,
+        "--run-id",
+        spec["run_id"],
+        "--hard-cap-usd",
+        f"{cap:g}",
+        "--thinking",
+        spec["thinking"],
+        *(["--no-skill"] if spec["skill"] == "off" else []),
+        *passthrough,
+    ]
 
 
 def execute(spec: dict, theorem: str, cap: float, passthrough: list[str], logs: Path) -> dict:
     with (logs / f"{spec['run_id']}.log").open("w") as log:
-        proc = subprocess.run(command(spec, theorem, cap, passthrough), cwd=ROOT, stdout=log,
-                              stderr=subprocess.STDOUT, text=True)
+        proc = subprocess.run(
+            command(spec, theorem, cap, passthrough), cwd=ROOT, stdout=log, stderr=subprocess.STDOUT, text=True
+        )
     row = {**spec, "exit_code": proc.returncode}
     directory = run_dir(spec["run_id"])
     config_path = directory / "run-config.json"
@@ -92,38 +106,49 @@ def compare(rows: list[dict], expected_packet: str) -> dict:
         cost, best = summary.get("cost", {}), (summary.get("progress", {}) or {}).get("best", {})
         pick = lambda key: (best.get(key) or {}).get("value")  # noqa: E731
         coherent = (summary.get("progress", {}) or {}).get("best_verified_candidate")
-        table.append({"run_id": row["run_id"], row["factor"]: row["value"], "exit_code": row["exit_code"],
-                      "stop_reason": summary.get("stop_reason"), "spent_usd": cost.get("spent_usd"),
-                      "unresolved_usd": cost.get("unresolved_usd"), "remaining_usd": cost.get("remaining_usd"),
-                      "requests": cost.get("requests"), "evaluations": summary.get("evaluations"),
-                      "tool_results": (summary.get("tools") or {}).get("results"),
-                      "retries": cost.get("retries"),
-                      "spent_after_best_usd": cost.get("spent_after_best_usd"),
-                      "requests_after_best": cost.get("requests_after_best"),
-                      "ideas_without_attempts": len(summary.get("ideas_without_attempts", [])),
-                      "best_candidate": coherent.get("candidate") if coherent else None,
-                      "best_tokens": coherent.get("tokens") if coherent else pick("tokens"),
-                      "best_heartbeats": coherent.get("heartbeats") if coherent else pick("heartbeats"),
-                      "best_proxy": coherent.get("proxy") if coherent else pick("proxy"),
-                      "best_estimated_proxy": pick("estimated_proxy"),
-                      "bookkeeping_and_rejected_pct": cost.get("bookkeeping_and_rejected_pct"),
-                      "cache_reuse_pct": (summary.get("cache") or {}).get("reuse_pct"),
-                      "tool_errors": (summary.get("tools") or {}).get("error_total"),
-                      "packet_matches": row["packet_sha256"] == expected_packet})
+        table.append(
+            {
+                "run_id": row["run_id"],
+                row["factor"]: row["value"],
+                "exit_code": row["exit_code"],
+                "stop_reason": summary.get("stop_reason"),
+                "spent_usd": cost.get("spent_usd"),
+                "unresolved_usd": cost.get("unresolved_usd"),
+                "remaining_usd": cost.get("remaining_usd"),
+                "requests": cost.get("requests"),
+                "evaluations": summary.get("evaluations"),
+                "tool_results": (summary.get("tools") or {}).get("results"),
+                "retries": cost.get("retries"),
+                "spent_after_best_usd": cost.get("spent_after_best_usd"),
+                "requests_after_best": cost.get("requests_after_best"),
+                "ideas_without_attempts": len(summary.get("ideas_without_attempts", [])),
+                "best_candidate": coherent.get("candidate") if coherent else None,
+                "best_tokens": coherent.get("tokens") if coherent else pick("tokens"),
+                "best_heartbeats": coherent.get("heartbeats") if coherent else pick("heartbeats"),
+                "best_proxy": coherent.get("proxy") if coherent else pick("proxy"),
+                "best_estimated_proxy": pick("estimated_proxy"),
+                "bookkeeping_and_rejected_pct": cost.get("bookkeeping_and_rejected_pct"),
+                "cache_reuse_pct": (summary.get("cache") or {}).get("reuse_pct"),
+                "tool_errors": (summary.get("tools") or {}).get("error_total"),
+                "packet_matches": row["packet_sha256"] == expected_packet,
+            }
+        )
     return {"identical_packets": all(item["packet_matches"] for item in table), "runs": table}
 
 
 def render(report: dict, factor: str) -> str:
     lines = [f"factor: {factor}; identical packets: {report['identical_packets']}"]
     for row in report["runs"]:
-        lines.append(f"{row[factor]:>10}  ${row['spent_usd'] or 0:.4f}  req {row['requests']}  eval {row['evaluations']}  "
-                     f"tool results {row['tool_results']}  retries {row['retries']}  "
-                     f"best {row['best_candidate'] or 'none'}  "
-                     f"tokens {row['best_tokens']}  hb {row['best_heartbeats']}  proxy {row['best_proxy']}/"
-                     f"{row['best_estimated_proxy']}  overhead {row['bookkeeping_and_rejected_pct']}%  "
-                     f"cache {row['cache_reuse_pct']}%  post-best ${row['spent_after_best_usd']} "
-                     f"({row['requests_after_best']} req)  zero-attempt ideas {row['ideas_without_attempts']}  "
-                     f"stop {row['stop_reason']}")
+        lines.append(
+            f"{row[factor]:>10}  ${row['spent_usd'] or 0:.4f}  req {row['requests']}  eval {row['evaluations']}  "
+            f"tool results {row['tool_results']}  retries {row['retries']}  "
+            f"best {row['best_candidate'] or 'none'}  "
+            f"tokens {row['best_tokens']}  hb {row['best_heartbeats']}  proxy {row['best_proxy']}/"
+            f"{row['best_estimated_proxy']}  overhead {row['bookkeeping_and_rejected_pct']}%  "
+            f"cache {row['cache_reuse_pct']}%  post-best ${row['spent_after_best_usd']} "
+            f"({row['requests_after_best']} req)  zero-attempt ideas {row['ideas_without_attempts']}  "
+            f"stop {row['stop_reason']}"
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -133,9 +158,16 @@ def main() -> int:
     parser.add_argument("--prefix", required=True, help="Run IDs are <prefix>-<factor>-<value>")
     parser.add_argument("--factor", required=True, choices=FACTORS)
     parser.add_argument("--values", required=True, help="Comma-separated values of the factor")
-    parser.add_argument("--model", default="deepseek-v4.1-flash", choices=MODELS, help="Fixed model unless it is the factor")
+    parser.add_argument(
+        "--model", default="deepseek-v4.1-flash", choices=MODELS, help="Fixed model unless it is the factor"
+    )
     parser.add_argument("--thinking", default="high", choices=THINKING_LEVELS)
-    parser.add_argument("--cap", type=float, default=3.0, help="Spend cap per run in USD (0.10-3.00); below 3 it is a soft cap on actual spend (the last request may overshoot), only 3 is a hard cap")
+    parser.add_argument(
+        "--cap",
+        type=float,
+        default=3.0,
+        help="Spend cap per run in USD (0.10-3.00); below 3 it is a soft cap on actual spend (the last request may overshoot), only 3 is a hard cap",
+    )
     parser.add_argument("--parallel", default="1", help="Runs at once: an integer or 'auto' (by free RAM)")
     parser.add_argument("--dry-run", action="store_true")
     args, passthrough = parser.parse_known_args()
@@ -164,8 +196,12 @@ def main() -> int:
     out.mkdir(parents=True)
     with ThreadPoolExecutor(max_workers=workers) as pool:
         rows = list(pool.map(lambda spec: execute(spec, args.theorem, args.cap, passthrough, out), specs))
-    report = {"theorem": args.theorem, "cap_usd": args.cap, "expected_packet_sha256": expected,
-              **compare(rows, expected)}
+    report = {
+        "theorem": args.theorem,
+        "cap_usd": args.cap,
+        "expected_packet_sha256": expected,
+        **compare(rows, expected),
+    }
     (out / "matrix.json").write_text(json.dumps(report, indent=2) + "\n")
     text = render(report, args.factor)
     (out / "matrix.txt").write_text(text)

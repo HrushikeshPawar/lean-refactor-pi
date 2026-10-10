@@ -4,17 +4,29 @@ import uuid
 from pathlib import Path
 from unittest.mock import patch
 
-from tests.slow import slow
 from arena import campaign
-from arena.engine import (WRAPPER_LINES, ROOT, candidate_file, declaration_head, evaluate,
-                          locate_source, _proof_length,
-                          instrument_sorries, map_measured_line, parse_diagnostics, problem,
-                          reconstruct, structure_diagnostics, validate_proof)
+from arena.engine import (
+    ROOT,
+    WRAPPER_LINES,
+    _proof_length,
+    declaration_head,
+    evaluate,
+    instrument_sorries,
+    locate_source,
+    map_measured_line,
+    parse_diagnostics,
+    problem,
+    reconstruct,
+    structure_diagnostics,
+    validate_proof,
+)
+from tests.slow import slow
 
 NAME = "Core.InitsUpdatesComm"
-FIXTURE = (ROOT / "runs/baseline/Core_InitsUpdatesComm/arena-candidate-126.txt")
-LEAN = unittest.skipUnless((ROOT / "workspaces/strata-v4.29.1").is_dir() and FIXTURE.exists(),
-                           "Strata fixture environment is not provisioned")
+FIXTURE = ROOT / "runs/baseline/Core_InitsUpdatesComm/arena-candidate-126.txt"
+LEAN = unittest.skipUnless(
+    (ROOT / "workspaces/strata-v4.29.1").is_dir() and FIXTURE.exists(), "Strata fixture environment is not provisioned"
+)
 
 
 class EvaluatorBoundaryTests(unittest.TestCase):
@@ -22,8 +34,7 @@ class EvaluatorBoundaryTests(unittest.TestCase):
         self.row = problem("Core.InitsUpdatesComm")
 
     def test_exact_reference_reconstructs_from_pinned_git(self):
-        path, source = reconstruct(self.row, self.row["src"], "v4.29.1",
-                                   self.row["version_info"][0]["v4.29.1"])
+        path, source = reconstruct(self.row, self.row["src"], "v4.29.1", self.row["version_info"][0]["v4.29.1"])
         self.assertIn(self.row["src"], source)
         self.assertEqual(path.name, "strata-v4.29.1")
 
@@ -59,17 +70,21 @@ class DiagnosticMappingTests(unittest.TestCase):
         self.assertEqual(map_measured_line(20 + WRAPPER_LINES + 7, 20), (27, False))
 
     def test_messages_split_by_header_with_continuation_lines(self):
-        output = ("a.lean:5:2: error: unsolved goals\ncase x\n⊢ False\n"
-                  "a.lean:9:0: warning: unused variable `h`\n"
-                  "a.lean:1:0: info: ARENA_HEARTBEATS 12")
+        output = (
+            "a.lean:5:2: error: unsolved goals\ncase x\n⊢ False\n"
+            "a.lean:9:0: warning: unused variable `h`\n"
+            "a.lean:1:0: info: ARENA_HEARTBEATS 12"
+        )
         found = parse_diagnostics(output)
         self.assertEqual([item["severity"] for item in found], ["error", "warning", "info"])
         self.assertIn("⊢ False", found[0]["message"])
 
     def test_unpositioned_info_lines_are_not_glued_to_the_previous_error(self):
         # Lean's command line prints logInfo output with no position header.
-        output = ("a.lean:2:19: error: Type mismatch\n  rfl\nhas type\n  ?m.8 = ?m.8\n"
-                  "ARENA_HEARTBEATS 7\nTry this:\n  [apply] simp only")
+        output = (
+            "a.lean:2:19: error: Type mismatch\n  rfl\nhas type\n  ?m.8 = ?m.8\n"
+            "ARENA_HEARTBEATS 7\nTry this:\n  [apply] simp only"
+        )
         found = parse_diagnostics(output)
         self.assertEqual([item["severity"] for item in found], ["error", "info", "info"])
         self.assertNotIn("ARENA_HEARTBEATS", found[0]["message"])
@@ -81,8 +96,7 @@ class DiagnosticMappingTests(unittest.TestCase):
         # The target starts at line 30 in this version's file but at line 10 in
         # the materialized primary file the model inspects.
         text = "\n".join(f"line{i}" for i in range(1, 41)) + "\n"
-        result = structure_diagnostics("f.lean:32:2: error: unknown tactic", text, 30, 35,
-                                       report_start_line=10)
+        result = structure_diagnostics("f.lean:32:2: error: unknown tactic", text, 30, 35, report_start_line=10)
         item = result["diagnostics"][0]
         self.assertEqual((item["file_line"], item["proof_line"]), (12, 3))
         self.assertEqual(item["source_line_text"], "line32")
@@ -92,10 +106,12 @@ class DiagnosticMappingTests(unittest.TestCase):
         text = "\n".join(f"line{i}" for i in range(1, 31)) + "\n"
         # Measured file: wrapper inserted before line 10; an error on text line 12
         # is reported at 12 + 14, one on line 3 stays at 3, a warning on line 25 is outside.
-        output = (f"f.lean:{12 + WRAPPER_LINES}:4: error: boom\n"
-                  "f.lean:3:0: error: earlier trouble\n"
-                  f"f.lean:{25 + WRAPPER_LINES}:0: warning: elsewhere\n"
-                  "f.lean:10:0: info: ARENA_HEARTBEATS 5")
+        output = (
+            f"f.lean:{12 + WRAPPER_LINES}:4: error: boom\n"
+            "f.lean:3:0: error: earlier trouble\n"
+            f"f.lean:{25 + WRAPPER_LINES}:0: warning: elsewhere\n"
+            "f.lean:10:0: info: ARENA_HEARTBEATS 5"
+        )
         result = structure_diagnostics(output, text, 10, 20, wrapper_start=10)
         self.assertEqual(len(result["diagnostics"]), 1)
         item = result["diagnostics"][0]
@@ -114,8 +130,9 @@ class DiagnosticMappingTests(unittest.TestCase):
         self.assertEqual(declaration_head(plain, plain.index("theorem")), plain.index("theorem"))
         # A binder list ending in `]` and a `@[expose] public section` line are not attributes
         # of the declaration (PhysLib).
-        physlib = ("@[expose] public section\n\nvariable {Y} [MeasurableSpace Y]\n\n/-- doc -/\n"
-                   "lemma t : True := trivial\n")
+        physlib = (
+            "@[expose] public section\n\nvariable {Y} [MeasurableSpace Y]\n\n/-- doc -/\nlemma t : True := trivial\n"
+        )
         self.assertEqual(declaration_head(physlib, physlib.index("lemma")), physlib.index("/--"))
         module_doc = "/-! module notes -/\ntheorem t : True := trivial\n"
         self.assertEqual(declaration_head(module_doc, module_doc.index("theorem")), module_doc.index("theorem"))
@@ -127,8 +144,10 @@ class DiagnosticMappingTests(unittest.TestCase):
         self.assertEqual(out.count("trace_state; sorry"), 3)
 
     def test_sorry_in_match_and_case_arms_is_instrumented(self):
-        proof = ("theorem t : True := by\n  rcases h with h | h\n  | inl h => sorry\n  | .inr h => sorry\n"
-                 "  case foo => sorry\n  next x => sorry\n  exact sorry_lemma\n  exact h_sorry")
+        proof = (
+            "theorem t : True := by\n  rcases h with h | h\n  | inl h => sorry\n  | .inr h => sorry\n"
+            "  case foo => sorry\n  next x => sorry\n  exact sorry_lemma\n  exact h_sorry"
+        )
         out = instrument_sorries(proof)
         self.assertEqual(out.count("\n"), proof.count("\n"))
         self.assertEqual(out.count("trace_state; sorry"), 4)
@@ -168,9 +187,11 @@ class LocateSourceTests(unittest.TestCase):
 
     def test_ambiguous_or_absent_declaration_is_file_modified(self):
         original = "theorem t : True := trivial"
-        for source in ("theorem t : True := trivial\ntheorem t : True := trivial\n",   # two exact
-                       "theorem t :  True := trivial\ntheorem t : True  := trivial\n",  # two loose
-                       "theorem u : True := trivial\n"):                                 # none
+        for source in (
+            "theorem t : True := trivial\ntheorem t : True := trivial\n",  # two exact
+            "theorem t :  True := trivial\ntheorem t : True  := trivial\n",  # two loose
+            "theorem u : True := trivial\n",
+        ):  # none
             with self.assertRaisesRegex(ValueError, "FILE_MODIFIED: pinned theorem is absent or ambiguous on v9"):
                 locate_source(source, original, "v9")
 
@@ -235,8 +256,9 @@ class RealLeanTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.good = FIXTURE.read_text()
-        cls.broken = cls.good.replace("exact Exists.intro σ'' ⟨InitStatesUpdated Hinit, Hinit, UpdateStates.update_none⟩",
-                                      "exact rfl")
+        cls.broken = cls.good.replace(
+            "exact Exists.intro σ'' ⟨InitStatesUpdated Hinit, Hinit, UpdateStates.update_none⟩", "exact rfl"
+        )
         assert cls.broken != cls.good
         cls.run_id = f"test-{uuid.uuid4().hex[:10]}"
 
@@ -273,6 +295,7 @@ class RealLeanTests(unittest.TestCase):
                 self.assertEqual(materialized[item["file_line"] - 1], item["source_line_text"], version)
                 self.assertEqual(item["file_line"], location["start_line"] + item["proof_line"] - 1, version)
                 self.assertNotIn("ARENA_HEARTBEATS", item["message"])
+
 
 if __name__ == "__main__":
     unittest.main()

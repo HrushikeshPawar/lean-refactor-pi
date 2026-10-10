@@ -13,12 +13,23 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timedelta, timezone
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Callable
 
-from arena.routes import progress as route_progress, route_table
-from arena.summary import HARD_CAP_USD, configured_cap, _result_ok, _turns, build_summary, hit_rate_pct, reconcile_spend, session_spend, trace_rows
+from arena.routes import progress as route_progress
+from arena.routes import route_table
+from arena.summary import (
+    HARD_CAP_USD,
+    _result_ok,
+    _turns,
+    build_summary,
+    configured_cap,
+    hit_rate_pct,
+    reconcile_spend,
+    session_spend,
+    trace_rows,
+)
 
 BASELINE_PROXY = round(100 / 3, 2)
 STALL_SECONDS = 15 * 60
@@ -29,6 +40,7 @@ _CACHE: dict = {}
 # ---------------------------------------------------------------------------------------------
 # File access with cheap caching
 # ---------------------------------------------------------------------------------------------
+
 
 def _stamp(path: Path):
     try:
@@ -111,6 +123,7 @@ def _reference(theorem: str | None) -> dict | None:
         return None
     try:
         from arena.scoring import reference as published
+
         tokens, heartbeats = published(theorem)
     except (ValueError, ImportError, KeyError):
         return None
@@ -150,10 +163,12 @@ def _start_end(directory: Path) -> tuple[float | None, float | None]:
 # Hub: one row per run
 # ---------------------------------------------------------------------------------------------
 
+
 def hub_row(run_id: str, directory: Path, campaign: str | None = None, now: float | None = None) -> dict:
     now = time.time() if now is None else now
-    config, state, answer = (read_json(directory / name) for name in ("run-config.json", "state.json",
-                                                                       "submission.json"))
+    config, state, answer = (
+        read_json(directory / name) for name in ("run-config.json", "state.json", "submission.json")
+    )
     summary = _live_summary(directory)
     finished = bool(read_json(directory / "summary.json"))
     cost = summary.get("cost") or {}
@@ -170,36 +185,61 @@ def hub_row(run_id: str, directory: Path, campaign: str | None = None, now: floa
     best = state.get("best") or {}
     verified = (summary.get("progress") or {}).get("best_verified_candidate") or {}
     if not best and verified:
-        best = {"candidate": verified.get("candidate"), "proxy": verified.get("proxy"),
-                "tokens": verified.get("tokens"), "heartbeats": verified.get("heartbeats")}
+        best = {
+            "candidate": verified.get("candidate"),
+            "proxy": verified.get("proxy"),
+            "tokens": verified.get("tokens"),
+            "heartbeats": verified.get("heartbeats"),
+        }
     reference = _reference(config.get("theorem"))
     stalled = not finished and last is not None and now - last > STALL_SECONDS
     status = "finished" if finished else "stalled" if stalled else "live"
     ended = last if finished or stalled else now
     proxy = best.get("proxy")
     return {
-        "run_id": run_id, "campaign": campaign, "model": config.get("model"),
-        "theorem": config.get("theorem"), "reference": reference, "thinking": config.get("thinking"),
+        "run_id": run_id,
+        "campaign": campaign,
+        "model": config.get("model"),
+        "theorem": config.get("theorem"),
+        "reference": reference,
+        "thinking": config.get("thinking"),
         "soft_cap_usd": cost.get("soft_cap_usd") or configured_cap(config),
-        "cap_usd": configured_cap(config), "hard_cap_usd": HARD_CAP_USD,
-        "spent_usd": round(spent, 6), "requests": cost.get("requests") or requests,
-        "tool_results": tools.get("results"), "tool_errors": tools.get("error_total"),
+        "cap_usd": configured_cap(config),
+        "hard_cap_usd": HARD_CAP_USD,
+        "spent_usd": round(spent, 6),
+        "requests": cost.get("requests") or requests,
+        "tool_results": tools.get("results"),
+        "tool_errors": tools.get("error_total"),
         "cache_reuse_pct": cache.get("reuse_pct"),
         "cache_savings_pct": cache.get("savings_pct"),
         "bookkeeping_pct": cost.get("bookkeeping_and_rejected_pct"),
         "spent_after_best_usd": cost.get("spent_after_best_usd"),
         "requests_after_best": cost.get("requests_after_best"),
-        "best": {"candidate": best.get("candidate"), "proxy": proxy, "tokens": best.get("tokens"),
-                 "heartbeats": best.get("heartbeats")} if best else None,
+        "best": {
+            "candidate": best.get("candidate"),
+            "proxy": proxy,
+            "tokens": best.get("tokens"),
+            "heartbeats": best.get("heartbeats"),
+        }
+        if best
+        else None,
         "delta_proxy": round(proxy - BASELINE_PROXY, 2) if isinstance(proxy, (int, float)) else None,
-        "leading_unverified": state.get("leading_unverified"), "checking": state.get("checking", []),
-        "finished": finished, "status": status,
+        "leading_unverified": state.get("leading_unverified"),
+        "checking": state.get("checking", []),
+        "finished": finished,
+        "status": status,
         "stop_reason": summary.get("stop_reason") if finished else None,
         "submission": answer.get("candidate"),
-        "submission_info": {"candidate": answer.get("candidate"), "proxy": answer.get("proxy"),
-                            "verified_by": answer.get("verified_by"),
-                            "cold_verified": answer.get("verified_by") == "cold compile"} if answer else None,
-        "started": start, "ended": ended,
+        "submission_info": {
+            "candidate": answer.get("candidate"),
+            "proxy": answer.get("proxy"),
+            "verified_by": answer.get("verified_by"),
+            "cold_verified": answer.get("verified_by") == "cold compile",
+        }
+        if answer
+        else None,
+        "started": start,
+        "ended": ended,
         "duration_s": round(ended - start, 1) if start and ended else None,
         "langfuse_url": None,
     }
@@ -208,6 +248,7 @@ def hub_row(run_id: str, directory: Path, campaign: str | None = None, now: floa
 # ---------------------------------------------------------------------------------------------
 # Per-run dashboard
 # ---------------------------------------------------------------------------------------------
+
 
 def _candidate_labels(ledger: list[dict]) -> dict[str, str]:
     labels: dict[str, str] = {}
@@ -229,12 +270,21 @@ def score_timeline(ledger: list[dict], start: float | None) -> list[dict]:
         proxy = metrics.get("proxy")
         if event.get("mode") == "full" and metrics.get("compiled") and proxy is not None:
             best = proxy if best is None else max(best, proxy)
-        rows.append({"n": number, "t": round(event["ts"] - start, 1) if start else None,
-                     "candidate": labels.get(event.get("candidate_id")), "candidate_id": event.get("candidate_id"),
-                     "mode": event.get("mode"),
-                     "proxy": proxy, "estimated_proxy": metrics.get("estimated_proxy"),
-                     "tokens": result.get("tokens"), "heartbeats": result.get("heartbeat"),
-                     "compiled": bool(metrics.get("compiled")), "best_verified": best})
+        rows.append(
+            {
+                "n": number,
+                "t": round(event["ts"] - start, 1) if start else None,
+                "candidate": labels.get(event.get("candidate_id")),
+                "candidate_id": event.get("candidate_id"),
+                "mode": event.get("mode"),
+                "proxy": proxy,
+                "estimated_proxy": metrics.get("estimated_proxy"),
+                "tokens": result.get("tokens"),
+                "heartbeats": result.get("heartbeat"),
+                "compiled": bool(metrics.get("compiled")),
+                "best_verified": best,
+            }
+        )
     return rows
 
 
@@ -259,13 +309,28 @@ def spend_series(directory: Path, start: float | None, soft_cap: float | None) -
         spent += float(settle.get("usd") or 0)
         stamp = _seconds(settle.get("ts"))
         read, write, fresh = tokens.get("cache_read", 0), tokens.get("cache_write", 0), tokens.get("input", 0)
-        points.append({"n": len(points) + 1, "t": round(stamp - start, 1) if start and stamp else None,
-                       "request_usd": float(settle.get("usd") or 0), "spent_usd": round(spent, 6),
-                       "parts": parts, "tokens": tokens, "kind": turn.get("kind"), "tools": turn.get("tools", []),
-                       "reuse_pct": hit_rate_pct(read, write, fresh)})
-    return {"points": points, "spent_usd": round(max(spent, recon["spent_usd"]), 6), "soft_cap_usd": soft_cap,
-            "hard_cap_usd": HARD_CAP_USD, "unresolved_usd": round(recon["unresolved_usd"], 6),
-            "unsettled_usd": recon["gap_usd"], "reconciliation": recon}
+        points.append(
+            {
+                "n": len(points) + 1,
+                "t": round(stamp - start, 1) if start and stamp else None,
+                "request_usd": float(settle.get("usd") or 0),
+                "spent_usd": round(spent, 6),
+                "parts": parts,
+                "tokens": tokens,
+                "kind": turn.get("kind"),
+                "tools": turn.get("tools", []),
+                "reuse_pct": hit_rate_pct(read, write, fresh),
+            }
+        )
+    return {
+        "points": points,
+        "spent_usd": round(max(spent, recon["spent_usd"]), 6),
+        "soft_cap_usd": soft_cap,
+        "hard_cap_usd": HARD_CAP_USD,
+        "unresolved_usd": round(recon["unresolved_usd"], 6),
+        "unsettled_usd": recon["gap_usd"],
+        "reconciliation": recon,
+    }
 
 
 def tool_timeline(directory: Path, start: float | None) -> list[dict]:
@@ -275,14 +340,22 @@ def tool_timeline(directory: Path, start: float | None) -> list[dict]:
         kind = row.get("kind")
         key = str(row.get("tool_call_id"))
         if kind == "tool_call":
-            calls[key] = {"id": key, "name": row.get("name"), "start": _seconds(row.get("ts")),
-                          "end": None, "args": _clip(row.get("args")), "result": None, "is_error": False}
+            calls[key] = {
+                "id": key,
+                "name": row.get("name"),
+                "start": _seconds(row.get("ts")),
+                "end": None,
+                "args": _clip(row.get("args")),
+                "result": None,
+                "is_error": False,
+            }
         elif kind == "tool_result" and key in calls:
             result = row.get("result")
             text = row.get("text")
             if text is None and isinstance(result, dict):
-                text = "\n".join(block.get("text", "") for block in result.get("content", [])
-                                 if isinstance(block, dict))
+                text = "\n".join(
+                    block.get("text", "") for block in result.get("content", []) if isinstance(block, dict)
+                )
             call = calls[key]
             call["end"] = _seconds(row.get("ts"))
             call["result"] = _clip(text if text is not None else result)
@@ -320,16 +393,28 @@ def ideas_view(ledger: list[dict]) -> list[dict]:
     for event in ledger:
         kind = event.get("kind")
         if kind == "idea":
-            ideas[event["id"]] = {"id": event["id"], "title": event.get("title"), "hypothesis": event.get("hypothesis"),
-                                  "region": event.get("region"), "expected_effect": event.get("expected_effect"),
-                                  "status": event.get("status"), "reason": event.get("reason"),
-                                  "attempts": [], "probes": 0, "best_proxy": None}
+            ideas[event["id"]] = {
+                "id": event["id"],
+                "title": event.get("title"),
+                "hypothesis": event.get("hypothesis"),
+                "region": event.get("region"),
+                "expected_effect": event.get("expected_effect"),
+                "status": event.get("status"),
+                "reason": event.get("reason"),
+                "attempts": [],
+                "probes": 0,
+                "best_proxy": None,
+            }
         elif kind == "idea_update" and event.get("id") in ideas:
             ideas[event["id"]].update({k: event[k] for k in ("status", "title", "reason") if k in event})
         elif kind == "candidate" and event.get("idea_id") in ideas:
-            ideas[event["idea_id"]]["attempts"].append({"candidate": labels.get(event["candidate_id"]),
-                                                       "id": event["candidate_id"], "parents": [
-                                                           labels.get(p, p) for p in event.get("parents", [])]})
+            ideas[event["idea_id"]]["attempts"].append(
+                {
+                    "candidate": labels.get(event["candidate_id"]),
+                    "id": event["candidate_id"],
+                    "parents": [labels.get(p, p) for p in event.get("parents", [])],
+                }
+            )
         elif kind == "probe" and event.get("idea_id") in ideas:
             ideas[event["idea_id"]]["probes"] += 1
     owner = {a["id"]: i for i, idea in ideas.items() for a in idea["attempts"]}
@@ -352,22 +437,52 @@ def control_events(directory: Path, start: float | None) -> list[dict]:
         stamp = _seconds(event.get("ts"))
         t = round(stamp - start, 1) if start and stamp else None
         if kind == "finish":
-            rows.append({"t": t, "kind": "finish", "label": f"finish {event.get('phase')}",
-                         "detail": {k: v for k, v in event.items() if k not in ("ts", "kind", "phase")}})
+            rows.append(
+                {
+                    "t": t,
+                    "kind": "finish",
+                    "label": f"finish {event.get('phase')}",
+                    "detail": {k: v for k, v in event.items() if k not in ("ts", "kind", "phase")},
+                }
+            )
         elif kind == "control":
             label = f"control: stop {event['stop']}" if event.get("stop") else "control"
-            rows.append({"t": t, "kind": "control", "label": label,
-                         "detail": {k: v for k, v in event.items() if k not in ("ts", "kind")}})
+            rows.append(
+                {
+                    "t": t,
+                    "kind": "control",
+                    "label": label,
+                    "detail": {k: v for k, v in event.items() if k not in ("ts", "kind")},
+                }
+            )
         elif kind == "gate" and event.get("decision") != "allow":
-            rows.append({"t": t, "kind": "gate", "label": f"gate {event.get('decision')}",
-                         "detail": {k: event.get(k) for k in ("reason", "estimate_usd", "remaining_usd", "spent_usd")}})
+            rows.append(
+                {
+                    "t": t,
+                    "kind": "gate",
+                    "label": f"gate {event.get('decision')}",
+                    "detail": {k: event.get(k) for k in ("reason", "estimate_usd", "remaining_usd", "spent_usd")},
+                }
+            )
         elif kind == "cache_alarm":
-            rows.append({"t": t, "kind": "cache_alarm", "label": "cache alarm", "detail": {
-                k: v for k, v in event.items() if k not in ("ts", "kind")}})
+            rows.append(
+                {
+                    "t": t,
+                    "kind": "cache_alarm",
+                    "label": "cache alarm",
+                    "detail": {k: v for k, v in event.items() if k not in ("ts", "kind")},
+                }
+            )
         elif kind == "settle" and not soft_crossed and (event.get("soft_overshoot_usd") or 0) > 0:
             soft_crossed = True
-            rows.append({"t": t, "kind": "soft_cap", "label": "soft cap crossed",
-                         "detail": {"soft_overshoot_usd": event.get("soft_overshoot_usd")}})
+            rows.append(
+                {
+                    "t": t,
+                    "kind": "soft_cap",
+                    "label": "soft cap crossed",
+                    "detail": {"soft_overshoot_usd": event.get("soft_overshoot_usd")},
+                }
+            )
     return rows
 
 
@@ -401,20 +516,26 @@ def run_dashboard(run_id: str, directory: Path) -> dict:
     except OSError:
         packet_text = None
     # A live summary always carries a default stop_reason, so only summary.json means the run ended.
-    return {"run_id": run_id, "started": start, "last_activity": last,
-            "finished": bool(read_json(directory / "summary.json")),
-            "config": read_json(directory / "run-config.json"),
-            "summary": summary, "submission": read_json(directory / "submission.json") or None,
-            "reference": _reference(summary.get("theorem")),
-            "baseline_proxy": BASELINE_PROXY,
-            "scores": score_timeline(ledger, start),
-            "spend": spend_series(directory, start, soft),
-            "tools": tool_timeline(directory, start),
-            "ideas": ideas_view(ledger),
-            "routes": (route_rows := route_table(ledger)), "route_progress": route_progress(route_rows),
-            "controls": control_events(directory, start),
-            "lean": lean_mix(ledger),
-            "packet": packet_text}
+    return {
+        "run_id": run_id,
+        "started": start,
+        "last_activity": last,
+        "finished": bool(read_json(directory / "summary.json")),
+        "config": read_json(directory / "run-config.json"),
+        "summary": summary,
+        "submission": read_json(directory / "submission.json") or None,
+        "reference": _reference(summary.get("theorem")),
+        "baseline_proxy": BASELINE_PROXY,
+        "scores": score_timeline(ledger, start),
+        "spend": spend_series(directory, start, soft),
+        "tools": tool_timeline(directory, start),
+        "ideas": ideas_view(ledger),
+        "routes": (route_rows := route_table(ledger)),
+        "route_progress": route_progress(route_rows),
+        "controls": control_events(directory, start),
+        "lean": lean_mix(ledger),
+        "packet": packet_text,
+    }
 
 
 # ---------------------------------------------------------------------------------------------
@@ -447,14 +568,21 @@ def _config_fetch(config_path: Path) -> tuple[Fetch, str]:
             raise LangfuseUnavailable(f"Langfuse answered HTTP {error.code}") from None
         except (urllib.error.URLError, OSError, ValueError):
             raise LangfuseUnavailable("Langfuse is not reachable") from None
+
     return fetch, base
 
 
 class Langfuse:
     """Session view of one run, cached for `ttl` seconds. `fetch(path, query)` is injectable."""
 
-    def __init__(self, config_path: Path | None = None, fetch: Fetch | None = None,
-                 base_url: str | None = None, ttl: float = 45.0, clock: Callable[[], float] = time.monotonic):
+    def __init__(
+        self,
+        config_path: Path | None = None,
+        fetch: Fetch | None = None,
+        base_url: str | None = None,
+        ttl: float = 45.0,
+        clock: Callable[[], float] = time.monotonic,
+    ):
         self.config_path = config_path or Path.home() / ".pi" / "agent" / "langfuse.json"
         self._fetch, self._base, self.ttl, self.clock = fetch, base_url, ttl, clock
         self._project: tuple[float, str | None] | None = None
@@ -504,10 +632,14 @@ class Langfuse:
     def _load(self, run_id: str, started: float | None) -> dict:
         fetch, base = self._ready()
         project = self.project_id()
-        begin = datetime.fromtimestamp((started or time.time() - 14 * 86400) - 300, timezone.utc)
-        query = {"sessionId": run_id, "fromStartTime": begin.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                 "toStartTime": (datetime.now(timezone.utc) + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                 "fields": _LF_FIELDS, "limit": "1000"}
+        begin = datetime.fromtimestamp((started or time.time() - 14 * 86400) - 300, UTC)
+        query = {
+            "sessionId": run_id,
+            "fromStartTime": begin.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "toStartTime": (datetime.now(UTC) + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "fields": _LF_FIELDS,
+            "limit": "1000",
+        }
         rows: list[dict] = []
         for _ in range(5):
             page = fetch("/api/public/v2/observations", query)
@@ -539,22 +671,42 @@ def shape_langfuse(run_id: str, rows: list[dict], base: str, project: str | None
         cost = row.get("totalCost")
         if cost is None:
             cost = (row.get("costDetails") or {}).get("total")
-        item = {"id": row.get("id"), "trace_id": row.get("traceId"), "parent_id": row.get("parentObservationId"),
-                "type": row.get("type"), "name": row.get("name"), "level": row.get("level"),
-                "status_message": row.get("statusMessage") or None, "model": row.get("model") or None,
-                "start": _iso(row.get("startTime")), "latency_s": row.get("latency"),
-                "cost_usd": cost,
-                "input_tokens": number(row.get("inputUsage")) or number(usage.get("input")),
-                "output_tokens": number(row.get("outputUsage")) or number(usage.get("output")),
-                "cache_read_tokens": number(usage.get("cache_read_input_tokens")),
-                "cache_write_tokens": sum(number(v) for k, v in usage.items()
-                                          if "cache_creation" in k or "cache_write" in k),
-                "url": f"{root}/traces/{row.get('traceId')}?observation={row.get('id')}" if root else None}
+        item = {
+            "id": row.get("id"),
+            "trace_id": row.get("traceId"),
+            "parent_id": row.get("parentObservationId"),
+            "type": row.get("type"),
+            "name": row.get("name"),
+            "level": row.get("level"),
+            "status_message": row.get("statusMessage") or None,
+            "model": row.get("model") or None,
+            "start": _iso(row.get("startTime")),
+            "latency_s": row.get("latency"),
+            "cost_usd": cost,
+            "input_tokens": number(row.get("inputUsage")) or number(usage.get("input")),
+            "output_tokens": number(row.get("outputUsage")) or number(usage.get("output")),
+            "cache_read_tokens": number(usage.get("cache_read_input_tokens")),
+            "cache_write_tokens": sum(
+                number(v) for k, v in usage.items() if "cache_creation" in k or "cache_write" in k
+            ),
+            "url": f"{root}/traces/{row.get('traceId')}?observation={row.get('id')}" if root else None,
+        }
         observations.append(item)
-        trace = traces.setdefault(row.get("traceId"), {
-            "trace_id": row.get("traceId"), "name": None, "start": item["start"], "latency_s": None,
-            "cost_usd": 0.0, "generations": 0, "tools": 0, "errors": 0, "models": set(),
-            "url": f"{root}/traces/{row.get('traceId')}" if root else None})
+        trace = traces.setdefault(
+            row.get("traceId"),
+            {
+                "trace_id": row.get("traceId"),
+                "name": None,
+                "start": item["start"],
+                "latency_s": None,
+                "cost_usd": 0.0,
+                "generations": 0,
+                "tools": 0,
+                "errors": 0,
+                "models": set(),
+                "url": f"{root}/traces/{row.get('traceId')}" if root else None,
+            },
+        )
         if item["parent_id"] is None:
             trace["name"], trace["latency_s"] = item["name"], item["latency_s"]
         trace["start"] = min(filter(None, (trace["start"], item["start"])), default=None)
@@ -570,12 +722,20 @@ def shape_langfuse(run_id: str, rows: list[dict], base: str, project: str | None
         trace["cost_usd"] = round(trace["cost_usd"], 6)
     generations = [o for o in observations if o["type"] == "GENERATION"]
     latencies = [o["latency_s"] for o in generations if isinstance(o["latency_s"], (int, float))]
-    return {"available": True, "run_id": run_id, "project_id": project, "traces": trace_rows,
-            "observations": observations,
-            "session_url": f"{root}/sessions/{quoted}" if root else None,
-            "totals": {"observations": len(observations), "generations": len(generations),
-                       "tools": sum(o["type"] == "TOOL" for o in observations),
-                       "errors": sum(o["level"] == "ERROR" for o in observations),
-                       "cost_usd": round(sum(number(o["cost_usd"]) for o in observations), 6),
-                       "mean_generation_latency_s": round(sum(latencies) / len(latencies), 2) if latencies else None,
-                       "max_generation_latency_s": max(latencies) if latencies else None}}
+    return {
+        "available": True,
+        "run_id": run_id,
+        "project_id": project,
+        "traces": trace_rows,
+        "observations": observations,
+        "session_url": f"{root}/sessions/{quoted}" if root else None,
+        "totals": {
+            "observations": len(observations),
+            "generations": len(generations),
+            "tools": sum(o["type"] == "TOOL" for o in observations),
+            "errors": sum(o["level"] == "ERROR" for o in observations),
+            "cost_usd": round(sum(number(o["cost_usd"]) for o in observations), 6),
+            "mean_generation_latency_s": round(sum(latencies) / len(latencies), 2) if latencies else None,
+            "max_generation_latency_s": max(latencies) if latencies else None,
+        },
+    }

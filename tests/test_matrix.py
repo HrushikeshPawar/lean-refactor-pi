@@ -8,11 +8,11 @@ import unittest
 import uuid
 from pathlib import Path
 
-from tests.slow import slow
 from arena.campaign import run_dir
 from arena.engine import ROOT
 from arena.traces import PATCH_SHA256
 from tests.pi_support import FAKE, NAME, PI_AVAILABLE
+from tests.slow import slow
 from tools import run_experiment_matrix as matrix
 
 
@@ -48,23 +48,44 @@ class PlanTests(unittest.TestCase):
             matrix.parallelism("0", 2, 0)
 
     def test_comparison_flags_mismatched_packets(self):
-        row = {"run_id": "r", "factor": "thinking", "value": "low", "exit_code": 0, "packet_sha256": "aa",
-               "summary": {"cost": {"spent_usd": 0.05, "requests": 7, "bookkeeping_and_rejected_pct": 3.0},
-                           "progress": {"best": {"tokens": {"value": 90}}}, "evaluations": 4}}
+        row = {
+            "run_id": "r",
+            "factor": "thinking",
+            "value": "low",
+            "exit_code": 0,
+            "packet_sha256": "aa",
+            "summary": {
+                "cost": {"spent_usd": 0.05, "requests": 7, "bookkeeping_and_rejected_pct": 3.0},
+                "progress": {"best": {"tokens": {"value": 90}}},
+                "evaluations": 4,
+            },
+        }
         self.assertTrue(matrix.compare([row], "aa")["identical_packets"])
         report = matrix.compare([row], "bb")
         self.assertFalse(report["identical_packets"])
         self.assertEqual(report["runs"][0]["best_tokens"], 90)
 
     def test_matrix_uses_score_tokens_and_heartbeats_from_one_candidate(self):
-        row = {"run_id": "r", "factor": "thinking", "value": "low", "exit_code": 0, "packet_sha256": "aa",
-               "summary": {"cost": {}, "progress": {
-                   "best": {"tokens": {"value": 90}, "heartbeats": {"value": 300}, "proxy": {"value": 62}},
-                   "best_verified_candidate": {"candidate": "#3", "tokens": 70,
-                                               "heartbeats": 800, "proxy": 60.5}}, "evaluations": 4}}
+        row = {
+            "run_id": "r",
+            "factor": "thinking",
+            "value": "low",
+            "exit_code": 0,
+            "packet_sha256": "aa",
+            "summary": {
+                "cost": {},
+                "progress": {
+                    "best": {"tokens": {"value": 90}, "heartbeats": {"value": 300}, "proxy": {"value": 62}},
+                    "best_verified_candidate": {"candidate": "#3", "tokens": 70, "heartbeats": 800, "proxy": 60.5},
+                },
+                "evaluations": 4,
+            },
+        }
         result = matrix.compare([row], "aa")["runs"][0]
-        self.assertEqual((result["best_candidate"], result["best_tokens"], result["best_heartbeats"],
-                          result["best_proxy"]), ("#3", 70, 800, 60.5))
+        self.assertEqual(
+            (result["best_candidate"], result["best_tokens"], result["best_heartbeats"], result["best_proxy"]),
+            ("#3", 70, 800, 60.5),
+        )
 
 
 @slow
@@ -76,28 +97,73 @@ class MatrixRunTests(unittest.TestCase):
         script = work / "script.json"
         script.write_text(json.dumps([{"text": "done"}] * 8))
         receipt = work / "preflight.json"
-        receipt.write_text(json.dumps({"status": "pass", "patch_sha256": PATCH_SHA256,
-                                       "models": {"deepseek-v4.1-flash": {"session_id": "s", "trace_ids": ["t"]}}}))
+        receipt.write_text(
+            json.dumps(
+                {
+                    "status": "pass",
+                    "patch_sha256": PATCH_SHA256,
+                    "models": {"deepseek-v4.1-flash": {"session_id": "s", "trace_ids": ["t"]}},
+                }
+            )
+        )
         env = {**os.environ, "ARENA_FAKE_SCRIPT": str(script), "ARENA_PREFLIGHT_RECEIPT": str(receipt)}
         try:
             proc = subprocess.run(
-                [sys.executable, "tools/run_experiment_matrix.py", "--theorem", NAME, "--prefix", prefix,
-                 "--factor", "thinking", "--values", "low,high", "--cap", "0.1", "--parallel", "2",
-                 "--", "--no-mcp", "--no-langfuse", "--test-extension", str(FAKE)],
-                cwd=ROOT, env=env, text=True, capture_output=True, timeout=600)
+                [
+                    sys.executable,
+                    "tools/run_experiment_matrix.py",
+                    "--theorem",
+                    NAME,
+                    "--prefix",
+                    prefix,
+                    "--factor",
+                    "thinking",
+                    "--values",
+                    "low,high",
+                    "--cap",
+                    "0.1",
+                    "--parallel",
+                    "2",
+                    "--",
+                    "--no-mcp",
+                    "--no-langfuse",
+                    "--test-extension",
+                    str(FAKE),
+                ],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=600,
+            )
             self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
             report = json.loads((ROOT / "runs/pi-budget" / f"{prefix}-matrix" / "matrix.json").read_text())
             self.assertTrue(report["identical_packets"])
             self.assertEqual([r["thinking"] for r in report["runs"]], ["low", "high"])
-            configs = [json.loads((run_dir(f"{prefix}-thinking-{v}") / "run-config.json").read_text())
-                       for v in ("low", "high")]
+            configs = [
+                json.loads((run_dir(f"{prefix}-thinking-{v}") / "run-config.json").read_text()) for v in ("low", "high")
+            ]
             self.assertEqual(configs[0]["packet_sha256"], configs[1]["packet_sha256"])
             self.assertEqual([c["thinking"] for c in configs], ["low", "high"])
             self.assertTrue((ROOT / "runs/pi-budget" / f"{prefix}-matrix" / "matrix.txt").exists())
             clash = subprocess.run(
-                [sys.executable, "tools/run_experiment_matrix.py", "--theorem", NAME, "--prefix", prefix,
-                 "--factor", "thinking", "--values", "low,high", "--dry-run"],
-                cwd=ROOT, text=True, capture_output=True)
+                [
+                    sys.executable,
+                    "tools/run_experiment_matrix.py",
+                    "--theorem",
+                    NAME,
+                    "--prefix",
+                    prefix,
+                    "--factor",
+                    "thinking",
+                    "--values",
+                    "low,high",
+                    "--dry-run",
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+            )
             self.assertNotEqual(clash.returncode, 0)
             self.assertIn("already exist", clash.stderr)
         finally:

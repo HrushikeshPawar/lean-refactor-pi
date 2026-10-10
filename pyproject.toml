@@ -25,7 +25,8 @@ extend-exclude = ["vendor", "workspaces", "runs", "research"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "C4", "PERF", "RUF"]
-ignore = ["E501"]
+# RUF001-003: Lean statements and goals use ×, α, ℝ, ι on purpose.
+ignore = ["E501", "RUF001", "RUF002", "RUF003"]
 
 [tool.ty.environment]
 python-version = "3.13"

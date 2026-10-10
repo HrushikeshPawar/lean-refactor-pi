@@ -1,14 +1,14 @@
 import json
-import unittest
 import tempfile
+import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from arena.graph import common_base, merge_text, ranked_frontier
 from arena import campaign
+from arena.graph import common_base, merge_text, ranked_frontier
 from tools.build_candidate_graph import build_snapshot
-from tools.serve_candidate_graph import graph_payload
 from tools.run_pi_budgeted import attempt_has_model_error
+from tools.serve_candidate_graph import graph_payload
 
 
 class MergeTests(unittest.TestCase):
@@ -35,8 +35,24 @@ class MergeTests(unittest.TestCase):
 class FrontierTests(unittest.TestCase):
     def test_frontier_rotates_from_saturated_lineage(self):
         nodes = [
-            {"id": "a", "parents": [], "status": "full", "local_proxy": 70, "tokens": 150, "attempts_since_gain": 6, "children": ["a1"]},
-            {"id": "b", "parents": [], "status": "full", "local_proxy": 68, "tokens": 152, "attempts_since_gain": 0, "children": []},
+            {
+                "id": "a",
+                "parents": [],
+                "status": "full",
+                "local_proxy": 70,
+                "tokens": 150,
+                "attempts_since_gain": 6,
+                "children": ["a1"],
+            },
+            {
+                "id": "b",
+                "parents": [],
+                "status": "full",
+                "local_proxy": 68,
+                "tokens": 152,
+                "attempts_since_gain": 0,
+                "children": [],
+            },
         ]
         ranked = ranked_frontier(nodes)
         self.assertEqual(ranked[0]["candidate_id"], "b")
@@ -45,14 +61,23 @@ class FrontierTests(unittest.TestCase):
 
 class WorkerTests(unittest.TestCase):
     def test_primary_compile_failure_is_materialized_for_lean_repair(self):
-        with tempfile.TemporaryDirectory() as temporary, \
-             patch.object(campaign, "ROOT", Path(temporary)), \
-             patch.object(campaign, "problem", return_value={"name": "T"}), \
-             patch.object(campaign, "validate_proof"), \
-             patch.object(campaign, "versions", return_value=[("v1", "a")]), \
-             patch.object(campaign, "evaluate", return_value={"ok": True, "tokens": 4,
-                 "compat": {"v1": {"passed": False, "diagnostics": "exact goal"}}}), \
-             patch.object(campaign, "materialize", return_value={"candidate_path": "scratch.lean"}) as live:
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(campaign, "ROOT", Path(temporary)),
+            patch.object(campaign, "problem", return_value={"name": "T"}),
+            patch.object(campaign, "validate_proof"),
+            patch.object(campaign, "versions", return_value=[("v1", "a")]),
+            patch.object(
+                campaign,
+                "evaluate",
+                return_value={
+                    "ok": True,
+                    "tokens": 4,
+                    "compat": {"v1": {"passed": False, "diagnostics": "exact goal"}},
+                },
+            ),
+            patch.object(campaign, "materialize", return_value={"candidate_path": "scratch.lean"}) as live,
+        ):
             campaign._append(campaign.run_dir("repair"), {"kind": "init", "theorem": "T"})
             result = campaign.record_evaluation("T", "repair", "theorem t := by\n  bad", "fast")
             self.assertEqual(result["candidate_path"], "scratch.lean")
@@ -62,19 +87,28 @@ class WorkerTests(unittest.TestCase):
         base = "theorem t := by\n  intro x\n  have h := x\n  exact h\n"
         left = base.replace("have h := x", "have h : _ := x")
         right = base.replace("exact h", "simpa using h")
+
         def fake_eval(_name, proof, mode, known=None):
             compat = {"v1": {"passed": True}}
             if mode == "full":
                 compat.update({"v2": {"passed": True}, "v3": {"passed": True}})
-            return {"ok": True, "tokens": len(proof), "heartbeat": 3,
-                    "local_proxy": 50 if mode == "full" else None, "compat": compat}
-        with tempfile.TemporaryDirectory() as temporary, \
-             patch.object(campaign, "ROOT", Path(temporary)), \
-             patch.object(campaign, "problem", return_value={"name": "T"}), \
-             patch.object(campaign, "validate_proof"), \
-             patch.object(campaign, "versions", return_value=[("v1", "a"), ("v2", "b"), ("v3", "c")]), \
-             patch.object(campaign, "evaluate", side_effect=fake_eval), \
-             patch.object(campaign, "materialize") as live:
+            return {
+                "ok": True,
+                "tokens": len(proof),
+                "heartbeat": 3,
+                "local_proxy": 50 if mode == "full" else None,
+                "compat": compat,
+            }
+
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(campaign, "ROOT", Path(temporary)),
+            patch.object(campaign, "problem", return_value={"name": "T"}),
+            patch.object(campaign, "validate_proof"),
+            patch.object(campaign, "versions", return_value=[("v1", "a"), ("v2", "b"), ("v3", "c")]),
+            patch.object(campaign, "evaluate", side_effect=fake_eval),
+            patch.object(campaign, "materialize") as live,
+        ):
             directory = campaign.run_dir("test")
             campaign._append(directory, {"kind": "init", "theorem": "T"})
             root = campaign.record_evaluation("T", "test", base, "full", materialize_live=False)["candidate_id"]
@@ -94,23 +128,34 @@ class WorkerTests(unittest.TestCase):
 
     def test_worker_checks_every_open_good_pair_and_deduplicates_combinations(self):
         base = "theorem t := by\n  a\n  b\n  c\n"
+
         def fake_eval(_name, proof, mode, known=None):
             compat = {"v1": {"passed": True}}
             if mode == "full":
                 compat.update({"v2": {"passed": True}, "v3": {"passed": True}})
-            return {"ok": True, "tokens": len(proof), "heartbeat": 1,
-                    "local_proxy": 40 if mode == "full" else None, "compat": compat}
-        with tempfile.TemporaryDirectory() as temporary, \
-             patch.object(campaign, "ROOT", Path(temporary)), \
-             patch.object(campaign, "problem", return_value={"name": "T"}), \
-             patch.object(campaign, "validate_proof"), \
-             patch.object(campaign, "versions", return_value=[("v1", "a"), ("v2", "b"), ("v3", "c")]), \
-             patch.object(campaign, "evaluate", side_effect=fake_eval):
+            return {
+                "ok": True,
+                "tokens": len(proof),
+                "heartbeat": 1,
+                "local_proxy": 40 if mode == "full" else None,
+                "compat": compat,
+            }
+
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(campaign, "ROOT", Path(temporary)),
+            patch.object(campaign, "problem", return_value={"name": "T"}),
+            patch.object(campaign, "validate_proof"),
+            patch.object(campaign, "versions", return_value=[("v1", "a"), ("v2", "b"), ("v3", "c")]),
+            patch.object(campaign, "evaluate", side_effect=fake_eval),
+        ):
             directory = campaign.run_dir("all-pairs")
             campaign._append(directory, {"kind": "init", "theorem": "T"})
             root = campaign.record_evaluation("T", "all-pairs", base, "full", materialize_live=False)["candidate_id"]
             for old, new in (("  a", "  aa"), ("  b", "  bb"), ("  c", "  cc")):
-                campaign.record_evaluation("T", "all-pairs", base.replace(old, new), "full", [root], materialize_live=False)
+                campaign.record_evaluation(
+                    "T", "all-pairs", base.replace(old, new), "full", [root], materialize_live=False
+                )
             for _ in range(200):
                 if campaign.merge_batch("all-pairs", max_checks=4)["checks"] == 0:
                     break
@@ -118,8 +163,9 @@ class WorkerTests(unittest.TestCase):
                 self.fail("pair checks did not converge")
             graph = campaign.graph_state("all-pairs")
             self.assertEqual(len(graph["nodes"]), 8)
-            self.assertEqual(len({tuple(check["parents"]) for check in graph["merge_checks"]}),
-                             len(graph["merge_checks"]))
+            self.assertEqual(
+                len({tuple(check["parents"]) for check in graph["merge_checks"]}), len(graph["merge_checks"])
+            )
             self.assertTrue(any("aa\n  bb\n  cc" in node["proof"] for node in graph["nodes"]))
 
 
@@ -150,10 +196,23 @@ class ViewerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary, patch.object(campaign, "ROOT", Path(temporary)):
             directory = campaign.run_dir("viewer")
             campaign._append(directory, {"kind": "init", "theorem": "T"})
-            with patch("tools.serve_candidate_graph.graph_state", return_value={
-                "run_id": "viewer", "theorem": "T", "nodes": [], "evaluations": 0,
-                "ledger_events": 1, "merge_checks": [], "milestones": [], "frontier": [], "timeline": []}), \
-                patch("tools.serve_candidate_graph.run_dir", return_value=directory):
+            with (
+                patch(
+                    "tools.serve_candidate_graph.graph_state",
+                    return_value={
+                        "run_id": "viewer",
+                        "theorem": "T",
+                        "nodes": [],
+                        "evaluations": 0,
+                        "ledger_events": 1,
+                        "merge_checks": [],
+                        "milestones": [],
+                        "frontier": [],
+                        "timeline": [],
+                    },
+                ),
+                patch("tools.serve_candidate_graph.run_dir", return_value=directory),
+            ):
                 output = build_snapshot("viewer", Path(temporary) / "snapshot.html")
                 self.assertIn("window.GRAPH_SNAPSHOT", output.read_text())
                 self.assertEqual(graph_payload("viewer")["run_id"], "viewer")
@@ -169,16 +228,21 @@ class ViewerTests(unittest.TestCase):
                 '{"kind":"reserve","id":"two","usd":0.5}\n'
                 '{"kind":"settle","id":"two","usd":0.2,"pi_embedded_cost_usd":0.2,'
                 '"tokens":{"input":1,"output":20,"cache_read":150,"cache_write":50},'
-                '"ledger_components_usd":{"input":0.01,"output":0.09,"cacheRead":0.08,"cacheWrite":0.02}}\n')
+                '"ledger_components_usd":{"input":0.01,"output":0.09,"cacheRead":0.08,"cacheWrite":0.02}}\n'
+            )
             (directory / "run-config.json").write_text('{"hard_cap_usd": 0.1}')
-            with patch("tools.serve_candidate_graph.graph_state", return_value={}), \
-                 patch("tools.serve_candidate_graph.run_dir", return_value=directory):
+            with (
+                patch("tools.serve_candidate_graph.graph_state", return_value={}),
+                patch("tools.serve_candidate_graph.run_dir", return_value=directory),
+            ):
                 payload = graph_payload("viewer")
             timeline = payload["cost_timeline"]
             self.assertEqual([row["number"] for row in timeline], [1, 2])
             self.assertEqual([round(row["spent_usd"], 3) for row in timeline], [0.1, 0.3])
-            self.assertEqual({k: round(v, 3) for k, v in timeline[-1]["parts"].items()},
-                             {"input": 0.02, "output": 0.13, "cache_read": 0.08, "cache_write": 0.07})
+            self.assertEqual(
+                {k: round(v, 3) for k, v in timeline[-1]["parts"].items()},
+                {"input": 0.02, "output": 0.13, "cache_read": 0.08, "cache_write": 0.07},
+            )
             self.assertAlmostEqual(timeline[1]["reuse_pct"], 100 * 150 / 201)  # read / (input + read + write)
             self.assertAlmostEqual(timeline[0]["ts"], 1791274568.395)
             self.assertAlmostEqual(payload["cost"]["pi_embedded_usd"], 0.3)
@@ -186,19 +250,35 @@ class ViewerTests(unittest.TestCase):
 
     def test_score_charts_start_from_the_original_proof(self):
         from tools.serve_candidate_graph import baseline_point
-        payload = {"theorem": "Core.InitsUpdatesComm",
-                   "nodes": [{"id": "ref", "origin": "reference"}, {"id": "a", "origin": "model"}]}
+
+        payload = {
+            "theorem": "Core.InitsUpdatesComm",
+            "nodes": [{"id": "ref", "origin": "reference"}, {"id": "a", "origin": "model"}],
+        }
         point = baseline_point(payload)
-        self.assertEqual((point["number"], point["candidate_id"], point["tokens"], point["local_proxy"]),
-                         (0, "ref", 224, 33.33))
+        self.assertEqual(
+            (point["number"], point["candidate_id"], point["tokens"], point["local_proxy"]), (0, "ref", 224, 33.33)
+        )
         self.assertGreater(point["heartbeat"], 0)
         self.assertIsNone(baseline_point({"theorem": "Core.InitsUpdatesComm", "nodes": []}))
 
     def test_original_proof_node_shows_its_published_numbers(self):
         from tools.serve_candidate_graph import baseline_point, give_reference_its_numbers
-        payload = {"theorem": "Core.InitsUpdatesComm",
-                   "nodes": [{"id": "ref", "origin": "reference", "status": "unevaluated", "tokens": None,
-                              "heartbeat": None, "local_proxy": None}, {"id": "a", "origin": "model", "tokens": None}]}
+
+        payload = {
+            "theorem": "Core.InitsUpdatesComm",
+            "nodes": [
+                {
+                    "id": "ref",
+                    "origin": "reference",
+                    "status": "unevaluated",
+                    "tokens": None,
+                    "heartbeat": None,
+                    "local_proxy": None,
+                },
+                {"id": "a", "origin": "model", "tokens": None},
+            ],
+        }
         payload["baseline"] = baseline_point(payload)
         give_reference_its_numbers(payload)
         ref, other = payload["nodes"]
@@ -211,23 +291,32 @@ class ViewerTests(unittest.TestCase):
         import urllib.error
         import urllib.request
         from http.server import ThreadingHTTPServer
+
         from tools.serve_candidate_graph import Runs, handler_for
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            for name, model in (("rep-r3-model-a", "deepseek-v4.1-flash"), ("rep-r3-model-b", "deepseek-v4.1-flash"),
-                                ("rep-r3-matrix", None), ("other-run", "deepseek-v4.1-flash")):
+            for name, model in (
+                ("rep-r3-model-a", "deepseek-v4.1-flash"),
+                ("rep-r3-model-b", "deepseek-v4.1-flash"),
+                ("rep-r3-matrix", None),
+                ("other-run", "deepseek-v4.1-flash"),
+            ):
                 (root / name).mkdir()
                 if model:
                     (root / name / "ledger.jsonl").write_text('{"kind":"init","theorem":"T"}\n')
-                    (root / name / "run-config.json").write_text(json.dumps(
-                        {"model": model, "hard_cap_usd": 0.1, "theorem": "Core.InitsUpdatesComm"}))
+                    (root / name / "run-config.json").write_text(
+                        json.dumps({"model": model, "hard_cap_usd": 0.1, "theorem": "Core.InitsUpdatesComm"})
+                    )
             (root / "rep-r3-model-b" / "summary.json").write_text('{"stop_reason": "actual_usage_cap"}')
             (root / "rep-r3-model-b" / "state.json").write_text('{"best": {"candidate": "#5", "proxy": 81.76}}')
             (root / "rep-r3-model-b" / "cost-ledger.jsonl").write_text(
-                '{"kind":"settle","usd":0.03}\n{"kind":"settle","usd":0.02}\n')
-            with patch("tools.serve_candidate_graph.run_dir", side_effect=lambda run_id: root / run_id), \
-                 patch("tools.serve_candidate_graph.graph_state", side_effect=lambda run_id: {"run_id": run_id}):
+                '{"kind":"settle","usd":0.03}\n{"kind":"settle","usd":0.02}\n'
+            )
+            with (
+                patch("tools.serve_candidate_graph.run_dir", side_effect=lambda run_id: root / run_id),
+                patch("tools.serve_candidate_graph.graph_state", side_effect=lambda run_id: {"run_id": run_id}),
+            ):
                 server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(Runs([], "rep-r3-*")))
                 threading.Thread(target=server.serve_forever, daemon=True).start()
                 self.addCleanup(server.shutdown)
@@ -244,8 +333,10 @@ class ViewerTests(unittest.TestCase):
                 # The matrix log directory has no ledger and runs outside the glob are not shown.
                 self.assertEqual([c["run_id"] for c in cards], ["rep-r3-model-a", "rep-r3-model-b"])
                 done = cards[1]
-                self.assertEqual((done["finished"], done["best"]["proxy"], done["spent_usd"], done["requests"]),
-                                 (True, 81.76, 0.05, 2))
+                self.assertEqual(
+                    (done["finished"], done["best"]["proxy"], done["spent_usd"], done["requests"]),
+                    (True, 81.76, 0.05, 2),
+                )
                 self.assertFalse(cards[0]["finished"])
                 # The hub shows every change against the theorem's original proof.
                 self.assertEqual(cards[0]["reference"], {"tokens": 224, "heartbeats": 4251, "proxy": 33.33})
@@ -262,6 +353,7 @@ class ViewerTests(unittest.TestCase):
 
     def test_a_single_run_still_gets_the_plain_viewer_at_the_root(self):
         from tools.serve_candidate_graph import Runs
+
         self.assertFalse(Runs(["one"]).hub)
         self.assertTrue(Runs(["one", "two"]).hub)
         self.assertTrue(Runs([], "x-*").hub)
@@ -275,9 +367,12 @@ class ViewerTests(unittest.TestCase):
                 '{"kind":"reserve","id":"legacy","usd":0.3}\n'
                 '{"kind":"settle","id":"legacy","usd":0.3,"usage_known":false}\n'
                 '{"kind":"reserve","id":"paid","usd":0.5}\n'
-                '{"kind":"settle","id":"paid","usd":0.12,"usage_known":true}\n')
-            with patch("tools.serve_candidate_graph.graph_state", return_value={}), \
-                 patch("tools.serve_candidate_graph.run_dir", return_value=directory):
+                '{"kind":"settle","id":"paid","usd":0.12,"usage_known":true}\n'
+            )
+            with (
+                patch("tools.serve_candidate_graph.graph_state", return_value={}),
+                patch("tools.serve_candidate_graph.run_dir", return_value=directory),
+            ):
                 payload = graph_payload("viewer")
             self.assertEqual(payload["cost"]["spent_usd"], 0.12)
             self.assertEqual(payload["cost"]["unresolved_usd"], 0)
@@ -288,9 +383,12 @@ class ViewerTests(unittest.TestCase):
             session = directory / "session"
             session.mkdir()
             (session / "old.jsonl").write_text(
-                '{"type":"message","message":{"usage":{"totalTokens":10,"cost":{"total":0.02}}}}\n')
-            with patch("tools.serve_candidate_graph.graph_state", return_value={}), \
-                 patch("tools.serve_candidate_graph.run_dir", return_value=directory):
+                '{"type":"message","message":{"usage":{"totalTokens":10,"cost":{"total":0.02}}}}\n'
+            )
+            with (
+                patch("tools.serve_candidate_graph.graph_state", return_value={}),
+                patch("tools.serve_candidate_graph.run_dir", return_value=directory),
+            ):
                 estimate = graph_payload("viewer")["cost_report"]["pi_embedded_estimate"]
             self.assertEqual(estimate, {"usd": 0.02, "priced_entries": 1, "missing_entries": 0})
 
@@ -301,10 +399,14 @@ class RunnerTests(unittest.TestCase):
             path = Path(temporary) / "events.jsonl"
             path.write_text('{"type":"message_end","message":{"role":"assistant","stopReason":"error"}}\n')
             offset = path.stat().st_size
-            path.write_text(path.read_text() + '{"type":"message_end","message":{"role":"assistant","stopReason":"stop"}}\n')
+            path.write_text(
+                path.read_text() + '{"type":"message_end","message":{"role":"assistant","stopReason":"stop"}}\n'
+            )
             self.assertFalse(attempt_has_model_error(path, offset))
             offset = path.stat().st_size
-            path.write_text(path.read_text() + '{"type":"message_end","message":{"role":"assistant","stopReason":"aborted"}}\n')
+            path.write_text(
+                path.read_text() + '{"type":"message_end","message":{"role":"assistant","stopReason":"aborted"}}\n'
+            )
             self.assertTrue(attempt_has_model_error(path, offset))
 
     def test_budget_stop_and_recovered_transport_error_are_not_fatal(self):
@@ -314,7 +416,8 @@ class RunnerTests(unittest.TestCase):
                 '{"type":"message_end","message":{"role":"assistant","stopReason":"error","errorMessage":"Connection error."}}\n'
                 '{"type":"auto_retry_end","success":true}\n'
                 '{"type":"message_end","message":{"role":"assistant","stopReason":"stop"}}\n'
-                '{"type":"message_end","message":{"role":"assistant","stopReason":"error","errorMessage":"Arena budget stop: observed usage reached cap"}}\n')
+                '{"type":"message_end","message":{"role":"assistant","stopReason":"error","errorMessage":"Arena budget stop: observed usage reached cap"}}\n'
+            )
             self.assertFalse(attempt_has_model_error(path, 0))
 
 

@@ -1,7 +1,6 @@
 """Lean health gate, circuit breaker and between-run cleanup: injected fakes only, no Lean, Pi or model."""
 
 import json
-import signal
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,9 +13,21 @@ from tools import run_pi_budgeted as rpb
 
 def run_gate(checks, warms=None, versions=(("v1", "c1"), ("v2", "c2")), directory=None):
     lines = []
-    warm = (lambda row, v, c, slots, lane="model": warms[v]) if warms is not None else (lambda *a, **kw: {"ok": True, "workers": 4, "seconds": [10.0], "failed": []})
-    report = lh.gate("T", 4, directory, row_fn=lambda name: {"name": name}, versions_fn=lambda row: list(versions),
-                     warm_fn=warm, check_fn=lambda row, v, c: checks[v], log=lines.append)
+    warm = (
+        (lambda row, v, c, slots, lane="model": warms[v])
+        if warms is not None
+        else (lambda *a, **kw: {"ok": True, "workers": 4, "seconds": [10.0], "failed": []})
+    )
+    report = lh.gate(
+        "T",
+        4,
+        directory,
+        row_fn=lambda name: {"name": name},
+        versions_fn=lambda row: list(versions),
+        warm_fn=warm,
+        check_fn=lambda row, v, c: checks[v],
+        log=lines.append,
+    )
     return report, lines
 
 
@@ -70,10 +81,18 @@ class GateTests(unittest.TestCase):
             calls.append((v, slots, lane))
             return {"ok": True, "workers": slots, "seconds": [1.0], "failed": []}
 
-        lh.gate("T", 4, None, row_fn=lambda name: {"name": name},
-                versions_fn=lambda row: [("v1", "c1"), ("v2", "c2"), ("v3", "c3")],
-                warm_fn=warm, check_fn=lambda row, v, c: ok(1.0), log=lambda m: None)
+        lh.gate(
+            "T",
+            4,
+            None,
+            row_fn=lambda name: {"name": name},
+            versions_fn=lambda row: [("v1", "c1"), ("v2", "c2"), ("v3", "c3")],
+            warm_fn=warm,
+            check_fn=lambda row, v, c: ok(1.0),
+            log=lambda m: None,
+        )
         self.assertEqual(calls, [("v1", 4, "model"), ("v2", 1, "background"), ("v3", 1, "background")])
+
 
 def check(kind: str, trigger: str = "model", record: str = "evaluation") -> dict:
     entry = {"passed": False, "lean": {"path": "session"}}
@@ -110,7 +129,7 @@ class BreakerTests(unittest.TestCase):
             ledger = [check("timeout")] * 4
             self.assertIsNone(lh.trip_if_unhealthy(directory, ledger))
             self.assertIsNone(lh.tripped(directory))
-            marker = lh.trip_if_unhealthy(directory, ledger + [check("timeout", record="probe")], now_fn=lambda: 7.0)
+            marker = lh.trip_if_unhealthy(directory, [*ledger, check("timeout", record="probe")], now_fn=lambda: 7.0)
             self.assertEqual((marker["consecutive"], marker["stop_reason"], marker["ts"]), (5, "lean_unhealthy", 7.0))
             self.assertEqual(lh.tripped(directory)["consecutive"], 5)
             self.assertEqual(lh.trip_if_unhealthy(directory, ledger * 3)["ts"], 7.0)
@@ -148,9 +167,11 @@ class RunnerTests(unittest.TestCase):
     def test_unhealthy_gate_stops_before_any_model_and_writes_the_stop(self):
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
-            with mock.patch.object(rpb, "cost_report_from_ledger", return_value={"spent_usd": 0}), \
-                    mock.patch.object(rpb, "write_summary", return_value={}) as write, \
-                    mock.patch.object(rpb, "render_text", return_value="summary\n"):
+            with (
+                mock.patch.object(rpb, "cost_report_from_ledger", return_value={"spent_usd": 0}),
+                mock.patch.object(rpb, "write_summary", return_value={}) as write,
+                mock.patch.object(rpb, "render_text", return_value="summary\n"),
+            ):
                 code = rpb.stop_unhealthy(None, directory, ["v1: reference timed out"])
             self.assertEqual(code, lh.EXIT_CODE)
             write.assert_called_once_with(directory, "lean_unhealthy")
@@ -159,11 +180,14 @@ class RunnerTests(unittest.TestCase):
     def test_gate_sets_the_timeout_env_only_when_healthy(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict("os.environ", {}, clear=False):
             import os
+
             os.environ.pop("ARENA_LEAN_TIMEOUT", None)
             directory = Path(tmp)
             (directory / lh.TRIPPED_FILE).write_text("{}")
             with mock.patch.dict(rpb._LEAN, {"process": object()}):
-                bad = rpb.lean_gate("T", directory, lambda *a: {"verdict": "unhealthy", "reasons": ["x"], "timeout": 900})
+                bad = rpb.lean_gate(
+                    "T", directory, lambda *a: {"verdict": "unhealthy", "reasons": ["x"], "timeout": 900}
+                )
                 self.assertEqual(bad["verdict"], "unhealthy")
                 self.assertNotIn("ARENA_LEAN_TIMEOUT", os.environ)
                 good = rpb.lean_gate("T", directory, lambda *a: {"verdict": "healthy", "reasons": [], "timeout": 333})
@@ -200,25 +224,38 @@ class CleanupTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.dir = Path(self.temp.name) / "run-1"
         self.dir.mkdir()
-        (self.dir / "lean-session.json").write_text(json.dumps(
-            {"pid": 100, "pgids": [201], "pids": [201, 202, 203, 204]}))
+        (self.dir / "lean-session.json").write_text(
+            json.dumps({"pid": 100, "pgids": [201], "pids": [201, 202, 203, 204]})
+        )
 
     def fake(self):
-        return FakeProc({100: ("python3", f"python -m arena.lean_session serve --run-dir {self.dir}", True),
-                         201: ("lean", "", True), 202: ("lake", "", True),
-                         203: ("firefox", "", True),  # a recorded pid that was reused by something else
-                         9999: ("lean", "", True)})   # a Lean of someone else: never recorded
+        return FakeProc(
+            {
+                100: ("python3", f"python -m arena.lean_session serve --run-dir {self.dir}", True),
+                201: ("lean", "", True),
+                202: ("lake", "", True),
+                203: ("firefox", "", True),  # a recorded pid that was reused by something else
+                9999: ("lean", "", True),
+            }
+        )  # a Lean of someone else: never recorded
 
     def reap(self, proc):
-        return rc.reap_run(self.dir, comm_fn=proc.comm, cmdline_fn=proc.cmdline, alive_fn=proc.alive,
-                           kill_fn=proc.kill, killpg_fn=proc.killpg, sleep_fn=lambda s: None)
+        return rc.reap_run(
+            self.dir,
+            comm_fn=proc.comm,
+            cmdline_fn=proc.cmdline,
+            alive_fn=proc.alive,
+            kill_fn=proc.kill,
+            killpg_fn=proc.killpg,
+            sleep_fn=lambda s: None,
+        )
 
     def test_only_recorded_lean_lake_and_the_daemon_are_killed(self):
         proc = self.fake()
         self.assertEqual(self.reap(proc), 3)
         signalled = {s[0] if s[0] != "pg" else s[1] for s in proc.signals}
         self.assertEqual(signalled, {100, 201, 202})
-        self.assertIn(203, proc.table)   # reused pid left alone
+        self.assertIn(203, proc.table)  # reused pid left alone
         self.assertIn(9999, proc.table)  # unrecorded Lean left alone
 
     def test_another_runs_daemon_with_a_reused_pid_is_not_killed(self):
@@ -242,6 +279,7 @@ class CleanupTests(unittest.TestCase):
         (root / "arena-new").mkdir()
         (root / "keep").mkdir()
         import os
+
         os.utime(root / "arena-old", (1, 1))
         self.assertEqual(rc.sweep_candidate_dirs(root, 1000.0), 1)
         self.assertEqual(sorted(p.name for p in root.iterdir()), ["arena-old", "keep"])
@@ -259,26 +297,54 @@ class HousekeepingTests(unittest.TestCase):
             left.pop(0) if len(left) > 1 else None
             free.pop(0) if len(free) > 1 else None
 
-        hk = rc.Housekeeping(8.0, 300.0, 0.0, Path("/nonexistent"), mem_fn=lambda: free[0], reap_fn=lambda d: 2,
-                             lingering_fn=lambda d: left[0], sweep_fn=lambda root, since: 1, sleep_fn=nap,
-                             now_fn=lambda: clock[0], log=lines.append)
+        hk = rc.Housekeeping(
+            8.0,
+            300.0,
+            0.0,
+            Path("/nonexistent"),
+            mem_fn=lambda: free[0],
+            reap_fn=lambda d: 2,
+            lingering_fn=lambda d: left[0],
+            sweep_fn=lambda root, since: 1,
+            sleep_fn=nap,
+            now_fn=lambda: clock[0],
+            log=lines.append,
+        )
         hk.finished.append(Path("/runs/a"))
         hk.before_run("b")
         self.assertEqual(len(naps), 2)
         self.assertTrue(any("waiting before b" in line for line in lines))
         hk.after_run("b", Path("/runs/b"))
-        self.assertTrue(any(line.startswith("cleanup b: reaped 2, removed 1") and "MemAvailable 12.0 GB" in line for line in lines))
+        self.assertTrue(
+            any(line.startswith("cleanup b: reaped 2, removed 1") and "MemAvailable 12.0 GB" in line for line in lines)
+        )
 
     def test_gives_up_waiting_after_the_limit(self):
         clock, lines = [0.0], []
-        hk = rc.Housekeeping(8.0, 20.0, 0.0, mem_fn=lambda: 1.0, lingering_fn=lambda d: [], sleep_fn=lambda s: clock.__setitem__(0, clock[0] + s),
-                             now_fn=lambda: clock[0], log=lines.append)
+        hk = rc.Housekeeping(
+            8.0,
+            20.0,
+            0.0,
+            mem_fn=lambda: 1.0,
+            lingering_fn=lambda d: [],
+            sleep_fn=lambda s: clock.__setitem__(0, clock[0] + s),
+            now_fn=lambda: clock[0],
+            log=lines.append,
+        )
         hk.before_run("x")
         self.assertTrue(any("starting x anyway" in line for line in lines))
 
     def test_memory_is_not_required_while_another_run_is_in_flight(self):
-        hk = rc.Housekeeping(8.0, 20.0, 0.0, mem_fn=lambda: 1.0, lingering_fn=lambda d: [], sleep_fn=lambda s: self.fail("waited"),
-                             now_fn=lambda: 0.0, log=lambda m: None)
+        hk = rc.Housekeeping(
+            8.0,
+            20.0,
+            0.0,
+            mem_fn=lambda: 1.0,
+            lingering_fn=lambda d: [],
+            sleep_fn=lambda s: self.fail("waited"),
+            now_fn=lambda: 0.0,
+            log=lambda m: None,
+        )
         hk.in_flight = 1
         hk.before_run("second")
         self.assertEqual(hk.in_flight, 2)

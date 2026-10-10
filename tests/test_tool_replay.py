@@ -6,7 +6,6 @@ from pathlib import Path
 
 from arena import campaign
 
-
 FIXTURE = Path(__file__).parent / "fixtures" / "proof_tool_replay.json"
 
 
@@ -29,12 +28,10 @@ class ProofToolReplayTests(unittest.TestCase):
         self.assertEqual(len(genuine), 16)
         self.assertTrue(all(call["replay"] == "preserve_expected_error" for call in genuine))
         sources = [call for call in calls if call["old_tool"] == "arena_source"]
-        self.assertTrue(all(call["old_request"]["path"] == call["request"]["handle"]
-                            for call in sources))
+        self.assertTrue(all(call["old_request"]["path"] == call["request"]["handle"] for call in sources))
 
     def test_legacy_path_aliases_replay_with_exact_pinned_line_ranges(self):
-        calls = [call for call in self.fixture["calls"]
-                 if call["replay"] == "resolve_pinned_path_alias"]
+        calls = [call for call in self.fixture["calls"] if call["replay"] == "resolve_pinned_path_alias"]
         self.assertEqual(len(calls), 6)
         for call in calls:
             with self.subTest(run=call["run"], request=call["request"]):
@@ -64,8 +61,7 @@ class ProofToolReplayTests(unittest.TestCase):
             self.assertIn(call["request"]["draft_form"], {"by_body", "complete_or_other"})
 
     def test_historical_proof_shapes_normalize_against_the_exact_statement(self):
-        calls = [call for call in self.fixture["calls"]
-                 if call["replay"] == "normalize_proof_body"]
+        calls = [call for call in self.fixture["calls"] if call["replay"] == "normalize_proof_body"]
         self.assertEqual(len(calls), 7)
         for call in calls:
             with self.subTest(run=call["run"], theorem=call["theorem"]):
