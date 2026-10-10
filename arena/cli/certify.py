@@ -6,18 +6,18 @@ the published one, the local heartbeat count is within a tolerance of the publis
 its kickoff packet builds (render_packet raises when a required section or name cannot be certified).
 Rows whose environments are not provisioned are reported, not failed (use --require-all to fail them).
 
-    python tools/arena_certify.py                       # every row
-    python tools/arena_certify.py --rows Core.InitsUpdatesComm --tolerance 0.05
+    python arena certify                       # every row
+    python arena certify --rows Core.InitsUpdatesComm --tolerance 0.05
 """
 
 from __future__ import annotations
 
-import argparse
 import json
-import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from rich.console import Console
+from rich.table import Table
+
 from arena import environments
 from arena.context import render_packet
 from arena.engine import BENCHMARK, evaluate, problem
@@ -101,25 +101,27 @@ def render(results: list[dict]) -> str:
     )
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--rows", help="Comma-separated row names (default: every row)")
-    parser.add_argument(
-        "--tolerance", type=float, default=0.05, help="Allowed heartbeat drift from the published value"
-    )
-    parser.add_argument("--json", type=Path, help="Write the full results here")
-    parser.add_argument("--require-all", action="store_true", help="Treat unprovisioned rows as failures")
-    args = parser.parse_args()
-    names = args.rows.split(",") if args.rows else all_rows()
-    results = [certify(name, args.tolerance) for name in names]
-    print(render(results), end="")
-    if args.json:
-        args.json.write_text(json.dumps(results, indent=2, ensure_ascii=False) + "\n")
-    bad = any(
-        item["status"] == "failed" or (args.require_all and item["status"] == "unprovisioned") for item in results
-    )
+def execute(
+    rows: str | None = None,
+    tolerance: float = 0.05,
+    output: Path | None = None,
+    json_output: bool = False,
+    require_all: bool = False,
+) -> int:
+    names = rows.split(",") if rows else all_rows()
+    results = [certify(name, tolerance) for name in names]
+    if output:
+        output.write_text(json.dumps(results, indent=2, ensure_ascii=False) + "\n")
+    if json_output:
+        print(json.dumps(results, ensure_ascii=False))
+    else:
+        table = Table(title="Arena certification")
+        table.add_column("Row")
+        table.add_column("Status")
+        table.add_column("Details")
+        for item in results:
+            details = item.get("reasons") or item.get("missing") or []
+            table.add_row(item["name"], item["status"], json.dumps(details, ensure_ascii=False) if details else "")
+        Console().print(table)
+    bad = any(item["status"] == "failed" or (require_all and item["status"] == "unprovisioned") for item in results)
     return 1 if bad else 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

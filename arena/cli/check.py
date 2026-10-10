@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 
-import argparse
 import re
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from arena.forbidden import FORBIDDEN, remove_comments
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--proof-name", required=True)
-    ap.add_argument("--temp-file-path", required=True)
-    ap.add_argument("--task-dir", required=True)
-    ap.add_argument("--upstream-checker", required=True)
-    args = ap.parse_args()
+@dataclass(frozen=True)
+class CheckOptions:
+    proof_name: str
+    temp_file_path: Path
+    task_dir: Path
+    upstream_checker: Path
 
-    temp_file = Path(args.temp_file_path).resolve()
+
+def execute(args: CheckOptions) -> int:
+    temp_file = args.temp_file_path.resolve()
 
     sanitized = re.sub(r"[^a-zA-Z0-9_]", "_", args.proof_name)
     expected_suffix = f"_{sanitized}"
@@ -41,7 +41,7 @@ def main() -> int:
         print(f"ARENA_CHECK_ERROR: original Lean file does not exist: {original_file}")
         return 2
 
-    proof_path = Path(args.task_dir) / "current_proof.txt"
+    proof_path = args.task_dir / "current_proof.txt"
     proof = proof_path.read_text()
     clean = remove_comments(proof)
 
@@ -60,7 +60,7 @@ def main() -> int:
 
     cmd = [
         sys.executable,
-        args.upstream_checker,
+        str(args.upstream_checker),
         "--proof-name",
         args.proof_name,
         "--temp-file-path",
@@ -101,7 +101,3 @@ def main() -> int:
 
     print("ARENA_CHECK_ERROR: upstream checker returned no recognized accept/reject status")
     return 2
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

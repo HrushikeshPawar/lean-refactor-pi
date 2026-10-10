@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import argparse
 import fcntl
 import json
 import os
@@ -31,13 +30,8 @@ def _status(directory: Path, state: str, detail: dict | None = None) -> None:
     print(f"[{datetime.now(UTC).isoformat(timespec='seconds')}] merge worker {state}{summary}", flush=True)
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("run_id")
-    parser.add_argument("--parent-pid", type=int)
-    parser.add_argument("--once", action="store_true")
-    args = parser.parse_args()
-    directory = run_dir(args.run_id)
+def execute(run_id: str, parent_pid: int | None = None, once: bool = False) -> int:
+    directory = run_dir(run_id)
     directory.mkdir(parents=True, exist_ok=True)
     with (directory / "merge-worker.lock").open("a") as lock:
         try:
@@ -48,7 +42,7 @@ def main() -> int:
         last_state = None
         while True:
             try:
-                batch = merge_batch(args.run_id)
+                batch = merge_batch(run_id)
                 result = batch["last"]
             except Exception as error:
                 _status(directory, "error", {"error": repr(error)})
@@ -56,21 +50,17 @@ def main() -> int:
             if result is not None:
                 _status(directory, "working", result)
                 last_state = "working"
-                if args.once:
+                if once:
                     return 0
                 continue
             if last_state != "idle":
                 _status(directory, "idle")
                 last_state = "idle"
-            if args.once:
+            if once:
                 return 0
-            if args.parent_pid:
+            if parent_pid:
                 try:
-                    os.kill(args.parent_pid, 0)
+                    os.kill(parent_pid, 0)
                 except ProcessLookupError:
                     return 0
             time.sleep(1)
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

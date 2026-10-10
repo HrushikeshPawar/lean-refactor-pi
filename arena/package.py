@@ -19,9 +19,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from string import Template
 
+from arena.cli.run import MODELS
 from arena.engine import ROOT, validate_proof
 from arena.summary import ledger_spend, session_spend
-from tools.run_pi_budgeted import MODELS
 
 ELIGIBLE_MODELS = tuple(MODELS)  # closed-track models the competitor has confirmed eligible
 CEILING_USD = 3.0  # closed-track per-problem ceiling over every call of every run of that problem
@@ -261,11 +261,11 @@ def select(run_ids: list[str], manifest: dict[str, dict], runs_root: Path = RUNS
 
 def discover_runs(theorems: set[str], runs_root: Path = RUNS) -> list[str]:
     """Every run directory of these problems, so the ceiling counts calls the operator did not list."""
-    found = []
-    for config in sorted(runs_root.glob("*/run-config.json")):
-        if _json(config).get("theorem") in theorems:
-            found.append(config.parent.name)
-    return found
+    return [
+        config.parent.name
+        for config in sorted(runs_root.glob("*/run-config.json"))
+        if _json(config).get("theorem") in theorems
+    ]
 
 
 def budget_by_problem(audits: list[dict]) -> dict[str, dict]:
@@ -288,8 +288,8 @@ def violations(audits: list[dict], budget: dict[str, dict]) -> list[str]:
             )
     for info in audits:
         if info["model"] not in ELIGIBLE_MODELS and info["spend"]["settles"]:
-            problems.append(
-                f"{info['run_id']}: model {info['model']!r} is not in the eligibility list {ELIGIBLE_MODELS}"
+            problems.extend(
+                [f"{info['run_id']}: model {info['model']!r} is not in the eligibility list {ELIGIBLE_MODELS}"]
             )
     return problems
 
@@ -390,10 +390,10 @@ Archive of harness commit `{commit}` (`git archive`, read-only). Staging name: `
 
 ## Regenerate `proofs.jsonl`
 
-1. Provision the pinned workspaces (`tools/provision_workspace.py`) for each benchmark row.
-2. Re-run each problem with `tools/run_pi_budgeted.py` or the campaign driver, or reuse the recorded run
+1. Provision the pinned workspaces (`arena provision`) for each benchmark row.
+2. Re-run each problem with `arena run` or `arena campaign`, or reuse the recorded run
    directories listed in `provenance.json`.
-3. Package: `uv run python tools/arena_package.py --name {name} {runs}`
+3. Package: `uv run arena package {runs} --name {name}`
 
 `provenance.json` joins each proof's sha256 to its run, candidate, model and every charged API attempt.
 """

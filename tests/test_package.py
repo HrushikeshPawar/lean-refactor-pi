@@ -237,11 +237,12 @@ class StageTests(Fixture):
         self.assertEqual(calls["good"]["retries"], 1)
         self.assertTrue(calls["loser"]["discarded"])
         self.assertEqual(calls["loser"]["attempts"][0]["usd"], 0.2)
-        names = tarfile.open(out / "code.tar.gz").getnames()
+        with tarfile.open(out / "code.tar.gz") as archive:
+            names = archive.getnames()
         self.assertIn("packages/app.py", names)
         self.assertIn("REPRODUCE.md", names)
         self.assertIn(".gitmodules", prov["code_archive"]["dependency_files"])
-        self.assertIn("tools/arena_package.py", (out / "REPRODUCE.md").read_text())
+        self.assertIn("arena package", (out / "REPRODUCE.md").read_text())
         text = (out / "report.md").read_text()
         positions = [text.index(f"## {s}") for s in ("Approach", "Models", "Budget accounting", "Reproduction")]
         self.assertEqual(positions, sorted(positions))

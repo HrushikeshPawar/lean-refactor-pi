@@ -1,15 +1,18 @@
+import importlib
 import json
 import os
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import patch
 
 from arena import engine, environments
 from arena.engine import ROOT
 from tests.slow import slow
-from tools import arena_certify
+
+arena_certify = importlib.import_module("arena.cli.certify")
 
 GIT_ENV = {
     **os.environ,
@@ -78,7 +81,7 @@ class RegistryTests(unittest.TestCase):
 
 
 class StandaloneTests(unittest.TestCase):
-    ROW = {
+    ROW: ClassVar[dict] = {
         "name": "putnam_1999_a1",
         "source": "putnambench",
         "file_path": "",
@@ -100,9 +103,11 @@ class StandaloneTests(unittest.TestCase):
         self.assertTrue(engine.is_standalone(self.ROW))
 
     def test_a_standalone_row_without_a_header_is_refused(self):
-        with patch.object(engine, "workspace", return_value=Path("/ws")):
-            with self.assertRaisesRegex(ValueError, "needs its header"):
-                engine.candidate_file({**self.ROW, "header": ""}, self.ROW["src"], "v4.25.0", "c1")
+        with (
+            patch.object(engine, "workspace", return_value=Path("/ws")),
+            self.assertRaisesRegex(ValueError, "needs its header"),
+        ):
+            engine.candidate_file({**self.ROW, "header": ""}, self.ROW["src"], "v4.25.0", "c1")
 
     def test_repository_rows_keep_their_file_path(self):
         row = engine.problem("Core.InitsUpdatesComm")
@@ -117,7 +122,7 @@ class StandaloneTests(unittest.TestCase):
 
 
 class MeasurementVersionTests(unittest.TestCase):
-    ROW = {"name": "R", "version_info": [{"v2": "b"}, {"v1": "a"}]}
+    ROW: ClassVar[dict] = {"name": "R", "version_info": [{"v2": "b"}, {"v1": "a"}]}
 
     def test_default_is_the_primary_listed_version_and_overrides_must_be_listed(self):
         with tempfile.TemporaryDirectory() as temporary:
