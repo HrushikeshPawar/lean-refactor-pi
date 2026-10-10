@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { render } from "./text.ts";
 
 /** Read-only context tools whose identical repeat can be replaced by a stub; proof results never are. */
 export const STUBBABLE_TOOLS = new Set(["arena_source", "arena_declarations", "arena_find", "arena_candidate",
@@ -19,13 +20,13 @@ export class ResultTrimmer {
   forget() { this.seen.clear(); }
 
   /** The text to show the model for one successful tool result. */
-  trim(toolName: string, input: unknown, text: string): string {
+  async trim(toolName: string, input: unknown, text: string): Promise<string> {
     if (STUBBABLE_TOOLS.has(toolName) && text.length >= STUB_MIN_CHARS) {
       const key = `${toolName}:${JSON.stringify(input ?? {})}`;
       const digest = createHash("sha256").update(text).digest("hex");
       if (this.seen.get(key) === digest) {
         return JSON.stringify({ ok: true, unchanged: true,
-          note: `${toolName === "arena_skill_read" ? "This skill file was" : "This result was"} already loaded earlier in this run; unchanged. Use the earlier text.` });
+          note: await render(toolName === "arena_skill_read" ? "messages/trim.skill_stub" : "messages/trim.result_stub") });
       }
       this.seen.set(key, digest);
     }
@@ -36,34 +37,37 @@ export class ResultTrimmer {
 const isDiagnostic = (value: any) => value && typeof value === "object" && typeof value.severity === "string" && typeof value.message === "string";
 
 /** Compact JSON from a Lean tool: no indentation or null fields, repeated long messages pointed back, long warnings cut. */
-export function compactDiagnostics(text: string): string {
+export async function compactDiagnostics(text: string): Promise<string> {
   let parsed: unknown;
   try { parsed = JSON.parse(text); } catch { return text; }
   const messages = new Map<string, string>();
-  const walk = (value: any): any => {
-    if (Array.isArray(value)) return value.map(walk);
+  const walk = async (value: any): Promise<any> => {
+    if (Array.isArray(value)) return Promise.all(value.map(walk));
     if (!value || typeof value !== "object") return value;
     const out: Record<string, any> = {};
     for (const [key, item] of Object.entries(value)) {
       if (item === null || (key === "category" && item === "diagnostic")) continue;
-      out[key] = walk(item);
+      out[key] = await walk(item);
     }
     if (isDiagnostic(value)) {
       const where = `${value.line ?? "?"}:${value.column ?? "?"}`;
       const signature = `${value.severity}\u0000${value.message}`;
       const earlier = messages.get(signature);
       if (value.message.length >= REPEATED_MESSAGE_MIN && earlier !== undefined) {
-        out.message = `same message as the ${value.severity} at ${earlier}`;
+        out.message = await render("messages/trim.repeated", { severity: value.severity, where: earlier });
       } else {
         messages.set(signature, where);
         if (value.severity !== "error" && value.message.length > WARNING_LIMIT) {
-          out.message = `${value.message.slice(0, WARNING_LIMIT)} ... [${value.message.length - WARNING_LIMIT} more characters of this ${value.severity} omitted]`;
+          out.message = await render("messages/trim.warning_cut", {
+            message: value.message.slice(0, WARNING_LIMIT), omitted: value.message.length - WARNING_LIMIT,
+            severity: value.severity,
+          });
         }
       }
     }
     return out;
   };
-  const compact = JSON.stringify(walk(parsed));
+  const compact = JSON.stringify(await walk(parsed));
   return compact.length < text.length ? compact : text;
 }
 

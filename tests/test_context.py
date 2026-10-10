@@ -704,7 +704,7 @@ class RouteRuleAgreementTests(unittest.TestCase):
     def test_packet_tool_description_and_skill_state_the_same_route_rule(self):
         sources = {
             "packet": ROOT / "agent-text" / "packet" / "task.md",
-            "tool": ROOT / "packages" / "arena-pi" / "extensions" / "arena.ts",
+            "tool": ROOT / "agent-text" / "tools" / "arena_probe.yaml",
             "skill": ROOT / "agent-text" / "skill" / "SKILL.md",
         }
         for label, path in sources.items():

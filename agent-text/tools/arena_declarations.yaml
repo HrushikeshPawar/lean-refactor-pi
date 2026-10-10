@@ -1,0 +1,1 @@
+description: "Read several declarations by qualified name or decl: handle. Returns full pinned source bodies, typed unavailable reasons, local scope/type, or per-name misses. Use next_cursor to continue a long batch."

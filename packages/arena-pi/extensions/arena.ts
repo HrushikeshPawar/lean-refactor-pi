@@ -13,7 +13,7 @@ import { objectToolArguments, ResultTrimmer } from "./trim.ts";
 import { continuationPush, finishPush, routesText, trimProfile, leanPathViolation, planEvaluate, resolveInlineIdea, planProbe, sinceRefusal, staleNotice } from "./rules.ts";
 import type { RouteStats } from "./rules.ts";
 import { cacheAlarm, cacheHitPct, callCost, finishAllowed, limitReached, limitUsd, spendFooter, toolsForSpend } from "./spend.ts";
-import { render as renderText } from "./text.ts";
+import { numbers as textNumbers, render as renderText } from "./text.ts";
 
 const root = resolve(import.meta.dirname, "../../..");
 const workspaces = resolve(root, "workspaces");
@@ -84,7 +84,10 @@ function deliveredBlocks(content: unknown): Array<Record<string, unknown>> {
   });
 }
 
-export default function arenaExtension(pi: ExtensionAPI) {
+export default async function arenaExtension(pi: ExtensionAPI) {
+  const sharedNumbers = await textNumbers();
+  const draftLimitWord = ({ 1: "one", 2: "two", 3: "three", 4: "four" } as Record<number, string>)[sharedNumbers.max_drafts]
+    ?? String(sharedNumbers.max_drafts);
   // Every Arena tool sees cleaned arguments: empty optional fields are absent, text arrays are parsed.
   const registerTool = ((tool: any) => pi.registerTool({ ...tool, prepareArguments: requireToolArguments,
     execute: (id: string, params: any, ...rest: any[]) =>
@@ -132,7 +135,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
   const trimmer = new ResultTrimmer();
 
   async function campaign(action: string, args: string[] = []): Promise<Record<string, any>> {
-    if (!active || !runId) throw new Error("Arena run is not selected");
+    if (!active || !runId) throw new Error("Arena run is not selected"); // not-model-facing: internal extension state invariant.
     const command = ["run", "--no-sync", "arena", "protocol", action,
       "--theorem", active, "--run-id", runId, ...args];
     const output = await new Promise<string>((accept, reject) => {
@@ -147,7 +150,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
         : accept(JSON.stringify({ ok: false, error: (Buffer.concat(errors).toString("utf8").trim().split("\n").at(-1) ?? "Arena command failed").replace(/^\w*(Error|Exception): /, "") })));
     });
     try { return JSON.parse(output.trim().split("\n").at(-1) ?? ""); }
-    catch { return { ok: false, error: `Arena command returned no result: ${output.trim().slice(0, 200)}` }; }
+    catch { return { ok: false, error: await renderText("messages/errors.command_no_result", { output: output.trim().slice(0, 200) }) }; }
   }
 
   // Full checks on the other toolchains run in a background checker the harness starts
@@ -175,10 +178,14 @@ export default function arenaExtension(pi: ExtensionAPI) {
     try { return JSON.parse(readFileSync(resolve(runDirectory, "state.json"), "utf8")); }
     catch { return undefined; }
   }
-  function briefText(item: Record<string, any> | null | undefined): string {
-    if (!item) return "none";
-    const score = item.proxy !== undefined ? `proxy ${item.proxy}` : `est. ${item.estimated_proxy}`;
-    return `${item.candidate} ${score} (${item.tokens} tok, ${item.heartbeats} HB)`;
+  async function briefText(item: Record<string, any> | null | undefined): Promise<string> {
+    if (!item) return renderText("messages/arena-line.none");
+    const score = item.proxy !== undefined
+      ? await renderText("messages/arena-line.brief_proxy", { proxy: item.proxy })
+      : await renderText("messages/arena-line.brief_estimated", { estimated_proxy: item.estimated_proxy });
+    return renderText("messages/arena-line.brief", {
+      candidate: item.candidate, score, tokens: item.tokens, heartbeats: item.heartbeats,
+    });
   }
   function payloadFromToolResult(result: any): Record<string, any> | undefined {
     // The JSON payload is the first text part; a later `[arena]` status part must not hide it.
@@ -201,7 +208,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
     } else if (toolName === "arena_find") {
       for (const row of payload.results ?? []) if (row && (row.name || row.handle)) keys.push(`decl:${row.name ?? row.handle}:${row.signature ?? ""}`);
     } else if (toolName === "arena_source") {
-      keys.push(`source:${payload.handle ?? payload.path ?? ""}:${payload.first ?? ""}:${payload.last ?? ""}:${payload.text ?? payload.source ?? ""}`);
+      keys.push(`source:${payload.handle ?? payload.path ?? ""}:${payload.first ?? ""}:${payload.last ?? ""}:${payload.text ?? payload.source ?? ""}`); // not-model-facing: internal novelty-detection key.
     } else if (toolName.endsWith("lean_goal")) {
       keys.push(`goal:${JSON.stringify(payload.goals ?? payload)}`);
     }
@@ -218,19 +225,22 @@ export default function arenaExtension(pi: ExtensionAPI) {
     const heartbeatsBetter = current.heartbeats != null && (previous.heartbeats == null || current.heartbeats < previous.heartbeats);
     return scoreBetter || tokensBetter || heartbeatsBetter;
   }
-  function stateLine(state: Record<string, any>, force = false): string | undefined {
+  async function stateLine(state: Record<string, any>, force = false): Promise<string | undefined> {
     const updates = (state.updates ?? []).filter((item: any) => item.seq > deliveredSeq);
     const best = JSON.stringify([state.best ?? null, state.leading_unverified ?? null]);
     if (!force && !updates.length && best === deliveredBest) return undefined;
     deliveredSeq = Math.max(deliveredSeq, ...(state.updates ?? []).map((item: any) => item.seq));
     deliveredBest = best;
     const parts = updates.map((item: any) => item.text);
-    parts.push(`best verified: ${briefText(state.best)}`);
+    parts.push(await renderText("messages/arena-line.best_verified", { best: await briefText(state.best) }));
     if (state.leading_unverified) {
-      const pending = (state.checking ?? []).includes(state.leading_unverified.candidate) ? "being checked" : "not yet checked";
-      parts.push(`leading unverified: ${briefText(state.leading_unverified)}, ${pending}`);
+      const pending = await renderText((state.checking ?? []).includes(state.leading_unverified.candidate)
+        ? "messages/arena-line.being_checked" : "messages/arena-line.not_yet_checked");
+      parts.push(await renderText("messages/arena-line.leading_unverified", {
+        best: await briefText(state.leading_unverified), pending,
+      }));
     }
-    return `[arena] ${parts.join(" · ")}`;
+    return renderText("messages/arena-line", { parts: parts.join(" · ") });
   }
 
   function costEvents(): Array<Record<string, unknown>> {
@@ -239,14 +249,14 @@ export default function arenaExtension(pi: ExtensionAPI) {
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
   }
   function appendCost(event: Record<string, unknown>) {
-    if (!costJournal) throw new Error("Arena cost journal is unavailable");
+    if (!costJournal) throw new Error("Arena cost journal is unavailable"); // not-model-facing: internal cost ledger invariant.
     mkdirSync(dirname(costJournal), { recursive: true });
     const fd = openSync(costJournal, "a", 0o600);
     try { appendFileSync(fd, `${JSON.stringify({ ts: Date.now(), ...event })}\n`); fsyncSync(fd); }
     finally { closeSync(fd); }
   }
   function appendTrace(event: Record<string, unknown>) {
-    if (!traceJournal) throw new Error("Arena trace journal is unavailable");
+    if (!traceJournal) throw new Error("Arena trace journal is unavailable"); // not-model-facing: internal trace ledger invariant.
     mkdirSync(dirname(traceJournal), { recursive: true });
     const fd = openSync(traceJournal, "a", 0o600);
     try { appendFileSync(fd, `${JSON.stringify({ ts: Date.now(), ...event })}\n`); fsyncSync(fd); }
@@ -339,7 +349,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
     if (process.env.ARENA_BUDGET_REQUIRED !== "1") return;
     if (!active || limitHit || ctx.model?.id !== (process.env.ARENA_PI_MODEL_ID ?? process.env.ARENA_MODEL)) {
       ctx.abort();
-      if (ctx.hasUI) ctx.ui.notify(limitHit ? "The spend limit is already reached." : "Select /arena and the run's model before prompting.", "error");
+      if (ctx.hasUI) ctx.ui.notify(limitHit ? "The spend limit is already reached." : "Select /arena and the run's model before prompting.", "error"); // not-model-facing: operator UI notification.
     }
   });
 
@@ -364,10 +374,10 @@ export default function arenaExtension(pi: ExtensionAPI) {
       const alarm = cacheAlarm(usage, settledCalls);
       if (alarm) {
         appendCost({ kind: "cache_alarm", id, ...alarm });
-        console.error(`[arena-cache-alarm] request ${alarm.request}: wrote ${alarm.write} cache tokens but read ${alarm.read}; the stable prefix was not reused`);
+        console.error(`[arena-cache-alarm] request ${alarm.request}: wrote ${alarm.write} cache tokens but read ${alarm.read}; the stable prefix was not reused`); // not-model-facing: operator diagnostic log.
       }
     }
-    if (known) console.error(`[arena-cost] settled $${usd.toFixed(6)}; cache read ${usage?.cacheRead ?? 0}, write ${usage?.cacheWrite ?? 0}; total $${spentUsd.toFixed(6)}`);
+    if (known) console.error(`[arena-cost] settled $${usd.toFixed(6)}; cache read ${usage?.cacheRead ?? 0}, write ${usage?.cacheWrite ?? 0}; total $${spentUsd.toFixed(6)}`); // not-model-facing: operator diagnostic log.
     applyFinishGate();
     // Stop the agent at once: no further provider request, no further tool batch. The turn that follows is
     // closed in agent_before_settle with the limit as the stop reason.
@@ -406,7 +416,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
         cache_read: message.usage?.cacheRead ?? 0, cache_write: message.usage?.cacheWrite ?? 0 } });
     // The next request of a failed one is its retry.
     previousFailed = known ? undefined : id;
-    if (!known) console.error(`[arena-cost] request ${id} returned no usage`);
+    if (!known) console.error(`[arena-cost] request ${id} returned no usage`); // not-model-facing: operator diagnostic log.
     return repaired ? { message: repaired } : undefined;
   });
   // A compaction's summary requests have no message_end; Pi records their combined usage on the entry.
@@ -464,13 +474,14 @@ export default function arenaExtension(pi: ExtensionAPI) {
   let leanProject: string | undefined;
 
   pi.registerCommand("arena", {
-    description: "Select a benchmark theorem: /arena Core.InitsUpdatesComm",
+    description: "Select a benchmark theorem: /arena Core.InitsUpdatesComm", // not-model-facing: slash-command help shown in the UI.
     handler: async (name, ctx) => {
       const wanted = name.trim();
       const rows = (await readFile(resolve(root, "benchmark/original/warmup.jsonl"), "utf8"))
         .split("\n").filter(Boolean).map((line) => JSON.parse(line));
       const row = rows.find((item) => item.name === wanted);
       if (!row) {
+        // not-model-facing: slash-command error shown to the operator.
         ctx.ui.notify(`Unknown benchmark theorem: ${wanted}`, "error");
         return;
       }
@@ -511,7 +522,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
     // Arbitrary shell syntax cannot be safely classified as read-only.
     // Lean context comes from MCP; candidate evaluation comes from arena_evaluate.
     if (event.toolName === "bash" || event.toolName === "powershell") {
-      return { block: true, reason: "Bash is disabled while an Arena target is active; use Lean MCP or arena_evaluate." };
+      return { block: true, reason: await renderText("messages/notices.block_shell") };
     }
     if (event.toolName.startsWith("mcp__arena_lean__") && leanProject) {
       const reason = await leanPathViolation(event.input as { file_path?: unknown; path?: unknown }, leanProject);
@@ -526,7 +537,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
           return resolve(parent, candidate.split(sep).at(-1)!);
         });
         if (inside(candidate, workspaces) || inside(canonical, workspaces)) {
-          return { block: true, reason: "Arena workspaces are read-only semantic context." };
+          return { block: true, reason: await renderText("messages/notices.block_workspace") };
         }
       }
     }
@@ -576,30 +587,32 @@ export default function arenaExtension(pi: ExtensionAPI) {
       is_error: event.isError });
   });
 
-  pi.on("tool_result", event => {
+  pi.on("tool_result", async event => {
     if (!active) return;
     // Errors reach the model untouched; only successful results are trimmed (the trace keeps the full text).
-    const content = event.isError ? event.content : event.content.map(part => {
+    const content = event.isError ? event.content : await Promise.all(event.content.map(async part => {
       if (part.type !== "text" || !part.text) return part;
-      const text = trimmer.trim(event.toolName, event.input, part.text);
+      const text = await trimmer.trim(event.toolName, event.input, part.text);
       return text === part.text ? part : { ...part, text };
-    });
+    }));
     const changed = content.some((part, index) => part !== event.content[index]);
     if (changed) untrimmed.set(event.toolCallId, event.content.filter(part => part.type === "text" && part.text)
       .map(part => (part as { text: string }).text).join("\n"));
     const state = readState();
-    const stateText = state && stateLine(state);
+      const stateText = state && await stateLine(state);
     let spend = "";
-    try { spend = spendFooter(spentUsd, limit); } catch { /* the footer is best effort */ }
-    const line = spend ? (stateText ? `${stateText} \u00b7 ${spend}` : `[arena] ${spend}`) : stateText;
+    try { spend = await spendFooter(spentUsd, limit); } catch { /* the footer is best effort */ }
+    const line = spend ? (stateText
+      ? await renderText("messages/arena-line.join", { state: stateText, spend })
+      : await renderText("messages/arena-line.only_spend", { spend })) : stateText;
     if (!line && !changed) return;
     return { content: line ? [...content, { type: "text" as const, text: line }] : content,
       details: event.details, isError: event.isError };
   });
 
-  pi.on("context", event => {
+  pi.on("context", async event => {
     let changed = false;
-    const messages = event.messages.map(message => {
+    const messages = await Promise.all(event.messages.map(async message => {
       if (message.role !== "toolResult" || !message.isError) return message;
       const first = message.content.find(part => part.type === "text") as { text?: string } | undefined;
       const name = first?.text?.trim().match(/^Tool (\S+) not found$/)?.[1];
@@ -607,8 +620,8 @@ export default function arenaExtension(pi: ExtensionAPI) {
       if (!suggestion) return message;
       changed = true;
       return { ...message, content: [...message.content, { type: "text" as const,
-        text: `Closest registered tool: ${suggestion}.` }] };
-    });
+        text: await renderText("messages/notices.closest_tool", { suggestion }) }] };
+    }));
     return changed ? { messages } : undefined;
   });
 
@@ -621,7 +634,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
   // One harness line when a route's attempts keep leaving goal states it already had. Route fingerprints are filed in the
   // background, so a streak can surface on the call after the attempt that completed it.
   async function withStaleNotice(result: ReturnType<typeof reply>) {
-    const notice = staleNotice((await campaign("frontier")).routes ?? [], staleNoticed);
+    const notice = await staleNotice((await campaign("frontier")).routes ?? [], staleNoticed);
     return notice ? { ...result, content: [...result.content, { type: "text" as const, text: notice }] } : result;
   }
 
@@ -666,10 +679,13 @@ export default function arenaExtension(pi: ExtensionAPI) {
       const attempts = Number(previous.attempts ?? 0);
       const produced = previous.best?.candidate && previous.best.candidate === before.best?.candidate;
       const [status, reason] = produced
-        ? ["succeeded", `auto: produced the best candidate so far (${briefText(previous.best)}); superseded by ${result.id}`]
+        ? ["succeeded", await renderText("messages/notices.auto_idea_succeeded", { best: await briefText(previous.best), idea: result.id })]
         : attempts > 0
-          ? ["abandoned", `auto: ${attempts} attempt${attempts === 1 ? "" : "s"} did not produce the best candidate${previous.best ? ` (best ${briefText(previous.best)})` : ""}; superseded by ${result.id}`]
-          : ["parked", `auto: no attempt was made before ${result.id} was declared`];
+          ? ["abandoned", await renderText("messages/notices.auto_idea_abandoned", {
+            attempts, plural: attempts === 1 ? "" : "s",
+            best_text: previous.best ? ` (best ${await briefText(previous.best)})` : "", idea: result.id,
+          })]
+          : ["parked", await renderText("messages/notices.auto_idea_parked", { idea: result.id })];
       const update = await campaign("idea", ["--idea-id", previous.id, "--status", status, "--reason", reason]);
       if (update.ok !== false) closed.push(`${previous.id} ${status}`);
     }
@@ -682,19 +698,19 @@ export default function arenaExtension(pi: ExtensionAPI) {
   registerTool({
     name: "arena_evaluate",
     label: "Arena evaluate",
-    description: "Score a complete theorem (statement + proof) on the primary toolchain. Give `proof`, or an existing node with `candidate` (\"#N\"), or a probe with `from_probe` (\"pN\"). If it compiles, the harness checks the other toolchains in the background and reports the outcome in a later tool result; you never need to request it. `parents`, `idea_id`, `idea` (a one-line route title that creates the idea) and `hypothesis` are optional labels; the current candidate is the default parent. If `proof` comes with `candidate`, the proof is scored and that candidate becomes its parent. Returns tokens, heartbeats, per-axis contribution, estimated proxy, deltas, and diagnostics whose file_line matches the candidate file lean_goal reads.",
+    description: await renderText("tools/arena_evaluate.description"),
     parameters: Type.Object({
-      proof: Type.Optional(Type.String({ description: "Complete theorem statement and replacement proof" })),
-      candidate: Type.Optional(Type.String({ description: "Existing node such as #4" })),
-      from_probe: Type.Optional(Type.String({ description: "Probe id such as p2" })),
+      proof: Type.Optional(Type.String({ description: await renderText("tools/arena_evaluate.params.proof") })),
+      candidate: Type.Optional(Type.String({ description: await renderText("tools/arena_evaluate.params.candidate") })),
+      from_probe: Type.Optional(Type.String({ description: await renderText("tools/arena_evaluate.params.from_probe") })),
       parents: Type.Optional(Type.Array(Type.String())),
       hypothesis: Type.Optional(Type.String()),
       idea_id: Type.Optional(Type.String()),
-      idea: Type.Optional(Type.String({ description: "One-line route title; creates the idea and links this attempt to it" })),
+      idea: Type.Optional(Type.String({ description: await renderText("tools/arena_evaluate.params.idea") })),
     }),
     async execute(_id, params) {
-      if (!active) throw new Error("Select a theorem with /arena first");
-      const plan = planEvaluate(params);
+      if (!active) throw new Error(await renderText("messages/errors.select_target"));
+      const plan = await planEvaluate(params);
       if (!plan.ok) return reply({ ok: false, error: "usage_error", detail: plan.detail });
       const idea = await inlineIdea(params);
       if (!idea.ok) return reply(idea.error);
@@ -715,14 +731,14 @@ export default function arenaExtension(pi: ExtensionAPI) {
 
   registerTool({
     name: "arena_probe", label: "Arena probe",
-    description: "Compile one proof draft or one to four drafts on the primary toolchain. Each may be a complete theorem, a `by` proof body, or a `:=` proof body; the exact benchmark statement is supplied for proof bodies. `sorry` is allowed and each incomplete draft returns its actual hole goals and stable pN ID. Routes are fingerprinted from complete proofs that compile; drafts with `sorry` holes are not fingerprinted. A probe takes several drafts at once (two or three is typical). A complete compiling draft is automatically promoted to a candidate. `idea` (a one-line route title) creates an idea and links the attempt to it.",
+    description: await renderText("tools/arena_probe.description", { draft_limit_word: draftLimitWord }),
     parameters: Type.Object({ proof: Type.Optional(Type.String()),
-      drafts: Type.Optional(Type.Array(Type.String(), { minItems: 1, maxItems: 4 })),
+      drafts: Type.Optional(Type.Array(Type.String(), { minItems: 1, maxItems: sharedNumbers.max_drafts })),
       idea_id: Type.Optional(Type.String()), parent: Type.Optional(Type.String()),
-      idea: Type.Optional(Type.String({ description: "One-line route title; creates the idea and links this attempt to it" })) }),
+      idea: Type.Optional(Type.String({ description: await renderText("tools/arena_probe.params.idea") })) }),
     async execute(_id, params) {
-      if (!active) throw new Error("Select a theorem with /arena first");
-      const plan = planProbe(params);
+      if (!active) throw new Error(await renderText("messages/errors.select_target"));
+      const plan = await planProbe(params);
       if (!plan.ok) return reply({ ok: false, error: "usage_error", detail: plan.detail });
       const idea = await inlineIdea(params);
       if (!idea.ok) return reply(idea.error);
@@ -752,11 +768,11 @@ export default function arenaExtension(pi: ExtensionAPI) {
 
   registerTool({
     name: "arena_profile", label: "Arena heartbeat profile",
-    description: "Per-tactic heartbeat profile of a compiling proof: heartbeats per proof line or tactic block (inclusive and self), share of the total, nesting, the top self costs with cumulative share, and how the profiled total relates to the measured whole-proof heartbeats. Give `candidate` (\"#N\" or probe \"pN\"), `proof`, or nothing for the current candidate. Informational only; it makes no recommendation.",
+    description: await renderText("tools/arena_profile.description"),
     parameters: Type.Object({ candidate: Type.Optional(Type.String()), proof: Type.Optional(Type.String()) }),
     async execute(_id, params) {
-      if (!active) throw new Error("Select a theorem with /arena first");
-      return reply(trimProfile(await withProofFile(params.proof, file => {
+      if (!active) throw new Error(await renderText("messages/errors.select_target"));
+      return reply(await trimProfile(await withProofFile(params.proof, file => {
         const args: string[] = [];
         if (file) args.push("--proof-file", file);
         if (params.candidate) args.push("--candidate", params.candidate);
@@ -766,8 +782,8 @@ export default function arenaExtension(pi: ExtensionAPI) {
   });
 
   registerTool({
-    name: "arena_idea", label: "Record or update an idea",
-    description: "Create an idea (title, hypothesis, region such as proof lines \"12-30\", expected_effect per axis), optionally naming it yourself with idea_id; or update an existing idea by idea_id: set status active, parked, succeeded or abandoned with a reason. Ideas are yours; the harness only records them. Declaring a new idea closes the one that was current from the harness's own outcomes (succeeded if it produced the best candidate so far, abandoned if it made attempts without doing so, parked if it had none) and records that reason, so a separate status call is only needed to override it. The reply is a one-line acknowledgement.",
+    name: "arena_idea", label: "Record or update an idea", // not-model-facing: tool label shown in the UI.
+    description: await renderText("tools/arena_idea.description"),
     parameters: Type.Object({
       idea_id: Type.Optional(Type.String()), title: Type.Optional(Type.String()),
       hypothesis: Type.Optional(Type.String()), region: Type.Optional(Type.String()),
@@ -795,7 +811,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
 
   registerTool({
     name: "arena_state", label: "Arena run state",
-    description: "Show the best verified candidate, pinned original baseline, leading unchecked result, active idea with attempt count, and recent failures. Read-only and concise; no title or hypothesis is needed.",
+    description: await renderText("tools/arena_state.description"),
     parameters: Type.Object({}),
     async execute() {
       const [checks, portfolio] = await Promise.all([campaign("state"), campaign("frontier")]);
@@ -815,8 +831,8 @@ export default function arenaExtension(pi: ExtensionAPI) {
   });
 
   registerTool({
-    name: "arena_finish", label: "Review and finish the Arena run",
-    description: "Request to stop the run. A confirm is accepted once 10% or less of the spend allowance remains. Before that, the call is refused with the amount spent and left, the routes tried and the current best's saving per score axis (compat, tokens, heartbeats). With 10% or less left, the first call returns one factual review (with at most one reminder if the current idea has no proof attempt) and a second call after the decision turn confirms the stop; finishing is final for this run.",
+    name: "arena_finish", label: "Review and finish the Arena run", // not-model-facing: tool label shown in the UI.
+    description: await renderText("tools/arena_finish.description"),
     parameters: Type.Object({}),
     async execute() {
       if (finishConfirmed) return reply({ ok: true, phase: "confirmed", stop: true });
@@ -845,13 +861,13 @@ export default function arenaExtension(pi: ExtensionAPI) {
           reminder_issued: reminder, remaining_fraction: Number(room.remainingFraction.toFixed(4)) });
         if (reminder) appendCost({ kind: "finish", phase: "reminder", current_idea_id: idea.id });
       }
-      const reminderText = reminder ? `Idea ${idea.id} has no linked proof attempt; probe it or abandon it before finishing.` : null;
+      const reminderText = reminder ? await renderText("messages/notices.finish_reminder", { id: idea.id }) : null;
       if (!room.allowed) {
         // More than 10% of the allowance is left: refuse, stating the facts.
         const newIdeaProbed = ideaRows.some(row => row.attempts > 0 && !refusalIdeaIds.has(String(row.id)));
         const routeRows: any[] = portfolio.routes ?? [];
         const since = sinceRefusal(routeRows, refusalRouteStats, refusalCredited);
-        const push = finishPush({ usedPct: budget.used_pct, remainingUsd: room.remainingUsd, capUsd: limit,
+        const push = await finishPush({ usedPct: budget.used_pct, remainingUsd: room.remainingUsd, capUsd: limit,
           baseline: checks.baseline, best: bestVerified, top: portfolio.top, ideas: ideaRows,
           refusals: finishRefusals, newIdeaProbed, routes: portfolio.routes, sinceRefusal: since });
         finishRefusals += 1;
@@ -867,9 +883,11 @@ export default function arenaExtension(pi: ExtensionAPI) {
       if (firstReview) {
         return reply(dropEmpty({ ok: true, phase: "review", best_verified: bestVerified ?? "none", reminder: reminderText,
           remaining_usd: budget.remaining_usd, used_pct: budget.used_pct,
-          routes_tried: routesText(portfolio.routes ?? []),
-          next: `${budget.used_pct}% of the $${limit} allowance is spent ($${budget.remaining_usd} left, within the final 10%). ` +
-            "Use this decision turn to try another route if one is worth it, then call arena_finish again to confirm stop." }));
+          routes_tried: await routesText(portfolio.routes ?? []),
+          next: await renderText("messages/notices.finish_review", {
+            used_pct: budget.used_pct, limit, remaining: budget.remaining_usd,
+            action: await renderText("messages/notices.finish_review_action"),
+          }) }));
       }
       finishConfirmed = true;
       appendCost({ kind: "finish", phase: "confirmed" });
@@ -881,19 +899,19 @@ export default function arenaExtension(pi: ExtensionAPI) {
   });
 
   registerTool({
-    name: "arena_candidate", label: "Restore a candidate or probe",
-    description: "Restore node \"#N\" or probe \"pN\" into the Lean scratch project (so lean_goal reads it) and return its exact proof and recorded results.",
-    parameters: Type.Object({ candidate: Type.String({ description: "#N or pN" }) }),
+    name: "arena_candidate", label: "Restore a candidate or probe", // not-model-facing: tool label shown in the UI.
+    description: await renderText("tools/arena_candidate.description"),
+    parameters: Type.Object({ candidate: Type.String({ description: await renderText("tools/arena_candidate.params.candidate") }) }),
     async execute(_id, params) { return reply(await campaign("candidate", ["--candidate", params.candidate])); },
   });
 
   registerTool({
-    name: "arena_skill_read", label: "Read Arena skill reference",
-    description: "Read a file from the Arena Lean skill (for example references/proof-golfing.md). Without `path`, list the available files. Read-only and scoped to the skill directory.",
+    name: "arena_skill_read", label: "Read Arena skill reference", // not-model-facing: tool label shown in the UI.
+    description: await renderText("tools/arena_skill_read.description"),
     parameters: Type.Object({ path: Type.Optional(Type.String()), offset: Type.Optional(Type.Number()) }),
     async execute(_id, params) {
       const base = process.env.ARENA_SKILL_DIR;
-      if (!base) return reply({ ok: false, error: "No Arena skill is loaded for this run" });
+      if (!base) return reply({ ok: false, error: await renderText("messages/errors.skill_missing") });
       const skillRoot = await realpath(base);
       if (!params.path) {
         const files: string[] = [];
@@ -904,9 +922,9 @@ export default function arenaExtension(pi: ExtensionAPI) {
       }
       const target = await realpath(resolve(skillRoot, params.path)).catch(() => undefined);
       if (!target || !inside(target, skillRoot)) {
-        return reply({ ok: false, error: `${params.path} is not a file of the Arena skill; call without path to list files` });
+        return reply({ ok: false, error: await renderText("messages/errors.skill_path", { path: params.path }) });
       }
-      if (!(await stat(target)).isFile()) return reply({ ok: false, error: `${params.path} is a directory` });
+      if (!(await stat(target)).isFile()) return reply({ ok: false, error: await renderText("messages/errors.skill_directory", { path: params.path }) });
       const source = await readFile(target, "utf8");
       let text = target.endsWith(".md")
         ? await renderText(relative(resolve(skillRoot, ".."), target).replaceAll(sep, "/").replace(/\.md$/, ""))
@@ -921,7 +939,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
 
   registerTool({
     name: "arena_source", label: "Pinned Lean source",
-    description: "Read pinned source by a decl:<qualified-name> handle or a project/dependency path alias (up to 400 lines per call; next_first continues; a decl: handle without first starts at its declaration). Reports the pin, canonical path and file length.",
+    description: await renderText("tools/arena_source.description"),
     parameters: Type.Object({ handle: Type.String(), first: Type.Optional(Type.Number()), last: Type.Optional(Type.Number()) }),
     async execute(_id, params) {
       const args = ["--handle", params.handle];
@@ -933,13 +951,13 @@ export default function arenaExtension(pi: ExtensionAPI) {
 
   registerTool({
     name: "arena_declarations", label: "Pinned declarations",
-    description: "Read several declarations by qualified name or decl: handle. Returns full pinned source bodies, typed unavailable reasons, local scope/type, or per-name misses. Use next_cursor to continue a long batch.",
+    description: await renderText("tools/arena_declarations.description"),
     // One object schema: providers reject a top-level anyOf. Exactly one of the two fields is used.
     parameters: Type.Object({ items: Type.Optional(Type.Array(Type.String())), cursor: Type.Optional(Type.String()) }),
     async execute(_id, params) {
       if ((params.items === undefined) === (params.cursor === undefined)) {
         return reply({ ok: false, error: "usage_error",
-          detail: "Pass exactly one of items (a nonempty list of names or decl: handles) or cursor (next_cursor from a previous page)." });
+          detail: await renderText("messages/errors.declarations_usage") });
       }
       const args = [];
       if (params.items !== undefined) args.push("--items", JSON.stringify(params.items));
@@ -950,7 +968,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
 
   registerTool({
     name: "arena_find", label: "Search pinned declarations",
-    description: "Search pinned source by several names or text queries. Results are distinct qualified declarations with name, decl: handle, path, line and signature (not the body; read bodies with arena_declarations), counted toward limit; at most 30 files are scanned per query and files_truncated reports more. Misses include qualified-name suggestions.",
+    description: await renderText("tools/arena_find.description"),
     parameters: Type.Object({ queries: Type.Array(Type.String()), limit: Type.Optional(Type.Number()) }),
     async execute(_id, params) {
       const args = ["--queries", JSON.stringify(params.queries)];
@@ -1014,13 +1032,17 @@ export default function arenaExtension(pi: ExtensionAPI) {
     const ideas = (state.ideas ?? []).filter((idea: any) => idea.status === "active")
       .map((idea: any) => `${idea.id} ${idea.title}`);
     const current = readState();
-    const status = current ? stateLine(current, true) : `[arena] best verified: ${briefText(state.best)}`;
+    const status = current ? await stateLine(current, true) : await renderText("messages/arena-line.best_verified", { best: await briefText(state.best) })
+      .then(value => renderText("messages/arena-line", { parts: value }));
     const room = finishAllowed(spentUsd, limit);
     const checks = !room.allowed ? await campaign("state") : undefined;
     const content = !room.allowed
-      ? continuationPush({ usedPct: Math.round(100 * spentUsd / limit), remainingUsd: room.remainingUsd, capUsd: limit,
+      ? await continuationPush({ usedPct: Math.round(100 * spentUsd / limit), remainingUsd: room.remainingUsd, capUsd: limit,
         baseline: checks?.baseline, best: checks?.best, top: state.top, routes: state.routes })
-      : `Continue proof optimization. ${status}. Active ideas: ${ideas.length ? ideas.join("; ") : "none recorded"}. Remaining on the $${limit} limit (actual spend): $${room.remainingUsd.toFixed(4)}.`;
+      : await renderText("messages/continuation", {
+        status, ideas: ideas.length ? ideas.join("; ") : await renderText("messages/refusals.none_recorded"),
+        limit, remaining: room.remainingUsd.toFixed(4),
+      });
     return { entries: [...event.entries, { type: "custom_message" as const, customType: "arena-continuation",
       content, display: false }], continue: true };
   });

@@ -15,29 +15,29 @@ const finishInput = { usedPct: 40, remainingUsd: 0.06, capUsd: 0.1, baseline: me
 async function outputs() {
   const trimmer = new ResultTrimmer();
   const source = "# Proof information\n".repeat(20);
-  trimmer.trim("arena_skill_read", { path: "SKILL.md" }, source);
-  const stub = trimmer.trim("arena_skill_read", { path: "SKILL.md" }, source);
+  await trimmer.trim("arena_skill_read", { path: "SKILL.md" }, source);
+  const stub = await trimmer.trim("arena_skill_read", { path: "SKILL.md" }, source);
   const warning = "a".repeat(610);
   const diagnostics = JSON.stringify({ items: [
     { diagnostics: [{ severity: "warning", message: warning, line: 2, column: 1 }] },
     { diagnostics: [{ severity: "warning", message: warning, line: 3, column: 1 }] },
   ] }, null, 2);
-  const profile = trimProfile({ ok: true, entries: [{ hb: 10 }, { hb: 20 }], line_profile: [], profiled_total: 30 }, 1);
+  const profile = await trimProfile({ ok: true, entries: [{ hb: 10 }, { hb: 20 }], line_profile: [], profiled_total: 30 }, 1);
   return {
-    finishPush: finishPush(finishInput).message,
-    continuationPush: continuationPush({ ...finishInput, routes }),
-    routesText: routesText(routes),
-    staleNotice: staleNotice(routes, new Set()),
-    planEvaluateCandidateNote: planEvaluate({ proof: "x", candidate: "#2" }),
-    planEvaluateExplicitParentsNote: planEvaluate({ proof: "x", candidate: "#2", parents: ["#1"] }),
-    planProbePlaceholderNote: planProbe({ proof: "x", drafts: ["sorry"] }),
-    planProbeBatchNote: planProbe({ proof: "x", drafts: ["by rfl"] }),
-    planProbeLimit: planProbe({ proof: "x", drafts: ["a", "b", "c", "d"] }),
+    finishPush: (await finishPush(finishInput)).message,
+    continuationPush: await continuationPush({ ...finishInput, routes }),
+    routesText: await routesText(routes),
+    staleNotice: await staleNotice(routes, new Set()),
+    planEvaluateCandidateNote: await planEvaluate({ proof: "x", candidate: "#2" }),
+    planEvaluateExplicitParentsNote: await planEvaluate({ proof: "x", candidate: "#2", parents: ["#1"] }),
+    planProbePlaceholderNote: await planProbe({ proof: "x", drafts: ["sorry"] }),
+    planProbeBatchNote: await planProbe({ proof: "x", drafts: ["by rfl"] }),
+    planProbeLimit: await planProbe({ proof: "x", drafts: ["a", "b", "c", "d"] }),
     leanPathViolation: await leanPathViolation({ path: "../secret.lean" }, "/tmp/arena-text-golden"),
     trimProfile: profile.trimmed_for_model,
-    spendFooter: spendFooter(0.125, 0.5),
+    spendFooter: await spendFooter(0.125, 0.5),
     resultTrimmerStub: stub,
-    compactDiagnostics: compactDiagnostics(diagnostics),
+    compactDiagnostics: await compactDiagnostics(diagnostics),
   };
 }
 

@@ -1,0 +1,1 @@
+description: "Read a file from the Arena Lean skill (for example references/proof-golfing.md). Without `path`, list the available files. Read-only and scoped to the skill directory."

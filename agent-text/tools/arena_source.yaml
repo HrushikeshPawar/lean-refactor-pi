@@ -1,0 +1,1 @@
+description: "Read pinned source by a decl:<qualified-name> handle or a project/dependency path alias (up to {source_lines_per_call} lines per call; next_first continues; a decl: handle without first starts at its declaration). Reports the pin, canonical path and file length."

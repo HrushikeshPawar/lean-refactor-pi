@@ -1,0 +1,1 @@
+description: "Search pinned source by several names or text queries. Results are distinct qualified declarations with name, decl: handle, path, line and signature (not the body; read bodies with arena_declarations), counted toward limit; at most {find_files_per_query} files are scanned per query and files_truncated reports more. Misses include qualified-name suggestions."

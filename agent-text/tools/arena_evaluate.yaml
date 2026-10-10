@@ -1,0 +1,6 @@
+description: "Score a complete theorem (statement + proof) on the primary toolchain. Give `proof`, or an existing node with `candidate` (\"#N\"), or a probe with `from_probe` (\"pN\"). If it compiles, the harness checks the other toolchains in the background and reports the outcome in a later tool result; you never need to request it. `parents`, `idea_id`, `idea` (a one-line route title that creates the idea) and `hypothesis` are optional labels; the current candidate is the default parent. If `proof` comes with `candidate`, the proof is scored and that candidate becomes its parent. Returns tokens, heartbeats, per-axis contribution, estimated proxy, deltas, and diagnostics whose file_line matches the candidate file lean_goal reads."
+params:
+  proof: "Complete theorem statement and replacement proof"
+  candidate: "Existing node such as #4"
+  from_probe: "Probe id such as p2"
+  idea: "One-line route title; creates the idea and links this attempt to it"
