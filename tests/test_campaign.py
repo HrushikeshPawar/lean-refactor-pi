@@ -272,3 +272,10 @@ class LeanUnhealthyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(rc, "RUNS", Path(tmp)):
             rc.execute(spec, 0.1, "high", [], Path(tmp), "h", run_fn=fake, summary_fn=lambda d: None, housekeeping=hk)
         self.assertEqual(calls, [("before", spec["run_id"]), ("run",), ("after", spec["run_id"])])
+
+    def test_provider_unreachable_runs_are_listed_for_rerun(self):
+        spec = rc.plan("p", ["A"], ["deepseek-v4.1-flash"], 1)[0]
+        row = rc.run_row(spec, fixture_summary(None, spent=0.03, stop="provider_unreachable"), 1, "h", "h")
+        self.assertEqual(rc.provider_unreachable_rows([row]), [row])
+        text = rc.render(rc.aggregate([row], {"A": "h"}))
+        self.assertIn(f"PROVIDER UNREACHABLE (rerun): 1 run(s): {row['run_id']} ($0.0300)", text)

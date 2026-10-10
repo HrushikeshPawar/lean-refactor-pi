@@ -120,6 +120,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `messages/errors.stopped_run` | 6 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.theorem_location_missing` | 9 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.toolchains_missing` | 4 | Agent messages and notices | when the matching event occurs |
+| `messages/errors.turn_cut` | 8 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.unknown_candidate` | 6 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.unknown_candidate_short` | 2 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.unknown_probe` | 6 | Agent messages and notices | when the matching event occurs |

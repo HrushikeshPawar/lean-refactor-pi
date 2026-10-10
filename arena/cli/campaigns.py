@@ -317,6 +317,12 @@ def render(report: dict) -> str:
             f"LEAN UNHEALTHY: {len(skipped)} run(s) stopped lean_unhealthy (skipped or cut short): "
             + ", ".join(f"{run['run_id']} (${run['spent_usd'] or 0:.4f})" for run in skipped)
         )
+    unreachable = provider_unreachable_rows(report["runs"])
+    if unreachable:
+        lines.append(
+            f"PROVIDER UNREACHABLE (rerun): {len(unreachable)} run(s): "
+            + ", ".join(f"{run['run_id']} (${run['spent_usd'] or 0:.4f})" for run in unreachable)
+        )
     alarmed = [run for run in report["runs"] if (run.get("lean") or {}).get("alarm") and run not in skipped]
     if alarmed:
         lines.append("LEAN ALARM (timeout rate above 20%): " + ", ".join(run["run_id"] for run in alarmed))
@@ -327,6 +333,10 @@ def lean_unhealthy_rows(runs: list[dict]) -> list[dict]:
     return [
         run for run in runs if run.get("stop_reason") == "lean_unhealthy" or run.get("exit_code") == LEAN_UNHEALTHY_EXIT
     ]
+
+
+def provider_unreachable_rows(runs: list[dict]) -> list[dict]:
+    return [run for run in runs if run.get("stop_reason") == "provider_unreachable"]
 
 
 # ---- housekeeping between runs --------------------------------------------------------------------------------------
@@ -655,6 +665,7 @@ def cli_execute(options: CampaignOptions, passthrough: tuple[str, ...] = ()) -> 
         "prefix": args.prefix,
         **aggregate(runs, expected),
         "lean_unhealthy_runs": [run["run_id"] for run in lean_unhealthy_rows(runs)],
+        "provider_unreachable_runs": [run["run_id"] for run in provider_unreachable_rows(runs)],
     }
     (out / "campaign.json").write_text(json.dumps(report, indent=2) + "\n")
     (out / "campaign.txt").write_text(render(report))

@@ -65,7 +65,11 @@ class SummaryTests(unittest.TestCase):
                     "ts": 130.0,
                     "candidate_id": "struct",
                     "mode": "full",
-                    "result": {"tokens": 70, "heartbeat": 800, "metrics": {"compiled": True, "proxy": 60.5}},
+                    "result": {
+                        "tokens": 70,
+                        "heartbeat": 800,
+                        "metrics": {"compiled": True, "proxy": 60.5, "axes": {"compat": {"passed": 1, "total": 1}}},
+                    },
                 },
                 {
                     "kind": "evaluation",
@@ -121,6 +125,35 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(data["cost"]["bookkeeping_and_rejected_pct"], 40.0)
         self.assertEqual(data["stop_reason"], "plateau")
         self.assertEqual((data["thinking"], data["skill"]), ("high", "abc"))
+
+    def test_best_verified_requires_every_listed_version(self):
+        cases = [
+            ("one-version", "full", {"passed": 1, "total": 1}, True),
+            ("partial-full", "full", {"passed": 1, "total": 3}, False),
+            ("fast", "fast", {"passed": 1, "total": 3}, False),
+        ]
+        for name, mode, compat, verified in cases:
+            with self.subTest(name=name):
+                write(
+                    self.dir / "ledger.jsonl",
+                    [
+                        {"kind": "init", "ts": 100.0, "theorem": "T"},
+                        {"kind": "candidate", "candidate_id": "candidate", "origin": "model", "parents": []},
+                        {
+                            "kind": "evaluation",
+                            "ts": 110.0,
+                            "candidate_id": "candidate",
+                            "mode": mode,
+                            "result": {
+                                "tokens": 90,
+                                "heartbeat": 400,
+                                "metrics": {"compiled": True, "proxy": 55.0, "axes": {"compat": compat}},
+                            },
+                        },
+                    ],
+                )
+                result = summary.build_summary(self.dir)["progress"]["best_verified_candidate"]
+                self.assertEqual(result is not None, verified)
 
     def test_rejection_classification_survives_appended_status_text(self):
         rows = [

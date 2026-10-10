@@ -14,6 +14,9 @@ import { continuationPush, finishPush, routesText, trimProfile, leanPathViolatio
 import type { RouteStats } from "./rules.ts";
 import { cacheAlarm, cacheHitPct, callCost, finishAllowed, limitReached, limitUsd, spendFooter, toolsForSpend } from "./spend.ts";
 import { numbers as textNumbers, render as renderText } from "./text.ts";
+import { classifyFailure, nextWait } from "./outage.ts";
+import { applyToolTurnEffort } from "./thinking.ts";
+import { buildTurnCutLine } from "./truncation.ts";
 
 const root = resolve(import.meta.dirname, "../../..");
 const workspaces = resolve(root, "workspaces");
@@ -115,6 +118,8 @@ export default async function arenaExtension(pi: ExtensionAPI) {
   let continuations = 0;
   let plateau = 0;
   let errorStreak = 0;
+  let outageStartedAt: number | undefined;
+  let outageAttempt = 0;
   let previousProgress = "";
   let finishReviewIssued = false;
   let finishReminderIssued = false;
@@ -294,6 +299,8 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     continuations = Number(latest?.continuations ?? 0);
     plateau = Number(latest?.plateau ?? 0);
     errorStreak = Number(latest?.error_streak ?? 0);
+    outageStartedAt = typeof latest?.outage_started_at === "number" ? latest.outage_started_at : undefined;
+    outageAttempt = Number(latest?.outage_attempt ?? 0);
     previousProgress = String(latest?.progress ?? "");
     const finishEvents = costEvents().filter(item => item.kind === "finish");
     finishReviewIssued = finishEvents.some(item => item.phase === "review" || item.phase === "reminder");
@@ -323,6 +330,8 @@ export default async function arenaExtension(pi: ExtensionAPI) {
   pi.on("before_provider_request", (event, ctx) => {
     if (!active || !runDirectory) return;
     let payload = event.payload;
+    const configuredModel = configuredModels.models?.[process.env.ARENA_MODEL ?? ""];
+    payload = applyToolTurnEffort(payload, configuredModel?.toolTurnReasoningEffort);
     // A fixed per-request output ceiling for the whole run (models.yaml request_output_tokens).
     if (outputLimit > 0 && payload && typeof payload === "object" && !Array.isArray(payload)) {
       const body = payload as Record<string, unknown>;
@@ -385,7 +394,8 @@ export default async function arenaExtension(pi: ExtensionAPI) {
       limitHit = true;
       // Recorded here because an aborted run may never reach agent_before_settle.
       appendCost({ kind: "control", continuations, plateau, no_work_turns: noWorkTurns,
-        error_streak: errorStreak, progress: previousProgress, stop: "limit_reached" });
+        error_streak: errorStreak, progress: previousProgress, stop: "limit_reached",
+        outage_started_at: outageStartedAt ?? null, outage_attempt: outageAttempt });
       ctx.abort();
     }
   }
@@ -612,8 +622,18 @@ export default async function arenaExtension(pi: ExtensionAPI) {
 
   pi.on("context", async event => {
     let changed = false;
+    let cutTokens: number | undefined;
     const messages = await Promise.all(event.messages.map(async message => {
+      if (message.role === "assistant") {
+        cutTokens = message.stopReason === "length" ? message.usage.output : undefined;
+        return message;
+      }
       if (message.role !== "toolResult" || !message.isError) return message;
+      if (cutTokens !== undefined) {
+        const notice = await renderText("messages/errors.turn_cut", { tokens: String(cutTokens) });
+        changed = true;
+        message = { ...message, content: [...message.content, { type: "text" as const, text: notice }] };
+      }
       const first = message.content.find(part => part.type === "text") as { text?: string } | undefined;
       const name = first?.text?.trim().match(/^Tool (\S+) not found$/)?.[1];
       const suggestion = name && nearestToolName(name, pi.getActiveTools());
@@ -984,7 +1004,16 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     // Only a turn that produced a real model response counts as work. Provider or extension
     // errors back off and eventually stop the run instead of burning continuations.
     const failed = event.outcome !== "completed";
-    errorStreak = failed ? errorStreak + 1 : 0;
+    const lastAssistant = [...event.context.contextMessages].reverse().find(message => message.role === "assistant") as AssistantMessage | undefined;
+    // Keep every failed outcome inside one retry budget. Pi's error outcomes normally include an
+    // assistant error message; if one is absent, fail closed as model-side instead of retrying forever.
+    const failure = failed ? classifyFailure(lastAssistant) ?? "model" : undefined;
+    if (!failed) {
+      outageStartedAt = undefined;
+      outageAttempt = 0;
+      errorStreak = 0;
+    } else if (failure === "model") errorStreak += 1;
+    const cutTokens = lastAssistant?.stopReason === "length" ? lastAssistant.usage.output : undefined;
     let activity = { proof_attempt: turnHadProofAttempt, novel_context: turnHadNovelContext,
       verified_improvement: turnHadVerifiedImprovement, finish_review: finishReviewTurn };
     if (!failed) {
@@ -1003,7 +1032,8 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     }
     const stop = limitHit ? "limit_reached"
       : finishConfirmed ? "finished"
-      : errorStreak >= MAX_ERROR_STREAK ? "error_loop"
+      : failure === "transport" && outageStartedAt !== undefined && nextWait(outageAttempt, Number(process.env.ARENA_BACKOFF_MS ?? 2000), outageStartedAt, Date.now(), Number(process.env.ARENA_OUTAGE_LIMIT_MS ?? 600000)).stop ? "provider_unreachable"
+      : failure === "model" && errorStreak >= MAX_ERROR_STREAK ? "error_loop"
       : continuations >= 12 ? "continuation_limit"
       : noWorkTurns >= 2 ? "no_work_fallback"
       // A plateau only ends the run inside the final 10%; earlier the model must try a new route.
@@ -1015,19 +1045,33 @@ export default async function arenaExtension(pi: ExtensionAPI) {
       const latestControl = costEvents().filter(item => item.kind === "control").at(-1);
       if (latestControl?.stop !== stop) {
         appendCost({ kind: "control", continuations, plateau, no_work_turns: noWorkTurns,
-          error_streak: errorStreak, progress, ...activity, stop });
+          error_streak: errorStreak, progress, ...activity, stop,
+          ...(failed ? { error_message: (lastAssistant?.errorMessage ?? "").slice(0, 300), failure } : {}),
+          outage_started_at: outageStartedAt ?? null, outage_attempt: outageAttempt,
+          ...(failure === "transport" ? { outage_ms: Date.now() - (outageStartedAt ?? Date.now()) } : {}) });
       }
       return { continue: false };
     }
     if (failed) {
-      const delay = Math.min(30_000, Number(process.env.ARENA_BACKOFF_MS ?? 2000) * 2 ** (errorStreak - 1));
+      let delay: number;
+      if (failure === "transport") {
+        const now = Date.now();
+        outageStartedAt ??= now;
+        outageAttempt += 1;
+        const wait = nextWait(outageAttempt, Number(process.env.ARENA_BACKOFF_MS ?? 2000), outageStartedAt, now, Number(process.env.ARENA_OUTAGE_LIMIT_MS ?? 600000));
+        delay = wait.stop ? 0 : wait.delayMs;
+      } else delay = Math.min(30_000, Number(process.env.ARENA_BACKOFF_MS ?? 2000) * 2 ** (errorStreak - 1));
       appendCost({ kind: "control", continuations, plateau, no_work_turns: noWorkTurns,
-        error_streak: errorStreak, progress, ...activity, stop: null, backoff_ms: delay });
-      await new Promise(done => setTimeout(done, delay));
+        error_streak: errorStreak, progress, ...activity, stop: null, backoff_ms: delay,
+        ...(failure ? { error_message: (lastAssistant?.errorMessage ?? "").slice(0, 300), failure } : {}),
+        outage_started_at: outageStartedAt ?? null, outage_attempt: outageAttempt,
+        ...(failure === "transport" ? { outage_ms: Date.now() - outageStartedAt! } : {}) });
+      if (delay > 0) await new Promise(done => setTimeout(done, delay));
     } else {
       continuations += 1;
       appendCost({ kind: "control", continuations, plateau, no_work_turns: noWorkTurns,
-        error_streak: errorStreak, progress, ...activity, stop: null });
+        error_streak: errorStreak, progress, ...activity, stop: null,
+        outage_started_at: null, outage_attempt: 0 });
     }
     const ideas = (state.ideas ?? []).filter((idea: any) => idea.status === "active")
       .map((idea: any) => `${idea.id} ${idea.title}`);
@@ -1043,7 +1087,10 @@ export default async function arenaExtension(pi: ExtensionAPI) {
         status, ideas: ideas.length ? ideas.join("; ") : await renderText("messages/refusals.none_recorded"),
         limit, remaining: room.remainingUsd.toFixed(4),
       });
+    const cutLine = cutTokens === undefined ? undefined
+      : buildTurnCutLine(cutTokens, await renderText("messages/errors.turn_cut", { tokens: "{tokens}" }));
+    const nextText = cutLine === undefined ? content : `${content}\n${cutLine}`;
     return { entries: [...event.entries, { type: "custom_message" as const, customType: "arena-continuation",
-      content, display: false }], continue: true };
+      content: nextText, display: false }], continue: true };
   });
 }

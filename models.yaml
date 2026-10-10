@@ -6,6 +6,8 @@
 
 provider: opencode-go          # default provider: a Pi catalog provider (Pi prices its models from its own catalog)
 provider_timeout_ms: 120000    # a silent request is cut after this; Pi's own default is 300 s
+outage_limit_ms: 600000
+retry: {max_retries: 3, base_delay_ms: 2000, max_delay_ms: 60000}
 
 thinking:
   default: high                # reasoning level when --thinking is not given
@@ -55,6 +57,7 @@ models:
     id: primalabs-ai/MiMo-V2.6-Pro
     name: MiMo V2.6 Pro (PrimaLabs)
     reasoning: true
+    tool_turn_reasoning_effort: none # plan §9a: API honours reasoning_effort none after tool results
     # primalab dashboard prices (authoritative over its docs table); no cache-write charge.
     price: {input: 0.43, output: 0.87, cache_read: 0.0036, cache_write: 0}
     context_window: 1048576

@@ -108,7 +108,15 @@ export default function fakeOpenCode(pi: ExtensionAPI) {
           if (process.env.ARENA_FAKE_CRASH === "1") process.exit(23);
           if (process.env.ARENA_FAKE_ERROR === "1") throw new Error("Offline provider failure with unknown usage");
           if (step?.delay_ms) await new Promise(done => setTimeout(done, step.delay_ms));
-          if (step?.error) throw new Error(step.error);
+          if (step?.error) {
+            const billed = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, ...step.usage };
+            const usage = step.usage ? { ...billed, totalTokens: billed.input + billed.output + billed.cacheRead + billed.cacheWrite,
+              cost: costOf(billed) } : { ...billed, totalTokens: 0, cost: zeroCost };
+            stream.push({ type: "error", reason: "error", error: {
+              role: "assistant", content: [], api: model.api, provider: model.provider, model: model.id,
+              usage, stopReason: "error", errorMessage: step.error, timestamp: Date.now() } });
+            return;
+          }
           const content: Array<Record<string, unknown>> = [];
           if (step?.text || !step?.tool_calls?.length) {
             content.push({ type: "text", text: step?.text ?? "Offline fixture response." });

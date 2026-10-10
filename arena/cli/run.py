@@ -40,17 +40,56 @@ SYSTEM_PROMPT = (
 # Every per-model fact (prices, windows, output limits, compaction, timeout, thinking levels) lives in models.yaml.
 CONFIG = model_config.load()
 MODELS = model_config.models()
-MODEL_WINDOWS = {name: row["context_window"] for name, row in CONFIG["models"].items()}
 # After Pi exits, pending background full checks get this long before the submission is chosen.
 DRAIN_S = 300
 # How long Pi gets to finish an in-flight evaluation and write cost.json after a stop request.
-PROVIDER_TIMEOUT_MS = CONFIG["provider_timeout_ms"]
 STOP_GRACE_S = 45
 THINKING_LEVELS = tuple(CONFIG["thinking"]["levels"])
 _tool_started: dict[str, tuple[float, dict]] = {}
 _request_count = 0
 _tool_result_count = 0
 _retry_count = 0
+
+
+def pi_settings(args, config: dict) -> dict:
+    """Build the complete project settings file from the selected model and central config."""
+    model = config["models"][args.model]
+    timeout = config["provider_timeout_ms"]
+    retry = config["retry"]
+    return {
+        "compaction": {
+            "enabled": True,
+            "keepRecentTokens": args.compact_keep_tokens,
+            "reserveTokens": max(0, model["context_window"] - args.compact_at_tokens),
+        },
+        "autoEnableCodemode": False,
+        "httpIdleTimeoutMs": timeout,
+        "retry": {
+            "enabled": True,
+            "maxRetries": retry["max_retries"],
+            "baseDelayMs": int(os.environ.get("ARENA_RETRY_BASE_MS", retry["base_delay_ms"])),
+            "maxAgentDelayMs": retry["max_delay_ms"],
+            "provider": {"timeoutMs": timeout, "maxRetries": 0},
+        },
+    }
+
+
+def seed_agent_dir(target: Path, source: Path, provider: str, model_id: str, max_tokens: int) -> Path:
+    """A Pi agent directory that links every entry of `source` except models.json, which becomes the
+    operator's models.json plus a maxTokens override for the run model (so a turn cut at the run's
+    output ceiling is not "recoverable" and stays in history)."""
+    target.mkdir(parents=True, exist_ok=True)
+    if source.is_dir():
+        for entry in source.iterdir():
+            link = target / entry.name
+            if entry.name != "models.json" and not link.exists() and not link.is_symlink():
+                link.symlink_to(entry)
+    user = source / "models.json"
+    merged = json.loads(user.read_text()) if user.is_file() else {}
+    overrides = merged.setdefault("providers", {}).setdefault(provider, {}).setdefault("modelOverrides", {})
+    overrides.setdefault(model_id, {})["maxTokens"] = max_tokens
+    (target / "models.json").write_text(json.dumps(merged, indent=2) + "\n")
+    return target
 
 
 def attempt_has_model_error(event_log: Path, offset: int, intentional_stop: bool = False) -> bool:
@@ -395,6 +434,7 @@ def run(options: RunOptions) -> int:
     env["ARENA_MODELS_JSON"] = model_config.pi_json(CONFIG)
     env["ARENA_LIMIT_USD"] = str(args.limit_usd)
     env["ARENA_REQUEST_OUTPUT_TOKENS"] = str(CONFIG["models"][args.model]["request_output_tokens"])
+    env.setdefault("ARENA_OUTAGE_LIMIT_MS", str(CONFIG["outage_limit_ms"]))
     env["ARENA_SKILL_DIR"] = "" if args.no_skill else str(SKILL_DIR)
     if args.no_mcp:
         env["ARENA_NO_MCP"] = "1"
@@ -446,25 +486,18 @@ def run(options: RunOptions) -> int:
     # Pi reads the project's .pi/settings.json. Compaction is the only thing allowed to rewrite
     # history, and only once the context passes --compact-at-tokens.
     (shadow / ".pi").mkdir(exist_ok=True)
-    (shadow / ".pi" / "settings.json").write_text(
-        json.dumps(
-            {
-                "compaction": {
-                    "enabled": True,
-                    "keepRecentTokens": args.compact_keep_tokens,
-                    "reserveTokens": max(0, MODEL_WINDOWS[args.model] - args.compact_at_tokens),
-                },
-                # The model gets only declared tools; Pi's codemode sandbox could call any tool and
-                # non-LLM models outside the run's spend accounting.
-                "autoEnableCodemode": False,
-                # Pi's default HTTP idle timeout is 300 s (v6c2 DeepSeek lost a request to it); a silent
-                # request is cut after PROVIDER_TIMEOUT_MS instead. Provider-level retries stay off.
-                "httpIdleTimeoutMs": PROVIDER_TIMEOUT_MS,
-                "retry": {"provider": {"timeoutMs": PROVIDER_TIMEOUT_MS, "maxRetries": 0}},
-            },
-            indent=2,
+    (shadow / ".pi" / "settings.json").write_text(json.dumps(pi_settings(args, CONFIG), indent=2) + "\n")
+    # Pi reads models.json only from its agent directory, so the run gets its own directory that links
+    # everything else (auth.json, plugins, settings) from the operator's and caps the run model's maxTokens.
+    selected_model = CONFIG["models"][args.model]
+    env["PI_CODING_AGENT_DIR"] = str(
+        seed_agent_dir(
+            directory / "pi-agent",
+            Path(os.environ.get("PI_CODING_AGENT_DIR") or Path.home() / ".pi/agent"),
+            model_config.provider(args.model, CONFIG),
+            selected_model.get("id", args.model),
+            selected_model["request_output_tokens"],
         )
-        + "\n"
     )
     event_log = directory / "events.jsonl"
     event_offset = event_log.stat().st_size if event_log.exists() else 0

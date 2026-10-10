@@ -122,18 +122,21 @@ class StandaloneTests(unittest.TestCase):
 
 
 class MeasurementVersionTests(unittest.TestCase):
-    ROW: ClassVar[dict] = {"name": "R", "version_info": [{"v2": "b"}, {"v1": "a"}]}
+    ROW: ClassVar[dict] = {"name": "R", "version_info": [{"v4.27.0": "b"}, {"v4.26.0": "a"}]}
 
-    def test_default_is_the_primary_listed_version_and_overrides_must_be_listed(self):
+    def test_override_wins_when_listed_and_default_selects_newest(self):
         with tempfile.TemporaryDirectory() as temporary:
             overrides = Path(temporary) / "m.json"
             with patch.object(engine, "_MEASURE_OVERRIDES", overrides):
-                self.assertEqual(engine.measure_version(self.ROW), ("v2", "b"))
-                overrides.write_text(json.dumps({"R": "v1"}))
-                self.assertEqual(engine.measure_version(self.ROW), ("v1", "a"))
-                overrides.write_text(json.dumps({"R": "v9"}))
+                self.assertEqual(engine.measure_version(self.ROW), ("v4.27.0", "b"))
+                overrides.write_text(json.dumps({"R": "v4.26.0"}))
+                self.assertEqual(engine.measure_version(self.ROW), ("v4.26.0", "a"))
+                overrides.write_text(json.dumps({"R": "v9.0.0"}))
                 with self.assertRaisesRegex(ValueError, "not listed"):
                     engine.measure_version(self.ROW)
+                oldest_first = {"name": "OldestFirst", "version_info": [{"v4.25.0": "a"}, {"v4.27.0": "b"}]}
+                overrides.write_text("{}")
+                self.assertEqual(engine.measure_version(oldest_first), ("v4.27.0", "b"))
 
     def test_fast_mode_also_compiles_the_measurement_version_and_records_it(self):
         calls = []
@@ -156,12 +159,12 @@ class MeasurementVersionTests(unittest.TestCase):
             patch.object(engine, "validate_proof", return_value=5),
             patch.object(engine, "compile_version", side_effect=compile_stub),
             patch.object(engine, "candidate_file", return_value={"start_line": 1}),
-            patch.object(engine, "measure_version", return_value=("v1", "a")),
+            patch.object(engine, "measure_version", return_value=("v4.26.0", "a")),
             patch("arena.scoring.metrics", return_value={"compiled": True}),
         ):
             result = engine.evaluate("R", "theorem R : True := by trivial", "fast")
-        self.assertEqual(calls, [("v2", False), ("v1", True)])
-        self.assertEqual((result["measured_on"], result["heartbeat"]), ("v1", 100))
+        self.assertEqual(calls, [("v4.27.0", False), ("v4.26.0", True)])
+        self.assertEqual((result["measured_on"], result["heartbeat"]), ("v4.26.0", 100))
 
 
 class CertificationTests(unittest.TestCase):

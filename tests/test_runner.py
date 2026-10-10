@@ -667,15 +667,19 @@ class ErrorLoopAndContinuationTests(unittest.TestCase):
         return run.run()
 
     def test_consecutive_provider_errors_stop_with_error_loop_without_burning_continuations(self):
-        run = self.fake([{"error": "provider is down"}] * 20, env={"ARENA_BACKOFF_MS": "10"})
+        billed = {"input": 10, "output": 1}
+        run = self.fake([{"error": "model failed", "usage": billed}] * 20, env={"ARENA_BACKOFF_MS": "10"})
         controls = [e for e in run.jsonl("cost-ledger.jsonl") if e["kind"] == "control"]
         self.assertEqual(controls[-1]["stop"], "error_loop")
+        self.assertEqual(controls[-1]["failure"], "model")
         self.assertEqual(max(e["continuations"] for e in controls), 0)
         self.assertEqual(run.json("summary.json")["stop_reason"], "error_loop")
         self.assertLess(len(run.requests), 20)
 
     def test_a_recovered_error_resets_the_streak_and_continuation_work_counts_normally(self):
-        steps = [{"error": "blip"}, {"text": "first answer"}] + [{"text": "more"}] * 8
+        steps = [{"error": "blip", "usage": {"input": 10, "output": 1}}, {"text": "first answer"}] + [
+            {"text": "more"}
+        ] * 8
         run = self.fake(steps, env={"ARENA_BACKOFF_MS": "10"})
         controls = [e for e in run.jsonl("cost-ledger.jsonl") if e["kind"] == "control"]
         self.assertNotEqual(controls[-1]["stop"], "error_loop")
@@ -873,6 +877,114 @@ class ErrorLoopAndContinuationTests(unittest.TestCase):
 
 @slow
 @unittest.skipUnless(PI_AVAILABLE, "pi and the Strata fixture are required")
+class OutageTests(unittest.TestCase):
+    def setUp(self):
+        self.runs = []
+
+    def tearDown(self):
+        for run in self.runs:
+            run.cleanup()
+
+    def run_fake(self, steps, env):
+        run = FakeRun(steps, env=env, timeout=900).run()
+        self.runs.append(run)
+        return run
+
+    def test_transport_outage_stops_at_wall_clock_limit_and_reports_error(self):
+        run = self.run_fake(
+            [{"error": "gateway offline"}] * 25,
+            {
+                "ARENA_BACKOFF_MS": "10",
+                "ARENA_RETRY_BASE_MS": "10",
+                "ARENA_OUTAGE_LIMIT_MS": "300",
+            },
+        )
+        controls = [row for row in run.jsonl("cost-ledger.jsonl") if row.get("kind") == "control"]
+        self.assertEqual(controls[-1]["stop"], "provider_unreachable")
+        self.assertEqual(run.json("summary.json")["stop_reason"], "provider_unreachable")
+        self.assertTrue(any(row.get("error_message") == "gateway offline" for row in controls))
+        self.assertEqual([row.get("stop") for row in controls].count("error_loop"), 0)
+
+    def test_recovered_transport_errors_do_not_end_the_run(self):
+        run = self.run_fake(
+            [{"error": "brief outage"}] * 5 + [{"text": "recovered"}] + [{"text": "more"}] * 8,
+            {
+                "ARENA_BACKOFF_MS": "10",
+                "ARENA_RETRY_BASE_MS": "10",
+                "ARENA_OUTAGE_LIMIT_MS": "10000",
+            },
+        )
+        controls = [row for row in run.jsonl("cost-ledger.jsonl") if row.get("kind") == "control"]
+        self.assertNotEqual(controls[-1].get("stop"), "provider_unreachable")
+        self.assertTrue(any(row.get("continuations", 0) > 0 for row in controls))
+        self.assertTrue(any(row.get("failure") == "transport" for row in controls))
+
+    def test_billed_model_failures_reach_error_loop_after_three_failed_turns(self):
+        run = self.run_fake(
+            [{"error": "model failed", "usage": {"input": 10, "output": 1}}] * 20,
+            {
+                "ARENA_BACKOFF_MS": "10",
+                "ARENA_RETRY_BASE_MS": "10",
+                "ARENA_OUTAGE_LIMIT_MS": "10000",
+            },
+        )
+        controls = [row for row in run.jsonl("cost-ledger.jsonl") if row.get("kind") == "control"]
+        self.assertEqual(controls[-1]["stop"], "error_loop")
+        self.assertEqual(controls[-1]["error_streak"], 3)
+        self.assertEqual(max(row.get("continuations", 0) for row in controls), 0)
+
+
+@slow
+@unittest.skipUnless(PI_AVAILABLE, "pi and the Strata fixture are required")
+class TruncationTests(unittest.TestCase):
+    def setUp(self):
+        self.runs = []
+
+    def tearDown(self):
+        for run in self.runs:
+            run.cleanup()
+
+    def test_cut_turn_is_kept_without_compaction_and_the_next_message_names_the_cut(self):
+        ceiling = models.load()["models"]["deepseek-v4.1-flash"]["request_output_tokens"]
+        run = FakeRun(
+            [
+                {"text": "reasoning before the cut", "stop_reason": "length", "usage": {"output": ceiling}},
+                {"text": "done"},
+            ],
+            timeout=900,
+        )
+        self.runs.append(run)
+        run.run()
+        self.assertEqual(run.result.returncode, 0, run.stdout + run.result.stderr[-2000:])
+        self.assertFalse(any(not request["messages"][0].get("sections") for request in run.requests))
+        later = run.requests[1]
+        transcript = "\n".join(message_text(message) for message in later["messages"])
+        self.assertIn("reasoning before the cut", transcript)
+        self.assertIn(f"The previous turn was cut at {ceiling} tokens.", transcript)
+
+    def test_cut_turn_tool_errors_also_name_the_cut(self):
+        ceiling = models.load()["models"]["deepseek-v4.1-flash"]["request_output_tokens"]
+        run = FakeRun(
+            [
+                {
+                    "text": "reasoning before the cut",
+                    "tool_calls": [{"name": "arena_state", "arguments": {}}],
+                    "stop_reason": "length",
+                    "usage": {"output": ceiling},
+                },
+                {"text": "done"},
+            ],
+            timeout=900,
+        )
+        self.runs.append(run)
+        run.run()
+        self.assertEqual(run.result.returncode, 0, run.stdout + run.result.stderr[-2000:])
+        later = "\n".join(message_text(message) for message in run.requests[1]["messages"])
+        self.assertIn(f"The previous turn was cut at {ceiling} tokens.", later)
+
+
+@slow
+@unittest.skipUnless(PI_AVAILABLE, "pi and the Strata fixture are required")
 class FinishReplayTests(unittest.TestCase):
     FIXTURES = Path(__file__).resolve().parent / "fixtures/arena_finish_replays"
 
@@ -997,7 +1109,7 @@ class CompactionPolicyTests(unittest.TestCase):
         self.assertEqual(recon["gap_usd"], 0, recon)
         self.assertAlmostEqual(run.json("cost.json")["spent_usd"], sum(e["usd"] for e in settles), places=9)
 
-    def test_a_length_stop_settles_its_compaction_in_the_ledger(self):
+    def test_a_length_stop_does_not_compact_after_the_output_ceiling(self):
         steps = [
             {
                 "tool_calls": [{"name": "arena_skill_read", "arguments": {"path": path, "offset": offset}}],
@@ -1014,16 +1126,14 @@ class CompactionPolicyTests(unittest.TestCase):
         run.run("--compact-keep-tokens", "300")
         requests = run.requests
         summaries = [r for r in requests if not r["messages"][0].get("sections")]
-        self.assertTrue(summaries, "a length stop should make Pi compact before retrying")
+        self.assertFalse(summaries, "a cut turn at the configured output ceiling stays in history")
         events = run.jsonl("cost-ledger.jsonl")
         compactions = [e for e in events if e["kind"] == "settle" and e.get("source") == "compaction"]
-        self.assertGreaterEqual(len(compactions), 1)
-        self.assertLessEqual(len(compactions), len(summaries))
-        self.assertTrue(all(e["usage_known"] and e["usd"] > 0 for e in compactions))
+        self.assertEqual(compactions, [])
         cost = run.json("summary.json")["cost"]
         self.assertEqual(cost["reconciliation"]["gap_usd"], 0, cost["reconciliation"])
         self.assertAlmostEqual(cost["spent_usd"], run.json("cost.json")["spent_usd"], places=5)
-        self.assertEqual(cost["by_turn_type"]["compaction"]["requests"], len(compactions))
+        self.assertEqual(cost["by_turn_type"].get("compaction", {}).get("requests", 0), 0)
 
 
 if __name__ == "__main__":

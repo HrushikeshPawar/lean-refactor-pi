@@ -1,10 +1,11 @@
+import json
 import shutil
 import unittest
 import uuid
 from pathlib import Path
 from unittest.mock import patch
 
-from arena import campaign
+from arena import campaign, engine
 from arena.engine import (
     ROOT,
     WRAPPER_LINES,
@@ -14,10 +15,12 @@ from arena.engine import (
     instrument_sorries,
     locate_source,
     map_measured_line,
+    measure_version,
     parse_diagnostics,
     problem,
     reconstruct,
     structure_diagnostics,
+    toolchain_key,
     validate_proof,
 )
 from tests.slow import slow
@@ -59,7 +62,36 @@ class EvaluatorBoundaryTests(unittest.TestCase):
             full = evaluate(self.row["name"], self.row["src"], "full")
             self.assertEqual(compile_mock.call_count, 3)
             self.assertIsNone(full["score"])
-            self.assertEqual(full["local_proxy"], 32.17)
+        self.assertEqual(full["local_proxy"], 32.17)
+
+
+class NewestMeasurementVersionTests(unittest.TestCase):
+    def test_all_benchmark_rows_measure_on_the_newest_listed_toolchain(self):
+        expected = {
+            "CallElimCorrect.substOldPostSubset": "v4.26.0",
+            "CallElimCorrect.extractedOldExprInVars": "v4.26.0",
+            "Core.InitsUpdatesComm": "v4.29.1",
+            "fundamental_theorem_of_variational_calculus'": "v4.32.0",
+            "Electromagnetism.ElectromagneticPotential.time_deriv_time_deriv_electricField_of_isExtrema": "v4.32.0",
+            "FieldSpecification.WickAlgebra.ι_timeOrderF_superCommuteF_eq_time": "v4.32.0",
+            "Cslib.LambdaCalculus.LocallyNameless.Fsub.Typing.progress": "v4.33.0-rc2",
+            "Cslib.SKI.parallelReduction_diamond": "v4.33.0-rc2",
+            "Cslib.CCS.bisimilarity_congr_choice": "v4.33.0-rc2",
+            "Binius.BinaryBasefold.fiberwise_dist_lt_imp_dist_lt_unique_decoding_radius": "v4.31.0",
+            "Binius.BinaryBasefold.fold_advances_evaluation_poly": "v4.31.0",
+            "interleaved_affine_gaps_imply_tensor_gaps": "v4.31.0",
+            "putnam_1964_a4": "v4.27.0",
+            "putnam_1964_b2": "v4.26.0",
+            "putnam_1995_a3": "v4.27.0",
+        }
+        rows = [json.loads(line) for line in engine.BENCHMARK.read_text().splitlines()]
+        self.assertEqual({row["name"]: measure_version(row)[0] for row in rows}, expected)
+
+    def test_toolchain_order_handles_releases_rcs_and_unparseable_names(self):
+        self.assertLess(toolchain_key("v4.25.0"), toolchain_key("v4.29.1"))
+        self.assertLess(toolchain_key("v4.33.0-rc2"), toolchain_key("v4.33.0"))
+        with self.assertRaisesRegex(ValueError, "v4.next"):
+            toolchain_key("v4.next")
 
 
 class DiagnosticMappingTests(unittest.TestCase):

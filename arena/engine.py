@@ -131,7 +131,10 @@ _MEASURE_OVERRIDES = ROOT / "benchmark/derived/measure-versions.json"
 
 
 def measure_version(row: dict) -> tuple[str, str]:
-    """Toolchain on which heartbeats are measured: explicit per row, default the primary listed version."""
+    """Toolchain for heartbeats: optional per-row override, otherwise the newest listed version.
+
+    `benchmark/derived/measure-versions.json` is an optional per-row override (plan §7.2).
+    """
     listed = versions(row)
     if _MEASURE_OVERRIDES.exists():
         wanted = json.loads(_MEASURE_OVERRIDES.read_text()).get(row["name"])
@@ -142,7 +145,16 @@ def measure_version(row: dict) -> tuple[str, str]:
                     text.render("messages/errors.measure_version_missing", wanted=wanted, name=row["name"])
                 )
             return match
-    return listed[0]
+    return max(listed, key=lambda pair: toolchain_key(pair[0]))
+
+
+def toolchain_key(version: str) -> tuple[int, int, int, int, int]:
+    """Sort Lean releases numerically, with each release candidate before its matching release."""
+    match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)(?:-rc(\d+))?", version)
+    if not match:
+        raise ValueError(version)
+    major, minor, patch, rc = match.groups()
+    return int(major), int(minor), int(patch), int(rc is None), int(rc or 0)
 
 
 _COMBINATOR_START = re.compile(r"(?:omit|include|open|variable|set_option|attribute|universe)\b")

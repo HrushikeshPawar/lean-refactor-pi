@@ -116,10 +116,16 @@ def _price(owner: str, price) -> None:
 
 
 def validate(config: dict) -> dict:
-    for key in ("provider", "models", "thinking", "provider_timeout_ms"):
+    for key in ("provider", "models", "thinking", "provider_timeout_ms", "outage_limit_ms", "retry"):
         if key not in config:
             raise ModelConfigError(f"models.yaml: missing {key}")
     _number("", "provider_timeout_ms", config["provider_timeout_ms"], integer=True)
+    _number("", "outage_limit_ms", config["outage_limit_ms"], integer=True)
+    retry = config["retry"]
+    if not isinstance(retry, dict):
+        raise ModelConfigError("models.yaml: retry must be a map")
+    for key in ("max_retries", "base_delay_ms", "max_delay_ms"):
+        _number("retry", key, retry.get(key), integer=True)
     thinking = config["thinking"]
     if not isinstance(thinking, dict) or thinking.get("default") not in (thinking.get("levels") or ()):
         raise ModelConfigError("models.yaml: thinking.default must be one of thinking.levels")
@@ -129,6 +135,10 @@ def validate(config: dict) -> dict:
     for name, model in models.items():
         if not isinstance(model, dict):
             raise ModelConfigError(f"models.yaml: {name} must be a map")
+        if "tool_turn_reasoning_effort" in model and (
+            not isinstance(model["tool_turn_reasoning_effort"], str) or not model["tool_turn_reasoning_effort"]
+        ):
+            raise ModelConfigError(f"models.yaml: {name}.tool_turn_reasoning_effort must be a non-empty string")
         _price(f"{name}.price", model.get("price"))
         for key in POSITIVE:
             _number(name, key, model.get(key), integer=True)

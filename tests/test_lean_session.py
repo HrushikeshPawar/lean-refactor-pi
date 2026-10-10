@@ -717,7 +717,10 @@ class SessionLogTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.directory = Path(self.temp.name)
-        self.session = lean_session.Session(self.directory)
+        self.session = lean_session.Session(
+            self.directory,
+            budget=lean_session.WorkerBudget(self.directory / "tokens", 4),
+        )
         self.entry = lean_session._Entry(self.directory / "proj", {}, self.FakeServer())
         self.session.entries[str(self.entry.project)] = self.entry
 

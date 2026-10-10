@@ -260,10 +260,14 @@ def _edit_classes(ledger: list[dict], directory: Path) -> dict:
         proof_path = directory / "proofs" / f"{event['candidate_id']}.lean"
         proofs[event["candidate_id"]] = proof_path.read_text() if proof_path.exists() else ""
         parent = (event.get("parents") or [None])[0]
+        if not isinstance(parent, str):
+            counts["unclassified"] += 1
+            continue
         if parent not in proofs:
             parent_path = directory / "proofs" / f"{parent}.lean"
-            proofs[parent] = parent_path.read_text() if parent and parent_path.exists() else None
-        if proofs.get(parent) is None:
+            if parent_path.exists():
+                proofs[parent] = parent_path.read_text()
+        if parent not in proofs:
             counts["unclassified"] += 1
             continue
         old, new = proofs[parent].splitlines(), proofs[event["candidate_id"]].splitlines()
@@ -306,7 +310,13 @@ def _progress(ledger: list[dict]) -> dict:
         timeline.append(row)
         if not row["compiled"]:
             continue
-        if event["mode"] == "full" and metrics.get("proxy") is not None:
+        compat = metrics.get("axes", {}).get("compat", {})
+        if (
+            event["mode"] == "full"
+            and metrics.get("proxy") is not None
+            and compat.get("total") is not None
+            and compat.get("passed") == compat.get("total")
+        ):
             candidate = {
                 "candidate": row["candidate"],
                 "tokens": row["tokens"],
