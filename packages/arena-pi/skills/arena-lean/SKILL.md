@@ -102,21 +102,3 @@ top-level commands or auxiliary declarations, and anything outside the one theor
   proof already 90% down on heartbeats gains little from heartbeat work, and micro-golf of a settled
   route rarely closes a large token gap. Golf only after the route is settled.
 - Never discard a compiling candidate: restore it with `arena_candidate` instead of retyping it.
-
-## References (read on demand with `arena_skill_read`)
-
-The golfing and simplification references apply after the route is settled, not before you have compared
-routes. The references come from a general Lean skill. Where they mention running `lake build`, `lake env lean`
-or a shell, use `arena_probe` / `arena_evaluate` instead; where they suggest editing a file directly,
-send the whole proof to those tools. `references/lean-lsp-server.md` describes the Lean tools you have.
-
-| File | Use |
-|------|-----|
-| `references/proof-golfing.md`, `references/proof-golfing-patterns.md` | shortening proofs safely |
-| `references/proof-simplification.md` | strategy-level simplification |
-| `references/performance-optimization.md`, `references/profiling-workflows.md` | heartbeat cost by symptom |
-| `references/tactics-reference.md`, `references/tactic-patterns.md` | tactic lookup |
-| `references/simp-reference.md`, `references/grind-tactic.md` | simp and grind behaviour |
-| `references/calc-patterns.md` | calc chains |
-| `references/compilation-errors.md` | error-by-error guidance |
-| `references/lean-lsp-server.md` | Lean LSP tool behaviour |

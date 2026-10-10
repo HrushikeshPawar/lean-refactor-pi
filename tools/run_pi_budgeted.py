@@ -22,7 +22,7 @@ from arena import lean_health, lean_session, models as model_config
 from arena.campaign import autocheck, init, packet, run_dir, submission, write_state
 from arena.summary import configured_cap, cost_report_from_ledger, render_text, write_summary
 from arena.traces import langfuse_environment, langfuse_extension, plugin_problems
-from tools.arena_skill import SKILL_DIR, skill_hash, skill_prompt
+from arena.skill import SKILL_DIR, skill_hash, skill_prompt
 
 SYSTEM_PROMPT = ("You are optimizing one Lean 4 proof for the Lean Refactor Arena. Only the listed tools are "
                  "available. Keep replies short; spend effort on proofs, not prose.")

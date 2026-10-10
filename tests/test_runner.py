@@ -7,7 +7,7 @@ import unittest
 
 from tests.slow import slow
 from tests.pi_support import LIVE_LANGFUSE, NAME, PI_AVAILABLE, AnthropicWire, FakeRun, message_text
-from tools.arena_skill import SKILL_DIR, skill_hash
+from arena.skill import SKILL_DIR, skill_hash
 
 STOP = [{"text": "done"}]
 
@@ -88,7 +88,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertLessEqual(len(requests), len(gates) - 1, "a refused request reached the provider")
         self.assertEqual(len(requests), 2)
         self.assertEqual(len({json.dumps(row["request_shape"], sort_keys=True) for row in requests}), 1)
-        self.assertTrue(all(row["request_shape"]["max_output_tokens"] == 16_000 for row in requests))
+        self.assertTrue(all(row["request_shape"]["max_output_tokens"] == 64_000 for row in requests))
         self.assertEqual(run.json("summary.json")["stop_reason"], "estimated_request_unaffordable")
         self.assertTrue(any(row.get("kind") == "gate_refusal" for row in run.jsonl("trace-journal.jsonl")))
         submission = run.json("submission.json")
@@ -153,8 +153,8 @@ def cheap_tool(name: str, arguments: dict, **usage) -> dict:
             "usage": {"input": 300, "output": 40, "cacheRead": 4000, "cacheWrite": 100, **usage}}
 
 
-# One scripted Luna response whose 180K output tokens ($0.50/M) spend 90% of the $0.1 test cap.
-SPEND_90_PCT = 180_000
+# One scripted response whose 150K output tokens ($0.60/M) spend 90% of the $0.1 test cap.
+SPEND_90_PCT = 150_000
 SOURCE = {"handle": "Strata/Languages/Core/StatementSemanticsProps.lean", "first": 950, "last": 960}
 
 
@@ -178,7 +178,7 @@ class CacheDisciplineTests(unittest.TestCase):
             cheap_tool("arena_idea", {"title": "First idea", "hypothesis": "h"}),
             cheap_tool("arena_skill_read", {}),
             cheap_tool("arena_source", SOURCE),
-            cheap_tool("arena_skill_read", {"path": "references/profiling-workflows.md"}),
+            cheap_tool("arena_skill_read", {"path": "SKILL.md"}),
             cheap_tool("arena_evaluate", {"candidate": "#7"}),
             {"text": "done"}])
         requests = run.requests
@@ -271,7 +271,7 @@ class AutomaticChecksTests(unittest.TestCase):
             ("arena_source", {"handle": row["file_path"], "first": 950, "last": 960}),
             ("arena_declarations", {"items": ["decl:InitStatesUpdated", "missing_helper"]}),
             ("arena_find", {"queries": ["InitStatesUpdated", "missing_helper"], "limit": 5}),
-            ("arena_skill_read", {"path": "references/lean-lsp-server.md"}),
+            ("arena_skill_read", {"path": "SKILL.md"}),
             ("arena_probe", {"proof": row["statement"] + " := by\n  intros Hup Hinit\n  sorry", "idea_id": "structural"}),
             ("arena_evaluate", {"proof": good, "idea_id": "structural"}),
             ("arena_probe", {"proof": good + "\n  -- complete draft"}),
@@ -316,8 +316,6 @@ class SkillToolNamesTests(unittest.TestCase):
         import re
         available = ARENA_TOOLS | {name.removeprefix("mcp__arena_lean__") for name in LEAN_TOOLS}
         for path in sorted(SKILL_DIR.rglob("*.md")):
-            if path.name == "PROVENANCE.md":
-                continue
             named = set(re.findall(r"\b((?:lean|arena)_[a-z_]+)\b", path.read_text()))
             # Option names such as lean_options are not tools; tool names are what we guard.
             tools = {name for name in named if name.startswith("arena_") or name in available
@@ -413,24 +411,24 @@ class LeanMcpTests(unittest.TestCase):
 @slow
 @unittest.skipUnless(PI_AVAILABLE, "pi and the Strata fixture are required")
 class AnthropicWireTests(unittest.TestCase):
-    """Qwen through Pi's real Anthropic Messages client: what the provider receives is what Pi built."""
+    """The model through Pi's real Anthropic Messages client: what the provider receives is what Pi built."""
 
-    def run_qwen(self, thinking: str, replies: list[dict]) -> tuple[FakeRun, AnthropicWire]:
+    def run_wire(self, thinking: str, replies: list[dict]) -> tuple[FakeRun, AnthropicWire]:
         wire = AnthropicWire(replies)
         self.addCleanup(wire.close)
-        run = FakeRun([], "--thinking", thinking, model="qwen3.8-flash", env={"ARENA_FAKE_WIRE_URL": wire.url})
+        run = FakeRun([], "--thinking", thinking, model="deepseek-v4.1-flash", env={"ARENA_FAKE_WIRE_URL": wire.url})
         self.addCleanup(run.cleanup)
         return run.run(), wire
 
     def test_every_thinking_level_produces_payloads_the_api_accepts(self):
         for thinking in ("low", "medium", "high"):
             with self.subTest(thinking=thinking):
-                run, wire = self.run_qwen(thinking, [{"tool": "arena_idea", "input": {"title": "An idea"}},
+                run, wire = self.run_wire(thinking, [{"tool": "arena_idea", "input": {"title": "An idea"}},
                                                      {"text": "done"}])
                 self.assertEqual(wire.rejections, [], run.stdout[-800:])
                 self.assertGreaterEqual(len(wire.payloads), 2)
                 for payload in wire.payloads:
-                    self.assertLessEqual(payload["max_tokens"], 16_000)
+                    self.assertLessEqual(payload["max_tokens"], 64_000)
                     if payload.get("thinking", {}).get("type") == "enabled":
                         self.assertLess(payload["thinking"]["budget_tokens"], payload["max_tokens"])
                 self.assertNotEqual(run.json("summary.json")["stop_reason"], "error_loop")
@@ -438,7 +436,7 @@ class AnthropicWireTests(unittest.TestCase):
                 self.assertEqual(run.result.returncode, 0, run.stdout[-800:])
 
     def test_every_arena_tool_schema_is_a_top_level_object(self):
-        run, wire = self.run_qwen("low", [{"text": "done"}])
+        run, wire = self.run_wire("low", [{"text": "done"}])
         self.assertEqual(wire.rejections, [], run.stdout[-800:])
         tools = {tool["name"]: tool["input_schema"] for tool in wire.payloads[0]["tools"]
                  if tool["name"].startswith("arena_")}
@@ -462,7 +460,7 @@ class AnthropicWireTests(unittest.TestCase):
                               {"text": text, "redacted": "opaque-signature-1"}], fail_first=1)
         self.addCleanup(wire.close)
         started = datetime.now(timezone.utc)
-        run = FakeRun([], "--thinking", "high", model="qwen3.8-flash", timeout=300, langfuse=LIVE_LANGFUSE,
+        run = FakeRun([], "--thinking", "high", model="deepseek-v4.1-flash", timeout=300, langfuse=LIVE_LANGFUSE,
                       env={"ARENA_FAKE_WIRE_URL": wire.url, "ARENA_TRACE_PAD": "20001"})
         self.addCleanup(run.cleanup)
         run.run()
@@ -673,14 +671,14 @@ class ErrorLoopAndContinuationTests(unittest.TestCase):
         self.assertFalse(any(row.get("stop") == "no_work_fallback" for row in controls[:-1]))
         self.assertEqual(len(run.requests), len(reads) + 5)
 
-    def test_qwen_search_first_replay_allows_nineteen_source_requests_before_fallback(self):
+    def test_search_first_replay_allows_nineteen_source_requests_before_fallback(self):
         reads = [{"tool": "arena_source", "input": {"handle": SOURCE["handle"], "first": line, "last": line}}
                  for line in range(950, 969)]
         repeated = {"tool": "arena_source", "input": {"handle": SOURCE["handle"], "first": 950, "last": 950}}
         wire = AnthropicWire(reads + [{"text": "first final"}, repeated, {"text": "second final"},
                                       repeated, {"text": "third final"}, {"text": "must not be requested"}])
         self.addCleanup(wire.close)
-        run = FakeRun([], "--thinking", "low", model="qwen3.8-flash",
+        run = FakeRun([], "--thinking", "low", model="deepseek-v4.1-flash",
                       env={"ARENA_FAKE_WIRE_URL": wire.url})
         self.runs.append(run)
         run.run()
@@ -690,7 +688,7 @@ class ErrorLoopAndContinuationTests(unittest.TestCase):
         self.assertEqual(controls[-1]["no_work_turns"], 2)
         self.assertFalse(any(row.get("stop") == "no_work_fallback" for row in controls[:-1]))
         self.assertEqual(len(wire.payloads), len(reads) + 5)
-        self.assertEqual({payload["model"] for payload in wire.payloads}, {"qwen3.8-flash"})
+        self.assertEqual({payload["model"] for payload in wire.payloads}, {"deepseek-v4.1-flash"})
 
     def test_failed_skeleton_is_an_attempt_and_does_not_remind_or_abandon_idea(self):
         from arena.campaign import problem
@@ -754,10 +752,10 @@ class FinishReplayTests(unittest.TestCase):
 
     def test_historical_first_finals_keep_later_verified_candidates(self):
         replays = [
-            ("Luna r2", "Core.InitsUpdatesComm", "gpt-6-luna", "luna-r2-first.lean",
-             "luna-r2-later.lean", (155, 361, 74.11)),
-            ("Qwen CSLib", "Cslib.CCS.bisimilarity_congr_choice", "gpt-6-luna",
-             "qwen-cslib-first.lean", "qwen-cslib-later.lean", (139, 358, 78.45)),
+            ("v5 r2", "Core.InitsUpdatesComm", "deepseek-v4.1-flash", "model-a-first.lean",
+             "model-a-later.lean", (155, 361, 74.11)),
+            ("v5 CSLib", "Cslib.CCS.bisimilarity_congr_choice", "deepseek-v4.1-flash",
+             "model-b-first.lean", "model-b-later.lean", (139, 358, 78.45)),
         ]
         for label, theorem, model, first, later, expected in replays:
             with self.subTest(replay=label):
@@ -786,9 +784,8 @@ class FinishReplayTests(unittest.TestCase):
 @slow
 @unittest.skipUnless(PI_AVAILABLE, "pi and the Strata fixture are required")
 class CompactionPolicyTests(unittest.TestCase):
-    READS = [("references/compilation-errors.md", 0), ("references/compilation-errors.md", 24000),
-             ("references/performance-optimization.md", 0), ("references/proof-golfing.md", 0),
-             ("references/proof-golfing-patterns.md", 0), ("references/tactics-reference.md", 0)]
+    # The fake provider reports the usage that drives compaction; what each read returns does not matter.
+    READS = [("SKILL.md", 0)] * 6
 
     def setUp(self):
         self.runs = []

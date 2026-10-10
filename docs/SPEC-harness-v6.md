@@ -1,5 +1,7 @@
 # Arena harness v6: traceable proof search and first official submission
 
+> **Superseded** by [SPEC-harness-v7.md](SPEC-harness-v7.md) (2026-10-10). Kept as the v6 record.
+
 Status: local implementation spec, 2026-10-07. This document selects the v6 work. The longer evidence record and the full earlier story inventory remain in [WORKING-harness-v6-decisions.md](WORKING-harness-v6-decisions.md). Historical proposals there do not override the decisions here.
 
 ## Problem Statement

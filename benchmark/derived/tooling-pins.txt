@@ -1,5 +1,0 @@
- d9e46ee13c822925fb3031b0a0eac53b51631198 vendor/arena-space (heads/main)
- 9c98a3a097e53724e35b2a2e7fe316c331efa20a vendor/lean-refactor (heads/main)
- b6243b85b9b0a0ddff5bb6773889044daf687f8e vendor/lean4-skills (v3.4.2-legacy-357-gb6243b8)
-1.0.0
-lean-lsp-mcp 0.31.0

@@ -1,6 +1,9 @@
-# Official submission staging
+# Submission checklist (moved from submission/README.md, 2026-10-10)
 
-Status: preparing the first **manual** warm-up submission from future v6 model runs. The user chose not to
+Kept for the code-archive and report deadlines. `arena submit` (ticket 19) prepares files under `runs/submission/<name>/`; the owner uploads.
+
+
+Status (historical, written before v6): preparing the first **manual** warm-up submission. The user chose not to
 upload v5 proofs. No JSONL in this directory is ready for upload yet.
 
 Official source: https://huggingface.co/spaces/delta-lab-ai/lean-refactor-arena (Tracks & Rules and Submit tabs).
@@ -9,7 +12,7 @@ Official source: https://huggingface.co/spaces/delta-lab-ai/lean-refactor-arena 
 
 1. `proofs.jsonl`: one JSON object per submitted benchmark row, exactly `{"name": "<benchmark id>",
    "proof": "<full original statement and replacement proof>"}`. Use the best verified model-produced candidate
-   from each selected v6 run, not an analyst-combined hybrid. Every name must match `benchmark/original/warmup.jsonl`;
+   from the selected runs. Cross-run hybrids are allowed when disclosed (D13); `arena submit` also writes a no-hybrids file. Every name must match `benchmark/original/warmup.jsonl`;
    proof text must preserve that row's statement and contain no prohibited construct. The Space's upload limit is
    8 MB, and its worker is the final calibration for compilation and score.
 2. `provenance.json`: for each row, record the selected run ID, candidate ID, model/provider/version, pinned theorem
