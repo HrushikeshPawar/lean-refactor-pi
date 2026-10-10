@@ -186,7 +186,7 @@ def lean_context(name: str) -> dict:
     text = built["text"][: built["head"]] + inserted + built["text"][built["head"] :]
     ran = run_lean(row, built["path"], text, timeout=CONTEXT_TIMEOUT, prefix_end=built["head"])
     if ran is None:
-        return {"error": "Lean timed out while collecting context"}
+        return {"error": render_text("messages/errors.lean_context_timeout")}
     _returncode, output = ran
     parsed = parse_context(output, inserted.count("\n"), built["start_line"], _proof_boundary(row["src"], 1))
     if not parsed["complete"]:
@@ -748,8 +748,14 @@ def _profile_section(prof: dict) -> list[str]:
         hotspots = []
         for item in prof["hotspots"]:
             spans = ", ".join(
-                f"proof {span['proof_line']}-{span['end_proof_line']} / "
-                f"file {span['file_line']}-{span['end_file_line']} (depth {span['depth']})"
+                render_text(
+                    "packet/sections.fixed.profile_span",
+                    proof_start=span["proof_line"],
+                    proof_end=span["end_proof_line"],
+                    file_start=span["file_line"],
+                    file_end=span["end_file_line"],
+                    depth=span["depth"],
+                )
                 for span in item["tactic_spans"]
             )
             hotspots.append(
@@ -817,7 +823,7 @@ def _fit(parts: list[tuple[str, list[str]]], limit: int) -> str:
         else:
             break
     if len(render()) > limit:
-        raise ValueError("Required kickoff inventory exceeds packet budget; certification failed")
+        raise ValueError(render_text("packet/sections.fixed.budget_certification_failed"))
     return render()
 
 
@@ -827,7 +833,9 @@ def render_packet(name: str) -> str:
     context = lean_context(name)
     context["root"] = "" if is_standalone(row) else row["file_path"].split("/")[0]
     prof = reference_profile(name)
-    pins = "; ".join(f"Lean {version} / source revision {commit}" for version, commit in targets)
+    pins = "; ".join(
+        render_text("packet/sections.fixed.pin", version=version, commit=commit) for version, commit in targets
+    )
     task = (
         render_text("packet/task", name=name, rates=_rates(name, len(targets)), scoring=SCORING_FACTS)
         .strip()
@@ -880,7 +888,9 @@ def render_packet(name: str) -> str:
     manifest = packet_manifest(parts, context)
     result = certify_manifest(manifest)
     if not result["certified"]:
-        raise ValueError("Kickoff packet is not certifiable: " + "; ".join(result["reasons"]))
+        raise ValueError(
+            render_text("packet/sections.fixed.packet_not_certifiable", reasons="; ".join(result["reasons"]))
+        )
     root = context.get("root", "")
     helpers, tags, named = _extra_dependencies(context)
     parts.append(

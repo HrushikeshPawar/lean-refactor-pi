@@ -21,10 +21,12 @@ from contextvars import ContextVar
 from functools import lru_cache
 from pathlib import Path
 
-from arena import vendor
+from arena import text, vendor
+from arena import text as agent_text
 
 ROOT = Path(__file__).resolve().parents[1]
 BENCHMARK = ROOT / "benchmark/original/warmup.jsonl"
+# not-model-facing: Lean code injected for heartbeat measurement.
 HEARTBEAT_WRAPPER = """open Lean Elab Command in
 elab "arena_measure_heartbeats " cmd:command : command => do
   let t0 ← IO.getNumHeartbeats
@@ -51,11 +53,12 @@ def _proof_length(proof: str, statement: str | None = None) -> int:
     count. The published denominators count the proof only, so the statement is swapped for a neutral one.
     """
     if statement is not None and proof.startswith(statement):
+        # not-model-facing: minimal Lean theorem text used by the source normalizer.
         proof = "theorem x : True" + proof[len(statement) :]
     module = vendor.checker()
     length = module._proof_length(proof)
     if length >= 10**9:
-        raise ValueError("Pinned proof utility could not parse the candidate")
+        raise ValueError(text.render("messages/errors.proof_utility_parse"))
     return length
 
 
@@ -80,25 +83,29 @@ def validate_proof(row: dict, proof: str, allow_sorry: bool = False) -> int:
         )
         line = statement.count("\n", 0, at) + 1
         raise ValueError(
-            f"STATEMENT_MODIFIED: candidate must begin with the exact benchmark statement; first "
-            f"difference on statement line {line}: expected {statement[at : at + 40]!r}, got "
-            f"{proof[at : at + 40]!r}. Copy the statement from the packet byte for byte."
+            text.render(
+                "messages/errors.statement_modified_first",
+                line=line,
+                expected=repr(statement[at : at + 40]),
+                actual=repr(proof[at : at + 40]),
+            )
         )
     if not re.match(r"\s*:=", proof[len(statement) :]):
         raise ValueError(
-            "STATEMENT_MODIFIED: the statement must be followed directly by `:=`; got "
-            f"{proof[len(statement) : len(statement) + 30]!r}"
+            text.render(
+                "messages/errors.statement_modified_suffix", suffix=repr(proof[len(statement) : len(statement) + 30])
+            )
         )
     from arena.forbidden import FORBIDDEN, remove_comments
 
     clean = remove_comments(proof)
     if re.search(r"(?m)^(?:theorem|lemma|end|namespace|section|open|set_option)\b", clean[len(statement) :]):
-        raise ValueError("EXTRA_COMMAND: candidate contains a second top-level command")
+        raise ValueError(text.render("messages/errors.extra_command"))
     for label, pattern in FORBIDDEN:
         if allow_sorry and label in ("sorry", "admit"):
             continue
         if pattern.search(clean):
-            raise ValueError(f"FORBIDDEN: {label}")
+            raise ValueError(text.render("messages/errors.forbidden_construct", label=label))
     return _proof_length(proof, statement)
 
 
@@ -131,7 +138,9 @@ def measure_version(row: dict) -> tuple[str, str]:
         if wanted:
             match = next((pair for pair in listed if pair[0] == wanted), None)
             if match is None:
-                raise ValueError(f"Measurement version {wanted} is not listed for {row['name']}")
+                raise ValueError(
+                    text.render("messages/errors.measure_version_missing", wanted=wanted, name=row["name"])
+                )
             return match
     return listed[0]
 
@@ -194,7 +203,7 @@ def locate_source(source: str, original: str, version: str) -> tuple[int, int]:
         found = list(pattern.finditer(source))
         if len(found) == 1:
             return found[0].start(), found[0].end()
-    raise ValueError(f"FILE_MODIFIED: pinned theorem is absent or ambiguous on {version}")
+    raise ValueError(text.render("messages/errors.pinned_statement_missing", version=version))
 
 
 def candidate_file(row: dict, proof: str, version: str, commit: str, truncate: bool = True) -> dict:
@@ -210,7 +219,7 @@ def candidate_file(row: dict, proof: str, version: str, commit: str, truncate: b
     if is_standalone(row):
         header = row.get("header") or ""
         if not row.get("statement") or not header.strip():
-            raise ValueError("A standalone row needs its header and statement")
+            raise ValueError(agent_text.render("messages/errors.standalone_row"))
         return {
             "path": path,
             "text": header + body + "\n",
@@ -220,7 +229,7 @@ def candidate_file(row: dict, proof: str, version: str, commit: str, truncate: b
             "end_line": header.count("\n") + 1 + body.count("\n"),
         }
     if not row.get("start_line") or not row.get("end_line"):
-        raise ValueError("The row does not say where its theorem lives")
+        raise ValueError(agent_text.render("messages/errors.theorem_location_missing"))
     source = subprocess.run(
         ["git", "show", f"{commit}:{row['file_path']}"],
         cwd=path,
@@ -352,8 +361,12 @@ def structure_diagnostics(
         "outside_target": outside,
         "goals": goals[:12],
         "error_headlines": [
-            f"line {i['file_line']} (proof line {i['proof_line']}): "
-            f"{i['message'].splitlines()[0] if i['message'] else ''}"
+            agent_text.render(
+                "replies/evaluate.diagnostic_headline",
+                file_line=i["file_line"],
+                proof_line=i["proof_line"],
+                message=i["message"].splitlines()[0] if i["message"] else "",
+            )
             for i in ordered
             if i["severity"] == "error"
         ][:_DIAGNOSTIC_LIMIT],
@@ -362,8 +375,12 @@ def structure_diagnostics(
 
 # Tactic positions: a line start (after a bullet), `by`, `<;>`, and the `=>` of a match or case arm
 # (`| .inl h => sorry`, `case h => sorry`, `next => sorry`).
+# not-model-facing: regex that locates Lean syntax positions for probe instrumentation.
 _SORRY_TACTIC = re.compile(
+    # not-model-facing: compiler-instrumentation pattern, not diagnostic prose.
     r"(?m)(^[ \t]*(?:[·.][ \t]*)?|\bby[ \t]+|<;>[ \t]*|"
+    # not-model-facing: compiler-instrumentation pattern, not diagnostic prose.
+    # not-model-facing: compiler-instrumentation pattern, not diagnostic prose.
     r"(?:\||\bcase\b|\bnext\b)[^\n=]*=>[ \t]*)sorry\b(?![_'])"
 )
 _GOAL_MARKER = re.compile(r"^ARENA_SORRY (\d+)$")
@@ -378,6 +395,7 @@ def instrument_sorries(proof: str) -> str:
 
     def replace(match: re.Match) -> str:
         line = proof.count("\n", 0, match.start()) + 1
+        # not-model-facing: generated Lean syntax used only by the compiler.
         return f'{match[1]}(trace "ARENA_SORRY {line}"; trace_state; sorry)'
 
     return _SORRY_TACTIC.sub(replace, proof)
@@ -613,7 +631,11 @@ def compile_version(
     output = run_lean(row, built["path"], text, timeout=timeout, prefix_end=built["head"], lane=lane)
     lean_run = last_lean_run()
     if output is None:
-        return {"passed": False, "error": f"Lean timed out after {timeout} seconds", "lean": lean_run}
+        return {
+            "passed": False,
+            "error": agent_text.render("messages/errors.lean_timeout", timeout=timeout),
+            "lean": lean_run,
+        }
     returncode, output = output
     match = re.search(r"ARENA_HEARTBEATS (\d+)", output) if measure else None
     passed = returncode == 0 and (not measure or match is not None)
@@ -639,7 +661,7 @@ def evaluate(name: str, proof: str, mode: str = "fast", known: dict | None = Non
     `lane` "background" keeps harness-side checks off the model's Lean workers.
     """
     if mode not in ("fast", "full", "probe"):
-        raise ValueError("mode must be fast, full or probe")
+        raise ValueError(text.render("messages/errors.mode_invalid"))
     from arena.scoring import local_proxy, metrics
 
     row = problem(name)
@@ -647,7 +669,7 @@ def evaluate(name: str, proof: str, mode: str = "fast", known: dict | None = Non
     length = validate_proof(row, proof, allow_sorry=probe)
     targets = versions(row)
     if not targets:
-        raise ValueError("No toolchain versions listed")
+        raise ValueError(text.render("messages/errors.toolchains_missing"))
     measured_on = measure_version(row)
     checked = targets if mode == "full" else targets[:1]
     if mode == "fast" and measured_on != targets[0]:
@@ -688,7 +710,7 @@ def evaluate(name: str, proof: str, mode: str = "fast", known: dict | None = Non
         "measured_on": measured_on[0],
         "local_proxy": proxy,
         "score": None,
-        "calibration": "pending official Arena worker comparison",
+        "calibration": text.render("replies/evaluate.calibration_pending"),
     }
     if probe:
         result["scored"] = False

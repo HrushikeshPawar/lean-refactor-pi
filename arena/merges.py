@@ -8,6 +8,8 @@ been worth and decide what to do with it.
 
 from __future__ import annotations
 
+from arena import text
+
 
 def merge_report(history: list[dict]) -> list[dict]:
     """One row per merge check whose combined proof compiled, from the ledger alone (no Lean).
@@ -54,14 +56,22 @@ def merge_text(rows: list[dict]) -> str:
     """One line for the run summary."""
     useful = [row for row in rows if row["beats_parents"]]
     if not rows:
-        return "none checked"
+        return text.render("replies/merge.none_checked")
     return (
-        f"{len(rows)} combined proof(s) compiled, {len(useful)} verified above both parents"
+        text.render("replies/merge.summary", count=len(rows), verified=len(useful))
         + (
             ": "
-            + "; ".join(f"{row['candidate']} = {' + '.join(row['parents'])} proxy {row['proxy']}" for row in useful)
+            + "; ".join(
+                text.render(
+                    "replies/merge.entry",
+                    candidate=row["candidate"],
+                    parents=" + ".join(row["parents"]),
+                    proxy=row["proxy"],
+                )
+                for row in useful
+            )
             if useful
             else ""
         )
-        + " (report only, never submitted: submissions are model-written)"
+        + text.render("replies/merge.not_submitted")
     )

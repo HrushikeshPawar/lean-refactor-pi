@@ -1,0 +1,4 @@
+advisory: "The last {window} candidates (#{first}-#{last}) all descend from #{root} and none improved on its score{score_suffix}"
+no_candidate_passed: "no model candidate passed every version; the original proof stands"
+no_candidate_cold_passed: "no candidate that passed in the Lean session also passed a clean cold compile"
+cold_compile_without_session: "cold compile (no session used)"

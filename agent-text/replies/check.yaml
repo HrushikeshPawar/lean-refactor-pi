@@ -1,0 +1,4 @@
+queued: "queued: the other {count} version(s) are checked in the background"
+could_not_run: "#{number} full check could not run: {error}"
+passed: "#{number} passes all {total} versions: proxy {proxy}"
+failed: "#{number} fails {failing} ({passed}/{total} pass): {reason}"

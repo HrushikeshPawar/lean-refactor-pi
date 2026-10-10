@@ -31,6 +31,8 @@ from __future__ import annotations
 import math
 import re
 
+from arena import text as agent_text
+
 SAME_ROUTE = 0.5
 ROUTE_DEPTH = 3  # distinct goal states that make a route explored
 TEXT_EXEMPLAR_MIN = (
@@ -379,6 +381,7 @@ def label(print_: dict, reference: dict | None = None, weights: dict[str, dict[s
     holes = int((print_.get("kernel") or {}).get("holes") or 0) + int(
         (print_.get("kernel") or {}).get("synthetic") or 0
     )
+    # not-model-facing: label is a viewer-only route table caption; the agent sees routes_text.
     return f"{source} fingerprint, {differ} constants differ from r1" + (f", {holes} open holes" if holes else "")
 
 
@@ -545,32 +548,41 @@ def routes_text(table: list[dict]) -> str:
         if not row["attempts"] and not row["original"]:
             continue
         best = (
-            f"best proxy {row['best_proxy']} ({row['best_candidate']})"
+            agent_text.render("replies/routes.best_proxy", proxy=row["best_proxy"], candidate=row["best_candidate"])
             if row["best_proxy"] is not None
-            else "no scored proof"
+            else agent_text.render("replies/routes.no_scored_proof")
         )
         tag = (
-            " (original's route)"
+            agent_text.render("replies/routes.original_tag")
             if row["original"]
-            else " (credited)"
+            else agent_text.render("replies/routes.credited_tag")
             if row.get("credited")
-            else " (not credited)"
+            else agent_text.render("replies/routes.not_credited_tag")
             if "credited" in row or "depth" in row
             else ""
         )
         states = (
-            f" \u00b7 {row['depth']} goal state{'s' if row['depth'] != 1 else ''}"
+            agent_text.render("replies/routes.state_count", depth=row["depth"], plural="" if row["depth"] == 1 else "s")
             if row.get("depth") is not None
             else ""
         )
         parts.append(
-            f"{row['route']}{tag} \u00b7 {row['attempts']} attempt{'s' if row['attempts'] != 1 else ''}{states} \u00b7 {best}"
+            agent_text.render(
+                "replies/routes.row",
+                route=row["route"],
+                tag=tag,
+                attempts=row["attempts"],
+                plural="" if row["attempts"] == 1 else "s",
+                states=states,
+                best=best,
+            )
         )
-    return "; ".join(parts) if parts else "none"
+    return "; ".join(parts) if parts else agent_text.render("replies/routes.none")
 
 
 def routes_detail_text(table: list[dict]) -> str:
     """`routes_text` with each route's depth: goal states, fewest holes, stale streak, explored/opened, credit."""
+    # not-model-facing: this detailed format is only included in the operator's run summary.
     parts = []
     for row in table:
         if not row["attempts"] and not row["original"]:
@@ -580,6 +592,7 @@ def routes_detail_text(table: list[dict]) -> str:
             if row["best_proxy"] is not None
             else "no scored proof"
         )
+        # not-model-facing: detailed route table is only shown in the operator summary.
         tag = " [the original proof's route]" if row["original"] else ""
         states = row.get("depth", 0)
         extra = [f"{states} goal state{'s' if states != 1 else ''}"]
@@ -589,6 +602,7 @@ def routes_detail_text(table: list[dict]) -> str:
             extra.append(f"stale streak {row['stale_streak']}")
         extra.append("explored" if row.get("explored") else "opened")
         if row.get("credited"):
+            # not-model-facing: detailed route table is only shown in the operator summary.
             extra.append("credited" + (" (opened by a skeleton)" if row.get("skeleton") else ""))
         parts.append(
             f'{row["route"]} "{row["label"]}"{tag}: {row["attempts"]} attempt{"s" if row["attempts"] != 1 else ""}, '

@@ -14,6 +14,7 @@ import json
 import re
 from pathlib import Path
 
+from arena import text as agent_text
 from arena.engine import (
     ROOT,
     _proof_length,
@@ -30,6 +31,7 @@ LEAN_DIR = Path(__file__).with_name("lean")
 
 
 MAX_DEPTH = 4
+# not-model-facing: parser for structured output printed by the Lean profiler.
 _ENTRY = re.compile(r"^ARENA_PROFILE (\d+) (\d+) (\d+) (\d+) (\d+)$", re.M)
 _TOTAL = re.compile(r"^ARENA_PROFILE_TOTAL (\d+)$", re.M)
 ENTRY_LIMIT = 60
@@ -335,7 +337,7 @@ def summarize(
             if proof_line > item["end_proof_line"]:
                 item["end_proof_line"] = proof_line
                 item["end_file_line"] = None if offset is None else proof_line + offset
-        for proof_line, item in by_line.items():
+        for item in by_line.values():
             token_count = item["tokens"]
             item["baseline_cost_points"] = round(
                 token_count * 100 / reference_tokens / 3 + item["self_hb"] * 100 / reference_heartbeats / 3, 4
@@ -356,8 +358,8 @@ def summarize(
         "line_tokens_total": token_total if token_ok else None,
         "token_attribution_available": bool(token_ok),
         "hotspots": hotspots,
-        "hotspot_label": "top-ten score-equivalent cost (not predicted savings)",
-        "unit": "heartbeats (the scoring unit, raw / 1000); hb is inclusive of nested tactics",
+        "hotspot_label": agent_text.render("replies/profile.hotspot_label"),
+        "unit": agent_text.render("replies/profile.unit"),
     }
 
 
@@ -369,14 +371,18 @@ def _instrumented(
     text = built["text"][: built["head"]] + inserted + built["text"][built["head"] :]
     ran = run_lean(row, built["path"], text, prefix_end=built["head"])
     if ran is None:
-        raise ValueError("Lean timed out while profiling")
+        raise ValueError(agent_text.render("messages/errors.profile_timeout"))
     returncode, output = ran
     shift = inserted.count("\n")
     records, total = parse_profile(output, shift, built["start_line"])
     if returncode != 0 or not records:
         raise ValueError(
-            "instrumented compile failed: "
-            + (next((line for line in output.splitlines() if "error" in line), output[:160]) or "no output")[:200]
+            agent_text.render(
+                "messages/errors.profile_compile_failed",
+                detail=(next((line for line in output.splitlines() if "error" in line), output[:160]) or "no output")[
+                    :200
+                ],
+            )
         )
     return records, total, built, output
 
@@ -386,7 +392,7 @@ def profile(name: str, proof: str, measured: int | None = None) -> dict:
     row = problem(name)
     version, commit = measure_version(row)
     if re.search(r"\bsorry\b", proof):
-        raise ValueError("Profiling needs a proof without sorry; finish the draft first")
+        raise ValueError(agent_text.render("messages/errors.profile_requires_complete"))
     granularity, failures = "tactic", []
     result = None
     for depth in (MAX_DEPTH, 0):
@@ -400,8 +406,8 @@ def profile(name: str, proof: str, measured: int | None = None) -> dict:
         reference = compile_version(row, proof, version, commit, measure=True)
         if not reference["passed"]:
             headlines = reference.get("error_headlines") or [reference.get("error", "compile failed")]
-            raise ValueError("The proof does not compile, so it cannot be profiled: " + headlines[0])
-        raise ValueError("Profiling could not instrument this proof: " + failures[-1])
+            raise ValueError(agent_text.render("messages/errors.profile_proof_compile", headline=headlines[0]))
+        raise ValueError(agent_text.render("messages/errors.profile_instrumentation_failed", detail=failures[-1]))
     records, instrumented, built, _ = result
     if measured is None:
         measure = compile_version(row, proof, version, commit, measure=True)
@@ -427,7 +433,7 @@ def profile(name: str, proof: str, measured: int | None = None) -> dict:
         "granularity": granularity,
         "version": version,
         **summary,
-        "note": ("Profile degraded to the outermost tactics: " + failures[0]) if failures else None,
+        "note": agent_text.render("replies/profile.degraded", detail=failures[0]) if failures else None,
     }
 
 
@@ -444,7 +450,7 @@ def heartbeat_floor(name: str) -> dict:
         known[key] = {
             "heartbeats": outcome.get("heartbeats"),
             "version": version,
-            "method": "statement elaborated with a sorry proof",
+            "method": agent_text.render("replies/profile.floor_method"),
         }
         cache.parent.mkdir(parents=True, exist_ok=True)
         cache.write_text(json.dumps(known, indent=1))

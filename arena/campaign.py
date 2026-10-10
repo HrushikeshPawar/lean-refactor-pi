@@ -18,7 +18,8 @@ from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from pathlib import Path
 
-from arena import goalstate, lean_health, lean_session
+from arena import goalstate, lean_health, lean_session, text
+from arena import text as agent_text
 from arena.engine import (
     ROOT,
     candidate_file,
@@ -37,7 +38,7 @@ from arena.profile import heartbeat_floor, profile
 
 def run_dir(run_id: str) -> Path:
     if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?", run_id):
-        raise ValueError("Invalid run ID")
+        raise ValueError(text.render("messages/errors.invalid_run_id"))
     return ROOT / "runs" / "pi-budget" / run_id
 
 
@@ -45,7 +46,9 @@ class AmbiguousDeclaration(ValueError):
     """More than one distinct qualified declaration matches an unqualified or partial name."""
 
     def __init__(self, symbol: str, candidates: list[str]):
-        super().__init__(f"{symbol} is ambiguous: {', '.join(candidates[:12])}")
+        super().__init__(
+            text.render("messages/errors.ambiguous_symbol", symbol=symbol, candidates=", ".join(candidates[:12]))
+        )
         self.candidates = candidates
 
 
@@ -119,7 +122,7 @@ def _session():
 
 def _git_source(project: Path, commit: str, path: str) -> str:
     if not path.endswith(".lean") or Path(path).is_absolute() or ".." in Path(path).parts:
-        raise ValueError("Only relative .lean paths inside the pinned project are allowed")
+        raise ValueError(text.render("messages/errors.pinned_project_path"))
     session = _SESSION.get()
     if session is not None:
         return session.read(project, commit, path)
@@ -140,17 +143,15 @@ def _context(name: str) -> dict:
     return session.contexts[name]
 
 
-MAX_SOURCE_LINES = 400
+MAX_SOURCE_LINES = int(text.numbers()["source_lines_per_call"])
+MAX_DRAFTS = int(text.numbers()["max_drafts"])
 MAX_DECLARATION_PAGE_CHARS = 16_000
 
 
 def declarations(name: str, items: list[str] | None = None, cursor: str | None = None) -> dict:
     """Resolve a batch of declaration handles against the kickoff's tagged constant index."""
     if bool(items) == bool(cursor):
-        raise ValueError(
-            "Pass exactly one of items (a nonempty list of declaration names or handles) "
-            "or cursor (next_cursor from a previous page)"
-        )
+        raise ValueError(text.render("messages/errors.declarations_usage"))
     with _session():
         return _declarations(name, items, cursor)
 
@@ -165,11 +166,11 @@ def _declarations(name: str, items: list[str] | None, cursor: str | None) -> dic
                 raise ValueError
             items, offset = state["items"], state["offset"]
         except (ValueError, KeyError, TypeError, json.JSONDecodeError):
-            raise ValueError("Invalid declaration cursor") from None
+            raise ValueError(text.render("messages/errors.invalid_declaration_cursor")) from None
     else:
         offset = 0
     if not isinstance(items, list) or not items or not all(isinstance(item, str) and item for item in items):
-        raise ValueError("items must be a nonempty list of declaration names or handles")
+        raise ValueError(text.render("messages/errors.declaration_items"))
 
     inventory = _context(name)
     if inventory.get("error"):
@@ -323,14 +324,14 @@ def _source_range(name: str, path: str, first: int | None, last: int | None) -> 
         if not path.startswith(STDLIB_ALIAS):
             lines = _git_source(project, commit, path).splitlines()
     except subprocess.CalledProcessError:
-        raise ValueError(f"{path} does not exist in the pinned project at {commit[:8]}") from None
+        raise ValueError(text.render("messages/errors.project_file_missing", path=path, commit=commit[:8])) from None
     first = 1 if first is None else first
     if first < 1 or first > len(lines):
-        raise ValueError(f"{path} has {len(lines)} lines; first={first} is out of range")
+        raise ValueError(text.render("messages/errors.source_line_range", path=path, count=len(lines), first=first))
     wanted = last if last is not None else first + 199
     end = min(wanted, len(lines), first + MAX_SOURCE_LINES - 1)
     if end < first:
-        raise ValueError("last must not precede first")
+        raise ValueError(text.render("messages/errors.source_range_order"))
     return {
         "source": f"{row['source']}@{commit}:{path}:{first}-{end}",
         "pin": commit,
@@ -346,9 +347,9 @@ def _source_range(name: str, path: str, first: int | None, last: int | None) -> 
 def find(name: str, queries: list[str], limit: int = 20) -> dict:
     """Search declaration lines of the pinned trees and the kickoff index, counting each qualified declaration once."""
     if not queries or not all(isinstance(query, str) and query.strip() for query in queries):
-        raise ValueError("queries must be a nonempty list of names or search strings")
+        raise ValueError(text.render("messages/errors.find_queries"))
     if limit < 1:
-        raise ValueError("limit must be positive")
+        raise ValueError(text.render("messages/errors.find_limit"))
     limit = min(limit, 100)
     with _session():
         return _find(name, queries, limit)
@@ -516,12 +517,14 @@ def _candidate_files(
     leaf = parts[-1].casefold()
     namespaced = {
         (index, path)
-        for index, _, path, _, text in hits
-        if len(parts) > 1 and re.match(r"^\s*namespace\s", text, re.I) and parts[-2].casefold() in text.casefold()
+        for index, _, path, _, source_text in hits
+        if len(parts) > 1
+        and re.match(r"^\s*namespace\s", source_text, re.I)
+        and parts[-2].casefold() in source_text.casefold()
     }
     ranked: dict[tuple[int, str, str], int] = {}
-    for index, pin, path, _, text in hits:
-        declared = _DECLARATION_PATTERN.match(text)
+    for index, pin, path, _, source_text in hits:
+        declared = _DECLARATION_PATTERN.match(source_text)
         if is_name:
             if not declared:
                 continue
@@ -529,7 +532,7 @@ def _candidate_files(
             if leaf not in local or (len(parts) > 1 and folded not in local and (index, path) not in namespaced):
                 continue
             tier = 0 if local.split(".")[-1] == leaf else 1 if local.split(".")[-1].startswith(leaf) else 2
-        elif folded in text.casefold():
+        elif folded in source_text.casefold():
             tier = 2
         else:
             continue
@@ -552,7 +555,11 @@ def _split_source_handle(path: str, pin: str) -> tuple[str, int | None, int | No
     printed = _HANDLE_PIN.match(path)
     if printed:
         if not pin.startswith(printed.group(1)):
-            raise ValueError(f"Source handle commit {printed.group(1)[:12]} is not the pinned commit {pin[:8]}")
+            raise ValueError(
+                text.render(
+                    "messages/errors.source_commit_mismatch", source_commit=printed.group(1)[:12], pinned_commit=pin[:8]
+                )
+            )
         path = path[printed.end() :]
     return path, first, last
 
@@ -564,10 +571,10 @@ def _stdlib_source(version: str, path: str) -> str:
     """Lean's own library source from the measured toolchain, which elan installs read-only per version."""
     relative = Path(path[len(STDLIB_ALIAS) :])
     if relative.is_absolute() or ".." in relative.parts or relative.suffix != ".lean":
-        raise ValueError("Only relative .lean paths inside Lean's library are allowed")
+        raise ValueError(text.render("messages/errors.library_path"))
     target = Path.home() / ".elan" / "toolchains" / f"leanprover--lean4---{version}" / "src" / "lean" / relative
     if not target.is_file():
-        raise ValueError(f"{path} does not exist in Lean {version}'s library")
+        raise ValueError(text.render("messages/errors.library_file_missing", path=path, version=version))
     return target.read_text()
 
 
@@ -579,7 +586,7 @@ def _canonical_source_path(row: dict, path: str) -> str:
             break
     path = path.removeprefix("./")
     if path.startswith("/") or ".." in Path(path).parts or not path.endswith(".lean"):
-        raise ValueError("Only relative .lean paths inside the pinned project are allowed")
+        raise ValueError(text.render("messages/errors.pinned_project_path"))
     return path
 
 
@@ -622,7 +629,7 @@ def _source_target(project: Path, commit: str, path: str, module: str | None = N
         for candidate in (module_path, path):
             if candidate and (root / candidate).is_file():
                 return root, pin, candidate
-    raise ValueError(f"{path} does not exist in the pinned project or its dependency roots")
+    raise ValueError(text.render("messages/errors.source_path_missing", path=path))
 
 
 # One Lean 4 identifier: dotted components, each a Unicode letter or `_` followed by letters, digits,
@@ -646,7 +653,7 @@ _DECLARATION_GREP = (
     r"^[[:space:]]*(@\[[^]]*\][[:space:]]*)*((private|protected|noncomputable|nonrec|unsafe|partial)"
     r"[[:space:]]+)*(theorem|lemma|def|opaque|instance|abbrev|inductive|structure|class|axiom)[[:space:]]+"
 )
-MAX_SCAN_FILES = 30
+MAX_SCAN_FILES = int(text.numbers()["find_files_per_query"])
 
 
 def _source_declarations(lines: list[str]) -> list[tuple[int, str]]:
@@ -719,9 +726,9 @@ def _signature(lines: list[str], start: int, end: int) -> str:
     """The first declaration lines after any doc comment and attributes, up to the line that opens the body."""
     shown = []
     keyword = next((i for i in range(start, end + 1) if _DECLARATION_PATTERN.match(lines[i - 1])), start)
-    for text in lines[keyword - 1 : min(end, keyword + 5)]:
-        shown.append(text.rstrip())
-        if ":=" in text or text.rstrip().endswith("where") or text.strip().startswith("|"):
+    for line_text in lines[keyword - 1 : min(end, keyword + 5)]:
+        shown.append(line_text.rstrip())
+        if ":=" in line_text or line_text.rstrip().endswith("where") or line_text.strip().startswith("|"):
             break
     return "\n".join(shown)
 
@@ -783,7 +790,7 @@ def _declaration_hits(roots: list[tuple[Path, str, str]], needles: list[str]) ->
             check=False,
         )
         if result.returncode not in (0, 1):
-            raise RuntimeError(result.stderr.strip() or "Pinned source search failed")
+            raise RuntimeError(result.stderr.strip() or text.render("messages/errors.source_search_failed"))
         hits = []
         for raw in result.stdout.splitlines():
             parts = raw[len(pin) + 1 :].split(":", 2)
@@ -820,7 +827,7 @@ def _resolve_declaration_source(
     match wins; several distinct qualified matches raise AmbiguousDeclaration.
     """
     if not re.fullmatch(_LEAN_NAME, symbol):
-        raise ValueError("Invalid declaration name")
+        raise ValueError(agent_text.render("messages/errors.invalid_declaration"))
     row = problem(name)
     version, commit = measure_version(row)
     project = workspace(row, version, commit)
@@ -832,9 +839,7 @@ def _resolve_declaration_source(
     elif module:
         located = _module_file(roots, module)
         if located is None:
-            raise ValueError(
-                f"{symbol} is defined in {module}, which is not in the pinned project or its dependency roots"
-            )
+            raise ValueError(agent_text.render("messages/errors.module_missing", symbol=symbol, module=module))
         files = [located]
     else:
         hits = _declaration_hits(roots, [symbol])
@@ -892,7 +897,7 @@ def _resolve_declaration_source(
         raise AmbiguousDeclaration(symbol, sorted(found))
     if found:
         return next(iter(found.values()))
-    raise ValueError(f"Declaration not found in pinned project: {symbol}")
+    raise ValueError(agent_text.render("messages/errors.declaration_missing", symbol=symbol))
 
 
 def _indexed_entry(name: str, symbol: str) -> dict | None:
@@ -938,7 +943,7 @@ def _source_declaration(name: str, symbol: str) -> dict:
     if symbol.startswith("decl:"):
         symbol = symbol[5:]
     if not re.fullmatch(_LEAN_NAME, symbol):
-        raise ValueError("Invalid declaration name")
+        raise ValueError(text.render("messages/errors.invalid_declaration"))
     source_symbol, module, span = _source_hint(name, symbol)
     try:
         located = _resolve_declaration_source(name, source_symbol, module, span)
@@ -972,7 +977,7 @@ def _source_declaration(name: str, symbol: str) -> dict:
             "module": module,
             "signature": entry.get("sig"),
         }
-    return {"symbol": symbol, "found": False, "hint": "No pinned source declaration matched this name."}
+    return {"symbol": symbol, "found": False, "hint": text.render("messages/errors.no_source_declaration")}
 
 
 def _declaration_in_lean(name: str, symbol: str) -> dict:
@@ -986,14 +991,14 @@ def _declaration_in_lean(name: str, symbol: str) -> dict:
     text = built["text"][: built["head"]] + inserted + built["text"][built["head"] :]
     ran = run_lean(row, built["path"], text, prefix_end=built["head"])
     if ran is None:
-        raise ValueError("Lean timed out while resolving the name")
+        raise ValueError(agent_text.render("messages/errors.resolve_name_timeout"))
     records = [json.loads(raw) for raw in re.findall(r"^ARENA_DECL (\{.*\})$", ran[1], re.M)]
     found = [item for item in records if item.get("found")]
     if not found:
         return {
             "symbol": symbol,
             "found": False,
-            "hint": "No declaration of that name is visible where the theorem is stated; try the full name or a prefix.",
+            "hint": agent_text.render("messages/errors.name_not_visible"),
         }
     best = found[0]
     return {
@@ -1038,7 +1043,7 @@ def _evaluate(name: str, proof: str, mode: str, known: dict | None = None, lane:
 def _refuse_if_tripped(directory: Path) -> None:
     """After the Lean circuit breaker tripped, model-lane work is refused: the runner is stopping the run."""
     if lean_health.tripped(directory):
-        raise ValueError("The harness has stopped this run")
+        raise ValueError(text.render("messages/errors.stopped_run"))
 
 
 def _check_breaker(directory: Path) -> None:
@@ -1072,6 +1077,7 @@ def _record_route_later(directory: Path, name: str, proof_id: str, proof: str) -
         queue.write(json.dumps({"proof_id": proof_id, "name": name}) + "\n")
     if _worker_running(directory):
         return  # it re-reads the queue before exiting, so this entry is not stranded
+    # not-model-facing: subprocess bootstrap source for the background route worker.
     code = "import sys; from pathlib import Path; from arena.campaign import _route_worker; _route_worker(Path(sys.argv[1]))"
     with suppress(OSError):
         subprocess.Popen(
@@ -1335,7 +1341,7 @@ def init(name: str, run_id: str, extra: str = "") -> dict:
     if directory.exists() and any(
         item.name not in lean_session.SESSION_FILES and item.name != "lean-session.log" for item in directory.iterdir()
     ):
-        raise ValueError(f"Run ID already exists: {directory}")
+        raise ValueError(agent_text.render("messages/errors.run_exists", directory=directory))
     row = problem(name)
     version, commit = versions(row)[0]
     project = workspace(row, version, commit)
@@ -1364,7 +1370,7 @@ def init(name: str, run_id: str, extra: str = "") -> dict:
             "kind": "candidate",
             "candidate_id": reference_id,
             "parents": [],
-            "hypothesis": "Pinned original reference proof",
+            "hypothesis": agent_text.render("replies/candidate.original_reference"),
             "origin": "reference",
             "source_versions": versions(row),
             "evaluator_sha256": hashlib.sha256(Path(__file__).with_name("engine.py").read_bytes()).hexdigest(),
@@ -1429,7 +1435,7 @@ def resolve_candidate_ref(history: list[dict], reference: str) -> str:
         matches = [candidate for candidate in candidates if candidate.startswith(reference)]
         if len(matches) == 1:
             return matches[0]
-    raise ValueError(f"Unknown candidate {reference}; candidates are #1-#{len(candidates)}")
+    raise ValueError(text.render("messages/errors.unknown_candidate", reference=reference, count=len(candidates)))
 
 
 def _current(history: list[dict]) -> str | None:
@@ -1454,7 +1460,9 @@ def resolve_probe_ref(history: list[dict], reference: str) -> str:
     for proof_id, label in _probe_numbers(history).items():
         if reference in (label, proof_id):
             return proof_id
-    raise ValueError(f"Unknown probe {reference}; probes are p1-p{len(_probe_numbers(history))}")
+    raise ValueError(
+        text.render("messages/errors.unknown_probe", reference=reference, count=len(_probe_numbers(history)))
+    )
 
 
 def resolve_parent_ref(history: list[dict], reference: str) -> str:
@@ -1471,7 +1479,7 @@ def resolve_parent_ref(history: list[dict], reference: str) -> str:
         )
         if parent:
             return parent
-        raise ValueError(f"Probe {reference.strip()} has no recorded parent candidate")
+        raise ValueError(text.render("messages/errors.probe_parent_missing", reference=reference.strip()))
     return resolve_candidate_ref(history, reference)
 
 
@@ -1511,11 +1519,11 @@ def record_idea(
     directory = run_dir(run_id)
     history = events(directory)
     if not history or not history[0].get("theorem"):
-        raise ValueError("Run is uninitialized")
+        raise ValueError(text.render("messages/errors.run_uninitialized"))
     if status is not None and status not in IDEA_STATUSES:
-        raise ValueError(f"status must be one of {', '.join(IDEA_STATUSES)}")
+        raise ValueError(text.render("messages/errors.idea_statuses", statuses=", ".join(IDEA_STATUSES)))
     if status in ("parked", "abandoned", "succeeded") and not reason.strip():
-        raise ValueError(f"Give a one-line reason when marking an idea {status}")
+        raise ValueError(text.render("messages/errors.idea_reason", status=status))
     effect = {
         str(k): str(v)[:80] for k, v in (expected_effect or {}).items() if k in ("tokens", "heartbeats", "compat")
     }
@@ -1525,7 +1533,7 @@ def record_idea(
         idea_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", idea_id.strip())[:40] or None
     if idea_id and idea_id not in known and not (title and title.strip()):
         raise ValueError(
-            f"Unknown idea {idea_id}; give a title to create it (recorded ideas: {', '.join(known) or 'none yet'})"
+            text.render("messages/errors.idea_id_unknown", idea_id=idea_id, ideas=", ".join(known) or "none yet")
         )
     if idea_id and idea_id in known:
         update = {"kind": "idea_update", "id": idea_id}
@@ -1544,7 +1552,7 @@ def record_idea(
         _append(directory, update)
         return {"ok": True, **{k: v for k, v in update.items() if k != "kind"}}
     if not title or not title.strip():
-        raise ValueError("A new idea needs a title")
+        raise ValueError(text.render("messages/errors.idea_title_missing"))
     # Models often name their own ideas; keep that name so later updates by it work.
     identifier = idea_id or next(f"i{n}" for n in range(len(known) + 1, len(known) + 1000) if f"i{n}" not in known)
     item = {
@@ -1680,9 +1688,14 @@ def _advisory(rows: list[dict], window: int = 4) -> str | None:
     base = by_id[root]["score"]
     if any(r["score"] is not None and (base is None or r["score"] > base) for r in recent):
         return None
-    return (
-        f"The last {window} candidates (#{recent[0]['n']}-#{recent[-1]['n']}) all descend from "
-        f"#{by_id[root]['n']} and none improved on its score" + (f" of {base}." if base is not None else ".")
+    score_suffix = f" of {base}." if base is not None else "."
+    return text.render(
+        "replies/state.advisory",
+        window=window,
+        first=recent[0]["n"],
+        last=recent[-1]["n"],
+        root=by_id[root]["n"],
+        score_suffix=score_suffix,
     )
 
 
@@ -1738,7 +1751,7 @@ def _model_view(result: dict) -> dict:
         if lean.get("path") == "session":
             item["lean"] = "session"
         elif lean.get("path") == "cold-fallback":
-            item["lean"] = f"cold (session unavailable: {lean.get('reason')})"
+            item["lean"] = text.render("messages/errors.cold_session_unavailable", reason=lean.get("reason"))
         counts = info.get("diagnostic_counts") or {}
         if counts.get("omitted"):
             item["omitted_diagnostics"] = counts["omitted"]
@@ -1785,7 +1798,7 @@ def record_evaluation(
     compiled for this exact proof and mode; `trigger` says whether the model or the
     harness asked for it."""
     if mode not in ("fast", "full"):
-        raise ValueError("mode must be fast or full")
+        raise ValueError(text.render("messages/errors.evaluation_mode"))
     directory = run_dir(run_id)
     if lane == "model" and trigger == "model":
         _refuse_if_tripped(directory)
@@ -1798,9 +1811,9 @@ def record_evaluation(
     with _candidate_lock(directory, candidate_id):
         history = events(directory)
         if not history or history[0].get("theorem") != name:
-            raise ValueError("Run is uninitialized or theorem differs")
+            raise ValueError(text.render("messages/errors.run_theorem_mismatch"))
         if history[0].get("versions") and history[0]["versions"] != [list(pair) for pair in versions(row)]:
-            raise ValueError("Pinned source versions changed since run initialization")
+            raise ValueError(text.render("messages/errors.source_versions_changed"))
         known = set(_candidate_ids(history))
         if candidate_id not in known and idea_id is None:
             idea_id = _current_active_idea(history)
@@ -1809,7 +1822,7 @@ def record_evaluation(
             try:
                 resolved = resolve_candidate_ref(history, reference)
             except ValueError as error:
-                notes.append(f"parent {reference} ignored: {error}")
+                notes.append(text.render("messages/errors.parent_ignored", reference=reference, error=error))
                 continue
             if resolved != candidate_id and resolved not in explicit:
                 explicit.append(resolved)
@@ -1822,7 +1835,7 @@ def record_evaluation(
                 if item.get("kind") == "candidate" and item["candidate_id"] == candidate_id
             )
         if idea_id and idea_id not in {item["id"] for item in history if item.get("kind") == "idea"}:
-            notes.append(f"idea_id {idea_id} is not a recorded idea; kept as a label")
+            notes.append(text.render("messages/errors.idea_id_label", idea_id=idea_id))
         _snapshot(directory, candidate_id, proof)
         if candidate_id not in known:
             _append(
@@ -1964,7 +1977,7 @@ def evaluate_request(
     candidate_ref = candidate_ref or None
     from_probe = from_probe or None
     if sum(value is not None for value in (proof, candidate_ref, from_probe)) != 1:
-        raise ValueError("Pass exactly one of proof, candidate, or from_probe")
+        raise ValueError(text.render("messages/errors.evaluation_reference"))
     directory = run_dir(run_id)
     history = events(directory)
     if candidate_ref:
@@ -1979,12 +1992,12 @@ def evaluate_request(
         idea_id = idea_id or source.get("idea_id")
         parents = parents or ([source["parent"]] if source.get("parent") else None)
     if not proof:
-        raise ValueError("Supply proof, candidate (#N) or from_probe (pN)")
+        raise ValueError(text.render("messages/errors.evaluation_proof_missing"))
     try:
         result = record_evaluation(name, run_id, proof, mode, parents, hypothesis, idea_id=idea_id)
     except ValueError as error:
         if str(error) in ("FORBIDDEN: sorry", "FORBIDDEN: admit"):
-            raise ValueError(f"{error}; use arena_probe to inspect a draft with holes") from None
+            raise ValueError(text.render("messages/errors.probe_forbidden", error=error)) from None
         raise
     return _model_view({**result, "full_check": _full_check_status(events(directory), result["candidate_id"])})
 
@@ -1999,11 +2012,11 @@ def _full_check_status(history: list[dict], candidate_id: str) -> str | None:
     done = next((e for e in reversed(row["evaluations"]) if e["mode"] == "full"), None)
     if done:
         return _check_text(row["n"], done["result"], total)
-    return f"queued: the other {total - 1} version(s) are checked in the background"
+    return text.render("replies/check.queued", count=total - 1)
 
 
 # Results compiled ahead of time for the current batch, keyed by normalized draft text.
-_PRECOMPILED: ContextVar[dict[str, dict]] = ContextVar("arena_precompiled_probes", default={})
+_PRECOMPILED: ContextVar[dict[str, dict] | None] = ContextVar("arena_precompiled_probes", default=None)
 PROBE_GB = 2.0  # one Lean process compiling a Mathlib-sized file
 PROBE_WORKERS = 4
 
@@ -2087,7 +2100,7 @@ def probe(name: str, run_id: str, proof: str, idea_id: str | None = None, parent
         try:
             parent_id = resolve_parent_ref(history, parent)
         except ValueError as error:
-            notes.append(f"parent {parent} ignored: {error}")
+            notes.append(text.render("messages/errors.parent_ignored", reference=parent, error=error))
     parent_id = parent_id or _current(history)
     proof_id = hashlib.sha256((name + "\0" + proof).encode()).hexdigest()
     if proof_id in set(_candidate_ids(history)):
@@ -2101,7 +2114,7 @@ def probe(name: str, run_id: str, proof: str, idea_id: str | None = None, parent
     else:
         validate_proof(row, proof, allow_sorry=True)
         complete = not _has_hole(row, proof)
-        result = _PRECOMPILED.get().get(proof)
+        result = (_PRECOMPILED.get() or {}).get(proof)
         if result is None:
             with lean_lock(directory):
                 result = _compile_probe(name, row, proof)
@@ -2113,7 +2126,7 @@ def probe(name: str, run_id: str, proof: str, idea_id: str | None = None, parent
                 {**recorded, "full_check": _full_check_status(events(directory), recorded["candidate_id"])}
             )
             view.setdefault("notes", []).append(
-                f"complete draft compiled, recorded as candidate {recorded['candidate']}"
+                text.render("replies/probe.complete_candidate", candidate=recorded["candidate"])
             )
             return view
         result = {**result, "mode": "probe", "scored": False}
@@ -2142,7 +2155,7 @@ def probe(name: str, run_id: str, proof: str, idea_id: str | None = None, parent
 def normalize_draft(name: str, draft: str) -> str:
     """Add the exact benchmark declaration to a proof body without altering complete proofs."""
     if not isinstance(draft, str) or not draft.strip():
-        raise ValueError("Draft must be nonempty proof text")
+        raise ValueError(text.render("messages/errors.draft_missing"))
     statement = problem(name)["statement"]
     body = draft.lstrip()
     if body.startswith(statement):
@@ -2162,8 +2175,9 @@ def probe_batch(
     name: str, run_id: str, drafts: list[str], idea_id: str | None = None, parent: str | None = None
 ) -> dict:
     """Probe one to four drafts in order, keeping their parent fixed across promotions."""
-    if not isinstance(drafts, list) or not 1 <= len(drafts) <= 4:
-        raise ValueError("Pass between one and four drafts")
+    if not isinstance(drafts, list) or not 1 <= len(drafts) <= MAX_DRAFTS:
+        word = {1: "one", 2: "two", 3: "three", 4: "four"}.get(MAX_DRAFTS, str(MAX_DRAFTS))
+        raise ValueError(text.render("messages/errors.draft_limit", max_drafts_word=word))
     history = events(run_dir(run_id))
     fixed_parent = resolve_parent_ref(history, parent) if parent else _current(history)
     outcomes = []
@@ -2198,7 +2212,7 @@ def candidate(name: str, run_id: str, reference: str) -> dict:
     candidate_id = resolve_candidate_ref(history, reference)
     proof_path = directory / "proofs" / f"{candidate_id}.lean"
     if not proof_path.exists():
-        raise ValueError("Unknown candidate")
+        raise ValueError(text.render("messages/errors.unknown_candidate_short"))
     proof = proof_path.read_text()
     location = materialize(name, run_id, proof)
     _append(directory, {"kind": "current", "candidate_id": candidate_id})
@@ -2239,7 +2253,7 @@ def profile_request(name: str, run_id: str, reference: str | None = None, proof:
         else:
             proof_id = resolve_candidate_ref(history, reference) if reference else _current(history)
             if proof_id is None:
-                raise ValueError("No candidate to profile; give candidate (#N) or probe (pN)")
+                raise ValueError(text.render("messages/errors.profile_candidate_missing"))
             label = _label(history, proof_id)
         proof = (directory / "proofs" / f"{proof_id}.lean").read_text()
     proof_id = hashlib.sha256((name + "\0" + proof).encode()).hexdigest()
@@ -2267,7 +2281,7 @@ def profile_request(name: str, run_id: str, reference: str | None = None, proof:
 
 def set_decision(run_id: str, candidate_id: str, decision: str, reason: str) -> dict:
     if decision not in ("pursue", "park") or not reason.strip():
-        raise ValueError("Decision must be pursue or park with a reason")
+        raise ValueError(text.render("messages/errors.decision_invalid"))
     directory = run_dir(run_id)
     candidate_id = resolve_candidate_ref(events(directory), candidate_id)
     record = {"kind": "decision", "candidate_id": candidate_id, "decision": decision, "reason": reason.strip()}
@@ -2498,7 +2512,7 @@ def merge_once(run_id: str, graph: dict | None = None) -> dict | None:
                         merged["text"],
                         "fast",
                         pair,
-                        "Deterministic combination of disjoint edits",
+                        text.render("replies/merge.hypothesis"),
                         origin="auto_merge",
                         merge={
                             "base": base["base"],
@@ -2517,7 +2531,7 @@ def merge_once(run_id: str, graph: dict | None = None) -> dict | None:
                             merged["text"],
                             "full",
                             pair,
-                            "Deterministic combination of disjoint edits",
+                            text.render("replies/merge.hypothesis"),
                             origin="auto_merge",
                             merge={
                                 "base": base["base"],
@@ -2562,14 +2576,23 @@ def _has_hole(row: dict, proof: str) -> bool:
 def _check_text(number: int, result: dict, total: int) -> str:
     compat = result.get("compat") or {}
     if result.get("ok") is False or not compat:
-        return f"#{number} full check could not run: {str(result.get('error') or 'unknown error')[:160]}"
+        return text.render(
+            "replies/check.could_not_run", number=number, error=str(result.get("error") or "unknown error")[:160]
+        )
     failing = [version for version, info in compat.items() if not info.get("passed")]
     if not failing and len(compat) == total:
         proxy = (result.get("metrics") or {}).get("proxy", result.get("local_proxy"))
-        return f"#{number} passes all {total} versions: proxy {proxy}"
+        return text.render("replies/check.passed", number=number, total=total, proxy=proxy)
     first = compat[failing[0]]
     reason = (first.get("error_headlines") or [first.get("error") or "compile failed"])[0]
-    return f"#{number} fails {', '.join(failing)} ({len(compat) - len(failing)}/{total} pass): {str(reason)[:160]}"
+    return text.render(
+        "replies/check.failed",
+        number=number,
+        failing=", ".join(failing),
+        passed=len(compat) - len(failing),
+        total=total,
+        reason=str(reason)[:160],
+    )
 
 
 def _autocheck_jobs(rows: list[dict]) -> list[dict]:
@@ -2636,7 +2659,7 @@ def state(run_id: str) -> dict:
     better unverified one if any, what is being checked, and the harness's check results."""
     history = events(run_dir(run_id))
     if not history:
-        raise ValueError("Run is uninitialized")
+        raise ValueError(text.render("messages/errors.run_uninitialized"))
     rows = _summaries(history)
     total = len(history[0].get("versions") or [1])
     numbers = {r["id"]: r["n"] for r in rows}
@@ -2725,7 +2748,7 @@ def cold_verify(run_id: str, row: dict) -> dict:
             "kind": "cold_verification",
             "candidate_id": row["id"],
             "confirmed": False,
-            "error": "Lean unhealthy; cold verification paused",
+            "error": text.render("messages/errors.cold_verification_paused"),
             "recorded_heartbeats": row["heartbeats"],
             "paused": True,
         }
@@ -2808,10 +2831,10 @@ def submission(run_id: str) -> dict:
         answer = {
             "ok": True,
             "candidate": None,
-            "reason": "no model candidate passed every version; the original proof stands",
+            "reason": text.render("replies/state.no_candidate_passed"),
         }
         if rejected:
-            answer["reason"] = "no candidate that passed in the Lean session also passed a clean cold compile"
+            answer["reason"] = text.render("replies/state.no_candidate_cold_passed")
     else:
         proof = (directory / "proofs" / f"{best['id']}.lean").read_text()
         (directory / "submission.lean").write_text(proof)
@@ -2823,7 +2846,9 @@ def submission(run_id: str) -> dict:
             "heartbeats": best["heartbeats"],
             "proxy": best["score"],
             "proof_file": "submission.lean",
-            "verified_by": "cold compile" if cold and cold["confirmed"] else "cold compile (no session used)",
+            "verified_by": "cold compile"
+            if cold and cold["confirmed"]
+            else text.render("replies/state.cold_compile_without_session"),
         }
         if cold and cold["confirmed"]:
             # The clean compile is the certified measurement; the session figure is kept for audit.
@@ -2851,7 +2876,7 @@ def frontier(run_id: str) -> dict:
     """Compact status: best candidates, the model's ideas with their attempts, recent failures."""
     history = events(run_dir(run_id))
     if not history:
-        raise ValueError("Run is uninitialized")
+        raise ValueError(text.render("messages/errors.run_uninitialized"))
     rows = _summaries(history)
     ideas: dict[str, dict] = {}
     for item in history:
@@ -2875,24 +2900,24 @@ def frontier(run_id: str) -> dict:
         failed = [r for r in mine if r["status"] == "fail" and r["evaluations"]]
         last = failed[-1] if failed else None
         idea["last_failure"] = (f"#{last['n']}: " + _failure_text(last["evaluations"][-1]["result"])) if last else None
-    for row in rows:
-        if row["status"] == "fail" and row["evaluations"]:
-            failures.append(
-                {
-                    "ref": f"#{row['n']}",
-                    "idea_id": row["idea_id"],
-                    "error": _failure_text(row["evaluations"][-1]["result"]),
-                }
-            )
-    for item in history:
-        if item.get("kind") == "probe" and _probe_failed(item["result"]):
-            failures.append(
-                {
-                    "ref": probe_numbers[item["proof_id"]],
-                    "idea_id": item.get("idea_id"),
-                    "error": _failure_text(item["result"]),
-                }
-            )
+    failures.extend(
+        {
+            "ref": f"#{row['n']}",
+            "idea_id": row["idea_id"],
+            "error": _failure_text(row["evaluations"][-1]["result"]),
+        }
+        for row in rows
+        if row["status"] == "fail" and row["evaluations"]
+    )
+    failures.extend(
+        {
+            "ref": probe_numbers[item["proof_id"]],
+            "idea_id": item.get("idea_id"),
+            "error": _failure_text(item["result"]),
+        }
+        for item in history
+        if item.get("kind") == "probe" and _probe_failed(item["result"])
+    )
     top = sorted(
         (r for r in rows if r["status"] in ("full", "primary") and r["origin"] != "reference"),
         key=lambda r: (r["verified"], r["score"] or -1),
