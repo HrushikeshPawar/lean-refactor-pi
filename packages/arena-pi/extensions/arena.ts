@@ -88,6 +88,9 @@ export default function arenaExtension(pi: ExtensionAPI) {
   const registerTool = ((tool: any) => pi.registerTool({ ...tool, prepareArguments: requireToolArguments,
     execute: (id: string, params: any, ...rest: any[]) =>
       tool.execute(id, normalizeToolArguments(params, tool.parameters), ...rest) })) as typeof pi.registerTool;
+  // Providers Pi does not ship (models.yaml `providers`) are registered here; Pi prices their calls from these models.
+  const configuredModels = JSON.parse(process.env.ARENA_MODELS_JSON ?? "{}");
+  for (const [name, config] of Object.entries(configuredModels.providers ?? {})) pi.registerProvider(name, config as any);
   // A factory invocation owns one Pi session. No active theorem is module-global.
   let active: string | undefined;
   const runId = process.env.ARENA_RUN_ID;
@@ -333,7 +336,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
   pi.on("before_agent_start", (_event, ctx) => {
     applyFinishGate();
     if (process.env.ARENA_BUDGET_REQUIRED !== "1") return;
-    if (!active || limitHit || ctx.model?.id !== process.env.ARENA_MODEL) {
+    if (!active || limitHit || ctx.model?.id !== (process.env.ARENA_PI_MODEL_ID ?? process.env.ARENA_MODEL)) {
       ctx.abort();
       if (ctx.hasUI) ctx.ui.notify(limitHit ? "The spend limit is already reached." : "Select /arena and the run's model before prompting.", "error");
     }

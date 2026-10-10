@@ -23,6 +23,7 @@ import contextlib
 from arena import lean_health, lean_session
 from arena import models as model_config
 from arena.campaign import autocheck, init, packet, run_dir, submission, write_state
+from arena.provenance import code_version
 from arena.skill import SKILL_DIR, skill_hash, skill_prompt
 from arena.summary import configured_cap, cost_report_from_ledger, render_text, write_summary
 from arena.traces import langfuse_environment, langfuse_extension, plugin_problems
@@ -355,7 +356,7 @@ def run() -> int:
         "--thinking",
         args.thinking,
         "--model",
-        f"{CONFIG['provider']}/{args.model}",
+        model_config.pi_model(args.model, CONFIG),
         "--session-id",
         args.run_id,
         "--session-dir",
@@ -379,6 +380,11 @@ def run() -> int:
             print("\n".join(problems), file=sys.stderr)
             return 1
 
+    price_problems = [] if args.test_extension else model_config.catalog_price_problems(CONFIG)
+    if price_problems:
+        print("Pi's catalog prices differ from models.yaml; the spend stop would be wrong:", file=sys.stderr)
+        print("\n".join(price_problems), file=sys.stderr)
+        return 1
     if not args.resume_run:
         init(args.theorem, args.run_id, extra)
         (directory / "run-config.json").write_text(
@@ -386,6 +392,7 @@ def run() -> int:
                 {
                     "theorem": args.theorem,
                     "model": args.model,
+                    "pi_model": model_config.pi_model(args.model, CONFIG),
                     "limit_usd": args.limit_usd,
                     "packet_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
                     "thinking": args.thinking,
@@ -393,6 +400,7 @@ def run() -> int:
                     "compact_at_tokens": args.compact_at_tokens,
                     "compact_keep_tokens": args.compact_keep_tokens,
                     "skill": None if args.no_skill else {"name": "arena-lean", "sha256": skill_hash()},
+                    "code": code_version(),
                 },
                 indent=2,
             )
@@ -407,6 +415,7 @@ def run() -> int:
     env["ARENA_AUTOCONTINUE"] = "0" if args.preflight else "1"
     env["ARENA_RUN_ID"] = args.run_id
     env["ARENA_MODEL"] = args.model
+    env["ARENA_PI_MODEL_ID"] = CONFIG["models"][args.model].get("id", args.model)
     env["ARENA_MODELS_JSON"] = model_config.pi_json(CONFIG)
     env["ARENA_LIMIT_USD"] = str(args.limit_usd)
     env["ARENA_REQUEST_OUTPUT_TOKENS"] = str(CONFIG["models"][args.model]["request_output_tokens"])

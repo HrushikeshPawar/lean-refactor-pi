@@ -1,7 +1,8 @@
 """Load and validate the central model configuration, models.yaml.
 
 Only the YAML subset that file uses is parsed (nested maps, flow lists and maps, scalars,
-comments), so the harness needs no YAML dependency. `pi_json` is what the offline test provider reads.
+comments), so the harness needs no YAML dependency. `pi_json` is what the Arena extension and the offline test
+provider read: the models, and the providers the extension registers with Pi.
 """
 
 from __future__ import annotations
@@ -145,6 +146,17 @@ def validate(config: dict) -> dict:
             _number(f"{name}.compaction", key, compaction.get(key), integer=True)
         if compaction["at_tokens"] >= model["context_window"]:
             raise ModelConfigError(f"models.yaml: {name}.compaction.at_tokens must be below context_window")
+    providers = config.get("providers") or {}
+    for name, provider in providers.items():
+        for key in ("base_url", "api", "api_key_env"):
+            if not isinstance(provider, dict) or not isinstance(provider.get(key), str):
+                raise ModelConfigError(f"models.yaml: providers.{name}.{key} is required")
+    for name, model in models.items():
+        provider = model.get("provider", config["provider"])
+        if provider != config["provider"] and provider not in providers:
+            raise ModelConfigError(f"models.yaml: {name}.provider {provider!r} is neither the default nor in providers")
+        if provider in providers and not isinstance(model.get("reasoning"), bool):
+            raise ModelConfigError(f"models.yaml: {name}.reasoning (true/false) is required for a registered provider")
     for name, preset in (config.get("presets") or {}).items():
         unknown = [model for model in preset.get("models", []) if model not in models]
         if unknown:
@@ -175,7 +187,92 @@ def _camelize(value):
     return value
 
 
-def pi_json(config: dict | None = None) -> str:
-    """The ARENA_MODELS_JSON shape the offline test provider reads (camelCase keys, models only)."""
+def provider(name: str, config: dict | None = None) -> str:
     config = config or load()
-    return json.dumps({"provider": config["provider"], "models": _camelize(config["models"])}, separators=(",", ":"))
+    return config["models"][name].get("provider", config["provider"])
+
+
+def pi_model(name: str, config: dict | None = None) -> str:
+    """The `provider/id` Pi selects for one models.yaml entry."""
+    config = config or load()
+    return f"{provider(name, config)}/{config['models'][name].get('id', name)}"
+
+
+def pi_providers(config: dict | None = None) -> dict:
+    """`pi.registerProvider` arguments for every provider Pi does not ship, with the models that name it."""
+    config = config or load()
+    out = {}
+    for key, row in (config.get("providers") or {}).items():
+        models = [
+            {
+                "id": model.get("id", name),
+                "name": model.get("name", name),
+                "reasoning": model["reasoning"],
+                "input": ["text"],
+                "cost": _camelize(model["price"]),
+                "contextWindow": model["context_window"],
+                "maxTokens": model["max_tokens"],
+                **({"compat": _camelize(model["compat"])} if "compat" in model else {}),
+            }
+            for name, model in config["models"].items()
+            if model.get("provider") == key
+        ]
+        out[key] = {"baseUrl": row["base_url"], "api": row["api"], "apiKey": f"${row['api_key_env']}", "models": models}
+    return out
+
+
+def pi_json(config: dict | None = None) -> str:
+    """The ARENA_MODELS_JSON shape: camelCase models plus the providers the extension registers."""
+    config = config or load()
+    return json.dumps(
+        {"provider": config["provider"], "models": _camelize(config["models"]), "providers": pi_providers(config)},
+        separators=(",", ":"),
+    )
+
+
+def pi_catalog(provider_name: str, home: Path | None = None) -> dict[str, dict]:
+    """The installed Pi's built-in catalog for one provider, by model id; empty when Pi is not installed."""
+    home = home or Path.home()
+    install = home / ".pi/agent/install"
+    try:
+        version = (install / "current-version").read_text().strip()
+        data = json.loads(
+            (
+                install
+                / "releases"
+                / version
+                / "node_modules/@earendil-works/pi-ai/dist/providers/data"
+                / f"{provider_name}.json"
+            ).read_text()
+        )
+    except (OSError, ValueError):
+        return {}
+    return {row["id"]: row for rows in data.values() for row in rows.values() if isinstance(row, dict) and "id" in row}
+
+
+def catalog_price_problems(config: dict | None = None, home: Path | None = None) -> list[str]:
+    """Models whose models.yaml price differs from the price Pi charges them at.
+
+    Pi computes each call's cost from its own catalog for the providers it ships, and the spend stop sums those
+    costs, so a catalog price that drifted from the provider's bill makes the stop wrong. Registered providers are
+    priced from models.yaml itself and cannot drift. A model missing from an installed catalog is a problem too.
+    """
+    home = home or Path.home()
+    config = config or load()
+    problems = []
+    for name, model in config["models"].items():
+        provider_name = provider(name, config)
+        if provider_name in (config.get("providers") or {}):
+            continue
+        catalog = pi_catalog(provider_name, home)
+        if not catalog:
+            continue  # Pi is not installed here
+        row = catalog.get(model.get("id", name))
+        if row is None:
+            problems.append(f"{name}: not in Pi's {provider_name} catalog")
+            continue
+        expected = _camelize(model["price"])
+        actual = {key: row.get("cost", {}).get(key) for key in expected}
+        if any(actual[key] is None or abs(actual[key] - value) > 1e-9 for key, value in expected.items()):
+            problems.append(f"{name}: models.yaml price {expected} but Pi charges {actual}")
+    return problems

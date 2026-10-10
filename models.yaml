@@ -4,12 +4,21 @@
 # {k: v} maps, # comments. Prices are USD per 1M tokens as OpenCode Go bills them; Pi prices each call
 # from its own catalog and the run's spend is the sum of those actual costs.
 
-provider: opencode-go          # Pi catalog provider that serves and bills every model below
+provider: opencode-go          # default provider: a Pi catalog provider (Pi prices its models from its own catalog)
 provider_timeout_ms: 120000    # a silent request is cut after this; Pi's own default is 300 s
 
 thinking:
   default: high                # reasoning level when --thinking is not given
   levels: [off, minimal, low, medium, high, xhigh, max]
+
+# Providers Pi does not ship. The Arena extension registers each one with Pi at start, with the models below that
+# name it; Pi then prices their calls from the `price` given here. The key is read from the named environment
+# variable (`arena run` loads .env).
+providers:
+  primalabs:
+    base_url: https://api.primalabs.ai/v1
+    api: openai-completions
+    api_key_env: PL_API_KEY
 
 # Campaign presets: run_campaign.py --preset <name>. Explicit flags override them.
 presets:
@@ -22,7 +31,7 @@ presets:
 
 # Order here is the order of --model choices and of `arena_preflight` runs.
 models:
-  deepseek-v4.1-flash:         # Anthropic Messages API (max_tokens)
+  deepseek-v4.1-flash:         # OpenAI chat completions on opencode-go (Pi 1.1.0 catalog)
     # Automatic caching: cache writes are free and not reported (cache_write 0 is expected).
     price: {input: 0.15, output: 0.60, cache_read: 0.003, cache_write: 0}
     context_window: 1000000
@@ -39,4 +48,21 @@ models:
       # output <= 850K + 25K + 120K cap = 995K < 1M (typical summaries are ~10K); a normal 64K output
       # turn needs 850K + 25K + 64K = 939K < 1M.
       at_tokens: 850000
+      keep_recent_tokens: 40000
+
+  mimo-v2.6-pro:               # OpenAI chat completions on primalabs; probed 2026-10-10 (plan §9a)
+    provider: primalabs
+    id: primalabs-ai/MiMo-V2.6-Pro
+    name: MiMo V2.6 Pro (PrimaLabs)
+    reasoning: true
+    # primalab dashboard prices (authoritative over its docs table); no cache-write charge.
+    price: {input: 0.43, output: 0.87, cache_read: 0.0036, cache_write: 0}
+    context_window: 1048576
+    max_tokens: 131072         # not published; Pi's catalog value
+    request_output_tokens: 64000
+    compat: {supports_store: false, supports_developer_role: false, max_tokens_field: max_tokens, requires_reasoning_content_on_assistant_messages: true, thinking_format: openai}
+    compaction:
+      # Uncached input is 120x the cache-read price, so a summary request at 850K costs ~$0.37, most of a
+      # $0.50 run, while a cached 850K turn costs ~$0.003: compact only when the window forces it.
+      at_tokens: 900000
       keep_recent_tokens: 40000

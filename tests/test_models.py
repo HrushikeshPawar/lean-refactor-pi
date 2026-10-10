@@ -1,6 +1,8 @@
 import copy
 import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from arena import models
 
@@ -63,3 +65,39 @@ class ModelConfigTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProviderTests(unittest.TestCase):
+    def test_registered_providers_carry_the_key_by_name_and_price_from_models_yaml(self):
+        registered = models.pi_providers(GOOD)["primalabs"]
+        self.assertEqual(registered["apiKey"], "$PL_API_KEY")  # Pi interpolates it; the value never enters the config
+        (mimo,) = registered["models"]
+        self.assertEqual(mimo["id"], "primalabs-ai/MiMo-V2.6-Pro")
+        self.assertEqual(mimo["cost"]["cacheRead"], GOOD["models"]["mimo-v2.6-pro"]["price"]["cache_read"])
+        self.assertEqual(models.pi_model("mimo-v2.6-pro", GOOD), "primalabs/primalabs-ai/MiMo-V2.6-Pro")
+
+    def test_a_model_must_name_a_known_provider(self):
+        config = copy.deepcopy(GOOD)
+        config["models"]["mimo-v2.6-pro"]["provider"] = "nowhere"
+        with self.assertRaises(models.ModelConfigError):
+            models.validate(config)
+
+    def test_catalog_drift_is_reported_and_registered_providers_are_exempt(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            install = home / ".pi/agent/install"
+            data = install / "releases/9.9.9/node_modules/@earendil-works/pi-ai/dist/providers/data"
+            data.mkdir(parents=True)
+            (install / "current-version").write_text("9.9.9\n")
+            price = {"input": 0.15, "output": 0.60, "cacheRead": 0.003, "cacheWrite": 0}
+            row = {"id": "deepseek-v4.1-flash", "cost": price}
+            (data / "opencode-go.json").write_text(json.dumps({"openai-completions": {"chat:x": row}}))
+            self.assertEqual(models.catalog_price_problems(GOOD, home), [])
+            row["cost"] = {**price, "output": 0.30}
+            (data / "opencode-go.json").write_text(json.dumps({"openai-completions": {"chat:x": row}}))
+            (problem,) = models.catalog_price_problems(GOOD, home)
+            self.assertIn("deepseek-v4.1-flash", problem)
+
+    def test_no_installed_pi_means_no_price_check(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            self.assertEqual(models.catalog_price_problems(GOOD, Path(temporary)), [])
