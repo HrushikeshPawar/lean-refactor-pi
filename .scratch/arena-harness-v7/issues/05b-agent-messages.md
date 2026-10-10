@@ -10,7 +10,7 @@ before. **This ticket does not reword anything**: the rewrite is ticket 16.
 
 **Blocked by:** 05a: Agent text: format, renderers, numbers.yaml, skill/packet/memory moved verbatim, `arena text` (the renderers `arena/text.py` and `text.ts`, `numbers.yaml`, and the `arena text` sub-app).
 
-**Status:** ready-for-agent
+**Status:** done
 
 **Branch:** `v7/05b-agent-messages` (stacked on `v7/05a-agent-text`)
 
