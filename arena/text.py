@@ -95,7 +95,7 @@ def _load() -> tuple[dict[str, str], dict[str, int | float]]:
     }
     numbers_path = directory / "numbers.yaml"
     for path in directory.rglob("*.yaml"):
-        if path == numbers_path:
+        if path == numbers_path or path.name == "shown.yaml":
             continue
         prefix = path.relative_to(directory).with_suffix("").as_posix()
         templates.update(
@@ -147,6 +147,22 @@ def template(key: str) -> str:
 
 def numbers() -> dict[str, int | float]:
     return dict(_load()[1])
+
+
+@lru_cache(maxsize=1)
+def shown() -> dict[str, dict[str, str]]:
+    """Read per-template display metadata, kept outside the renderable message catalog."""
+    path = _directory() / "shown.yaml"
+    if not path.exists():
+        return {}
+    raw = _flatten(_parse_yaml(path.read_text(), "shown"))
+    result: dict[str, dict[str, str]] = {}
+    for key, value in raw.items():
+        if key.endswith(".where"):
+            result.setdefault(key[:-6], {})["where"] = value
+        elif key.endswith(".per_run"):
+            result.setdefault(key[:-8], {})["per_run"] = value
+    return result
 
 
 def render(key: str, **values: object) -> str:

@@ -1,0 +1,110 @@
+messages:
+  arena_line:
+    where: "Agent messages and notices"
+    per_run: "when the matching event occurs"
+  compaction_memory:
+    where: "Agent messages and notices"
+    per_run: "when the matching event occurs"
+  continuation:
+    where: "Agent messages and notices"
+    per_run: "when the matching event occurs"
+  errors:
+    where: "Agent messages and notices"
+    per_run: "when the matching event occurs"
+  footer:
+    where: "Agent messages and notices"
+    per_run: "when the matching event occurs"
+  notices:
+    where: "Agent messages and notices"
+    per_run: "when the matching event occurs"
+  refusals:
+    where: "Agent messages and notices"
+    per_run: "when the matching event occurs"
+  trim:
+    where: "Agent messages and notices"
+    per_run: "when the matching event occurs"
+packet:
+  inventory:
+    where: "Initial theorem packet"
+    per_run: "once per run"
+  library:
+    where: "Initial theorem packet"
+    per_run: "once per run"
+  profile:
+    where: "Initial theorem packet"
+    per_run: "once per run"
+  rates:
+    where: "Initial theorem packet"
+    per_run: "once per run"
+  scoring:
+    where: "Initial theorem packet"
+    per_run: "once per run"
+  sections:
+    where: "Initial theorem packet"
+    per_run: "once per run"
+  task:
+    where: "Initial theorem packet"
+    per_run: "once per run"
+replies:
+  candidate:
+    where: "Tool replies"
+    per_run: "when the matching tool result occurs"
+  check:
+    where: "Tool replies"
+    per_run: "when the matching tool result occurs"
+  evaluate:
+    where: "Tool replies"
+    per_run: "when the matching tool result occurs"
+  merge:
+    where: "Tool replies"
+    per_run: "when the matching tool result occurs"
+  probe:
+    where: "Tool replies"
+    per_run: "when the matching tool result occurs"
+  profile:
+    where: "Tool replies"
+    per_run: "when the matching tool result occurs"
+  routes:
+    where: "Tool replies"
+    per_run: "when the matching tool result occurs"
+  state:
+    where: "Tool replies"
+    per_run: "when the matching tool result occurs"
+skill:
+  skill:
+    where: "Agent skill instructions"
+    per_run: "once per run"
+tools:
+  arena_candidate:
+    where: "Model tool definitions"
+    per_run: "every request"
+  arena_declarations:
+    where: "Model tool definitions"
+    per_run: "every request"
+  arena_evaluate:
+    where: "Model tool definitions"
+    per_run: "every request"
+  arena_find:
+    where: "Model tool definitions"
+    per_run: "every request"
+  arena_finish:
+    where: "Model tool definitions"
+    per_run: "every request"
+  arena_idea:
+    where: "Model tool definitions"
+    per_run: "every request"
+  arena_probe:
+    where: "Model tool definitions"
+    per_run: "every request"
+  arena_profile:
+    where: "Model tool definitions"
+    per_run: "every request"
+  arena_skill_read:
+    where: "Model tool definitions"
+    per_run: "every request"
+  arena_source:
+    where: "Model tool definitions"
+    per_run: "every request"
+  arena_state:
+    where: "Model tool definitions"
+    per_run: "every request"

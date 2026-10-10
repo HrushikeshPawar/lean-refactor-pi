@@ -6,10 +6,28 @@ from pathlib import Path
 from unittest.mock import patch
 
 from arena import text
-from arena.cli.text import _budget_markdown, _budget_rows
+from arena.cli.text import _budget_markdown, _budget_rows, _shown_for
 
 
 class TextRendererTests(unittest.TestCase):
+    def test_every_template_has_budget_metadata(self):
+        root = Path(__file__).parents[1] / "agent-text"
+        files = {
+            path.relative_to(root).with_suffix("").as_posix()
+            for path in root.rglob("*")
+            if path.is_file()
+            and path.suffix in {".yaml", ".md"}
+            and path.name not in {"README.md", "numbers.yaml", "shown.yaml"}
+        }
+        metadata = text.shown()
+        for key in files:
+            shown = key.replace("/", ".").replace("-", "_").lower()
+            self.assertIn(shown, metadata)
+            self.assertTrue(metadata[shown]["where"].strip())
+            self.assertTrue(metadata[shown]["per_run"].strip())
+        for key in text.keys():  # noqa: SIM118
+            self.assertTrue(_shown_for(key)["where"].strip())
+
     def test_repository_templates_parse_and_readme_budget_is_current(self):
         for key in text.keys():  # noqa: SIM118
             with self.subTest(key=key):
@@ -36,6 +54,18 @@ class TextRendererTests(unittest.TestCase):
                     else:
                         self.assertEqual(text.render(case["key"], **case.get("values", {})), case["expect"])
                 text._load.cache_clear()
+
+    def test_tool_descriptions_render_like_the_pre_move_tool_definitions(self):
+        cases = json.loads((Path(__file__).parent / "fixtures" / "agent_text_tool_definitions_golden.json").read_text())
+        for case in cases:
+            tool = case["expected"]
+            name = tool["name"]
+            with self.subTest(tool=name):
+                description_values = {"draft_limit_word": "four"} if name == "arena_probe" else {}
+                self.assertEqual(text.render(f"tools/{name}.description", **description_values), tool["description"])
+                for parameter, schema in tool["parameters"].get("properties", {}).items():
+                    if "description" in schema:
+                        self.assertEqual(text.render(f"tools/{name}.params.{parameter}"), schema["description"])
 
     def test_template_rejects_a_missing_directory_key(self):
         with (

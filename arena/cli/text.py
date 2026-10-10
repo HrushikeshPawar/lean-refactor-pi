@@ -18,15 +18,37 @@ app = App(name="text", help="Inspect agent-facing text templates.")
 _MARKERS = ("<!-- budget:start -->", "<!-- budget:end -->")
 
 
-def _budget_rows() -> list[tuple[str, int]]:
-    return [(key, len(text.template(key).split())) for key in text.keys()]  # noqa: SIM118
+def _shown_for(key: str) -> dict[str, str]:
+    normalized = key.replace("/", ".").replace("-", "_").lower()
+    matches = [prefix for prefix in text.shown() if normalized == prefix or normalized.startswith(prefix + ".")]
+    if not matches:
+        raise ValueError(f"No shown.yaml entry for {key}")
+    return text.shown()[max(matches, key=len)]
 
 
-def _budget_markdown(rows: list[tuple[str, int]]) -> str:
-    return "\n".join(["| Template | Words |", "| --- | ---: |", *(f"| `{key}` | {words} |" for key, words in rows)])
+def _budget_rows() -> list[tuple[str, int, str, str]]:
+    return [
+        (
+            key,
+            len(text.template(key).split()),
+            _shown_for(key)["where"],
+            _shown_for(key)["per_run"],
+        )
+        for key in text.keys()  # noqa: SIM118
+    ]
 
 
-def _write_budget(rows: list[tuple[str, int]]) -> None:
+def _budget_markdown(rows: list[tuple[str, int, str, str]]) -> str:
+    return "\n".join(
+        [
+            "| Template | Words | Where shown | Per run |",
+            "| --- | ---: | --- | --- |",
+            *(f"| `{key}` | {words} | {where} | {per_run} |" for key, words, where, per_run in rows),
+        ]
+    )
+
+
+def _write_budget(rows: list[tuple[str, int, str, str]]) -> None:
     path = ROOT / "agent-text" / "README.md"
     readme = path.read_text()
     start, end = (_MARKERS[0], _MARKERS[1])
@@ -95,10 +117,17 @@ def budget(json_output: Annotated[bool, Parameter(name="json")] = False, write: 
     if write:
         _write_budget(rows)
     if json_output:
-        print(json.dumps([{"template": key, "words": words} for key, words in rows]))
+        print(
+            json.dumps(
+                [
+                    {"template": key, "words": words, "where": where, "per_run": per_run}
+                    for key, words, where, per_run in rows
+                ]
+            )
+        )
     else:
-        table = Table("Template", "Words")
-        for key, words in rows:
-            table.add_row(key, str(words))
+        table = Table("Template", "Words", "Where shown", "Per run")
+        for key, words, where, per_run in rows:
+            table.add_row(key, str(words), where, per_run)
         Console().print(table)
     return 0
