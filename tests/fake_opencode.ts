@@ -93,8 +93,16 @@ export default function fakeOpenCode(pi: ExtensionAPI) {
               max_tokens: (payload as any)?.max_tokens ?? null,
               thinking: (payload as any)?.thinking ?? null,
               reasoning: (payload as any)?.reasoning ?? null };
+            const definitions = new Map<string, unknown>();
+            for (const message of context.messages as any[]) {
+              for (const tool of message.toolsAdded ?? []) definitions.set(tool.name, tool);
+            }
+            for (const tool of context.tools ?? []) {
+              definitions.set(tool.name, { name: tool.name, description: tool.description, parameters: tool.parameters });
+            }
             appendFileSync(process.env.ARENA_FAKE_LOG, `${JSON.stringify({ index,
               thinking: options?.reasoning ?? null, tools: (context.tools ?? []).map(tool => tool.name),
+              tool_definitions: [...definitions.values()],
               request_shape: requestShape, messages: context.messages })}\n`);
           }
           if (process.env.ARENA_FAKE_CRASH === "1") process.exit(23);
