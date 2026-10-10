@@ -1,31 +1,32 @@
-"""The `arena` command line.
-
-Commands that still live in `tools/` are thin pass-throughs: every argument after the command name goes to the
-tool unchanged, so `arena run --help` prints the tool's own help. Ticket 04 moves the remaining tools in.
-"""
+"""The ``arena`` command line and its command tree."""
 
 from __future__ import annotations
 
-import importlib
 import os
 import sys
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 from cyclopts import App, Parameter
 
+from arena.cli.campaigns import CampaignOptions
+from arena.cli.check import CheckOptions
+from arena.cli.doctor import DoctorOptions
+from arena.cli.experiment import ExperimentOptions
+from arena.cli.lean_load import LeanLoadOptions
+from arena.cli.protocol import ProtocolOptions
+from arena.cli.provision import ProvisionOptions
+from arena.cli.run import RunOptions
+
 ROOT = Path(__file__).resolve().parents[2]
-
 app = App(name="arena", help="Lean Refactor Arena harness.", result_action="return_value")
-
-Tokens = Annotated[str, Parameter(allow_leading_hyphen=True)]
+_DEFAULT_DOCTOR_OPTIONS = DoctorOptions()
+_DEFAULT_PROVISION_OPTIONS = ProvisionOptions()
+_DEFAULT_LEAN_LOAD_OPTIONS = LeanLoadOptions()
 
 
 def load_env(path: Path = ROOT / ".env") -> list[str]:
-    """Export `KEY=value` lines from `path` that the shell has not already set; return the keys exported.
-
-    Values are never printed. Blank lines and `#` comments are skipped; surrounding quotes are stripped.
-    """
+    """Export unset ``KEY=value`` entries from ``path`` without printing their values."""
     try:
         lines = path.read_text().splitlines()
     except OSError:
@@ -45,51 +46,175 @@ def load_env(path: Path = ROOT / ".env") -> list[str]:
     return exported
 
 
-def _delegate(module: str, command: str, tokens: tuple[str, ...]) -> int:
-    """Run `tools.<module>.main()` as if it had been started with `tokens` on its command line."""
-    if str(ROOT) not in sys.path:
-        sys.path.insert(0, str(ROOT))
-    main = importlib.import_module(f"tools.{module}").main
-    argv = sys.argv
-    sys.argv = [f"arena {command}", *tokens]
-    try:
-        return main() or 0
-    except SystemExit as stop:  # argparse --help and usage errors
-        return stop.code if isinstance(stop.code, int) else (0 if stop.code is None else 1)
-    finally:
-        sys.argv = argv
-
-
-@app.command(help_flags=[])
-def run(*tokens: Tokens) -> int:
-    """Run one budgeted proof session through Pi (loads .env first)."""
+@app.command()
+def run(options: Annotated[RunOptions, Parameter(name="*")]) -> int:
     load_env()
-    return _delegate("run_pi_budgeted", "run", tokens)
+    from arena.cli.run import execute
+
+    return execute(options)
 
 
-@app.command(help_flags=[])
-def campaign(*tokens: Tokens) -> int:
-    """Run a campaign: rows x models x replicates, --jobs at a time (loads .env first)."""
+@app.command()
+def campaign(
+    options: Annotated[CampaignOptions, Parameter(name="*")],
+    *passthrough: Annotated[str, Parameter(allow_leading_hyphen=True)],
+) -> int:
     load_env()
-    return _delegate("run_campaign", "campaign", tokens)
+    from arena.cli.campaigns import cli_execute
+
+    return cli_execute(options, passthrough)
 
 
-@app.command(help_flags=[])
-def check(*tokens: Tokens) -> int:
-    """Check one candidate file with the forbidden filter and the official checker."""
-    return _delegate("arena_check", "check", tokens)
+@app.command()
+def certify(
+    rows: str | None = None,
+    tolerance: float = 0.05,
+    output: Path | None = None,
+    json_output: Annotated[bool, Parameter(name="json")] = False,
+    require_all: bool = False,
+) -> int:
+    from arena.cli.certify import execute
+
+    return execute(rows, tolerance, output, json_output, require_all)
 
 
-@app.command(name="eval", help_flags=[])
-def eval_(*tokens: Tokens) -> int:
-    """Evaluate one proof of a benchmark row and print its metrics."""
-    return _delegate("arena_eval", "eval", tokens)
+@app.command()
+def check(options: Annotated[CheckOptions, Parameter(name="*")]) -> int:
+    from arena.cli.check import execute
+
+    return execute(options)
 
 
-@app.command(show=False, help_flags=[])
-def protocol(*tokens: Tokens) -> int:
-    """JSON protocol between the Pi extension and one campaign (not for people)."""
-    return _delegate("arena_campaign", "protocol", tokens)
+@app.command(name="eval")
+def eval_(
+    name: str,
+    proof_file: Path,
+    mode: Literal["fast", "full"] = "fast",
+    json_output: Annotated[bool, Parameter(name="json")] = False,
+) -> int:
+    from arena.cli.evaluate import execute
+
+    return execute(name, proof_file, mode, json_output)
+
+
+@app.command()
+def merge(run_id: str, parent_pid: int | None = None, once: bool = False) -> int:
+    from arena.cli.merge import execute
+
+    return execute(run_id, parent_pid, once)
+
+
+@app.command()
+def package(
+    *run_ids: str,
+    name: str,
+    commit: str = "HEAD",
+    template: Path | None = None,
+    discover: bool = False,
+) -> int:
+    from arena.cli.package import execute
+
+    return execute(list(run_ids), name, commit, template, discover)
+
+
+@app.command()
+def preflight(
+    theorem: str = "Core.InitsUpdatesComm",
+    models: str | None = None,
+    json_output: Annotated[bool, Parameter(name="json")] = False,
+) -> int:
+    from arena.cli.preflight import execute
+
+    return execute(theorem, models, json_output)
+
+
+@app.command()
+def serve(
+    *run_ids: str,
+    match: str | None = None,
+    port: int = 8765,
+    no_langfuse: bool = False,
+    langfuse_ttl: float = 45.0,
+) -> int:
+    from arena.cli.serve import execute
+
+    return execute(list(run_ids), match, port, no_langfuse, langfuse_ttl)
+
+
+@app.command()
+def provision(options: Annotated[ProvisionOptions, Parameter(name="*")] = _DEFAULT_PROVISION_OPTIONS) -> int:
+    from arena.cli.provision import cli_execute
+
+    return cli_execute(options)
+
+
+@app.command()
+def experiment(
+    options: Annotated[ExperimentOptions, Parameter(name="*")],
+    *passthrough: Annotated[str, Parameter(allow_leading_hyphen=True)],
+) -> int:
+    from arena.cli.experiment import cli_execute
+
+    return cli_execute(options, passthrough)
+
+
+@app.command(show=False)
+def protocol(options: Annotated[ProtocolOptions, Parameter(name="*")]) -> int:
+    from arena.cli.protocol import execute
+
+    return execute(options)
+
+
+@app.command()
+def doctor(options: Annotated[DoctorOptions, Parameter(name="*")] = _DEFAULT_DOCTOR_OPTIONS) -> int:
+    from arena.cli.doctor import execute
+
+    return execute(options)
+
+
+@app.command()
+def smoke(*rows: str) -> int:
+    from arena.cli.smoke import execute
+
+    return execute(list(rows))
+
+
+graph_app = App(name="graph", help="Export graph data.")
+app.command(graph_app)
+
+
+@graph_app.command(name="export")
+def graph_export(run_id: str, output: Path | None = None) -> int:
+    from arena.cli.graph import execute
+
+    return execute(run_id, output)
+
+
+lean_app = App(name="lean", help="Manage Lean sessions.")
+app.command(lean_app)
+
+
+@lean_app.command(name="serve")
+def serve_lean(run_dir: Path, parent_pid: int | None = None, max_slots: int = 4) -> int:
+    from arena.cli.lean import serve
+
+    return serve(run_dir, parent_pid, max_slots)
+
+
+@lean_app.command()
+def health(run: str, json_output: Annotated[bool, Parameter(name="json")] = False) -> int:
+    from arena.cli.lean import health as show_health
+
+    return show_health(run, json_output)
+
+
+@lean_app.command(name="load-test")
+def load_test(
+    options: Annotated[LeanLoadOptions, Parameter(name="*")] = _DEFAULT_LEAN_LOAD_OPTIONS,
+) -> int:
+    from arena.cli.lean_load import cli_execute
+
+    return cli_execute(options)
 
 
 def main() -> None:

@@ -1,3 +1,4 @@
+import importlib
 import json
 import os
 import shutil
@@ -13,7 +14,8 @@ from arena.engine import ROOT
 from arena.traces import PATCH_SHA256
 from tests.pi_support import FAKE, NAME, PI_AVAILABLE
 from tests.slow import slow
-from tools import run_experiment_matrix as matrix
+
+matrix = importlib.import_module("arena.cli.experiment")
 
 
 class PlanTests(unittest.TestCase):
@@ -111,7 +113,9 @@ class MatrixRunTests(unittest.TestCase):
             proc = subprocess.run(
                 [
                     sys.executable,
-                    "tools/run_experiment_matrix.py",
+                    "-m",
+                    "arena.cli",
+                    "experiment",
                     "--theorem",
                     NAME,
                     "--prefix",
@@ -149,7 +153,9 @@ class MatrixRunTests(unittest.TestCase):
             clash = subprocess.run(
                 [
                     sys.executable,
-                    "tools/run_experiment_matrix.py",
+                    "-m",
+                    "arena.cli",
+                    "experiment",
                     "--theorem",
                     NAME,
                     "--prefix",

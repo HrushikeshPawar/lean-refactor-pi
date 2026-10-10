@@ -1,6 +1,8 @@
+import io
 import os
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -22,11 +24,70 @@ class LoadEnvTests(unittest.TestCase):
         self.assertEqual(load_env(Path("/nonexistent/.env")), [])
 
 
-class PassThroughTests(unittest.TestCase):
-    def test_tool_usage_errors_become_a_nonzero_exit_code(self):
-        with patch("sys.stderr"):
-            self.assertNotEqual(app(["eval"]), 0)  # arena_eval requires a name and a proof file
+class CommandTreeTests(unittest.TestCase):
+    def test_required_eval_arguments_are_enforced(self):
+        with patch("sys.stderr"), self.assertRaises(SystemExit) as result:
+            app(["eval"])
+        self.assertNotEqual(result.exception.code, 0)
 
-    def test_tool_help_exits_zero(self):
-        with patch("sys.stdout"):
-            self.assertEqual(app(["eval", "--help"]), 0)
+    def test_every_public_command_has_help(self):
+        commands = [
+            [name, "--help"]
+            for name in (
+                "run",
+                "campaign",
+                "certify",
+                "check",
+                "eval",
+                "merge",
+                "package",
+                "preflight",
+                "serve",
+                "provision",
+                "experiment",
+                "doctor",
+                "smoke",
+            )
+        ] + [["graph", "export", "--help"]]
+        commands.extend([["lean", name, "--help"] for name in ("serve", "health", "load-test")])
+        commands.append(["protocol", "--help"])
+        for command in commands:
+            with self.subTest(command=command), patch("sys.stdout", io.StringIO()), patch("sys.stderr", io.StringIO()):
+                self.assertIn(app(command), (0, None))
+
+    def test_campaign_dry_run_uses_module_command_without_creating_runs(self):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            status = app(
+                [
+                    "campaign",
+                    "--prefix",
+                    "t",
+                    "--rows",
+                    "Core.InitsUpdatesComm",
+                    "--models",
+                    "deepseek-v4.1-flash",
+                    "--dry-run",
+                ]
+            )
+        self.assertEqual(status, 0)
+        self.assertIn("arena run --model", output.getvalue())
+        self.assertFalse(any(Path("runs/pi-budget").glob("t-Core.InitsUpdatesComm-*")))
+
+    def test_campaign_dynamic_model_error_names_the_model(self):
+        output = io.StringIO()
+        with redirect_stdout(output), patch("sys.stderr", output):
+            status = app(
+                [
+                    "campaign",
+                    "--prefix",
+                    "t",
+                    "--rows",
+                    "Core.InitsUpdatesComm",
+                    "--models",
+                    "no-such-model",
+                    "--dry-run",
+                ]
+            )
+        self.assertEqual(status, 2)
+        self.assertIn("no-such-model", output.getvalue())

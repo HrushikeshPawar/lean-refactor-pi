@@ -5,7 +5,7 @@ Each row gets one certified kickoff packet shared by all its runs. Nothing is sp
 passing Langfuse preflight receipt covers every model (run here, or a fresh one) and every row's
 packet certifies with its mandatory sections. `--dry-run` prints the plan and worst-case cost.
 
-    python tools/run_campaign.py --prefix v6c1 --rows Core.InitsUpdatesComm,fundamental_theorem_of_variational_calculus' \\
+    python arena campaign --prefix v6c1 --rows Core.InitsUpdatesComm,fundamental_theorem_of_variational_calculus' \\
         --models deepseek-v4.1-flash --limit-usd 0.10 --replicates 1
 
 `--preset v6-matrix` is the standing comparison: the configured models x the Core and PhysLib rows x 3 replicates at the preset's spend limit.
@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import statistics
@@ -29,12 +30,15 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from tools.run_pi_budgeted import CONFIG, MODELS, THINKING_LEVELS
+from rich.console import Console
+from rich.table import Table
 
-ROOT = Path(__file__).resolve().parents[1]
+from arena.cli.run import CONFIG, MODELS, THINKING_LEVELS
+from arena.engine import ROOT
+
 RUNS = ROOT / "runs" / "pi-budget"
 RECEIPT_MAX_AGE_HOURS = 12.0
 # Named campaign configurations (models.yaml); explicit --rows/--models/--replicates/--limit-usd override a preset's values.
@@ -85,7 +89,9 @@ def worst_case_usd(specs: list[dict], limit: float) -> float:
 def command(spec: dict, limit: float, thinking: str, passthrough: list[str]) -> list[str]:
     return [
         sys.executable,
-        str(ROOT / "tools/run_pi_budgeted.py"),
+        "-m",
+        "arena.cli",
+        "run",
         "--model",
         spec["model"],
         "--theorem",
@@ -154,7 +160,7 @@ def check_preflight(
 
         def run_fn(models: list[str]) -> int:
             return subprocess.run(
-                [sys.executable, str(ROOT / "tools/arena_preflight.py"), "--models", ",".join(models)], cwd=ROOT
+                [sys.executable, "-m", "arena.cli", "preflight", "--models", ",".join(models)], cwd=ROOT
             ).returncode
 
     code = run_fn(models)
@@ -221,11 +227,15 @@ def run_row(
     }
 
 
-def _stats(values: list[float]) -> dict | None:
-    values = [value for value in values if value is not None]
-    if not values:
+def _stats(values: list[float | int | None]) -> dict | None:
+    numeric: list[float] = []
+    # The explicit narrowing loop keeps `None` out of the numeric collection for ty.
+    for value in values:
+        if value is not None:
+            numeric.append(float(value))  # noqa: PERF401
+    if not numeric:
         return None
-    return {"min": min(values), "median": statistics.median(values), "max": max(values)}
+    return {"min": min(numeric), "median": statistics.median(numeric), "max": max(numeric)}
 
 
 def aggregate(runs: list[dict], expected: dict[str, str]) -> dict:
@@ -261,7 +271,7 @@ def aggregate(runs: list[dict], expected: dict[str, str]) -> dict:
                 "cache_reuse_pct": _stats([item["cache_reuse_pct"] for item in items]),
                 "bookkeeping_and_rejected_pct": _stats([item["bookkeeping_and_rejected_pct"] for item in items]),
                 "spent_usd": {
-                    **_stats([item["spent_usd"] or 0 for item in items]),
+                    **(_stats([item["spent_usd"] or 0 for item in items]) or {}),
                     "total": round(sum(item["spent_usd"] or 0 for item in items), 6),
                 },
                 "stop_reasons": {
@@ -367,8 +377,9 @@ def recorded_pids(directory: Path) -> tuple[list[int], list[int]]:
     for key, bucket in (("pid", pids), ("pids", pids), ("pgids", pgids)):
         value = info.get(key)
         for item in value if isinstance(value, list) else [value]:
-            with suppress(TypeError, ValueError):
-                bucket.append(int(item))
+            if item is not None:
+                with suppress(TypeError, ValueError):
+                    bucket.append(int(item))
     return sorted(set(pids)), sorted(set(pgids))
 
 
@@ -556,8 +567,9 @@ def execute(
 
 
 def main(argv: list[str] | None = None) -> int:
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(line_buffering=True)  # progress reaches a redirected log as it happens
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if callable(reconfigure):
+        reconfigure(line_buffering=True)  # progress reaches a redirected log as it happens
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--prefix", required=True)
     parser.add_argument("--preset", choices=sorted(PRESETS), help="Start from a named configuration")
@@ -589,6 +601,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--skip-preflight", action="store_true", help="Explicitly skip the Langfuse preflight gate")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--json", action="store_true", help="Print the campaign report as JSON")
     args, passthrough = parser.parse_known_args(argv)
     passthrough = [item for item in passthrough if item != "--"]
     preset = PRESETS[args.preset] if args.preset else {}
@@ -612,7 +625,8 @@ def main(argv: list[str] | None = None) -> int:
         f"limit ${args.limit_usd:g} each; planned spend ${worst_case_usd(specs, args.limit_usd):.2f}"
     )
     for spec in specs:
-        print(" ", " ".join(command(spec, args.limit_usd, args.thinking, passthrough)[1:]))
+        planned = command(spec, args.limit_usd, args.thinking, passthrough)
+        print("  arena run " + shlex.join(planned[4:]))
     if args.dry_run:
         return 0
     clashes = [spec["run_id"] for spec in specs if (RUNS / spec["run_id"]).exists()]
@@ -652,7 +666,24 @@ def main(argv: list[str] | None = None) -> int:
     (out / "campaign.json").write_text(json.dumps(report, indent=2) + "\n")
     text = render(report)
     (out / "campaign.txt").write_text(text)
-    print(text, end="")
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False))
+    else:
+        table = Table(title=f"Campaign {args.prefix}")
+        table.add_column("Row")
+        table.add_column("Model")
+        table.add_column("Runs")
+        table.add_column("Verified")
+        table.add_column("Spend")
+        for group in report["groups"]:
+            table.add_row(
+                group["row"],
+                group["model"],
+                str(group["replicates"]),
+                str(group["verified_runs"]),
+                f"${group['spent_usd']['total']:.4f}",
+            )
+        Console().print(table)
     if not report["identical_packets"]:
         print("Packets differ between runs; the comparison is not valid.", file=sys.stderr)
         return 1
@@ -661,3 +692,38 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+@dataclass(frozen=True)
+class CampaignOptions:
+    prefix: str
+    preset: str | None = None
+    rows: str | None = None
+    models: str | None = None
+    replicates: int | None = None
+    limit_usd: float | None = None
+    jobs: int | None = None
+    thinking: str = CONFIG["thinking"]["default"]
+    min_free_gb: float = MIN_FREE_GB
+    cleanup_wait: float = CLEANUP_WAIT_S
+    skip_preflight: bool = False
+    dry_run: bool = False
+    json: bool = False
+
+
+def cli_execute(options: CampaignOptions, passthrough: tuple[str, ...] = ()) -> int:
+    """Execute a typed campaign request, preserving extra run options after ``--``."""
+    tokens = []
+    for name, value in asdict(options).items():
+        flag = "--" + name.replace("_", "-")
+        if isinstance(value, bool):
+            if value:
+                tokens.append(flag)
+        elif value is not None:
+            tokens.extend((flag, str(value)))
+    if passthrough:
+        tokens.extend(("--", *passthrough))
+    try:
+        return main(tokens)
+    except SystemExit as error:
+        return error.code if isinstance(error.code, int) else 1

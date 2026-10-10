@@ -4,7 +4,7 @@
 Every run gets the same theorem, packet, limit and options except the factor under test, so
 differences in the report are attributable to that factor. Use a small limit ($0.10-$0.20).
 
-    python tools/run_experiment_matrix.py --theorem Core.InitsUpdatesComm --prefix think-ab \\
+    python -m arena.cli experiment --theorem Core.InitsUpdatesComm --prefix think-ab \\
         --factor thinking --values medium,high --model deepseek-v4.1-flash --limit-usd 0.1
 
 Arguments after `--` are passed to every run (for example `--no-mcp`).
@@ -18,15 +18,15 @@ import re
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from arena.campaign import packet, run_dir
+from arena.cli.run import MODELS, THINKING_LEVELS
+from arena.engine import ROOT
 from arena.summary import build_summary
 from arena.traces import preflight_block
-from tools.run_pi_budgeted import MODELS, THINKING_LEVELS
 
-ROOT = Path(__file__).resolve().parents[1]
 FACTORS = ("model", "thinking", "skill")
 PER_RUN_GB = 4.5  # Pi, the Lean MCP server, and one Lean process in each of the model and background lanes
 
@@ -70,7 +70,9 @@ def plan(factor: str, values: list[str], model: str, thinking: str, prefix: str)
 def command(spec: dict, theorem: str, limit: float, passthrough: list[str]) -> list[str]:
     return [
         sys.executable,
-        str(ROOT / "tools/run_pi_budgeted.py"),
+        "-m",
+        "arena.cli",
+        "run",
         "--model",
         spec["model"],
         "--theorem",
@@ -104,7 +106,10 @@ def compare(rows: list[dict], expected_packet: str) -> dict:
     for row in rows:
         summary = row["summary"] or {}
         cost, best = summary.get("cost", {}), (summary.get("progress", {}) or {}).get("best", {})
-        pick = lambda key: (best.get(key) or {}).get("value")  # noqa: E731
+
+        def pick(key: str, best: dict = best):
+            return (best.get(key) or {}).get("value")
+
         coherent = (summary.get("progress", {}) or {}).get("best_verified_candidate")
         table.append(
             {
@@ -138,20 +143,44 @@ def compare(rows: list[dict], expected_packet: str) -> dict:
 def render(report: dict, factor: str) -> str:
     lines = [f"factor: {factor}; identical packets: {report['identical_packets']}"]
     for row in report["runs"]:
-        lines.append(
-            f"{row[factor]:>10}  ${row['spent_usd'] or 0:.4f}  req {row['requests']}  eval {row['evaluations']}  "
-            f"tool results {row['tool_results']}  retries {row['retries']}  "
-            f"best {row['best_candidate'] or 'none'}  "
-            f"tokens {row['best_tokens']}  hb {row['best_heartbeats']}  proxy {row['best_proxy']}/"
-            f"{row['best_estimated_proxy']}  overhead {row['bookkeeping_and_rejected_pct']}%  "
-            f"cache {row['cache_reuse_pct']}%  post-best ${row['spent_after_best_usd']} "
-            f"({row['requests_after_best']} req)  zero-attempt ideas {row['ideas_without_attempts']}  "
-            f"stop {row['stop_reason']}"
+        lines.extend(
+            [
+                f"{row[factor]:>10}  ${row['spent_usd'] or 0:.4f}  req {row['requests']}  eval {row['evaluations']}  "
+                f"tool results {row['tool_results']}  retries {row['retries']}  "
+                f"best {row['best_candidate'] or 'none'}  "
+                f"tokens {row['best_tokens']}  hb {row['best_heartbeats']}  proxy {row['best_proxy']}/"
+                f"{row['best_estimated_proxy']}  overhead {row['bookkeeping_and_rejected_pct']}%  "
+                f"cache {row['cache_reuse_pct']}%  post-best ${row['spent_after_best_usd']} "
+                f"({row['requests_after_best']} req)  zero-attempt ideas {row['ideas_without_attempts']}  "
+                f"stop {row['stop_reason']}"
+            ]
         )
     return "\n".join(lines) + "\n"
 
 
-def main() -> int:
+@dataclass(frozen=True)
+class ExperimentOptions:
+    theorem: str
+    prefix: str
+    factor: str
+    values: str
+    model: str = "deepseek-v4.1-flash"
+    thinking: str = "high"
+    limit_usd: float = 0.5
+    parallel: str = "1"
+    dry_run: bool = False
+
+
+def cli_execute(options: ExperimentOptions, passthrough: tuple[str, ...] = ()) -> int:
+    from arena.cli._args import option_tokens
+
+    try:
+        return main([*option_tokens(options), *(["--", *passthrough] if passthrough else [])])
+    except SystemExit as error:
+        return error.code if isinstance(error.code, int) else 1
+
+
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--theorem", required=True)
     parser.add_argument("--prefix", required=True, help="Run IDs are <prefix>-<factor>-<value>")
@@ -169,7 +198,7 @@ def main() -> int:
     )
     parser.add_argument("--parallel", default="1", help="Runs at once: an integer or 'auto' (by free RAM)")
     parser.add_argument("--dry-run", action="store_true")
-    args, passthrough = parser.parse_known_args()
+    args, passthrough = parser.parse_known_args(argv)
     passthrough = [item for item in passthrough if item != "--"]
     if not 0 < args.limit_usd <= 2:
         parser.error("--limit-usd must be above 0 and at most 2.00")

@@ -7,16 +7,16 @@ belongs to a later ticket, so the harmless model-visible tool is the skill listi
 
 from __future__ import annotations
 
-import argparse
+import json
 import subprocess
 import sys
 import time
 import uuid
 from datetime import UTC, datetime
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from arena.campaign import run_dir
+from arena.cli.run import MODELS
+from arena.engine import ROOT
 from arena.traces import (
     PATCH_SHA256,
     list_observations,
@@ -25,20 +25,14 @@ from arena.traces import (
     read_journal,
     write_receipt,
 )
-from tools.run_pi_budgeted import MODELS
-
-ROOT = Path(__file__).resolve().parents[1]
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--theorem", default="Core.InitsUpdatesComm")
-    parser.add_argument("--models", default=",".join(MODELS), help="Comma-separated Arena models")
-    args = parser.parse_args()
-    models = [item.strip() for item in args.models.split(",") if item.strip()]
+def execute(theorem: str = "Core.InitsUpdatesComm", models_csv: str | None = None, json_output: bool = False) -> int:
+    models = [item.strip() for item in (models_csv or ",".join(MODELS)).split(",") if item.strip()]
     unknown = [model for model in models if model not in MODELS]
     if unknown or len(models) != len(set(models)):
-        parser.error(f"models must be distinct members of {', '.join(MODELS)}")
+        print(f"error: models must be distinct members of {', '.join(MODELS)}", file=sys.stderr)
+        return 2
     problems = plugin_problems()
     if problems:
         print("\n".join(problems), file=sys.stderr)
@@ -52,11 +46,13 @@ def main() -> int:
         proc = subprocess.run(
             [
                 sys.executable,
-                str(ROOT / "tools/run_pi_budgeted.py"),
+                "-m",
+                "arena.cli",
+                "run",
                 "--model",
                 model,
                 "--theorem",
-                args.theorem,
+                theorem,
                 "--run-id",
                 run_id,
                 "--limit-usd",
@@ -75,10 +71,11 @@ def main() -> int:
         journal_path = directory / "trace-journal.jsonl"
         journal = read_journal(journal_path)
         observations, problems = _wait(run_id, started, journal)
-        trace_ids = sorted({row.get("traceId") for row in observations if row.get("traceId")})
-        print(
-            f"{model} session={run_id} exit={proc.returncode} observations={len(observations)} traces={','.join(trace_ids)}"
-        )
+        trace_ids = sorted({trace_id for row in observations if isinstance((trace_id := row.get("traceId")), str)})
+        if not json_output:
+            print(
+                f"{model} session={run_id} exit={proc.returncode} observations={len(observations)} traces={','.join(trace_ids)}"
+            )
         if proc.returncode != 0 or problems:
             failed = True
             print(proc.stderr[-1500:], file=sys.stderr)
@@ -98,10 +95,14 @@ def main() -> int:
         "models": covered,
     }
     write_receipt(receipt)
+    if json_output:
+        print(json.dumps(receipt, ensure_ascii=False))
     if receipt["status"] != "pass":
-        print("preflight failed", file=sys.stderr)
+        if not json_output:
+            print("preflight failed", file=sys.stderr)
         return 1
-    print(f"preflight passed for {', '.join(models)}")
+    if not json_output:
+        print(f"preflight passed for {', '.join(models)}")
     return 0
 
 
@@ -123,7 +124,3 @@ def _wait(run_id: str, started: datetime, journal: list[dict]) -> tuple[list[dic
             return observations, problems
         time.sleep(2)
     return observations, problems
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

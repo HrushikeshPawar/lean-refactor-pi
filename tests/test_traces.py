@@ -280,7 +280,9 @@ class MatrixGateTests(unittest.TestCase):
         proc = subprocess.run(
             [
                 sys.executable,
-                "tools/run_experiment_matrix.py",
+                "-m",
+                "arena.cli",
+                "experiment",
                 "--theorem",
                 NAME,
                 "--prefix",
@@ -310,7 +312,9 @@ class MatrixGateTests(unittest.TestCase):
         proc = subprocess.run(
             [
                 sys.executable,
-                "tools/run_experiment_matrix.py",
+                "-m",
+                "arena.cli",
+                "experiment",
                 "--theorem",
                 NAME,
                 "--prefix",

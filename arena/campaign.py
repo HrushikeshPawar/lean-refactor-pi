@@ -2689,7 +2689,7 @@ def write_state(run_id: str) -> None:
     temporary.replace(target)
 
 
-COLD_TOLERANCE = 0.05  # same drift tolerance as tools/arena_certify.py
+COLD_TOLERANCE = 0.05  # same drift tolerance as arena certify
 
 
 def _used_session(row: dict) -> bool:

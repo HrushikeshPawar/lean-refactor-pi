@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import math
@@ -14,15 +15,14 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import contextlib
 
 from arena import lean_health, lean_session
 from arena import models as model_config
 from arena.campaign import autocheck, init, packet, run_dir, submission, write_state
+from arena.engine import ROOT
 from arena.provenance import code_version
 from arena.skill import SKILL_DIR, skill_hash, skill_prompt
 from arena.summary import configured_cap, cost_report_from_ledger, render_text, write_summary
@@ -37,7 +37,6 @@ SYSTEM_PROMPT = (
 )
 
 
-ROOT = Path(__file__).resolve().parents[1]
 # Every per-model fact (prices, windows, output limits, compaction, timeout, thinking levels) lives in models.yaml.
 CONFIG = model_config.load()
 MODELS = model_config.models()
@@ -219,78 +218,48 @@ def stop_lean_session() -> None:
         pass
 
 
-def main() -> int:
+@dataclass(frozen=True)
+class RunOptions:
+    model: str
+    theorem: str
+    run_id: str
+    prompt_file: Path | None = None
+    limit_usd: float = DEFAULT_LIMIT_USD
+    thinking: str = CONFIG["thinking"]["default"]
+    compact_at_tokens: int | None = None
+    compact_keep_tokens: int | None = None
+    merge_worker: bool = False
+    no_lean_session: bool = False
+    no_skill: bool = False
+    no_mcp: bool = False
+    preflight: bool = False
+    no_langfuse: bool = False
+    test_extension: list[Path] = field(default_factory=list)
+    resume_run: bool = False
+    dry_run: bool = False
+
+
+def execute(options: RunOptions) -> int:
     try:
-        return run()
+        return run(options)
     finally:
         stop_lean_session()
 
 
-def run() -> int:
+def run(options: RunOptions) -> int:
     global _request_count, _tool_result_count, _retry_count
     _tool_started.clear()
     _request_count = _tool_result_count = _retry_count = 0
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", required=True, choices=MODELS)
-    parser.add_argument("--theorem", required=True)
-    parser.add_argument("--prompt-file", type=Path, help="Optional extra instructions appended after the source packet")
-    parser.add_argument("--run-id", required=True)
-    parser.add_argument(
-        "--limit-usd",
-        type=float,
-        default=DEFAULT_LIMIT_USD,
-        help=f"Spend limit in USD, above 0 and at most {MAX_LIMIT_USD:g} (default {DEFAULT_LIMIT_USD:g}). Each call's actual "
-        "cost is added after the call; the run stops once the total reaches the limit, so the last call may overshoot it",
-    )
-    parser.add_argument(
-        "--thinking",
-        choices=THINKING_LEVELS,
-        default=CONFIG["thinking"]["default"],
-        help="Reasoning level, recorded in run-config.json (default: high)",
-    )
-    parser.add_argument(
-        "--compact-at-tokens",
-        type=int,
-        help="Context size above which Pi compacts older turns; below it history is never rewritten "
-        "(default: the model's value in models.yaml)",
-    )
-    parser.add_argument(
-        "--compact-keep-tokens",
-        type=int,
-        help="Recent tokens kept verbatim when compaction runs (default: the model's value in models.yaml)",
-    )
-    parser.add_argument(
-        "--merge-worker",
-        action="store_true",
-        help="Run the deterministic merge worker beside the model (off by default: it competes for Lean CPU)",
-    )
-    parser.add_argument(
-        "--no-lean-session",
-        action="store_true",
-        help="Compile every Lean call cold instead of through the run's persistent Lean session",
-    )
-    parser.add_argument("--no-skill", action="store_true", help="Run without the Arena Lean skill (A/B factor)")
-    parser.add_argument("--no-mcp", action="store_true", help="Do not load the Lean MCP server (offline tests)")
-    parser.add_argument(
-        "--preflight",
-        action="store_true",
-        help="Send a short skill-read prompt instead of the theorem packet (cheap trace check)",
-    )
-    parser.add_argument(
-        "--no-langfuse",
-        action="store_true",
-        help="Do not load the Langfuse plugin (offline tests only; requires --test-extension)",
-    )
-    parser.add_argument(
-        "--test-extension",
-        action="append",
-        default=[],
-        type=Path,
-        help="Extra Pi extension, used only to load the offline fake provider in tests",
-    )
-    parser.add_argument("--resume-run", action="store_true", help="Resume the exact Pi session and cost ledger")
-    parser.add_argument("--dry-run", action="store_true", help="Validate setup without launching Pi")
-    args = parser.parse_args()
+    args = argparse.Namespace(**asdict(options))
+    if args.model not in MODELS:
+        print(f"error: unknown model {args.model!r}; choose from {', '.join(MODELS)}", file=sys.stderr)
+        return 2
+    if args.thinking not in THINKING_LEVELS:
+        print(
+            f"error: unknown thinking level {args.thinking!r}; choose from {', '.join(THINKING_LEVELS)}",
+            file=sys.stderr,
+        )
+        return 2
 
     compaction = CONFIG["models"][args.model]["compaction"]
     if args.compact_at_tokens is None:
@@ -298,18 +267,22 @@ def run() -> int:
     if args.compact_keep_tokens is None:
         args.compact_keep_tokens = compaction["keep_recent_tokens"]
     if not math.isfinite(args.limit_usd) or not 0 < args.limit_usd <= MAX_LIMIT_USD:
-        parser.error(f"--limit-usd must be above 0 and at most {MAX_LIMIT_USD:g}")
+        print(f"error: --limit-usd must be above 0 and at most {MAX_LIMIT_USD:g}", file=sys.stderr)
+        return 2
 
     if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?", args.run_id):
-        parser.error("--run-id must be a Pi-compatible session ID")
+        print("error: --run-id must be a Pi-compatible session ID", file=sys.stderr)
+        return 2
     rows = (json.loads(line) for line in (ROOT / "benchmark/original/warmup.jsonl").read_text().splitlines())
     if args.theorem not in {row["name"] for row in rows}:
-        parser.error(f"unknown warm-up theorem: {args.theorem}")
+        print(f"error: unknown warm-up theorem: {args.theorem}", file=sys.stderr)
+        return 2
     extra = args.prompt_file.read_text().strip() if args.prompt_file else ""
 
     directory = run_dir(args.run_id)
     if directory.exists() != args.resume_run:
-        parser.error("--resume-run must be used exactly when the run ID already exists")
+        print("error: --resume-run must be used exactly when the run ID already exists", file=sys.stderr)
+        return 2
     if not args.dry_run and not args.no_lean_session:
         start_lean_session(directory, os.getpid())
     if args.resume_run:
@@ -319,11 +292,13 @@ def run() -> int:
             args.model,
             args.limit_usd,
         ):
-            parser.error("resume theorem, model, or limit differs from the original run")
+            print("error: resume theorem, model, or limit differs from the original run", file=sys.stderr)
+            return 2
         if config.get("thinking") not in (None, args.thinking) or (
             config.get("skill") and config["skill"]["sha256"] != (None if args.no_skill else skill_hash())
         ):
-            parser.error("resume thinking level or skill differs from the original run")
+            print("error: resume thinking level or skill differs from the original run", file=sys.stderr)
+            return 2
         prompt = "Resume the existing Arena run from its recorded candidate frontier. Continue improving the proof."
     else:
         prompt = (
@@ -332,7 +307,8 @@ def run() -> int:
             else packet(args.theorem) + ("\nAdditional instructions:\n" + extra + "\n" if extra else "")
         )
     if args.no_langfuse and not args.test_extension:
-        parser.error("--no-langfuse is only for offline runs with --test-extension")
+        print("error: --no-langfuse is only for offline runs with --test-extension", file=sys.stderr)
+        return 2
     plugin = None if args.no_langfuse else langfuse_extension()
     command = [
         "pi",
@@ -434,7 +410,7 @@ def run() -> int:
         worker_command = [
             sys.executable,
             "-m",
-            "tools.arena_merge_worker",
+            "arena.cli.merge",
             args.run_id,
             "--parent-pid",
             str(os.getpid()),
@@ -457,10 +433,10 @@ def run() -> int:
     )
     status_path = directory / "merge-worker.json"
     for _ in range(30 if worker else 0):
-        if worker.poll() is not None:
+        if worker is not None and worker.poll() is not None:
             print("Merge worker exited before Pi started; inspect merge-worker.log", file=sys.stderr)
             return 1
-        if status_path.exists() and json.loads(status_path.read_text()).get("pid") == worker.pid:
+        if worker is not None and status_path.exists() and json.loads(status_path.read_text()).get("pid") == worker.pid:
             break
         time.sleep(0.1)
     else:
@@ -705,7 +681,3 @@ def finish(
         print("Pi ended with a model error or abort; inspect events.jsonl", file=sys.stderr)
         return 1
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

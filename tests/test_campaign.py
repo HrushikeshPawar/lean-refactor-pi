@@ -1,6 +1,7 @@
 """Offline tests for the campaign driver and comparison report: no Pi, Lean or network."""
 
 import contextlib
+import importlib
 import io
 import json
 import tempfile
@@ -9,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from tools import run_campaign as rc
+rc = importlib.import_module("arena.cli.campaigns")
 
 
 def fixture_summary(proxy, spent=0.05, stop="model_stopped", errors=0, ideas=0, cache=80.0, overhead=10.0):

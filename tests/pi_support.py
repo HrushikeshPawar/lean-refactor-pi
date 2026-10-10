@@ -47,7 +47,9 @@ class FakeRun:
         self.log = self.work / "requests.jsonl"
         self.command = [
             sys.executable,
-            "tools/run_pi_budgeted.py",
+            "-m",
+            "arena.cli",
+            "run",
             "--model",
             model,
             "--theorem",
