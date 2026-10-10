@@ -12,7 +12,7 @@ lint are ticket 05b.
 
 **Blocked by:** 04: Move the remaining tools into the CLI; arena doctor (this ticket edits `arena/cli/run.py` and adds a sub-app to `arena/cli/__init__.py`).
 
-**Status:** ready-for-agent
+**Status:** done
 
 **Branch:** `v7/05a-agent-text` (stacked on `v7/04-cli-tools`)
 
