@@ -10,7 +10,7 @@ newest listed toolchain (D31), proved over all 15 benchmark rows. A test that re
 
 **Blocked by:** 02: Actual-cost stop; 04: Move the remaining tools into the CLI (`arena/cli/run.py`, `campaigns.py`); 05b: Agent text: campaign/engine/TS messages moved verbatim, literal lint (`agent-text/messages/errors.yaml` and the lint that new text must satisfy; `text.ts` and the renderer come from 05a, below 05b).
 
-**Status:** ready-for-agent
+**Status:** done
 
 **Branch:** `v7/06-run-fixes` (stacked on `v7/05b-agent-messages`)
 
