@@ -17,6 +17,7 @@ from arena.cli.lean_load import LeanLoadOptions
 from arena.cli.protocol import ProtocolOptions
 from arena.cli.provision import ProvisionOptions
 from arena.cli.run import RunOptions
+from arena.cli.text import app as text_app
 
 ROOT = Path(__file__).resolve().parents[2]
 app = App(name="arena", help="Lean Refactor Arena harness.", result_action="return_value")
@@ -192,6 +193,8 @@ def graph_export(run_id: str, output: Path | None = None) -> int:
 
 lean_app = App(name="lean", help="Manage Lean sessions.")
 app.command(lean_app)
+
+app.command(text_app)
 
 
 @lean_app.command(name="serve")

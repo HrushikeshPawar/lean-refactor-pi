@@ -319,23 +319,23 @@ class RankingTests(unittest.TestCase):
         self.assertTrue(lines[0].startswith("line "))
         self.assertIn("[decl:N.", lines[0])
         self.assertLess(
-            next(i for i, l in enumerate(lines) if "decl:N.far_rw " in l),
-            next(i for i, l in enumerate(lines) if "decl:N.near " in l),
+            next(i for i, line in enumerate(lines) if "decl:N.far_rw " in line),
+            next(i for i, line in enumerate(lines) if "decl:N.near " in line),
         )
         context.LIMITS["earlier_budget"], saved = 300, context.LIMITS["earlier_budget"]
         try:
             short = context._earlier_section(self.inventory())
         finally:
             context.LIMITS["earlier_budget"] = saved
-        self.assertLessEqual(sum(len(l) + 1 for l in short), 300)
+        self.assertLessEqual(sum(len(line) + 1 for line in short), 300)
         self.assertEqual(short, lines[: len(short)])
 
     def test_zero_relevance_filler_is_capped_and_empty_context_is_safe(self):
         lines = context._earlier_section(self.inventory())
         self.assertLessEqual(
             sum(
-                "mentions" not in l and "concludes" not in l and "rw-ready" not in l and "related" not in l
-                for l in lines
+                "mentions" not in line and "concludes" not in line and "rw-ready" not in line and "related" not in line
+                for line in lines
             ),
             5,
         )
@@ -703,9 +703,9 @@ class RouteRuleAgreementTests(unittest.TestCase):
 
     def test_packet_tool_description_and_skill_state_the_same_route_rule(self):
         sources = {
-            "packet": ROOT / "arena" / "context.py",
+            "packet": ROOT / "agent-text" / "packet" / "task.md",
             "tool": ROOT / "packages" / "arena-pi" / "extensions" / "arena.ts",
-            "skill": ROOT / "packages" / "arena-pi" / "skills" / "arena-lean" / "SKILL.md",
+            "skill": ROOT / "agent-text" / "skill" / "SKILL.md",
         }
         for label, path in sources.items():
             text = " ".join(path.read_text(encoding="utf-8").split())

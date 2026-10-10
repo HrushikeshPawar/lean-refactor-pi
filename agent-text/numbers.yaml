@@ -1,0 +1,7 @@
+finish_remaining_pct: 10
+original_candidate: 1
+max_ideas: 8
+max_failures: 3
+max_drafts: 4
+source_lines_per_call: 400
+find_files_per_query: 30

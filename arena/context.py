@@ -19,6 +19,8 @@ from pathlib import Path
 from arena.engine import ROOT, candidate_file, is_standalone, measure_version, problem, run_lean, versions
 from arena.profile import MAX_DEPTH, heartbeat_floor, profile
 from arena.scoring import exchange_rates
+from arena.text import render as render_text
+from arena.text import template
 
 LEAN_FILE = Path(__file__).with_name("lean") / "context.lean"
 _RECORD = re.compile(r"^ARENA_CTX (\{.*\})$", re.M)
@@ -42,10 +44,10 @@ LIMITS = {
     "library_chars": 340,
 }
 REQUIRED_SECTIONS = (
-    "Pinned environment and candidate",
-    "Source-named declarations",
-    "Elaborated proof dependencies",
-    "Reference proof",
+    template("packet/sections.required.environment").strip(),
+    template("packet/sections.required.source").strip(),
+    template("packet/sections.required.dependencies").strip(),
+    template("packet/sections.required.reference").strip(),
 )
 
 
@@ -242,29 +244,26 @@ def _one_line(text: str) -> str:
     return " ".join(text.split())
 
 
-SCORING_FACTS = (
-    "Scoring facts. Proxy = (token_reduction% + heartbeat_reduction% + compatibility%) / 3, where "
-    "token_reduction% = (reference_tokens - tokens) / reference_tokens * 100, heartbeat_reduction% = "
-    "(reference_heartbeats - heartbeats) / reference_heartbeats * 100 (heartbeats in `maxHeartbeats` units, "
-    "measured with `maxHeartbeats 0`) and compatibility% = versions that compile / versions listed * 100; "
-    "a proof that does not compile scores 0 on all three. Tokens are counted by the harness's pinned counter "
-    "on the text after the statement's `:=`, with comments and attributes removed: each run of letters, digits, "
-    "`.`, `_`, `'` is one token whatever its length, every other non-space character is one token (so `⟨a, b⟩` "
-    "is 5), except the operators `:= != && -. -> ← .. ... :: :> <;> ;; == || => <= >= ⁻¹ ?_`, which count once. "
-    "Spaces and line breaks are free; a tab counts as a token. `_` can replace any argument or term Lean infers; "
-    "restating it, such as a lambda, costs tokens."
-)
+SCORING_FACTS = template("packet/scoring").strip()
 
 
 def _rates(name: str, total_versions: int) -> str:
     rates = exchange_rates(name, total_versions)
-    return (
-        f"Exchange rates for this problem (score points): 1 token = {rates['points_per_token']} pt "
-        f"(about {rates['heartbeats_per_token']} heartbeats); 100 heartbeats = "
-        f"{rates['points_per_100_heartbeats']} pt; one lost toolchain version = "
-        f"{rates['points_per_lost_version']} pt (about {rates['tokens_per_lost_version']} tokens). "
-        f"Reference: {rates['reference_tokens']} tokens, {rates['reference_heartbeats']} heartbeats."
-    )
+    return render_text(
+        "packet/rates",
+        **{
+            key: rates[key]
+            for key in (
+                "points_per_token",
+                "heartbeats_per_token",
+                "points_per_100_heartbeats",
+                "points_per_lost_version",
+                "tokens_per_lost_version",
+                "reference_tokens",
+                "reference_heartbeats",
+            )
+        },
+    ).strip()
 
 
 _SCOPE = re.compile(
@@ -327,7 +326,11 @@ def scope_lines(source: str) -> list[str]:
     if tail and _SCOPE.match(tail[-1]) and tail[-1].rstrip().endswith(" in"):
         active.append((len(stack), tail[-1].rstrip()))
     namespace = ".".join(name for kind, name in stack if kind == "namespace" and name)
-    body = [f"namespace {namespace}" if namespace else "(root namespace)"] + [text for _, text in active]
+    body = [
+        render_text("packet/sections.fixed.namespace", name=namespace)
+        if namespace
+        else template("packet/sections.fixed.root_namespace").strip()
+    ] + [text for _, text in active]
     return [_clip(line, LIMITS["scope_chars"]) for line in body][: LIMITS["scope"]]
 
 
@@ -337,11 +340,22 @@ def _types_section(context: dict) -> list[str]:
         if item["decl"] in ("inductive", "structure"):
             body = "\n".join(f"  | {_clip(c, LIMITS['type_chars'])}" for c in item["ctors"])
             lines.append(
-                f"decl:{item['name']} [{item['decl']}] {_clip(_readable(item['sig']), LIMITS['type_chars'])}\n{_readable(body)}"
+                render_text(
+                    "packet/sections.fixed.type_construct",
+                    name=item["name"],
+                    kind=item["decl"],
+                    signature=_clip(_readable(item["sig"]), LIMITS["type_chars"]),
+                    body=_readable(body),
+                )
             )
         else:
             lines.append(
-                f"decl:{item['name']} [def] {_clip(item['sig'], LIMITS['type_chars'])}\n  := {_clip(item.get('value', ''), LIMITS['type_chars'])}"
+                render_text(
+                    "packet/sections.fixed.type_definition",
+                    name=item["name"],
+                    signature=_clip(item["sig"], LIMITS["type_chars"]),
+                    value=_clip(item.get("value", ""), LIMITS["type_chars"]),
+                )
             )
     return lines
 
@@ -354,7 +368,9 @@ def _goal_section(context: dict) -> list[str]:
             if item["proof_line"] == item["end_proof_line"]
             else f"{item['proof_line']}-{item['end_proof_line']}"
         )
-        lines.append(f"-- before proof line {span}\n{_clip(item['text'], LIMITS['goal_chars'])}")
+        lines.append(
+            render_text("packet/sections.fixed.goal", span=span, text=_clip(item["text"], LIMITS["goal_chars"]))
+        )
     return lines
 
 
@@ -395,30 +411,41 @@ def _used_section(context: dict) -> list[str]:
     for item in context.get("source", []):
         occurrences.setdefault(item["name"], []).append(item)
     ordered = sorted(occurrences.items())
-    lines = [
-        "Qualified name [kind] S:statement lines P:proof lines U:lines whose position could not be placed "
-        "(no top-level `:=` found); use `decl:<name>` as its source handle."
-    ]
+    lines = [template("packet/sections.fixed.used_intro").strip()]
     for name, items in ordered:
-
-        def at(origin: str) -> str:
-            return ",".join(str(i["proof_line"]) for i in items if i.get("origin") == origin)
-
-        unknown = at("unknown")
+        statement = ",".join(str(i["proof_line"]) for i in items if i.get("origin") == "statement")
+        proof = ",".join(str(i["proof_line"]) for i in items if i.get("origin") == "proof")
+        unknown = ",".join(str(i["proof_line"]) for i in items if i.get("origin") == "unknown")
         lines.append(
-            f"decl:{name} [{items[0]['decl']}] S:{at('statement') or '-'} P:{at('proof') or '-'}"
-            + (f" U:{unknown}" if unknown else "")
+            render_text(
+                "packet/sections.fixed.used_line",
+                name=name,
+                kind=items[0]["decl"],
+                statement=statement or "-",
+                proof=proof or "-",
+                unknown=f" U:{unknown}" if unknown else "",
+            )
         )
     preview = _preview([items[0] for _, items in ordered], context.get("root", ""))
     lines.extend(
         [
             "",
-            f"Signature preview: {sum(bool(i.get('sig')) for i in preview)} shown of {len(ordered)} distinct source names; "
-            f"{sum(not bool(items[0].get('sig')) for _, items in ordered)} unavailable.",
+            render_text(
+                "packet/sections.fixed.used_preview",
+                shown=sum(bool(i.get("sig")) for i in preview),
+                distinct=len(ordered),
+                unavailable=sum(not bool(items[0].get("sig")) for _, items in ordered),
+            ),
         ]
     )
     lines.extend(
-        f"[decl:{i['name']} · {i['decl']} · {i['module']}] {_clip(_readable(_one_line(i['sig'])), LIMITS['used_chars'])}"
+        render_text(
+            "packet/sections.fixed.signature",
+            name=i["name"],
+            kind=i["decl"],
+            module=i["module"],
+            signature=_clip(_readable(_one_line(i["sig"])), LIMITS["used_chars"]),
+        )
         for i in preview
         if i.get("sig")
     )
@@ -427,23 +454,33 @@ def _used_section(context: dict) -> list[str]:
 
 def _dependency_section(context: dict) -> list[str]:
     helpers, counts, named = _extra_dependencies(context)
-    lines = [
-        "Qualified helper theorem name (project/this file first); origin: direct elaborated-proof use; "
-        "source handle: `decl:<name>`."
-    ]
-    lines.extend(f"decl:{i['name']}" for i in helpers)
+    lines = [template("packet/sections.fixed.dependency_intro").strip()]
+    lines.extend(render_text("packet/sections.fixed.dependency_name", name=i["name"]) for i in helpers)
     lines += [
         "",
-        f"Tagged, not listed: {', '.join(f'{tag} {n}' for tag, n in counts.items())}; also source-named: {named}. "
-        "Query the constant index or declaration lookup for these.",
+        render_text(
+            "packet/sections.fixed.dependency_summary",
+            counts=", ".join(f"{tag} {n}" for tag, n in counts.items()),
+            named=named,
+        ),
     ]
     preview = _preview(helpers, context.get("root", ""))
     lines += [
-        f"Signature preview: {sum(bool(i.get('sig')) for i in preview)} shown of {len(helpers)} helpers; "
-        f"{sum(not bool(i.get('sig')) for i in helpers)} unavailable."
+        render_text(
+            "packet/sections.fixed.dependency_preview",
+            shown=sum(bool(i.get("sig")) for i in preview),
+            helpers=len(helpers),
+            unavailable=sum(not bool(i.get("sig")) for i in helpers),
+        ),
     ]
     lines.extend(
-        f"[decl:{i['name']} · {i['decl']} · {i['module']}] {_clip(_readable(_one_line(i['sig'])), LIMITS['used_chars'])}"
+        render_text(
+            "packet/sections.fixed.signature",
+            name=i["name"],
+            kind=i["decl"],
+            module=i["module"],
+            signature=_clip(_readable(_one_line(i["sig"])), LIMITS["used_chars"]),
+        )
         for i in preview
         if i.get("sig")
     )
@@ -456,9 +493,15 @@ def _local_section(context: dict) -> list[str]:
         scopes.setdefault((item["name"], item["type"], item["scope"]), set()).add(item["proof_line"])
     if not scopes:
         return []
-    lines = ["Local variable name : type; lines are where the Lean local context exposes the variable."]
+    lines = [template("packet/sections.fixed.local_intro").strip()]
     lines.extend(
-        f"{name} : {_clip(_one_line(ty), 320)} [scope: {scope}; lines: {','.join(map(str, sorted(locations)))}]"
+        render_text(
+            "packet/sections.fixed.local_line",
+            name=name,
+            type=_clip(_one_line(ty), 320),
+            scope=scope,
+            lines=",".join(map(str, sorted(locations))),
+        )
         for (name, ty, scope), locations in sorted(scopes.items())
     )
     return lines
@@ -503,7 +546,7 @@ def certify_manifest(manifest: dict, expected: list[str] | None = None) -> dict:
     return {"certified": not reasons, "reasons": reasons}
 
 
-EARLIER_TITLE = "Relevant lemmas from this file (ranked)"
+EARLIER_TITLE = template("packet/sections.titles.earlier").strip()
 CORE_FACTOR = 0.25  # library (Init/Std/Lean) constants count a quarter of project and Mathlib ones
 GENERIC_SHARE = 0.2  # a constant in more than this share of earlier statements is infrastructure
 WEIGHTS = {"overlap": 10.0, "head": 5.0, "equation": 3.0, "co_usage": 3.0, "distance": 0.5}
@@ -597,13 +640,20 @@ def score_earlier(context: dict) -> list[dict]:
         score = relevance + WEIGHTS["distance"] * item["line"] / top_line
         tags = []
         if mine:
-            tags.append("mentions " + ", ".join(_short(n) for n in sorted(mine, key=lambda n: (-mine[n], n))[:3]))
+            tags.append(
+                render_text(
+                    "packet/sections.fixed.earlier_mention",
+                    names=", ".join(_short(n) for n in sorted(mine, key=lambda n: (-mine[n], n))[:3]),
+                )
+            )
         if matched:
-            tags.append("concludes " + ", ".join(_short(h) for h in matched[:2]))
+            tags.append(
+                render_text("packet/sections.fixed.earlier_conclusion", names=", ".join(_short(h) for h in matched[:2]))
+            )
         if equation:
-            tags.append("rw-ready")
+            tags.append(template("packet/sections.fixed.earlier_rewrite").strip())
         if co:
-            tags.append("used by related lemmas")
+            tags.append(template("packet/sections.fixed.earlier_usage").strip())
         ranked.append(
             {"item": item, "score": round(score, 3), "relevance": round(relevance, 3), "reason": " · ".join(tags)}
         )
@@ -619,10 +669,14 @@ def _earlier_section(context: dict) -> list[str]:
             filler += 1
             if filler > 5:
                 continue
-        tag = f" · {entry['reason']}" if entry["reason"] else ""
-        line = (
-            f"line {item['line']} [decl:{item['name']} · {item['decl']}{tag}] "
-            f"{_clip(_readable(_one_line(item['sig'])), LIMITS['earlier_chars'])}"
+        tag = render_text("packet/sections.fixed.earlier_reason", text=entry["reason"]) if entry["reason"] else ""
+        line = render_text(
+            "packet/sections.fixed.earlier_line",
+            line=item["line"],
+            name=item["name"],
+            kind=item["decl"],
+            reason=tag,
+            signature=_clip(_readable(_one_line(item["sig"])), LIMITS["earlier_chars"]),
         )
         if used + len(line) > LIMITS["earlier_budget"] or len(lines) >= LIMITS["earlier"]:
             break
@@ -631,10 +685,10 @@ def _earlier_section(context: dict) -> list[str]:
     return lines
 
 
-LOCAL_TITLE = "Local variables"
+LOCAL_TITLE = template("packet/sections.titles.locals").strip()
 LOCAL_FLOOR = 20  # local-variable lines kept (header included) before the rest of the packet is shed
 GOALS_FLOOR = 8  # goals kept before library lines are shed when the packet is over budget
-LIBRARY_TITLE = "Imported library lemmas matching the statement and goals (ranked)"
+LIBRARY_TITLE = template("packet/sections.titles.library").strip()
 
 
 def _library_section(context: dict) -> list[str]:
@@ -646,16 +700,17 @@ def _library_section(context: dict) -> list[str]:
     records = [item for item in context.get("library", []) if item["name"] not in known and item.get("sig")]
     if not records:
         return []
-    lines = [
-        "Rank by IDF over the imported environment of the constants shared with the theorem statement, its goals "
-        "and the lemmas its source names; not already used by the reference proof. `mentions` lists the shared constants."
-    ]
+    lines = [template("packet/library").strip()]
     used = 0
     for rank, item in enumerate(records[: LIMITS["library"]], 1):
         shared = ", ".join(_short(name) for name in item.get("shared", [])[:3])
-        line = (
-            f"{rank}. [decl:{item['name']} · {item['module']}{' · mentions ' + shared if shared else ''}] "
-            f"{_clip(_readable(_one_line(item['sig'])), LIMITS['library_chars'])}"
+        line = render_text(
+            "packet/sections.fixed.library_line",
+            rank=rank,
+            name=item["name"],
+            module=item["module"],
+            mentions=" · mentions " + shared if shared else "",
+            signature=_clip(_readable(_one_line(item["sig"])), LIMITS["library_chars"]),
         )
         if used + len(line) + 1 > LIMITS["library_budget"]:
             break
@@ -666,11 +721,8 @@ def _library_section(context: dict) -> list[str]:
 
 def _profile_section(prof: dict) -> list[str]:
     if prof.get("error"):
-        return [f"(profile unavailable: {_clip(prof['error'], 160)})"]
-    rows = [
-        f"Profile granularity: {prof['granularity']}",
-        "proof lines | file lines | heartbeats (incl.) | self | share | tactic",
-    ]
+        return [render_text("packet/sections.fixed.profile_missing", error=_clip(prof["error"], 160))]
+    rows = []
     kept = [e for e in prof["entries"] if e["share_pct"] >= 1.5 or e["depth"] == 0]
     for entry in kept[: LIMITS["profile_entries"]]:
         file_span = (
@@ -679,39 +731,69 @@ def _profile_section(prof: dict) -> list[str]:
             else f"{entry['file_line']}-{entry['end_file_line']}"
         )
         rows.append(
-            f"{entry['lines']} | {file_span} | {entry['hb']} | {entry['self_hb']} | {entry['share_pct']}% | "
-            f"{'  ' * entry['depth']}{_clip(entry['text'], 60)}"
+            render_text(
+                "packet/sections.fixed.profile_row",
+                lines=entry["lines"],
+                file_span=file_span,
+                heartbeats=entry["hb"],
+                self_heartbeats=entry["self_hb"],
+                share=entry["share_pct"],
+                indent="  " * entry["depth"],
+                text=_clip(entry["text"], 60),
+            )
         )
-    rows.append("Top-ten starting lines by score-equivalent baseline cost (not predicted savings):")
     if not prof.get("token_attribution_available"):
-        rows.append("(unavailable: proof-line tokens did not reconcile with the competition tokenizer)")
+        hotspots = [template("packet/sections.fixed.profile_unavailable").strip()]
     else:
+        hotspots = []
         for item in prof["hotspots"]:
             spans = ", ".join(
                 f"proof {span['proof_line']}-{span['end_proof_line']} / "
                 f"file {span['file_line']}-{span['end_file_line']} (depth {span['depth']})"
                 for span in item["tactic_spans"]
             )
-            rows.append(
-                f"proof {item['proof_line']}-{item['end_proof_line']} / file {item['file_line']}-{item['end_file_line']}"
-                f" (tactic spans: {_clip(spans, 180)}): {item['self_hb']} self hb, "
-                f"{item['tokens']} tokens, {item['baseline_cost_points']} baseline points"
+            hotspots.append(
+                render_text(
+                    "packet/sections.fixed.profile_hotspot",
+                    proof_start=item["proof_line"],
+                    proof_end=item["end_proof_line"],
+                    file_start=item["file_line"],
+                    file_end=item["end_file_line"],
+                    spans=_clip(spans, 180),
+                    heartbeats=item["self_hb"],
+                    tokens=item["tokens"],
+                    points=item["baseline_cost_points"],
+                )
             )
     top = ", ".join(
-        f"{t['lines']} ({t['self_hb']} hb, cum. {t['cumulative_share_pct']}%)" for t in prof["top_self_cost"]
+        render_text(
+            "packet/sections.fixed.profile_cost",
+            lines=t["lines"],
+            heartbeats=t["self_hb"],
+            share=t["cumulative_share_pct"],
+        )
+        for t in prof["top_self_cost"]
     )
-    rows.append(f"Top self costs: {top}")
     measured = prof.get("measured_total")
     profiled = prof.get("profiled_total")
     coverage = round(100 * profiled / measured, 1) if measured else None
-    rows.append(
-        f"Measured whole-proof heartbeats: {measured}; attributed tactic heartbeats: {profiled} "
-        f"({coverage}% coverage); statement floor: {prof.get('statement_floor_hb')}; "
-        f"unattributed remainder: {prof.get('unattributed')}."
+    return (
+        render_text(
+            "packet/profile",
+            granularity=prof["granularity"],
+            entries="\n".join(rows),
+            hotspots="\n".join([render_text("packet/sections.fixed.profile_top"), *hotspots]),
+            costs=top,
+            measured=measured,
+            profiled=profiled,
+            coverage=coverage,
+            floor=prof.get("statement_floor_hb"),
+            remainder=prof.get("unattributed"),
+            note=("\n" + _clip(prof["note"], 180)) if prof.get("note") else "",
+        )
+        .strip()
+        .splitlines()
     )
-    if prof.get("note"):
-        rows.append(_clip(prof["note"], 180))
-    return rows
 
 
 def _fit(parts: list[tuple[str, list[str]]], limit: int) -> str:
@@ -724,7 +806,7 @@ def _fit(parts: list[tuple[str, list[str]]], limit: int) -> str:
     # Shed order: earlier-lemma lines, then goals beyond the first few (later goals mostly repeat the same
     # hypotheses), then library lines, then local-variable lines past a floor (every hypothesis already
     # appears in the goals), then the remaining goals down to one.
-    goals = "Goal before each top-level tactic of the reference proof"
+    goals = template("packet/sections.titles.goals").strip()
     stages = [(EARLIER_TITLE, 0), (goals, GOALS_FLOOR), (LIBRARY_TITLE, 0), (LOCAL_TITLE, LOCAL_FLOOR), (goals, 1)]
     while len(render()) > limit:
         for title, floor in stages:
@@ -746,46 +828,49 @@ def render_packet(name: str) -> str:
     context["root"] = "" if is_standalone(row) else row["file_path"].split("/")[0]
     prof = reference_profile(name)
     pins = "; ".join(f"Lean {version} / source revision {commit}" for version, commit in targets)
-    task = [
-        f"Lean Refactor Arena: optimize {name}. The original proof is candidate #1.",
-        "The statement must stay byte-exact. The score is the mean of three percentages: proof tokens saved, "
-        "Lean heartbeats saved, and the share of listed toolchain versions the proof compiles on.",
-        _rates(name, len(targets)),
-        SCORING_FACTS,
-        "Survey the supplied references and pinned source before recording a route with arena_idea. "
-        "Then pursue the route and update its status with a reason as evidence arrives. "
-        "arena_probe compiles drafts (sorry allowed, goals reported; routes are fingerprinted from complete proofs that compile, and drafts with `sorry` holes are not fingerprinted); arena_profile shows where heartbeats go; "
-        "arena_evaluate scores a complete proof on the primary version (a sorry-free probe that compiles is scored the "
-        "same way). The harness checks every compiling candidate on the other versions in the background and appends "
-        "an [arena] line with results and the best verified candidate to a later tool result whenever something "
-        "changes; the best verified candidate is submitted automatically at the end. Parents and idea ids are optional "
-        "labels. The current candidate file is readable by lean_goal and lean_diagnostic_messages at the line numbers "
-        "reported in diagnostics.",
-    ]
-    note = "" if not context.get("error") else f"(elaboration context unavailable: {_clip(context['error'], 160)})"
+    task = (
+        render_text("packet/task", name=name, rates=_rates(name, len(targets)), scoring=SCORING_FACTS)
+        .strip()
+        .split("\n\n")
+    )
+    note = (
+        ""
+        if not context.get("error")
+        else render_text("packet/sections.fixed.context_missing", error=_clip(context["error"], 160))
+    )
+    titles = {
+        key: template(f"packet/sections.titles.{key}").strip()
+        for key in ("pinned", "types", "scope", "profile", "goals", "source", "dependencies", "inventory")
+    }
+    source_line = (
+        render_text("packet/sections.fixed.standalone_source", source=row["source"])
+        if is_standalone(row)
+        else render_text(
+            "packet/sections.fixed.source",
+            source=row["source"],
+            path=row["file_path"],
+            start=row["start_line"],
+            end=row["end_line"],
+        )
+    )
     parts: list[tuple[str, list[str]]] = [
         ("", task),
         (
-            "Pinned environment and candidate",
+            titles["pinned"],
             [
-                f"Source: {row['source']} standalone problem (file = header + statement + proof)"
-                if is_standalone(row)
-                else f"Source: {row['source']}:{row['file_path']}:{row['start_line']}-{row['end_line']}",
-                f"Lean toolchain and source revisions: {pins}",
-                "Original proof: candidate #1",
-                f"Available imports: {', '.join(_imports(row)) or '(none reported)'}",
+                source_line,
+                render_text("packet/sections.fixed.pins", pins=pins),
+                render_text("packet/sections.fixed.original"),
+                render_text("packet/sections.fixed.imports", imports=", ".join(_imports(row)) or "(none reported)"),
             ],
         ),
-        ("Definitions of project types and predicates in the statement", _types_section(context)),
-        (
-            "Scope at the theorem (namespace, open, variable, universe in effect before the statement)",
-            _scope_section(row),
-        ),
-        (f"Reference proof ({row['proof_length']} tokens)", [f"```lean\n{row['src']}\n```"]),
-        ("Heartbeat profile of the reference proof", _profile_section(prof)),
-        ("Goal before each top-level tactic of the reference proof", _goal_section(context)),
-        ("Source-named declarations", _used_section(context)),
-        ("Elaborated proof dependencies", _dependency_section(context)),
+        (titles["types"], _types_section(context)),
+        (titles["scope"], _scope_section(row)),
+        (render_text("packet/sections.titles.reference", count=row["proof_length"]), [f"```lean\n{row['src']}\n```"]),
+        (titles["profile"], _profile_section(prof)),
+        (titles["goals"], _goal_section(context)),
+        (titles["source"], _used_section(context)),
+        (titles["dependencies"], _dependency_section(context)),
         (LOCAL_TITLE, _local_section(context)),
         (LIBRARY_TITLE, _library_section(context)),
         (EARLIER_TITLE, _earlier_section(context)),
@@ -800,19 +885,22 @@ def render_packet(name: str) -> str:
     helpers, tags, named = _extra_dependencies(context)
     parts.append(
         (
-            "Kickoff inventory manifest",
-            [
-                f"Source names: {len(context.get('source', []))} occurrences; "
-                f"{len(_source_names(context))} distinct; signature preview "
-                f"{_signature_counts(list(_source_names(context).values()), root)[0]}; "
-                f"unavailable {_signature_counts(list(_source_names(context).values()), root)[1]}.",
-                f"Extra direct theorem/lemma dependencies: {len(helpers)} helpers shown; tagged and not listed: "
-                f"{', '.join(f'{tag} {n}' for tag, n in tags.items())}; already source-named: {named}; "
-                f"signature preview {_signature_counts(helpers, root)[0]}; unavailable {_signature_counts(helpers, root)[1]}.",
-                "Required sections: "
-                + ", ".join(name for name, state in manifest["sections"].items() if state["present"])
-                + ".",
-            ],
+            titles["inventory"],
+            render_text(
+                "packet/inventory",
+                occurrences=len(context.get("source", [])),
+                distinct=len(_source_names(context)),
+                source_shown=_signature_counts(list(_source_names(context).values()), root)[0],
+                source_unavailable=_signature_counts(list(_source_names(context).values()), root)[1],
+                helpers=len(helpers),
+                counts=", ".join(f"{tag} {n}" for tag, n in tags.items()),
+                named=named,
+                helper_shown=_signature_counts(helpers, root)[0],
+                helper_unavailable=_signature_counts(helpers, root)[1],
+                sections=", ".join(name for name, state in manifest["sections"].items() if state["present"]),
+            )
+            .strip()
+            .splitlines(),
         )
     )
     return _fit(parts, MAX_PACKET_CHARS) + "\n"

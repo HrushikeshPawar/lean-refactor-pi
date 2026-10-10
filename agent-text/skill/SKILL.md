@@ -82,7 +82,7 @@ top-level commands or auxiliary declarations, and anything outside the one theor
 5. `arena_evaluate` scores a complete proof on the primary version. `candidate: "#N"` re-reads an existing
    node; `from_probe: "pN"` promotes a probe without resending the proof.
 6. Use `arena_state` when you need the compact verified frontier, current idea, or recent failures.
-   `arena_finish` is allowed to end the run only when 10% or less of the spend allowance is left; before that
+   `arena_finish` is allowed to end the run only when {finish_remaining_pct}% or less of the spend allowance is left; before that
    it is refused and lists the routes tried and the headroom per axis. Near the end, call it once for its
    factual review, take one decision turn, then call it again to confirm. The harness checks every compiling candidate on the other versions in the background,
    appends an `[arena]` line to a later tool result when a check finishes or the best candidate changes, and
@@ -96,7 +96,7 @@ top-level commands or auxiliary declarations, and anything outside the one theor
   strategy, not a rewording of the same tactic skeleton. Record each as its own `arena_idea`
   and probe it. Marking an idea `succeeded` because it beat the original is not a reason to stop looking: the
   original scores only 33, and a better route usually moves far more points than polishing the first one.
-- Unspent allowance has no value. Stopping is only allowed near the end of the budget (10% or less left);
+- Unspent allowance has no value. Stopping is only allowed near the end of the budget ({finish_remaining_pct}% or less left);
   with more left, record a new structurally different idea and probe it instead of finishing.
 - Judge ideas by the per-axis numbers they produce, and look at which axis has the most headroom: a
   proof already 90% down on heartbeats gains little from heartbeat work, and micro-golf of a settled

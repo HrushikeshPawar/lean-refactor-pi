@@ -37,4 +37,3 @@ class AgentTextGoldenTests(unittest.TestCase):
                 else:
                     actual = memory.memory_text(case["front"], case["spent_usd"], case["cap_usd"])
                 self.assertEqual(actual, case["expected"])
-

@@ -9,73 +9,113 @@ nothing; the text is rebuilt from `frontier` each time and injected once, right 
 from __future__ import annotations
 
 from arena.routes import routes_text
+from arena.text import numbers, render
 
-MAX_IDEAS = 8
-MAX_FAILURES = 3
+MAX_IDEAS = int(numbers()["max_ideas"])
+MAX_FAILURES = int(numbers()["max_failures"])
 
 
 def _metrics(row: dict | None) -> str:
     if not row:
-        return "none yet"
-    score = (
-        f"proxy {row['proxy']} (verified)"
-        if row.get("proxy") is not None
-        else f"est. proxy {row.get('estimated_proxy')} (not yet verified)"
-    )
-    return f"{row['candidate']} {score}, {row.get('tokens')} tok, {row.get('heartbeats')} HB"
+        return render("messages/compaction-memory.metrics_none")
+    values = {
+        "candidate": row["candidate"],
+        "proxy": row["proxy"] if row.get("proxy") is not None else row.get("estimated_proxy"),
+        "tokens": row.get("tokens"),
+        "heartbeats": row.get("heartbeats"),
+    }
+    key = "metrics_verified" if row.get("proxy") is not None else "metrics_estimated"
+    return render(f"messages/compaction-memory.{key}", **values)
 
 
 def _idea(idea: dict) -> str:
     attempts = idea.get("attempts", 0)
     best = idea.get("best")
     outcome = (
-        f"best {_metrics(best)}"
+        render("messages/compaction-memory.idea_best", metrics=_metrics(best))
         if best
-        else (f"last failure {idea['last_failure']}" if idea.get("last_failure") else "no scored proof")
+        else (
+            render("messages/compaction-memory.idea_failure", failure=idea["last_failure"])
+            if idea.get("last_failure")
+            else render("messages/compaction-memory.idea_empty")
+        )
     )
-    return f'{idea["id"]} "{idea.get("title", "")}" [{idea.get("status", "?")}]: {attempts} attempt{"s" if attempts != 1 else ""}, {outcome}'
+    return render(
+        "messages/compaction-memory.idea",
+        id=idea["id"],
+        title=idea.get("title", ""),
+        status=idea.get("status", "?"),
+        attempts=attempts,
+        s="" if attempts == 1 else "s",
+        outcome=outcome,
+    )
 
 
 def memory_text(front: dict, spent_usd: float | None = None, cap_usd: float | None = None) -> str:
     """The memory block, a pure function of `frontier` output and the settled spend."""
     best = next((row for row in [front.get("best")] if row), None)
     verified = [row for row in [best] if row and row.get("proxy") is not None]
-    lines = [
-        "[arena memory] Context was just compacted. This is the harness's own record of the run; "
-        "it replaces nothing you must write and needs no reply."
-    ]
-    lines.append(
-        "Best verified candidate: "
-        + (
-            _metrics(verified[0]) + f"; arena_candidate {verified[0]['candidate']} returns its source."
-            if verified
-            else "none verified yet" + (f"; leading unverified: {_metrics(best)}" if best else "")
+    lines = [render("messages/compaction-memory.header")]
+    if verified:
+        best_line = render(
+            "messages/compaction-memory.best_verified",
+            metrics=_metrics(verified[0]),
+            candidate=verified[0]["candidate"],
         )
-    )
-    lines.append("Routes tried (harness fingerprints): " + routes_text(front.get("routes") or []))
+    else:
+        best_line = render("messages/compaction-memory.none_verified")
+        if best:
+            best_line += render("messages/compaction-memory.leading_unverified", metrics=_metrics(best))
+    lines.append(best_line)
+    lines.append(render("messages/compaction-memory.routes", routes=routes_text(front.get("routes") or [])))
     ideas = front.get("ideas") or []
     shown = sorted(ideas, key=lambda idea: (idea.get("status") != "active", -idea.get("attempts", 0)))[:MAX_IDEAS]
     lines.append(
-        "Ideas: "
-        + ("; ".join(_idea(idea) for idea in shown) if shown else "none recorded")
-        + (f" (+{len(ideas) - len(shown)} more)" if len(ideas) > len(shown) else "")
+        render(
+            "messages/compaction-memory.ideas",
+            ideas="; ".join(_idea(idea) for idea in shown) if shown else "none recorded",
+            more=(
+                render("messages/compaction-memory.idea_more", count=len(ideas) - len(shown))
+                if len(ideas) > len(shown)
+                else ""
+            ),
+        )
     )
     failures = (front.get("recent_failures") or [])[-MAX_FAILURES:]
     lines.append(
-        "Latest failures: "
-        + (
-            "; ".join(f"{row['ref']} ({row.get('idea_id') or 'no idea'}): {row['error']}" for row in failures)
-            if failures
-            else "none"
+        render(
+            "messages/compaction-memory.failures",
+            failures=(
+                "; ".join(
+                    render(
+                        "messages/compaction-memory.failure",
+                        ref=row["ref"],
+                        idea=row.get("idea_id") or "no idea",
+                        error=row["error"],
+                    )
+                    for row in failures
+                )
+                if failures
+                else "none"
+            ),
         )
     )
     if front.get("advisory"):
-        lines.append(f"Blocker: {front['advisory']}")
+        lines.append(render("messages/compaction-memory.blocker", advisory=front["advisory"]))
     lines.append(
-        f"Work so far: {front.get('candidates', 0)} candidates, {front.get('evaluations', 0)} evaluations, {front.get('probes', 0)} probes."
+        render(
+            "messages/compaction-memory.work",
+            candidates=front.get("candidates", 0),
+            evaluations=front.get("evaluations", 0),
+            probes=front.get("probes", 0),
+        )
     )
     if spent_usd is not None and cap_usd is not None:
-        lines.append(f"Allowance: ${spent_usd:.4f} of ${cap_usd:g} spent, ${max(0.0, cap_usd - spent_usd):.4f} left.")
+        lines.append(
+            render(
+                "messages/compaction-memory.allowance", spent=spent_usd, cap=cap_usd, left=max(0.0, cap_usd - spent_usd)
+            )
+        )
     return "\n".join(lines)
 
 

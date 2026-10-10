@@ -1,0 +1,1 @@
+Exchange rates for this problem (score points): 1 token = {points_per_token} pt (about {heartbeats_per_token} heartbeats); 100 heartbeats = {points_per_100_heartbeats} pt; one lost toolchain version = {points_per_lost_version} pt (about {tokens_per_lost_version} tokens). Reference: {reference_tokens} tokens, {reference_heartbeats} heartbeats.

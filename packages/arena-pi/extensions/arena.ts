@@ -13,6 +13,7 @@ import { objectToolArguments, ResultTrimmer } from "./trim.ts";
 import { continuationPush, finishPush, routesText, trimProfile, leanPathViolation, planEvaluate, resolveInlineIdea, planProbe, sinceRefusal, staleNotice } from "./rules.ts";
 import type { RouteStats } from "./rules.ts";
 import { cacheAlarm, cacheHitPct, callCost, finishAllowed, limitReached, limitUsd, spendFooter, toolsForSpend } from "./spend.ts";
+import { render as renderText } from "./text.ts";
 
 const root = resolve(import.meta.dirname, "../../..");
 const workspaces = resolve(root, "workspaces");
@@ -906,7 +907,11 @@ export default function arenaExtension(pi: ExtensionAPI) {
         return reply({ ok: false, error: `${params.path} is not a file of the Arena skill; call without path to list files` });
       }
       if (!(await stat(target)).isFile()) return reply({ ok: false, error: `${params.path} is a directory` });
-      const text = await readFile(target, "utf8");
+      const source = await readFile(target, "utf8");
+      let text = target.endsWith(".md")
+        ? await renderText(relative(resolve(skillRoot, ".."), target).replaceAll(sep, "/").replace(/\.md$/, ""))
+        : source;
+      if (target.endsWith("/SKILL.md") && text.startsWith("---")) text = text.split("---", 3)[2].trim();
       const start = Math.max(0, params.offset ?? 0);
       const slice = text.slice(start, start + SKILL_READ_LIMIT);
       return reply({ ok: true, path: relative(skillRoot, target), offset: start, total_chars: text.length,

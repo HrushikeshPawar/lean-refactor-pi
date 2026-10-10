@@ -1,0 +1,14 @@
+[
+  {"files":{"demo.md":"{x:.2f} {n:d} {v:g}"},"key":"demo","values":{"x":1.235,"n":4,"v":1200.0},"expect":"1.24 4 1200"},
+  {"files":{"demo.md":"{{literal}} {word}"},"key":"demo","values":{"word":"ready"},"expect":"{literal} ready"},
+  {"files":{"numbers.yaml":"finish_remaining_pct: 10\nlimits:\n  max_drafts: 4\n  rate: 0.125","demo.md":"{finish_remaining_pct:d}/{limits.max_drafts:d}/{limits.rate:.2f}"},"key":"demo","expect":"10/4/0.12"},
+  {"files":{"demo.yaml":"quoted: \"hello: world\"\nfolded: |\n  first line\n  second line\nstripped: |-\n  final line\n# ignored comment\n"},"key":"demo.quoted","expect":"hello: world"},
+  {"files":{"demo.yaml":"folded: |\n  first line\n  second line\n"},"key":"demo.folded","expect":"first line\nsecond line\n"},
+  {"files":{"demo.yaml":"stripped: |-\n  final line\n"},"key":"demo.stripped","expect":"final line"},
+  {"files":{"demo.yaml":"outer:\n    inner: invalid"},"key":"demo","error":"invalid YAML indentation"},
+  {"files":{"demo.md":"{missing}"},"key":"demo","error":"missing placeholder 'missing'"},
+  {"files":{"demo.md":"plain"},"key":"demo","values":{"extra":"x"},"error":"unused value 'extra'"},
+  {"files":{"numbers.yaml":"limit: 10","demo.md":"{limit:d}"},"key":"demo","values":{"limit":8},"error":"collides with numbers.yaml"},
+  {"files":{"demo.md":"bad } brace"},"key":"demo","error":"unmatched closing brace"},
+  {"files":{"demo.md":"bad {name:other}"},"key":"demo","error":"invalid placeholder"}
+]

@@ -1,0 +1,1 @@
+Rank by IDF over the imported environment of the constants shared with the theorem statement, its goals and the lemmas its source names; not already used by the reference proof. `mentions` lists the shared constants.
