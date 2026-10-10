@@ -2,30 +2,20 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-
-def _vendor() -> None:
-    vendor = Path(__file__).resolve().parents[1] / "vendor/arena-space"
-    if str(vendor) not in sys.path:
-        sys.path.insert(0, str(vendor))
+from arena import vendor
 
 
 def reference(name: str) -> tuple[int, int]:
     """Published denominators (proof tokens, heartbeats) for one benchmark row."""
-    _vendor()
-    from benchmark import original_heartbeats, original_length
-
-    tokens, heartbeats = original_length(name), original_heartbeats(name)
+    module = vendor.benchmark()
+    tokens, heartbeats = module.original_length(name), module.original_heartbeats(name)
     if not tokens or not heartbeats:
         raise ValueError(f"Published reference denominators are unavailable for {name}")
     return tokens, heartbeats
 
 
 def local_proxy(name: str, tokens: int, heartbeats: int, compat: dict) -> float:
-    _vendor()
-    from leaderboard import Leaderboard
+    Leaderboard = vendor.leaderboard()
 
     original_tokens, original_hb = reference(name)
     row = {

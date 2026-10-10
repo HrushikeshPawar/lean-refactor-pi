@@ -7,14 +7,12 @@ matches the Arena worker. Compilation and token counts are still useful gates.
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import json
 import os
 import re
 import shutil
 import signal
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -23,9 +21,10 @@ from contextvars import ContextVar
 from functools import lru_cache
 from pathlib import Path
 
+from arena import vendor
+
 ROOT = Path(__file__).resolve().parents[1]
 BENCHMARK = ROOT / "benchmark/original/warmup.jsonl"
-UPSTREAM_CHECKER = ROOT / "vendor/lean-refactor/lean_refactor/cc_agent/tools/check_proof.py"
 HEARTBEAT_WRAPPER = """open Lean Elab Command in
 elab "arena_measure_heartbeats " cmd:command : command => do
   let t0 ← IO.getNumHeartbeats
@@ -53,14 +52,7 @@ def _proof_length(proof: str, statement: str | None = None) -> int:
     """
     if statement is not None and proof.startswith(statement):
         proof = "theorem x : True" + proof[len(statement) :]
-    # The pinned checker imports its sibling `heartbeat` module.
-    if str(UPSTREAM_CHECKER.parent) not in sys.path:
-        sys.path.insert(0, str(UPSTREAM_CHECKER.parent))
-    spec = importlib.util.spec_from_file_location("pinned_check_proof", UPSTREAM_CHECKER)
-    if spec is None or spec.loader is None:
-        raise RuntimeError("Pinned proof utility is unavailable")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = vendor.checker()
     length = module._proof_length(proof)
     if length >= 10**9:
         raise ValueError("Pinned proof utility could not parse the candidate")
@@ -97,7 +89,7 @@ def validate_proof(row: dict, proof: str, allow_sorry: bool = False) -> int:
             "STATEMENT_MODIFIED: the statement must be followed directly by `:=`; got "
             f"{proof[len(statement) : len(statement) + 30]!r}"
         )
-    from tools.arena_check import FORBIDDEN, remove_comments
+    from arena.forbidden import FORBIDDEN, remove_comments
 
     clean = remove_comments(proof)
     if re.search(r"(?m)^(?:theorem|lemma|end|namespace|section|open|set_option)\b", clean[len(statement) :]):
