@@ -1,0 +1,624 @@
+[
+ {
+  "id": "errors.invalid_run_id",
+  "source": "arena/campaign.py:40",
+  "call": "campaign.run_dir with a run id that has a slash",
+  "expected": "Invalid run ID"
+ },
+ {
+  "id": "errors.ambiguous_symbol",
+  "source": "arena/campaign.py:48",
+  "call": "str(campaign.AmbiguousDeclaration('foo', ['A.foo', 'B.foo']))",
+  "expected": "foo is ambiguous: A.foo, B.foo"
+ },
+ {
+  "id": "errors.pinned_project_path@git_source",
+  "source": "arena/campaign.py:122",
+  "call": "campaign._git_source with a path that leaves the project",
+  "expected": "Only relative .lean paths inside the pinned project are allowed"
+ },
+ {
+  "id": "errors.pinned_project_path@canonical",
+  "source": "arena/campaign.py:582",
+  "call": "campaign._canonical_source_path with an absolute path",
+  "expected": "Only relative .lean paths inside the pinned project are allowed"
+ },
+ {
+  "id": "errors.declarations_usage",
+  "source": "arena/campaign.py:150",
+  "call": "campaign.declarations with neither items nor cursor",
+  "expected": "Pass exactly one of items (a nonempty list of declaration names or handles) or cursor (next_cursor from a previous page)"
+ },
+ {
+  "id": "errors.invalid_declaration_cursor",
+  "source": "arena/campaign.py:168",
+  "call": "campaign._declarations with an undecodable cursor",
+  "expected": "Invalid declaration cursor"
+ },
+ {
+  "id": "errors.declaration_items",
+  "source": "arena/campaign.py:172",
+  "call": "campaign._declarations with an empty item name",
+  "expected": "items must be a nonempty list of declaration names or handles"
+ },
+ {
+  "id": "errors.project_file_missing",
+  "source": "arena/campaign.py:326",
+  "call": "campaign._source_range when git cannot show the file",
+  "expected": "A.lean does not exist in the pinned project at c1"
+ },
+ {
+  "id": "errors.source_line_range",
+  "source": "arena/campaign.py:329",
+  "call": "campaign._source_range with first beyond the file",
+  "expected": "A.lean has 3 lines; first=5 is out of range"
+ },
+ {
+  "id": "errors.source_range_order",
+  "source": "arena/campaign.py:333",
+  "call": "campaign._source_range with last before first",
+  "expected": "last must not precede first"
+ },
+ {
+  "id": "errors.find_queries",
+  "source": "arena/campaign.py:349",
+  "call": "campaign.find with no queries",
+  "expected": "queries must be a nonempty list of names or search strings"
+ },
+ {
+  "id": "errors.find_limit",
+  "source": "arena/campaign.py:351",
+  "call": "campaign.find with a zero limit",
+  "expected": "limit must be positive"
+ },
+ {
+  "id": "errors.source_commit_mismatch",
+  "source": "arena/campaign.py:555",
+  "call": "campaign._split_source_handle with another commit in the handle",
+  "expected": "Source handle commit abcdef123456 is not the pinned commit 01234567"
+ },
+ {
+  "id": "errors.library_path",
+  "source": "arena/campaign.py:567",
+  "call": "campaign._stdlib_source with a path that leaves the library",
+  "expected": "Only relative .lean paths inside Lean's library are allowed"
+ },
+ {
+  "id": "errors.library_file_missing",
+  "source": "arena/campaign.py:570",
+  "call": "campaign._stdlib_source for a toolchain that is not installed",
+  "expected": ".lean-stdlib/lean/Nope.lean does not exist in Lean 0.0.0-none's library"
+ },
+ {
+  "id": "errors.source_path_missing",
+  "source": "arena/campaign.py:625",
+  "call": "campaign._source_target for a project that does not exist",
+  "expected": "a.lean does not exist in the pinned project or its dependency roots"
+ },
+ {
+  "id": "errors.source_search_failed",
+  "source": "arena/campaign.py:786",
+  "call": "campaign._declaration_hits with a git grep that fails silently",
+  "expected": "Pinned source search failed"
+ },
+ {
+  "id": "errors.invalid_declaration@resolve",
+  "source": "arena/campaign.py:823",
+  "call": "campaign._resolve_declaration_source with a malformed name",
+  "expected": "Invalid declaration name"
+ },
+ {
+  "id": "errors.module_missing",
+  "source": "arena/campaign.py:835",
+  "call": "campaign._resolve_declaration_source for a module no root holds",
+  "expected": "foo is defined in Foo.Bar, which is not in the pinned project or its dependency roots"
+ },
+ {
+  "id": "errors.declaration_missing",
+  "source": "arena/campaign.py:895",
+  "call": "campaign._resolve_declaration_source when the file has no such declaration",
+  "expected": "Declaration not found in pinned project: foo"
+ },
+ {
+  "id": "errors.invalid_declaration@source",
+  "source": "arena/campaign.py:941",
+  "call": "campaign._source_declaration with a malformed name",
+  "expected": "Invalid declaration name"
+ },
+ {
+  "id": "errors.no_source_declaration",
+  "source": "arena/campaign.py:975",
+  "call": "campaign._source_declaration for a name no source holds",
+  "expected": "No pinned source declaration matched this name."
+ },
+ {
+  "id": "errors.resolve_name_timeout",
+  "source": "arena/campaign.py:989",
+  "call": "campaign._declaration_in_lean when Lean times out",
+  "expected": "Lean timed out while resolving the name"
+ },
+ {
+  "id": "errors.name_not_visible",
+  "source": "arena/campaign.py:996",
+  "call": "campaign._declaration_in_lean when Lean prints no declaration",
+  "expected": "No declaration of that name is visible where the theorem is stated; try the full name or a prefix."
+ },
+ {
+  "id": "errors.stopped_run",
+  "source": "arena/campaign.py:1041",
+  "call": "campaign._refuse_if_tripped after the Lean breaker tripped",
+  "expected": "The harness has stopped this run"
+ },
+ {
+  "id": "errors.run_exists",
+  "source": "arena/campaign.py:1338",
+  "call": "campaign.init on a run directory that already holds a ledger",
+  "expected": "Run ID already exists: <tmp>/run"
+ },
+ {
+  "id": "candidate.original_reference",
+  "source": "arena/campaign.py:1367",
+  "call": "campaign.init on a fresh run, reading the reference candidate event",
+  "expected": "Pinned original reference proof"
+ },
+ {
+  "id": "errors.unknown_candidate",
+  "source": "arena/campaign.py:1432",
+  "call": "campaign.resolve_candidate_ref for a number beyond the candidates",
+  "expected": "Unknown candidate #7; candidates are #1-#1"
+ },
+ {
+  "id": "errors.unknown_probe",
+  "source": "arena/campaign.py:1457",
+  "call": "campaign.resolve_probe_ref with no probes",
+  "expected": "Unknown probe p3; probes are p1-p0"
+ },
+ {
+  "id": "errors.probe_parent_missing",
+  "source": "arena/campaign.py:1474",
+  "call": "campaign.resolve_parent_ref for a probe with no parent",
+  "expected": "Probe p1 has no recorded parent candidate"
+ },
+ {
+  "id": "errors.run_uninitialized@record_idea",
+  "source": "arena/campaign.py:1514",
+  "call": "campaign.record_idea on an empty ledger",
+  "expected": "Run is uninitialized"
+ },
+ {
+  "id": "errors.idea_statuses",
+  "source": "arena/campaign.py:1516",
+  "call": "campaign.record_idea with an unknown status",
+  "expected": "status must be one of active, parked, succeeded, abandoned"
+ },
+ {
+  "id": "errors.idea_reason",
+  "source": "arena/campaign.py:1518",
+  "call": "campaign.record_idea parking without a reason",
+  "expected": "Give a one-line reason when marking an idea parked"
+ },
+ {
+  "id": "errors.idea_id_unknown@none",
+  "source": "arena/campaign.py:1528",
+  "call": "campaign.record_idea updating an idea when none exist",
+  "expected": "Unknown idea zz; give a title to create it (recorded ideas: none yet)"
+ },
+ {
+  "id": "errors.idea_id_unknown@known",
+  "source": "arena/campaign.py:1528",
+  "call": "campaign.record_idea updating an unknown idea when one exists",
+  "expected": "Unknown idea zz; give a title to create it (recorded ideas: i1)"
+ },
+ {
+  "id": "errors.idea_title_missing",
+  "source": "arena/campaign.py:1547",
+  "call": "campaign.record_idea creating an idea with no title",
+  "expected": "A new idea needs a title"
+ },
+ {
+  "id": "state.advisory@scored",
+  "source": "arena/campaign.py:1683",
+  "call": "campaign._advisory over four stalled descendants of a scored node",
+  "expected": "The last 4 candidates (#3-#6) all descend from #2 and none improved on its score of 10.5."
+ },
+ {
+  "id": "state.advisory@unscored",
+  "source": "arena/campaign.py:1683",
+  "call": "campaign._advisory over four stalled descendants of an unscored node",
+  "expected": "The last 4 candidates (#3-#6) all descend from #2 and none improved on its score."
+ },
+ {
+  "id": "errors.cold_session_unavailable",
+  "source": "arena/campaign.py:1741",
+  "call": "campaign._model_view of a compile that fell back to a cold run",
+  "expected": "cold (session unavailable: busy)"
+ },
+ {
+  "id": "errors.evaluation_mode",
+  "source": "arena/campaign.py:1788",
+  "call": "campaign.record_evaluation with an unknown mode",
+  "expected": "mode must be fast or full"
+ },
+ {
+  "id": "errors.run_theorem_mismatch",
+  "source": "arena/campaign.py:1801",
+  "call": "campaign.record_evaluation against a ledger for another theorem",
+  "expected": "Run is uninitialized or theorem differs"
+ },
+ {
+  "id": "errors.source_versions_changed",
+  "source": "arena/campaign.py:1803",
+  "call": "campaign.record_evaluation when the pinned versions moved",
+  "expected": "Pinned source versions changed since run initialization"
+ },
+ {
+  "id": "errors.parent_ignored@evaluation",
+  "source": "arena/campaign.py:1812",
+  "call": "campaign.record_evaluation with a parent that does not exist",
+  "expected": [
+   "parent #9 ignored: Unknown candidate #9; candidates are #1-#0"
+  ]
+ },
+ {
+  "id": "errors.idea_id_label",
+  "source": "arena/campaign.py:1825",
+  "call": "campaign.record_evaluation with an idea id nobody recorded",
+  "expected": [
+   "idea_id zz is not a recorded idea; kept as a label"
+  ]
+ },
+ {
+  "id": "errors.evaluation_reference",
+  "source": "arena/campaign.py:1967",
+  "call": "campaign.evaluate_request with nothing to evaluate",
+  "expected": "Pass exactly one of proof, candidate, or from_probe"
+ },
+ {
+  "id": "errors.evaluation_proof_missing",
+  "source": "arena/campaign.py:1982",
+  "call": "campaign.evaluate_request for a candidate whose proof file is empty",
+  "expected": "Supply proof, candidate (#N) or from_probe (pN)"
+ },
+ {
+  "id": "errors.probe_forbidden",
+  "source": "arena/campaign.py:1987",
+  "call": "campaign.evaluate_request with a proof containing sorry",
+  "expected": "FORBIDDEN: sorry; use arena_probe to inspect a draft with holes"
+ },
+ {
+  "id": "check.queued",
+  "source": "arena/campaign.py:2002",
+  "call": "campaign._full_check_status for a primary pass with two versions",
+  "expected": "queued: the other 1 version(s) are checked in the background"
+ },
+ {
+  "id": "errors.parent_ignored@probe",
+  "source": "arena/campaign.py:2090",
+  "call": "campaign.probe with a parent that does not exist",
+  "expected": [
+   "parent #9 ignored: Unknown candidate #9; candidates are #1-#0"
+  ]
+ },
+ {
+  "id": "probe.complete_candidate",
+  "source": "arena/campaign.py:2116",
+  "call": "campaign.probe of a complete draft that compiles",
+  "expected": [
+   "complete draft compiled, recorded as candidate #1"
+  ]
+ },
+ {
+  "id": "errors.draft_missing",
+  "source": "arena/campaign.py:2145",
+  "call": "campaign.normalize_draft with a blank draft",
+  "expected": "Draft must be nonempty proof text"
+ },
+ {
+  "id": "errors.draft_limit",
+  "source": "arena/campaign.py:2165",
+  "call": "campaign.probe_batch with no drafts",
+  "expected": "Pass between one and four drafts"
+ },
+ {
+  "id": "errors.unknown_candidate_short",
+  "source": "arena/campaign.py:2201",
+  "call": "campaign.candidate for a candidate with no proof file",
+  "expected": "Unknown candidate"
+ },
+ {
+  "id": "errors.profile_candidate_missing",
+  "source": "arena/campaign.py:2242",
+  "call": "campaign.profile_request with no candidate on record",
+  "expected": "No candidate to profile; give candidate (#N) or probe (pN)"
+ },
+ {
+  "id": "errors.decision_invalid",
+  "source": "arena/campaign.py:2270",
+  "call": "campaign.set_decision with an unknown decision",
+  "expected": "Decision must be pursue or park with a reason"
+ },
+ {
+  "id": "merge.hypothesis@fast",
+  "source": "arena/campaign.py:2501",
+  "call": "campaign.merge_once, the hypothesis of the fast evaluation",
+  "expected": "Deterministic combination of disjoint edits"
+ },
+ {
+  "id": "merge.hypothesis@full",
+  "source": "arena/campaign.py:2520",
+  "call": "campaign.merge_once, the hypothesis of the full evaluation",
+  "expected": "Deterministic combination of disjoint edits"
+ },
+ {
+  "id": "check.could_not_run",
+  "source": "arena/campaign.py:2565",
+  "call": "campaign._check_text for a check that never ran",
+  "expected": "#3 full check could not run: boom"
+ },
+ {
+  "id": "check.passed",
+  "source": "arena/campaign.py:2569",
+  "call": "campaign._check_text for a check that passed every version",
+  "expected": "#3 passes all 1 versions: proxy 42.5"
+ },
+ {
+  "id": "check.failed",
+  "source": "arena/campaign.py:2572",
+  "call": "campaign._check_text for a check that failed one version",
+  "expected": "#3 fails w (1/2 pass): bad line"
+ },
+ {
+  "id": "errors.run_uninitialized@state",
+  "source": "arena/campaign.py:2639",
+  "call": "campaign.state on an empty ledger",
+  "expected": "Run is uninitialized"
+ },
+ {
+  "id": "errors.cold_verification_paused",
+  "source": "arena/campaign.py:2728",
+  "call": "campaign.cold_verify while the Lean breaker is tripped",
+  "expected": "Lean unhealthy; cold verification paused"
+ },
+ {
+  "id": "state.no_candidate_passed",
+  "source": "arena/campaign.py:2811",
+  "call": "campaign.submission when no candidate passed every version",
+  "expected": "no model candidate passed every version; the original proof stands"
+ },
+ {
+  "id": "state.no_candidate_cold_passed",
+  "source": "arena/campaign.py:2814",
+  "call": "campaign.submission when the only candidate fails the cold compile",
+  "expected": "no candidate that passed in the Lean session also passed a clean cold compile"
+ },
+ {
+  "id": "state.cold_compile_without_session",
+  "source": "arena/campaign.py:2826",
+  "call": "campaign.submission for a candidate that never used a session",
+  "expected": "cold compile (no session used)"
+ },
+ {
+  "id": "errors.run_uninitialized@frontier",
+  "source": "arena/campaign.py:2854",
+  "call": "campaign.frontier on an empty ledger",
+  "expected": "Run is uninitialized"
+ },
+ {
+  "id": "errors.proof_utility_parse",
+  "source": "arena/engine.py:58",
+  "call": "engine._proof_length when the pinned utility cannot parse",
+  "expected": "Pinned proof utility could not parse the candidate"
+ },
+ {
+  "id": "errors.statement_modified_first",
+  "source": "arena/engine.py:83",
+  "call": "engine.validate_proof with an edited statement",
+  "expected": "STATEMENT_MODIFIED: candidate must begin with the exact benchmark statement; first difference on statement line 1: expected 'e', got 'f := trivial'. Copy the statement from the packet byte for byte."
+ },
+ {
+  "id": "errors.statement_modified_suffix",
+  "source": "arena/engine.py:89",
+  "call": "engine.validate_proof with no `:=` after the statement",
+  "expected": "STATEMENT_MODIFIED: the statement must be followed directly by `:=`; got ' x'"
+ },
+ {
+  "id": "errors.extra_command",
+  "source": "arena/engine.py:96",
+  "call": "engine.validate_proof with a second top-level command",
+  "expected": "EXTRA_COMMAND: candidate contains a second top-level command"
+ },
+ {
+  "id": "errors.forbidden_construct",
+  "source": "arena/engine.py:101",
+  "call": "engine.validate_proof with sorry",
+  "expected": "FORBIDDEN: sorry"
+ },
+ {
+  "id": "errors.measure_version_missing",
+  "source": "arena/engine.py:134",
+  "call": "engine.measure_version with an override naming an unlisted version",
+  "expected": "Measurement version 9.9 is not listed for nm"
+ },
+ {
+  "id": "errors.pinned_statement_missing",
+  "source": "arena/engine.py:197",
+  "call": "engine.locate_source with a source that lacks the statement",
+  "expected": "FILE_MODIFIED: pinned theorem is absent or ambiguous on v1"
+ },
+ {
+  "id": "errors.standalone_row",
+  "source": "arena/engine.py:213",
+  "call": "engine.candidate_file for a standalone row with no header",
+  "expected": "A standalone row needs its header and statement"
+ },
+ {
+  "id": "errors.theorem_location_missing",
+  "source": "arena/engine.py:223",
+  "call": "engine.candidate_file for a file row with no line span",
+  "expected": "The row does not say where its theorem lives"
+ },
+ {
+  "id": "evaluate.diagnostic_headline",
+  "source": "arena/engine.py:355",
+  "call": "engine.structure_diagnostics for one Lean error inside the target",
+  "expected": [
+   "line 2 (proof line 2): boom"
+  ]
+ },
+ {
+  "id": "errors.lean_timeout",
+  "source": "arena/engine.py:616",
+  "call": "engine.compile_version when Lean times out",
+  "expected": "Lean timed out after 7 seconds"
+ },
+ {
+  "id": "errors.mode_invalid",
+  "source": "arena/engine.py:642",
+  "call": "engine.evaluate with an unknown mode",
+  "expected": "mode must be fast, full or probe"
+ },
+ {
+  "id": "errors.toolchains_missing",
+  "source": "arena/engine.py:650",
+  "call": "engine.evaluate for a row that lists no toolchain",
+  "expected": "No toolchain versions listed"
+ },
+ {
+  "id": "evaluate.calibration_pending",
+  "source": "arena/engine.py:691",
+  "call": "engine.evaluate of one proof with the compile and scoring patched out",
+  "expected": "pending official Arena worker comparison"
+ },
+ {
+  "id": "profile.hotspot_label",
+  "source": "arena/profile.py:359",
+  "call": "profile.summarize of an empty profile, the hotspot label",
+  "expected": "top-ten score-equivalent cost (not predicted savings)"
+ },
+ {
+  "id": "profile.unit",
+  "source": "arena/profile.py:360",
+  "call": "profile.summarize of an empty profile, the unit",
+  "expected": "heartbeats (the scoring unit, raw / 1000); hb is inclusive of nested tactics"
+ },
+ {
+  "id": "errors.profile_timeout",
+  "source": "arena/profile.py:372",
+  "call": "profile._instrumented when Lean times out",
+  "expected": "Lean timed out while profiling"
+ },
+ {
+  "id": "errors.profile_compile_failed",
+  "source": "arena/profile.py:378",
+  "call": "profile._instrumented when the instrumented file does not compile",
+  "expected": "instrumented compile failed: error: bad"
+ },
+ {
+  "id": "errors.profile_requires_complete",
+  "source": "arena/profile.py:389",
+  "call": "profile.profile of a draft containing sorry",
+  "expected": "Profiling needs a proof without sorry; finish the draft first"
+ },
+ {
+  "id": "errors.profile_proof_compile",
+  "source": "arena/profile.py:403",
+  "call": "profile.profile of a proof that does not compile",
+  "expected": "The proof does not compile, so it cannot be profiled: h1"
+ },
+ {
+  "id": "errors.profile_instrumentation_failed",
+  "source": "arena/profile.py:404",
+  "call": "profile.profile of a proof that compiles but cannot be instrumented",
+  "expected": "Profiling could not instrument this proof: boom"
+ },
+ {
+  "id": "profile.degraded",
+  "source": "arena/profile.py:430",
+  "call": "profile.profile when only the outermost tactics can be instrumented",
+  "expected": "Profile degraded to the outermost tactics: boom"
+ },
+ {
+  "id": "profile.floor_method",
+  "source": "arena/profile.py:447",
+  "call": "profile.heartbeat_floor for a row with no cached floor",
+  "expected": "statement elaborated with a sorry proof"
+ },
+ {
+  "id": "routes.original@best",
+  "source": "arena/routes.py:548",
+  "call": "routes.routes_text for the original's route with a best proxy and one goal state",
+  "expected": "r1 (original's route) · 1 attempt · 1 goal state · best proxy 61.2 (#3)"
+ },
+ {
+  "id": "routes.credited@none",
+  "source": "arena/routes.py:555",
+  "call": "routes.routes_text for a credited route with no scored proof and two goal states",
+  "expected": "r1 (credited) · 3 attempts · 2 goal states · no scored proof"
+ },
+ {
+  "id": "routes.not_credited",
+  "source": "arena/routes.py:557",
+  "call": "routes.routes_text for a route that opened but earned no credit",
+  "expected": "r1 (not credited) · 1 attempt · 0 goal states · no scored proof"
+ },
+ {
+  "id": "routes.plain",
+  "source": "arena/routes.py:562",
+  "call": "routes.routes_text for a route with no credit or depth fields",
+  "expected": "r1 · 1 attempt · no scored proof"
+ },
+ {
+  "id": "routes.none",
+  "source": "arena/routes.py:569",
+  "call": "routes.routes_text for an empty table",
+  "expected": "none"
+ },
+ {
+  "id": "merge.none_checked",
+  "source": "arena/merges.py:57",
+  "call": "merges.merge_text with no merge rows",
+  "expected": "none checked"
+ },
+ {
+  "id": "merge.summary",
+  "source": "arena/merges.py:59",
+  "call": "merges.merge_text with one merge that beat neither parent",
+  "expected": "1 combined proof(s) compiled, 0 verified above both parents (report only, never submitted: submissions are model-written)"
+ },
+ {
+  "id": "merge.entry",
+  "source": "arena/merges.py:62",
+  "call": "merges.merge_text with one merge that beat both parents",
+  "expected": "1 combined proof(s) compiled, 1 verified above both parents: #4 = #2 + #3 proxy 70.5 (report only, never submitted: submissions are model-written)"
+ },
+ {
+  "id": "errors.lean_context_timeout",
+  "source": "arena/context.py:189",
+  "call": "context.lean_context when Lean times out",
+  "expected": "Lean timed out while collecting context"
+ },
+ {
+  "id": "packet.profile_span",
+  "source": "arena/context.py:751",
+  "call": "context._profile_section with one hotspot that has one tactic span",
+  "expected": "Profile granularity: tactic\nproof lines | file lines | heartbeats (incl.) | self | share | tactic\n\nTop-ten starting lines by score-equivalent baseline cost (not predicted savings):\nproof 2-3 / file 12-13 (tactic spans: proof 2-3 / file 12-13 (depth 1)): 5 self hb, 4 tokens, 1.5 baseline points\nTop self costs: \nMeasured whole-proof heartbeats: 10; attributed tactic heartbeats: 8 (80.0% coverage); statement floor: None; unattributed remainder: None."
+ },
+ {
+  "id": "packet.budget_certification_failed",
+  "source": "arena/context.py:820",
+  "call": "context._fit with a section that cannot shrink below the limit",
+  "expected": "Required kickoff inventory exceeds packet budget; certification failed"
+ },
+ {
+  "id": "packet.pin",
+  "source": "arena/context.py:830",
+  "call": "context.render_packet, the line that lists the pinned toolchains",
+  "expected": "Lean toolchain and source revisions: Lean v1 / source revision c1; Lean v2 / source revision c2"
+ },
+ {
+  "id": "packet.packet_not_certifiable",
+  "source": "arena/context.py:883",
+  "call": "context.render_packet when certification fails",
+  "expected": "Kickoff packet is not certifiable: a; b"
+ }
+]
