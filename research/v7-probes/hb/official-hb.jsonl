@@ -1,0 +1,58 @@
+{"name": "Core.InitsUpdatesComm", "method": "ours", "ver": "v4.29.1", "label": "ref", "hb": 4251, "sec": 2, "err": ""}
+{"name": "Core.InitsUpdatesComm", "method": "org", "ver": "v4.29.1", "label": "ref", "hb": null, "sec": 0, "err": "lean exited with code 1: /mnt/SharedDrive/ActiveProjects/lean-refactor-pi/workspaces/strata-v4.29.1/Strata/Languages/Core/StatementSemanticsProps_hb_cea41271.lean:6:0: error: unknown module prefix 'Mathlib'\n\nNo directory 'Mathlib' or file 'Mathlib.olean' in the search path entries:\n/mnt/SharedDrive/"}
+{"name": "CallElimCorrect.extractedOldExprInVars", "method": "ours", "ver": "v4.26.0", "label": "ref", "hb": 2698, "sec": 8, "err": ""}
+{"name": "Core.InitsUpdatesComm", "method": "ours", "ver": "v4.29.1", "label": "ref", "hb": 4251, "sec": 2, "err": ""}
+{"name": "fundamental_theorem_of_variational_calculus'", "method": "ours", "ver": "v4.32.0", "label": "ref", "hb": 11946, "sec": 12, "err": ""}
+{"name": "Electromagnetism.ElectromagneticPotential.time_deriv_time_deriv_electricField_of_isExtrema", "method": "ours", "ver": "v4.32.0", "label": "ref", "hb": 26973, "sec": 12, "err": ""}
+{"name": "FieldSpecification.WickAlgebra.\u03b9_timeOrderF_superCommuteF_eq_time", "method": "ours", "ver": "v4.32.0", "label": "ref", "hb": 42165, "sec": 8, "err": ""}
+{"name": "CallElimCorrect.substOldPostSubset", "method": "ours", "ver": "v4.26.0", "label": "ref", "hb": 5175, "sec": 11, "err": ""}
+{"name": "Cslib.LambdaCalculus.LocallyNameless.Fsub.Typing.progress", "method": "ours", "ver": "v4.33.0-rc2", "label": "ref", "hb": 59815, "sec": 16, "err": ""}
+{"name": "Cslib.SKI.parallelReduction_diamond", "method": "ours", "ver": "v4.33.0-rc2", "label": "ref", "hb": 1384, "sec": 2, "err": ""}
+{"name": "Cslib.CCS.bisimilarity_congr_choice", "method": "ours", "ver": "v4.33.0-rc2", "label": "ref", "hb": 3855, "sec": 3, "err": ""}
+{"name": "Binius.BinaryBasefold.fiberwise_dist_lt_imp_dist_lt_unique_decoding_radius", "method": "ours", "ver": "v4.31.0", "label": "ref", "hb": 15913, "sec": 27, "err": ""}
+{"name": "Binius.BinaryBasefold.fold_advances_evaluation_poly", "method": "ours", "ver": "v4.31.0", "label": "ref", "hb": 45537, "sec": 12, "err": ""}
+{"name": "interleaved_affine_gaps_imply_tensor_gaps", "method": "ours", "ver": "v4.31.0", "label": "ref", "hb": 9281, "sec": 22, "err": ""}
+{"name": "putnam_1964_a4", "method": "ours", "ver": "v4.25.0", "label": "ref", "hb": 141085, "sec": 19, "err": ""}
+{"name": "putnam_1964_b2", "method": "ours", "ver": "v4.25.0", "label": "ref", "hb": 120486, "sec": 13, "err": ""}
+{"name": "putnam_1995_a3", "method": "ours", "ver": "v4.25.0", "label": "ref", "hb": 17959, "sec": 7, "err": ""}
+{"name": "fundamental_theorem_of_variational_calculus'", "method": "org", "ver": "v4.32.0", "label": "ref", "hb": null, "sec": 7, "err": "lean exited with code 1: /mnt/SharedDrive/ActiveProjects/lean-refactor-pi/workspaces/physlib-v4.32.0/Physlib/Mathematics/VariationalCalculus/Basic_hb_a18f7526.lean:99:2: error: unexpected token 'set_option'; expected 'lemma'\nUsed 11990 heartbeats, which is less than the current maximum of 200000.\nwa"}
+{"name": "Electromagnetism.ElectromagneticPotential.time_deriv_time_deriv_electricField_of_isExtrema", "method": "org", "ver": "v4.32.0", "label": "ref", "hb": 27407, "sec": 13, "err": ""}
+{"name": "FieldSpecification.WickAlgebra.\u03b9_timeOrderF_superCommuteF_eq_time", "method": "org", "ver": "v4.32.0", "label": "ref", "hb": 42293, "sec": 10, "err": ""}
+{"name": "Cslib.LambdaCalculus.LocallyNameless.Fsub.Typing.progress", "method": "org", "ver": "v4.33.0-rc2", "label": "ref", "hb": null, "sec": 13, "err": "lean exited with code 1: /mnt/SharedDrive/ActiveProjects/lean-refactor-pi/workspaces/cslib-v4.33.0-rc2/Cslib/Languages/LambdaCalculus/LocallyNameless/Fsub/Safety_hb_2205161f.lean:76:66: error: unexpected token 'set_option'; expected 'lemma'\nUsed 60095 heartbeats, which is less than the current maxim"}
+{"name": "Cslib.SKI.parallelReduction_diamond", "method": "org", "ver": "v4.33.0-rc2", "label": "ref", "hb": null, "sec": 2, "err": "lean exited with code 1: /mnt/SharedDrive/ActiveProjects/lean-refactor-pi/workspaces/cslib-v4.33.0-rc2/Cslib/Languages/CombinatoryLogic/Confluence_hb_8bb3a053.lean:142:2: error: unexpected token 'set_option'; expected 'lemma'\nUsed 1505 heartbeats, which is less than the current maximum of 200000.\nwa"}
+{"name": "Cslib.CCS.bisimilarity_congr_choice", "method": "org", "ver": "v4.33.0-rc2", "label": "ref", "hb": null, "sec": 4, "err": "lean exited with code 1: /mnt/SharedDrive/ActiveProjects/lean-refactor-pi/workspaces/cslib-v4.33.0-rc2/Cslib/Languages/CCS/BehaviouralTheory_hb_dac0a1b0.lean:311:28: error: unexpected token 'set_option'; expected 'lemma'\nUsed 4027 heartbeats, which is less than the current maximum of 200000.\nwarning"}
+{"name": "Binius.BinaryBasefold.fiberwise_dist_lt_imp_dist_lt_unique_decoding_radius", "method": "org", "ver": "v4.31.0", "label": "ref", "hb": null, "sec": 14, "err": "lean exited with code 1: \u0335w\u0335_\u0335p\u0335o\u0335s\u0335,\u0335_root_.mul_le_mul_right,\n          ge_iff_le]\n\nNote: This linter can be disabled with `set_option linter.unusedSimpArgs false`\n/mnt/SharedDrive/ActiveProjects/lean-refactor-pi/workspaces/arklib-v4.31.0/ArkLib/ProofSystem/Binius/BinaryBasefold/Prelude_hb_d980be64"}
+{"name": "Binius.BinaryBasefold.fold_advances_evaluation_poly", "method": "org", "ver": "v4.31.0", "label": "ref", "hb": null, "sec": 14, "err": "lean exited with code 1: asefold/Prelude_hb_aa167e8f.lean:1404:71: warning: This simp argument is unused:\n  pow_pos\n\nHint: Omit it from the simp argument list.\n  simp only [sum_const, Set.toFinset_card, smul_eq_mul, ofNat_pos, p\u0335o\u0335w\u0335_\u0335p\u0335o\u0335s\u0335,\u0335_root_.mul_le_mul_right,\n          ge_iff_le]\n\nNote: This"}
+{"name": "interleaved_affine_gaps_imply_tensor_gaps", "method": "org", "ver": "v4.31.0", "label": "ref", "hb": 9705, "sec": 21, "err": ""}
+{"name": "putnam_1964_a4", "method": "org", "ver": "v4.25.0", "label": "ref", "hb": 141095, "sec": 15, "err": ""}
+{"name": "putnam_1964_b2", "method": "org", "ver": "v4.25.0", "label": "ref", "hb": 120492, "sec": 13, "err": ""}
+{"name": "putnam_1995_a3", "method": "org", "ver": "v4.25.0", "label": "ref", "hb": 17954, "sec": 7, "err": ""}
+{"name": "CallElimCorrect.substOldPostSubset", "method": "orgd", "ver": "v4.26.0", "label": "ref", "hb": null, "sec": 2, "err": "lean exited with code 1: /mnt/SharedDrive/ActiveProjects/lean-refactor-pi/workspaces/strata-v4.26.0/Strata/Transform/CallElimCorrect_hb_945bf093.lean:7:0: error: unknown module prefix 'Mathlib'\n\nNo directory 'Mathlib' or file 'Mathlib.olean' in the search path entries:\n/mnt/SharedDrive/ActiveProject", "errlines": ["lean exited with code 1: /mnt/SharedDrive/ActiveProjects/lean-refactor-pi/workspaces/strata-v4.26.0/Strata/Transform/CallElimCorrect_hb_945bf093.lean:7:0: error: unknown module prefix 'Mathlib'"]}
+{"name": "CallElimCorrect.extractedOldExprInVars", "method": "orgd", "ver": "v4.26.0", "label": "ref", "hb": null, "sec": 0, "err": "lean exited with code 1: /mnt/SharedDrive/ActiveProjects/lean-refactor-pi/workspaces/strata-v4.26.0/Strata/Transform/CallElimCorrect_hb_3115672e.lean:7:0: error: unknown module prefix 'Mathlib'\n\nNo directory 'Mathlib' or file 'Mathlib.olean' in the search path entries:\n/mnt/SharedDrive/ActiveProject", "errlines": ["lean exited with code 1: /mnt/SharedDrive/ActiveProjects/lean-refactor-pi/workspaces/strata-v4.26.0/Strata/Transform/CallElimCorrect_hb_3115672e.lean:7:0: error: unknown module prefix 'Mathlib'"]}
+{"name": "fundamental_theorem_of_variational_calculus'", "method": "orgd", "ver": "v4.32.0", "label": "ref", "hb": 11991, "sec": 3, "err": "", "errlines": []}
+{"name": "Cslib.LambdaCalculus.LocallyNameless.Fsub.Typing.progress", "method": "orgd", "ver": "v4.33.0-rc2", "label": "ref", "hb": 60117, "sec": 9, "err": "", "errlines": []}
+{"name": "Cslib.SKI.parallelReduction_diamond", "method": "orgd", "ver": "v4.33.0-rc2", "label": "ref", "hb": 1505, "sec": 1, "err": "", "errlines": []}
+{"name": "Cslib.CCS.bisimilarity_congr_choice", "method": "orgd", "ver": "v4.33.0-rc2", "label": "ref", "hb": 3931, "sec": 3, "err": "", "errlines": []}
+{"name": "Binius.BinaryBasefold.fiberwise_dist_lt_imp_dist_lt_unique_decoding_radius", "method": "orgd", "ver": "v4.31.0", "label": "ref", "hb": 16864, "sec": 12, "err": "", "errlines": []}
+{"name": "Binius.BinaryBasefold.fold_advances_evaluation_poly", "method": "orgd", "ver": "v4.31.0", "label": "ref", "hb": 47746, "sec": 13, "err": "", "errlines": []}
+{"name": "Cslib.SKI.parallelReduction_diamond", "method": "orgd", "ver": "v4.33.0-rc2", "label": "ref", "hb": 1505, "sec": 1, "err": "", "errlines": []}
+{"name": "Cslib.SKI.parallelReduction_diamond", "method": "ours", "ver": "v4.33.0-rc2", "label": "ref", "hb": 1384, "sec": 1, "err": "", "errlines": []}
+{"name": "Cslib.SKI.parallelReduction_diamond", "method": "orgd", "ver": "v4.33.0-rc2", "label": "ref", "hb": 1506, "sec": 1, "err": "", "errlines": []}
+{"name": "Cslib.SKI.parallelReduction_diamond", "method": "ours", "ver": "v4.33.0-rc2", "label": "ref", "hb": 1384, "sec": 1, "err": "", "errlines": []}
+{"name": "Cslib.SKI.parallelReduction_diamond", "method": "orgt", "ver": "v4.33.0-rc2", "label": "ref", "hb": 1505, "sec": 1, "err": "", "errlines": []}
+{"name": "putnam_1964_a4", "method": "ours", "ver": "v4.26.0", "label": "ref", "hb": 115683, "sec": 34, "err": "", "errlines": []}
+{"name": "putnam_1964_a4", "method": "ours", "ver": "v4.27.0", "label": "ref", "hb": 111476, "sec": 33, "err": "", "errlines": []}
+{"name": "putnam_1964_b2", "method": "ours", "ver": "v4.26.0", "label": "ref", "hb": 134518, "sec": 25, "err": "", "errlines": []}
+{"name": "putnam_1995_a3", "method": "ours", "ver": "v4.26.0", "label": "ref", "hb": 14310, "sec": 6, "err": "", "errlines": []}
+{"name": "putnam_1995_a3", "method": "ours", "ver": "v4.27.0", "label": "ref", "hb": 14134, "sec": 6, "err": "", "errlines": []}
+{"name": "putnam_1964_a4", "method": "org", "ver": "v4.27.0", "label": "ref", "hb": 111476, "sec": 12, "err": "", "errlines": []}
+{"name": "putnam_1964_b2", "method": "org", "ver": "v4.26.0", "label": "ref", "hb": 134486, "sec": 15, "err": "", "errlines": []}
+{"name": "putnam_1995_a3", "method": "org", "ver": "v4.27.0", "label": "ref", "hb": 14129, "sec": 7, "err": "", "errlines": []}
+{"name": "Cslib.SKI.parallelReduction_diamond", "method": "ours", "ver": "v4.33.0-rc2", "label": "best_ski", "hb": 416, "sec": 4, "err": "", "errlines": []}
+{"name": "Cslib.SKI.parallelReduction_diamond", "method": "orgd", "ver": "v4.33.0-rc2", "label": "best_ski", "hb": 418, "sec": 1, "err": "", "errlines": []}
+{"name": "Binius.BinaryBasefold.fold_advances_evaluation_poly", "method": "ours", "ver": "v4.31.0", "label": "best_fold", "hb": 6766, "sec": 12, "err": "", "errlines": []}
+{"name": "Binius.BinaryBasefold.fold_advances_evaluation_poly", "method": "orgd", "ver": "v4.31.0", "label": "best_fold", "hb": 7023, "sec": 9, "err": "", "errlines": []}
+{"name": "putnam_1964_a4", "method": "ours", "ver": "v4.27.0", "label": "best_a4", "hb": 5066, "sec": 7, "err": "", "errlines": []}
+{"name": "putnam_1964_a4", "method": "orgd", "ver": "v4.27.0", "label": "best_a4", "hb": 5063, "sec": 5, "err": "", "errlines": []}
+{"name": "interleaved_affine_gaps_imply_tensor_gaps", "method": "ours", "ver": "v4.31.0", "label": "best_ilv", "hb": 2571, "sec": 21, "err": "", "errlines": []}
+{"name": "interleaved_affine_gaps_imply_tensor_gaps", "method": "orgd", "ver": "v4.31.0", "label": "best_ilv", "hb": 2599, "sec": 20, "err": "", "errlines": []}

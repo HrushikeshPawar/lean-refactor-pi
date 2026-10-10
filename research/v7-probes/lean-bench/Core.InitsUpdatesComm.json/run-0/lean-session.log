@@ -1,0 +1,12 @@
+17:32:57 session up (pid 2895944, max slots 4, reserve 5.0 GB)
+17:32:57 server strata-v4.29.1 started
+17:32:57 share 8 (1 live sessions): model 7, background 1
+17:32:57 warm strata-v4.29.1 slot 1 opening
+17:32:57 warm strata-v4.29.1 slot 2 opening
+17:32:57 warm strata-v4.29.1 slot 3 opening
+17:32:57 warm strata-v4.29.1 slot 4 opening
+17:32:59 warm strata-v4.29.1 slot 1 ready in 1.6 s
+17:33:01 warm strata-v4.29.1 slot 2 ready in 3.8 s
+17:33:03 warm strata-v4.29.1 slot 4 ready in 5.9 s
+17:33:05 warm strata-v4.29.1 slot 3 ready in 8.1 s
+17:33:15 session shutdown

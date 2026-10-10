@@ -1,0 +1,12 @@
+17:33:17 session up (pid 2903263, max slots 4, reserve 5.0 GB)
+17:33:21 server putnambench-v4.25.0 started
+17:33:21 share 8 (1 live sessions): model 7, background 1
+17:33:21 warm putnambench-v4.25.0 slot 1 opening
+17:33:21 warm putnambench-v4.25.0 slot 2 opening
+17:33:21 warm putnambench-v4.25.0 slot 3 opening
+17:33:21 warm putnambench-v4.25.0 slot 4 opening
+17:33:36 warm putnambench-v4.25.0 slot 1 ready in 14.8 s
+17:33:40 warm putnambench-v4.25.0 slot 2 ready in 19.0 s
+17:33:44 warm putnambench-v4.25.0 slot 3 ready in 23.1 s
+17:33:48 warm putnambench-v4.25.0 slot 4 ready in 27.5 s
+17:34:38 session shutdown

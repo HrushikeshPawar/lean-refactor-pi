@@ -14,6 +14,7 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -52,6 +53,9 @@ def _proof_length(proof: str, statement: str | None = None) -> int:
     """
     if statement is not None and proof.startswith(statement):
         proof = "theorem x : True" + proof[len(statement):]
+    # The pinned checker imports its sibling `heartbeat` module.
+    if str(UPSTREAM_CHECKER.parent) not in sys.path:
+        sys.path.insert(0, str(UPSTREAM_CHECKER.parent))
     spec = importlib.util.spec_from_file_location("pinned_check_proof", UPSTREAM_CHECKER)
     if spec is None or spec.loader is None:
         raise RuntimeError("Pinned proof utility is unavailable")
