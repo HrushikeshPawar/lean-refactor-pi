@@ -20,7 +20,7 @@ CORE = "Core.InitsUpdatesComm"
 PHYSLIB = "fundamental_theorem_of_variational_calculus'"
 CORE_READY = (ROOT / "workspaces/strata-v4.29.1").is_dir()
 PHYSLIB_READY = (ROOT / "workspaces/physlib-v4.32.0").is_dir()
-TOLERANCE = 0.05  # tools/arena_certify.py default
+TOLERANCE = 0.05  # arena certify default
 
 
 def alive(pid: int) -> bool:

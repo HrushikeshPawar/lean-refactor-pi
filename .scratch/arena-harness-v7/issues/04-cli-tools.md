@@ -9,7 +9,7 @@ keeps working unchanged: `arena protocol` stays the JSON contract it calls.
 
 **Blocked by:** 03: CLI skeleton, vendor adapter, MiMo provider (committed below your branch).
 
-**Status:** ready-for-agent
+**Status:** done
 
 **Branch:** `v7/04-cli-tools` (stacked on `v7/03-cli`)
 

@@ -8,12 +8,11 @@ showing that run's dashboard from `/run/<id>/dashboard.html` (graph at `/run/<id
 Per-run data: graph.json, dashboard.json, langfuse.json. Langfuse is queried server-side with the
 keys in ~/.pi/agent/langfuse.json (never sent to the browser) and cached; `--no-langfuse` disables it.
 
-    uv run python tools/serve_candidate_graph.py --match 'v6*'
+    uv run arena serve --match 'v6*'
 """
 
 from __future__ import annotations
 
-import argparse
 import fnmatch
 import json
 import re
@@ -21,16 +20,13 @@ import signal
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:  # allow `python tools/serve_candidate_graph.py`
-    sys.path.insert(0, str(ROOT))
+from arena.campaign import graph_state, run_dir
+from arena.summary import configured_cap
+from arena.viewer_data import Langfuse, campaign_of, hub_row, read_jsonl, run_dashboard
 
-from arena.campaign import graph_state, run_dir  # noqa: E402
-from arena.summary import configured_cap  # noqa: E402
-from arena.viewer_data import Langfuse, campaign_of, hub_row, read_jsonl, run_dashboard  # noqa: E402
-
-ASSETS = ROOT / "tools" / "graph_viewer"
+ASSETS = Path(__file__).resolve().parents[1] / "graph_viewer"
 
 
 def _clip(text, limit: int) -> str:
@@ -265,7 +261,7 @@ def handler_for(runs: Runs | str, langfuse: Langfuse | None = None):
         runs = Runs([runs])
 
     class Handler(BaseHTTPRequestHandler):
-        def log_message(self, *_args):
+        def log_message(self, format: str, *args: Any) -> None:
             pass
 
         def send(self, body: bytes, content_type: str) -> None:
@@ -349,19 +345,19 @@ def handler_for(runs: Runs | str, langfuse: Langfuse | None = None):
     return Handler
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("run_ids", nargs="*", help="One run (single viewer) or several (hub with tabs)")
-    parser.add_argument("--match", help="Glob over run IDs, re-scanned live, e.g. 'v5-rep-20261006-r3-*'")
-    parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--no-langfuse", action="store_true", help="Never contact Langfuse")
-    parser.add_argument("--langfuse-ttl", type=float, default=45.0, help="Seconds to cache Langfuse answers")
-    args = parser.parse_args()
-    if not args.run_ids and not args.match:
-        parser.error("give at least one run ID or --match")
-    runs = Runs(args.run_ids, args.match)
-    langfuse = None if args.no_langfuse else Langfuse(ttl=args.langfuse_ttl)
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), handler_for(runs, langfuse))
+def execute(
+    run_ids: list[str],
+    match: str | None = None,
+    port: int = 8765,
+    no_langfuse: bool = False,
+    langfuse_ttl: float = 45.0,
+) -> int:
+    if not run_ids and not match:
+        print("error: give at least one run ID or --match", file=sys.stderr)
+        return 2
+    runs = Runs(run_ids, match)
+    langfuse = None if no_langfuse else Langfuse(ttl=langfuse_ttl)
+    server = ThreadingHTTPServer(("127.0.0.1", port), handler_for(runs, langfuse))
     # Open browser connections must not keep the process alive after Ctrl+C.
     server.daemon_threads = True
     kind = "hub" if runs.hub else "viewer"
@@ -384,6 +380,4 @@ def main() -> None:
         server.server_close()
         print("Stopped.", flush=True)
 
-
-if __name__ == "__main__":
-    main()
+    return 0

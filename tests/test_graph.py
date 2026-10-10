@@ -5,10 +5,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from arena import campaign
+from arena.cli.graph import build_snapshot
+from arena.cli.run import attempt_has_model_error
+from arena.cli.serve import graph_payload
 from arena.graph import common_base, merge_text, ranked_frontier
-from tools.build_candidate_graph import build_snapshot
-from tools.run_pi_budgeted import attempt_has_model_error
-from tools.serve_candidate_graph import graph_payload
 
 
 class MergeTests(unittest.TestCase):
@@ -198,7 +198,7 @@ class ViewerTests(unittest.TestCase):
             campaign._append(directory, {"kind": "init", "theorem": "T"})
             with (
                 patch(
-                    "tools.serve_candidate_graph.graph_state",
+                    "arena.cli.serve.graph_state",
                     return_value={
                         "run_id": "viewer",
                         "theorem": "T",
@@ -211,7 +211,7 @@ class ViewerTests(unittest.TestCase):
                         "timeline": [],
                     },
                 ),
-                patch("tools.serve_candidate_graph.run_dir", return_value=directory),
+                patch("arena.cli.serve.run_dir", return_value=directory),
             ):
                 output = build_snapshot("viewer", Path(temporary) / "snapshot.html")
                 self.assertIn("window.GRAPH_SNAPSHOT", output.read_text())
@@ -230,8 +230,8 @@ class ViewerTests(unittest.TestCase):
             )
             (directory / "run-config.json").write_text('{"limit_usd": 0.1}')
             with (
-                patch("tools.serve_candidate_graph.graph_state", return_value={}),
-                patch("tools.serve_candidate_graph.run_dir", return_value=directory),
+                patch("arena.cli.serve.graph_state", return_value={}),
+                patch("arena.cli.serve.run_dir", return_value=directory),
             ):
                 payload = graph_payload("viewer")
             timeline = payload["cost_timeline"]
@@ -247,7 +247,7 @@ class ViewerTests(unittest.TestCase):
             self.assertEqual(payload["limit_usd"], 0.1)
 
     def test_score_charts_start_from_the_original_proof(self):
-        from tools.serve_candidate_graph import baseline_point
+        from arena.cli.serve import baseline_point
 
         payload = {
             "theorem": "Core.InitsUpdatesComm",
@@ -261,7 +261,7 @@ class ViewerTests(unittest.TestCase):
         self.assertIsNone(baseline_point({"theorem": "Core.InitsUpdatesComm", "nodes": []}))
 
     def test_original_proof_node_shows_its_published_numbers(self):
-        from tools.serve_candidate_graph import baseline_point, give_reference_its_numbers
+        from arena.cli.serve import baseline_point, give_reference_its_numbers
 
         payload = {
             "theorem": "Core.InitsUpdatesComm",
@@ -290,7 +290,7 @@ class ViewerTests(unittest.TestCase):
         import urllib.request
         from http.server import ThreadingHTTPServer
 
-        from tools.serve_candidate_graph import Runs, handler_for
+        from arena.cli.serve import Runs, handler_for
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -312,8 +312,8 @@ class ViewerTests(unittest.TestCase):
                 '{"kind":"settle","usd":0.03}\n{"kind":"settle","usd":0.02}\n'
             )
             with (
-                patch("tools.serve_candidate_graph.run_dir", side_effect=lambda run_id: root / run_id),
-                patch("tools.serve_candidate_graph.graph_state", side_effect=lambda run_id: {"run_id": run_id}),
+                patch("arena.cli.serve.run_dir", side_effect=lambda run_id: root / run_id),
+                patch("arena.cli.serve.graph_state", side_effect=lambda run_id: {"run_id": run_id}),
             ):
                 server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(Runs([], "rep-r3-*")))
                 threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -350,7 +350,7 @@ class ViewerTests(unittest.TestCase):
                 self.assertEqual(len(json.loads(get("/runs.json")[0])), 3)
 
     def test_a_single_run_still_gets_the_plain_viewer_at_the_root(self):
-        from tools.serve_candidate_graph import Runs
+        from arena.cli.serve import Runs
 
         self.assertFalse(Runs(["one"]).hub)
         self.assertTrue(Runs(["one", "two"]).hub)
@@ -365,8 +365,8 @@ class ViewerTests(unittest.TestCase):
                 '{"kind":"settle","id":"paid","usd":0.12,"usage_known":true}\n'
             )
             with (
-                patch("tools.serve_candidate_graph.graph_state", return_value={}),
-                patch("tools.serve_candidate_graph.run_dir", return_value=directory),
+                patch("arena.cli.serve.graph_state", return_value={}),
+                patch("arena.cli.serve.run_dir", return_value=directory),
             ):
                 payload = graph_payload("viewer")
             self.assertEqual(payload["cost"]["spent_usd"], 0.12)
@@ -380,8 +380,8 @@ class ViewerTests(unittest.TestCase):
                 '{"type":"message","message":{"usage":{"totalTokens":10,"cost":{"total":0.02}}}}\n'
             )
             with (
-                patch("tools.serve_candidate_graph.graph_state", return_value={}),
-                patch("tools.serve_candidate_graph.run_dir", return_value=directory),
+                patch("arena.cli.serve.graph_state", return_value={}),
+                patch("arena.cli.serve.run_dir", return_value=directory),
             ):
                 estimate = graph_payload("viewer")["cost_report"]["pi_embedded_estimate"]
             self.assertEqual(estimate, {"usd": 0.02, "priced_entries": 1, "missing_entries": 0})

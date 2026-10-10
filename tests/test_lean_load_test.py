@@ -1,9 +1,12 @@
-"""Pure parts of tools/lean_load_test.py: workload generation, statistics, criteria, report."""
+"""Pure parts of arena/cli/lean_load.py: workload generation, statistics, criteria, report."""
 
+import importlib
 import random
 import unittest
+from typing import ClassVar
 
-from tools import lean_load_test as llt
+llt = importlib.import_module("arena.cli.lean_load")
+
 
 ROW = {"statement": "theorem t\n(x : Nat)\n: x = x", "src": "theorem t\n(x : Nat)\n: x = x := by\n  rfl"}
 
@@ -81,7 +84,7 @@ class Workload(unittest.TestCase):
 
 
 class Criteria(unittest.TestCase):
-    samples = [{"mem_available_gb": 10.0}, {"mem_available_gb": 8.0}]
+    samples: ClassVar[list] = [{"mem_available_gb": 10.0}, {"mem_available_gb": 8.0}]
 
     def verdicts(self, records, runs=({"crashes": 0},), samples=None, orphans=()):
         return [r["ok"] for r in llt.evaluate(records, list(runs), samples or self.samples, list(orphans))]

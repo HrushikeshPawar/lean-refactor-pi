@@ -7,21 +7,27 @@ row's own module is built so its imports have object files. Standalone rows (no 
 repository, e.g. PutnamBench) pin Mathlib itself; their header only imports Mathlib, so the cache
 is all they need. The environment registry finds the worktrees by their git HEAD.
 
-    python tools/provision_workspace.py --row "Cslib.CCS.bisimilarity_congr_choice"
-    python tools/provision_workspace.py --row putnam_1964_b2 --dry-run
+    python arena provision --row "Cslib.CCS.bisimilarity_congr_choice"
+    python arena provision --row putnam_1964_b2 --dry-run
 """
 
 from __future__ import annotations
 
-import argparse
 import json
 import re
 import subprocess
 import sys
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Annotated
 
-ROOT = Path(__file__).resolve().parents[1]
+from cyclopts import Parameter
+from rich.console import Console
+from rich.table import Table
+
+from arena.engine import ROOT
+
 WORKSPACES = ROOT / "workspaces"
 LOGS = ROOT / "runs" / "provision"
 MATHLIB = "https://github.com/leanprover-community/mathlib4"
@@ -148,27 +154,145 @@ def mathlib_entry_files(worktree: Path, module: str) -> list[str]:
     return sorted(entries)
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--row", required=True, help="Benchmark row name")
-    parser.add_argument("--build-timeout", type=int, default=4 * 3600, help="Seconds allowed for one lake build")
-    parser.add_argument("--full-cache", action="store_true", help="Fetch the whole Mathlib cache, not only the imports")
-    parser.add_argument(
-        "--allow-full-fallback",
-        action="store_true",
-        help="If the selective cache fetch fails, fetch the whole cache (large download)",
+# Stages in order, with the share of total time each usually takes.
+STAGES = [
+    ("clone", "git clone", 0.05),
+    ("checkout", "git worktree add --detach", 0.05),
+    ("seed Mathlib", "remote.origin.url", 0.05),
+    ("Mathlib cache", "lake exe cache get", 0.35),
+    ("build", "lake build", 0.50),
+]
+DEFAULT = ["cslib-v4.33.0-rc2", "cslib-v4.32.0", "cslib-v4.31.0", "physlib-v4.32.0"]
+BAR = 28
+
+
+def status(name: str) -> tuple[float, str, bool, bool]:
+    """(fraction done, what is happening, finished, failed) for one environment."""
+    log = LOGS / f"{name}.log"
+    if not log.exists():
+        return 0.0, "waiting to start", False, False
+    text = log.read_text(errors="ignore")
+    # Only the latest attempt counts; earlier, interrupted attempts stay in the log above it.
+    text = text[text.rfind("=== provisioning") :] if "=== provisioning" in text else text
+    commands = list(re.finditer(r"^\$ (.*)$", text, re.M))
+    if not commands:
+        return 0.0, "starting", False, False
+    last = commands[-1]
+    tail = text[last.end() :]
+    stage_index = max((i for i, (_, marker, _) in enumerate(STAGES) if marker in last[1]), default=0)
+    done_share = sum(share for _, _, share in STAGES[:stage_index])
+    share = STAGES[stage_index][2]
+    exit_code = re.search(r"\[exit (\d+) after (\d+)s\]", tail)
+    if exit_code and exit_code[1] != "0":
+        return done_share, f"FAILED at {STAGES[stage_index][0]} (see {log.name})", True, True
+    if exit_code and STAGES[stage_index][0] == "build":
+        return 1.0, f"done (build {exit_code[2]}s)", True, False
+    inner, detail = 0.0, ""
+    if STAGES[stage_index][0] == "build":
+        steps = re.findall(r"\[(\d+)/(\d+)\]", tail)
+        if steps:
+            current, total = map(int, steps[-1])
+            inner, detail = current / total, f" {current}/{total} modules"
+    elif STAGES[stage_index][0] == "Mathlib cache":
+        if "downloading https://releases.lean-lang.org" in tail and "installing" not in tail:
+            detail = " (downloading Lean toolchain)"
+        elif "cloning" in tail and "Built Cache" not in tail:
+            detail = " (fetching small dependencies)"
+        elif "Decompress" in tail or "unpack" in tail.lower():
+            inner, detail = 0.8, " (unpacking)"
+        else:
+            inner, detail = 0.4, " (downloading cache files)"
+    elif exit_code:
+        inner = 1.0
+    return done_share + share * inner, f"{STAGES[stage_index][0]}{detail}", False, False
+
+
+def render(names: list[str]) -> tuple[str, bool]:
+    lines, overall, finished = [], 0.0, True
+    for name in names:
+        fraction, what, done, failed = status(name)
+        overall += fraction
+        finished &= done
+        filled = int(BAR * fraction)
+        mark = "✗" if failed else "✓" if done else "…"
+        lines.append(f"{mark} {name:20} [{'█' * filled}{'·' * (BAR - filled)}] {100 * fraction:3.0f}%  {what}")
+    overall /= max(1, len(names))
+    filled = int(BAR * overall)
+    lines.append(
+        f"\n  {'overall':20} [{'█' * filled}{'·' * (BAR - filled)}] {100 * overall:3.0f}%  "
+        f"({time.strftime('%H:%M:%S')})"
     )
-    parser.add_argument("--version", action="append", help="Only these versions (default: every listed one)")
-    parser.add_argument("--dry-run", action="store_true")
-    args = parser.parse_args()
-    row = row_for(args.row)
-    steps = [step for step in plan(row) if not args.version or step["version"] in args.version]
+    return "\n".join(lines), finished
+
+
+@dataclass(frozen=True)
+class ProvisionOptions:
+    row: str | None = None
+    build_timeout: int = 4 * 3600
+    full_cache: bool = False
+    allow_full_fallback: bool = False
+    version: list[str] = field(default_factory=list)
+    dry_run: bool = False
+    progress: bool = False
+    watch: bool = False
+    only: list[str] = field(default_factory=list)
+    json_output: Annotated[bool, Parameter(name="json")] = field(default=False, metadata={"flag": "--json"})
+
+
+def execute(options: ProvisionOptions) -> int:
+    if options.progress:
+        names = options.only or DEFAULT
+        console = Console()
+        while True:
+            readings = [(name, *status(name)) for name in names]
+            finished = all(item[3] for item in readings)
+            if options.json_output:
+                if not options.watch or finished:
+                    print(
+                        json.dumps(
+                            {
+                                "items": [
+                                    {
+                                        "name": name,
+                                        "fraction": fraction,
+                                        "detail": detail,
+                                        "finished": done,
+                                        "failed": failed,
+                                    }
+                                    for name, fraction, detail, done, failed in readings
+                                ],
+                                "finished": finished,
+                            },
+                            ensure_ascii=False,
+                        ),
+                        flush=True,
+                    )
+            else:
+                if options.watch:
+                    console.clear()
+                table = Table(title="Workspace provisioning")
+                table.add_column("Environment")
+                table.add_column("Progress", justify="right")
+                table.add_column("Status")
+                for name, fraction, detail, done, failed in readings:
+                    table.add_row(
+                        name, f"{100 * fraction:.0f}%", ("FAILED · " if failed else "done · " if done else "") + detail
+                    )
+                console.print(table)
+            if not options.watch or finished:
+                return 0
+            time.sleep(3)
+    if not options.row:
+        print("--row is required unless --progress is set", file=sys.stderr)
+        return 2
+    row = row_for(options.row)
+    steps = [step for step in plan(row) if not options.version or step["version"] in options.version]
     for step in steps:
         print(
             f"{row['source']} {step['version']} {step['commit'][:12]} -> {step['worktree'].relative_to(ROOT)}"
             f"  build {step['module'] or '(Mathlib cache only)'}"
         )
-    if args.dry_run:
+    if options.dry_run:
         return 0
     LOGS.mkdir(parents=True, exist_ok=True)
     failed = 0
@@ -177,7 +301,13 @@ def main() -> int:
         with log_path.open("a") as log:
             log.write(f"\n=== provisioning {step['worktree'].name} at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
             try:
-                provision(step, log, args.build_timeout, not args.full_cache, args.allow_full_fallback)
+                provision(
+                    step,
+                    log,
+                    options.build_timeout,
+                    not options.full_cache,
+                    options.allow_full_fallback,
+                )
                 print(f"ok      {step['worktree'].name}", flush=True)
             except (RuntimeError, subprocess.TimeoutExpired) as error:
                 failed += 1
@@ -185,5 +315,4 @@ def main() -> int:
     return 1 if failed else 0
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+cli_execute = execute

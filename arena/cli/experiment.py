@@ -12,7 +12,7 @@ Arguments after `--` are passed to every run (for example `--no-mcp`).
 
 from __future__ import annotations
 
-import argparse
+import hashlib
 import json
 import re
 import subprocess
@@ -172,75 +172,48 @@ class ExperimentOptions:
 
 
 def cli_execute(options: ExperimentOptions, passthrough: tuple[str, ...] = ()) -> int:
-    from arena.cli._args import option_tokens
-
+    if not 0 < options.limit_usd <= 2:
+        print("--limit-usd must be above 0 and at most 2.00", file=sys.stderr)
+        return 2
     try:
-        return main([*option_tokens(options), *(["--", *passthrough] if passthrough else [])])
-    except SystemExit as error:
-        return error.code if isinstance(error.code, int) else 1
-
-
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--theorem", required=True)
-    parser.add_argument("--prefix", required=True, help="Run IDs are <prefix>-<factor>-<value>")
-    parser.add_argument("--factor", required=True, choices=FACTORS)
-    parser.add_argument("--values", required=True, help="Comma-separated values of the factor")
-    parser.add_argument(
-        "--model", default="deepseek-v4.1-flash", choices=MODELS, help="Fixed model unless it is the factor"
-    )
-    parser.add_argument("--thinking", default="high", choices=THINKING_LEVELS)
-    parser.add_argument(
-        "--limit-usd",
-        type=float,
-        default=0.5,
-        help="Spend limit per run in USD (default 0.50, at most 2.00); the run stops once its actual spend reaches it, so the last call may overshoot",
-    )
-    parser.add_argument("--parallel", default="1", help="Runs at once: an integer or 'auto' (by free RAM)")
-    parser.add_argument("--dry-run", action="store_true")
-    args, passthrough = parser.parse_known_args(argv)
-    passthrough = [item for item in passthrough if item != "--"]
-    if not 0 < args.limit_usd <= 2:
-        parser.error("--limit-usd must be above 0 and at most 2.00")
-    try:
-        specs = plan(args.factor, args.values.split(","), args.model, args.thinking, args.prefix)
-        workers = parallelism(args.parallel, len(specs), available_memory_kb())
+        specs = plan(options.factor, options.values.split(","), options.model, options.thinking, options.prefix)
+        workers = parallelism(options.parallel, len(specs), available_memory_kb())
     except ValueError as error:
-        parser.error(str(error))
+        print(error, file=sys.stderr)
+        return 2
     clashes = [spec["run_id"] for spec in specs if run_dir(spec["run_id"]).exists()]
     if clashes:
-        parser.error(f"run IDs already exist: {', '.join(clashes)}")
-    expected = __import__("hashlib").sha256(packet(args.theorem).encode()).hexdigest()
+        print(f"run IDs already exist: {', '.join(clashes)}", file=sys.stderr)
+        return 2
+    run_options = list(passthrough)
+    expected = hashlib.sha256(packet(options.theorem).encode()).hexdigest()
     print(
-        f"{len(specs)} runs varying {args.factor}; packet {expected[:12]}; {workers} at once; limit ${args.limit_usd:g} each"
+        f"{len(specs)} runs varying {options.factor}; packet {expected[:12]}; {workers} at once; "
+        f"limit ${options.limit_usd:g} each"
     )
     for spec in specs:
-        print(" ", " ".join(command(spec, args.theorem, args.limit_usd, passthrough)[1:]))
-    if args.dry_run:
+        print("  arena run " + " ".join(command(spec, options.theorem, options.limit_usd, run_options)[4:]))
+    if options.dry_run:
         return 0
     blocked = preflight_block([spec["model"] for spec in specs])
     if blocked:
         print(blocked, file=sys.stderr)
         return 1
-    out = ROOT / "runs" / "pi-budget" / f"{args.prefix}-matrix"
+    out = ROOT / "runs" / "pi-budget" / f"{options.prefix}-matrix"
     out.mkdir(parents=True)
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        rows = list(pool.map(lambda spec: execute(spec, args.theorem, args.limit_usd, passthrough, out), specs))
+        rows = list(pool.map(lambda spec: execute(spec, options.theorem, options.limit_usd, run_options, out), specs))
     report = {
-        "theorem": args.theorem,
-        "limit_usd": args.limit_usd,
+        "theorem": options.theorem,
+        "limit_usd": options.limit_usd,
         "expected_packet_sha256": expected,
         **compare(rows, expected),
     }
     (out / "matrix.json").write_text(json.dumps(report, indent=2) + "\n")
-    text = render(report, args.factor)
+    text = render(report, options.factor)
     (out / "matrix.txt").write_text(text)
     print(text, end="")
     if not report["identical_packets"]:
         print("Packets differ between runs; the comparison is not valid.", file=sys.stderr)
         return 1
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

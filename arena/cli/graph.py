@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 from pathlib import Path
 
-from tools.serve_candidate_graph import graph_payload
+from arena.cli.serve import graph_payload
+from arena.engine import ROOT
 
-ROOT = Path(__file__).resolve().parents[1]
-ASSETS = ROOT / "tools" / "graph_viewer"
+ASSETS = Path(__file__).resolve().parents[1] / "graph_viewer"
 
 
 def build_snapshot(run_id: str, output: Path) -> Path:
@@ -30,14 +29,7 @@ def build_snapshot(run_id: str, output: Path) -> Path:
     return output
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("run_id")
-    parser.add_argument("--output", type=Path)
-    args = parser.parse_args()
-    output = args.output or ROOT / "runs" / "analysis" / f"{args.run_id}-graph.html"
-    print(build_snapshot(args.run_id, output))
-
-
-if __name__ == "__main__":
-    main()
+def execute(run_id: str, output: Path | None = None) -> int:
+    destination = output or ROOT / "runs" / "analysis" / f"{run_id}-graph.html"
+    print(build_snapshot(run_id, destination))
+    return 0

@@ -1,5 +1,5 @@
 # Central model configuration: the one place for per-model facts. Edit here, not in code.
-# tools/run_pi_budgeted.py loads this file (arena/models.py), selects the real Pi provider/model below
+# arena run loads this file (arena/models.py), selects the real Pi provider/model below
 # and hands the output ceiling to the Pi extension. Subset of YAML only: nested maps, [a, b] lists,
 # {k: v} maps, # comments. Prices are USD per 1M tokens as OpenCode Go bills them; Pi prices each call
 # from its own catalog and the run's spend is the sum of those actual costs.
@@ -42,7 +42,7 @@ models:
       # 350-400K tokens, plus a cold turn after it) and saves only ~$0.015 of cache reads afterwards
       # (cache read is $0.003/M), so compact as late as the window allows.
       # Pi (1.0.4) compacts when context > window - reserveTokens, with reserveTokens = window - at_tokens
-      # (tools/run_pi_budgeted.py). It also caps the summary output at 0.8 * reserveTokens = 120K here.
+      # (arena run). It also caps the summary output at 0.8 * reserveTokens = 120K here.
       # Headroom at 850K: the check runs after a turn, so the context can overshoot by one turn's tool
       # results (~25K at the measured ~2.85-2.9 bytes/token); summary request = context + prompt + summary
       # output <= 850K + 25K + 120K cap = 995K < 1M (typical summaries are ~10K); a normal 64K output

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Lean session load simulator: more load than Pi produces, no model calls.
 
-Starts K simulated runs (one session daemon each, like tools/run_pi_budgeted.py), warms them
+Starts K simulated runs (one session daemon each, like -m arena.cli run), warms them
 all at once, then drives M model-lane and B background-lane checks per run for --minutes:
 sorry probes, the reference proof, tiny edits, proofs with errors, deliberately too-slow proofs
 (each followed by a quick probe on the same run to see whether the worker stayed warm), plus
@@ -11,9 +11,9 @@ It goes through the real client path (lean_session.start_daemon / request / stop
 engine.candidate_file), sampling memory, Lean process counts and mount.ntfs CPU every 5 s.
 It exits 0 on PASS and 1 on FAIL; see the criteria in `evaluate`.
 
-    python3 -m tools.lean_load_test --rows Core.InitsUpdatesComm --runs 1 --concurrency 1 \
+    uv run arena lean load-test --rows Core.InitsUpdatesComm --runs 1 --concurrency 1 \
         --background 0 --minutes 2 --max-checks 2 --weights slow=1 --timeout 20      # smoke
-    python3 -m tools.lean_load_test                                                 # full stress
+    uv run arena lean load-test                                                 # full stress
 
 Session API assumed beyond the current one (guarded; the report says which parts were missing):
   * op "warm": the check payload plus "slots" (as engine.warm_session sends it); ok true means the
@@ -25,7 +25,6 @@ Session API assumed beyond the current one (guarded; the report says which parts
 
 from __future__ import annotations
 
-import argparse
 import contextlib
 import hashlib
 import json
@@ -35,12 +34,11 @@ import signal
 import sys
 import threading
 import time
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+from arena.engine import ROOT
 
 KINDS = ("sorry", "reference", "edit", "error", "slow")
 DEFAULT_WEIGHTS = {"sorry": 30, "reference": 20, "edit": 25, "error": 15, "slow": 6}
@@ -606,6 +604,8 @@ def simulate(config: dict) -> int:
         for index in range(config["runs"]):
             run = SimRun(index, out / f"run-{index}", row, config, recorder, t0)
             run.start()
+            if run.process is None:
+                raise RuntimeError("load simulator failed to start its Lean session daemon")
             runs.append(run)
             sessions[index] = run.socket
             log(f"run {index}: daemon pid {run.process.pid}")
@@ -625,20 +625,20 @@ def simulate(config: dict) -> int:
         threads = []
         for run in runs:
             run.deadline = deadline
-            for n in range(config["concurrency"]):
-                threads.append(
-                    threading.Thread(
-                        target=run.model_worker, args=(config["seed"] * 1000 + run.index * 100 + n,), daemon=True
-                    )
+            threads.extend(
+                threading.Thread(
+                    target=run.model_worker, args=(config["seed"] * 1000 + run.index * 100 + n,), daemon=True
                 )
-            for n in range(config["background"]):
-                threads.append(
-                    threading.Thread(
-                        target=run.background_worker,
-                        args=(config["seed"] * 1000 + run.index * 100 + 50 + n,),
-                        daemon=True,
-                    )
+                for n in range(config["concurrency"])
+            )
+            threads.extend(
+                threading.Thread(
+                    target=run.background_worker,
+                    args=(config["seed"] * 1000 + run.index * 100 + 50 + n,),
+                    daemon=True,
                 )
+                for n in range(config["background"])
+            )
         log(f"load: {len(threads)} worker threads for {config['minutes']} min")
         for thread in threads:
             thread.start()
@@ -690,52 +690,45 @@ def simulate(config: dict) -> int:
     return 0 if all(r["ok"] for r in results) else 1
 
 
-def parse_args(argv: list[str] | None = None) -> dict:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument(
-        "--rows", nargs="+", default=["putnam_1964_a4"], help="benchmark rows (the first one is simulated)"
-    )
-    parser.add_argument("--runs", type=int, default=3, help="simulated concurrent runs (the campaign uses 2)")
-    parser.add_argument("--concurrency", type=int, default=6, help="concurrent model-lane checks per run")
-    parser.add_argument("--background", type=int, default=2, help="concurrent background-lane checks per run")
-    parser.add_argument("--minutes", type=float, default=20)
-    parser.add_argument(
-        "--slots", type=int, default=None, help="workers the warm op opens (default lean_session.MAX_SLOTS)"
-    )
-    parser.add_argument(
-        "--timeout",
-        type=float,
-        default=float(os.environ.get("ARENA_LEAN_TIMEOUT") or 180),
-        help="per-check seconds (default ARENA_LEAN_TIMEOUT or 180)",
-    )
-    parser.add_argument("--out", type=Path, default=None)
-    parser.add_argument("--seed", type=int, default=1)
-    parser.add_argument("--weights", default=None, help="kinds and weights, e.g. sorry=3,slow=1 (default: all)")
-    parser.add_argument("--max-checks", type=int, default=None, help="stop each run after this many checks (smoke)")
-    parser.add_argument("--think", type=float, default=1.0, help="max random pause between a worker's checks, seconds")
-    args = parser.parse_args(argv)
-    out = args.out or ROOT / "runs/analysis/loadtest" / datetime.now().strftime("%Y%m%d-%H%M%S")
-    return {
-        "rows": args.rows,
-        "runs": args.runs,
-        "concurrency": args.concurrency,
-        "background": args.background,
-        "minutes": args.minutes,
-        "timeout": args.timeout,
+@dataclass(frozen=True)
+class LeanLoadOptions:
+    rows: list[str] = field(default_factory=lambda: ["putnam_1964_a4"])
+    runs: int = 3
+    concurrency: int = 6
+    background: int = 2
+    minutes: float = 20
+    slots: int | None = None
+    timeout: float = float(os.environ.get("ARENA_LEAN_TIMEOUT") or 180)
+    out: Path | None = None
+    seed: int = 1
+    weights: str | None = None
+    max_checks: int | None = None
+    think: float = 1.0
+
+
+def execute(options: LeanLoadOptions) -> int:
+    out = options.out or ROOT / "runs/analysis/loadtest" / datetime.now().strftime("%Y%m%d-%H%M%S")
+    try:
+        weights = parse_weights(options.weights)
+    except ValueError as error:
+        print(error, file=sys.stderr)
+        return 2
+    config = {
+        "rows": options.rows,
+        "runs": options.runs,
+        "concurrency": options.concurrency,
+        "background": options.background,
+        "minutes": options.minutes,
+        "timeout": options.timeout,
         "out": out,
-        "seed": args.seed,
-        "weights": parse_weights(args.weights),
-        "max_checks": args.max_checks,
-        "think": args.think,
-        "slots": args.slots,
+        "seed": options.seed,
+        "weights": weights,
+        "max_checks": options.max_checks,
+        "think": options.think,
+        "slots": options.slots,
     }
-
-
-def main(argv: list[str] | None = None) -> int:
-    config = parse_args(argv)
     signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
     return simulate(config)
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+cli_execute = execute

@@ -15,7 +15,6 @@ Arguments after `--` are passed to every run (for example `--no-mcp`).
 
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
 import os
@@ -32,11 +31,12 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 from rich.console import Console
 from rich.table import Table
 
-from arena.cli.run import CONFIG, MODELS, THINKING_LEVELS
+from arena.cli.run import CONFIG, MODELS
 from arena.engine import ROOT
 
 RUNS = ROOT / "runs" / "pi-budget"
@@ -566,72 +566,66 @@ def execute(
     return run_row(spec, summary, proc.returncode, packet_sha, expected, directory if directory.exists() else None)
 
 
-def main(argv: list[str] | None = None) -> int:
+@dataclass(frozen=True)
+class CampaignOptions:
+    prefix: str
+    preset: str | None = None
+    rows: str | None = None
+    models: str | None = None
+    replicates: int | None = None
+    limit_usd: float | None = None
+    jobs: int | None = None
+    thinking: str = CONFIG["thinking"]["default"]
+    min_free_gb: float = MIN_FREE_GB
+    cleanup_wait: float = CLEANUP_WAIT_S
+    skip_preflight: bool = False
+    dry_run: bool = False
+    json: bool = False
+
+
+def cli_execute(options: CampaignOptions, passthrough: tuple[str, ...] = ()) -> int:
+    """Execute a typed campaign request, preserving extra run options after ``--``."""
     reconfigure = getattr(sys.stdout, "reconfigure", None)
     if callable(reconfigure):
-        reconfigure(line_buffering=True)  # progress reaches a redirected log as it happens
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--prefix", required=True)
-    parser.add_argument("--preset", choices=sorted(PRESETS), help="Start from a named configuration")
-    parser.add_argument("--rows", help="Comma-separated benchmark names")
-    parser.add_argument("--models", help=f"Comma-separated: {', '.join(MODELS)}")
-    parser.add_argument("--replicates", type=int)
-    parser.add_argument(
-        "--limit-usd",
-        type=float,
-        help="Spend limit per run in USD (default 0.50, at most 2.00); the run stops once its actual spend reaches it, so the last call may overshoot",
-    )
-    parser.add_argument(
-        "--jobs",
-        type=int,
-        help="Runs in flight at once (default 1); runs are API-bound, and each Lean daemon holds back workers when memory runs low",
-    )
-    parser.add_argument("--thinking", default=CONFIG["thinking"]["default"], choices=THINKING_LEVELS)
-    parser.add_argument(
-        "--min-free-gb",
-        type=float,
-        default=MIN_FREE_GB,
-        help="MemAvailable (GB) to wait for before starting a run when nothing else is running",
-    )
-    parser.add_argument(
-        "--cleanup-wait",
-        type=float,
-        default=CLEANUP_WAIT_S,
-        help="Longest wait (s) for finished runs' Lean processes to exit and memory to recover",
-    )
-    parser.add_argument("--skip-preflight", action="store_true", help="Explicitly skip the Langfuse preflight gate")
-    parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--json", action="store_true", help="Print the campaign report as JSON")
-    args, passthrough = parser.parse_known_args(argv)
-    passthrough = [item for item in passthrough if item != "--"]
+        reconfigure(line_buffering=True)
+    args = SimpleNamespace(**asdict(options))
+    passthrough_tokens = list(passthrough)
+    if args.preset is not None and args.preset not in PRESETS:
+        print(f"unknown preset {args.preset!r}; choose from {', '.join(sorted(PRESETS))}", file=sys.stderr)
+        return 2
     preset = PRESETS[args.preset] if args.preset else {}
     for name, default in (("rows", None), ("models", None), ("replicates", 3), ("limit_usd", 0.5), ("jobs", 1)):
         if getattr(args, name) is None:
             value = preset.get("cap" if name == "limit_usd" else name, default)
             setattr(args, name, ",".join(value) if isinstance(value, list) else value)
     if not args.rows or not args.models:
-        parser.error("--rows and --models are required unless --preset supplies them")
+        print("--rows and --models are required unless --preset supplies them", file=sys.stderr)
+        return 2
     if not 0 < args.limit_usd <= MAX_LIMIT_USD:
-        parser.error(f"--limit-usd must be above 0 and at most {MAX_LIMIT_USD:g}")
+        print(f"--limit-usd must be above 0 and at most {MAX_LIMIT_USD:g}", file=sys.stderr)
+        return 2
     if args.jobs < 1:
-        parser.error("--jobs must be at least 1")
+        print("--jobs must be at least 1", file=sys.stderr)
+        return 2
     rows, models = [r for r in args.rows.split(",") if r], [m for m in args.models.split(",") if m]
     try:
         specs = plan(args.prefix, rows, models, args.replicates)
     except ValueError as error:
-        parser.error(str(error))
+        print(error, file=sys.stderr)
+        return 2
     print(
         f"{len(specs)} runs ({len(rows)} rows x {len(models)} models x {args.replicates} replicates, {args.jobs} at a time); "
         f"limit ${args.limit_usd:g} each; planned spend ${worst_case_usd(specs, args.limit_usd):.2f}"
     )
     for spec in specs:
-        planned = command(spec, args.limit_usd, args.thinking, passthrough)
+        planned = command(spec, args.limit_usd, args.thinking, passthrough_tokens)
         print("  arena run " + shlex.join(planned[4:]))
     if args.dry_run:
         return 0
     clashes = [spec["run_id"] for spec in specs if (RUNS / spec["run_id"]).exists()]
     if clashes:
-        parser.error(f"run IDs already exist: {', '.join(clashes)}")
+        print(f"run IDs already exist: {', '.join(clashes)}", file=sys.stderr)
+        return 2
     try:
         expected = check_packets(rows)
         print("preflight:", check_preflight(models, args.skip_preflight))
@@ -640,7 +634,6 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     out = RUNS / f"{args.prefix}-campaign"
     out.mkdir(parents=True)
-    # Workers take specs in plan order (replicate-major), so a stopped campaign still has balanced replicates.
     housekeeping = Housekeeping(args.min_free_gb, args.cleanup_wait)
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
         runs = list(
@@ -649,7 +642,7 @@ def main(argv: list[str] | None = None) -> int:
                     spec,
                     args.limit_usd,
                     args.thinking,
-                    passthrough,
+                    passthrough_tokens,
                     out,
                     expected[spec["row"]],
                     housekeeping=housekeeping,
@@ -664,8 +657,7 @@ def main(argv: list[str] | None = None) -> int:
         "lean_unhealthy_runs": [run["run_id"] for run in lean_unhealthy_rows(runs)],
     }
     (out / "campaign.json").write_text(json.dumps(report, indent=2) + "\n")
-    text = render(report)
-    (out / "campaign.txt").write_text(text)
+    (out / "campaign.txt").write_text(render(report))
     if args.json:
         print(json.dumps(report, ensure_ascii=False))
     else:
@@ -688,42 +680,3 @@ def main(argv: list[str] | None = None) -> int:
         print("Packets differ between runs; the comparison is not valid.", file=sys.stderr)
         return 1
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
-
-
-@dataclass(frozen=True)
-class CampaignOptions:
-    prefix: str
-    preset: str | None = None
-    rows: str | None = None
-    models: str | None = None
-    replicates: int | None = None
-    limit_usd: float | None = None
-    jobs: int | None = None
-    thinking: str = CONFIG["thinking"]["default"]
-    min_free_gb: float = MIN_FREE_GB
-    cleanup_wait: float = CLEANUP_WAIT_S
-    skip_preflight: bool = False
-    dry_run: bool = False
-    json: bool = False
-
-
-def cli_execute(options: CampaignOptions, passthrough: tuple[str, ...] = ()) -> int:
-    """Execute a typed campaign request, preserving extra run options after ``--``."""
-    tokens = []
-    for name, value in asdict(options).items():
-        flag = "--" + name.replace("_", "-")
-        if isinstance(value, bool):
-            if value:
-                tokens.append(flag)
-        elif value is not None:
-            tokens.extend((flag, str(value)))
-    if passthrough:
-        tokens.extend(("--", *passthrough))
-    try:
-        return main(tokens)
-    except SystemExit as error:
-        return error.code if isinstance(error.code, int) else 1

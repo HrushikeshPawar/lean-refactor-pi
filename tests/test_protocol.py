@@ -10,6 +10,7 @@ import time
 import unittest
 import uuid
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import patch
 
 from arena import campaign
@@ -25,7 +26,7 @@ LEAN = unittest.skipUnless(
 
 def cli(run_id: str, action: str, *args: str, theorem: str = NAME) -> dict:
     proc = subprocess.run(
-        [sys.executable, "-m", "tools.arena_campaign", action, "--theorem", theorem, "--run-id", run_id, *args],
+        [sys.executable, "-m", "arena.cli", "protocol", action, "--theorem", theorem, "--run-id", run_id, *args],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -208,9 +209,11 @@ class CampaignCliTests(unittest.TestCase):
     def test_evaluate_rejects_conflicting_references_and_directs_holes_to_probe(self):
         with self.assertRaisesRegex(ValueError, "exactly one"):
             campaign.evaluate_request(NAME, "unused", "complete", candidate_ref="#2")
-        with patch("arena.campaign.record_evaluation", side_effect=ValueError("FORBIDDEN: sorry")):
-            with self.assertRaisesRegex(ValueError, "use arena_probe"):
-                campaign.evaluate_request(NAME, "unused", campaign.problem(NAME)["statement"] + " := by sorry")
+        with (
+            patch("arena.campaign.record_evaluation", side_effect=ValueError("FORBIDDEN: sorry")),
+            self.assertRaisesRegex(ValueError, "use arena_probe"),
+        ):
+            campaign.evaluate_request(NAME, "unused", campaign.problem(NAME)["statement"] + " := by sorry")
 
     def test_08_source_pagination_and_one_line_errors(self):
         row = campaign.problem(NAME)
@@ -388,7 +391,7 @@ class ProtocolLogicTests(unittest.TestCase):
         )
         campaign._append(self.directory, {"kind": "current", "candidate_id": reference["candidate_id"]})
 
-    calls: list = []
+    calls: ClassVar[list] = []
 
     @classmethod
     def fake_eval(cls, _name, proof, mode, known=None):
@@ -540,9 +543,11 @@ class ProtocolLogicTests(unittest.TestCase):
         self.assertEqual(free["region"], "the induction step")
 
     def test_forbidden_proofs_are_rejected_before_any_node_is_recorded(self):
-        with patch.object(campaign, "validate_proof", side_effect=ValueError("FORBIDDEN: sorry")):
-            with self.assertRaisesRegex(ValueError, "FORBIDDEN"):
-                self.evaluate("theorem t := by\n  sorry")
+        with (
+            patch.object(campaign, "validate_proof", side_effect=ValueError("FORBIDDEN: sorry")),
+            self.assertRaisesRegex(ValueError, "FORBIDDEN"),
+        ):
+            self.evaluate("theorem t := by\n  sorry")
         self.assertEqual(campaign.frontier("logic")["candidates"], 1)
 
     def test_autocheck_reuses_the_primary_result_and_checks_best_first(self):

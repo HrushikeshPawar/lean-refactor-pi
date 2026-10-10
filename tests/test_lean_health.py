@@ -1,5 +1,6 @@
 """Lean health gate, circuit breaker and between-run cleanup: injected fakes only, no Lean, Pi or model."""
 
+import importlib
 import json
 import tempfile
 import unittest
@@ -7,8 +8,9 @@ from pathlib import Path
 from unittest import mock
 
 from arena import lean_health as lh
-from tools import run_campaign as rc
-from tools import run_pi_budgeted as rpb
+
+rc = importlib.import_module("arena.cli.campaigns")
+rpb = importlib.import_module("arena.cli.run")
 
 
 def run_gate(checks, warms=None, versions=(("v1", "c1"), ("v2", "c2")), directory=None):

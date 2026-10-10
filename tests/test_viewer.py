@@ -1,5 +1,6 @@
 """Offline tests for the run viewer's data shaping and server (no Langfuse network, no live runs)."""
 
+import importlib
 import json
 import shutil
 import subprocess
@@ -14,7 +15,8 @@ from unittest.mock import patch
 
 from arena import campaign, viewer_data
 from arena.viewer_data import Langfuse, LangfuseUnavailable, hub_row, run_dashboard, shape_langfuse
-from tools import serve_candidate_graph as server
+
+server = importlib.import_module("arena.cli.serve")
 
 T0 = 1_791_000_000
 
@@ -433,7 +435,7 @@ class ServerTests(unittest.TestCase):
 class AssetTests(unittest.TestCase):
     """The viewer is desktop only and must never fail silently into an empty chart."""
 
-    ASSETS = Path(server.__file__).resolve().parent / "graph_viewer"
+    ASSETS = Path(server.__file__).resolve().parents[1] / "graph_viewer"
 
     def test_no_mobile_breakpoints(self):
         for name in ("hub.css", "dashboard.css", "style.css"):

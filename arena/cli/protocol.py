@@ -4,10 +4,12 @@
 Every failure is one line of JSON: `{"ok": false, "error": "..."}`.
 """
 
-import argparse
 import json
 import subprocess
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Literal
 
 from arena.campaign import (
     autocheck,
@@ -49,7 +51,7 @@ ACTIONS = (
 )
 
 
-def run(args: argparse.Namespace) -> dict:
+def run(args: SimpleNamespace) -> dict:
     if args.action == "init":
         return init(args.theorem, args.run_id)
     if args.action == "evaluate":
@@ -123,37 +125,42 @@ def publish_state(run_id: str) -> None:
         pass
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=ACTIONS)
-    parser.add_argument("--theorem", required=True)
-    parser.add_argument("--run-id", required=True)
-    parser.add_argument("--proof-file", type=Path)
-    parser.add_argument("--draft-file", type=Path, action="append", default=[])
-    parser.add_argument("--mode", choices=("fast", "full"), default="fast")
-    parser.add_argument("--parent", action="append", default=[])
-    parser.add_argument("--hypothesis", default="")
-    parser.add_argument("--idea-id")
-    parser.add_argument("--candidate", help="#N (or probe pN for the candidate action)")
-    parser.add_argument("--from-probe")
-    parser.add_argument("--handle")
-    parser.add_argument("--first", type=int)
-    parser.add_argument("--last", type=int)
-    parser.add_argument("--items")
-    parser.add_argument("--queries")
-    parser.add_argument("--cursor")
-    parser.add_argument("--limit", type=int, default=20)
-    parser.add_argument("--decision", choices=("pursue", "park"))
-    parser.add_argument("--reason", default="")
-    parser.add_argument("--title")
-    parser.add_argument("--region")
-    parser.add_argument("--expected-effect")
-    parser.add_argument("--status")
-    parser.add_argument("--max-seconds", type=float)
-    parser.add_argument("--spent-usd", type=float)
-    parser.add_argument("--cap-usd", type=float)
-    args = parser.parse_args()
+@dataclass(frozen=True)
+class ProtocolOptions:
+    action: str
+    theorem: str
+    run_id: str
+    proof_file: Path | None = None
+    draft_file: list[Path] = field(default_factory=list)
+    mode: Literal["fast", "full"] = "fast"
+    parent: list[str] = field(default_factory=list)
+    hypothesis: str = ""
+    idea_id: str | None = None
+    candidate: str | None = None
+    from_probe: str | None = None
+    handle: str | None = None
+    first: int | None = None
+    last: int | None = None
+    items: str | None = None
+    queries: str | None = None
+    cursor: str | None = None
+    limit: int = 20
+    decision: Literal["pursue", "park"] | None = None
+    reason: str = ""
+    title: str | None = None
+    region: str | None = None
+    expected_effect: str | None = None
+    status: str | None = None
+    max_seconds: float | None = None
+    spent_usd: float | None = None
+    cap_usd: float | None = None
+
+
+def execute(options: ProtocolOptions) -> int:
+    args = SimpleNamespace(**asdict(options))
     try:
+        if args.action not in ACTIONS:
+            raise ValueError(f"unknown action {args.action!r}")
         result = run(args)
         print(json.dumps(result, ensure_ascii=False))
         publish_state(args.run_id)
@@ -162,7 +169,3 @@ def main() -> int:
         message = " ".join(str(error).split()) or type(error).__name__
         print(json.dumps({"ok": False, "error": message[:400]}, ensure_ascii=False))
         return 2
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

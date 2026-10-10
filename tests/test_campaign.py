@@ -48,18 +48,14 @@ class PlanTests(unittest.TestCase):
     def test_dry_run_prints_plan_and_planned_spend_without_spending(self):
         out = io.StringIO()
         with mock.patch("subprocess.run") as run, contextlib.redirect_stdout(out):
-            code = rc.main(
-                [
-                    "--prefix",
-                    "p",
-                    "--rows",
-                    "A.b,C.d",
-                    "--models",
-                    "deepseek-v4.1-flash",
-                    "--limit-usd",
-                    "0.10",
-                    "--dry-run",
-                ]
+            code = rc.cli_execute(
+                rc.CampaignOptions(
+                    prefix="p",
+                    rows="A.b,C.d",
+                    models="deepseek-v4.1-flash",
+                    limit_usd=0.10,
+                    dry_run=True,
+                )
             )
         self.assertEqual(code, 0)
         run.assert_not_called()
@@ -126,8 +122,8 @@ class GateTests(unittest.TestCase):
             contextlib.redirect_stdout(io.StringIO()),
             contextlib.redirect_stderr(err),
         ):
-            code = rc.main(
-                ["--prefix", "zz-offline-test", "--rows", "A", "--models", "deepseek-v4.1-flash", "--replicates", "1"]
+            code = rc.cli_execute(
+                rc.CampaignOptions(prefix="zz-offline-test", rows="A", models="deepseek-v4.1-flash", replicates=1)
             )
         self.assertEqual(code, 1)
         execute.assert_not_called()

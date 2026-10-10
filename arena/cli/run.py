@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import contextlib
 import hashlib
 import json
@@ -18,6 +17,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 from arena import lean_health, lean_session
 from arena import models as model_config
@@ -250,7 +250,7 @@ def run(options: RunOptions) -> int:
     global _request_count, _tool_result_count, _retry_count
     _tool_started.clear()
     _request_count = _tool_result_count = _retry_count = 0
-    args = argparse.Namespace(**asdict(options))
+    args = SimpleNamespace(**asdict(options))
     if args.model not in MODELS:
         print(f"error: unknown model {args.model!r}; choose from {', '.join(MODELS)}", file=sys.stderr)
         return 2

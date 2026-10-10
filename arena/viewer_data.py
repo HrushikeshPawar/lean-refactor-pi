@@ -1,4 +1,4 @@
-"""Read-only data shaping for the local run viewer (tools/serve_candidate_graph.py).
+"""Read-only data shaping for the local run viewer (arena/cli/serve.py).
 
 Everything is derived from files a run already writes; nothing here starts, stops or writes to a
 run. Langfuse is read server-side only: the keys never reach a response, a log line or an error.

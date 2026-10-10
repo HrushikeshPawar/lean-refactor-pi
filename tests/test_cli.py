@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import tempfile
 import unittest
@@ -91,3 +92,42 @@ class CommandTreeTests(unittest.TestCase):
             )
         self.assertEqual(status, 2)
         self.assertIn("no-such-model", output.getvalue())
+
+    def test_provision_progress_json_reports_each_environment(self):
+        from unittest.mock import patch
+
+        output = io.StringIO()
+        with redirect_stdout(output), patch("arena.cli.provision.status", return_value=(0.5, "building", False, False)):
+            status = app(["provision", "--progress", "--json", "--only", "cslib-v4.32.0"])
+        self.assertEqual(status, 0)
+        self.assertEqual(
+            json.loads(output.getvalue()),
+            {
+                "items": [
+                    {
+                        "name": "cslib-v4.32.0",
+                        "fraction": 0.5,
+                        "detail": "building",
+                        "finished": False,
+                        "failed": False,
+                    }
+                ],
+                "finished": False,
+            },
+        )
+
+    def test_provision_watch_refreshes_until_every_environment_finishes(self):
+        from unittest.mock import patch
+
+        output = io.StringIO()
+        with (
+            redirect_stdout(output),
+            patch(
+                "arena.cli.provision.status",
+                side_effect=[(0.5, "building", False, False), (1.0, "done", True, False)],
+            ),
+            patch("arena.cli.provision.time.sleep"),
+        ):
+            status = app(["provision", "--progress", "--watch", "--only", "cslib-v4.32.0"])
+        self.assertEqual(status, 0)
+        self.assertGreaterEqual(output.getvalue().count("Workspace provisioning"), 2)
