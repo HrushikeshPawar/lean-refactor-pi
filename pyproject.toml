@@ -8,6 +8,18 @@ dependencies = [
     "rich>=14",
 ]
 
+[project.scripts]
+arena = "arena.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.13,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+# Flat layout: the package stays at arena/ because code finds benchmark/ and vendor/ via Path(__file__).parents.
+module-name = "arena"
+module-root = ""
+
 [dependency-groups]
 dev = [
     "pytest>=8",

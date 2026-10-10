@@ -129,7 +129,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
 
   async function campaign(action: string, args: string[] = []): Promise<Record<string, any>> {
     if (!active || !runId) throw new Error("Arena run is not selected");
-    const command = ["run", "--no-project", "python", "-m", "tools.arena_campaign", action,
+    const command = ["run", "--no-sync", "arena", "protocol", action,
       "--theorem", active, "--run-id", runId, ...args];
     const output = await new Promise<string>((accept, reject) => {
       const child = spawn("uv", command, { cwd: root, stdio: ["ignore", "pipe", "pipe"] });
@@ -154,7 +154,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
     if (!active || !runId) return;
     if (checker) { kickAgain = true; return; }
     kickAgain = false;
-    checker = spawn("uv", ["run", "--no-project", "python", "-m", "tools.arena_campaign", "autocheck",
+    checker = spawn("uv", ["run", "--no-sync", "arena", "protocol", "autocheck",
       "--theorem", active, "--run-id", runId], { cwd: root, stdio: "ignore" });
     const done = () => { checker = undefined; if (kickAgain) kickAutocheck(); };
     checker.on("close", done);
