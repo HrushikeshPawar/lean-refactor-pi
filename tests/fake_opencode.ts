@@ -7,7 +7,7 @@
  * ARENA_FAKE_LOG receives one JSON line per request: the full message transcript and thinking level.
  *
  * Wire mode: ARENA_FAKE_WIRE_URL points at a local HTTP server (tests/pi_support.py AnthropicWire).
- * Qwen is then served by Pi's real Anthropic Messages client, so the exact payload Pi and the
+ * The model is then served by Pi's real Anthropic Messages client, so the exact payload Pi and the
  * budget guard build is what the server validates.
  */
 import { appendFileSync, readFileSync } from "node:fs";
@@ -51,17 +51,17 @@ export default function fakeOpenCode(pi: ExtensionAPI) {
   if (process.env.ARENA_FAKE_WIRE_URL) {
     pi.registerProvider(configured.provider, {
       api: "anthropic-messages", apiKey: "offline-test", baseUrl: process.env.ARENA_FAKE_WIRE_URL,
-      models: [{ id: "qwen3.8-flash", name: "Offline Qwen wire fixture", api: "anthropic-messages",
+      models: [{ id: "deepseek-v4.1-flash", name: "Offline wire fixture", api: "anthropic-messages",
         baseUrl: process.env.ARENA_FAKE_WIRE_URL, reasoning: true, input: ["text"],
         compat: { allowEmptySignature: true },
-        ...catalogModel("qwen3.8-flash") }],
+        ...catalogModel("deepseek-v4.1-flash") }],
     });
     return;
   }
   pi.registerProvider(configured.provider, {
     api: "openai-responses", apiKey: "offline-test", baseUrl: "http://127.0.0.1:0",
-    models: [{ id: "gpt-6-luna", name: "Offline Luna fixture", reasoning: true,
-      input: ["text"], ...catalogModel("gpt-6-luna") }],
+    models: [{ id: "deepseek-v4.1-flash", name: "Offline fixture", reasoning: true,
+      input: ["text"], ...catalogModel("deepseek-v4.1-flash") }],
     streamSimple(model, context, options) {
       const stream = createAssistantMessageEventStream();
       // Pi's own summarization requests (compaction) carry no system sections; they are answered
@@ -77,7 +77,7 @@ export default function fakeOpenCode(pi: ExtensionAPI) {
           if (padInput > 0) input.push({ role: "user", content: "x".repeat(padInput) } as never);
           const payload = await options?.onPayload?.({ model: model.id, input,
             max_output_tokens: options.maxTokens ?? 128_000 });
-          if (!payload || Number((payload as { max_output_tokens?: number }).max_output_tokens) > 16_000) {
+          if (!payload || Number((payload as { max_output_tokens?: number }).max_output_tokens) > 64_000) {
             throw new Error("Arena did not enforce the fake provider output ceiling");
           }
           if (process.env.ARENA_FAKE_LOG) {

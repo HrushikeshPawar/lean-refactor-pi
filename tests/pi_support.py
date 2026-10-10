@@ -27,7 +27,7 @@ class FakeRun:
     """One scripted run. `steps` are provider responses; see tests/fake_opencode.ts."""
 
     def __init__(self, steps: list[dict], *extra: str, cap: str = "0.1", env: dict | None = None,
-                 run_id: str | None = None, timeout: int = 240, model: str = "gpt-6-luna",
+                 run_id: str | None = None, timeout: int = 240, model: str = "deepseek-v4.1-flash",
                  langfuse: bool = False, session: bool = False, theorem: str = NAME):
         self.run_id = run_id or f"test-{uuid.uuid4().hex[:10]}"
         self.directory = run_dir(self.run_id)
@@ -111,7 +111,7 @@ class AnthropicWire:
     """A local Anthropic Messages endpoint for Pi's real client.
 
     It enforces the request rules the real API rejects with HTTP 400 (the class of bug that
-    stopped the first Qwen v5 run), records every payload, and streams scripted replies:
+    stopped the first v5 run), records every payload, and streams scripted replies:
     each reply is {"text": str} or {"tool": name, "input": dict}. After the script it says "done".
     """
 

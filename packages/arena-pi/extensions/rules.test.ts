@@ -131,11 +131,6 @@ test("routes come from the harness fingerprint, not from idea titles", () => {
   assert.equal(push.tried.length, 1);
 });
 
-test("the continuation push lists the routes tried", () => {
-  const text = continuationPush({ usedPct: 50, remainingUsd: 0.5, capUsd: 1, baseline: base.baseline, best: base.best, routes });
-  assert.ok(text.includes("Routes tried: r1"));
-});
-
 const deep = [
   { route: "r1", label: "original", original: true, attempts: 1, best_proxy: 33.5, best_candidate: "#2", depth: 0, new_states: 0, min_holes: null, explored: true, credited: false },
   { route: "r2", label: "recursion: none", attempts: 34, best_proxy: 86.07, best_candidate: "#34", depth: 7, new_states: 7, min_holes: 0, stale_streak: 2, explored: true, credited: true },

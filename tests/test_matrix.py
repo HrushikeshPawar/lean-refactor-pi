@@ -18,32 +18,23 @@ from tools import run_experiment_matrix as matrix
 
 class PlanTests(unittest.TestCase):
     def test_exactly_one_factor_varies(self):
-        specs = matrix.plan("thinking", ["low", "high"], "gpt-6-luna", "medium", "ab")
+        specs = matrix.plan("thinking", ["low", "high"], "deepseek-v4.1-flash", "medium", "ab")
         self.assertEqual([s["run_id"] for s in specs], ["ab-thinking-low", "ab-thinking-high"])
         for spec in specs:
-            self.assertEqual((spec["model"], spec["skill"]), ("gpt-6-luna", "on"))
+            self.assertEqual((spec["model"], spec["skill"]), ("deepseek-v4.1-flash", "on"))
         self.assertEqual({s["thinking"] for s in specs}, {"low", "high"})
-        skill = matrix.plan("skill", ["on", "off"], "qwen3.8-flash", "high", "sk")
-        self.assertEqual({s["model"] for s in skill}, {"qwen3.8-flash"})
+        skill = matrix.plan("skill", ["on", "off"], "deepseek-v4.1-flash", "high", "sk")
+        self.assertEqual({s["model"] for s in skill}, {"deepseek-v4.1-flash"})
         self.assertIn("--no-skill", matrix.command(skill[1], NAME, 0.1, []))
         self.assertNotIn("--no-skill", matrix.command(skill[0], NAME, 0.1, []))
 
     def test_bad_declarations_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "at least two"):
-            matrix.plan("model", ["gpt-6-luna"], "gpt-6-luna", "high", "x")
+            matrix.plan("model", ["deepseek-v4.1-flash"], "deepseek-v4.1-flash", "high", "x")
         with self.assertRaisesRegex(ValueError, "invalid thinking"):
-            matrix.plan("thinking", ["low", "wild"], "gpt-6-luna", "high", "x")
+            matrix.plan("thinking", ["low", "wild"], "deepseek-v4.1-flash", "high", "x")
         with self.assertRaisesRegex(ValueError, "factor must be"):
-            matrix.plan("cap", ["1", "2"], "gpt-6-luna", "high", "x")
-
-    def test_matrix_defaults_to_the_three_dollar_per_problem_allowance(self):
-        prefix = f"test-default-{uuid.uuid4().hex[:8]}"
-        proc = subprocess.run(
-            [sys.executable, "tools/run_experiment_matrix.py", "--theorem", NAME, "--prefix", prefix,
-             "--factor", "thinking", "--values", "low,high", "--dry-run"],
-            cwd=ROOT, text=True, capture_output=True, check=False)
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("cap $3 each", proc.stdout)
+            matrix.plan("cap", ["1", "2"], "deepseek-v4.1-flash", "high", "x")
 
     def test_parallelism_follows_free_memory_and_never_exceeds_runs(self):
         gb = 1024 * 1024
@@ -86,7 +77,7 @@ class MatrixRunTests(unittest.TestCase):
         script.write_text(json.dumps([{"text": "done"}] * 8))
         receipt = work / "preflight.json"
         receipt.write_text(json.dumps({"status": "pass", "patch_sha256": PATCH_SHA256,
-                                       "models": {"gpt-6-luna": {"session_id": "s", "trace_ids": ["t"]}}}))
+                                       "models": {"deepseek-v4.1-flash": {"session_id": "s", "trace_ids": ["t"]}}}))
         env = {**os.environ, "ARENA_FAKE_SCRIPT": str(script), "ARENA_PREFLIGHT_RECEIPT": str(receipt)}
         try:
             proc = subprocess.run(

@@ -6,9 +6,9 @@ passing Langfuse preflight receipt covers every model (run here, or a fresh one)
 packet certifies with its mandatory sections. `--dry-run` prints the plan and worst-case cost.
 
     python tools/run_campaign.py --prefix v6c1 --rows Core.InitsUpdatesComm,fundamental_theorem_of_variational_calculus' \\
-        --models gpt-6-luna,deepseek-v4.1-flash --cap 0.10 --replicates 1
+        --models deepseek-v4.1-flash --cap 0.10 --replicates 1
 
-`--preset v6-matrix` is the standing comparison: the three models x the Core and PhysLib rows x 3 replicates at a $3 cap.
+`--preset v6-matrix` is the standing comparison: the configured models x the Core and PhysLib rows x 3 replicates at a $3 cap.
 
 Arguments after `--` are passed to every run (for example `--no-mcp`).
 """

@@ -28,7 +28,7 @@ from tests.pi_support import LIVE_LANGFUSE, NAME
 
 
 def _request(identifier: str, payload: dict, ts: int, retry_of: str | None = None) -> dict:
-    return {"kind": "request", "id": identifier, "ts": ts, "model": "qwen3.8-flash",
+    return {"kind": "request", "id": identifier, "ts": ts, "model": "deepseek-v4.1-flash",
             "retry_of": retry_of, "post_hook": payload}
 
 
@@ -51,7 +51,7 @@ def _generation(payload: dict, text: str, start: str, cost: float = 0.01,
 
 def _joined(payload: dict | None = None, text: str = "done") -> tuple[list[dict], list[dict]]:
     """One tool-call turn and one text turn, as the patched plugin exports them."""
-    payload = payload or {"model": "qwen3.8-flash", "max_tokens": 2048, "messages": [{"role": "user", "content": "hi"}]}
+    payload = payload or {"model": "deepseek-v4.1-flash", "max_tokens": 2048, "messages": [{"role": "user", "content": "hi"}]}
     usage = {"input": 300, "output": 40, "cache_read": 4000, "cache_write": 100}
     call = {"type": "toolCall", "id": "c1", "name": "arena_skill_read", "arguments": {"page": 1}}
     journal = [
@@ -76,7 +76,7 @@ def _joined(payload: dict | None = None, text: str = "done") -> tuple[list[dict]
 
 class JudgeTests(unittest.TestCase):
     def test_a_complete_trace_joins_and_key_redaction_matches_the_plugin(self):
-        payload = {"model": "qwen3.8-flash", "messages": [{"role": "user", "content": "key pk-lf-abc secret"}]}
+        payload = {"model": "deepseek-v4.1-flash", "messages": [{"role": "user", "content": "key pk-lf-abc secret"}]}
         journal, observations = _joined(payload, "answered")
         for item in observations:
             if item["type"] == "GENERATION":
@@ -86,7 +86,7 @@ class JudgeTests(unittest.TestCase):
         self.assertEqual(redact("offline-test"), "offline-test")
 
     def test_identical_retries_need_one_generation_each(self):
-        payload = {"model": "qwen3.8-flash", "max_tokens": 16000}
+        payload = {"model": "deepseek-v4.1-flash", "max_tokens": 16000}
         journal = [_request("a", payload, 1), _wire("a", payload),
                    {"kind": "response", "id": "a", "text": "", "stop_reason": "error", "settled_usd": None},
                    _request("b", payload, 2, retry_of="a"), _wire("b", payload),
@@ -183,14 +183,14 @@ class ReceiptTests(unittest.TestCase):
         path = Path(tempfile.mkdtemp()) / "preflight.json"
         self.addCleanup(shutil.rmtree, path.parent, True)
         write_receipt({"status": "pass", "patch_sha256": PATCH_SHA256,
-                       "models": {"qwen3.8-flash": {"session_id": "s", "trace_ids": ["t"]}}}, path)
+                       "models": {"deepseek-v4.1-flash": {"session_id": "s", "trace_ids": ["t"]}}}, path)
         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
         previous = os.environ.get("ARENA_PREFLIGHT_RECEIPT")
         os.environ["ARENA_PREFLIGHT_RECEIPT"] = str(path)
         self.addCleanup(self._restore_receipt, previous)
-        self.assertIsNone(preflight_block(["qwen3.8-flash"]))
-        blocked = preflight_block(["qwen3.8-flash", "gpt-6-luna"])
-        self.assertIn("gpt-6-luna", blocked or "")
+        self.assertIsNone(preflight_block(["deepseek-v4.1-flash"]))
+        blocked = preflight_block(["deepseek-v4.1-flash", "uncovered-model"])
+        self.assertIn("uncovered-model", blocked or "")
 
     def _restore_receipt(self, previous: str | None) -> None:
         if previous is None:

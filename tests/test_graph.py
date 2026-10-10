@@ -215,8 +215,8 @@ class ViewerTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            for name, model in (("rep-r3-model-a", "gpt-6-luna"), ("rep-r3-model-b", "qwen3.8-flash"),
-                                ("rep-r3-matrix", None), ("other-run", "gpt-6-luna")):
+            for name, model in (("rep-r3-model-a", "deepseek-v4.1-flash"), ("rep-r3-model-b", "deepseek-v4.1-flash"),
+                                ("rep-r3-matrix", None), ("other-run", "deepseek-v4.1-flash")):
                 (root / name).mkdir()
                 if model:
                     (root / name / "ledger.jsonl").write_text('{"kind":"init","theorem":"T"}\n')

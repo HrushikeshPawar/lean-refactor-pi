@@ -463,7 +463,7 @@ class ProtocolLogicTests(unittest.TestCase):
         self.assertEqual((current["id"], current["attempts"], current["probes"]), ("i1", 3, 1))
 
     def test_a_new_idea_may_carry_the_models_own_id(self):
-        # Luna v5 created ideas as {idea_id: "state_algebra", title: ...}; that is a creation.
+        # A v5 model created ideas as {idea_id: "state_algebra", title: ...}; that is a creation.
         made = campaign.record_idea("logic", "State algebra", "h", idea_id="state_algebra")
         self.assertEqual(made["id"], "state_algebra")
         again = campaign.record_idea("logic", idea_id="state_algebra", status="parked", reason="later")

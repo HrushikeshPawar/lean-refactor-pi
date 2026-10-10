@@ -639,7 +639,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
         ledger_components_usd: usageCostParts(usage, model),
         pi_embedded_cost_usd: usage.cost?.total ?? null });
       // Pi prices the same usage from its catalog, which `catalogPriceProblem` keeps equal to
-      // the ledger, except Luna's conservative high tier, which only the ledger applies.
+      // the ledger, except a conservative high price tier, which only the ledger applies.
       const priceTier = MODELS[model].highPrice && priceForUsage(usage, model) === MODELS[model].highPrice ? "high" : "base";
       appendTrace({ ...delivered, settled_usd: usd, price_tier: priceTier, pi_cost_usd: usage.cost?.total ?? null,
         estimate_usd: Number(state.usd), remaining_allowance_usd: remainingAllowanceUsd,
@@ -725,7 +725,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
     const model = ctx.model;
     let report: Record<string, unknown> = { session_id: ctx.sessionManager.getSessionId(),
       theorem: active ?? null,
-      price_basis: "OpenCode Go list prices checked 2026-10-06; Luna tier chosen from billed prompt tokens" };
+      price_basis: "OpenCode Go list prices checked 2026-10-06; a high tier, where configured, is chosen from billed prompt tokens" };
     try {
       const limits = budgetLimits();
       if (model?.provider !== BUDGET_PROVIDER || !isBudgetModel(model.id)) {
@@ -733,7 +733,7 @@ export default function arenaExtension(pi: ExtensionAPI) {
       }
       report = { ...report, hard_cap_usd: limits.hardCapUsd, soft_cap_usd: limits.stopUsd, stop_target_usd: limits.stopUsd,
         provider: PROVIDER, model: model.id, ...budgetStatus(ctx),
-        price_method: "Observed usage priced per request using OpenCode Go list rates; Luna uses the >272K tier only when billed prompt tokens cross that threshold. Neither this nor Pi's embedded estimate is a provider invoice.",
+        price_method: "Observed usage priced per request using OpenCode Go list rates; A configured high tier applies only when billed prompt tokens cross its threshold. Neither this nor Pi's embedded estimate is a provider invoice.",
         configured_usd_per_million_tokens: MODELS[model.id].price,
         configured_high_tier: MODELS[model.id].highPrice ? {
           prompt_tokens_over: MODELS[model.id].highContextThreshold,

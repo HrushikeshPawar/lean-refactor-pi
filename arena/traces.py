@@ -274,7 +274,7 @@ def judge(journal: list[dict], observations: list[dict]) -> list[str]:
     single generation must not satisfy two requests. Every request also needs its byte-exact
     wire row. The ledger's settled cost is authoritative; Pi prices from a catalog that
     `catalogPriceProblem` holds equal to the ledger, so Langfuse totalCost must match it,
-    except where the ledger applied Luna's conservative high tier. Tool spans join their
+    except where the ledger applied a conservative high price tier. Tool spans join their
     journal rows by tool call ID.
     """
     try:

@@ -5,7 +5,7 @@ Every run gets the same theorem, packet, cap and options except the factor under
 differences in the report are attributable to that factor. Use a small cap ($0.10-$0.20).
 
     python tools/run_experiment_matrix.py --theorem Core.InitsUpdatesComm --prefix think-ab \\
-        --factor thinking --values medium,high --model gpt-6-luna --cap 0.1
+        --factor thinking --values medium,high --model deepseek-v4.1-flash --cap 0.1
 
 Arguments after `--` are passed to every run (for example `--no-mcp`).
 """
@@ -133,7 +133,7 @@ def main() -> int:
     parser.add_argument("--prefix", required=True, help="Run IDs are <prefix>-<factor>-<value>")
     parser.add_argument("--factor", required=True, choices=FACTORS)
     parser.add_argument("--values", required=True, help="Comma-separated values of the factor")
-    parser.add_argument("--model", default="gpt-6-luna", choices=MODELS, help="Fixed model unless it is the factor")
+    parser.add_argument("--model", default="deepseek-v4.1-flash", choices=MODELS, help="Fixed model unless it is the factor")
     parser.add_argument("--thinking", default="high", choices=THINKING_LEVELS)
     parser.add_argument("--cap", type=float, default=3.0, help="Spend cap per run in USD (0.10-3.00); below 3 it is a soft cap on actual spend (the last request may overshoot), only 3 is a hard cap")
     parser.add_argument("--parallel", default="1", help="Runs at once: an integer or 'auto' (by free RAM)")

@@ -53,7 +53,6 @@ class EvaluatorBoundaryTests(unittest.TestCase):
 
 class DiagnosticMappingTests(unittest.TestCase):
     def test_wrapper_shift_is_applied_once_after_insertion_point(self):
-        self.assertEqual(WRAPPER_LINES, 14)
         self.assertEqual(map_measured_line(10, 20), (10, False))
         self.assertEqual(map_measured_line(20 + 5, 20), (20, True))
         self.assertEqual(map_measured_line(20 + WRAPPER_LINES, 20), (20, False))

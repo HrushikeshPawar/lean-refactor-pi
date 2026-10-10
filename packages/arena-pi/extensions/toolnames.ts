@@ -46,7 +46,7 @@ function listFromText(text: string): string[] {
  * Some models fill every optional field with an empty value ("", [""]) and send arrays as strings.
  * Treat empty values as absent and parse stringified arrays, using the tool's object schema.
  */
-// Names models use for a schema field that has another name (Qwen sent `idea` for arena_idea's `title`).
+// Names models use for a schema field that has another name (some send `idea` for arena_idea's `title`).
 const KEY_SYNONYMS: Record<string, string[]> = { title: ["idea", "name"], proof: ["code", "lean", "body"] };
 
 /** The schema field an unknown key stands for: a synonym, else the nearest name within one edit (`draft` → `drafts`). */

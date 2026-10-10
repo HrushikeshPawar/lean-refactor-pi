@@ -38,39 +38,25 @@ class PlanTests(unittest.TestCase):
     def test_dry_run_prints_plan_and_worst_case_without_spending(self):
         out = io.StringIO()
         with mock.patch("subprocess.run") as run, contextlib.redirect_stdout(out):
-            code = rc.main(["--prefix", "p", "--rows", "A.b,C.d", "--models", "gpt-6-luna,deepseek-v4.1-flash",
+            code = rc.main(["--prefix", "p", "--rows", "A.b,C.d", "--models", "deepseek-v4.1-flash",
                             "--cap", "0.10", "--dry-run"])
         self.assertEqual(code, 0)
         run.assert_not_called()
         text = out.getvalue()
-        self.assertIn("12 runs", text)
-        self.assertIn("worst case $1.20", text)
+        self.assertIn("6 runs", text)
+        self.assertIn("worst case $0.60", text)
         self.assertIn("--hard-cap-usd 0.1", text)
 
-    def test_v6_matrix_preset_is_three_models_by_two_rows_by_three_replicates_at_three_dollars(self):
-        out = io.StringIO()
-        with mock.patch("subprocess.run") as run, contextlib.redirect_stdout(out):
-            code = rc.main(["--prefix", "p", "--preset", "v6-matrix", "--dry-run"])
-        self.assertEqual(code, 0)
-        run.assert_not_called()
-        text = out.getvalue()
-        self.assertIn("18 runs (2 rows x 3 models x 3 replicates", text)
-        self.assertIn("cap $3 each; worst case $54.00", text)
-        for model in ("deepseek-v4.1-flash", "gpt-6-luna", "qwen3.8-flash"):
-            self.assertIn(f"--model {model}", text)
-        self.assertIn("--theorem Core.InitsUpdatesComm", text)
-        self.assertIn("--theorem fundamental_theorem_of_variational_calculus'", text)
-
     def test_replicates_are_sequential_and_ids_distinct(self):
-        specs = rc.plan("p", ["A", "B"], ["gpt-6-luna", "qwen3.8-flash"], 2)
-        self.assertEqual([s["replicate"] for s in specs], [1] * 4 + [2] * 4)
-        self.assertEqual(len({s["run_id"] for s in specs}), 8)
-        self.assertEqual(rc.worst_case_usd(specs, 0.1), 0.8)
+        specs = rc.plan("p", ["A", "B"], ["deepseek-v4.1-flash"], 2)
+        self.assertEqual([s["replicate"] for s in specs], [1] * 2 + [2] * 2)
+        self.assertEqual(len({s["run_id"] for s in specs}), 4)
+        self.assertEqual(rc.worst_case_usd(specs, 0.1), 0.4)
         with self.assertRaises(ValueError):
             rc.plan("p", ["A"], ["not-a-model"], 1)
 
     def test_apostrophe_row_name_gives_valid_run_id(self):
-        spec = rc.plan("p", ["fundamental_theorem'"], ["gpt-6-luna"], 1)[0]
+        spec = rc.plan("p", ["fundamental_theorem'"], ["deepseek-v4.1-flash"], 1)[0]
         self.assertRegex(spec["run_id"], r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?")
 
 
@@ -107,7 +93,7 @@ class GateTests(unittest.TestCase):
         with mock.patch.object(rc, "check_packets", side_effect=rc.CampaignAbort("boom")), \
                 mock.patch.object(rc, "execute") as execute, \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
-            code = rc.main(["--prefix", "zz-offline-test", "--rows", "A", "--models", "gpt-6-luna", "--replicates", "1"])
+            code = rc.main(["--prefix", "zz-offline-test", "--rows", "A", "--models", "deepseek-v4.1-flash", "--replicates", "1"])
         self.assertEqual(code, 1)
         execute.assert_not_called()
         self.assertIn("aborted before any paid run", err.getvalue())
@@ -117,7 +103,7 @@ class ExecuteAndReportTests(unittest.TestCase):
     def test_execute_runs_one_subprocess_with_cap_and_reads_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            spec = rc.plan("p", ["A"], ["gpt-6-luna"], 1)[0]
+            spec = rc.plan("p", ["A"], ["deepseek-v4.1-flash"], 1)[0]
             directory = write_run(root, spec["run_id"], True)
             (directory / "run-config.json").write_text(json.dumps({"packet_sha256": "h"}))
             seen = []
@@ -134,7 +120,7 @@ class ExecuteAndReportTests(unittest.TestCase):
 
     def test_sequential_execution_order(self):
         order = []
-        specs = rc.plan("p", ["A", "B"], ["gpt-6-luna"], 2)
+        specs = rc.plan("p", ["A", "B"], ["deepseek-v4.1-flash"], 2)
         fake = lambda cmd, **kw: order.append(cmd[cmd.index("--run-id") + 1]) or SimpleNamespace(returncode=0)  # noqa: E731
         with tempfile.TemporaryDirectory() as tmp:
             for spec in specs:
@@ -142,7 +128,7 @@ class ExecuteAndReportTests(unittest.TestCase):
         self.assertEqual(order, [s["run_id"] for s in specs])
 
     def test_aggregation_over_replicates(self):
-        specs = rc.plan("p", ["A"], ["gpt-6-luna"], 3)
+        specs = rc.plan("p", ["A"], ["deepseek-v4.1-flash"], 3)
         proxies = [60.0, 80.0, None]
         runs = [rc.run_row(s, fixture_summary(p, spent=0.05 * (i + 1), stop="finished" if i else "cap",
                                               errors=i, ideas=i), 0, "h", "h")
@@ -165,7 +151,7 @@ class ExecuteAndReportTests(unittest.TestCase):
         self.assertFalse(bad["identical_packets"])
 
     def test_route_depth_reaches_the_campaign_table(self):
-        spec = rc.plan("p", ["A"], ["gpt-6-luna"], 1)[0]
+        spec = rc.plan("p", ["A"], ["deepseek-v4.1-flash"], 1)[0]
         summary = fixture_summary(60.0) | {"route_progress": {"credited_routes": 2, "explored_routes": 1, "new_state_share": 0.5}}
         group = rc.aggregate([rc.run_row(spec, summary, 0, "h", "h")], {"A": "h"})["groups"][0]
         self.assertEqual((group["credited_routes"]["max"], group["new_state_share"]["max"]), (2, 0.5))
@@ -199,7 +185,7 @@ class StdlibSourceTest(unittest.TestCase):
 
 class LeanUnhealthyTests(unittest.TestCase):
     def test_campaign_continues_after_a_lean_unhealthy_row_and_reports_it(self):
-        specs = rc.plan("p", ["A", "B"], ["gpt-6-luna"], 1)
+        specs = rc.plan("p", ["A", "B"], ["deepseek-v4.1-flash"], 1)
         codes = {specs[0]["run_id"]: 75, specs[1]["run_id"]: 0}
         ran = []
 
@@ -228,7 +214,7 @@ class LeanUnhealthyTests(unittest.TestCase):
         self.assertIn(specs[0]["run_id"], text)
 
     def test_execute_cleans_up_around_each_run(self):
-        spec = rc.plan("p", ["A"], ["gpt-6-luna"], 1)[0]
+        spec = rc.plan("p", ["A"], ["deepseek-v4.1-flash"], 1)[0]
         calls = []
         hk = mock.Mock()
         hk.before_run.side_effect = lambda run_id: calls.append(("before", run_id))

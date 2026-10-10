@@ -25,7 +25,7 @@ class Fixture(unittest.TestCase):
         self.manifest.write_text("\n".join(json.dumps({"name": n, "source": "s", "statement": s})
                                            for n, s in STATEMENTS.items()) + "\n")
 
-    def run_dir(self, run_id, theorem="A.one", model="gpt-6-luna", proof=None, origin="model", spend=(0.5,),
+    def run_dir(self, run_id, theorem="A.one", model="deepseek-v4.1-flash", proof=None, origin="model", spend=(0.5,),
                 verified_by="cold compile", journal=True, candidate=True, passed=True, retry=False,
                 config=None, proxy=70.0, cold=None):
         d = self.runs / run_id
@@ -172,7 +172,7 @@ class StageTests(Fixture):
         self.assertEqual(row["toolchains"], ["v4.29.1"])
         self.assertEqual(row["local_verification"]["lean_paths"], {"v4.29.1": "cold"})
         self.assertEqual(row["langfuse"]["trace_ids"], ["trace-good"])
-        self.assertEqual(row["model"]["response_models"], ["gpt-6-luna-2026"])
+        self.assertEqual(row["model"]["response_models"], ["deepseek-v4.1-flash-2026"])
         self.assertAlmostEqual(row["spend_usd"], 0.9)  # both attempts and the losing run
         calls = {c["run_id"]: c for c in row["calls"]}
         self.assertEqual(len(calls["good"]["attempts"]), 2)
@@ -187,7 +187,7 @@ class StageTests(Fixture):
         text = (out / "report.md").read_text()
         positions = [text.index(f"## {s}") for s in ("Approach", "Models", "Budget accounting", "Reproduction")]
         self.assertEqual(positions, sorted(positions))
-        self.assertIn("gpt-6-luna", text)
+        self.assertIn("deepseek-v4.1-flash", text)
         self.assertIn("0.9000", text)
 
     def test_ceiling_violation_counts_unlisted_runs(self):
@@ -210,7 +210,6 @@ class StageTests(Fixture):
         self.run_dir("bad", model="gpt-5-mystery")
         with self.assertRaisesRegex(package.PackageError, "not in the eligibility list"):
             self.stage("bad")
-        self.assertEqual(package.ELIGIBLE_MODELS, ("gpt-6-luna", "qwen3.8-flash", "deepseek-v4.1-flash"))
 
     def test_nothing_acceptable_refuses(self):
         self.run_dir("ref", origin="reference")

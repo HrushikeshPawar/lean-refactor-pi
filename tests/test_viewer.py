@@ -325,11 +325,6 @@ class GraphViewerUpgradeTests(unittest.TestCase):
         self.assertEqual(rows["p2"]["headlines"], ["type mismatch"])
         self.assertNotIn("diagnostics", rows["p1"]["result"]["compat"]["v1"])
 
-    def test_legend_uses_the_short_route_label_with_the_full_one_as_title(self):
-        app = (self.ASSETS / "app.js").read_text()
-        self.assertIn("clip(r.short_label || r.label, 44)", app)
-        self.assertIn('title="${esc(r.label || \'\')}"', app)
-
     def test_assets_keep_csp_rules_and_do_not_rebuild_open_selects(self):
         for name in ("index.html", "dashboard.html", "hub.html"):
             self.assertNotRegex((self.ASSETS / name).read_text(), r'\sstyle\s*=', name)

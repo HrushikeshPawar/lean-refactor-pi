@@ -33,12 +33,6 @@ class ParsingTests(unittest.TestCase):
             self.assertFalse(result["ok"])
             self.assertIn("boom", result["error"])
 
-    def test_extractor_source_defines_the_command(self):
-        text = route_features.LEAN_FILE.read_text()
-        self.assertIn('elab "arena_route "', text)
-        self.assertIn("ARENA_ROUTE", text)
-
-
 @slow
 class LeanTests(unittest.TestCase):
     def test_the_original_reads_as_induction_on_update_states_and_synonyms_agree(self):

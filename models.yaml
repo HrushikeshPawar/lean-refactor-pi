@@ -15,36 +15,13 @@ thinking:
 presets:
   v6-matrix:
     rows: [Core.InitsUpdatesComm, "fundamental_theorem_of_variational_calculus'"]
-    models: [deepseek-v4.1-flash, gpt-6-luna, qwen3.8-flash]
+    models: [deepseek-v4.1-flash]
     replicates: 3
     cap: 3.0
     jobs: 3
 
 # Order here is the order of --model choices and of `arena_preflight` runs.
 models:
-  gpt-6-luna:                  # Responses API (max_output_tokens)
-    price: {input: 0.10, output: 0.50, cache_read: 0.01, cache_write: 0.125}
-    # Higher tier when the billed prompt (input + cache read + cache write) exceeds
-    # high_context_threshold. Pi's catalog has no tier, so only the ledger applies it.
-    high_price: {input: 0.20, output: 0.75, cache_read: 0.02, cache_write: 0.25}
-    high_context_threshold: 272000
-    context_window: 1050000
-    max_tokens: 128000         # physical output limit; the catalog may not exceed it
-    request_output_tokens: 16000   # per-request output limit the run uses (includes thinking)
-    compaction:
-      at_tokens: 200000        # compact above this; below it history is never rewritten.
-                               # Kept under the 272K tier boundary, where Luna's prices double.
-      keep_recent_tokens: 40000
-
-  qwen3.8-flash:               # Anthropic Messages API (max_tokens)
-    price: {input: 0.15, output: 0.47, cache_read: 0.016, cache_write: 0.20}
-    context_window: 1000000
-    max_tokens: 131072
-    request_output_tokens: 16000
-    compaction:
-      at_tokens: 300000        # cache read is ~9x cheaper than input; each compaction re-sends
-      keep_recent_tokens: 40000   # tens of thousands of uncached tokens, so compact later
-
   deepseek-v4.1-flash:         # Anthropic Messages API (max_tokens)
     # Automatic caching: cache writes are free and not reported (cache_write 0 is expected).
     price: {input: 0.15, output: 0.60, cache_read: 0.003, cache_write: 0}

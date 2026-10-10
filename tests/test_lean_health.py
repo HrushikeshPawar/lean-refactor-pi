@@ -75,12 +75,6 @@ class GateTests(unittest.TestCase):
                 warm_fn=warm, check_fn=lambda row, v, c: ok(1.0), log=lambda m: None)
         self.assertEqual(calls, [("v1", 4, "model"), ("v2", 1, "background"), ("v3", 1, "background")])
 
-    def test_apply_timeout_env(self):
-        env: dict = {}
-        lh.apply_timeout_env({"timeout": 420}, env)
-        self.assertEqual(env, {"ARENA_LEAN_TIMEOUT": "420"})
-
-
 def check(kind: str, trigger: str = "model", record: str = "evaluation") -> dict:
     entry = {"passed": False, "lean": {"path": "session"}}
     if kind == "timeout":

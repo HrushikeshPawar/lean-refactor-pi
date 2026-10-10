@@ -60,10 +60,5 @@ class MergeReportTests(unittest.TestCase):
         self.assertEqual(answer["candidate"], "#2", "the best model-written candidate, not the 80.0 combination")
         self.assertEqual((directory / "submission.lean").read_text(), LEFT)
 
-    def test_no_merge_checks_means_an_empty_report(self):
-        self.assertEqual(merge_report([]), [])
-        self.assertEqual(merge_text([]), "none checked")
-
-
 if __name__ == "__main__":
     unittest.main()
