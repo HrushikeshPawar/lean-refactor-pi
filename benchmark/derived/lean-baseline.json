@@ -1,0 +1,425 @@
+{
+  "schema": 1,
+  "label": "v6",
+  "recorded": "2026-10-11",
+  "code": {
+    "commit": "5be945a5751ea16a0d99eaebb241d1558f52713f",
+    "tree": "692058e03ce9aa57dc593b641d34cc75090a6800",
+    "branch": "v7/07-lean-gate",
+    "branch_commit": "cbfbe7075757eccfcede04bd7a7a654dab41012e",
+    "dirty": false,
+    "models_sha256": "39453b556e45ae6bf1761519f898d2c3c8273e46dd3b30571c67d6c8c1dad53e",
+    "pi_version": "1.1.0"
+  },
+  "machine": {
+    "cpus": 8,
+    "mem_total_gb": 30.488811492919922
+  },
+  "measurement_note": "Cold is the first open of this invocation; the page cache is not dropped (that requires root).",
+  "settings": {
+    "repeats": 5,
+    "timeout": 180
+  },
+  "rows": {
+    "Core.InitsUpdatesComm": {
+      "v4.29.1": {
+        "commit": "384e22374e0872095ad9c6f74c5998c09cfd93a9",
+        "open_cold_s": 1.79,
+        "open_warm_s": 1.85,
+        "checks": {
+          "edit": {
+            "n": 5,
+            "p50": 0.34,
+            "p95": 0.382,
+            "max": 0.39,
+            "timeouts": 0
+          },
+          "error": {
+            "n": 5,
+            "p50": 0.29,
+            "p95": 0.376,
+            "max": 0.39,
+            "timeouts": 0
+          },
+          "reference": {
+            "n": 5,
+            "p50": 0.44,
+            "p95": 0.6519999999999999,
+            "max": 0.69,
+            "timeouts": 0
+          },
+          "sorry": {
+            "n": 5,
+            "p50": 0.29,
+            "p95": 0.346,
+            "max": 0.36,
+            "timeouts": 0
+          },
+          "splice_early": {
+            "n": 5,
+            "p50": 0.44,
+            "p95": 0.708,
+            "max": 0.77,
+            "timeouts": 0
+          },
+          "splice_late": {
+            "n": 5,
+            "p50": 0.3,
+            "p95": 0.3,
+            "max": 0.3,
+            "timeouts": 0
+          }
+        },
+        "pss_gb": {
+          "workers_idle_gb": [
+            0.5312776565551758
+          ],
+          "worker_peak_gb": 0.5312776565551758
+        },
+        "min_available_gb": 15.858562469482422
+      }
+    },
+    "putnam_1964_b2": {
+      "v4.25.0": {
+        "commit": "1ccd71f89cbbd82ae7d097723ce1722ca7b01c33",
+        "open_cold_s": 4.12,
+        "open_warm_s": 4.06,
+        "checks": {
+          "edit": {
+            "n": 5,
+            "p50": 2.26,
+            "p95": 2.608,
+            "max": 2.66,
+            "timeouts": 0
+          },
+          "error": {
+            "n": 5,
+            "p50": 0.23,
+            "p95": 0.33999999999999997,
+            "max": 0.36,
+            "timeouts": 0
+          },
+          "reference": {
+            "n": 5,
+            "p50": 12.33,
+            "p95": 17.135999999999996,
+            "max": 18.33,
+            "timeouts": 0
+          },
+          "sorry": {
+            "n": 5,
+            "p50": 0.22,
+            "p95": 0.32999999999999996,
+            "max": 0.35,
+            "timeouts": 0
+          },
+          "splice_early": {
+            "n": 5,
+            "p50": 12.15,
+            "p95": 12.578,
+            "max": 12.67,
+            "timeouts": 0
+          },
+          "splice_late": {
+            "n": 5,
+            "p50": 2.29,
+            "p95": 2.3,
+            "max": 2.3,
+            "timeouts": 0
+          }
+        },
+        "pss_gb": {
+          "workers_idle_gb": [
+            5.029022216796875
+          ],
+          "worker_peak_gb": 5.029022216796875
+        },
+        "min_available_gb": 12.908306121826172
+      }
+    },
+    "Cslib.SKI.parallelReduction_diamond": {
+      "v4.33.0-rc2": {
+        "commit": "3aa9d4416c185e0b9faeb72bbd65abe85b95dbcc",
+        "open_cold_s": 1.95,
+        "open_warm_s": 1.89,
+        "checks": {
+          "edit": {
+            "n": 5,
+            "p50": 0.24,
+            "p95": 0.266,
+            "max": 0.27,
+            "timeouts": 0
+          },
+          "error": {
+            "n": 5,
+            "p50": 0.22,
+            "p95": 0.228,
+            "max": 0.23,
+            "timeouts": 0
+          },
+          "reference": {
+            "n": 5,
+            "p50": 0.24,
+            "p95": 0.3,
+            "max": 0.31,
+            "timeouts": 0
+          },
+          "sorry": {
+            "n": 5,
+            "p50": 0.23,
+            "p95": 0.324,
+            "max": 0.34,
+            "timeouts": 0
+          },
+          "splice_early": {
+            "n": 5,
+            "p50": 0.24,
+            "p95": 0.33399999999999996,
+            "max": 0.35,
+            "timeouts": 0
+          },
+          "splice_late": {
+            "n": 5,
+            "p50": 0.25,
+            "p95": 0.26,
+            "max": 0.26,
+            "timeouts": 0
+          }
+        },
+        "pss_gb": {
+          "workers_idle_gb": [
+            0.6073236465454102
+          ],
+          "worker_peak_gb": 0.6073236465454102
+        },
+        "min_available_gb": 15.570575714111328
+      }
+    },
+    "Binius.BinaryBasefold.fiberwise_dist_lt_imp_dist_lt_unique_decoding_radius": {
+      "v4.31.0": {
+        "commit": "c1712f6c496d0aef04f09bae42aec13811b3273f",
+        "open_cold_s": 27.99,
+        "open_warm_s": 16.27,
+        "checks": {
+          "edit": {
+            "n": 5,
+            "p50": 1.96,
+            "p95": 6.494,
+            "max": 7.23,
+            "timeouts": 0
+          },
+          "error": {
+            "n": 5,
+            "p50": 1.56,
+            "p95": 2.214,
+            "max": 2.22,
+            "timeouts": 0
+          },
+          "reference": {
+            "n": 5,
+            "p50": 3.88,
+            "p95": 5.838,
+            "max": 6.03,
+            "timeouts": 0
+          },
+          "sorry": {
+            "n": 5,
+            "p50": 1.53,
+            "p95": 1.998,
+            "max": 2.02,
+            "timeouts": 0
+          },
+          "splice_early": {
+            "n": 5,
+            "p50": 3.98,
+            "p95": 5.028,
+            "max": 5.28,
+            "timeouts": 0
+          },
+          "splice_late": {
+            "n": 5,
+            "p50": 1.94,
+            "p95": 2.79,
+            "max": 2.91,
+            "timeouts": 0
+          }
+        },
+        "pss_gb": {
+          "workers_idle_gb": [
+            3.589527130126953
+          ],
+          "worker_peak_gb": 3.589527130126953
+        },
+        "min_available_gb": 14.645267486572266
+      },
+      "v4.30.0": {
+        "commit": "e6d77b18ca1334a91faf4d1ccf9f96d854d58ba4",
+        "open_cold_s": 29.27,
+        "open_warm_s": 19.08,
+        "checks": {
+          "edit": {
+            "n": 5,
+            "p50": 2.23,
+            "p95": 4.524,
+            "max": 4.7,
+            "timeouts": 0
+          },
+          "error": {
+            "n": 5,
+            "p50": 1.75,
+            "p95": 3.282,
+            "max": 3.41,
+            "timeouts": 0
+          },
+          "reference": {
+            "n": 5,
+            "p50": 4.44,
+            "p95": 6.688,
+            "max": 6.97,
+            "timeouts": 0
+          },
+          "sorry": {
+            "n": 5,
+            "p50": 1.8,
+            "p95": 2.2760000000000002,
+            "max": 2.29,
+            "timeouts": 0
+          },
+          "splice_early": {
+            "n": 5,
+            "p50": 4.38,
+            "p95": 6.582,
+            "max": 7.11,
+            "timeouts": 0
+          },
+          "splice_late": {
+            "n": 5,
+            "p50": 2.22,
+            "p95": 3.13,
+            "max": 3.24,
+            "timeouts": 0
+          }
+        },
+        "pss_gb": {
+          "workers_idle_gb": [
+            3.714723587036133
+          ],
+          "worker_peak_gb": 3.714909553527832
+        },
+        "min_available_gb": 17.90595245361328
+      },
+      "v4.29.0": {
+        "commit": "de71a9dfd2f5a343e8895517b7efe857d9f1ce5c",
+        "open_cold_s": 30.94,
+        "open_warm_s": 19.89,
+        "checks": {
+          "edit": {
+            "n": 5,
+            "p50": 3.91,
+            "p95": 7.4399999999999995,
+            "max": 7.67,
+            "timeouts": 0
+          },
+          "error": {
+            "n": 5,
+            "p50": 1.66,
+            "p95": 2.486,
+            "max": 2.52,
+            "timeouts": 0
+          },
+          "reference": {
+            "n": 5,
+            "p50": 4.27,
+            "p95": 5.972,
+            "max": 6.19,
+            "timeouts": 0
+          },
+          "sorry": {
+            "n": 5,
+            "p50": 1.68,
+            "p95": 2.286,
+            "max": 2.35,
+            "timeouts": 0
+          },
+          "splice_early": {
+            "n": 5,
+            "p50": 4.26,
+            "p95": 5.768,
+            "max": 6.1,
+            "timeouts": 0
+          },
+          "splice_late": {
+            "n": 5,
+            "p50": 2.21,
+            "p95": 4.026,
+            "max": 4.37,
+            "timeouts": 0
+          }
+        },
+        "pss_gb": {
+          "workers_idle_gb": [
+            3.6353769302368164
+          ],
+          "worker_peak_gb": 3.6353769302368164
+        },
+        "min_available_gb": 18.7430419921875
+      },
+      "v4.28.0": {
+        "commit": "673fa440714eb1949b8b50a28f2a4f52b1837e9b",
+        "open_cold_s": 46.09,
+        "open_warm_s": 29.12,
+        "checks": {
+          "edit": {
+            "n": 5,
+            "p50": 10.25,
+            "p95": 13.491999999999999,
+            "max": 14.24,
+            "timeouts": 0
+          },
+          "error": {
+            "n": 5,
+            "p50": 4.07,
+            "p95": 5.194,
+            "max": 5.45,
+            "timeouts": 0
+          },
+          "reference": {
+            "n": 5,
+            "p50": 10.29,
+            "p95": 14.203999999999999,
+            "max": 15.18,
+            "timeouts": 0
+          },
+          "sorry": {
+            "n": 5,
+            "p50": 4.14,
+            "p95": 5.326,
+            "max": 5.62,
+            "timeouts": 0
+          },
+          "splice_early": {
+            "n": 5,
+            "p50": 10.45,
+            "p95": 14.065999999999999,
+            "max": 14.93,
+            "timeouts": 0
+          },
+          "splice_late": {
+            "n": 5,
+            "p50": 9.97,
+            "p95": 13.765999999999998,
+            "max": 14.7,
+            "timeouts": 0
+          }
+        },
+        "pss_gb": {
+          "workers_idle_gb": [
+            5.965609550476074
+          ],
+          "worker_peak_gb": 5.965609550476074
+        },
+        "min_available_gb": 19.2265625
+      }
+    }
+  }
+}
