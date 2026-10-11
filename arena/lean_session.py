@@ -133,10 +133,8 @@ class _Token:
     def release(self) -> None:
         fd, self.fd = self.fd, -1
         if fd >= 0:
-            try:
+            with suppress(OSError):
                 os.close(fd)  # closing the descriptor drops the flock
-            except OSError:
-                pass
 
     def __del__(self) -> None:
         self.release()
@@ -489,10 +487,8 @@ class LeanServer:
             self.dead = self.dead or "crashed"
             self._wake_all()
             if process is not None:
-                try:
+                with suppress(subprocess.TimeoutExpired):
                     process.wait(timeout=10)  # reap it so a crashed server is not left as a zombie
-                except subprocess.TimeoutExpired:
-                    pass
 
     def _dispatch(self, message: dict) -> None:
         method = message.get("method")
@@ -689,17 +685,20 @@ def process_tree(root: int | None) -> list[int]:
     return [pid for pid in found if Path(f"/proc/{pid}").exists()]
 
 
-def tree_pss_gb(root: int | None) -> float:
+def pid_pss_gb(pid: int) -> float | None:
+    """Proportional memory of one process, or None when its smaps data is unavailable."""
+    try:
+        for line in Path(f"/proc/{pid}/smaps_rollup").read_text().splitlines():
+            if line.startswith("Pss:"):
+                return int(line.split()[1]) / 1024 / 1024
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def tree_pss_gb(root: int | None, pss_reader: Callable[[int], float | None] = pid_pss_gb) -> float:
     """Proportional memory of a process tree (the server and its workers)."""
-    total = 0
-    for pid in process_tree(root):
-        try:
-            for line in Path(f"/proc/{pid}/smaps_rollup").read_text().splitlines():
-                if line.startswith("Pss:"):
-                    total += int(line.split()[1])
-        except (OSError, ValueError):
-            continue
-    return total / 1024 / 1024
+    return sum(value for pid in process_tree(root) if (value := pss_reader(pid)) is not None)
 
 
 def running(pid: int) -> bool:

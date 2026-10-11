@@ -227,6 +227,12 @@ class DaemonTests(unittest.TestCase):
                     os.kill(pid, signal.SIGKILL)
             parent.wait()
 
+    def test_tree_pss_uses_injected_per_pid_measurements(self):
+        with patch.object(lean_session, "process_tree", return_value=[101, 102, 103]):
+            measured = lean_session.tree_pss_gb(100, lambda pid: {101: 0.4, 102: None, 103: 0.7}[pid])
+
+        self.assertEqual(measured, 1.1)
+
 
 @slow
 class SubmissionColdVerificationTests(unittest.TestCase):
