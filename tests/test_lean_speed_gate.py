@@ -1,6 +1,6 @@
 """Lean speed gate against the recorded baseline.
 
-Run once at the end of every ticket that touches Lean machinery: 08a, 08b, 08c, 08d, 10b, 12. Never in the fast suite.
+Run once at the end of every ticket that touches Lean machinery: 08a, 08b, 08c, 08d, 10b, 12. Never in the fast suite. If it fails right after other large Lean work (another workspace, a campaign, a reboot), run it once more: the first run refills the page cache. A figure that fails both runs is a regression.
 """
 
 import os

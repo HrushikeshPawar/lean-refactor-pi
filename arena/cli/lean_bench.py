@@ -16,6 +16,9 @@ from arena import engine, lean_session, provenance
 from arena.cli import lean_load
 
 NOISE_FLOOR_S = 0.25
+# The first open of a session measures how much of the library the page cache holds, not Lean: after other
+# large workspaces evict it, it is several times slower. Reported and recorded, never gated.
+UNGATED_FIGURES = frozenset({"open_cold_s"})
 BENCHMARK_ROWS = (
     "Core.InitsUpdatesComm",
     "putnam_1964_b2",
@@ -146,7 +149,7 @@ def compare(
                 raise ValueError(f"toolchain {toolchain!r} for row {row_name!r} is missing from baseline")
             base_result = baseline["rows"][row_name][toolchain]
             before, after = _figure_values(base_result), _figure_values(current_result)
-            for figure in sorted(set(before) | set(after)):
+            for figure in sorted((set(before) | set(after)) - UNGATED_FIGURES):
                 old, new = before.get(figure), after.get(figure)
                 if new is None and old is None:
                     continue
@@ -165,6 +168,20 @@ def compare(
                         Regression(row_name, toolchain, figure, old, new, new / old - 1 if old else None, tolerance)
                     )
     return regressions
+
+
+def cold_cache_warnings(result: dict, ratio: float = 2.0) -> list[str]:
+    """Name each row and toolchain whose first open was much slower than its repeat: the page cache was cold."""
+    warnings = []
+    for row, toolchains in result.get("rows", {}).items():
+        for toolchain, item in toolchains.items():
+            cold, warm = item.get("open_cold_s"), item.get("open_warm_s")
+            if cold is not None and warm and cold > warm * ratio and cold - warm > NOISE_FLOOR_S:
+                warnings.append(
+                    f"{row} | {toolchain} | first open {cold:.2f}s vs repeat {warm:.2f}s: the page cache was cold; "
+                    "if the gate fails, run it once more"
+                )
+    return warnings
 
 
 def format_report(regressions: list[Regression]) -> str:
@@ -398,7 +415,10 @@ def measure(rows: list[str], versions: str | dict[str, list[str]], repeats: int,
     t0 = time.time()
     recorder = lean_load.Recorder(out_dir / "raw.jsonl", t0)
     result = {
-        "measurement_note": "Cold is the first open of this invocation; the page cache is not dropped (that requires root).",
+        "measurement_note": (
+            "Cold is the first open of this invocation; the page cache is not dropped (that requires root), "
+            "so it is reported but not gated."
+        ),
         "settings": {"repeats": repeats, "timeout": timeout},
         "rows": {},
     }

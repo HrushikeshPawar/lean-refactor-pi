@@ -237,7 +237,7 @@ def bench(
 ) -> int:
     """Measure Lean speed and compare it with a recorded baseline.
 
-    Run once at the end of every ticket that touches Lean machinery: 08a, 08b, 08c, 08d, 10b, 12. Never in the fast suite.
+    Run once at the end of every ticket that touches Lean machinery: 08a, 08b, 08c, 08d, 10b, 12. Never in the fast suite. If it fails right after other large Lean work (another workspace, a campaign, a reboot), run it once more: the first run refills the page cache. A figure that fails both runs is a regression.
     """
     from datetime import datetime
 
@@ -284,6 +284,8 @@ def bench(
             lean_bench.print_table(measured)
         if old_record is not None:
             _print_bench_comparison(old_record, {**old_record, **measured})
+        for warning in lean_bench.cold_cache_warnings(measured):
+            print(warning)
         if baseline is not None:
             regressions = lean_bench.compare(baseline, measured, tolerance_p50, tolerance_p95)
             print(lean_bench.format_report(regressions))

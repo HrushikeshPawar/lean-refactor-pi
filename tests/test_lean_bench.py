@@ -91,6 +91,26 @@ class ComparisonTests(unittest.TestCase):
         self.assertEqual(len(lean_bench.compare(self.baseline(p95=10.0), self.current(p95=12.1))), 1)
         self.assertEqual(lean_bench.compare(baseline, self.current(p50=0.5, p95=0.5)), [])
 
+    def test_first_open_is_reported_but_not_gated(self):
+        baseline, current = self.baseline(), self.current()
+        baseline["rows"]["sample"]["v4.1.0"].update(open_cold_s=4.0, open_warm_s=4.0)
+        current["rows"]["sample"]["v4.1.0"].update(open_cold_s=19.0, open_warm_s=5.1)
+
+        self.assertEqual([item.figure for item in lean_bench.compare(baseline, current)], ["open_warm_s"])
+
+    def test_cold_page_cache_is_named_only_when_first_open_is_much_slower(self):
+        result = {
+            "rows": {
+                "putnam": {"v4.25.0": {"open_cold_s": 18.8, "open_warm_s": 5.1}},
+                "core": {"v4.29.1": {"open_cold_s": 1.8, "open_warm_s": 1.85}},
+            }
+        }
+
+        warnings = lean_bench.cold_cache_warnings(result)
+
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("putnam | v4.25.0", warnings[0])
+
     def test_missing_figures_are_named_and_missing_baseline_rows_are_rejected(self):
         current = self.current()
         current["rows"]["sample"]["v4.1.0"]["checks"].clear()
