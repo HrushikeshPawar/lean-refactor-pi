@@ -9,6 +9,7 @@ from typing import Annotated, Literal
 
 from cyclopts import App, Parameter
 
+from arena import engine
 from arena.cli.campaigns import CampaignOptions
 from arena.cli.check import CheckOptions
 from arena.cli.doctor import DoctorOptions
@@ -218,6 +219,108 @@ def load_test(
     from arena.cli.lean_load import cli_execute
 
     return cli_execute(options)
+
+
+@lean_app.command()
+def bench(
+    rows: Annotated[list[str] | None, Parameter(name="rows", consume_multiple=True)] = None,
+    versions: str = "first",
+    repeats: int = 5,
+    timeout: float = 180,
+    out: Path | None = None,
+    record: Path | None = None,
+    compare: Path | None = None,
+    tolerance_p50: float = 0.10,
+    tolerance_p95: float = 0.20,
+    force: bool = False,
+    json_output: Annotated[bool, Parameter(name="json")] = False,
+) -> int:
+    """Measure Lean speed and compare it with a recorded baseline.
+
+    Run once at the end of every ticket that touches Lean machinery: 08a, 08b, 08c, 08d, 10b, 12. Never in the fast suite.
+    """
+    from datetime import datetime
+
+    from arena.cli import lean_bench
+
+    requested_rows = rows is not None
+    selected_rows = rows or list(lean_bench.BENCHMARK_ROWS)
+    selected_out = out or ROOT / "runs/analysis/bench" / datetime.now().strftime("%Y%m%d-%H%M%S")
+    if not requested_rows:
+        available = []
+        for name in selected_rows:
+            try:
+                row = engine.problem(name)
+                toolchains = engine.versions(row)
+                selected = toolchains if versions == "all" else toolchains[:1]
+                if any(engine.workspace(row, v, c).is_dir() for v, c in selected):
+                    available.append(name)
+                else:
+                    print(f"skip {name}: no requested workspace is provisioned")
+            except (KeyError, ValueError):
+                print(f"skip {name}: benchmark row is unavailable")
+        selected_rows = available
+    if not selected_rows:
+        print("No benchmark rows have provisioned workspaces; skipped.")
+        return 0
+    try:
+        if record is not None and record.exists() and not force:
+            raise FileExistsError(f"refusing to overwrite {record}; pass --force")
+        baseline = lean_bench.load_baseline(compare) if compare is not None else None
+        if baseline is not None and baseline["settings"]["repeats"] != repeats:
+            raise ValueError(
+                f"baseline repeats ({baseline['settings']['repeats']}) differ from requested repeats ({repeats})"
+            )
+        measured = lean_bench.measure(selected_rows, versions, repeats, timeout, selected_out)
+        old_record = None
+        if record is not None:
+            old_record = lean_bench.write_baseline(record, measured, force)
+        if json_output:
+            import json
+
+            print(json.dumps(measured, indent=2))
+        else:
+            print(measured["measurement_note"])
+            lean_bench.print_table(measured)
+        if old_record is not None:
+            _print_bench_comparison(old_record, {**old_record, **measured})
+        if baseline is not None:
+            regressions = lean_bench.compare(baseline, measured, tolerance_p50, tolerance_p95)
+            print(lean_bench.format_report(regressions))
+            return 1 if regressions else 0
+    except FileNotFoundError as error:
+        print(error)
+        return 2
+    except (OSError, ValueError, RuntimeError) as error:
+        print(error)
+        return 2
+    return 0
+
+
+def _print_bench_comparison(old: dict, new: dict) -> None:
+    from rich.console import Console
+    from rich.table import Table
+
+    from arena.cli.lean_bench import _figure_values
+
+    table = Table(title="Recorded baseline compared with new figures")
+    for heading in ("Row", "Toolchain", "Figure", "Old", "New"):
+        table.add_column(heading)
+    for row, toolchains in new.get("rows", {}).items():
+        for toolchain, result in toolchains.items():
+            prior = old.get("rows", {}).get(row, {}).get(toolchain)
+            old_values = {} if prior is None else _figure_values(prior)
+            new_values = _figure_values(result)
+            for figure in sorted(set(old_values) | set(new_values)):
+                before, after = old_values.get(figure), new_values.get(figure)
+                table.add_row(
+                    row,
+                    toolchain,
+                    figure,
+                    str(before) if before is not None else "-",
+                    str(after) if after is not None else "-",
+                )
+    Console().print(table)
 
 
 def main() -> None:
