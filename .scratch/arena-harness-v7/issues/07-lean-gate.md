@@ -10,7 +10,7 @@ end, by every ticket that touches Lean machinery: 08a, 08b, 08c, 08d, 10b and 12
 
 **Blocked by:** 04: Move the remaining tools into the CLI (the load test and the `arena lean` sub-app live in `arena/cli/` after it); 06: Run-control fixes (the measure version it changes is why the bench names its toolchain explicitly).
 
-**Status:** ready-for-agent
+**Status:** done
 
 **Branch:** `v7/07-lean-gate` (stacked on `v7/06-run-fixes`)
 

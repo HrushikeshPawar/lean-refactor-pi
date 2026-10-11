@@ -1138,6 +1138,20 @@ in `research/v7-probes/lean-bench/`. The Putnam edit time reflects the row's hea
 120K heartbeats), not the machinery. Before v7 relies on this baseline it is extended with ArkLib (v4.28–v4.31,
 the largest headers) and with PSS per worker.
 
+**v7 bench baseline (ticket 07, 2026-10-11)** supersedes the table above as the gate's yardstick:
+`benchmark/derived/lean-baseline.json` (label `v6`, recorded with `arena lean bench`, 5 repeats, first toolchain
+for the three rows above plus ArkLib on v4.28–v4.31). Its figures are **not comparable** to the table above: the
+bench runs a fixed check order, and a check's cost depends on the line where it differs from the previous
+document. In the v6 run, Putnam's reference after a sorry probe took 12.7 s and after a trailing edit 2.3 s (the
+table's p50 is the latter); the bench always times reference after sorry (12.3 s). Like for like, all three rows
+are within noise of v6. The first open of a session (`open_cold_s`) is recorded but **not gated**: it measures the
+page cache (Putnam 4.1 s warm, 18.8 s after ArkLib evicted it); owner decision 2026-10-11. The repeat open
+(`open_warm_s`) does the same work with a hot cache and stays gated. The bench warns when a first open is over
+twice the repeat (cold cache); a gate that fails right after other large Lean work gets one rerun, and a figure
+that fails both runs is a regression. ArkLib v4.28.0 is the slowest setup measured
+(open 46 s, edit p50 10.3 s, sorry 4.1 s, worker 6.0 GB; v4.29–v4.31 open about 30 s, sorry about 1.6 s, worker
+3.6 GB).
+
 **Benchmark first** (Lean only, phase 0/3), extending `tools/lean_load_test.py`, which already drives the real
 client path and samples memory:
 1. Header open cold and warm per toolchain, with PSS per worker.
