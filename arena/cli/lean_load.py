@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Lean session load simulator: more load than Pi produces, no model calls.
 
-Starts K simulated runs (one session daemon each, like -m arena.cli run), warms them
+Starts K simulated runs against one shared service, warms them
 all at once, then drives M model-lane and B background-lane checks per run for --minutes:
 sorry probes, the reference proof, tiny edits, proofs with errors, deliberately too-slow proofs
 (each followed by a quick probe on the same run to see whether the worker stayed warm), plus
 route-extraction-like and other-version compatibility checks on the background lane.
 
-It goes through the real client path (lean_session.start_daemon / request / stop_daemon and
+It goes through the real client path (lean_session.ensure_service / request / release and
 engine.candidate_file), sampling memory, Lean process counts and mount.ntfs CPU every 5 s.
 It exits 0 on PASS and 1 on FAIL; see the criteria in `evaluate`.
 
@@ -37,6 +37,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 from arena.engine import ROOT
 
@@ -232,12 +233,13 @@ def render_report(
         "",
         "## Warm-up per run",
         "",
-        "| run | warm op | warm-up s | ok | note |",
-        "|---|---|---|---|---|",
+        "| run | warm op | warm-up s | header opens | ok | note |",
+        "|---|---|---|---:|---|---|",
     ]
     for run in runs:
         lines.append(
             f"| {run['run']} | {run.get('warm_mode', '-')} | {_fmt(run.get('warm_seconds'))} "
+            f"| {run.get('header_opens', 0)} "
             f"| {run.get('warm_ok')} | {run.get('warm_note', '')} |"
         )
     lines += [
@@ -395,7 +397,7 @@ class Recorder:
 
 
 class SimRun:
-    """One simulated run: its own daemon and run directory, like a real campaign run."""
+    """One simulated run: a lease on the shared service and its own run directory."""
 
     def __init__(self, index: int, directory: Path, row: dict, config: dict, recorder: Recorder, t0: float) -> None:
         from arena import engine
@@ -404,6 +406,8 @@ class SimRun:
         self.config, self.recorder, self.t0 = config, recorder, t0
         self.process = None
         self.socket = ""
+        self.run_id = f"lean-load-{os.getpid()}-{index}-{int(t0)}"
+        self.owns_service = False
         self.warm_done_at: float | None = None
         self.info: dict = {"run": index}
         self.budget = config["max_checks"]
@@ -416,10 +420,33 @@ class SimRun:
         self.deadline = 0.0
 
     def start(self) -> None:
-        from arena import lean_session
+        from arena import engine, lean_session
 
-        self.process = lean_session.start_daemon(self.directory, os.getpid())
-        self.socket = str(lean_session.socket_path(self.directory))
+        path = lean_session.socket_path()
+        existing = lean_session.request({"op": "status", "protocol": lean_session.PROTOCOL}, 0.5, str(path))
+        self.owns_service = not bool(existing and existing.get("ok"))
+        self.socket = lean_session.ensure_service()
+        reply = lean_session.request(
+            {
+                "op": "lease",
+                "protocol": lean_session.PROTOCOL,
+                "run_id": self.run_id,
+                "pid": os.getpid(),
+                "primary": str(engine.workspace(self.row, *self.primary)),
+                "others": [
+                    str(engine.workspace(self.row, v, c))
+                    for v, c in engine.versions(self.row)
+                    if (v, c) != self.primary
+                ],
+            },
+            5,
+            self.socket,
+        )
+        if not reply or not reply.get("ok"):
+            raise RuntimeError(f"Lean service refused load-test lease: {(reply or {}).get('reason')}")
+        self.process = SimpleNamespace(
+            pid=int(json.loads((lean_session.service_dir() / lean_session.INFO_NAME).read_text())["pid"])
+        )
 
     def next_serial(self) -> int:
         with self.lock:
@@ -444,6 +471,7 @@ class SimRun:
         message = {
             "op": op,
             "protocol": lean_session.PROTOCOL,
+            "run_id": self.run_id,
             "project": str(built["path"]),
             "fingerprint": engine._fingerprint(str(built["path"])),
             "text": built["text"],
@@ -600,6 +628,9 @@ def simulate(config: dict) -> int:
     sessions: dict[int, str] = {}
     recorded_pids: set[int] = set()
     recorded_pgids: set[int] = set()
+    service_path = lean_session.socket_path()
+    initial_service = lean_session.request({"op": "status", "protocol": lean_session.PROTOCOL}, 0.5, str(service_path))
+    started_service = not bool(initial_service and initial_service.get("ok"))
     try:
         for index in range(config["runs"]):
             run = SimRun(index, out / f"run-{index}", row, config, recorder, t0)
@@ -608,7 +639,8 @@ def simulate(config: dict) -> int:
                 raise RuntimeError("load simulator failed to start its Lean session daemon")
             runs.append(run)
             sessions[index] = run.socket
-            log(f"run {index}: daemon pid {run.process.pid}")
+            run.owns_service = False
+            log(f"run {index}: service pid {run.process.pid}; socket={run.socket}")
         sampler = Sampler(sessions, t0, recorder.write)
         sampler.start()
         log(f"warming {len(runs)} runs at once ({row_name} on {runs[0].primary[0]})")
@@ -653,19 +685,23 @@ def simulate(config: dict) -> int:
             sampler.join(timeout=15)
             recorded_pids |= sampler.seen_pids
             recorded_pgids |= sampler.seen_pgids
+        try:
+            info = json.loads((lean_session.service_dir() / lean_session.INFO_NAME).read_text())
+            recorded_pids.update(int(p) for p in info.get("pids", []))
+            recorded_pgids.update(int(g) for g in info.get("pgids", []))
+        except (OSError, ValueError):
+            pass
         for run in runs:
-            try:
-                info = json.loads((run.directory / lean_session.INFO_NAME).read_text())
-                recorded_pids.update(int(p) for p in info.get("pids", []))
-                recorded_pgids.update(int(g) for g in info.get("pgids", []))
-            except (OSError, ValueError):
-                pass
             run.info["crashes"] = crash_count(run.directory)
         for run in runs:
             try:
-                lean_session.stop_daemon(run.directory, run.process)
+                lean_session.request(
+                    {"op": "release", "protocol": lean_session.PROTOCOL, "run_id": run.run_id}, 10, run.socket
+                )
             except Exception as error:
-                log(f"stop_daemon run {run.index}: {error}")
+                log(f"release run {run.index}: {error}")
+        if started_service:
+            lean_session.stop_service()
         time.sleep(2)
         orphans = find_orphans(recorded_pids, recorded_pgids, baseline)
         for pid in orphans:  # only processes recorded as ours; kill by PID
@@ -673,6 +709,11 @@ def simulate(config: dict) -> int:
                 os.kill(pid, signal.SIGKILL)
         for run in runs:
             run.info["crashes"] = crash_count(run.directory)
+            with contextlib.suppress(OSError):
+                log_text = (lean_session.service_dir() / lean_session.LOG_NAME).read_text(errors="replace")
+                run.info["header_opens"] = sum(
+                    f"header open run={run.run_id} " in line for line in log_text.splitlines()
+                )
     samples = sampler.samples if sampler else []
     results = evaluate(recorder.records, [run.info for run in runs], samples, orphans)
     report = render_report(

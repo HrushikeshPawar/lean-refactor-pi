@@ -12,9 +12,36 @@ from arena import lean_health, lean_session
 from arena.engine import ROOT
 
 
-def serve(run_dir: Path, parent_pid: int | None = None, max_slots: int = lean_session.MAX_SLOTS) -> int:
-    """Start the Lean session daemon for a run directory."""
-    return lean_session.serve(run_dir, parent_pid, max_slots)
+def serve(service_dir: Path | None = None) -> int:
+    """Run the shared Lean service in the foreground."""
+    return lean_session.serve(service_dir or lean_session.service_dir())
+
+
+def status(json_output: bool = False) -> int:
+    path = lean_session.socket_path()
+    reply = lean_session.request({"op": "status", "protocol": lean_session.PROTOCOL}, 2, str(path))
+    if not reply or not reply.get("ok"):
+        print("no service")
+        return 0
+    if json_output:
+        print(json.dumps(reply, sort_keys=True))
+        return 0
+    table = Table(title="Lean service")
+    table.add_column("Project")
+    table.add_column("Workers", justify="right")
+    table.add_column("Busy", justify="right")
+    table.add_column("GB", justify="right")
+    for server in reply.get("servers", []):
+        table.add_row(server["project"], str(server["workers"]), str(server["busy"]), str(server["gb"]))
+    Console().print(table)
+    Console().print(f"Leases: {json.dumps(reply.get('leases', {}), sort_keys=True)}")
+    Console().print(f"Holds: {json.dumps(reply.get('holds', {}), sort_keys=True)}")
+    return 0
+
+
+def stop() -> int:
+    lean_session.stop_service()
+    return 0
 
 
 def health(run: str, json_output: bool = False) -> int:

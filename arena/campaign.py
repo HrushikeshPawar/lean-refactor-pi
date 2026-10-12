@@ -1179,7 +1179,7 @@ def _yield_to_lean_session(directory: Path) -> None:
     ages out 2 minutes after the last refusal, so this ends by itself."""
     from arena.lean_session import memory_pressure
 
-    while memory_pressure(directory):
+    while memory_pressure():
         time.sleep(5)
 
 

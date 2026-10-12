@@ -151,68 +151,75 @@ class FallbackTests(unittest.TestCase):
 
 @slow
 class DaemonTests(unittest.TestCase):
-    """The per-run daemon, without any Lean."""
+    """The shared service control path, without starting Lean."""
 
     def setUp(self):
         self.directory = Path(tempfile.mkdtemp(prefix="arena-session-"))
         self.addCleanup(shutil.rmtree, self.directory, ignore_errors=True)
 
     def test_start_serve_and_stop_removes_every_trace(self):
-        process = lean_session.start_daemon(self.directory)
-        path = str(lean_session.socket_path(self.directory))
+        path = lean_session.ensure_service(self.directory)
+        self.addCleanup(lean_session.stop_service, self.directory)
         status = lean_session.request({"op": "status"}, 5, path)
         self.assertTrue(status["ok"])
         self.assertEqual(status["servers"], [])
         self.assertEqual(status["code"], lean_session.code_sha())
-        lean_session.stop_daemon(self.directory, process)
-        self.assertIsNotNone(process.poll())
+        lean_session.stop_service(self.directory)
         self.assertFalse(Path(path).exists())
         self.assertFalse((self.directory / lean_session.INFO_NAME).exists())
         self.assertEqual(lean_session.request({"op": "status"}, 2, path)["ok"], False)
 
-    def test_a_long_run_directory_gets_a_short_socket_and_the_pointer_says_where(self):
+    def test_an_overlong_service_socket_path_is_rejected(self):
         deep = self.directory / ("x" * 90)
-        process = lean_session.start_daemon(deep)
-        try:
-            path = lean_session.socket_path(deep)
-            self.assertLessEqual(len(str(path)), lean_session.SOCKET_LIMIT)
-            self.assertEqual(json.loads((deep / lean_session.INFO_NAME).read_text())["socket"], str(path))
-            self.assertTrue(lean_session.request({"op": "status"}, 5, str(path))["ok"])
-        finally:
-            lean_session.stop_daemon(deep, process)
+        with self.assertRaises(lean_session.SessionError):
+            lean_session.socket_path(deep)
 
     def test_a_stale_evaluator_gets_a_stale_answer_not_a_compile(self):
-        process = lean_session.start_daemon(self.directory)
+        path = lean_session.ensure_service(self.directory)
+        self.addCleanup(lean_session.stop_service, self.directory)
+        reply = lean_session.request(
+            {
+                "op": "check",
+                "protocol": lean_session.PROTOCOL,
+                "project": str(self.directory),
+                "fingerprint": {"code": "not-the-running-evaluator"},
+                "text": "x",
+                "display": "f.lean",
+                "timeout": 5,
+            },
+            10,
+            path,
+        )
+        self.assertEqual((reply["ok"], reply["stale"]), (False, True))
+        self.assertIn("evaluator changed", reply["reason"])
+
+    def test_a_dead_lease_is_dropped_by_the_watch_loop(self):
+        parent = subprocess.Popen(["sleep", "300"])
+        path = lean_session.ensure_service(self.directory)
+        self.addCleanup(lean_session.stop_service, self.directory)
         try:
             reply = lean_session.request(
                 {
-                    "op": "check",
+                    "op": "lease",
                     "protocol": lean_session.PROTOCOL,
-                    "project": str(self.directory),
-                    "fingerprint": {"code": "not-the-running-evaluator"},
-                    "text": "x",
-                    "display": "f.lean",
-                    "timeout": 5,
+                    "run_id": "gone",
+                    "pid": parent.pid,
+                    "primary": "/not-opened",
+                    "others": [],
                 },
-                10,
-                str(lean_session.socket_path(self.directory)),
+                5,
+                path,
             )
-            self.assertEqual((reply["ok"], reply["stale"]), (False, True))
-            self.assertIn("evaluator changed", reply["reason"])
-        finally:
-            lean_session.stop_daemon(self.directory, process)
-
-    def test_the_daemon_exits_when_its_runner_is_gone(self):
-        parent = subprocess.Popen(["sleep", "300"])
-        try:
-            process = lean_session.start_daemon(self.directory, parent=parent.pid)
+            self.assertTrue(reply["ok"], reply)
             parent.kill()
             parent.wait()
-            self.assertTrue(wait_until(lambda: process.poll() is not None, 15), "daemon outlived its runner")
-            self.assertFalse(lean_session.socket_path(self.directory).exists())
+            self.assertTrue(
+                wait_until(lambda: "gone" not in lean_session.request({"op": "status"}, 2, path)["leases"], 5)
+            )
         finally:
-            parent.kill()
-            lean_session.stop_daemon(self.directory, None)
+            if parent.poll() is None:
+                parent.kill()
+            parent.wait()
 
     def test_process_tree_and_memory_probes_see_children_in_other_groups(self):
         parent = subprocess.Popen(["sh", "-c", "setsid sleep 30 & wait"], start_new_session=True)
@@ -330,17 +337,37 @@ class SubmissionColdVerificationTests(unittest.TestCase):
 
 
 class SessionHarness:
-    """Shared by the Lean-backed tests: one daemon per class, cold vs session compiles of one row."""
+    """Shared Lean-backed tests: one leased service per class, cold vs session compiles of one row."""
 
     name = CORE
 
     @classmethod
     def setUpClass(cls):
         cls.directory = Path(tempfile.mkdtemp(prefix="arena-session-"))
-        cls.process = lean_session.start_daemon(cls.directory)
-        cls.socket = str(lean_session.socket_path(cls.directory))
+        cls.previous_service_dir = os.environ.get(lean_session.SERVICE_DIR_ENV)
+        os.environ[lean_session.SERVICE_DIR_ENV] = str(cls.directory)
+        cls.socket = lean_session.ensure_service(cls.directory)
         cls.row = problem(cls.name)
         cls.version, cls.commit = versions(cls.row)[0]
+        cls.run_id = f"test-{os.getpid()}-{cls.name}"
+        primary = str(engine.workspace(cls.row, cls.version, cls.commit))
+        others = [
+            str(engine.workspace(cls.row, v, c)) for v, c in versions(cls.row) if (v, c) != (cls.version, cls.commit)
+        ]
+        reply = lean_session.request(
+            {
+                "op": "lease",
+                "protocol": lean_session.PROTOCOL,
+                "run_id": cls.run_id,
+                "pid": os.getpid(),
+                "primary": primary,
+                "others": others,
+            },
+            5,
+            cls.socket,
+        )
+        if not reply or not reply.get("ok"):
+            raise RuntimeError(f"could not lease Lean service: {reply}")
         cls.previous = os.environ.get(lean_session.ENV)
         os.environ[lean_session.ENV] = cls.socket
 
@@ -350,7 +377,12 @@ class SessionHarness:
             os.environ.pop(lean_session.ENV, None)
         else:
             os.environ[lean_session.ENV] = cls.previous
-        lean_session.stop_daemon(cls.directory, cls.process)
+        lean_session.request({"op": "release", "protocol": lean_session.PROTOCOL, "run_id": cls.run_id}, 5, cls.socket)
+        lean_session.stop_service(cls.directory)
+        if cls.previous_service_dir is None:
+            os.environ.pop(lean_session.SERVICE_DIR_ENV, None)
+        else:
+            os.environ[lean_session.SERVICE_DIR_ENV] = cls.previous_service_dir
         shutil.rmtree(cls.directory, ignore_errors=True)
 
     def both(self, proof: str, **options):
@@ -414,6 +446,64 @@ class SessionHarness:
 @slow
 @unittest.skipUnless(CORE_READY, "Strata fixture environment is not provisioned")
 class CoreSessionTests(SessionHarness, unittest.TestCase):
+    def test_sequential_leases_reuse_the_core_header(self):
+        project = str(engine.workspace(self.row, self.version, self.commit))
+        proof = self.row["statement"] + " := by\n  intros\n  sorry"
+        first = compile_version(self.row, proof, self.version, self.commit, probe=True)
+        self.assertEqual(first["lean"]["path"], "session")
+        owner = f"queued-{self.run_id}"
+        next_run = f"next-{self.run_id}"
+        held = lean_session.request(
+            {
+                "op": "hold",
+                "protocol": lean_session.PROTOCOL,
+                "owner": owner,
+                "pid": os.getpid(),
+                "projects": [project],
+            },
+            5,
+            self.socket,
+        )
+        self.assertTrue(held and held.get("ok"), held)
+        lean_session.request(
+            {"op": "release", "protocol": lean_session.PROTOCOL, "run_id": self.run_id}, 5, self.socket
+        )
+        leased = lean_session.request(
+            {
+                "op": "lease",
+                "protocol": lean_session.PROTOCOL,
+                "run_id": next_run,
+                "pid": os.getpid(),
+                "primary": project,
+                "others": [],
+            },
+            5,
+            self.socket,
+        )
+        self.assertTrue(leased and leased.get("ok"), leased)
+        unheld = lean_session.request(
+            {"op": "unhold", "protocol": lean_session.PROTOCOL, "owner": owner}, 5, self.socket
+        )
+        self.assertTrue(unheld and unheld.get("ok"), unheld)
+        with patch.dict(os.environ, {"ARENA_RUN_ID": next_run}):
+            second = compile_version(self.row, proof + "\n-- second run", self.version, self.commit, probe=True)
+        self.assertFalse(second["lean"]["new_worker"])
+        self.assertIsNone(second["lean"].get("header_seconds"))
+        lean_session.request({"op": "release", "protocol": lean_session.PROTOCOL, "run_id": next_run}, 5, self.socket)
+        restored = lean_session.request(
+            {
+                "op": "lease",
+                "protocol": lean_session.PROTOCOL,
+                "run_id": self.run_id,
+                "pid": os.getpid(),
+                "primary": project,
+                "others": [],
+            },
+            5,
+            self.socket,
+        )
+        self.assertTrue(restored and restored.get("ok"), restored)
+
     def test_only_the_changed_theorem_is_reelaborated(self):
         statement = self.row["statement"]
         compile_version(self.row, statement + " := by\n  intros\n  sorry", self.version, self.commit, probe=True)
@@ -557,13 +647,37 @@ class LifecycleTests(unittest.TestCase):
     def setUp(self):
         self.directory = Path(tempfile.mkdtemp(prefix="arena-session-"))
         self.addCleanup(shutil.rmtree, self.directory, ignore_errors=True)
+        self.previous_service_dir = os.environ.get(lean_session.SERVICE_DIR_ENV)
+        os.environ[lean_session.SERVICE_DIR_ENV] = str(self.directory)
+        self.addCleanup(self.restore_service_dir)
+
+    def restore_service_dir(self):
+        lean_session.stop_service(self.directory)
+        if self.previous_service_dir is None:
+            os.environ.pop(lean_session.SERVICE_DIR_ENV, None)
+        else:
+            os.environ[lean_session.SERVICE_DIR_ENV] = self.previous_service_dir
 
     def start_with_server(self, **options):
-        process = lean_session.start_daemon(self.directory, **options)
-        socket_ = str(lean_session.socket_path(self.directory))
+        socket_ = lean_session.ensure_service(self.directory)
         row = problem(CORE)
         version, commit = versions(row)[0]
         project = engine.workspace(row, version, commit)
+        run_id = f"lifecycle-{os.getpid()}-{time.monotonic_ns()}"
+        pid = options.get("parent_pid", os.getpid())
+        lease = lean_session.request(
+            {
+                "op": "lease",
+                "protocol": lean_session.PROTOCOL,
+                "run_id": run_id,
+                "pid": pid,
+                "primary": str(project),
+                "others": [],
+            },
+            5,
+            socket_,
+        )
+        self.assertTrue(lease and lease.get("ok"), lease)
         reply = lean_session.request(
             {
                 "op": "check",
@@ -587,41 +701,39 @@ class LifecycleTests(unittest.TestCase):
             wait_until(lambda: set(pids) <= set(json.loads(info.read_text())["pids"]), 10),
             "the daemon did not record its Lean processes",
         )
-        return process, pids
+        return socket_, run_id, pid, pids
 
     @unittest.skipUnless(CORE_READY, "Strata fixture environment is not provisioned")
-    def test_stopping_the_daemon_stops_the_server_and_its_workers(self):
-        process, pids = self.start_with_server()
+    def test_stopping_the_service_stops_its_lean_processes(self):
+        _socket, _run_id, _pid, pids = self.start_with_server()
         self.assertTrue(all(alive(pid) for pid in pids))
-        lean_session.stop_daemon(self.directory, process)
+        lean_session.stop_service(self.directory)
         self.assertTrue(
             wait_until(lambda: not any(alive(pid) for pid in pids), 10), "Lean processes survived the daemon"
         )
+        self.assertFalse(lean_session.socket_path(self.directory).exists())
 
     @unittest.skipUnless(CORE_READY, "Strata fixture environment is not provisioned")
-    def test_a_killed_runner_takes_the_session_with_it(self):
+    def test_a_killed_runner_lease_is_dropped_and_its_project_is_closed(self):
         parent = subprocess.Popen(["sleep", "300"])
         try:
-            process, pids = self.start_with_server(parent=parent.pid)
+            socket_, run_id, _pid, pids = self.start_with_server(parent_pid=parent.pid)
             parent.kill()
             parent.wait()
             self.assertTrue(
-                wait_until(lambda: process.poll() is not None and not any(alive(pid) for pid in pids), 20),
-                "daemon or Lean outlived the killed runner",
+                wait_until(
+                    lambda: (
+                        run_id not in lean_session.request({"op": "status"}, 5, socket_)["leases"]
+                        and not any(alive(pid) for pid in pids)
+                    ),
+                    20,
+                ),
+                "lease or project Lean processes survived the killed runner",
             )
         finally:
-            parent.kill()
-            lean_session.stop_daemon(self.directory, None)
-
-    @unittest.skipUnless(CORE_READY, "Strata fixture environment is not provisioned")
-    def test_a_killed_daemon_leaves_no_lean_behind_even_without_the_sweep(self):
-        process, pids = self.start_with_server()
-        process.kill()
-        process.wait()
-        self.assertTrue(
-            wait_until(lambda: not any(alive(pid) for pid in pids), 30),
-            "Lean kept running after its owner died and nothing swept it",
-        )
+            if parent.poll() is None:
+                parent.kill()
+            parent.wait()
 
 
 @slow
@@ -631,10 +743,19 @@ class RunnerSessionTests(unittest.TestCase):
 
     def setUp(self):
         self.runs = []
+        self.service_directory = Path(tempfile.mkdtemp(prefix="arena-runner-service-"))
+        self.previous_service_dir = os.environ.get(lean_session.SERVICE_DIR_ENV)
+        os.environ[lean_session.SERVICE_DIR_ENV] = str(self.service_directory)
 
     def tearDown(self):
         for run in self.runs:
             run.cleanup()
+        lean_session.stop_service(self.service_directory)
+        if self.previous_service_dir is None:
+            os.environ.pop(lean_session.SERVICE_DIR_ENV, None)
+        else:
+            os.environ[lean_session.SERVICE_DIR_ENV] = self.previous_service_dir
+        shutil.rmtree(self.service_directory, ignore_errors=True)
 
     def probe(self):
         from tests.pi_support import FakeRun
@@ -658,7 +779,7 @@ class RunnerSessionTests(unittest.TestCase):
         self.assertEqual(len(probes), 1, run.stdout[-1000:])
         self.assertEqual(probes[0]["result"]["compat"]["v4.29.1"]["lean"]["path"], "session")
         self.assertIn("Lean session pid=", run.stdout)
-        for leftover in ("lean-session.sock", "lean-session.json"):
+        for leftover in ("service.sock", "service.json"):
             self.assertFalse((run.directory / leftover).exists(), leftover)
 
     def test_ctrl_c_shuts_pi_down_cleanly_and_leaves_no_lean_processes(self):
@@ -667,20 +788,19 @@ class RunnerSessionTests(unittest.TestCase):
         self.runs.append(run)
         process = run.start(own_group=True)
         self.assertTrue(run.wait_for_requests(2, 180), "the probe never finished")
-        info = json.loads((run.directory / lean_session.INFO_NAME).read_text())
-        self.assertTrue(
-            wait_until(lambda: len(json.loads((run.directory / lean_session.INFO_NAME).read_text())["pids"]) >= 2, 20)
-        )
-        info = json.loads((run.directory / lean_session.INFO_NAME).read_text())
-        os.killpg(process.pid, signal.SIGINT)
+        info = json.loads((self.service_directory / lean_session.INFO_NAME).read_text())
+        status = lean_session.request({"op": "status"}, 5, info["socket"])
+        run_id = run.run_id
+        self.assertIn(run_id, status["leases"])
+        process.send_signal(signal.SIGINT)
         _, stderr = process.communicate(timeout=120)
         self.assertEqual(process.returncode, 128 + signal.SIGINT, stderr)
         self.assertNotEqual(run.json("cost.json").get("written_by"), "runner_ledger_reconstruction", stderr)
         self.assertEqual(run.json("summary.json")["stop_reason"], "interrupted")
         self.assertTrue(
-            wait_until(lambda: not any(alive(p) for p in info["pids"] + [info["pid"]]), 15),
-            "Lean or the session daemon survived Ctrl+C",
+            wait_until(lambda: run_id not in lean_session.request({"op": "status"}, 5, info["socket"])["leases"], 15)
         )
+        self.assertEqual(lean_session.request({"op": "status"}, 5, info["socket"])["servers"], [])
 
     def test_a_killed_runner_leaves_no_lean_processes(self):
         call, FakeRun = self.probe()
@@ -688,16 +808,28 @@ class RunnerSessionTests(unittest.TestCase):
         self.runs.append(run)
         process = run.start(own_group=True)
         self.assertTrue(run.wait_for_requests(2, 180), "the probe never finished")
-        self.assertTrue(
-            wait_until(lambda: len(json.loads((run.directory / lean_session.INFO_NAME).read_text())["pids"]) >= 2, 20)
-        )
-        info = json.loads((run.directory / lean_session.INFO_NAME).read_text())
+        info = json.loads((self.service_directory / lean_session.INFO_NAME).read_text())
+        self.assertIn(run.run_id, lean_session.request({"op": "status"}, 5, info["socket"])["leases"])
+        children = subprocess.run(
+            ["ps", "--no-headers", "--ppid", str(process.pid), "-o", "pid="],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout.split()
+        for child in children:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(int(child), signal.SIGKILL)
         process.kill()  # a crash: no handler runs
         process.wait()
-        subprocess.run(["pkill", "-9", "-f", run.run_id])  # Pi and its tools; the daemon has its own session
         self.assertTrue(
-            wait_until(lambda: not any(alive(p) for p in info["pids"] + [info["pid"]]), 30),
-            "Lean or the session daemon survived a crashed runner",
+            wait_until(
+                lambda: (
+                    run.run_id not in lean_session.request({"op": "status"}, 5, info["socket"])["leases"]
+                    and not lean_session.request({"op": "status"}, 5, info["socket"])["servers"]
+                ),
+                5,
+            ),
+            "lease or project Lean processes survived a crashed runner",
         )
 
 
@@ -723,6 +855,9 @@ class SessionLogTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.directory = Path(self.temp.name)
+        self.environment = patch.dict(os.environ, {lean_session.SERVICE_DIR_ENV: str(self.directory)})
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
         self.session = lean_session.Session(
             self.directory,
             budget=lean_session.WorkerBudget(self.directory / "tokens", 4),
@@ -735,7 +870,7 @@ class SessionLogTests(unittest.TestCase):
         with patch.object(lean_session, "_log", lines.append):
             with patch.object(lean_session, "_available_gb", return_value=100.0):
                 self.session._acquire(self.entry, 1)
-            self.assertFalse(lean_session.memory_pressure(self.directory))
+            self.assertFalse(lean_session.memory_pressure())
             other = lean_session._Entry(self.directory / "other", {}, self.FakeServer())
             self.session.entries[str(other.project)] = other
             with (
@@ -745,6 +880,6 @@ class SessionLogTests(unittest.TestCase):
                 self.session._acquire(other, 1)
         self.assertTrue(any(line.startswith("worker open proj") for line in lines), lines)
         self.assertTrue(any("no room for a Lean worker: memory (4.0 GB available)" in line for line in lines), lines)
-        self.assertTrue(lean_session.memory_pressure(self.directory))
-        self.assertFalse(lean_session.memory_pressure(self.directory, within=0))
+        self.assertTrue(lean_session.memory_pressure())
+        self.assertFalse(lean_session.memory_pressure(within=0))
         self.assertIn(lean_session.WAITING_NAME, lean_session.SESSION_FILES)

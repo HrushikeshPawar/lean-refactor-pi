@@ -34,20 +34,24 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager, nullcontext, suppress
 from functools import lru_cache
 from pathlib import Path
+from typing import cast
 
 ROOT = Path(__file__).resolve().parents[1]
 ENV = "ARENA_LEAN_SESSION"
-PROTOCOL = 1
-SOCKET_NAME = "lean-session.sock"
-INFO_NAME = "lean-session.json"
-SESSION_FILES = (SOCKET_NAME, INFO_NAME, "lean-session", "lean-session.waiting")
+PROTOCOL = 2
+SOCKET_NAME = "service.sock"
+INFO_NAME = "service.json"
+LOG_NAME = "service.log"
+LOCK_NAME = "start.lock"
+SERVICE_DIR_ENV = "ARENA_LEAN_SERVICE_DIR"
+RUN_ID_ENV = "ARENA_LEAN_RUN_ID"
+SESSION_FILES = ("lean-session.sock", "lean-session.json", "lean-session", "lean-session.waiting")
 MAX_SLOTS = 4  # concurrent documents (workers) per toolchain
 MAX_WORKERS = 6  # across toolchains, one daemon
 BACKGROUND_SLOTS = 1  # per toolchain entry: its own warm background worker, which model requests never take (and that never takes theirs)
 BACKGROUND_TOKENS = (
     64  # token files kept past the machine limit for the background workers (one per toolchain a live session checks)
 )
-BACKGROUND_IDLE_S = 900  # a background worker nobody asked for in this long is closed
 MODEL_QUEUE_TIMEOUT = float(
     os.environ.get("ARENA_LEAN_QUEUE_TIMEOUT", "900")
 )  # a model request may wait this long for a free worker; not charged to its check timeout
@@ -62,7 +66,8 @@ OPENING_NAME = (
 )
 WORKER_GB = 3.0  # planning figure until a real worker has been measured
 RESERVE_GB = 5.0  # memory that must stay available after opening another worker
-IDLE_SECONDS = 600  # a toolchain nobody asked for in this long is closed
+ADHOC_IDLE_S = 600
+SERVICE_LINGER_S = 600
 SOCKET_LIMIT = 100  # sun_path is 108 bytes
 # The server asks `lake setup-file` for the file's options and imports. Those options (a lakefile's
 # `leanOptions`, such as warnings as errors) are not what `lake env lean <file>` compiles with, so
@@ -71,6 +76,15 @@ SOCKET_LIMIT = 100  # sun_path is 108 bytes
 NO_LAKE = "/nonexistent/arena-no-lake"
 WAITING_NAME = "lean-session.waiting"  # touched when a request was refused a worker for memory; see memory_pressure()
 WAITING_SECONDS = 120.0
+
+
+def service_dir() -> Path:
+    """Return the machine-wide service directory."""
+    if value := os.environ.get(SERVICE_DIR_ENV):
+        return Path(value)
+    if value := os.environ.get("XDG_RUNTIME_DIR"):
+        return Path(value) / "arena-lean-service"
+    return Path("/tmp") / f"arena-lean-service-{os.getuid()}"
 
 
 def reorder_lean_path(lean_path: str, project: Path) -> str:
@@ -106,17 +120,17 @@ def server_lean_path(project: str) -> str | None:
 
 
 def _log(message: str) -> None:
-    """One timestamped line on stderr, which `start_daemon` points at lean-session.log: the only record of why
+    """One timestamped line on stderr, captured in service.log as the record of why
     a probe went cold (worker refused, evicted, timed out) once the run is over."""
     with suppress(OSError, ValueError):
         print(f"{time.strftime('%H:%M:%S')} {message}", file=sys.stderr, flush=True)
 
 
-def memory_pressure(directory: Path, within: float = WAITING_SECONDS) -> bool:
+def memory_pressure(within: float = WAITING_SECONDS) -> bool:
     """True when this run's session refused a worker for memory in the last `within` seconds. Background work of the
     same run (route extraction) yields to it: its cold Lean process is what the session was short of."""
     try:
-        return time.time() - (directory / WAITING_NAME).stat().st_mtime < within
+        return time.time() - (service_dir() / WAITING_NAME).stat().st_mtime < within
     except OSError:
         return False
 
@@ -182,54 +196,6 @@ class WorkerBudget:
             return False
         token.release()
         return True
-
-    def register(self) -> _Token | None:
-        """Mark one session daemon as live: a flock on `session-<pid>.lock` (a `-k` suffix when this process already
-        registered another session), dropped by the kernel when the daemon dies."""
-        try:
-            self.directory.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            return None
-        pid = os.getpid()
-        for suffix in [""] + [f"-{k}" for k in range(2, 200)]:
-            path = self.directory / f"session-{pid}{suffix}.lock"
-            try:
-                fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o666)
-            except OSError:
-                return None
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError:
-                os.close(fd)
-                continue
-            token = _Token(fd, path.name)
-            return token
-        return None
-
-    def live_sessions(self) -> int:
-        """Registered sessions whose lock is still held (this one included); at least 1."""
-        live = 0
-        try:
-            names = sorted(self.directory.glob("session-*.lock"))
-        except OSError:
-            return 1
-        for path in names:
-            try:
-                fd = os.open(path, os.O_RDWR)
-            except OSError:
-                continue
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError:
-                live += 1
-            finally:
-                os.close(fd)  # drops the probe's lock, if it got one
-        return max(1, live)
-
-    def share(self) -> tuple[int, int]:
-        """(workers one session may hold, live sessions): the machine limit split evenly, at least 2."""
-        live = self.live_sessions()
-        return max(2, self.limit // live), live
 
     @contextmanager
     def opening(self, need_gb: float, timeout: float) -> Iterator[float]:
@@ -348,6 +314,7 @@ class _Doc:
         self.used = time.monotonic()
         self.lane = "model"
         self.header: str | None = None  # the text of the imports and prefix this document was opened with
+        self.display: str | None = None
         self.token: _Token | None = None
 
 
@@ -564,7 +531,13 @@ class LeanServer:
         return round(time.monotonic() - started, 3)
 
     def check(
-        self, doc: _Doc, text: str, timeout: float, header_end: int | None = None, open_timeout: float = OPEN_TIMEOUT
+        self,
+        doc: _Doc,
+        text: str,
+        timeout: float,
+        header_end: int | None = None,
+        open_timeout: float = OPEN_TIMEOUT,
+        run_id: str | None = None,
     ) -> dict:
         """Make `doc` hold `text`; return its diagnostics once Lean has elaborated all of it.
 
@@ -584,7 +557,7 @@ class LeanServer:
         if doc.text is None and header is not None:
             header_seconds = self.open_header(doc, header, open_timeout)
             before = None  # to the caller this is a fresh worker
-            _log(f"header open {Path(doc.uri).name}: {header_seconds:.1f} s")
+            _log(f"header open run={run_id or 'ad-hoc'} {Path(doc.uri).name}: {header_seconds:.1f} s")
         started = time.monotonic()
         version = self._send_text(doc, text)
         try:
@@ -723,7 +696,9 @@ class _Entry:
         self.last_text: str | None = None
         self.growing = False
         self.prefixes: dict[str, str] = {}  # file -> hash of the text before the target declaration
+        self.close_displays: set[str] = set()
         self.last_header_end: int | None = None
+        self.was_referenced = False
         self.queues: dict[str, list[object]] = {
             "model": [],
             "background": [],
@@ -734,19 +709,110 @@ class _Entry:
 
 
 class Session:
-    def __init__(self, directory: Path, max_slots: int = MAX_SLOTS, budget: WorkerBudget | None = None):
+    def __init__(self, directory: Path, budget: WorkerBudget | None = None):
         self.directory = directory
         self.budget = budget if budget is not None else WorkerBudget()
         self._reserved: _Token | None = None  # a token _may_open took for the slot its caller is about to create
-        self.registration = self.budget.register()
-        self._last_share: tuple[int, int] | None = None
         self.logs = directory / "lean-session"
-        self.max_slots = max_slots
+        self.leases: dict[str, dict] = {}
+        self.holds: dict[str, dict] = {}
         self.entries: dict[str, _Entry] = {}
         self.lock = threading.Lock()
         self.counter = 0
         self.closing = False
-        self.primary: str | None = None  # the first toolchain asked for: the one the model works on
+        self.last_active = time.monotonic()
+
+    @staticmethod
+    def _pid_alive(pid: int) -> bool:
+        return running(pid)
+
+    def _referenced(self, project: Path | str) -> bool:
+        name = str(project)
+        with self.lock:
+            return any(name == lease["primary"] or name in lease["others"] for lease in self.leases.values()) or any(
+                name in hold["projects"] for hold in self.holds.values()
+            )
+
+    def _is_primary(self, project: Path | str) -> bool:
+        name = str(project)
+        with self.lock:
+            return any(name == lease["primary"] for lease in self.leases.values())
+
+    def _is_adhoc(self, entry: _Entry) -> bool:
+        return not entry.was_referenced
+
+    def lease(self, request: dict) -> dict:
+        pid = int(request.get("pid", 0))
+        run_id = str(request.get("run_id", ""))
+        if not run_id or not self._pid_alive(pid):
+            return {"ok": False, "reason": "lease pid is not alive"}
+        with self.lock:
+            self.leases[run_id] = {"pid": pid, "primary": str(request["primary"]), "others": list(request["others"])}
+            for project in [request["primary"], *request["others"]]:
+                if entry := self.entries.get(str(project)):
+                    entry.was_referenced = True
+            self.last_active = time.monotonic()
+        return {"ok": True}
+
+    def hold(self, request: dict) -> dict:
+        pid = int(request.get("pid", 0))
+        if not self._pid_alive(pid):
+            return {"ok": False, "reason": "hold pid is not alive"}
+        with self.lock:
+            self.holds[str(request["owner"])] = {"pid": pid, "projects": list(request["projects"])}
+            for project in request["projects"]:
+                if entry := self.entries.get(str(project)):
+                    entry.was_referenced = True
+            self.last_active = time.monotonic()
+        return {"ok": True}
+
+    def release(self, run_id: str) -> dict:
+        with self.lock:
+            lease = self.leases.pop(run_id, None)
+            self.last_active = time.monotonic()
+        closing = []
+        if lease:
+            for name in [lease["primary"], *lease["others"]]:
+                if not self._referenced(name):
+                    entry = self.entries.get(name)
+                    if entry is not None:
+                        self._close_unreferenced(entry)
+                        closing.append(name)
+        return {"ok": True, "closing": closing}
+
+    def unhold(self, owner: str) -> dict:
+        with self.lock:
+            hold = self.holds.pop(owner, None)
+            self.last_active = time.monotonic()
+        if hold:
+            for name in hold["projects"]:
+                if not self._referenced(name) and (entry := self.entries.get(name)) is not None:
+                    self._close_unreferenced(entry)
+        return {"ok": True}
+
+    def _close_unreferenced(self, entry: _Entry) -> None:
+        with entry.condition:
+            if any(slot.busy for slot in entry.slots):
+                return
+            with self.lock:
+                name = str(entry.project)
+                referenced = any(
+                    name == lease["primary"] or name in lease["others"] for lease in self.leases.values()
+                ) or any(name in hold["projects"] for hold in self.holds.values())
+                if referenced:
+                    return
+                self.entries.pop(str(entry.project), None)
+            self._stop_entry(entry)
+        _log(f"closed: no run or queued row needs it ({entry.project.name})")
+
+    def reap_dead(self) -> None:
+        with self.lock:
+            self.leases = {key: value for key, value in self.leases.items() if self._pid_alive(value["pid"])}
+            self.holds = {key: value for key, value in self.holds.items() if self._pid_alive(value["pid"])}
+            entries = list(self.entries.values())
+        for entry in entries:
+            if not self._referenced(entry.project):
+                self._close_unreferenced(entry)
 
     # slots
     def _entry(self, project: Path, key: dict) -> _Entry:
@@ -767,7 +833,10 @@ class Session:
                 _log(f"server {project.name} started")
                 entry = self.entries[str(project)] = _Entry(project, key, server)
                 server.open_gate = lambda timeout, entry=entry: self.budget.opening(entry.worker_gb, timeout)
-                self.primary = self.primary or str(project)
+                entry.was_referenced = any(
+                    str(project) == lease["primary"] or str(project) in lease["others"]
+                    for lease in self.leases.values()
+                ) or any(str(project) in hold["projects"] for hold in self.holds.values())
             entry.used = time.monotonic()
             return entry
 
@@ -780,13 +849,24 @@ class Session:
             return
         known = entry.prefixes.setdefault(display, sha)
         if known != sha:
-            with self.lock:
-                self.entries.pop(str(entry.project), None)
-            self._stop_entry(entry)
-            _log(f"server {entry.project.name} restarted: file prefix changed")
-            raise SessionError("stale session: the file prefix changed; restarting it")
+            with entry.condition:
+                entry.prefixes[display] = sha
+                entry.close_displays.add(display)
+                for slot in list(entry.slots):
+                    if slot.display == display and not slot.busy:
+                        entry.server.close_doc(slot)
+                        entry.slots.remove(slot)
+                        self._free(slot)
+                if not any(slot.display == display for slot in entry.slots):
+                    entry.close_displays.discard(display)
+            _log(f"documents for {display} closed: file prefix changed")
+            raise SessionError("stale session: the file prefix changed")
 
     def _stop_entry(self, entry: _Entry) -> None:
+        for slot in entry.slots:
+            if slot.text is not None:
+                with suppress(SessionError, OSError):
+                    entry.server.close_doc(slot)
         entry.server.stop()
         for slot in entry.slots:
             self._free(slot)
@@ -803,31 +883,15 @@ class Session:
     def _slots_total(self) -> int:
         return sum(len(e.slots) for e in self.entries.values())
 
-    def _share(self) -> tuple[int, int]:
-        share, live = self.budget.share()
-        if (share, live) != self._last_share:
-            self._last_share = (share, live)
-            _log(f"share {share} ({live} live sessions): model {share - 1}, background 1")
-        return share, live
-
-    def _model_total(self) -> int:
-        return sum(len(e.lane_slots("model")) for e in self.entries.values())
-
     def _may_open(self, entry: _Entry, lane: str = "model", reserve: bool = False) -> str | None:
-        """None when another worker fits; otherwise why not. With `reserve`, the machine-wide token for it is
-        taken too (held in `_reserved` until `_new_slot` hands it to the slot). A model worker must fit this
-        session's fair share minus the background reserve; the background worker (one per session, which the
-        caller guarantees) needs only memory."""
+        """None when another worker fits; otherwise why not."""
         background = lane == "background"
         if background:
             if len(entry.lane_slots("background")) >= BACKGROUND_SLOTS:
                 return "slots"
         else:
-            if len(entry.lane_slots("model")) >= self.max_slots:
+            if len(entry.lane_slots("model")) >= MAX_SLOTS:
                 return "slots"
-            share, _live = self._share()
-            if self._model_total() >= share - 1:
-                return "share"
         free = _available_gb()
         if free is not None and free - entry.worker_gb < RESERVE_GB:
             return f"memory ({free:.1f} GB available)"
@@ -853,7 +917,7 @@ class Session:
         entry.slots.append(slot)
         return slot, None
 
-    def _acquire(self, entry: _Entry, timeout: float, lane: str = "model") -> _Doc:
+    def _acquire(self, entry: _Entry, timeout: float, lane: str = "model", header: str | None = None) -> _Doc:
         """A worker of `lane`, waiting up to `timeout` seconds for one (first come, first served). Waiting in line
         is not part of any check's own timeout."""
         started = time.monotonic()
@@ -870,7 +934,8 @@ class Session:
                     if queue[0] is ticket:
                         idle = [slot for slot in mine if not slot.busy]
                         if idle:
-                            slot = max(idle, key=lambda s: s.used)  # the most recently used worker is warmest
+                            matching = [slot for slot in idle if header is not None and slot.header == header]
+                            slot = max(matching or idle, key=lambda s: s.used)
                             slot.busy = True
                             self._waited(entry, lane, started)
                             return slot
@@ -889,6 +954,7 @@ class Session:
                             # Only model work may make room by closing another toolchain's idle model worker.
                             if lane == "model" and self._evict_idle(entry):
                                 continue
+                            assert blocked is not None
                             self._refused(entry, blocked)
                             raise SessionError(f"no room for a Lean worker: {blocked}")
                     if self.closing:
@@ -916,7 +982,7 @@ class Session:
         _log(f"refused {entry.project.name}: no room for a Lean worker: {blocked}; {self._workers()} workers open")
         if blocked.startswith("memory"):
             with suppress(OSError):
-                (self.directory / WAITING_NAME).touch()
+                (service_dir() / WAITING_NAME).touch()
 
     def _evict_idle(self, keep: _Entry) -> bool:
         """Close the longest-idle model worker of another toolchain to make room for another model request (never for
@@ -952,12 +1018,7 @@ class Session:
         A batch of drafts needs one warm document each; opening them while the model is thinking
         means the first batch is as fast as the later ones. Memory decides how many fit."""
         with entry.condition:
-            if (
-                entry.growing
-                or self.closing
-                or len(entry.lane_slots("model")) >= self.max_slots
-                or entry.last_text is None
-            ):
+            if entry.growing or self.closing or len(entry.lane_slots("model")) >= MAX_SLOTS or entry.last_text is None:
                 return
             entry.growing = True
         threading.Thread(target=self._grow_all, args=(entry,), daemon=True, name="lean-grow").start()
@@ -1000,7 +1061,17 @@ class Session:
         with entry.condition:
             slot.busy = False
             slot.used = time.monotonic()
+            if slot.display in entry.close_displays:
+                with suppress(SessionError, OSError):
+                    entry.server.close_doc(slot)
+                if slot in entry.slots:
+                    entry.slots.remove(slot)
+                self._free(slot)
+                if not any(item.display == slot.display for item in entry.slots):
+                    entry.close_displays.discard(slot.display)
             entry.condition.notify_all()
+        if not self._referenced(entry.project) and entry.was_referenced:
+            self._close_unreferenced(entry)
 
     # request
     def check(self, request: dict) -> dict:
@@ -1019,14 +1090,15 @@ class Session:
             self._guard_prefix(entry, request)
             # The wait for a worker has its own limit; the check's timeout starts once the worker is held.
             queue = MODEL_QUEUE_TIMEOUT if lane == "model" else timeout + OPEN_TIMEOUT
-            slot = self._acquire(entry, queue, lane)
+            slot = self._acquire(entry, queue, lane, request["text"][:header_end] if header_end else None)
         except SessionError as error:
             return {"ok": False, "stale": str(error).startswith("stale"), "reason": str(error)}
         except OSError as error:
             return {"ok": False, "reason": f"cannot start Lean: {error}"}
         try:
             fresh = slot.text is None
-            outcome = entry.server.check(slot, request["text"], timeout, header_end)
+            slot.display = request["display"]
+            outcome = entry.server.check(slot, request["text"], timeout, header_end, run_id=request.get("run_id"))
         except SessionError as error:
             return {"ok": False, "reason": str(error)}
         finally:
@@ -1047,7 +1119,7 @@ class Session:
         if lane == "model":
             entry.last_text = request["text"]
             entry.last_header_end = header_end
-            if str(project) == self.primary:
+            if self._is_primary(project) or self._is_adhoc(entry):
                 self._grow(entry)
         return {
             "ok": True,
@@ -1084,8 +1156,7 @@ class Session:
         except OSError as error:
             return {"ok": False, "reason": f"cannot start Lean: {error}"}
         lane = "background" if request.get("lane") == "background" else "model"
-        share, _live = self._share()
-        allowed = BACKGROUND_SLOTS if lane == "background" else max(0, min(MAX_SLOTS, self.max_slots, share - 1))
+        allowed = BACKGROUND_SLOTS if lane == "background" else MAX_SLOTS
         wanted = max(0, min(int(request.get("slots", 1)), allowed))
         if lane == "model":
             entry.last_text, entry.last_header_end = text, header_end
@@ -1099,6 +1170,7 @@ class Session:
             started = time.monotonic()
             try:
                 took = entry.server.open_header(slot, header, timeout)
+                _log(f"header open run={request.get('run_id') or 'ad-hoc'} {Path(slot.uri).name}: {took:.1f} s")
                 _log(f"warm {project.name} slot {number} ready in {took:.1f} s")
                 with lock:
                     seconds.append(took)
@@ -1119,12 +1191,14 @@ class Session:
                 with self.lock:
                     slot, blocked = self._new_slot(entry, lane)
                 if slot is None:
-                    if blocked not in ("slots", "share"):
+                    if blocked is not None and blocked not in ("slots", "share"):
                         self._refused(entry, blocked)
                         failed.append(f"no room for a Lean worker: {blocked}")
                     break
                 number = len(entry.lane_slots(lane))
                 _log(f"warm {project.name} slot {number} opening" + (" (background lane)" if lane != "model" else ""))
+                slot.header = header
+                slot.display = request.get("display")
                 thread = threading.Thread(target=open_one, args=(slot, number), daemon=True, name="lean-warm-op")
                 threads.append(thread)
                 thread.start()
@@ -1151,6 +1225,8 @@ class Session:
                 "pid": os.getpid(),
                 "protocol": PROTOCOL,
                 "code": code_sha(),
+                "leases": self.leases.copy(),
+                "holds": self.holds.copy(),
                 "servers": [
                     {
                         "project": str(e.project),
@@ -1165,26 +1241,20 @@ class Session:
             }
 
     def reap_idle(self) -> None:
+        self.reap_dead()
+        now = time.monotonic()
         with self.lock:
-            now = time.monotonic()
-            for entry in list(self.entries.values()):
-                # Lock order is entry then session elsewhere, so only try here.
-                if not entry.condition.acquire(blocking=False):
-                    continue
-                try:
-                    for slot in list(entry.lane_slots("background")):
-                        if not slot.busy and now - slot.used > BACKGROUND_IDLE_S:
-                            if slot.text is not None:
-                                entry.server.close_doc(slot)
-                            entry.slots.remove(slot)
-                            self._free(slot)
-                            _log(f"background worker closed on {entry.project.name}: idle {BACKGROUND_IDLE_S} s")
-                finally:
-                    entry.condition.release()
-            for name, entry in list(self.entries.items()):
-                if name != self.primary and now - entry.used > IDLE_SECONDS and not any(s.busy for s in entry.slots):
-                    self._stop_entry(self.entries.pop(name))
-                    _log(f"server {Path(name).name} closed: idle {IDLE_SECONDS} s")
+            entries = list(self.entries.values())
+        for entry in entries:
+            if self._is_adhoc(entry) and not self._referenced(entry.project) and now - entry.used > ADHOC_IDLE_S:
+                self._close_unreferenced(entry)
+
+    def should_exit(self) -> bool:
+        with self.lock:
+            empty = not self.entries and not self.leases and not self.holds
+            if not empty:
+                self.last_active = time.monotonic()
+            return empty and time.monotonic() - self.last_active >= SERVICE_LINGER_S
 
     def pgids(self) -> list[int]:
         return [e.server.pgid for e in self.entries.values() if e.server.pgid]
@@ -1200,11 +1270,6 @@ class Session:
             entries, self.entries = list(self.entries.values()), {}
         for entry in entries:
             self._stop_entry(entry)
-        registration, self.registration = self.registration, None
-        if registration is not None:
-            with suppress(OSError):
-                (self.budget.directory / registration.name).unlink()
-            registration.release()
 
 
 class _Handler(socketserver.StreamRequestHandler):
@@ -1213,7 +1278,7 @@ class _Handler(socketserver.StreamRequestHandler):
             request = json.loads(self.rfile.readline())
         except ValueError:
             return
-        session: Session = self.server.session  # type: ignore[attr-defined]
+        session = cast(_Server, self.server).session
         op = request.get("op")
         try:
             if op == "check":
@@ -1222,6 +1287,14 @@ class _Handler(socketserver.StreamRequestHandler):
                 reply = session.warm(request)
             elif op == "status":
                 reply = {"ok": True, **session.status()}
+            elif op == "lease":
+                reply = session.lease(request)
+            elif op == "release":
+                reply = session.release(str(request.get("run_id", "")))
+            elif op == "hold":
+                reply = session.hold(request)
+            elif op == "unhold":
+                reply = session.unhold(str(request.get("owner", "")))
             elif op == "shutdown":
                 reply = {"ok": True}
                 threading.Thread(target=self.server.shutdown, daemon=True).start()
@@ -1236,25 +1309,65 @@ class _Handler(socketserver.StreamRequestHandler):
 class _Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     daemon_threads = True
     allow_reuse_address = True
+    session: Session
 
 
-def socket_path(directory: Path) -> Path:
-    """The socket in the run directory; a short path under the user's runtime dir if that is too long."""
-    preferred = directory / SOCKET_NAME
-    if len(str(preferred)) <= SOCKET_LIMIT:
-        return preferred
-    base = Path(os.environ.get("XDG_RUNTIME_DIR") or "/tmp")
-    return base / f"arena-lean-{hashlib.sha256(str(directory).encode()).hexdigest()[:16]}.sock"
+def socket_path(directory: Path | None = None) -> Path:
+    path = (directory or service_dir()) / SOCKET_NAME
+    if len(os.fsencode(path)) > SOCKET_LIMIT:
+        raise SessionError(f"Lean service socket path exceeds {SOCKET_LIMIT} bytes: {path}")
+    return path
 
 
-def serve(directory: Path, parent: int | None, max_slots: int) -> int:
+def ensure_service(directory: Path | None = None, wait: float = 15.0) -> str:
+    directory = directory or service_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    path = socket_path(directory)
+    with (directory / LOCK_NAME).open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        status = request({"op": "status", "protocol": PROTOCOL}, 1, str(path)) if path.exists() else None
+        if status and status.get("ok"):
+            if status.get("protocol") == PROTOCOL and status.get("code") == code_sha():
+                return str(path)
+            if status.get("leases") or status.get("holds"):
+                raise SessionError("the Lean service runs older code with live runs")
+            request({"op": "shutdown", "protocol": PROTOCOL}, 2, str(path))
+            deadline = time.monotonic() + 20
+            while path.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            if path.exists():
+                raise SessionError("old Lean service did not stop")
+        path.unlink(missing_ok=True)
+        log = (directory / LOG_NAME).open("ab")
+        try:
+            subprocess.Popen(
+                [sys.executable, "-m", "arena.lean_session", "serve", "--service-dir", str(directory)],
+                cwd=ROOT,
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        finally:
+            log.close()
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline:
+            status = request({"op": "status", "protocol": PROTOCOL}, 0.5, str(path)) if path.exists() else None
+            if status and status.get("ok") and status.get("code") == code_sha():
+                return str(path)
+            time.sleep(0.05)
+        raise SessionError(f"Lean service did not become ready; see {directory / LOG_NAME}")
+
+
+def serve(directory: Path) -> int:
     directory.mkdir(parents=True, exist_ok=True)
     path = socket_path(directory)
     path.unlink(missing_ok=True)
-    session = Session(directory, max_slots)
+    session = Session(directory)
     server = _Server(str(path), _Handler)
-    server.session = session  # type: ignore[attr-defined]
+    server.session = session
     info = directory / INFO_NAME
+    started = time.time()
 
     def write_info() -> None:
         info.write_text(
@@ -1263,9 +1376,10 @@ def serve(directory: Path, parent: int | None, max_slots: int) -> int:
                     "pid": os.getpid(),
                     "socket": str(path),
                     "code": code_sha(),
-                    "parent": parent,
+                    "protocol": PROTOCOL,
                     "pgids": session.pgids(),
                     "pids": session.pids(),
+                    "started": started,
                 }
             )
             + "\n"
@@ -1278,34 +1392,55 @@ def serve(directory: Path, parent: int | None, max_slots: int) -> int:
         signal.signal(number, stop)
 
     def watch() -> None:
-        last = None
         while not session.closing:
-            if parent is not None:
-                try:
-                    os.kill(parent, 0)
-                except ProcessLookupError:
-                    stop()
-                    return
-                except PermissionError:
-                    pass
             session.reap_idle()
-            if (session.pgids(), session.pids()) != last:
-                last = (session.pgids(), session.pids())
-                with suppress(OSError):
-                    write_info()
+            with suppress(OSError):
+                write_info()
+            if session.should_exit():
+                stop()
+                return
             time.sleep(1.0)
 
-    _log(f"session up (pid {os.getpid()}, max slots {max_slots}, reserve {RESERVE_GB} GB)")
     write_info()
+    _log(f"service up (pid {os.getpid()}, protocol {PROTOCOL})")
     threading.Thread(target=watch, daemon=True, name="watch").start()
     try:
         server.serve_forever(poll_interval=0.2)
     finally:
         session.shutdown()
         server.server_close()
-        for leftover in (path, info):
-            leftover.unlink(missing_ok=True)
+        path.unlink(missing_ok=True)
+        info.unlink(missing_ok=True)
     return 0
+
+
+def stop_service(directory: Path | None = None, grace: float = 20.0) -> None:
+    directory = directory or service_dir()
+    path, info = socket_path(directory), directory / INFO_NAME
+    if not path.exists():
+        info.unlink(missing_ok=True)
+        return
+    request({"op": "shutdown", "protocol": PROTOCOL}, 2, str(path))
+    deadline = time.monotonic() + grace
+    while path.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    if path.exists():
+        try:
+            pid = int(json.loads(info.read_text())["pid"])
+            cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+        except (OSError, ValueError, KeyError):
+            path.unlink(missing_ok=True)
+            info.unlink(missing_ok=True)
+            return
+        if "arena.lean_session" in cmdline:
+            with suppress(ProcessLookupError, PermissionError):
+                os.kill(pid, signal.SIGTERM)
+            deadline = time.monotonic() + 5
+            while running(pid) and time.monotonic() < deadline:
+                time.sleep(0.05)
+        if not running(pid) or "arena.lean_session" not in cmdline:
+            path.unlink(missing_ok=True)
+            info.unlink(missing_ok=True)
 
 
 # -- client --------------------------------------------------------------------------------------
@@ -1332,85 +1467,13 @@ def configured() -> bool:
     return bool(os.environ.get(ENV))
 
 
-def start_daemon(
-    directory: Path, parent: int | None = None, max_slots: int = MAX_SLOTS, wait: float = 15.0
-) -> subprocess.Popen:
-    """Start the run's daemon in its own session and wait for its socket. Used by the runner."""
-    directory.mkdir(parents=True, exist_ok=True)
-    path = socket_path(directory)
-    path.unlink(missing_ok=True)
-    log = (directory / "lean-session.log").open("ab")
-    process = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "arena.lean_session",
-            "serve",
-            "--run-dir",
-            str(directory),
-            "--parent-pid",
-            str(parent if parent is not None else os.getpid()),
-            "--max-slots",
-            str(max_slots),
-        ],
-        cwd=ROOT,
-        stdin=subprocess.DEVNULL,
-        stdout=log,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-    )
-    log.close()
-    deadline = time.monotonic() + wait
-    while time.monotonic() < deadline:
-        if process.poll() is not None:
-            raise SessionError("Lean session daemon exited at start-up; see lean-session.log")
-        if path.exists() and request({"op": "status"}, 2, str(path)).get("ok"):
-            return process
-        time.sleep(0.05)
-    stop_daemon(directory, process)
-    raise SessionError("Lean session daemon did not become ready")
-
-
-def stop_daemon(directory: Path, process: subprocess.Popen | None, grace: float = 20.0) -> None:
-    """Stop the daemon and every Lean process it started, however they are doing."""
-    pgids: list[int] = []
-    pids: list[int] = []
-    info = directory / INFO_NAME
-    try:
-        recorded = json.loads(info.read_text())
-        pgids = [int(g) for g in recorded.get("pgids", [])]
-        pids = [int(p) for p in recorded.get("pids", [])]
-    except (OSError, ValueError):
-        pass
-    if process is not None and process.poll() is None:
-        process.terminate()
-        try:
-            process.wait(timeout=grace)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
-    for pgid in pgids:  # only matters if the daemon died without cleaning up
-        with suppress(ProcessLookupError, PermissionError):
-            os.killpg(pgid, signal.SIGKILL)
-    for pid in pids:
-        try:  # a recorded pid may have been reused by now; only ever kill Lean
-            if "lean" in Path(f"/proc/{pid}/cmdline").read_text().split("\0")[0]:
-                os.kill(pid, signal.SIGKILL)
-        except (OSError, IndexError):
-            pass
-    socket_path(directory).unlink(missing_ok=True)
-    info.unlink(missing_ok=True)
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
     run = sub.add_parser("serve")
-    run.add_argument("--run-dir", type=Path, required=True)
-    run.add_argument("--parent-pid", type=int)
-    run.add_argument("--max-slots", type=int, default=MAX_SLOTS)
+    run.add_argument("--service-dir", type=Path, required=True)
     args = parser.parse_args()
-    return serve(args.run_dir, args.parent_pid, args.max_slots)
+    return serve(args.service_dir)
 
 
 if __name__ == "__main__":

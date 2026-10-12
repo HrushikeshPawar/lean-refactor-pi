@@ -351,12 +351,7 @@ def mem_available_gb() -> float | None:
 
 
 def read_session_info(directory: Path) -> dict:
-    """The run's Lean session record (pids and process groups), or {} when the run already cleaned up after itself."""
-    from arena.lean_session import INFO_NAME
-
-    with suppress(OSError, ValueError):
-        info = json.loads((directory / INFO_NAME).read_text())
-        return info if isinstance(info, dict) else {}
+    """Legacy run directories do not own or record the machine-wide Lean service."""
     return {}
 
 
@@ -394,13 +389,15 @@ def recorded_pids(directory: Path) -> tuple[list[int], list[int]]:
 
 
 def ours(pid: int, directory: Path, comm_fn=proc_comm, cmdline_fn=proc_cmdline) -> bool:
-    """A recorded pid may have been reused: only Lean, lake, or that run's own session daemon qualifies."""
+    """A recorded pid may have been reused: only Lean/lake or a run-scoped process qualifies."""
     comm = comm_fn(pid)
     if comm is None:
         return False
     if comm in ("lean", "lake"):
         return True
-    return comm.startswith("python") and "arena.lean_session" in cmdline_fn(pid) and str(directory) in cmdline_fn(pid)
+    return (
+        comm.startswith("python") and str(directory) in cmdline_fn(pid) and "arena.lean_session" not in cmdline_fn(pid)
+    )
 
 
 def lingering(directory: Path, comm_fn=proc_comm, cmdline_fn=proc_cmdline, alive_fn=proc_alive) -> list[int]:

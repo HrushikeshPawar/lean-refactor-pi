@@ -97,9 +97,12 @@ class Base(unittest.TestCase):
         self.addCleanup(lambda: [s.shutdown() for s in self.sessions])
 
     def session(self, name="run", limit=6, **options):
-        session = lean_session.Session(
-            self.dir / name, budget=lean_session.WorkerBudget(self.dir / "tokens", limit), **options
-        )
+        max_slots = options.pop("max_slots", None)
+        if max_slots is not None:
+            patcher = patch.object(lean_session, "MAX_SLOTS", max_slots)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        session = lean_session.Session(self.dir / name, budget=lean_session.WorkerBudget(self.dir / "tokens", limit))
         self.sessions.append(session)
         return session
 
@@ -168,7 +171,7 @@ class WarmTimeoutTests(Base):
         reply = session.check({**self.request("-- PROOF 30\n", timeout=0.4), "header_end": None})
         self.assertEqual((reply["ok"], reply["timeout"], reply["warm_kept"]), (True, True, False))
         time.sleep(0.3)
-        self.assertEqual(len(self.events("didClose")), 1)
+        self.assertEqual(len(self.events("didClose")), len(self.events("didOpen")))
 
     def test_a_changed_header_reopens_the_document(self):
         server = lean_session.LeanServer(self.dir / "proj", self.dir / "s.log")
@@ -285,23 +288,19 @@ class BackgroundWorkerTests(Base):
             self.assertEqual(len(entry.lane_slots("model")), 0)
         self.assertEqual(len(session.entries[str(self.dir / "proj")].lane_slots("model")), 2)
 
-    def test_an_idle_background_worker_is_closed_after_the_idle_limit(self):
+    def test_an_adhoc_project_closes_after_its_idle_limit(self):
         session = self.session(limit=8)
         self.background(session, self.other("v2"))
         entry = session.entries[str(self.dir / "v2")]
-        with patch.object(lean_session, "BACKGROUND_IDLE_S", 0.3):
+        entry.used = time.monotonic() - 1
+        with patch.object(lean_session, "ADHOC_IDLE_S", 0.3):
             session.reap_idle()
-            self.assertEqual(len(entry.lane_slots("background")), 1)  # not idle long enough yet
-            time.sleep(0.4)
-            session.reap_idle()
-        self.assertEqual(entry.lane_slots("background"), [])
+        self.assertNotIn(str(self.dir / "v2"), session.entries)
         for _ in range(100):
             if self.events("didClose"):
                 break
             time.sleep(0.02)
         self.assertEqual(len(self.events("didClose")), 1)
-        again = self.background(session, str(self.dir / "v2"))
-        self.assertTrue(again["ok"] and again["new_worker"])
 
     def test_warm_on_the_background_lane_opens_only_the_background_worker(self):
         session = self.session(limit=8)
@@ -332,7 +331,7 @@ class BackgroundWorkerTests(Base):
         self.assertGreater(time.monotonic() - started, 0.8)  # it queued behind the first instead of failing
 
     def test_background_never_evicts_a_model_worker_even_with_no_machine_room(self):
-        first = self.session("a", limit=2)  # share 2: model 1, background 1
+        first = self.session("a", limit=1)
         self.assertEqual(first.warm({**self.request(), "slots": 4, "timeout": 30})["workers"], 1)
         other = self.other("v2")
         reply = self.background(first, other)
@@ -343,7 +342,7 @@ class BackgroundWorkerTests(Base):
 
     def test_background_is_guaranteed_even_when_model_workers_hold_every_machine_token(self):
         session = self.session(limit=2)
-        self.assertEqual(session.warm({**self.request(), "slots": 4, "timeout": 30})["workers"], 1)
+        self.assertEqual(session.warm({**self.request(), "slots": 4, "timeout": 30})["workers"], 2)
         hog = lean_session.WorkerBudget(self.dir / "tokens", 2)
         _held = [hog.acquire(), hog.acquire()]  # held (not garbage-collected) so no model token is left
         self.assertFalse(hog.available())
@@ -351,7 +350,7 @@ class BackgroundWorkerTests(Base):
         self.assertTrue(reply["ok"], reply)
 
     def test_model_requests_do_not_evict_for_background_but_may_for_another_model_request(self):
-        session = self.session(limit=2)  # model 1
+        session = self.session(limit=1)  # force the documented idle-worker eviction path
         self.assertEqual(session.warm({**self.request(), "slots": 1, "timeout": 30})["workers"], 1)
         reply = session.check({**self.request("-- PROOF 0\n", timeout=10), "project": self.other("v2")})
         self.assertTrue(reply["ok"], reply)  # a model request on another toolchain evicts the idle model worker
@@ -484,69 +483,6 @@ class MachineBudgetTests(Base):
         self.assertTrue(reply["ok"], reply)
         return reply
 
-    def test_two_sessions_split_the_machine_budget_evenly(self):
-        first = self.session("a", limit=8)
-        self.assertEqual(first.budget.share(), (8, 1))
-        second = self.session("b", limit=8)
-        self.assertEqual(first.budget.share(), (4, 2))
-        a, b = self.warm(first, 9), self.warm(second, 9)
-        self.assertEqual((a["allowed"], a["workers"], b["allowed"], b["workers"]), (3, 3, 3, 3))
-        self.assertEqual(b["failed"], [])
-
-    def test_three_sessions_get_a_third_and_a_share_is_never_below_two(self):
-        sessions = [self.session(name, limit=8) for name in "abc"]
-        self.assertEqual(sessions[0].budget.share(), (2, 3))  # 8 // 3
-        self.assertEqual(self.warm(sessions[0], 9)["allowed"], 1)
-        many = [self.session(f"m{i}", limit=8) for i in range(5)]
-        self.assertEqual(many[0].budget.share(), (2, 8))  # 8 // 8 = 1, floored at 2
-
-    def test_a_warm_op_gets_the_share_minus_the_background_reserve(self):
-        solo = self.session("solo", limit=4)
-        reply = self.warm(solo, 9)
-        self.assertEqual((reply["allowed"], reply["workers"]), (3, 3))
-        self.assertEqual(len(self.events("didOpen")), 3)
-
-    def test_a_dying_session_frees_its_tokens_and_registration(self):
-        first, second = self.session("a", limit=8), self.session("b", limit=8)
-        self.assertEqual(self.warm(second, 9)["allowed"], 3)
-        self.assertEqual(self.warm(first, 9)["workers"], 3)
-        first.shutdown()
-        self.assertEqual(second.budget.share(), (8, 1))
-        self.assertEqual(self.warm(second, 9)["allowed"], 4)  # capped by MAX_SLOTS, not by the share
-        self.assertEqual(lean_session.WorkerBudget(self.dir / "tokens", 8).live_sessions(), 1)
-
-    def test_a_killed_process_drops_its_registration(self):
-        import subprocess
-
-        code = (
-            "import sys; from pathlib import Path; from arena import lean_session as l; "
-            "t = l.WorkerBudget(Path(sys.argv[1]), 8).register(); print('held' if t else 'no', flush=True); "
-            "sys.stdin.read()"
-        )
-        holder = subprocess.Popen(
-            [sys.executable, "-c", code, str(self.dir / "tokens")],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            text=True,
-            cwd=lean_session.ROOT,
-        )
-        self.assertEqual(holder.stdout.readline().strip(), "held")
-        mine = self.session("a", limit=8)
-        self.assertEqual(mine.budget.share(), (4, 2))
-        holder.kill()
-        holder.wait()
-        self.assertEqual(mine.budget.share(), (8, 1))
-
-    def test_a_shrinking_share_keeps_warm_workers_but_opens_no_more(self):
-        first = self.session("a", limit=8)
-        self.assertEqual(self.warm(first, 4)["workers"], 4)
-        self.session("b", limit=8)  # share drops to 4: model 3, first holds 4
-        reply = self.warm(first, 4)
-        self.assertEqual((reply["allowed"], reply["workers"]), (3, 4))
-        self.assertEqual(self.events("didClose"), [])
-        entry = next(iter(first.entries.values()))
-        self.assertEqual(len(entry.lane_slots("model")), 4)
-
     def test_tokens_free_themselves_when_the_holder_exits(self):
         budget = lean_session.WorkerBudget(self.dir / "tok", 1)
         code = (
@@ -568,6 +504,120 @@ class MachineBudgetTests(Base):
         holder.kill()
         holder.wait()
         self.assertTrue(budget.available())
+
+
+class ServiceLeaseTests(Base):
+    def test_release_closes_a_project_unless_a_hold_still_references_it(self):
+        session = self.session()
+        project = str(self.dir / "proj")
+        self.assertTrue(session.check(self.request())["ok"])
+        lease = {"run_id": "first", "pid": os.getpid(), "primary": project, "others": []}
+        self.assertTrue(session.lease(lease)["ok"])
+        session.hold({"owner": "queue", "pid": os.getpid(), "projects": [project]})
+        session.release("first")
+        self.assertIn(project, session.entries)
+        session.unhold("queue")
+        for _ in range(100):
+            if project not in session.entries:
+                break
+            time.sleep(0.02)
+        self.assertNotIn(project, session.entries)
+        self.assertEqual(len(self.events("didClose")), len(self.events("didOpen")))
+
+    def test_a_dead_lease_pid_is_refused_and_reaped(self):
+        session = self.session()
+        self.assertFalse(session.lease({"run_id": "dead", "pid": 2**30, "primary": "p", "others": []})["ok"])
+        session.leases["old"] = {"pid": os.getpid(), "primary": "p", "others": []}
+        with patch.object(session, "_pid_alive", return_value=False):
+            session.reap_dead()
+        self.assertNotIn("old", session.leases)
+
+    def test_service_linger_starts_only_when_no_entries_leases_or_holds_remain(self):
+        session = self.session()
+        with patch.object(lean_session, "SERVICE_LINGER_S", 0.1):
+            session.last_active = time.monotonic() - 1
+            self.assertTrue(session.should_exit())
+            session.leases["active"] = {"pid": os.getpid(), "primary": "p", "others": []}
+            self.assertFalse(session.should_exit())
+            session.leases.clear()
+
+    def test_ensure_service_reuses_matching_code_and_restarts_idle_old_code(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            path = lean_session.socket_path(directory)
+            path.touch()
+            current = {"ok": True, "protocol": lean_session.PROTOCOL, "code": "current", "leases": {}, "holds": {}}
+            with (
+                patch.object(lean_session, "code_sha", return_value="current"),
+                patch.object(lean_session, "request", return_value=current),
+                patch.object(lean_session.subprocess, "Popen") as start,
+            ):
+                self.assertEqual(lean_session.ensure_service(directory), str(path))
+                start.assert_not_called()
+
+            calls = []
+
+            def request(payload, _timeout, _path):
+                calls.append(payload["op"])
+                if payload["op"] == "status":
+                    if len(calls) == 1:
+                        return {**current, "code": "old"}
+                    return current
+                path.unlink(missing_ok=True)
+                return {"ok": True}
+
+            def launch(*_args, **_kwargs):
+                path.touch()
+
+            with (
+                patch.object(lean_session, "code_sha", return_value="current"),
+                patch.object(lean_session, "request", side_effect=request),
+                patch.object(lean_session.subprocess, "Popen", side_effect=launch) as start,
+            ):
+                self.assertEqual(lean_session.ensure_service(directory), str(path))
+                start.assert_called_once()
+
+    def test_ensure_service_refuses_old_code_when_live_leases_exist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            lean_session.socket_path(directory).touch()
+            with (
+                patch.object(lean_session, "code_sha", return_value="current"),
+                patch.object(
+                    lean_session,
+                    "request",
+                    return_value={"ok": True, "protocol": 1, "code": "old", "leases": {"r": {}}, "holds": {}},
+                ),
+                self.assertRaisesRegex(lean_session.SessionError, "older code with live runs"),
+            ):
+                lean_session.ensure_service(directory)
+
+
+class SharedDocumentTests(Base):
+    def test_prefix_change_closes_only_documents_for_that_display(self):
+        session = self.session()
+        first_header, second_header = "import A\n", "import B\n"
+        session.warm({**self.request(header=first_header, display="A.lean", prefix_sha="first"), "slots": 1})
+        session.warm({**self.request(header=second_header, display="B.lean", prefix_sha="second"), "slots": 2})
+        reply = session.check({**self.request(header=first_header, display="A.lean", prefix_sha="changed")})
+        self.assertFalse(reply["ok"])
+        entry = session.entries[str(self.dir / "proj")]
+        self.assertEqual([slot.display for slot in entry.slots], ["B.lean"])
+        self.assertEqual(len(self.events("didClose")), 1)
+
+    def test_idle_document_with_matching_header_is_preferred(self):
+        session = self.session()
+        first_header, second_header = "import A\n", "import B\n"
+        session.warm({**self.request(header=first_header, display="A.lean"), "slots": 1})
+        session.warm({**self.request(header=second_header, display="B.lean"), "slots": 2})
+        entry = session.entries[str(self.dir / "proj")]
+        matching = next(slot for slot in entry.slots if slot.header == first_header)
+        other = next(slot for slot in entry.slots if slot.header == second_header)
+        matching.used, other.used = 1.0, 2.0
+        reply = session.check(self.request(header=first_header, display="A.lean"))
+        self.assertTrue(reply["ok"] and not reply["new_worker"], reply)
+        self.assertIsNone(reply["header_seconds"])
+        self.assertGreater(matching.used, other.used)
 
 
 class OpeningGateTests(Base):
@@ -596,9 +646,12 @@ class OpeningGateTests(Base):
 
     def test_a_held_gate_blocks_another_holder_until_released(self):
         budget = lean_session.WorkerBudget(self.dir / "tokens", 8)
-        with budget.opening(0.0, 1.0), self.assertRaisesRegex(lean_session.SessionError, "still loading"):
-            with budget.opening(0.0, 0.3):
-                pass
+        with (
+            budget.opening(0.0, 1.0),
+            self.assertRaisesRegex(lean_session.SessionError, "still loading"),
+            budget.opening(0.0, 0.3),
+        ):
+            pass
         with budget.opening(0.0, 0.5):
             pass
 

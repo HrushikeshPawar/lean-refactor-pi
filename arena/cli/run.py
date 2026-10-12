@@ -186,16 +186,39 @@ def log_event(event: dict) -> None:
         print(f"[{datetime.now().astimezone().strftime('%H:%M:%S')}] {note}", flush=True)
 
 
-_LEAN: dict = {"process": None, "directory": None}
+_LEAN: dict = {"socket": None, "run_id": None, "directory": None}
 
 
-def start_lean_session(directory: Path, parent_pid: int) -> None:
-    """Start the run's Lean session daemon. Failing to start it only costs speed: calls run cold."""
+def start_lean_session(directory: Path, row: dict, run_id: str) -> None:
+    """Lease this run's toolchains on the shared Lean service; failure only costs speed."""
     try:
+        from arena import engine
+
         _LEAN["directory"] = directory
-        _LEAN["process"] = lean_session.start_daemon(directory, parent_pid)
-        os.environ[lean_session.ENV] = str(lean_session.socket_path(directory))
-        print(f"Lean session pid={_LEAN['process'].pid}; socket={os.environ[lean_session.ENV]}", flush=True)
+        path = lean_session.ensure_service()
+        os.environ[lean_session.ENV] = path
+        versions = engine.versions(row)
+        version, commit = engine.measure_version(row)
+        primary = str(engine.workspace(row, version, commit))
+        others = [str(engine.workspace(row, v, c)) for v, c in versions if (v, c) != (version, commit)]
+        reply = lean_session.request(
+            {
+                "op": "lease",
+                "protocol": lean_session.PROTOCOL,
+                "run_id": run_id,
+                "pid": os.getpid(),
+                "primary": primary,
+                "others": others,
+            },
+            5,
+            path,
+        )
+        if not reply or not reply.get("ok"):
+            raise lean_session.SessionError((reply or {}).get("reason", "service refused lease"))
+        _LEAN.update(socket=path, run_id=run_id)
+        os.environ[lean_session.RUN_ID_ENV] = run_id
+        pid = int(json.loads((lean_session.service_dir() / lean_session.INFO_NAME).read_text())["pid"])
+        print(f"Lean session pid={pid}; socket={path}", flush=True)
     except (lean_session.SessionError, OSError) as error:
         os.environ.pop(lean_session.ENV, None)
         print(f"Lean session unavailable ({error}); Lean calls will compile cold", file=sys.stderr, flush=True)
@@ -209,7 +232,7 @@ def lean_gate(theorem: str, directory: Path, gate_fn=None) -> dict | None:
     ARENA_LEAN_GATE=0 for offline tests).
     """
     (directory / lean_health.TRIPPED_FILE).unlink(missing_ok=True)  # a resumed run starts with a clean breaker
-    if _LEAN["process"] is None or os.environ.get(lean_health.GATE_ENV) == "0":
+    if _LEAN["socket"] is None or os.environ.get(lean_health.GATE_ENV) == "0":
         return None
     slots = min(lean_session.MAX_SLOTS, 4)
     print(
@@ -242,11 +265,14 @@ def stop_unhealthy(args, directory: Path, reasons: list[str]) -> int:
 def stop_lean_session() -> None:
     """Stop the daemon and every Lean process it started; runs on every way out of `main`."""
     directory, _LEAN["directory"] = _LEAN["directory"], None
-    process, _LEAN["process"] = _LEAN["process"], None
+    path, _LEAN["socket"] = _LEAN["socket"], None
+    run_id, _LEAN["run_id"] = _LEAN["run_id"], None
     os.environ.pop(lean_session.ENV, None)
+    os.environ.pop(lean_session.RUN_ID_ENV, None)
     if directory is None:
         return
-    lean_session.stop_daemon(directory, process)
+    if path and run_id:
+        lean_session.request({"op": "release", "protocol": lean_session.PROTOCOL, "run_id": run_id}, 10, path)
     # A run that never got as far as `init` leaves nothing but the session's own files.
     try:
         if directory.is_dir() and all(
@@ -312,8 +338,9 @@ def run(options: RunOptions) -> int:
     if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?", args.run_id):
         print("error: --run-id must be a Pi-compatible session ID", file=sys.stderr)
         return 2
-    rows = (json.loads(line) for line in (ROOT / "benchmark/original/warmup.jsonl").read_text().splitlines())
-    if args.theorem not in {row["name"] for row in rows}:
+    rows = [json.loads(line) for line in (ROOT / "benchmark/original/warmup.jsonl").read_text().splitlines()]
+    row = next((row for row in rows if row["name"] == args.theorem), None)
+    if row is None:
         print(f"error: unknown warm-up theorem: {args.theorem}", file=sys.stderr)
         return 2
     extra = args.prompt_file.read_text().strip() if args.prompt_file else ""
@@ -323,7 +350,7 @@ def run(options: RunOptions) -> int:
         print("error: --resume-run must be used exactly when the run ID already exists", file=sys.stderr)
         return 2
     if not args.dry_run and not args.no_lean_session:
-        start_lean_session(directory, os.getpid())
+        start_lean_session(directory, row, args.run_id)
     if args.resume_run:
         config = json.loads((directory / "run-config.json").read_text())
         if (config["theorem"], config["model"], configured_cap(config)) != (

@@ -319,13 +319,15 @@ def _kill_orphans(pids: list[int]) -> list[int]:
 
 
 def _stop_checked(run: lean_load.SimRun, baseline_processes: set[int]) -> None:
-    status = lean_session.request({"op": "status"}, 10, run.socket) or {}
+    status = lean_session.request({"op": "status", "protocol": lean_session.PROTOCOL}, 10, run.socket) or {}
     if not status.get("ok"):
         raise RuntimeError(f"Lean status failed before shutdown: {status.get('reason', 'unknown error')}")
     pids = {int(pid) for server in status.get("servers", []) for pid in server.get("pids", [])}
     pgids = {int(server["pgid"]) for server in status.get("servers", []) if server.get("pgid")}
-    lean_session.stop_daemon(run.directory, run.process)
+    lean_session.request({"op": "release", "protocol": lean_session.PROTOCOL, "run_id": run.run_id}, 10, run.socket)
     run.process = None
+    if run.owns_service:
+        lean_session.stop_service()
     orphans = lean_load.find_orphans(pids, pgids, baseline_processes)
     remaining = _kill_orphans(orphans)
     if remaining:

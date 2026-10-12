@@ -4,7 +4,7 @@
 
 **Blocked by:** 07: Lean speed baseline and gate (all lower tickets are committed below your branch).
 
-**Status:** ready-for-agent
+**Status:** needs-review
 
 **Branch:** `v7/08a-lean-service` (stacked on `v7/07-lean-gate`)
 

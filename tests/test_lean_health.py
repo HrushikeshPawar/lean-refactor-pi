@@ -186,7 +186,7 @@ class RunnerTests(unittest.TestCase):
             os.environ.pop("ARENA_LEAN_TIMEOUT", None)
             directory = Path(tmp)
             (directory / lh.TRIPPED_FILE).write_text("{}")
-            with mock.patch.dict(rpb._LEAN, {"process": object()}):
+            with mock.patch.dict(rpb._LEAN, {"socket": "service.sock"}):
                 bad = rpb.lean_gate(
                     "T", directory, lambda *a: {"verdict": "unhealthy", "reasons": ["x"], "timeout": 900}
                 )
@@ -226,14 +226,11 @@ class CleanupTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.dir = Path(self.temp.name) / "run-1"
         self.dir.mkdir()
-        (self.dir / "lean-session.json").write_text(
-            json.dumps({"pid": 100, "pgids": [201], "pids": [201, 202, 203, 204]})
-        )
 
     def fake(self):
         return FakeProc(
             {
-                100: ("python3", f"python -m arena.lean_session serve --run-dir {self.dir}", True),
+                100: ("python3", "python -m arena.lean_session serve --service-dir /tmp/service", True),
                 201: ("lean", "", True),
                 202: ("lake", "", True),
                 203: ("firefox", "", True),  # a recorded pid that was reused by something else
@@ -252,13 +249,10 @@ class CleanupTests(unittest.TestCase):
             sleep_fn=lambda s: None,
         )
 
-    def test_only_recorded_lean_lake_and_the_daemon_are_killed(self):
+    def test_run_housekeeping_never_signals_the_machine_wide_service(self):
         proc = self.fake()
-        self.assertEqual(self.reap(proc), 3)
-        signalled = {s[0] if s[0] != "pg" else s[1] for s in proc.signals}
-        self.assertEqual(signalled, {100, 201, 202})
-        self.assertIn(203, proc.table)  # reused pid left alone
-        self.assertIn(9999, proc.table)  # unrecorded Lean left alone
+        self.assertEqual(self.reap(proc), 0)
+        self.assertEqual(proc.signals, [])
 
     def test_another_runs_daemon_with_a_reused_pid_is_not_killed(self):
         proc = FakeProc({100: ("python3", "python -m arena.lean_session serve --run-dir /other/run", True)})
@@ -266,14 +260,13 @@ class CleanupTests(unittest.TestCase):
         self.assertEqual(proc.signals, [])
 
     def test_clean_run_has_nothing_to_reap(self):
-        (self.dir / "lean-session.json").unlink()
         proc = self.fake()
         self.assertEqual(self.reap(proc), 0)
         self.assertEqual(proc.signals, [])
 
     def test_lingering_lists_live_recorded_processes(self):
         proc = self.fake()
-        self.assertEqual(rc.lingering(self.dir, proc.comm, proc.cmdline, proc.alive), [100, 201, 202])
+        self.assertEqual(rc.lingering(self.dir, proc.comm, proc.cmdline, proc.alive), [])
 
     def test_sweep_removes_only_new_arena_dirs(self):
         root = Path(self.temp.name) / "evaluations"

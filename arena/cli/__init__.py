@@ -199,10 +199,24 @@ app.command(text_app)
 
 
 @lean_app.command(name="serve")
-def serve_lean(run_dir: Path, parent_pid: int | None = None, max_slots: int = 4) -> int:
+def serve_lean(service_dir: Path | None = None) -> int:
     from arena.cli.lean import serve
 
-    return serve(run_dir, parent_pid, max_slots)
+    return serve(service_dir)
+
+
+@lean_app.command()
+def status(json_output: Annotated[bool, Parameter(name="json")] = False) -> int:
+    from arena.cli.lean import status as show_status
+
+    return show_status(json_output)
+
+
+@lean_app.command()
+def stop() -> int:
+    from arena.cli.lean import stop as stop_service
+
+    return stop_service()
 
 
 @lean_app.command()

@@ -577,6 +577,8 @@ def run_lean(
             "timeout": timeout,
             "lane": lane,
         }
+        if run_id := os.environ.get(lean_session.RUN_ID_ENV):
+            payload["run_id"] = run_id
         # queue for a worker + header open + the check (+ a restore after a timeout) + slack
         queue = lean_session.MODEL_QUEUE_TIMEOUT if lane == "model" else timeout + lean_session.OPEN_TIMEOUT
         wait = queue + lean_session.OPEN_TIMEOUT + 2 * timeout + 60
@@ -617,6 +619,8 @@ def warm_session(row: dict, version: str, commit: str, slots: int, lane: str = "
         "timeout": lean_session.OPEN_TIMEOUT,
         "lane": lane,
     }
+    if run_id := os.environ.get(lean_session.RUN_ID_ENV):
+        payload["run_id"] = run_id
     return lean_session.request(payload, lean_session.OPEN_TIMEOUT + 120)
 
 
