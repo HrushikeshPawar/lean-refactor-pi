@@ -6,11 +6,13 @@ session keeps Lean's own language server alive for the run. The candidate file i
 open document; a new draft is a `textDocument/didChange` that Lean re-elaborates
 incrementally from the first changed line, so only the target theorem is elaborated.
 
-Model tool calls are one-shot processes, so the server is owned by a per-run daemon
-(`python -m arena.lean_session serve`) that the runner starts and stops. Compile paths
-reach it through a Unix socket named in `ARENA_LEAN_SESSION`. Anything that goes wrong
-(no daemon, crash, stale fingerprint, no memory) makes the caller run the cold compile
-and report which path ran; a session result is never trusted more than a cold one.
+Model tool calls are one-shot processes, so the servers are owned by one service per machine
+(`python -m arena.lean_session serve`), started on demand by `ensure_service`. A run leases the
+toolchains it uses; a toolchain closes when no lease or hold has named it for RELEASE_GRACE_S, so
+the next run of the same row finds it warm. Compile paths reach the service through the Unix
+socket named in `ARENA_LEAN_SESSION`. Anything that goes wrong (no service, crash, stale
+fingerprint, no memory) makes the caller run the cold compile and report which path ran; a session
+result is never trusted more than a cold one.
 
 Messages are rendered exactly like the command line renders them, so the diagnostics
 parser and every line number downstream are unchanged.
@@ -34,7 +36,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager, nullcontext, suppress
 from functools import lru_cache
 from pathlib import Path
-from typing import cast
+from typing import IO, cast
 
 ROOT = Path(__file__).resolve().parents[1]
 ENV = "ARENA_LEAN_SESSION"
@@ -66,8 +68,11 @@ OPENING_NAME = (
 )
 WORKER_GB = 3.0  # planning figure until a real worker has been measured
 RESERVE_GB = 5.0  # memory that must stay available after opening another worker
-ADHOC_IDLE_S = 600
-SERVICE_LINGER_S = 600
+ADHOC_IDLE_S = 600  # a project no lease or hold ever named closes after this long without a request
+RELEASE_GRACE_S = float(
+    os.environ.get("ARENA_LEAN_RELEASE_GRACE_S", "120")
+)  # a project stays warm this long after its last lease or hold ends, for the row's next run
+SERVICE_LINGER_S = 600  # the service exits after this long with no projects, leases or holds
 SOCKET_LIMIT = 100  # sun_path is 108 bytes
 # The server asks `lake setup-file` for the file's options and imports. Those options (a lakefile's
 # `leanOptions`, such as warnings as errors) are not what `lake env lean <file>` compiles with, so
@@ -315,6 +320,7 @@ class _Doc:
         self.lane = "model"
         self.header: str | None = None  # the text of the imports and prefix this document was opened with
         self.display: str | None = None
+        self.stale = False  # its file prefix changed while it was busy: closed when released
         self.token: _Token | None = None
 
 
@@ -695,8 +701,8 @@ class _Entry:
         self.worker_gb = WORKER_GB
         self.last_text: str | None = None
         self.growing = False
-        self.prefixes: dict[str, str] = {}  # file -> hash of the text before the target declaration
-        self.close_displays: set[str] = set()
+        self.prefixes: dict[tuple[str | None, str], str] = {}  # (run, file) -> hash of the text before the target
+        self.unreferenced_since: float | None = None  # when the last lease or hold naming it ended
         self.last_header_end: int | None = None
         self.was_referenced = False
         self.queues: dict[str, list[object]] = {
@@ -717,6 +723,7 @@ class Session:
         self.leases: dict[str, dict] = {}
         self.holds: dict[str, dict] = {}
         self.entries: dict[str, _Entry] = {}
+        self._starting: dict[str, threading.Lock] = {}  # one server start per project at a time
         self.lock = threading.Lock()
         self.counter = 0
         self.closing = False
@@ -726,68 +733,83 @@ class Session:
     def _pid_alive(pid: int) -> bool:
         return running(pid)
 
+    @staticmethod
+    def _name(project: Path | str) -> str:
+        return str(Path(project).resolve())
+
+    def _referenced_locked(self, name: str) -> bool:
+        return any(name == lease["primary"] or name in lease["others"] for lease in self.leases.values()) or any(
+            name in hold["projects"] for hold in self.holds.values()
+        )
+
     def _referenced(self, project: Path | str) -> bool:
-        name = str(project)
+        name = self._name(project)
         with self.lock:
-            return any(name == lease["primary"] or name in lease["others"] for lease in self.leases.values()) or any(
-                name in hold["projects"] for hold in self.holds.values()
-            )
+            return self._referenced_locked(name)
 
     def _is_primary(self, project: Path | str) -> bool:
-        name = str(project)
+        name = self._name(project)
         with self.lock:
             return any(name == lease["primary"] for lease in self.leases.values())
 
     def _is_adhoc(self, entry: _Entry) -> bool:
         return not entry.was_referenced
 
+    def _claim(self, names: list[str]) -> None:
+        """A new lease or hold stops its projects' grace countdown; they are never ad hoc again. Caller holds the lock."""
+        for name in names:
+            if entry := self.entries.get(name):
+                entry.was_referenced = True
+                entry.unreferenced_since = None
+
+    def _unclaim(self, names: list[str]) -> list[str]:
+        """Start the grace countdown of every open project nothing references any more. Caller holds the lock."""
+        now, closing = time.monotonic(), []
+        for name in names:
+            entry = self.entries.get(name)
+            if entry is not None and not self._referenced_locked(name):
+                if entry.unreferenced_since is None:
+                    entry.unreferenced_since = now
+                closing.append(name)
+        return closing
+
     def lease(self, request: dict) -> dict:
         pid = int(request.get("pid", 0))
         run_id = str(request.get("run_id", ""))
         if not run_id or not self._pid_alive(pid):
             return {"ok": False, "reason": "lease pid is not alive"}
+        primary = self._name(request["primary"])
+        others = [self._name(project) for project in request.get("others", [])]
         with self.lock:
-            self.leases[run_id] = {"pid": pid, "primary": str(request["primary"]), "others": list(request["others"])}
-            for project in [request["primary"], *request["others"]]:
-                if entry := self.entries.get(str(project)):
-                    entry.was_referenced = True
-            self.last_active = time.monotonic()
+            self.leases[run_id] = {"pid": pid, "primary": primary, "others": others}
+            self._claim([primary, *others])
         return {"ok": True}
 
     def hold(self, request: dict) -> dict:
         pid = int(request.get("pid", 0))
         if not self._pid_alive(pid):
             return {"ok": False, "reason": "hold pid is not alive"}
+        owner = str(request["owner"])
+        projects = [self._name(project) for project in request["projects"]]
         with self.lock:
-            self.holds[str(request["owner"])] = {"pid": pid, "projects": list(request["projects"])}
-            for project in request["projects"]:
-                if entry := self.entries.get(str(project)):
-                    entry.was_referenced = True
-            self.last_active = time.monotonic()
+            previous = self.holds.get(owner, {}).get("projects", [])
+            self.holds[owner] = {"pid": pid, "projects": projects}
+            self._claim(projects)
+            self._unclaim(previous)
         return {"ok": True}
 
     def release(self, run_id: str) -> dict:
+        """Drop a lease. Projects nothing else references close after RELEASE_GRACE_S (`closing`)."""
         with self.lock:
             lease = self.leases.pop(run_id, None)
-            self.last_active = time.monotonic()
-        closing = []
-        if lease:
-            for name in [lease["primary"], *lease["others"]]:
-                if not self._referenced(name):
-                    entry = self.entries.get(name)
-                    if entry is not None:
-                        self._close_unreferenced(entry)
-                        closing.append(name)
+            closing = self._unclaim([lease["primary"], *lease["others"]]) if lease else []
         return {"ok": True, "closing": closing}
 
     def unhold(self, owner: str) -> dict:
         with self.lock:
             hold = self.holds.pop(owner, None)
-            self.last_active = time.monotonic()
-        if hold:
-            for name in hold["projects"]:
-                if not self._referenced(name) and (entry := self.entries.get(name)) is not None:
-                    self._close_unreferenced(entry)
+            if hold:
+                self._unclaim(hold["projects"])
         return {"ok": True}
 
     def _close_unreferenced(self, entry: _Entry) -> None:
@@ -796,47 +818,55 @@ class Session:
                 return
             with self.lock:
                 name = str(entry.project)
-                referenced = any(
-                    name == lease["primary"] or name in lease["others"] for lease in self.leases.values()
-                ) or any(name in hold["projects"] for hold in self.holds.values())
-                if referenced:
+                if self._referenced_locked(name) or self.entries.get(name) is not entry:
                     return
-                self.entries.pop(str(entry.project), None)
+                self.entries.pop(name)
             self._stop_entry(entry)
         _log(f"closed: no run or queued row needs it ({entry.project.name})")
 
     def reap_dead(self) -> None:
+        """Drop leases and holds whose process is gone; their projects start the grace countdown."""
         with self.lock:
+            dead = [lease for lease in self.leases.values() if not self._pid_alive(lease["pid"])]
+            dead += [hold for hold in self.holds.values() if not self._pid_alive(hold["pid"])]
             self.leases = {key: value for key, value in self.leases.items() if self._pid_alive(value["pid"])}
             self.holds = {key: value for key, value in self.holds.items() if self._pid_alive(value["pid"])}
-            entries = list(self.entries.values())
-        for entry in entries:
-            if not self._referenced(entry.project):
-                self._close_unreferenced(entry)
+            for item in dead:
+                self._unclaim([item["primary"], *item["others"]] if "primary" in item else item["projects"])
 
     # slots
     def _entry(self, project: Path, key: dict) -> _Entry:
+        name = str(project)
         with self.lock:
-            entry = self.entries.get(str(project))
-            if entry is not None and (not entry.server.alive() or entry.key != key):
-                reason = "crashed" if not entry.server.alive() else "changed"
-                old = self.entries.pop(str(project))
-                self._stop_entry(old)
+            starting = self._starting.setdefault(name, threading.Lock())
+        # Starting a server takes seconds: hold only this project's start lock, so status and other
+        # projects are never kept waiting behind it.
+        with starting:
+            with self.lock:
+                entry = self.entries.get(name)
+                reason = None
+                if entry is not None and (not entry.server.alive() or entry.key != key):
+                    reason = "crashed" if not entry.server.alive() else "changed"
+                    self.entries.pop(name)
+            if entry is not None and reason is not None:
+                self._stop_entry(entry)
                 _log(f"server {project.name} restarted: {reason}")
                 if reason == "changed":
-                    changed = sorted(k for k in key if key[k] != old.key.get(k))
+                    changed = sorted(k for k in key if key[k] != entry.key.get(k))
                     raise SessionError("stale session: " + ", ".join(changed) + " changed; restarting it")
                 entry = None
             if entry is None:
                 server = LeanServer(project, self.logs / f"{project.name}.log")
                 server.start()
                 _log(f"server {project.name} started")
-                entry = self.entries[str(project)] = _Entry(project, key, server)
+                entry = _Entry(project, key, server)
                 server.open_gate = lambda timeout, entry=entry: self.budget.opening(entry.worker_gb, timeout)
-                entry.was_referenced = any(
-                    str(project) == lease["primary"] or str(project) in lease["others"]
-                    for lease in self.leases.values()
-                ) or any(str(project) in hold["projects"] for hold in self.holds.values())
+                with self.lock:
+                    if self.closing:
+                        server.stop()
+                        raise SessionError("session closing")
+                    entry.was_referenced = self._referenced_locked(name)
+                    self.entries[name] = entry
             entry.used = time.monotonic()
             return entry
 
@@ -847,18 +877,21 @@ class Session:
         sha, display = request.get("prefix_sha"), request["display"]
         if not sha:
             return
-        known = entry.prefixes.setdefault(display, sha)
+        pin = (request.get("run_id"), display)  # runs share the service; each run pins its own prefix
+        known = entry.prefixes.setdefault(pin, sha)
         if known != sha:
             with entry.condition:
-                entry.prefixes[display] = sha
-                entry.close_displays.add(display)
+                entry.prefixes.pop(pin, None)  # the next request pins the prefix afresh
                 for slot in list(entry.slots):
-                    if slot.display == display and not slot.busy:
+                    if slot.display != display:
+                        continue
+                    if slot.busy:
+                        slot.stale = True
+                        continue
+                    with suppress(SessionError, OSError):
                         entry.server.close_doc(slot)
-                        entry.slots.remove(slot)
-                        self._free(slot)
-                if not any(slot.display == display for slot in entry.slots):
-                    entry.close_displays.discard(display)
+                    entry.slots.remove(slot)
+                    self._free(slot)
             _log(f"documents for {display} closed: file prefix changed")
             raise SessionError("stale session: the file prefix changed")
 
@@ -1061,17 +1094,13 @@ class Session:
         with entry.condition:
             slot.busy = False
             slot.used = time.monotonic()
-            if slot.display in entry.close_displays:
+            if slot.stale:
                 with suppress(SessionError, OSError):
                     entry.server.close_doc(slot)
                 if slot in entry.slots:
                     entry.slots.remove(slot)
                 self._free(slot)
-                if not any(item.display == slot.display for item in entry.slots):
-                    entry.close_displays.discard(slot.display)
             entry.condition.notify_all()
-        if not self._referenced(entry.project) and entry.was_referenced:
-            self._close_unreferenced(entry)
 
     # request
     def check(self, request: dict) -> dict:
@@ -1191,7 +1220,7 @@ class Session:
                 with self.lock:
                     slot, blocked = self._new_slot(entry, lane)
                 if slot is None:
-                    if blocked is not None and blocked not in ("slots", "share"):
+                    if blocked is not None and blocked != "slots":
                         self._refused(entry, blocked)
                         failed.append(f"no room for a Lean worker: {blocked}")
                     break
@@ -1221,32 +1250,45 @@ class Session:
 
     def status(self) -> dict:
         with self.lock:
-            return {
-                "pid": os.getpid(),
-                "protocol": PROTOCOL,
-                "code": code_sha(),
-                "leases": self.leases.copy(),
-                "holds": self.holds.copy(),
-                "servers": [
-                    {
-                        "project": str(e.project),
-                        "workers": len([s for s in e.slots if s.text is not None]),
-                        "busy": len([s for s in e.slots if s.busy]),
-                        "gb": round(tree_pss_gb(e.server.pgid), 2),
-                        "pgid": e.server.pgid,
-                        "pids": process_tree(e.server.pgid),
-                    }
-                    for e in self.entries.values()
-                ],
-            }
+            leases = {key: dict(value) for key, value in self.leases.items()}
+            holds = {key: dict(value) for key, value in self.holds.items()}
+            entries = list(self.entries.values())
+        # /proc is read outside the lock: a status call must stay quick while the service is busy
+        return {
+            "pid": os.getpid(),
+            "protocol": PROTOCOL,
+            "code": code_sha(),
+            "leases": leases,
+            "holds": holds,
+            "servers": [
+                {
+                    "project": str(e.project),
+                    "workers": len([s for s in e.slots if s.text is not None]),
+                    "busy": len([s for s in e.slots if s.busy]),
+                    "gb": round(tree_pss_gb(e.server.pgid), 2),
+                    "pgid": e.server.pgid,
+                    "pids": process_tree(e.server.pgid),
+                    "closes_in_s": None
+                    if e.unreferenced_since is None
+                    else max(0, round(RELEASE_GRACE_S - (time.monotonic() - e.unreferenced_since))),
+                }
+                for e in entries
+            ],
+        }
 
     def reap_idle(self) -> None:
+        """Close a project RELEASE_GRACE_S after its last lease or hold ended, or an ad hoc one after ADHOC_IDLE_S
+        without a request. A busy project closes on the first tick after its request ends."""
         self.reap_dead()
         now = time.monotonic()
         with self.lock:
             entries = list(self.entries.values())
         for entry in entries:
-            if self._is_adhoc(entry) and not self._referenced(entry.project) and now - entry.used > ADHOC_IDLE_S:
+            if entry.was_referenced:
+                due = entry.unreferenced_since is not None and now - entry.unreferenced_since >= RELEASE_GRACE_S
+            else:
+                due = now - entry.used >= ADHOC_IDLE_S
+            if due:
                 self._close_unreferenced(entry)
 
     def should_exit(self) -> bool:
@@ -1279,6 +1321,7 @@ class _Handler(socketserver.StreamRequestHandler):
         except ValueError:
             return
         session = cast(_Server, self.server).session
+        session.last_active = time.monotonic()  # any client keeps a lingering service from exiting under it
         op = request.get("op")
         try:
             if op == "check":
@@ -1319,25 +1362,62 @@ def socket_path(directory: Path | None = None) -> Path:
     return path
 
 
+def _probe(path: Path, timeout: float) -> dict | str:
+    """The service's status reply, "absent" when nothing listens on the socket, or "busy" when something
+    listens but gives no answer in time (a busy service must never be mistaken for a dead one)."""
+    try:
+        with socket.socket(socket.AF_UNIX) as connection:
+            connection.settimeout(timeout)
+            connection.connect(str(path))
+            connection.sendall(json.dumps({"op": "status", "protocol": PROTOCOL}).encode() + b"\n")
+            line = connection.makefile("rb").readline()
+    except (FileNotFoundError, ConnectionRefusedError):
+        return "absent"
+    except OSError:
+        return "busy"
+    try:
+        reply = json.loads(line) if line else None
+    except ValueError:
+        return "busy"
+    return reply if isinstance(reply, dict) and reply.get("ok") else "busy"
+
+
+def _take_start_lock(directory: Path, blocking: bool = True) -> IO[str] | None:
+    """The service directory's start lock, held until the returned file is closed (None: someone else holds it).
+    A client holds it while it finds or starts the service, and a service while it exits."""
+    lock = (directory / LOCK_NAME).open("a")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+    except BlockingIOError:
+        lock.close()
+        return None
+    return lock
+
+
 def ensure_service(directory: Path | None = None, wait: float = 15.0) -> str:
     directory = directory or service_dir()
     directory.mkdir(parents=True, exist_ok=True)
     path = socket_path(directory)
-    with (directory / LOCK_NAME).open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        status = request({"op": "status", "protocol": PROTOCOL}, 1, str(path)) if path.exists() else None
-        if status and status.get("ok"):
+    with cast(IO[str], _take_start_lock(directory)):
+        deadline = time.monotonic() + wait
+        status = _probe(path, 2.0)
+        while status == "busy" and time.monotonic() < deadline:
+            time.sleep(0.2)
+            status = _probe(path, 2.0)
+        if status == "busy":
+            raise SessionError(f"the Lean service does not answer; see {directory / LOG_NAME}")
+        if isinstance(status, dict):
             if status.get("protocol") == PROTOCOL and status.get("code") == code_sha():
                 return str(path)
             if status.get("leases") or status.get("holds"):
                 raise SessionError("the Lean service runs older code with live runs")
             request({"op": "shutdown", "protocol": PROTOCOL}, 2, str(path))
-            deadline = time.monotonic() + 20
-            while path.exists() and time.monotonic() < deadline:
+            stop_by = time.monotonic() + 20
+            while _probe(path, 1.0) != "absent" and time.monotonic() < stop_by:
                 time.sleep(0.05)
-            if path.exists():
+            if _probe(path, 1.0) != "absent":
                 raise SessionError("old Lean service did not stop")
-        path.unlink(missing_ok=True)
+        path.unlink(missing_ok=True)  # nothing listens on it
         log = (directory / LOG_NAME).open("ab")
         try:
             subprocess.Popen(
@@ -1352,8 +1432,8 @@ def ensure_service(directory: Path | None = None, wait: float = 15.0) -> str:
             log.close()
         deadline = time.monotonic() + wait
         while time.monotonic() < deadline:
-            status = request({"op": "status", "protocol": PROTOCOL}, 0.5, str(path)) if path.exists() else None
-            if status and status.get("ok") and status.get("code") == code_sha():
+            status = _probe(path, 0.5)
+            if isinstance(status, dict) and status.get("code") == code_sha():
                 return str(path)
             time.sleep(0.05)
         raise SessionError(f"Lean service did not become ready; see {directory / LOG_NAME}")
@@ -1362,15 +1442,20 @@ def ensure_service(directory: Path | None = None, wait: float = 15.0) -> str:
 def serve(directory: Path) -> int:
     directory.mkdir(parents=True, exist_ok=True)
     path = socket_path(directory)
+    if isinstance(_probe(path, 2.0), dict):
+        raise SessionError(f"a Lean service already answers on {path}")
     path.unlink(missing_ok=True)
     session = Session(directory)
     server = _Server(str(path), _Handler)
     server.session = session
+    own_socket = path.stat().st_ino
     info = directory / INFO_NAME
     started = time.time()
+    exiting: list[IO[str]] = []  # the start lock, held from the linger decision until the socket is gone
 
     def write_info() -> None:
-        info.write_text(
+        temporary = info.with_name(f"{INFO_NAME}.{os.getpid()}.tmp")
+        temporary.write_text(
             json.dumps(
                 {
                     "pid": os.getpid(),
@@ -1384,6 +1469,7 @@ def serve(directory: Path) -> int:
             )
             + "\n"
         )
+        os.replace(temporary, info)  # readers never see a half-written file
 
     def stop(*_args) -> None:
         threading.Thread(target=server.shutdown, daemon=True).start()
@@ -1397,8 +1483,14 @@ def serve(directory: Path) -> int:
             with suppress(OSError):
                 write_info()
             if session.should_exit():
-                stop()
-                return
+                # Exit only while no client is starting or finding the service (they hold the start lock).
+                gate = _take_start_lock(directory, blocking=False)
+                if gate is not None and session.should_exit():
+                    exiting.append(gate)
+                    stop()
+                    return
+                if gate is not None:
+                    gate.close()
             time.sleep(1.0)
 
     write_info()
@@ -1409,45 +1501,65 @@ def serve(directory: Path) -> int:
     finally:
         session.shutdown()
         server.server_close()
-        path.unlink(missing_ok=True)
-        info.unlink(missing_ok=True)
+        with suppress(OSError):
+            if path.stat().st_ino == own_socket:  # never remove a newer service's socket
+                path.unlink()
+        with suppress(OSError, ValueError):
+            if json.loads(info.read_text()).get("pid") == os.getpid():
+                info.unlink()
+        for gate in exiting:
+            gate.close()
     return 0
 
 
+def _is_service(pid: int, directory: Path) -> bool:
+    try:
+        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+    except OSError:
+        return False
+    words = [word.decode(errors="replace") for word in cmdline]
+    return "arena.lean_session" in words and str(directory) in words
+
+
 def stop_service(directory: Path | None = None, grace: float = 20.0) -> None:
+    """Ask the service to shut down; if it does not, kill the pid recorded in service.json (after checking it is
+    this directory's service), then any Lean process it recorded that outlived it."""
     directory = directory or service_dir()
-    path, info = socket_path(directory), directory / INFO_NAME
-    if not path.exists():
-        info.unlink(missing_ok=True)
-        return
-    request({"op": "shutdown", "protocol": PROTOCOL}, 2, str(path))
-    deadline = time.monotonic() + grace
-    while path.exists() and time.monotonic() < deadline:
-        time.sleep(0.05)
-    if path.exists():
-        try:
-            pid = int(json.loads(info.read_text())["pid"])
-            cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
-        except (OSError, ValueError, KeyError):
-            path.unlink(missing_ok=True)
-            info.unlink(missing_ok=True)
-            return
-        if "arena.lean_session" in cmdline:
+    path, info_path = socket_path(directory), directory / INFO_NAME
+    try:
+        info = json.loads(info_path.read_text())
+    except (OSError, ValueError):
+        info = {}
+    if _probe(path, 2.0) != "absent":
+        request({"op": "shutdown", "protocol": PROTOCOL}, 2, str(path))
+        deadline = time.monotonic() + grace
+        while _probe(path, 1.0) != "absent" and time.monotonic() < deadline:
+            time.sleep(0.05)
+    pid = info.get("pid")
+    if isinstance(pid, int) and running(pid) and _is_service(pid, directory):
+        for number, wait in ((signal.SIGTERM, 5.0), (signal.SIGKILL, 5.0)):
             with suppress(ProcessLookupError, PermissionError):
-                os.kill(pid, signal.SIGTERM)
-            deadline = time.monotonic() + 5
+                os.kill(pid, number)
+            deadline = time.monotonic() + wait
             while running(pid) and time.monotonic() < deadline:
                 time.sleep(0.05)
-        if not running(pid) or "arena.lean_session" not in cmdline:
+            if not running(pid):
+                break
+    for lean in info.get("pids", []):
+        with suppress(OSError):
+            if Path(f"/proc/{lean}/comm").read_text().strip() in ("lean", "lake"):
+                os.kill(int(lean), signal.SIGKILL)
+    if not (isinstance(pid, int) and running(pid)):
+        if _probe(path, 1.0) == "absent":
             path.unlink(missing_ok=True)
-            info.unlink(missing_ok=True)
+        info_path.unlink(missing_ok=True)
 
 
 # -- client --------------------------------------------------------------------------------------
 
 
 def request(payload: dict, timeout: float, path: str | None = None) -> dict | None:
-    """One round trip to the daemon; None when there is no daemon or it cannot be reached."""
+    """One round trip to the service; None when no socket is configured."""
     path = path or os.environ.get(ENV)
     if not path:
         return None

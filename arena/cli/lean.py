@@ -13,12 +13,20 @@ from arena.engine import ROOT
 
 
 def serve(service_dir: Path | None = None) -> int:
-    """Run the shared Lean service in the foreground."""
-    return lean_session.serve(service_dir or lean_session.service_dir())
+    """Run the shared Lean service in the foreground (refused while another service answers)."""
+    try:
+        return lean_session.serve(service_dir or lean_session.service_dir())
+    except lean_session.SessionError as error:
+        print(error)
+        return 1
 
 
 def status(json_output: bool = False) -> int:
-    path = lean_session.socket_path()
+    try:
+        path = lean_session.socket_path()
+    except lean_session.SessionError as error:
+        print(f"no service ({error})")
+        return 0
     reply = lean_session.request({"op": "status", "protocol": lean_session.PROTOCOL}, 2, str(path))
     if not reply or not reply.get("ok"):
         print("no service")
@@ -31,8 +39,16 @@ def status(json_output: bool = False) -> int:
     table.add_column("Workers", justify="right")
     table.add_column("Busy", justify="right")
     table.add_column("GB", justify="right")
+    table.add_column("Closes in", justify="right")
     for server in reply.get("servers", []):
-        table.add_row(server["project"], str(server["workers"]), str(server["busy"]), str(server["gb"]))
+        closes = server.get("closes_in_s")
+        table.add_row(
+            server["project"],
+            str(server["workers"]),
+            str(server["busy"]),
+            str(server["gb"]),
+            "-" if closes is None else f"{closes} s",
+        )
     Console().print(table)
     Console().print(f"Leases: {json.dumps(reply.get('leases', {}), sort_keys=True)}")
     Console().print(f"Holds: {json.dumps(reply.get('holds', {}), sort_keys=True)}")

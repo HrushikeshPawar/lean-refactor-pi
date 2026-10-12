@@ -28,6 +28,11 @@ def alive(pid: int) -> bool:
     return lean_session.running(pid)
 
 
+def status_of(path: str, timeout: float = 5) -> dict:
+    """The service's status reply (a dict even when it cannot be reached)."""
+    return lean_session.request({"op": "status"}, timeout, path) or {}
+
+
 def wait_until(check, seconds: float = 20.0) -> bool:
     end = time.monotonic() + seconds
     while time.monotonic() < end:
@@ -167,7 +172,7 @@ class DaemonTests(unittest.TestCase):
         lean_session.stop_service(self.directory)
         self.assertFalse(Path(path).exists())
         self.assertFalse((self.directory / lean_session.INFO_NAME).exists())
-        self.assertEqual(lean_session.request({"op": "status"}, 2, path)["ok"], False)
+        self.assertEqual(status_of(path, 2)["ok"], False)
 
     def test_an_overlong_service_socket_path_is_rejected(self):
         deep = self.directory / ("x" * 90)
@@ -213,9 +218,7 @@ class DaemonTests(unittest.TestCase):
             self.assertTrue(reply["ok"], reply)
             parent.kill()
             parent.wait()
-            self.assertTrue(
-                wait_until(lambda: "gone" not in lean_session.request({"op": "status"}, 2, path)["leases"], 5)
-            )
+            self.assertTrue(wait_until(lambda: "gone" not in status_of(path, 2)["leases"], 5))
         finally:
             if parent.poll() is None:
                 parent.kill()
@@ -451,20 +454,7 @@ class CoreSessionTests(SessionHarness, unittest.TestCase):
         proof = self.row["statement"] + " := by\n  intros\n  sorry"
         first = compile_version(self.row, proof, self.version, self.commit, probe=True)
         self.assertEqual(first["lean"]["path"], "session")
-        owner = f"queued-{self.run_id}"
         next_run = f"next-{self.run_id}"
-        held = lean_session.request(
-            {
-                "op": "hold",
-                "protocol": lean_session.PROTOCOL,
-                "owner": owner,
-                "pid": os.getpid(),
-                "projects": [project],
-            },
-            5,
-            self.socket,
-        )
-        self.assertTrue(held and held.get("ok"), held)
         lean_session.request(
             {"op": "release", "protocol": lean_session.PROTOCOL, "run_id": self.run_id}, 5, self.socket
         )
@@ -481,14 +471,12 @@ class CoreSessionTests(SessionHarness, unittest.TestCase):
             self.socket,
         )
         self.assertTrue(leased and leased.get("ok"), leased)
-        unheld = lean_session.request(
-            {"op": "unhold", "protocol": lean_session.PROTOCOL, "owner": owner}, 5, self.socket
-        )
-        self.assertTrue(unheld and unheld.get("ok"), unheld)
-        with patch.dict(os.environ, {"ARENA_RUN_ID": next_run}):
+        with patch.dict(os.environ, {lean_session.RUN_ID_ENV: next_run}):
             second = compile_version(self.row, proof + "\n-- second run", self.version, self.commit, probe=True)
-        self.assertFalse(second["lean"]["new_worker"])
+        self.assertFalse(second["lean"]["new_worker"])  # the released project stayed warm for the row's next run
         self.assertIsNone(second["lean"].get("header_seconds"))
+        log = (self.directory / lean_session.LOG_NAME).read_text(errors="replace")
+        self.assertNotIn(f"header open run={next_run}", log)
         lean_session.request({"op": "release", "protocol": lean_session.PROTOCOL, "run_id": next_run}, 5, self.socket)
         restored = lean_session.request(
             {
@@ -547,7 +535,7 @@ class CoreSessionTests(SessionHarness, unittest.TestCase):
         compile_version(self.row, statement + " := by\n  sorry", self.version, self.commit, probe=True)
 
         def workers() -> int:
-            return lean_session.request({"op": "status"}, 5, self.socket)["servers"][0]["workers"]
+            return status_of(self.socket, 5)["servers"][0]["workers"]
 
         self.assertTrue(
             wait_until(lambda: workers() >= lean_session.MAX_SLOTS, 120),
@@ -589,11 +577,7 @@ class CoreSessionTests(SessionHarness, unittest.TestCase):
 
     def test_a_crashed_server_falls_back_then_recovers(self):
         compile_version(self.row, self.row["src"], self.version, self.commit, measure=True)
-        victims = [
-            pid
-            for server in lean_session.request({"op": "status"}, 5, self.socket)["servers"]
-            for pid in server["pids"]
-        ]
+        victims = [pid for server in status_of(self.socket, 5)["servers"] for pid in server["pids"]]
         for pid in victims:
             with contextlib.suppress(ProcessLookupError):
                 os.kill(pid, signal.SIGKILL)
@@ -650,6 +634,9 @@ class LifecycleTests(unittest.TestCase):
         self.previous_service_dir = os.environ.get(lean_session.SERVICE_DIR_ENV)
         os.environ[lean_session.SERVICE_DIR_ENV] = str(self.directory)
         self.addCleanup(self.restore_service_dir)
+        grace = patch.dict(os.environ, {"ARENA_LEAN_RELEASE_GRACE_S": "1"})  # the service inherits it
+        grace.start()
+        self.addCleanup(grace.stop)
 
     def restore_service_dir(self):
         lean_session.stop_service(self.directory)
@@ -692,7 +679,7 @@ class LifecycleTests(unittest.TestCase):
             socket_,
         )
         self.assertTrue(reply["ok"], reply)
-        servers = lean_session.request({"op": "status"}, 5, socket_)["servers"]
+        servers = status_of(socket_, 5)["servers"]
         self.assertEqual(len(servers), 1)
         pids = servers[0]["pids"]
         self.assertGreaterEqual(len(pids), 2, "expected the server and a worker")
@@ -722,10 +709,7 @@ class LifecycleTests(unittest.TestCase):
             parent.wait()
             self.assertTrue(
                 wait_until(
-                    lambda: (
-                        run_id not in lean_session.request({"op": "status"}, 5, socket_)["leases"]
-                        and not any(alive(pid) for pid in pids)
-                    ),
+                    lambda: run_id not in status_of(socket_, 5)["leases"] and not any(alive(pid) for pid in pids),
                     20,
                 ),
                 "lease or project Lean processes survived the killed runner",
@@ -734,6 +718,16 @@ class LifecycleTests(unittest.TestCase):
             if parent.poll() is None:
                 parent.kill()
             parent.wait()
+
+    @unittest.skipUnless(CORE_READY, "Strata fixture environment is not provisioned")
+    def test_a_killed_service_leaves_no_lean_behind_even_without_the_sweep(self):
+        _socket, _run_id, _pid, pids = self.start_with_server()
+        service = json.loads((self.directory / lean_session.INFO_NAME).read_text())["pid"]
+        os.kill(service, signal.SIGKILL)
+        self.assertTrue(
+            wait_until(lambda: not any(alive(pid) for pid in pids), 30),
+            "Lean kept running after the service died and nothing swept it",
+        )
 
 
 @slow
@@ -746,6 +740,9 @@ class RunnerSessionTests(unittest.TestCase):
         self.service_directory = Path(tempfile.mkdtemp(prefix="arena-runner-service-"))
         self.previous_service_dir = os.environ.get(lean_session.SERVICE_DIR_ENV)
         os.environ[lean_session.SERVICE_DIR_ENV] = str(self.service_directory)
+        grace = patch.dict(os.environ, {"ARENA_LEAN_RELEASE_GRACE_S": "1"})  # the service inherits it
+        grace.start()
+        self.addCleanup(grace.stop)
 
     def tearDown(self):
         for run in self.runs:
@@ -792,15 +789,16 @@ class RunnerSessionTests(unittest.TestCase):
         status = lean_session.request({"op": "status"}, 5, info["socket"])
         run_id = run.run_id
         self.assertIn(run_id, status["leases"])
-        process.send_signal(signal.SIGINT)
+        os.killpg(process.pid, signal.SIGINT)  # a terminal Ctrl+C reaches the whole group (the service has its own)
         _, stderr = process.communicate(timeout=120)
         self.assertEqual(process.returncode, 128 + signal.SIGINT, stderr)
         self.assertNotEqual(run.json("cost.json").get("written_by"), "runner_ledger_reconstruction", stderr)
         self.assertEqual(run.json("summary.json")["stop_reason"], "interrupted")
+        self.assertTrue(wait_until(lambda: run_id not in status_of(info["socket"], 5)["leases"], 15))
         self.assertTrue(
-            wait_until(lambda: run_id not in lean_session.request({"op": "status"}, 5, info["socket"])["leases"], 15)
+            wait_until(lambda: status_of(info["socket"], 5)["servers"] == [], 15),
+            "the interrupted run's project outlived the release grace",
         )
-        self.assertEqual(lean_session.request({"op": "status"}, 5, info["socket"])["servers"], [])
 
     def test_a_killed_runner_leaves_no_lean_processes(self):
         call, FakeRun = self.probe()
@@ -809,25 +807,24 @@ class RunnerSessionTests(unittest.TestCase):
         process = run.start(own_group=True)
         self.assertTrue(run.wait_for_requests(2, 180), "the probe never finished")
         info = json.loads((self.service_directory / lean_session.INFO_NAME).read_text())
-        self.assertIn(run.run_id, lean_session.request({"op": "status"}, 5, info["socket"])["leases"])
-        children = subprocess.run(
-            ["ps", "--no-headers", "--ppid", str(process.pid), "-o", "pid="],
-            capture_output=True,
-            text=True,
-            check=False,
-        ).stdout.split()
-        for child in children:
+        self.assertIn(run.run_id, status_of(info["socket"], 5)["leases"])
+        # The runner started the machine-wide service, which must outlive the run: kill the runner's other
+        # descendants (Pi and its tools) by their recorded PIDs, then the runner itself.
+        victims = set(lean_session.process_tree(process.pid)) - set(lean_session.process_tree(info["pid"]))
+        victims -= {process.pid, info["pid"]}
+        for pid in victims:
             with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.kill(int(child), signal.SIGKILL)
+                os.kill(pid, signal.SIGKILL)
         process.kill()  # a crash: no handler runs
         process.wait()
+        self.assertTrue(wait_until(lambda: not any(alive(pid) for pid in victims), 10), "Pi or a tool survived")
         self.assertTrue(
             wait_until(
                 lambda: (
-                    run.run_id not in lean_session.request({"op": "status"}, 5, info["socket"])["leases"]
-                    and not lean_session.request({"op": "status"}, 5, info["socket"])["servers"]
+                    run.run_id not in status_of(info["socket"], 5)["leases"]
+                    and not status_of(info["socket"], 5)["servers"]
                 ),
-                5,
+                10,
             ),
             "lease or project Lean processes survived a crashed runner",
         )

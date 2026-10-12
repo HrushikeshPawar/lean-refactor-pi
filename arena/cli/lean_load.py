@@ -239,7 +239,7 @@ def render_report(
     for run in runs:
         lines.append(
             f"| {run['run']} | {run.get('warm_mode', '-')} | {_fmt(run.get('warm_seconds'))} "
-            f"| {run.get('header_opens', 0)} "
+            f"| {run.get('header_opens', '-')} "
             f"| {run.get('warm_ok')} | {run.get('warm_note', '')} |"
         )
     lines += [
@@ -407,7 +407,6 @@ class SimRun:
         self.process = None
         self.socket = ""
         self.run_id = f"lean-load-{os.getpid()}-{index}-{int(t0)}"
-        self.owns_service = False
         self.warm_done_at: float | None = None
         self.info: dict = {"run": index}
         self.budget = config["max_checks"]
@@ -419,13 +418,16 @@ class SimRun:
         self.commits = dict(engine.versions(row))
         self.deadline = 0.0
 
-    def start(self) -> None:
+    def start(self, socket: str | None = None) -> None:
+        """Lease this run's toolchains on the service at `socket` (found or started here when not given)."""
         from arena import engine, lean_session
 
-        path = lean_session.socket_path()
-        existing = lean_session.request({"op": "status", "protocol": lean_session.PROTOCOL}, 0.5, str(path))
-        self.owns_service = not bool(existing and existing.get("ok"))
-        self.socket = lean_session.ensure_service()
+        self.socket = socket or lean_session.ensure_service()
+        others = []  # the bench names its primary toolchain explicitly, so this is not engine.lease_projects
+        for version, commit in engine.versions(self.row):
+            if (version, commit) != self.primary:
+                with contextlib.suppress(FileNotFoundError):  # unprovisioned: compiled cold
+                    others.append(str(engine.workspace(self.row, version, commit)))
         reply = lean_session.request(
             {
                 "op": "lease",
@@ -433,20 +435,15 @@ class SimRun:
                 "run_id": self.run_id,
                 "pid": os.getpid(),
                 "primary": str(engine.workspace(self.row, *self.primary)),
-                "others": [
-                    str(engine.workspace(self.row, v, c))
-                    for v, c in engine.versions(self.row)
-                    if (v, c) != self.primary
-                ],
+                "others": others,
             },
             5,
             self.socket,
         )
         if not reply or not reply.get("ok"):
             raise RuntimeError(f"Lean service refused load-test lease: {(reply or {}).get('reason')}")
-        self.process = SimpleNamespace(
-            pid=int(json.loads((lean_session.service_dir() / lean_session.INFO_NAME).read_text())["pid"])
-        )
+        status = lean_session.request({"op": "status", "protocol": lean_session.PROTOCOL}, 5, self.socket) or {}
+        self.process = SimpleNamespace(pid=status.get("pid"))
 
     def next_serial(self) -> int:
         with self.lock:
@@ -632,14 +629,14 @@ def simulate(config: dict) -> int:
     initial_service = lean_session.request({"op": "status", "protocol": lean_session.PROTOCOL}, 0.5, str(service_path))
     started_service = not bool(initial_service and initial_service.get("ok"))
     try:
+        socket = lean_session.ensure_service()  # one service shared by every simulated run
         for index in range(config["runs"]):
             run = SimRun(index, out / f"run-{index}", row, config, recorder, t0)
-            run.start()
+            run.start(socket)
             if run.process is None:
                 raise RuntimeError("load simulator failed to start its Lean session daemon")
             runs.append(run)
             sessions[index] = run.socket
-            run.owns_service = False
             log(f"run {index}: service pid {run.process.pid}; socket={run.socket}")
         sampler = Sampler(sessions, t0, recorder.write)
         sampler.start()
@@ -703,7 +700,8 @@ def simulate(config: dict) -> int:
         if started_service:
             lean_session.stop_service()
         time.sleep(2)
-        orphans = find_orphans(recorded_pids, recorded_pgids, baseline)
+        # On a service other runs share, their Lean processes are not ours to kill.
+        orphans = find_orphans(recorded_pids, recorded_pgids, baseline) if started_service else []
         for pid in orphans:  # only processes recorded as ours; kill by PID
             with contextlib.suppress(OSError):
                 os.kill(pid, signal.SIGKILL)

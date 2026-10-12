@@ -197,10 +197,7 @@ def start_lean_session(directory: Path, row: dict, run_id: str) -> None:
         _LEAN["directory"] = directory
         path = lean_session.ensure_service()
         os.environ[lean_session.ENV] = path
-        versions = engine.versions(row)
-        version, commit = engine.measure_version(row)
-        primary = str(engine.workspace(row, version, commit))
-        others = [str(engine.workspace(row, v, c)) for v, c in versions if (v, c) != (version, commit)]
+        primary, others = engine.lease_projects(row)
         reply = lean_session.request(
             {
                 "op": "lease",
@@ -217,8 +214,8 @@ def start_lean_session(directory: Path, row: dict, run_id: str) -> None:
             raise lean_session.SessionError((reply or {}).get("reason", "service refused lease"))
         _LEAN.update(socket=path, run_id=run_id)
         os.environ[lean_session.RUN_ID_ENV] = run_id
-        pid = int(json.loads((lean_session.service_dir() / lean_session.INFO_NAME).read_text())["pid"])
-        print(f"Lean session pid={pid}; socket={path}", flush=True)
+        status = lean_session.request({"op": "status", "protocol": lean_session.PROTOCOL}, 5, path) or {}
+        print(f"Lean session pid={status.get('pid')}; socket={path}", flush=True)
     except (lean_session.SessionError, OSError) as error:
         os.environ.pop(lean_session.ENV, None)
         print(f"Lean session unavailable ({error}); Lean calls will compile cold", file=sys.stderr, flush=True)
@@ -263,7 +260,7 @@ def stop_unhealthy(args, directory: Path, reasons: list[str]) -> int:
 
 
 def stop_lean_session() -> None:
-    """Stop the daemon and every Lean process it started; runs on every way out of `main`."""
+    """Release this run's lease (the service keeps its toolchains warm for a while); runs on every way out of `main`."""
     directory, _LEAN["directory"] = _LEAN["directory"], None
     path, _LEAN["socket"] = _LEAN["socket"], None
     run_id, _LEAN["run_id"] = _LEAN["run_id"], None

@@ -389,15 +389,10 @@ def recorded_pids(directory: Path) -> tuple[list[int], list[int]]:
 
 
 def ours(pid: int, directory: Path, comm_fn=proc_comm, cmdline_fn=proc_cmdline) -> bool:
-    """A recorded pid may have been reused: only Lean/lake or a run-scoped process qualifies."""
-    comm = comm_fn(pid)
-    if comm is None:
-        return False
-    if comm in ("lean", "lake"):
-        return True
-    return (
-        comm.startswith("python") and str(directory) in cmdline_fn(pid) and "arena.lean_session" not in cmdline_fn(pid)
-    )
+    """A recorded pid may have been reused: only Lean or lake qualifies. Runs own no Python helper any more (the
+    Lean service is machine-wide and never a run's to stop)."""
+    del directory, cmdline_fn
+    return comm_fn(pid) in ("lean", "lake")
 
 
 def lingering(directory: Path, comm_fn=proc_comm, cmdline_fn=proc_cmdline, alive_fn=proc_alive) -> list[int]:

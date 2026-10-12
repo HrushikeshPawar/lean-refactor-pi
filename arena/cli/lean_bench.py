@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
+import tempfile
 import threading
 import time
 from contextlib import suppress
@@ -318,7 +320,8 @@ def _kill_orphans(pids: list[int]) -> list[int]:
     return [pid for pid in still_running if lean_session.running(pid)]
 
 
-def _stop_checked(run: lean_load.SimRun, baseline_processes: set[int]) -> None:
+def _stop_checked(run: lean_load.SimRun, service: Path, baseline_processes: set[int]) -> None:
+    """Stop the bench's private service and check that none of its Lean processes outlived it."""
     status = lean_session.request({"op": "status", "protocol": lean_session.PROTOCOL}, 10, run.socket) or {}
     if not status.get("ok"):
         raise RuntimeError(f"Lean status failed before shutdown: {status.get('reason', 'unknown error')}")
@@ -326,8 +329,7 @@ def _stop_checked(run: lean_load.SimRun, baseline_processes: set[int]) -> None:
     pgids = {int(server["pgid"]) for server in status.get("servers", []) if server.get("pgid")}
     lean_session.request({"op": "release", "protocol": lean_session.PROTOCOL, "run_id": run.run_id}, 10, run.socket)
     run.process = None
-    if run.owns_service:
-        lean_session.stop_service()
+    lean_session.stop_service(service)
     orphans = lean_load.find_orphans(pids, pgids, baseline_processes)
     remaining = _kill_orphans(orphans)
     if remaining:
@@ -351,16 +353,20 @@ def _measure_pair(
     run.primary = (version, commit)
     baseline_processes = set(lean_load.processes_named(lean_load.LEAN_NAMES))
     sampler: _WorkerSampler | None = None
+    # A service of the bench's own (short path: the socket name is limited): no other run's Lean is measured
+    # with it or killed by it, and stopping it between the two opens makes the repeat open a real one where
+    # a shared service would keep the header warm.
+    service = Path(tempfile.mkdtemp(prefix="arena-bench-"))
     try:
-        run.start()
+        run.start(lean_session.ensure_service(service))
         run.warm()
         if not run.info.get("warm_ok"):
             raise RuntimeError(f"Lean warm-up failed for {row['name']} {version}: {run.info.get('warm_note')}")
         cold = float(run.info["warm_seconds"])
-        _stop_checked(run, baseline_processes)
+        _stop_checked(run, service, baseline_processes)
         run = lean_load.SimRun(index + 1_000_000, out / f"session-{index}-repeat", row, config, recorder, t0)
         run.primary = (version, commit)
-        run.start()
+        run.start(lean_session.ensure_service(service))
         run.warm()
         if not run.info.get("warm_ok"):
             raise RuntimeError(f"Lean repeat warm-up failed for {row['name']} {version}: {run.info.get('warm_note')}")
@@ -406,7 +412,10 @@ def _measure_pair(
         if sampler is not None and sampler.ident is not None and sampler.is_alive():
             sampler.stop()
         if run.process is not None:
-            _stop_checked(run, baseline_processes)
+            _stop_checked(run, service, baseline_processes)
+        with suppress(OSError):
+            shutil.copyfile(service / lean_session.LOG_NAME, out / f"service-{index}.log")
+        shutil.rmtree(service, ignore_errors=True)
 
 
 def measure(rows: list[str], versions: str | dict[str, list[str]], repeats: int, timeout: float, out_dir: Path) -> dict:

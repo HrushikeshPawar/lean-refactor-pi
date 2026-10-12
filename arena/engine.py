@@ -116,6 +116,21 @@ def workspace(row: dict, version: str, commit: str) -> Path:
     return environments.resolve(row["source"], version, commit)
 
 
+def lease_projects(row: dict) -> tuple[str, list[str]]:
+    """The workspaces a run of `row` leases on the Lean service: the measuring toolchain's, then every other
+    provisioned one. An unprovisioned toolchain is left out; calls on it compile cold."""
+    primary_version = measure_version(row)
+    others = []
+    for version, commit in versions(row):
+        if (version, commit) == primary_version:
+            continue
+        try:
+            others.append(str(workspace(row, version, commit)))
+        except FileNotFoundError:
+            continue
+    return str(workspace(row, *primary_version)), others
+
+
 def source_path(row: dict) -> str:
     """Path the candidate file has in the project. Standalone rows get a scratch path."""
     if row.get("file_path"):

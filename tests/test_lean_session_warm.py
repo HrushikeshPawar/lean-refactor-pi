@@ -125,6 +125,14 @@ class Base(unittest.TestCase):
             return []
         return [r for r in rows if method is None or r["method"] == method]
 
+    def settled(self, method, expected, within=3.0):
+        """The fake logs asynchronously: the count of `method` events once it reaches `expected` (or the deadline)."""
+        deadline = time.monotonic() + within
+        while len(self.events(method)) < expected and time.monotonic() < deadline:
+            time.sleep(0.02)
+        time.sleep(0.1)  # and nothing more arrives
+        return len(self.events(method))
+
 
 class HeaderFirstTests(Base):
     def test_the_header_open_is_not_charged_to_the_request_timeout(self):
@@ -170,8 +178,8 @@ class WarmTimeoutTests(Base):
         session = self.session()
         reply = session.check({**self.request("-- PROOF 30\n", timeout=0.4), "header_end": None})
         self.assertEqual((reply["ok"], reply["timeout"], reply["warm_kept"]), (True, True, False))
-        time.sleep(0.3)
-        self.assertEqual(len(self.events("didClose")), len(self.events("didOpen")))
+        self.assertEqual(self.settled("didOpen", 1), 1)
+        self.assertEqual(self.settled("didClose", 1), 1)
 
     def test_a_changed_header_reopens_the_document(self):
         server = lean_session.LeanServer(self.dir / "proj", self.dir / "s.log")
@@ -288,19 +296,17 @@ class BackgroundWorkerTests(Base):
             self.assertEqual(len(entry.lane_slots("model")), 0)
         self.assertEqual(len(session.entries[str(self.dir / "proj")].lane_slots("model")), 2)
 
-    def test_an_adhoc_project_closes_after_its_idle_limit(self):
+    def test_an_adhoc_project_stays_open_until_its_idle_limit(self):
         session = self.session(limit=8)
         self.background(session, self.other("v2"))
         entry = session.entries[str(self.dir / "v2")]
-        entry.used = time.monotonic() - 1
-        with patch.object(lean_session, "ADHOC_IDLE_S", 0.3):
+        entry.used = time.monotonic() - 5
+        session.reap_idle()  # the watch loop runs every second: an idle ad hoc project must outlive many ticks
+        self.assertIn(str(self.dir / "v2"), session.entries)
+        with patch.object(lean_session, "ADHOC_IDLE_S", 3):
             session.reap_idle()
         self.assertNotIn(str(self.dir / "v2"), session.entries)
-        for _ in range(100):
-            if self.events("didClose"):
-                break
-            time.sleep(0.02)
-        self.assertEqual(len(self.events("didClose")), 1)
+        self.assertEqual(self.settled("didClose", 1), 1)
 
     def test_warm_on_the_background_lane_opens_only_the_background_worker(self):
         session = self.session(limit=8)
@@ -507,30 +513,70 @@ class MachineBudgetTests(Base):
 
 
 class ServiceLeaseTests(Base):
-    def test_release_closes_a_project_unless_a_hold_still_references_it(self):
+    def reap(self, session, project, closed=True, within=5.0):
+        """Tick like the service's watch loop until `project` is closed (or, with closed=False, for a while).
+        A project closes only when no document is busy, and a check starts background pre-warming."""
+        deadline = time.monotonic() + within
+        while time.monotonic() < deadline:
+            session.reap_idle()
+            if closed and project not in session.entries:
+                break
+            time.sleep(0.05)
+        return project not in session.entries
+
+    def lease(self, session, run_id, primary, others=()):
+        reply = session.lease({"run_id": run_id, "pid": os.getpid(), "primary": primary, "others": list(others)})
+        self.assertTrue(reply["ok"], reply)
+
+    def test_the_next_run_of_a_row_finds_its_workers_warm_and_they_close_after_the_grace(self):
         session = self.session()
         project = str(self.dir / "proj")
-        self.assertTrue(session.check(self.request())["ok"])
-        lease = {"run_id": "first", "pid": os.getpid(), "primary": project, "others": []}
-        self.assertTrue(session.lease(lease)["ok"])
-        session.hold({"owner": "queue", "pid": os.getpid(), "projects": [project]})
-        session.release("first")
-        self.assertIn(project, session.entries)
-        session.unhold("queue")
-        for _ in range(100):
-            if project not in session.entries:
-                break
-            time.sleep(0.02)
-        self.assertNotIn(project, session.entries)
-        self.assertEqual(len(self.events("didClose")), len(self.events("didOpen")))
+        self.lease(session, "first", project)
+        self.assertTrue(session.check(self.request(run_id="first"))["ok"])
+        opened = self.settled("didOpen", 1)
+        self.assertEqual(session.release("first")["closing"], [project])
+        session.reap_idle()
+        self.assertIn(project, session.entries)  # inside the grace: still warm
+        self.lease(session, "second", project)
+        reply = session.check(self.request("-- PROOF 0.01\n", run_id="second"))
+        self.assertTrue(reply["ok"], reply)
+        self.assertFalse(reply["new_worker"])
+        self.assertIsNone(reply["header_seconds"])
+        self.assertEqual(self.settled("didOpen", opened), opened)  # no new document for the second run
+        session.release("second")
+        with patch.object(lean_session, "RELEASE_GRACE_S", 0):
+            self.assertTrue(self.reap(session, project))
+        self.assertEqual(self.settled("didClose", len(self.events("didOpen"))), len(self.events("didOpen")))
 
-    def test_a_dead_lease_pid_is_refused_and_reaped(self):
+    def test_a_project_another_lease_or_a_hold_names_stays_open(self):
         session = self.session()
-        self.assertFalse(session.lease({"run_id": "dead", "pid": 2**30, "primary": "p", "others": []})["ok"])
-        session.leases["old"] = {"pid": os.getpid(), "primary": "p", "others": []}
+        project, other = str(self.dir / "proj"), str(self.dir / "v2")
+        (self.dir / "v2").mkdir()
+        self.lease(session, "first", project)
+        self.lease(session, "second", other, others=[project])
+        self.assertTrue(session.check(self.request(run_id="first"))["ok"])
+        session.release("first")
+        with patch.object(lean_session, "RELEASE_GRACE_S", 0):
+            self.assertFalse(self.reap(session, project, closed=False, within=0.5))  # in the second run's others
+            self.assertTrue(session.hold({"owner": "queue", "pid": os.getpid(), "projects": [project]})["ok"])
+            session.release("second")
+            self.assertFalse(self.reap(session, project, closed=False, within=0.5))  # a queued row holds it
+            session.unhold("queue")
+            self.assertTrue(self.reap(session, project))
+
+    def test_dead_pids_are_refused_and_their_leases_and_holds_dropped(self):
+        session = self.session()
+        project = str(self.dir / "proj")
+        self.lease(session, "run", project)
+        self.assertTrue(session.hold({"owner": "queue", "pid": os.getpid(), "projects": [project]})["ok"])
+        self.assertTrue(session.check(self.request(run_id="run"))["ok"])
         with patch.object(session, "_pid_alive", return_value=False):
+            self.assertFalse(session.lease({"run_id": "x", "pid": 1, "primary": project, "others": []})["ok"])
+            self.assertFalse(session.hold({"owner": "y", "pid": 1, "projects": [project]})["ok"])
             session.reap_dead()
-        self.assertNotIn("old", session.leases)
+        self.assertEqual((session.leases, session.holds), ({}, {}))
+        with patch.object(lean_session, "RELEASE_GRACE_S", 0):
+            self.assertTrue(self.reap(session, project))  # a crashed runner's project closes like a released one
 
     def test_service_linger_starts_only_when_no_entries_leases_or_holds_remain(self):
         session = self.session()
@@ -541,56 +587,59 @@ class ServiceLeaseTests(Base):
             self.assertFalse(session.should_exit())
             session.leases.clear()
 
-    def test_ensure_service_reuses_matching_code_and_restarts_idle_old_code(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp)
-            path = lean_session.socket_path(directory)
-            path.touch()
-            current = {"ok": True, "protocol": lean_session.PROTOCOL, "code": "current", "leases": {}, "holds": {}}
-            with (
-                patch.object(lean_session, "code_sha", return_value="current"),
-                patch.object(lean_session, "request", return_value=current),
-                patch.object(lean_session.subprocess, "Popen") as start,
-            ):
-                self.assertEqual(lean_session.ensure_service(directory), str(path))
-                start.assert_not_called()
 
-            calls = []
+class EnsureServiceTests(unittest.TestCase):
+    """Finding, reusing or replacing the machine-wide service, with injected status replies and process start."""
 
-            def request(payload, _timeout, _path):
-                calls.append(payload["op"])
-                if payload["op"] == "status":
-                    if len(calls) == 1:
-                        return {**current, "code": "old"}
-                    return current
-                path.unlink(missing_ok=True)
-                return {"ok": True}
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.directory = Path(temp.name)
+        self.path = lean_session.socket_path(self.directory)
+        patcher = patch.object(lean_session, "code_sha", return_value="current")
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
-            def launch(*_args, **_kwargs):
-                path.touch()
+    def status(self, code="current", **extra):
+        return {"ok": True, "protocol": lean_session.PROTOCOL, "code": code, "leases": {}, "holds": {}, **extra}
 
-            with (
-                patch.object(lean_session, "code_sha", return_value="current"),
-                patch.object(lean_session, "request", side_effect=request),
-                patch.object(lean_session.subprocess, "Popen", side_effect=launch) as start,
-            ):
-                self.assertEqual(lean_session.ensure_service(directory), str(path))
-                start.assert_called_once()
+    def ensure(self, probes, shutdown=None):
+        replies = iter(probes)
+        with (
+            patch.object(lean_session, "_probe", side_effect=lambda *_: next(replies)),
+            patch.object(lean_session, "request", side_effect=shutdown) as request,
+            patch.object(lean_session.subprocess, "Popen") as start,
+        ):
+            return lean_session.ensure_service(self.directory, wait=0.5), start, request
 
-    def test_ensure_service_refuses_old_code_when_live_leases_exist(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp)
-            lean_session.socket_path(directory).touch()
-            with (
-                patch.object(lean_session, "code_sha", return_value="current"),
-                patch.object(
-                    lean_session,
-                    "request",
-                    return_value={"ok": True, "protocol": 1, "code": "old", "leases": {"r": {}}, "holds": {}},
-                ),
-                self.assertRaisesRegex(lean_session.SessionError, "older code with live runs"),
-            ):
-                lean_session.ensure_service(directory)
+    def test_a_service_with_current_code_is_reused(self):
+        path, start, _ = self.ensure([self.status()])
+        self.assertEqual(path, str(self.path))
+        start.assert_not_called()
+
+    def test_an_idle_service_with_old_code_is_stopped_and_replaced(self):
+        path, start, request = self.ensure(
+            [self.status("old"), "absent", "absent", self.status()], shutdown=lambda *_: {"ok": True}
+        )
+        self.assertEqual(path, str(self.path))
+        self.assertEqual(request.call_args.args[0]["op"], "shutdown")
+        start.assert_called_once()
+
+    def test_old_code_with_live_runs_is_refused(self):
+        with self.assertRaisesRegex(lean_session.SessionError, "older code with live runs"):
+            self.ensure([self.status("old", leases={"r": {}})])
+
+    def test_a_busy_service_is_never_mistaken_for_a_dead_one(self):
+        self.path.touch()
+        with self.assertRaisesRegex(lean_session.SessionError, "does not answer"):
+            self.ensure(["busy"] * 50)
+        self.assertTrue(self.path.exists())  # its socket was left alone and no second service was started
+
+    def test_a_dead_socket_is_replaced(self):
+        self.path.touch()
+        path, start, _ = self.ensure(["absent", self.status()])
+        self.assertEqual(path, str(self.path))
+        start.assert_called_once()
 
 
 class SharedDocumentTests(Base):
@@ -603,7 +652,17 @@ class SharedDocumentTests(Base):
         self.assertFalse(reply["ok"])
         entry = session.entries[str(self.dir / "proj")]
         self.assertEqual([slot.display for slot in entry.slots], ["B.lean"])
-        self.assertEqual(len(self.events("didClose")), 1)
+        self.assertEqual(self.settled("didClose", 1), 1)
+        again = session.check({**self.request(header=first_header, display="A.lean", prefix_sha="first")})
+        self.assertTrue(again["ok"], again)  # the pin was reset: going back is not a second change
+
+    def test_runs_on_different_targets_in_one_file_do_not_disturb_each_other(self):
+        session = self.session()
+        for _ in range(2):
+            for run, prefix in (("one", "first target"), ("two", "second target")):
+                reply = session.check({**self.request(display="A.lean", prefix_sha=prefix), "run_id": run})
+                self.assertTrue(reply["ok"], reply)
+        self.assertEqual(self.settled("didClose", 0, within=0.3), 0)
 
     def test_idle_document_with_matching_header_is_preferred(self):
         session = self.session()
