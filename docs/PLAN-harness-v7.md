@@ -1213,7 +1213,18 @@ Header opens are not in `lean.seconds`.
 - **LSP documents** for the model's interactive edits, goals and splice.
 - **Cold `lake env lean`** only for the final official-equivalent check.
 
-**Cheap trials** (Lean-only benchmark, phase 0/3):
+**Built (ticket 08a, 2026-10-13):** one service per machine (`service_dir()`, socket `service.sock`), started on
+demand by `ensure_service`; runs `lease` their primary and other toolchains, campaigns will `hold` queued rows
+(ticket 09). Close policy, owner decision 2026-10-13: a project closes **RELEASE_GRACE_S = 120 s** after the last
+lease or hold naming it ends (env `ARENA_LEAN_RELEASE_GRACE_S`), so the next run of a row reuses its warm workers
+with no hold; a project nothing ever leased closes after `ADHOC_IDLE_S = 600 s` idle; the service exits after
+`SERVICE_LINGER_S = 600 s` with nothing open. `arena lean status|stop|serve`. The bench runs its **own private
+service** per measurement, so its repeat open stays a real reopen and it never touches another run's Lean.
+Gate on an idle machine: Core and CSLib pass; ArkLib (4 toolchains) repeats within limits except two noise
+figures (a p95 from 5 repeats, and +0.26 s on a 1.9 s split); Putnam varies about ±20% between runs on the same
+code, and an A/B on one idle machine showed 08a within ±3% of 07 on every Putnam figure. Run the gate on an idle
+machine (no backup, browser or second agent running Lean); a busy machine read as a +30% Putnam regression.
+ (Lean-only benchmark, phase 0/3):
 - Lean v4.32's experimental `--incr-header-save` / `--incr-load` cross-process header snapshots, on the ≥v4.32 rows.
 - REPL tags: **verified** for v4.25.0 through v4.33.0 (`git ls-remote`), including v4.33.0-rc2. **No `v4.29.1` tag**:
   test whether the v4.29.0 REPL works on the Core row's v4.29.1 toolchain, or build it from source.
