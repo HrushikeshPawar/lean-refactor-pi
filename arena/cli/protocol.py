@@ -21,9 +21,11 @@ from arena.campaign import (
     frontier,
     init,
     map_view,
+    price_table,
     probe,
     probe_batch,
     profile_request,
+    quote,
     record_idea,
     run_dir,
     set_decision,
@@ -47,6 +49,8 @@ ACTIONS = (
     "declarations",
     "find",
     "profile",
+    "prices",
+    "quote",
     "autocheck",
     "state",
     "map",
@@ -113,6 +117,14 @@ def run(args: SimpleNamespace) -> dict:
         return profile_request(
             args.theorem, args.run_id, args.candidate, args.proof_file.read_text() if args.proof_file else None
         )
+    if args.action == "prices":
+        return price_table(args.theorem, args.run_id, args.candidate)
+    if args.action == "quote":
+        items = json.loads(args.items) if args.items else None
+        if not isinstance(items, list):
+            raise ValueError("Pass --items with a JSON list of strings")
+        against = json.loads(args.against) if args.against else None
+        return quote(args.theorem, args.run_id, items, against)
     if args.action == "autocheck":
         return autocheck(args.theorem, args.run_id, args.max_seconds)
     if args.action == "state":
@@ -159,6 +171,7 @@ class ProtocolOptions:
     first: int | None = None
     last: int | None = None
     items: str | None = None
+    against: str | None = None
     queries: str | None = None
     cursor: str | None = None
     limit: int = 20

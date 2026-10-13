@@ -435,7 +435,7 @@ def stall_target(graph: Graph, fired: dict, mode: str) -> Cell | None:
     return min(candidates, key=lambda cell: (cell.visits, cell.letter))
 
 
-def map_view(graph: Graph) -> dict:
+def map_view(graph: Graph, effort: list[dict] | None = None) -> dict:
     """Hidden JSON map projection over the archive and its currently open sketch holes."""
     scored = [node for node in graph.nodes if node.score is not None]
     best_node = max(scored, key=lambda node: node.score) if scored else None
@@ -490,7 +490,77 @@ def map_view(graph: Graph) -> dict:
         for hole in node.holes
         if hole["status"] == "open"
     ]
-    return {"best": best, "archive": archive_rows, "recent": recent, "effort": [], "open": open_holes}
+    return {"best": best, "archive": archive_rows, "recent": recent, "effort": effort or [], "open": open_holes}
+
+
+def changed_lines(old: str, new: str) -> int:
+    """Count changed source lines, charging a replacement for the larger side."""
+    return sum(
+        max(old_end - old_start, new_end - new_start)
+        for tag, old_start, old_end, new_start, new_end in SequenceMatcher(
+            None, old.splitlines(), new.splitlines(), autojunk=False
+        ).get_opcodes()
+        if tag != "equal"
+    )
+
+
+def effort_table(graph: Graph, step_tables: dict[str, dict]) -> list[dict]:
+    """Project attempts and gains onto each step of the best scored node."""
+    from arena.prices import snippet_tokens
+
+    scored = [node for node in graph.nodes if node.score is not None]
+    if not scored:
+        return []
+    best = max(scored, key=lambda node: node.score)
+    best_rows = step_tables.get(best.proof_id, {}).get("rows", [])
+    if not best_rows:
+        return []
+    by_id = {node.proof_id: node for node in graph.nodes}
+    result = []
+    for step_index, step in enumerate(best.steps):
+        variants: set[str] = set()
+        replacements: list[int] = []
+        latest_gain: int | None = None
+        for node_index, node in enumerate(graph.nodes):
+            if node is best or node.origin == "reference":
+                continue
+            matcher = SequenceMatcher(
+                None,
+                [item.hash for item in best.steps],
+                [item.hash for item in node.steps],
+                autojunk=False,
+            )
+            varied = False
+            for tag, old_start, old_end, new_start, new_end in matcher.get_opcodes():
+                if tag == "equal" or not (old_start <= step_index < old_end):
+                    continue
+                varied = True
+                old_steps = best.steps[old_start:old_end]
+                new_steps = node.steps[new_start:new_end]
+                if node.status == "closed" and len(old_steps) == len(new_steps) == 1:
+                    replacements.append(snippet_tokens(new_steps[0].text) - snippet_tokens(old_steps[0].text))
+                parent_ids = (node.edge or {}).get("from") or []
+                parent = by_id.get(parent_ids[0]) if parent_ids else None
+                if (
+                    node.status == "closed"
+                    and node.score is not None
+                    and parent is not None
+                    and parent.score is not None
+                    and node.score > parent.score
+                ):
+                    latest_gain = node_index
+            if varied:
+                variants.add(node.proof_id)
+        result.append(
+            {
+                "step": step.id,
+                "at_stake": best_rows[step_index]["pts_if_gone"],
+                "variants": len(variants),
+                "best_dtok": min(replacements) if replacements else None,
+                "last_gain": len(graph.nodes) - 1 - latest_gain if latest_gain is not None else None,
+            }
+        )
+    return result
 
 
 def common_base(left: str, right: str, parents: dict[str, list[str]]) -> dict:

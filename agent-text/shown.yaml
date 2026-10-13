@@ -45,6 +45,9 @@ packet:
   profile:
     where: "Initial theorem packet"
     per_run: "once per run"
+  price_table:
+    where: "Prices action replies"
+    per_run: "when the table is requested"
   rates:
     where: "Initial theorem packet"
     per_run: "once per run"
@@ -76,6 +79,9 @@ replies:
   profile:
     where: "Tool replies"
     per_run: "when the matching tool result occurs"
+  price_row:
+    where: "Compile replies"
+    per_run: "when a scored proof is compiled"
   routes:
     where: "Tool replies"
     per_run: "when the matching tool result occurs"

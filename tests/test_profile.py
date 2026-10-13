@@ -1,4 +1,5 @@
 import unittest
+from typing import ClassVar
 from unittest.mock import patch
 
 from arena import profile as profiler
@@ -135,9 +136,10 @@ class AggregationTests(unittest.TestCase):
 
 
 class DegradationTests(unittest.TestCase):
-    row = {"name": "T", "statement": "theorem t : True", "file_path": "T.lean"}
+    row: ClassVar[dict] = {"name": "T", "statement": "theorem t : True", "file_path": "T.lean"}
 
-    def fake_instrumented(self, row, proof, version, commit, depth):
+    def fake_instrumented(self, row, proof, version, commit, depth, lane):
+        del lane
         if depth:
             raise ValueError("instrumented compile failed: boom")
         records, total = profiler.parse_profile("ARENA_PROFILE 5 2 0 5 7\nARENA_PROFILE_TOTAL 7", 0, 1)

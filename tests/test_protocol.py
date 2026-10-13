@@ -88,6 +88,21 @@ class CampaignCliTests(unittest.TestCase):
         self.assertNotIn("proof", result)
         self.assertNotIn("exchange_rates", result)
 
+    def test_prices_profiles_archive_candidate_and_returns_table(self):
+        result = cli(self.run_id, "evaluate", "--proof-file", self.proof(self.good))
+        self.assertTrue(result["ok"], result)
+        self.assertIn("price_row", result)
+        checked = cli(self.run_id, "autocheck")
+        self.assertTrue(checked["ok"], checked)
+        table = cli(self.run_id, "prices", "--candidate", result["candidate"])
+        print(table["text"])
+        self.assertTrue(table["profiled"])
+        self.assertTrue(all(row["tokens"] is not None for row in table["rows"]))
+        self.assertTrue(any(row["incl_hb"] is not None for row in table["rows"]))
+        measured = result["heartbeat"]
+        profiled = sum(row["incl_hb"] or 0 for row in table["rows"])
+        self.assertLessEqual(abs(profiled - measured), measured * 0.10)
+
     def test_02_arbitrary_idea_and_unknown_parent_never_reject(self):
         variant = self.good + "\n  -- annotated"
         result = cli(

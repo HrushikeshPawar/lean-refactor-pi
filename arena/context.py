@@ -212,7 +212,7 @@ def cached_context(name: str) -> dict:
         return {}
 
 
-def reference_profile(name: str) -> dict:
+def reference_profile(name: str, cache_only: bool = False) -> dict:
     """Heartbeat profile of the reference proof, cached like the context."""
     row = problem(name)
     _version, commit = measure_version(row)
@@ -225,6 +225,8 @@ def reference_profile(name: str) -> dict:
     cache = _cache("profile", name, commit, salt)
     if cache.exists():
         return json.loads(cache.read_text())
+    if cache_only:
+        return {}
     try:
         result = profile(name, row["src"])
         result["statement_floor_hb"] = heartbeat_floor(name)["heartbeats"]

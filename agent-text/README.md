@@ -174,6 +174,10 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `messages/trim.warning_cut` | 9 | Agent messages and notices | when the matching event occurs |
 | `packet/inventory` | 34 | Initial theorem packet | once per run |
 | `packet/library` | 35 | Initial theorem packet | once per run |
+| `packet/price-table` | 7 | Prices action replies | when the table is requested |
+| `packet/price-table.rates` | 18 | Prices action replies | when the table is requested |
+| `packet/price-table.row` | 7 | Prices action replies | when the table is requested |
+| `packet/price-table.total` | 6 | Prices action replies | when the table is requested |
 | `packet/profile` | 40 | Initial theorem packet | once per run |
 | `packet/rates` | 35 | Initial theorem packet | once per run |
 | `packet/scoring` | 160 | Initial theorem packet | once per run |
@@ -244,6 +248,11 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/merge.none_checked` | 2 | Tool replies | when the matching tool result occurs |
 | `replies/merge.not_submitted` | 7 | Tool replies | when the matching tool result occurs |
 | `replies/merge.summary` | 9 | Tool replies | when the matching tool result occurs |
+| `replies/price-row` | 16 | Compile replies | when a scored proof is compiled |
+| `replies/price-row.changed` | 3 | Compile replies | when a scored proof is compiled |
+| `replies/price-row.row_root` | 9 | Compile replies | when a scored proof is compiled |
+| `replies/price-row.versions_full` | 1 | Compile replies | when a scored proof is compiled |
+| `replies/price-row.versions_pending` | 4 | Compile replies | when a scored proof is compiled |
 | `replies/probe.complete_candidate` | 7 | Tool replies | when the matching tool result occurs |
 | `replies/profile.degraded` | 7 | Tool replies | when the matching tool result occurs |
 | `replies/profile.floor_method` | 6 | Tool replies | when the matching tool result occurs |

@@ -364,12 +364,12 @@ def summarize(
 
 
 def _instrumented(
-    row: dict, proof: str, version: str, commit: str, depth: int
+    row: dict, proof: str, version: str, commit: str, depth: int, lane: str = "model"
 ) -> tuple[list[dict], int | None, dict, str]:
     built = candidate_file(row, proof, version, commit)
     inserted = preamble(depth)
     text = built["text"][: built["head"]] + inserted + built["text"][built["head"] :]
-    ran = run_lean(row, built["path"], text, prefix_end=built["head"])
+    ran = run_lean(row, built["path"], text, prefix_end=built["head"], lane=lane)
     if ran is None:
         raise ValueError(agent_text.render("messages/errors.profile_timeout"))
     returncode, output = ran
@@ -387,7 +387,7 @@ def _instrumented(
     return records, total, built, output
 
 
-def profile(name: str, proof: str, measured: int | None = None) -> dict:
+def profile(name: str, proof: str, measured: int | None = None, lane: str = "model") -> dict:
     """Profile a sorry-free, compiling proof on the primary toolchain."""
     row = problem(name)
     version, commit = measure_version(row)
@@ -397,20 +397,20 @@ def profile(name: str, proof: str, measured: int | None = None) -> dict:
     result = None
     for depth in (MAX_DEPTH, 0):
         try:
-            result = _instrumented(row, proof, version, commit, depth)
+            result = _instrumented(row, proof, version, commit, depth, lane)
             granularity = "tactic" if depth else "top_level"
             break
         except ValueError as error:
             failures.append(str(error))
     if result is None:
-        reference = compile_version(row, proof, version, commit, measure=True)
+        reference = compile_version(row, proof, version, commit, measure=True, lane=lane)
         if not reference["passed"]:
             headlines = reference.get("error_headlines") or [reference.get("error", "compile failed")]
             raise ValueError(agent_text.render("messages/errors.profile_proof_compile", headline=headlines[0]))
         raise ValueError(agent_text.render("messages/errors.profile_instrumentation_failed", detail=failures[-1]))
     records, instrumented, built, _ = result
     if measured is None:
-        measure = compile_version(row, proof, version, commit, measure=True)
+        measure = compile_version(row, proof, version, commit, measure=True, lane=lane)
         measured = measure.get("heartbeats")
     whole_tokens = _proof_length(proof, row.get("statement"))
     token_lines = _line_token_counts(proof, whole_tokens)

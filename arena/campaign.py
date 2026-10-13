@@ -36,8 +36,11 @@ from arena.graph import (
     FILING_MIN_SIMILARITY,
     Graph,
     Node,
+    archive,
+    changed_lines,
     common_base,
     edit_fingerprint,
+    effort_table,
     measured_parent,
     merge_steps,
     merge_text,
@@ -48,6 +51,8 @@ from arena.graph import (
     stall_target,
 )
 from arena.graph import map_view as graph_map_view
+from arena.prices import changed_steps, fmt_hb, fmt_signed, quote_tokens, rates, snippet_tokens, step_table
+from arena.prices import price_row as build_price_row
 from arena.profile import heartbeat_floor, profile
 from arena.salvage import fill_cost, fill_text
 from arena.salvage import holes as find_holes
@@ -1786,6 +1791,7 @@ def _model_view(result: dict) -> dict:
             "notes",
             "full_check",
             "advisory",
+            "price_row",
             "scored",
             "contains_sorry",
             "goals",
@@ -2026,7 +2032,7 @@ def record_evaluation(
     best_line = {"verified": _brief(verified)}
     if fast and (not verified or (fast["score"] or 0) > (verified["score"] or 0)):
         best_line["fast_only"] = _brief(fast)
-    return {
+    reply = {
         **result,
         "candidate_id": candidate_id,
         "candidate": _label(history, candidate_id),
@@ -2038,6 +2044,34 @@ def record_evaluation(
         "advisory": _advisory(rows),
         **location,
     }
+    if me and (result.get("metrics") or {}).get("axes") and not re.search(r"\bsorry\b", proof):
+        projection = projection_out[0] if projection_out else Graph.from_history(history, _proof_reader(directory))
+        node = next((item for item in projection.nodes if item.proof_id == candidate_id), None)
+        if node is not None and node.score is not None:
+            parent_ids = (node.edge or {}).get("from") or []
+            by_id = {item.proof_id: item for item in projection.nodes}
+            parent_node = by_id.get(parent_ids[0]) if parent_ids else None
+            scored = [item for item in projection.nodes if item.score is not None and item.proof_id != node.proof_id]
+            best_node = max(scored, key=lambda item: item.score) if scored else None
+            cached_profiles = _cached_profiles(name, history)
+            old_profile = cached_profiles.get(parent_node.proof_id) if parent_node else None
+            new_profile = cached_profiles.get(node.proof_id)
+            old_hb = _step_heartbeats(parent_node, old_profile)
+            new_hb = _step_heartbeats(node, new_profile)
+            changes = changed_steps(parent_node.steps, node.steps, old_hb, new_hb) if parent_node else []
+            row = build_price_row(
+                node,
+                parent_node,
+                best_node,
+                changed_lines(parent_node.proof_text, node.proof_text)
+                if parent_node
+                else len(node.proof_text.splitlines()),
+                changes,
+            )
+            total_versions = len(versions(problem(name)))
+            row["versions"] = _versions_text(node.versions, total_versions)
+            reply["price_row"] = render_price_row(row, parent_node is None, parent_node is best_node)
+    return reply
 
 
 def evaluate_request(
@@ -2518,6 +2552,200 @@ def profile_request(name: str, run_id: str, reference: str | None = None, proof:
     return {**result, "target": label, "cached": False}
 
 
+def _cached_profiles(name: str, history: list[dict]) -> dict[str, dict]:
+    del name
+    return {
+        event["proof_id"]: event["result"]
+        for event in history
+        if event.get("kind") == "profile" and isinstance(event.get("result"), dict)
+    }
+
+
+def _step_heartbeats(node: Node | None, profile_result: dict | None) -> dict[str, int] | None:
+    if node is None or profile_result is None:
+        return None
+    return {
+        step.id: entry["hb"]
+        for step in node.steps
+        for entry in (profile_result.get("entries") or [])
+        if entry.get("depth") == 0 and entry.get("proof_line") == step.first_line and entry.get("hb") is not None
+    }
+
+
+def _versions_text(statuses: dict[str, bool], total: int) -> str:
+    checked = len(statuses)
+    passed = sum(bool(value) for value in statuses.values())
+    if checked == total:
+        return text.render("replies/price-row.versions_full", passed=passed, total=total)
+    return text.render("replies/price-row.versions_pending", checked=checked, total=total)
+
+
+def _versions_total(statuses: dict[str, bool], total: int) -> str:
+    return f"{sum(bool(value) for value in statuses.values())}/{total}"
+
+
+def _price_change_text(changes: list[dict]) -> str:
+    values = []
+    for change in changes:
+        label = ",".join(change["ids"]) or "—"
+        value = f"{label} ({change['old_tokens']}→{change['new_tokens']} tok"
+        if "old_hb" in change:
+            value += f", {fmt_hb(change['old_hb'])}→{fmt_hb(change['new_hb'])} hb"
+        values.append(value + ")")
+    return "; ".join(values)
+
+
+def render_price_row(row: dict, root: bool = False, parent_is_best: bool = False) -> str:
+    if root:
+        return text.render(
+            "replies/price-row.row_root",
+            label=row["label"],
+            tokens=row["tokens"],
+            hb=fmt_hb(row["hb"]),
+            versions=row["versions"],
+        )
+    tokens_part = (
+        "n/a" if row["tokens_vs_parent"] is None else f"{fmt_signed(row['tokens_vs_parent'])} vs {row['parent_label']}"
+    )
+    if not parent_is_best:
+        best = "n/a" if row["tokens_vs_best"] is None else f"{fmt_signed(row['tokens_vs_best'])} vs best"
+        tokens_part += f", {best}"
+    hb_part = "n/a" if row["hb_vs_parent"] is None else fmt_signed(row["hb_vs_parent"])
+    if not parent_is_best:
+        best = "n/a" if row["hb_vs_best"] is None else fmt_signed(row["hb_vs_best"])
+        hb_part += f", {best}"
+    score_part = "n/a" if row["score_vs_best"] is None else f"{row['score_vs_best']:+.1f} vs best"
+    rendered = [
+        text.render(
+            "replies/price-row",
+            label=row["label"],
+            parent_label=row["parent_label"],
+            lines=row["lines"],
+            tokens=row["tokens"],
+            tokens_part=tokens_part,
+            hb=fmt_hb(row["hb"]),
+            hb_part=hb_part,
+            versions=row["versions"],
+            score_part=score_part,
+        )
+    ]
+    if row["changed"]:
+        rendered.append(text.render("replies/price-row.changed", changes=_price_change_text(row["changed"])))
+    return "\n".join(rendered)
+
+
+def render_price_table(table: dict) -> str:
+    rows = [text.render("packet/price-table")]
+    rows.extend(
+        [
+            text.render(
+                "packet/price-table.row",
+                step=row["id"],
+                lines=f"{row['first_line']}-{row['last_line']}",
+                tokens=row["tokens"],
+                self_hb=fmt_hb(row["self_hb"]),
+                incl_hb=fmt_hb(row["incl_hb"]),
+                pts_if_gone=f"{row['pts_if_gone']:+.2f}",
+                text=row["text"],
+            )
+            for row in table["rows"]
+        ]
+    )
+    total = table["total"]
+    rows.append(
+        text.render(
+            "packet/price-table.total",
+            tokens=total["tokens"],
+            heartbeats=fmt_hb(total["heartbeats"]),
+            versions=total["versions"] or "n/a",
+            proxy="n/a" if total["proxy"] is None else f"{total['proxy']:.2f}",
+        )
+    )
+    rates_value = table["rates"]
+    rows.append(
+        text.render(
+            "packet/price-table.rates",
+            pts_token=f"{rates_value['points_per_token']:.3f}",
+            pts_hb=f"{rates_value['points_per_1k_hb']:.3f}",
+            pts_version=f"{rates_value['points_per_version']:.2f}",
+        )
+    )
+    return "\n".join(rows)
+
+
+def _table_for_node(name: str, node: Node, profiles: dict[str, dict], price_rates: dict, total_versions: int) -> dict:
+    profile_result = profiles.get(node.proof_id)
+    if profile_result is None and node.origin == "reference":
+        from arena.context import reference_profile
+
+        try:
+            profile_result = reference_profile(name, cache_only=True)
+        except (ValueError, OSError):
+            profile_result = None
+    table = step_table(
+        node.proof_text,
+        profile_result,
+        price_rates,
+        node.tokens if node.tokens is not None else snippet_tokens(node.proof_text),
+        node.heartbeats,
+        _versions_total(node.versions, total_versions),
+    )
+    table["total"]["proxy"] = node.score
+    return table
+
+
+def price_table(name: str, run_id: str, reference: str | None = None) -> dict:
+    """Return prices from cached proof/profile data only; this action never starts Lean."""
+    directory = run_dir(run_id)
+    history = events(directory)
+    graph = Graph.from_history(history, _proof_reader(directory))
+    scored = [node for node in graph.nodes if node.score is not None]
+    if reference:
+        proof_id = resolve_node_ref(history, reference)
+        node = next(node for node in graph.nodes if node.proof_id == proof_id)
+    else:
+        if not scored:
+            raise ValueError(text.render("messages/errors.node_reference_invalid", reference="best scored node"))
+        node = max(scored, key=lambda item: item.score)
+    from arena.scoring import reference as scoring_reference
+
+    reference_tokens, reference_heartbeats = scoring_reference(name)
+    total_versions = len(versions(problem(name)))
+    price_rates = rates(reference_tokens, reference_heartbeats, total_versions)
+    profiles = _cached_profiles(name, history)
+    profiled = node.proof_id in profiles
+    if node.origin == "reference" and not profiled:
+        from arena.context import reference_profile
+
+        try:
+            reference_result = reference_profile(name, cache_only=True)
+        except (ValueError, OSError):
+            reference_result = {}
+        if reference_result:
+            profiles[node.proof_id] = reference_result
+            profiled = True
+    table = _table_for_node(name, node, profiles, price_rates, total_versions)
+    return {**table, "text": render_price_table(table), "profiled": profiled}
+
+
+def quote(name: str, run_id: str, items: list, against: dict | None = None) -> dict:
+    """Count draft/snippet tokens without Lean, locks, or ledger writes."""
+    resolved = None
+    if against is not None:
+        history = events(run_dir(run_id))
+        proof_id = resolve_node_ref(history, against.get("node", ""))
+        directory = run_dir(run_id)
+        proof = (directory / "proofs" / f"{proof_id}.lean").read_text()
+        from arena.steps import split_steps, step_range
+
+        first, last = step_range(split_steps(proof), against.get("steps", ""))
+        step_list = split_steps(proof)
+        resolved = {
+            "text": "\n".join(step.text for step in step_list[step_list.index(first) : step_list.index(last) + 1])
+        }
+    return quote_tokens(name, items, resolved, problem(name)["statement"])
+
+
 def set_decision(run_id: str, candidate_id: str, decision: str, reason: str) -> dict:
     if decision not in ("pursue", "park") or not reason.strip():
         raise ValueError(text.render("messages/errors.decision_invalid"))
@@ -2531,8 +2759,20 @@ def set_decision(run_id: str, candidate_id: str, decision: str, reason: str) -> 
 def map_view(run_id: str) -> dict:
     """Return the hidden JSON map without rendering it into model-facing prose."""
     directory = run_dir(run_id)
-    graph = Graph.from_history(events(directory), _proof_reader(directory))
-    return graph_map_view(graph)
+    history = events(directory)
+    graph = Graph.from_history(history, _proof_reader(directory))
+    from arena.scoring import reference as scoring_reference
+
+    name = history[0]["theorem"]
+    try:
+        reference_tokens, reference_heartbeats = scoring_reference(name)
+    except ValueError:
+        return graph_map_view(graph)
+    total_versions = len(history[0].get("versions") or [1])
+    price_rates = rates(reference_tokens, reference_heartbeats, total_versions)
+    profiles = _cached_profiles(name, history)
+    tables = {node.proof_id: _table_for_node(name, node, profiles, price_rates, total_versions) for node in graph.nodes}
+    return graph_map_view(graph, effort_table(graph, tables))
 
 
 def graph_state(run_id: str) -> dict:
@@ -2924,6 +3164,43 @@ def _step_goal_jobs(history: list[dict], directory: Path) -> list[str]:
     return jobs
 
 
+def _profile_jobs(history: list[dict], graph: Graph) -> list[Node]:
+    attempted = {event.get("proof_id") for event in history if event.get("kind") in {"profile", "profile_error"}}
+    return [
+        cell.node
+        for cell in archive(graph)
+        if cell.node.status == "closed" and cell.node.origin != "reference" and cell.node.proof_id not in attempted
+    ]
+
+
+def _run_profile_job(name: str, run_id: str, node: Node) -> None:
+    directory = run_dir(run_id)
+    started = time.monotonic()
+    try:
+        with lean_lock(directory, "background"):
+            result = profile(name, node.proof_text, node.heartbeats, lane="background")
+        _append(
+            directory,
+            {
+                "kind": "profile",
+                "proof_id": node.proof_id,
+                "result": result,
+                "seconds": round(time.monotonic() - started, 2),
+            },
+        )
+    except ValueError as error:
+        _append(
+            directory,
+            {
+                "kind": "profile_error",
+                "proof_id": node.proof_id,
+                "error": str(error)[:300],
+                "seconds": round(time.monotonic() - started, 2),
+            },
+        )
+    write_state(run_id)
+
+
 def _salvage_jobs(history: list[dict], directory: Path, graph: Graph | None = None) -> list[Node]:
     """Broken, filed graph nodes with no terminal salvage event yet."""
     done = {item.get("proof_id") for item in history if item.get("kind") == "salvage"}
@@ -3146,7 +3423,11 @@ def autocheck(name: str, run_id: str, max_seconds: float | None = None, closing:
             projection = Graph.from_history(history, _proof_reader(directory))
             # Closing drain: the model has stopped, so only full checks (and assemblies, whose
             # results become new candidates) matter; salvage and step goals only serve the model.
-            order = ("full", "assembly") if closing else ("salvage", "assembly", "full", "step_goals")
+            order = (
+                ("full", "assembly", "profiles")
+                if closing
+                else ("salvage", "assembly", "full", "step_goals", "profiles")
+            )
             for kind in order:
                 if kind == "salvage" and (salvage_jobs := _salvage_jobs(history, directory, projection)):
                     _run_salvage(name, run_id, salvage_jobs[0])
@@ -3159,6 +3440,9 @@ def autocheck(name: str, run_id: str, max_seconds: float | None = None, closing:
                     break
                 if kind == "step_goals" and (goal_jobs := _step_goal_jobs(history, directory)):
                     _run_step_goals(name, run_id, goal_jobs[0])
+                    break
+                if kind == "profiles" and (profile_jobs := _profile_jobs(history, projection)):
+                    _run_profile_job(name, run_id, profile_jobs[0])
                     break
             else:
                 break
