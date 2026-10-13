@@ -4,7 +4,7 @@
 
 **Blocked by:** 10b: Per-step goals pipeline; 11: Routes, K1 archive, map, stall (this ticket profiles archive nodes and extends the map); 08c: Lean service callers, tests, speed gate. (Ticket 10a and ticket 12 are committed below this branch as well.)
 
-**Status:** needs-review
+**Status:** done
 
 **Branch:** `v7/13-prices` (stacked on `v7/12-salvage`)
 

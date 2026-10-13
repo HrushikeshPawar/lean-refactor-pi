@@ -448,6 +448,19 @@ would be all 1s. The ranked top-60 library itself stays (D34).
 A small `skill/lean-facts.md` (well under 1K tokens) is kept only for facts the harness can't measure, such as the
 forbidden `native_decide`. Its numbers are still rendered from the counter.
 
+**Built (ticket 13, 2026-10-13):** `arena/prices.py` (rates, step prices, instant quotes: 0.28 s for a quote, no
+Lean), the price row on every scored compile reply, the cached price table (hidden `prices` action), `quote`, and
+map effort data; profiles run as background jobs after the other queues. Reviewer decisions: (1) the price row
+compares against the **filing** parent while the legacy `metrics.deltas.vs_parent` keeps the named parent until 15c;
+the two are different, labelled quantities, and every same-quantity figure (own tokens, heartbeats, versions,
+vs-best, and vs-parent when both parents coincide) must agree (tested). (2) Review fixes: the closing drain skips
+profiles (they only feed the model's price tables), and any exception in a profile job is a terminal
+`profile_error` (an `OSError` used to abort the whole autocheck loop and block it for the rest of the run).
+**Open for 16:** the 10a step parser makes match alternatives (`| update_none =>`) at the `induction ... with`
+indentation into separate top-level steps. They have no heartbeats of their own (the price table shows `n/a`;
+`induction`'s inclusive figure already holds them), so their token price is right but they are not independent
+steps; decide in 16 whether the table should group them under their tactic.
+
 ## 4. Tools: full analysis and the v7 surface
 
 ### 4a. What the agent must be able to do
