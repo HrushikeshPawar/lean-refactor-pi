@@ -26,7 +26,7 @@ from cyclopts import Parameter
 from rich.console import Console
 from rich.table import Table
 
-from arena import scheduler
+from arena import engine, scheduler
 from arena.engine import ROOT
 
 WORKSPACES = ROOT / "workspaces"
@@ -324,6 +324,7 @@ def _execute(options: ProvisionOptions) -> int:
         return 0
     LOGS.mkdir(parents=True, exist_ok=True)
     failed = 0
+    measure = engine.measure_version(row)[0]  # search reads only this toolchain's index
     for step in steps:
         log_path = LOGS / f"{row['source']}-{step['version']}.log"
         with log_path.open("a") as log:
@@ -337,6 +338,8 @@ def _execute(options: ProvisionOptions) -> int:
                     options.allow_full_fallback,
                 )
                 print(f"ok      {step['worktree'].name}", flush=True)
+                if step["version"] != measure:
+                    continue
                 try:
                     from arena.index import build_index
 

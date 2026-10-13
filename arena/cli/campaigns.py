@@ -135,6 +135,18 @@ def check_packets(rows: list[str], packet_fn=None) -> dict[str, str]:
     return hashes
 
 
+def check_indexes(rows: list[str], path_fn=None) -> None:
+    """Every row needs its measure-version declaration index; search reads nothing else."""
+    if path_fn is None:
+        from arena.index import index_path as path_fn
+    missing = [row for row in rows if path_fn(row) is None]
+    if missing:
+        raise CampaignAbort(
+            f"declaration index missing for {', '.join(missing)}; build it with: "
+            + "; ".join(f"uv run arena index build {row}" for row in missing)
+        )
+
+
 def check_preflight(
     models: list[str],
     skip: bool,
@@ -703,6 +715,7 @@ def _run_campaign(args, rows, models, specs, passthrough_tokens, lock_info, run_
         "lock": lock_info,
     }
     try:
+        check_indexes(rows)
         expected = check_packets(rows)
         print("preflight:", check_preflight(models, args.skip_preflight))
     except CampaignAbort as error:

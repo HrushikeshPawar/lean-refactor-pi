@@ -100,17 +100,21 @@ class ProvisionTests(unittest.TestCase):
             ):
                 self.assertEqual(provision.execute(provision.ProvisionOptions(row="known", dry_run=True)), 0)
             lock.release()
-            row = {"name": "known", "source": "src", "version_info": [{"v1": "commit"}]}
+            row = {"name": "known", "source": "src", "version_info": [{"v1": "commit"}, {"v2": "commit2"}]}
+            output = io.StringIO()
             with (
                 mock.patch.object(scheduler, "LOCK_PATH", path),
                 mock.patch.object(provision, "row_for", return_value=row),
+                mock.patch.object(provision.engine, "measure_version", return_value=("v2", "commit2")),
                 mock.patch.object(
                     provision,
                     "plan",
                     return_value=[
-                        {"version": "v1", "commit": "commit", "worktree": provision.ROOT / "ws", "module": None}
+                        {"version": "v1", "commit": "commit", "worktree": provision.ROOT / "ws1", "module": None},
+                        {"version": "v2", "commit": "commit2", "worktree": provision.ROOT / "ws2", "module": None},
                     ],
                 ),
+                contextlib.redirect_stdout(output),
                 mock.patch.object(provision, "LOGS", Path(tmp) / "logs"),
                 mock.patch.object(provision, "provision") as provision_fn,
                 mock.patch(
@@ -119,8 +123,10 @@ class ProvisionTests(unittest.TestCase):
                 ) as index_fn,
             ):
                 self.assertEqual(provision.execute(provision.ProvisionOptions(row="known")), 0)
-                provision_fn.assert_called_once()
-                index_fn.assert_called_once_with("known", "v1")
+                self.assertEqual(provision_fn.call_count, 2)
+                index_fn.assert_called_once_with("known", "v2")
+            self.assertEqual(output.getvalue().count("index   "), 1)
+            self.assertIn("index   ws2:", output.getvalue())
 
 
 class PrewarmTests(unittest.TestCase):
@@ -260,6 +266,7 @@ class CampaignRecordTests(unittest.TestCase):
 
             with (
                 mock.patch.object(campaigns, "RUNS", root),
+                mock.patch.object(campaigns, "check_indexes"),
                 mock.patch.object(campaigns, "check_packets", return_value={"A": "hash"}),
                 mock.patch.object(campaigns, "check_preflight", return_value="skipped"),
                 mock.patch.object(campaigns, "Housekeeping", FakeHousekeeping),

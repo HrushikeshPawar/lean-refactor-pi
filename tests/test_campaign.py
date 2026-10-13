@@ -163,6 +163,7 @@ class GateTests(unittest.TestCase):
             with (
                 mock.patch.object(rc, "RUNS", runs),
                 mock.patch.object(rc.scheduler, "LOCK_PATH", runs / "campaign.lock"),
+                mock.patch.object(rc, "check_indexes"),
                 mock.patch.object(rc, "check_packets", side_effect=rc.CampaignAbort("boom")),
                 mock.patch.object(rc.engine, "problem", return_value={"source": "A", "version_info": []}),
                 mock.patch.object(rc, "execute") as execute,
@@ -176,6 +177,41 @@ class GateTests(unittest.TestCase):
             execute.assert_not_called()
         self.assertEqual(code, 1)
         self.assertIn("aborted before any paid run", err.getvalue())
+
+    def _main_with_index(self, index_path):
+        err = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp)
+            with (
+                mock.patch.object(rc, "RUNS", runs),
+                mock.patch.object(rc.scheduler, "LOCK_PATH", runs / "campaign.lock"),
+                mock.patch("arena.index.index_path", side_effect=index_path),
+                mock.patch.object(rc, "check_packets", side_effect=rc.CampaignAbort("past index gate")) as packets,
+                mock.patch.object(rc.engine, "problem", return_value={"source": "A", "version_info": []}),
+                mock.patch.object(rc, "execute") as execute,
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(err),
+            ):
+                code = rc.cli_execute(
+                    rc.CampaignOptions(prefix="zz-offline-test", rows="A,B", models="deepseek-v4.1-flash", replicates=1)
+                )
+            self.assertFalse((runs / "zz-offline-test-campaign").exists())
+            execute.assert_not_called()
+        return code, err.getvalue(), packets
+
+    def test_missing_measure_index_aborts_and_names_rows(self):
+        code, err, packets = self._main_with_index(lambda name: None if name == "B" else Path("/idx") / name)
+        self.assertEqual(code, 1)
+        self.assertIn("aborted before any paid run", err)
+        self.assertIn("uv run arena index build B", err)
+        self.assertNotIn("index build A", err)
+        packets.assert_not_called()
+
+    def test_present_index_proceeds_past_gate(self):
+        code, err, packets = self._main_with_index(lambda name: Path("/idx") / name)
+        self.assertEqual(code, 1)
+        self.assertIn("past index gate", err)
+        packets.assert_called_once()
 
 
 class ExecuteAndReportTests(unittest.TestCase):
