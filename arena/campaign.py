@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
@@ -1547,6 +1548,16 @@ def _named_parent_id(history: list[dict], reference: str | None) -> str | None:
         return None
 
 
+def _proof_reader(directory: Path) -> Callable[[str], str | None]:
+    """Read a stored proof by id, or None when the file is missing."""
+
+    def read(ident: str) -> str | None:
+        path = directory / "proofs" / f"{ident}.lean"
+        return path.read_text() if path.is_file() else None
+
+    return read
+
+
 def _file_node(
     directory: Path,
     history: list[dict],
@@ -1565,22 +1576,14 @@ def _file_node(
         )
         if existing:
             return existing
-        graph = Graph.from_history(
-            history,
-            lambda ident: (
-                (directory / "proofs" / f"{ident}.lean").read_text()
-                if (directory / "proofs" / f"{ident}.lean").is_file()
-                else None
-            ),
-        )
-        prior_texts = [
-            (
-                node.proof_id,
-                (directory / "proofs" / f"{node.proof_id}.lean").read_text(),
-            )
+        read = _proof_reader(directory)
+        graph = Graph.from_history(history, read)
+        recent = [
+            node.proof_id
             for node in graph.nodes
             if node.proof_id != proof_id and (directory / "proofs" / f"{node.proof_id}.lean").is_file()
-        ]
+        ][-20:]
+        prior_texts = [(ident, read(ident)) for ident in recent]
         measured_id, measured_score = measured_parent(prior_texts, proof)
         focus_similarity = None
         if operation is not None:
@@ -1591,11 +1594,7 @@ def _file_node(
         else:
             in_batch, batch_focus = _BATCH_FOCUS.get()
             focus_id = batch_focus if in_batch else graph.focus
-            focus_proof = (
-                (directory / "proofs" / f"{focus_id}.lean").read_text()
-                if focus_id and (directory / "proofs" / f"{focus_id}.lean").is_file()
-                else None
-            )
+            focus_proof = read(focus_id) if focus_id else None
             focus_similarity = similarity(focus_proof, proof) if focus_proof is not None else None
             if focus_id and focus_similarity is not None and focus_similarity >= FILING_MIN_SIMILARITY:
                 edge_type, sources, exact = "filed_under_focus", [focus_id], False
@@ -1620,14 +1619,7 @@ def _file_node(
 
 def _settle_focus(directory: Path, proof_ids: list[str]) -> str | None:
     history = events(directory)
-    graph = Graph.from_history(
-        history,
-        lambda ident: (
-            (directory / "proofs" / f"{ident}.lean").read_text()
-            if (directory / "proofs" / f"{ident}.lean").is_file()
-            else None
-        ),
-    )
+    graph = Graph.from_history(history, _proof_reader(directory))
     nodes = {node.proof_id: node for node in graph.nodes}
     eligible = [nodes[ident] for ident in proof_ids if ident in nodes and nodes[ident].status in ("closed", "sketch")]
     if not eligible:
@@ -2463,14 +2455,7 @@ def compile_operation(
     filed = next(
         event for event in events(directory) if event.get("kind") == "edge" and event.get("proof_id") == proof_id
     )
-    projection = Graph.from_history(
-        events(directory),
-        lambda ident: (
-            (directory / "proofs" / f"{ident}.lean").read_text()
-            if (directory / "proofs" / f"{ident}.lean").is_file()
-            else None
-        ),
-    )
+    projection = Graph.from_history(events(directory), _proof_reader(directory))
     node = next(item.id for item in projection.nodes if item.proof_id == proof_id)
     return {**result, "node": node, "edge": {"type": filed["type"], "from": filed["from"]}}
 
@@ -2747,14 +2732,7 @@ def graph_state(run_id: str) -> dict:
         idea["attempts"] = sum(1 for node in rows if node["idea_id"] == idea["id"] and node["origin"] == "model")
         idea["probes"] = sum(1 for item in probes if item["idea_id"] == idea["id"])
     idea_rows = ideas
-    projection = Graph.from_history(
-        history,
-        lambda ident: (
-            (directory / "proofs" / f"{ident}.lean").read_text()
-            if (directory / "proofs" / f"{ident}.lean").is_file()
-            else None
-        ),
-    )
+    projection = Graph.from_history(history, _proof_reader(directory))
     projected = {node.proof_id: node for node in projection.nodes}
     for node in rows:
         graph_node = projected.get(node["id"])
