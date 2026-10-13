@@ -1247,6 +1247,17 @@ ArkLib v4.31 `reference` +14% / `splice_late` +19% failed at a clock 17-25% belo
 not the limit. Owner decision 2026-10-13: gate on clock-adjusted figures (seconds x MHz / baseline MHz) from the next
 Lean review (08c): re-record the baseline with CPU figures on ticket 07's code (v6 machinery) plus the CPU logging,
 then gate 08b's and 08c's code against it. Raising the power limit (root) stays an option for later.
+**Built (ticket 08c, 2026-10-13):** after the primary gate the runner checks the other toolchains in a background
+thread (`start_background_checks`); a failure stops Pi once through the breaker's path, naming the toolchain (stop
+reason `lean_unhealthy`, exit 75); housekeeping counts the warm service's memory as free. The Core row lists three
+toolchains (not one), so the slow runner tests exercise the background warm-ups: a project closes only once its
+header load ends (about 12 s for the last one), and the crash tests now allow 60 s. **Clock-adjusted gate in place:**
+`compare` gates `seconds x current MHz / baseline MHz` when both sides carry a clock and reports the measured value.
+Core, Putnam and CSLib were re-recorded with their clock on ticket 07's code plus the CPU logging (`rerecorded` in the
+baseline; Putnam's reference 17.1 s at 2800 MHz scales to 12.6 s at turbo, against 12.3 s recorded then). ArkLib keeps
+its 2026-10-11 figures until the full gate after 08d. 08c's quick gate: 0 regressions. Open (owner, later): replace
+Putnam in the quick gate with a row whose full re-check takes 2-4 s and whose header is small (about 2 min instead of
+6; Putnam's 15 full re-checks of about 13-17 s are 5 of the 6 minutes).
  (Lean-only benchmark, phase 0/3):
 - Lean v4.32's experimental `--incr-header-save` / `--incr-load` cross-process header snapshots, on the ≥v4.32 rows.
 - REPL tags: **verified** for v4.25.0 through v4.33.0 (`git ls-remote`), including v4.33.0-rc2. **No `v4.29.1` tag**:
