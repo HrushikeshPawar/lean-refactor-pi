@@ -1,0 +1,80 @@
+{
+  "complete": true,
+  "rows": {
+    "Core.InitsUpdatesComm": {
+      "v4.29.1": {
+        "header_cold_s": 5.332,
+        "header_unpickle_s": 13.259,
+        "pickle_ok": false,
+        "check_p50": {
+          "lsp": 0.43900000000000006,
+          "repl": 0.48
+        },
+        "check_p95": {
+          "lsp": 0.7665500000000002,
+          "repl": 0.8572
+        },
+        "pss_gb": {
+          "lsp": 0.3601226806640625,
+          "repl": 0.4568796157836914
+        },
+        "pickle_bytes": 1420888,
+        "disagreements": 0,
+        "repl_errors": [],
+        "max_heartbeat_difference": 0.011759172154280339,
+        "adopt": false
+      },
+      "v4.27.0": {
+        "header_cold_s": 5.335,
+        "header_unpickle_s": 15.559,
+        "pickle_ok": false,
+        "check_p50": {
+          "lsp": 0.469,
+          "repl": 0.405
+        },
+        "check_p95": {
+          "lsp": 0.8775500000000002,
+          "repl": 0.7197500000000001
+        },
+        "pss_gb": {
+          "lsp": 0.4211702346801758,
+          "repl": 0.5010833740234375
+        },
+        "pickle_bytes": 1398000,
+        "disagreements": 0,
+        "repl_errors": [],
+        "max_heartbeat_difference": 0.024390243902439025,
+        "adopt": false
+      },
+      "v4.26.0": {
+        "header_cold_s": 6.896,
+        "header_unpickle_s": 14.535,
+        "pickle_ok": false,
+        "check_p50": {
+          "lsp": 0.5045000000000001,
+          "repl": 0.4215
+        },
+        "check_p95": {
+          "lsp": 0.8279000000000002,
+          "repl": 0.70515
+        },
+        "pss_gb": {
+          "lsp": 0.5851144790649414,
+          "repl": 0.6670932769775391
+        },
+        "pickle_bytes": 1086024,
+        "disagreements": 0,
+        "repl_errors": [],
+        "max_heartbeat_difference": 0.024390243902439025,
+        "adopt": false
+      }
+    }
+  },
+  "toolchains": {
+    "v4.29.1": false,
+    "v4.27.0": false,
+    "v4.26.0": false
+  },
+  "adopt": false,
+  "scope": "Core.InitsUpdatesComm only, its 3 toolchains, the 20 drafts (reference, edit, error, sorry x5). Owner decision 2026-10-13: rule 9 needs every compared row to pass and Core fails (d), so the other rows cannot change the verdict."
+}

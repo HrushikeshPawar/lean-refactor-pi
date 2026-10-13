@@ -4,7 +4,7 @@
 
 **Blocked by:** 08c: Lean service callers, tests, speed gate (all lower tickets are committed below your branch).
 
-**Status:** needs-review
+**Status:** done
 
 **Branch:** `v7/08d-repl-pool` (stacked on `v7/08c-lean-callers`)
 
