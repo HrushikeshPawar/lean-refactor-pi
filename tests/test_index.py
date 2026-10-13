@@ -3,12 +3,14 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from arena import engine, index, search
 from tests.slow import slow
 
 FIXTURES = Path(__file__).parent / "fixtures"
 CORE_ROW = "Core.InitsUpdatesComm"
+HIDDEN_ROW = {"name": "Fixture", "file_path": "Fixture.lean", "version_info": [{"v4.29.1": "fixture-commit"}]}
 
 
 class IndexLoaderTests(unittest.TestCase):
@@ -46,6 +48,51 @@ class IndexLoaderTests(unittest.TestCase):
                 self.assertIsNotNone(
                     connection.execute("SELECT idf FROM constants WHERE name = 'HAppend.hAppend'").fetchone()
                 )
+
+    def test_hidden_records_without_type_load_resolve_and_add_no_constants(self):
+        records = [
+            {"name": "Nat.add_comm", "kind": "theorem", "module": "Nat", "line": 1, "end_line": 2,
+             "generated": False, "private": False, "type": "∀ a b, a + b = b + a", "head": "Eq",
+             "consts": ["Eq", "HAdd.hAdd"]},
+            {"name": "Nat.add_comm.proof_1", "kind": "theorem", "module": "Nat", "line": 3, "end_line": 4,
+             "generated": True, "private": False, "type": None, "head": "", "consts": []},
+            # A stale writer may still send constants for a hidden row; the loader drops them.
+            {"name": "_private.Nat.0.helper", "kind": "def", "module": "Nat", "line": 5, "end_line": 5,
+             "generated": False, "private": True, "type": None, "head": "Hidden.head", "consts": ["Hidden.c"]},
+        ]  # fmt: skip
+        with tempfile.TemporaryDirectory() as temporary:
+            jsonl = Path(temporary) / "hidden.jsonl"
+            jsonl.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+            database = Path(temporary) / "index.sqlite"
+            self.assertEqual(index.load_index(jsonl, database), 3)
+            with sqlite3.connect(database) as connection:
+                row = connection.execute(
+                    "SELECT type, head, consts, generated, line FROM declarations WHERE name = 'Nat.add_comm.proof_1'"
+                ).fetchone()
+                self.assertEqual(row, (None, "", "[]", 1, 3))
+                constants = {name for (name,) in connection.execute("SELECT name FROM constants")}
+                self.assertEqual(constants, {"Eq", "HAdd.hAdd"})
+                linked = connection.execute("SELECT DISTINCT decl_id FROM decl_consts").fetchall()
+                self.assertEqual(linked, [(1,)])
+            connection = sqlite3.connect(database)
+            connection.row_factory = sqlite3.Row
+            with (
+                patch.object(index, "index_path", return_value=database),
+                patch.object(index, "open_index", return_value=connection),
+                patch.object(engine, "problem", return_value=HIDDEN_ROW),
+            ):
+                names = search.search("Fixture", ["proof_1"], kind="name")
+                self.assertEqual(names["queries"][0]["hits"], [])
+            connection = sqlite3.connect(database)
+            connection.row_factory = sqlite3.Row
+            with (
+                patch.object(index, "open_index", return_value=connection),
+                patch.object(engine, "problem", return_value=HIDDEN_ROW),
+            ):
+                resolved = search.resolve_handle("Fixture", "decl:Nat.add_comm.proof_1")
+            assert resolved is not None
+            self.assertTrue(resolved["generated"])
+            self.assertEqual((resolved["signature"], resolved["line"]), ("Nat.add_comm.proof_1", 3))
 
     def test_current_file_ranges_drop_only_the_inserted_wrapper_lines(self):
         with tempfile.TemporaryDirectory() as temporary:

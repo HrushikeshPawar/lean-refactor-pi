@@ -16,7 +16,7 @@ from pathlib import Path
 from arena import engine
 
 LEAN_FILE = Path(__file__).with_name("lean") / "index.lean"
-INDEX_TIMEOUT = 900
+INDEX_TIMEOUT = 1800
 SCHEMA_VERSION = "declaration-index-v2"
 
 
@@ -152,7 +152,12 @@ def load_index(jsonl_path: Path, db_path: Path) -> int:
                 last = name.rsplit(".", 1)[-1]
                 folded_last = last.casefold()
                 normalized = unicodedata.normalize("NFKC", name).casefold()
-                consts = list(dict.fromkeys(str(value) for value in record.get("consts", [])))
+                generated = bool(record.get("generated", False))
+                private = bool(record.get("private", False))
+                # Hidden rows are never search results, so they carry no type terms and add nothing to IDF.
+                hidden = generated or private
+                consts = [] if hidden else list(dict.fromkeys(str(value) for value in record.get("consts") or []))
+                head = "" if hidden else str(record.get("head") or "")
                 component_id = components.get(folded_last)
                 if component_id is None:
                     component_id = components[folded_last] = len(components) + 1
@@ -176,15 +181,15 @@ def load_index(jsonl_path: Path, db_path: Path) -> int:
                         str(record["module"]),
                         record.get("line"),
                         record.get("end_line"),
-                        int(bool(record.get("generated", False))),
-                        int(bool(record.get("private", False))),
+                        int(generated),
+                        int(private),
                         record.get("type"),
-                        str(record.get("head", "")),
+                        head,
                         json.dumps(consts, ensure_ascii=False),
                     ),
                 ).lastrowid
                 assert decl_id is not None
-                for constant in set(consts) | ({str(record["head"])} if record.get("head") else set()):
+                for constant in set(consts) | ({head} if head else set()):
                     documents.setdefault(constant, set()).add(decl_id)
                 count += 1
         total = max(count, 1)

@@ -4,6 +4,12 @@ meta def arenaGeneratedSuffixes : List String :=
     "noConfusionType", "below", "ibelow", "casesOn", "recOn", "rec", "congr_simp", "induct",
     "induct_unfolding"]
 
+-- Compiler-made numbered names (`match_1`, `eq_2`, `proof_3`) that `Name.isInternal` misses.
+meta def arenaNumberedAux (last : String) : Bool :=
+  ["match_", "eq_", "proof_"].any (fun lead =>
+    last.startsWith lead && last.length > lead.length &&
+      (last.drop lead.length).all (fun c => c.isDigit || c == '_'))
+
 meta unsafe def arena_indexModuleRanges (moduleName : Lean.Name) : IO (Array (Lean.Name × Lean.DeclarationRanges)) := do
   let fileName ← Lean.findOLean moduleName
   let parts ← Lean.readModuleDataParts #[fileName, Lean.OLeanLevel.server.adjustFileName fileName]
@@ -18,13 +24,12 @@ elab "arena_index" : command => do
   let env ← getEnv
   let outputPath : System.FilePath := @@INDEX_PATH@@
   let handle ← IO.FS.Handle.mk outputPath .write
-  let moduleRanges ← IO.mkRef ({} : Std.HashMap Lean.Name (Array (Lean.Name × Lean.DeclarationRanges)))
+  let moduleRanges ← IO.mkRef ({} : Std.HashMap Lean.Name (Std.HashMap Lean.Name Lean.DeclarationRanges))
   let isGenerated (name : Lean.Name) : Bool :=
-    name.isInternal || name.isInternalDetail || match name with
-      | .str _ last => arenaGeneratedSuffixes.contains last ||
-          ((last.startsWith "match_" || last.startsWith "eq_") && last.length > 3 &&
-            (last.drop 3).all (fun c => c.isDigit || c == '_'))
-      | _ => false
+    name.isInternal || name.isInternalDetail || Lean.isAuxRecursor env name || Lean.isNoConfusion env name ||
+      Lean.Meta.isMatcherCore env name || match name with
+        | .str _ last => arenaGeneratedSuffixes.contains last || arenaNumberedAux last
+        | _ => false
   let declKind (name : Lean.Name) (info : Lean.ConstantInfo) : String :=
     if Lean.Meta.isInstanceCore env name then "instance" else
     match info with
@@ -62,10 +67,12 @@ elab "arena_index" : command => do
           | some ranges => pure ranges
           | none => do
             let found ← try unsafe arena_indexModuleRanges moduleName catch _ => pure #[]
-            moduleRanges.modify (·.insert moduleName found)
-            pure found
-        match ranges.find? (·.1 == name) with
-        | some (_, range) => pure (some (range.range.pos.line, range.range.endPos.line))
+            let table : Std.HashMap Lean.Name Lean.DeclarationRanges :=
+              found.foldl (fun acc item => acc.insert item.1 item.2) {}
+            moduleRanges.modify (·.insert moduleName table)
+            pure table
+        match ranges[name]? with
+        | some range => pure (some (range.range.pos.line, range.range.endPos.line))
         | none => pure none
   let rows := env.constants.map₁.toList ++ env.constants.map₂.toList
   let localNames := env.constants.map₂.toList.map (fun item => item.1)
@@ -84,13 +91,17 @@ elab "arena_index" : command => do
       ("end_line", match range with | some (_, line) => toJson line | none => Json.null),
       ("generated", toJson generated),
       ("private", toJson privateName)]
+    -- Search never shows generated or private declarations; handle resolution needs only the fields
+    -- above, so skip the pretty-printer and constant walk for them.
     if !generated && !privateName then
       let signature ← typeText info
-      fields := fields ++ [("type", toJson signature)]
-    let consts := info.type.getUsedConstants.filter (fun used => !used.isInternal && !Lean.Meta.isInstanceCore env used)
-    fields := fields ++ [
-      ("head", toJson (headOf info.type)),
-      ("consts", Json.arr (((consts.toList.take 40).map (fun used => Json.str used.toString)).toArray))]
+      let consts := info.type.getUsedConstants.filter (fun used => !used.isInternal && !Lean.Meta.isInstanceCore env used)
+      fields := fields ++ [
+        ("type", toJson signature),
+        ("head", toJson (headOf info.type)),
+        ("consts", Json.arr (((consts.toList.take 40).map (fun used => Json.str used.toString)).toArray))]
+    else
+      fields := fields ++ [("type", Json.null), ("head", toJson ""), ("consts", Json.arr #[])]
     handle.putStrLn (Json.mkObj fields).compress
   handle.flush
 
