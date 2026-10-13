@@ -231,7 +231,7 @@ def lean_gate(theorem: str, directory: Path, gate_fn=None) -> dict | None:
     (directory / lean_health.TRIPPED_FILE).unlink(missing_ok=True)  # a resumed run starts with a clean breaker
     if _LEAN["socket"] is None or os.environ.get(lean_health.GATE_ENV) == "0":
         return None
-    slots = min(lean_session.MAX_SLOTS, 4)
+    slots = lean_session.PRIMARY_MIN_WORKERS
     print(
         f"Lean health gate: warming {slots} workers per version and checking the reference proof "
         f"(blocks until done; no model request is made before it passes)",

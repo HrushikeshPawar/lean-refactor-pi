@@ -13,17 +13,17 @@ Mathlib from NTFS against a 180 s budget). Two protections, both free of model c
 from __future__ import annotations
 
 import contextlib
-import inspect
 import json
 import os
 import time
 from pathlib import Path
+from typing import cast
 
 HEALTH_FILE = "lean-health.json"
 TRIPPED_FILE = "lean-unhealthy.json"
 STOP_REASON = "lean_unhealthy"
 EXIT_CODE = 75  # runner exit status for a Lean-unhealthy row (EX_TEMPFAIL): the campaign skips the row and goes on
-LIMIT_FLOOR = 180
+LIMIT_FLOOR = 60
 LIMIT_CAP = 900
 LIMIT_FACTOR = 3
 MAX_USE = 0.5  # a warm reference check may use at most this share of the limit
@@ -33,7 +33,7 @@ GATE_ENV = "ARENA_LEAN_GATE"  # "0" turns the gate off (offline tests with a fak
 
 
 def choose_limit(slowest_warm: float | None) -> int:
-    """clamp(max(180, 3 x slowest warm reference check), <= 900)."""
+    """clamp(max(60, 3 x the primary warm reference check), <= 900)."""
     return int(min(LIMIT_CAP, max(LIMIT_FLOOR, LIMIT_FACTOR * (slowest_warm or 0.0))))
 
 
@@ -49,26 +49,30 @@ def gate_versions(row: dict) -> list[tuple[str, str]]:
     return [first] + [pair for pair in engine.versions(row) if pair != first]
 
 
-def _warm(row: dict, version: str, commit: str, slots: int, lane: str = "model") -> dict | None:
+def _warm(row: dict, version: str, commit: str, slots: int, lane: str = "model", wait: bool = True) -> dict | None:
     from arena import engine
 
     warm = getattr(engine, "warm_session", None)
     if not warm:
         return None
-    return warm(row, version, commit, slots) if lane == "model" else warm(row, version, commit, slots, lane=lane)
+    return warm(row, version, commit, slots, lane=lane, wait=wait)
 
 
-def _reference_check(row: dict, version: str, commit: str, timeout: int = LIMIT_CAP) -> dict:
+def _reference_check(row: dict, version: str, commit: str, timeout: int = LIMIT_CAP, lane: str = "model") -> dict:
     """Compile the untouched reference proof through the normal path (the session when one is configured)."""
     from arena import engine
 
     built = engine.candidate_file(row, row["src"], version, commit)
-    kwargs = {"prefix_end": built["head"], "timeout": timeout}
-    if "lane" in inspect.signature(engine.run_lean).parameters:
-        kwargs["lane"] = "model"
     started = time.monotonic()
     try:
-        done = engine.run_lean(row, built["path"], built["text"], **kwargs)
+        done = engine.run_lean(
+            row,
+            cast(Path, built["path"]),
+            str(built["text"]),
+            prefix_end=cast(int, built["head"]),
+            timeout=timeout,
+            lane=lane,
+        )
     except Exception as error:
         return {
             "seconds": round(time.monotonic() - started, 2),
@@ -78,13 +82,20 @@ def _reference_check(row: dict, version: str, commit: str, timeout: int = LIMIT_
         }
     seconds = round(time.monotonic() - started, 2)
     if done is None:
-        return {"seconds": seconds, "passed": False, "timed_out": True, "detail": f"timed out after {timeout} s"}
+        return {
+            "seconds": seconds,
+            "passed": False,
+            "timed_out": True,
+            "detail": f"timed out after {timeout} s",
+            "path": engine.last_lean_run().get("path"),
+        }
     returncode, output = done
     return {
         "seconds": seconds,
         "passed": returncode == 0,
         "timed_out": False,
         "detail": "" if returncode == 0 else output.strip()[:200],
+        "path": engine.last_lean_run().get("path"),
     }
 
 
@@ -100,7 +111,7 @@ def gate(
     log=print,
     now_fn=time.time,
 ) -> dict:
-    """Warm the session, check the reference on every version, decide the row's limit and verdict.
+    """Warm and check the primary version, starting other toolchain warm-ups in the background.
 
     Blocking and free of model calls. The four functions are injected in tests. Persists `lean-health.json` in
     `directory` when given. Returns {"verdict": "healthy"|"unhealthy", "timeout": int, "reasons": [...],
@@ -116,70 +127,82 @@ def gate(
     check_fn = check_fn or _reference_check
     report: dict = {"theorem": theorem, "slots": slots, "started": now_fn(), "versions": {}}
     started = time.monotonic()
-    for number, (version, commit) in enumerate(targets):
-        entry: dict = {}
-        report["versions"][version] = entry
+    version, commit = targets[0]
+    entry: dict = {}
+    report["versions"][version] = entry
+    try:
+        warmed = warm_fn(row, version, commit, slots, lane="model", wait=True)
+    except Exception as error:
+        warmed = {"ok": False, "workers": 0, "seconds": [], "failed": [f"{type(error).__name__}: {error}"]}
+    if warmed is None:
+        entry.update(workers=None, header_seconds=None, warm_failed=[])
+    else:
+        warm_result = warmed if isinstance(warmed, dict) else {}
+        seconds_value = warm_result.get("seconds")
+        seconds = [float(s) for s in seconds_value] if isinstance(seconds_value, list) else []
+        failed_value = warm_result.get("failed")
+        failed = [str(item) for item in failed_value] if isinstance(failed_value, list) else []
+        entry.update(
+            workers=warm_result.get("workers"),
+            header_seconds=round(max(seconds), 1) if seconds else None,
+            warm_failed=failed,
+            warm_ok=bool(warm_result.get("ok")),
+        )
+    warm_result = warmed if isinstance(warmed, dict) else {}
+    seconds_value = warm_result.get("seconds")
+    warm_seconds = [float(s) for s in seconds_value] if isinstance(seconds_value, list) else []
+    _say(
+        log,
+        f"lean warm {version}: {entry.get('workers')} workers ready"
+        + (f" in {max(warm_seconds):.0f} s" if warm_seconds else ""),
+    )
+    checked = check_fn(row, version, commit, lane="model")
+    entry.update(
+        check_seconds=checked["seconds"],
+        passed=bool(checked["passed"]),
+        timed_out=bool(checked.get("timed_out")),
+        detail=checked.get("detail", ""),
+    )
+    _say(
+        log,
+        f"reference {version}: {checked['seconds']:.0f} s "
+        + ("passed" if checked["passed"] else f"FAILED ({entry['detail'][:100]})"),
+    )
+    pending = []
+    for other_version, other_commit in targets[1:]:
+        pending.append(other_version)
         try:
-            # The measure version (first) gets model workers; every other version one background worker, which
-            # is what its compatibility checks use.
-            warmed = (
-                warm_fn(row, version, commit, slots)
-                if number == 0
-                else warm_fn(row, version, commit, 1, lane="background")
-            )
+            warmed = warm_fn(row, other_version, other_commit, 1, lane="background", wait=False)
         except Exception as error:
             warmed = {"ok": False, "workers": 0, "seconds": [], "failed": [f"{type(error).__name__}: {error}"]}
-        if warmed is None:
-            entry.update(workers=None, header_seconds=None, warm_failed=[])
-            _say(log, f"lean warm {version}: no session configured; the reference check below includes the import")
-        else:
-            seconds = [float(s) for s in warmed.get("seconds") or []]
-            entry.update(
-                workers=warmed.get("workers"),
-                header_seconds=round(max(seconds), 1) if seconds else None,
-                warm_failed=list(warmed.get("failed") or []),
-                warm_ok=bool(warmed.get("ok")),
-            )
-            if warmed.get("workers"):
-                took = f" in {max(seconds):.0f} s" if seconds else ""
-                _say(
-                    log,
-                    f"lean warm {version}: {warmed['workers']} workers ready{took}"
-                    + (f"; {len(entry['warm_failed'])} failed" if entry["warm_failed"] else ""),
-                )
-            else:
-                _say(log, f"lean warm {version}: NO worker ready ({'; '.join(map(str, entry['warm_failed']))[:160]})")
-        checked = check_fn(row, version, commit)
-        entry.update(
-            check_seconds=checked["seconds"],
-            passed=bool(checked["passed"]),
-            timed_out=bool(checked.get("timed_out")),
-            detail=checked.get("detail", ""),
-        )
-        _say(
-            log,
-            f"reference {version}: {checked['seconds']:.0f} s "
-            + (
-                "passed"
-                if checked["passed"]
-                else f"FAILED ({'timed out' if checked.get('timed_out') else entry['detail'][:100]})"
-            ),
-        )
-    slowest = max((e["check_seconds"] for e in report["versions"].values()), default=0.0)
+        warm_result = warmed if isinstance(warmed, dict) else {}
+        seconds_value = warm_result.get("seconds")
+        seconds = [float(s) for s in seconds_value] if isinstance(seconds_value, list) else []
+        failed_value = warm_result.get("failed")
+        failed = [str(item) for item in failed_value] if isinstance(failed_value, list) else []
+        report["versions"][other_version] = {
+            "warmup": "background",
+            "checked": False,
+            "workers": warm_result.get("workers"),
+            "header_seconds": round(max(seconds), 1) if seconds else None,
+            "warm_failed": failed,
+            "warm_ok": bool(warm_result.get("ok")),
+        }
+    report["pending"] = pending
+    slowest = float(entry["check_seconds"])
     limit = choose_limit(slowest)
     reasons = []
-    for version, entry in report["versions"].items():
-        if entry.get("workers") == 0:
-            reasons.append(f"{version}: no Lean worker could open the file header")
-        if not entry["passed"]:
-            reasons.append(
-                f"{version}: reference proof did not pass ({'timed out' if entry['timed_out'] else entry['detail'][:100] or 'failed'})"
-            )
-        elif entry["check_seconds"] > MAX_USE * limit:
-            reasons.append(
-                f"{version}: warm reference check took {entry['check_seconds']:.0f} s, over "
-                f"{int(MAX_USE * 100)}% of the {limit} s limit"
-            )
+    if entry.get("workers") == 0:
+        reasons.append(f"{version}: no Lean worker could open the file header")
+    if not entry["passed"]:
+        reasons.append(
+            f"{version}: reference proof did not pass ({'timed out' if entry['timed_out'] else entry['detail'][:100] or 'failed'})"
+        )
+    elif entry["check_seconds"] > MAX_USE * limit:
+        reasons.append(
+            f"{version}: warm reference check took {entry['check_seconds']:.0f} s, over "
+            f"{int(MAX_USE * 100)}% of the {limit} s limit"
+        )
     report.update(
         timeout=limit,
         slowest_warm_seconds=slowest,
@@ -193,6 +216,73 @@ def gate(
             (Path(directory) / HEALTH_FILE).write_text(json.dumps(report, indent=2) + "\n")
     _say(log, f"lean gate {report['verdict']}: limit {limit} s" + (" (" + "; ".join(reasons) + ")" if reasons else ""))
     return report
+
+
+def trip_unhealthy(directory: Path, version: str, detail: str, now_fn=time.time) -> dict:
+    marker = {
+        "ts": now_fn(),
+        "stop_reason": STOP_REASON,
+        "source": "reference_check",
+        "version": version,
+        "detail": detail,
+    }
+    (Path(directory) / TRIPPED_FILE).write_text(json.dumps(marker) + "\n")
+    _say(print, f"Lean reference check failed on {version}: {detail[:160]}")
+    return marker
+
+
+def check_others(
+    theorem: str,
+    directory: Path,
+    *,
+    row_fn=None,
+    versions_fn=None,
+    check_fn=None,
+    cancelled=lambda: False,
+    log=print,
+    now_fn=time.time,
+) -> list[dict]:
+    """Run pending cross-version reference checks serially and trip on the first failure."""
+    report = read_health(directory)
+    if report is None:
+        return []
+    if row_fn is None:
+        from arena import engine
+
+        row_fn = engine.problem
+    row = row_fn(theorem)
+    targets = (versions_fn or gate_versions)(row)
+    check_fn = check_fn or _reference_check
+    completed = []
+    for version, commit in targets[1:]:
+        if cancelled():
+            break
+        entry = report.get("versions", {}).get(version, {})
+        if entry.get("checked"):
+            continue
+        check = check_fn(row, version, commit, lane="background")
+        entry.update(
+            checked=True,
+            check_seconds=check["seconds"],
+            passed=bool(check["passed"]),
+            timed_out=bool(check.get("timed_out")),
+            detail=check.get("detail", ""),
+        )
+        report["versions"][version] = entry
+        report["pending"] = [pending for pending in report.get("pending", []) if pending != version]
+        (Path(directory) / HEALTH_FILE).write_text(json.dumps(report, indent=2) + "\n")
+        completed.append({"version": version, **entry})
+        detail = entry["detail"] or ("timed out" if entry["timed_out"] else "reference failed")
+        if (
+            not entry["passed"]
+            or entry.get("workers") == 0
+            or entry.get("warm_ok") is False
+            or check.get("path") == "cold-fallback"
+        ):
+            trip_unhealthy(directory, version, detail, now_fn=now_fn)
+            break
+        _say(log, f"reference {version}: {entry['check_seconds']:.0f} s passed")
+    return completed
 
 
 def read_health(directory: Path) -> dict | None:

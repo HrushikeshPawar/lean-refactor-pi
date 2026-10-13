@@ -16,7 +16,7 @@ rpb = importlib.import_module("arena.cli.run")
 def run_gate(checks, warms=None, versions=(("v1", "c1"), ("v2", "c2")), directory=None):
     lines = []
     warm = (
-        (lambda row, v, c, slots, lane="model": warms[v])
+        (lambda row, v, c, slots, lane="model", wait=True: warms[v])
         if warms is not None
         else (lambda *a, **kw: {"ok": True, "workers": 4, "seconds": [10.0], "failed": []})
     )
@@ -27,7 +27,7 @@ def run_gate(checks, warms=None, versions=(("v1", "c1"), ("v2", "c2")), director
         row_fn=lambda name: {"name": name},
         versions_fn=lambda row: list(versions),
         warm_fn=warm,
-        check_fn=lambda row, v, c: checks[v],
+        check_fn=lambda row, v, c, lane="model": checks[v],
         log=lines.append,
     )
     return report, lines
@@ -39,26 +39,30 @@ def ok(seconds):
 
 class GateTests(unittest.TestCase):
     def test_choose_limit_clamps(self):
-        self.assertEqual(lh.choose_limit(None), 180)
-        self.assertEqual(lh.choose_limit(10), 180)
+        self.assertEqual(lh.choose_limit(None), 60)
+        self.assertEqual(lh.choose_limit(10), 60)
+        self.assertEqual(lh.choose_limit(3), 60)
         self.assertEqual(lh.choose_limit(100), 300)
         self.assertEqual(lh.choose_limit(500), 900)
 
-    def test_healthy_row_picks_three_times_the_slowest_warm_check(self):
+    def test_gate_uses_only_primary_and_records_other_versions_as_pending(self):
         with tempfile.TemporaryDirectory() as tmp:
-            report, lines = run_gate({"v1": ok(41.0), "v2": ok(70.0)}, directory=Path(tmp))
-            self.assertEqual((report["verdict"], report["timeout"], report["reasons"]), ("healthy", 210, []))
+            report, lines = run_gate({"v1": ok(41.0), "v2": {"seconds": 1000, "passed": False}}, directory=Path(tmp))
+            self.assertEqual((report["verdict"], report["timeout"], report["reasons"]), ("healthy", 123, []))
+            self.assertEqual(report["pending"], ["v2"])
+            self.assertEqual(report["versions"]["v2"]["warmup"], "background")
+            self.assertFalse(report["versions"]["v2"]["checked"])
             saved = json.loads((Path(tmp) / "lean-health.json").read_text())
             self.assertEqual(saved["versions"]["v1"]["check_seconds"], 41.0)
             self.assertEqual(saved["versions"]["v1"]["header_seconds"], 10.0)
         self.assertTrue(any("lean warm v1: 4 workers ready in 10 s" in line for line in lines))
-        self.assertTrue(any(line.startswith("reference v2: 70 s") for line in lines))
+        self.assertFalse(any(line.startswith("reference v2:") for line in lines))
 
     def test_reference_timeout_or_failure_is_unhealthy(self):
         timeout = {"seconds": 900.0, "passed": False, "timed_out": True, "detail": "timed out after 900 s"}
-        report, _ = run_gate({"v1": ok(5.0), "v2": timeout})
+        report, _ = run_gate({"v1": timeout, "v2": ok(5.0)})
         self.assertEqual(report["verdict"], "unhealthy")
-        self.assertIn("v2", report["reasons"][0])
+        self.assertIn("v1", report["reasons"][0])
         failed = {"seconds": 3.0, "passed": False, "timed_out": False, "detail": "error: unknown constant"}
         self.assertEqual(run_gate({"v1": failed, "v2": ok(1.0)})[0]["verdict"], "unhealthy")
 
@@ -76,12 +80,17 @@ class GateTests(unittest.TestCase):
         self.assertEqual(len(report["reasons"]), 1)
         self.assertIsNone(report["versions"]["v2"]["workers"])
 
-    def test_other_versions_are_warmed_on_the_background_lane(self):
+    def test_other_versions_are_warmed_without_waiting_or_checking(self):
         calls = []
+        checked = []
 
-        def warm(row, v, c, slots, lane="model"):
-            calls.append((v, slots, lane))
-            return {"ok": True, "workers": slots, "seconds": [1.0], "failed": []}
+        def warm(row, v, c, slots, lane="model", wait=True):
+            calls.append((v, slots, lane, wait))
+            return (
+                {"ok": True, "workers": slots, "seconds": [1.0], "failed": []}
+                if wait
+                else {"ok": True, "started": True}
+            )
 
         lh.gate(
             "T",
@@ -90,10 +99,73 @@ class GateTests(unittest.TestCase):
             row_fn=lambda name: {"name": name},
             versions_fn=lambda row: [("v1", "c1"), ("v2", "c2"), ("v3", "c3")],
             warm_fn=warm,
-            check_fn=lambda row, v, c: ok(1.0),
+            check_fn=lambda row, v, c, lane="model": checked.append((v, lane)) or ok(1.0),
             log=lambda m: None,
         )
-        self.assertEqual(calls, [("v1", 4, "model"), ("v2", 1, "background"), ("v3", 1, "background")])
+        self.assertEqual(
+            calls, [("v1", 4, "model", True), ("v2", 1, "background", False), ("v3", 1, "background", False)]
+        )
+        self.assertEqual(checked, [("v1", "model")])
+
+    def test_check_others_stops_after_first_failure_and_trips_named_version(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            run_gate({"v1": ok(2)}, directory=directory, versions=(("v1", "c1"), ("v2", "c2"), ("v3", "c3")))
+            calls = []
+
+            def check(row, version, commit, lane="model"):
+                calls.append((version, lane))
+                return {"seconds": 3, "passed": False, "detail": "bad", "timed_out": False}
+
+            rows = lh.check_others(
+                "T",
+                directory,
+                row_fn=lambda _: {},
+                versions_fn=lambda _: [("v1", "c1"), ("v2", "c2"), ("v3", "c3")],
+                check_fn=check,
+                now_fn=lambda: 7.0,
+            )
+            self.assertEqual(calls, [("v2", "background")])
+            self.assertEqual(rows[0]["version"], "v2")
+            marker = json.loads((directory / lh.TRIPPED_FILE).read_text())
+            self.assertEqual((marker["version"], marker["source"], marker["ts"]), ("v2", "reference_check", 7.0))
+
+    def test_check_others_respects_cancellation_and_leaves_successful_versions_healthy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            run_gate(
+                {"v1": ok(2)},
+                directory=directory,
+                versions=(("v1", "c1"), ("v2", "c2"), ("v3", "c3")),
+            )
+            calls = []
+
+            def check(row, version, commit, lane="model"):
+                calls.append(version)
+                return ok(2)
+
+            self.assertEqual(
+                lh.check_others(
+                    "T",
+                    directory,
+                    row_fn=lambda _: {},
+                    versions_fn=lambda _: [("v1", "c1"), ("v2", "c2"), ("v3", "c3")],
+                    check_fn=check,
+                    cancelled=lambda: True,
+                ),
+                [],
+            )
+            self.assertEqual(calls, [])
+            rows = lh.check_others(
+                "T",
+                directory,
+                row_fn=lambda _: {},
+                versions_fn=lambda _: [("v1", "c1"), ("v2", "c2"), ("v3", "c3")],
+                check_fn=check,
+            )
+            self.assertEqual([entry["version"] for entry in rows], ["v2", "v3"])
+            self.assertIsNone(lh.tripped(directory))
+            self.assertEqual(lh.read_health(directory)["pending"], [])
 
 
 def check(kind: str, trigger: str = "model", record: str = "evaluation") -> dict:
