@@ -36,7 +36,7 @@ from types import SimpleNamespace
 from rich.console import Console
 from rich.table import Table
 
-from arena import lean_session
+from arena import engine, lean_session, scheduler
 from arena.cli.run import CONFIG, MODELS
 from arena.engine import ROOT
 
@@ -62,8 +62,8 @@ def slug(text: str, limit: int = 40) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "-", text)[:limit].strip("-._") or "row"
 
 
-def plan(prefix: str, rows: list[str], models: list[str], replicates: int) -> list[dict]:
-    """Replicate-major order: every row x model gets replicate k before any gets k+1."""
+def plan(prefix: str, rows: list[str], models: list[str], replicates: int, group_of=None) -> list[dict]:
+    """Plan row-major specs, optionally grouping rows by a stable cache key."""
     if replicates < 1:
         raise ValueError("--replicates must be at least 1")
     if not rows or len(set(rows)) != len(rows) or not models or len(set(models)) != len(models):
@@ -71,10 +71,11 @@ def plan(prefix: str, rows: list[str], models: list[str], replicates: int) -> li
     bad = [model for model in models if model not in MODELS]
     if bad:
         raise ValueError(f"unknown models {bad}; choose from {', '.join(MODELS)}")
+    ordered_rows = rows if group_of is None else scheduler.plan_order(rows, group_of)
     specs = [
         {"row": row, "model": model, "replicate": k, "run_id": f"{prefix}-{slug(row)}-{slug(model)}-r{k}"}
+        for row in ordered_rows
         for k in range(1, replicates + 1)
-        for row in rows
         for model in models
     ]
     if len({spec["run_id"] for spec in specs}) != len(specs):
@@ -557,12 +558,20 @@ def execute(
     run_fn=subprocess.run,
     summary_fn=None,
     housekeeping: Housekeeping | None = None,
+    prewarm: scheduler.Prewarm | None = None,
+    sampler: scheduler.ResourceSampler | None = None,
+    on_finished=None,
 ) -> dict:
     if summary_fn is None:
         from arena.summary import build_summary as summary_fn
     directory = RUNS / spec["run_id"]
     if housekeeping:
         housekeeping.before_run(spec["run_id"])
+    started = time.monotonic()
+    if prewarm:
+        prewarm.started(spec)
+    if sampler:
+        sampler.run_started()
     print(f"{time.strftime('%H:%M:%S')} start  {spec['run_id']}", flush=True)
     try:
         with (logs / f"{spec['run_id']}.log").open("w") as log:
@@ -570,6 +579,13 @@ def execute(
                 command(spec, limit, thinking, passthrough), cwd=ROOT, stdout=log, stderr=subprocess.STDOUT, text=True
             )
     finally:
+        elapsed = time.monotonic() - started
+        if sampler:
+            sampler.run_finished()
+        if prewarm:
+            prewarm.finished(spec, elapsed)
+        if on_finished:
+            on_finished(spec)
         if housekeeping:
             housekeeping.after_run(spec["run_id"], directory)
     print(f"{time.strftime('%H:%M:%S')} done   {spec['run_id']} (exit {proc.returncode})", flush=True)
@@ -597,6 +613,7 @@ class CampaignOptions:
     thinking: str = CONFIG["thinking"]["default"]
     min_free_gb: float = MIN_FREE_GB
     cleanup_wait: float = CLEANUP_WAIT_S
+    prewarm_minutes: float = 12
     skip_preflight: bool = False
     dry_run: bool = False
     json: bool = False
@@ -626,9 +643,18 @@ def cli_execute(options: CampaignOptions, passthrough: tuple[str, ...] = ()) -> 
     if args.jobs < 1:
         print("--jobs must be at least 1", file=sys.stderr)
         return 2
+    if args.prewarm_minutes < 0:
+        print("--prewarm-minutes must be at least 0", file=sys.stderr)
+        return 2
     rows, models = [r for r in args.rows.split(",") if r], [m for m in args.models.split(",") if m]
     try:
-        specs = plan(args.prefix, rows, models, args.replicates)
+        specs = plan(
+            args.prefix,
+            rows,
+            models,
+            args.replicates,
+            group_of=lambda name: scheduler.row_group(engine.problem(name)),
+        )
     except ValueError as error:
         print(error, file=sys.stderr)
         return 2
@@ -645,38 +671,133 @@ def cli_execute(options: CampaignOptions, passthrough: tuple[str, ...] = ()) -> 
     if clashes:
         print(f"run IDs already exist: {', '.join(clashes)}", file=sys.stderr)
         return 2
+    lock = scheduler.CampaignLock()
+    try:
+        lock_info = lock.acquire({"prefix": args.prefix, "argv": sys.argv})
+    except scheduler.CampaignLocked as error:
+        print(error, file=sys.stderr)
+        return 1
+    try:
+        return _run_campaign(args, rows, models, specs, passthrough_tokens, lock_info)
+    finally:
+        lock.release()
+
+
+def _run_campaign(args, rows, models, specs, passthrough_tokens, lock_info, run_fn=subprocess.run) -> int:
+    out = RUNS / f"{args.prefix}-campaign"
+    out.mkdir(parents=True)
+    settings = {
+        "prefix": args.prefix,
+        "rows": rows,
+        "models": models,
+        "replicates": args.replicates,
+        "jobs": args.jobs,
+        "limit_usd": args.limit_usd,
+        "thinking": args.thinking,
+        "min_free_gb": args.min_free_gb,
+        "cleanup_wait_s": args.cleanup_wait,
+        "prewarm_minutes": args.prewarm_minutes,
+        "order": [spec["run_id"] for spec in specs],
+        "started": lock_info["started"],
+        "cpu_count": os.cpu_count(),
+        "mem_total_gb": scheduler.mem_total_default(),
+        "lock": lock_info,
+    }
+    campaign_path = out / "campaign.json"
+    campaign_path.write_text(json.dumps({"settings": settings}, indent=2) + "\n")
     try:
         expected = check_packets(rows)
         print("preflight:", check_preflight(models, args.skip_preflight))
     except CampaignAbort as error:
         print(f"aborted before any paid run: {error}", file=sys.stderr)
         return 1
-    out = RUNS / f"{args.prefix}-campaign"
-    out.mkdir(parents=True)
     housekeeping = Housekeeping(args.min_free_gb, args.cleanup_wait)
-    with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-        runs = list(
-            pool.map(
-                lambda spec: execute(
-                    spec,
-                    args.limit_usd,
-                    args.thinking,
-                    passthrough_tokens,
-                    out,
-                    expected[spec["row"]],
-                    housekeeping=housekeeping,
-                ),
-                specs,
-            )
+    sampler = scheduler.ResourceSampler()
+    sampler.start()
+    prewarm = (
+        scheduler.Prewarm(
+            list(dict.fromkeys(spec["row"] for spec in specs)),
+            args.replicates * len(models),
+            lead_s=60 * args.prewarm_minutes,
+            warm_fn=lambda name: _warm_row(name),
         )
-    report = {
+        if args.prewarm_minutes > 0
+        else None
+    )
+    completed: dict[str, int] = dict.fromkeys(rows, 0)
+    finished_lock = threading.Lock()
+    hold = None
+    stop_helpers = threading.Event()
+    helper_thread = None
+    try:
+        row_order = list(dict.fromkeys(spec["row"] for spec in specs))
+        row_info = [(name, scheduler.row_projects(engine.problem(name))) for name in row_order]
+        try:
+            socket_path = lean_session.ensure_service()
+            os.environ[lean_session.ENV] = socket_path
+            hold = scheduler.HoldKeeper(
+                f"campaign-{args.prefix}-{os.getpid()}",
+                os.getpid(),
+                lambda payload, timeout: lean_session.request(payload, timeout, path=socket_path),
+            )
+            hold.start(row_info)
+        except Exception as error:
+            print(f"Lean service hold unavailable ({error}); continuing with cold fallback", flush=True)
+        if prewarm:
+            prewarm.rows = row_order
+
+            def poll_prewarm():
+                while not stop_helpers.wait(30):
+                    next_row = prewarm.due(time.monotonic())
+                    if next_row:
+                        prewarm.warm_fn(next_row)
+
+            helper_thread = threading.Thread(target=poll_prewarm, daemon=True)
+            helper_thread.start()
+
+        def finished(spec):
+            with finished_lock:
+                completed[spec["row"]] += 1
+                last = completed[spec["row"]] == args.replicates * len(models)
+            if last and hold:
+                hold.row_finished(spec["row"])
+
+        with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+            runs = list(
+                pool.map(
+                    lambda spec: execute(
+                        spec,
+                        args.limit_usd,
+                        args.thinking,
+                        passthrough_tokens,
+                        out,
+                        expected[spec["row"]],
+                        housekeeping=housekeeping,
+                        prewarm=prewarm,
+                        sampler=sampler,
+                        on_finished=finished,
+                        run_fn=run_fn,
+                    ),
+                    specs,
+                )
+            )
+    finally:
+        stop_helpers.set()
+        if helper_thread:
+            helper_thread.join()
+        if hold:
+            hold.close()
+        observed = sampler.stop()
+    report: dict = {
         "limit_usd": args.limit_usd,
         "prefix": args.prefix,
         **aggregate(runs, expected),
         "lean_unhealthy_runs": [run["run_id"] for run in lean_unhealthy_rows(runs)],
         "provider_unreachable_runs": [run["run_id"] for run in provider_unreachable_rows(runs)],
+        "settings": settings,
+        "observed": observed,
     }
-    (out / "campaign.json").write_text(json.dumps(report, indent=2) + "\n")
+    campaign_path.write_text(json.dumps(report, indent=2) + "\n")
     (out / "campaign.txt").write_text(render(report))
     if args.json:
         print(json.dumps(report, ensure_ascii=False))
@@ -700,3 +821,27 @@ def cli_execute(options: CampaignOptions, passthrough: tuple[str, ...] = ()) -> 
         print("Packets differ between runs; the comparison is not valid.", file=sys.stderr)
         return 1
     return 0
+
+
+def _warm_row(name: str) -> None:
+    from arena import engine
+
+    row = engine.problem(name)
+    primary_version, primary_commit = engine.measure_version(row)
+    result = engine.warm_session(row, primary_version, primary_commit, slots=1, lane="model")
+    if _warm_refused(result):
+        print(f"pre-warm {name}: {result}", flush=True)
+    for version, commit in engine.versions(row):
+        if version == primary_version:
+            continue
+        result = engine.warm_session(row, version, commit, 1, lane="background", wait=False)
+        if _warm_refused(result):
+            print(f"pre-warm {name} {version}: {result}", flush=True)
+
+
+def _warm_refused(result: dict | None) -> bool:
+    if result is None:
+        return False
+    failures = [str(item) for item in result.get("failed", [])]
+    failures.append(str(result.get("reason", "")))
+    return any("no room for a Lean worker" in failure for failure in failures)

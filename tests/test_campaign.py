@@ -47,7 +47,11 @@ def write_run(root: Path, run_id: str, proxy_helper: bool):
 class PlanTests(unittest.TestCase):
     def test_dry_run_prints_plan_and_planned_spend_without_spending(self):
         out = io.StringIO()
-        with mock.patch("subprocess.run") as run, contextlib.redirect_stdout(out):
+        with (
+            mock.patch("subprocess.run") as run,
+            mock.patch.object(rc.engine, "problem", side_effect=lambda name: {"source": name, "version_info": []}),
+            contextlib.redirect_stdout(out),
+        ):
             code = rc.cli_execute(
                 rc.CampaignOptions(
                     prefix="p",
@@ -66,7 +70,7 @@ class PlanTests(unittest.TestCase):
 
     def test_replicates_are_sequential_and_ids_distinct(self):
         specs = rc.plan("p", ["A", "B"], ["deepseek-v4.1-flash"], 2)
-        self.assertEqual([s["replicate"] for s in specs], [1] * 2 + [2] * 2)
+        self.assertEqual([s["replicate"] for s in specs], [1, 2, 1, 2])
         self.assertEqual(len({s["run_id"] for s in specs}), 4)
         self.assertEqual(rc.worst_case_usd(specs, 0.1), 0.4)
         with self.assertRaises(ValueError):
@@ -152,19 +156,27 @@ class GateTests(unittest.TestCase):
             )
             self.assertEqual((got, len(calls)), ("ran preflight", 1))
 
-    def test_main_aborts_without_creating_runs_when_gate_fails(self):
+    def test_main_keeps_settings_when_gate_fails(self):
         err = io.StringIO()
-        with (
-            mock.patch.object(rc, "check_packets", side_effect=rc.CampaignAbort("boom")),
-            mock.patch.object(rc, "execute") as execute,
-            contextlib.redirect_stdout(io.StringIO()),
-            contextlib.redirect_stderr(err),
-        ):
-            code = rc.cli_execute(
-                rc.CampaignOptions(prefix="zz-offline-test", rows="A", models="deepseek-v4.1-flash", replicates=1)
-            )
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp)
+            with (
+                mock.patch.object(rc, "RUNS", runs),
+                mock.patch.object(rc.scheduler, "LOCK_PATH", runs / "campaign.lock"),
+                mock.patch.object(rc, "check_packets", side_effect=rc.CampaignAbort("boom")),
+                mock.patch.object(rc.engine, "problem", return_value={"source": "A", "version_info": []}),
+                mock.patch.object(rc, "execute") as execute,
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(err),
+            ):
+                code = rc.cli_execute(
+                    rc.CampaignOptions(prefix="zz-offline-test", rows="A", models="deepseek-v4.1-flash", replicates=1)
+                )
+            settings = json.loads((runs / "zz-offline-test-campaign" / "campaign.json").read_text())
+            self.assertIn("settings", settings)
+            self.assertNotIn("observed", settings)
+            execute.assert_not_called()
         self.assertEqual(code, 1)
-        execute.assert_not_called()
         self.assertIn("aborted before any paid run", err.getvalue())
 
 

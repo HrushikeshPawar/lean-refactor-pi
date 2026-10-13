@@ -26,6 +26,7 @@ from cyclopts import Parameter
 from rich.console import Console
 from rich.table import Table
 
+from arena import scheduler
 from arena.engine import ROOT
 
 WORKSPACES = ROOT / "workspaces"
@@ -240,6 +241,33 @@ class ProvisionOptions:
 
 
 def execute(options: ProvisionOptions) -> int:
+    if options.dry_run:
+        return _execute(options)
+    active = scheduler.holder()
+    if active is not None:
+        _campaign_lock_error(active)
+        return 1
+    lock = scheduler.CampaignLock()
+    try:
+        lock.acquire({"prefix": f"provision:{options.row or 'progress'}", "argv": sys.argv})
+    except scheduler.CampaignLocked:
+        _campaign_lock_error(scheduler.holder() or {})
+        return 1
+    try:
+        return _execute(options)
+    finally:
+        lock.release()
+
+
+def _campaign_lock_error(campaign: dict) -> None:
+    print(
+        f"a campaign (pid {campaign.get('pid', '?')}, prefix {campaign.get('prefix', '?')}, "
+        f"started {campaign.get('started', '?')}) holds the lock; provisioning is refused",
+        file=sys.stderr,
+    )
+
+
+def _execute(options: ProvisionOptions) -> int:
     if options.progress:
         names = options.only or DEFAULT
         console = Console()
