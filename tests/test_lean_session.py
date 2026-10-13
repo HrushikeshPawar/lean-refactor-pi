@@ -33,6 +33,9 @@ def status_of(path: str, timeout: float = 5) -> dict:
     return lean_session.request({"op": "status"}, timeout, path) or {}
 
 
+OPENS_IN_FLIGHT_S = 60.0  # background warm-ups still loading headers when a run ends (they load one at a time)
+
+
 def wait_until(check, seconds: float = 20.0) -> bool:
     end = time.monotonic() + seconds
     while time.monotonic() < end:
@@ -828,9 +831,10 @@ class RunnerSessionTests(unittest.TestCase):
         probes = [e for e in run.jsonl("ledger.jsonl") if e.get("kind") == "probe"]
         self.assertEqual(len(probes), 1, run.stdout[-1000:])
         self.assertEqual(probes[0]["result"]["compat"]["v4.29.1"]["lean"]["path"], "session")
-        health = json.loads((run.directory / "lean-health.json").read_text())
-        self.assertTrue(health["versions"]["v4.29.1"]["checked"])
-        self.assertTrue(health["versions"]["v4.29.1"]["passed"])
+        # The gate decides the primary toolchain itself (check_seconds, passed); only check_others sets "checked".
+        primary = json.loads((run.directory / "lean-health.json").read_text())["versions"]["v4.29.1"]
+        self.assertIsNotNone(primary.get("check_seconds"))
+        self.assertTrue(primary["passed"])
         self.assertIn("Lean session pid=", run.stdout)
         for leftover in ("service.sock", "service.json"):
             self.assertFalse((run.directory / leftover).exists(), leftover)
@@ -851,8 +855,10 @@ class RunnerSessionTests(unittest.TestCase):
         self.assertNotEqual(run.json("cost.json").get("written_by"), "runner_ledger_reconstruction", stderr)
         self.assertEqual(run.json("summary.json")["stop_reason"], "interrupted")
         self.assertTrue(wait_until(lambda: run_id not in status_of(info["socket"], 5)["leases"], 15))
+        # The other toolchains warm in the background (header loads take turns machine-wide, about 12 s for the
+        # last one), and a project closes only once its open has finished: allow that, not just the grace.
         self.assertTrue(
-            wait_until(lambda: status_of(info["socket"], 5)["servers"] == [], 15),
+            wait_until(lambda: status_of(info["socket"], 5)["servers"] == [], OPENS_IN_FLIGHT_S),
             "the interrupted run's project outlived the release grace",
         )
 
@@ -880,7 +886,7 @@ class RunnerSessionTests(unittest.TestCase):
                     run.run_id not in status_of(info["socket"], 5)["leases"]
                     and not status_of(info["socket"], 5)["servers"]
                 ),
-                10,
+                OPENS_IN_FLIGHT_S,  # as above: a background header load in flight finishes before its project closes
             ),
             "lease or project Lean processes survived a crashed runner",
         )
