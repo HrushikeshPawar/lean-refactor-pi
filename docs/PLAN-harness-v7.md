@@ -611,6 +611,16 @@ Graph operations (fork, edit, fill, merge, compare) are modes of `compile` and v
 **Ships only if measured** (BACKLOG §5b-7): same rows, same model, $0.50 cap. Bookkeeping share, tool errors per run
 and calls before the first compile must fall, with no loss on the proxy.
 
+**Built (ticket 15a, 2026-10-13):** `arena/reply.py` (one reply schema, pending updates, diagnostic dedup) and
+`arena/tools.py` (the five handlers `compile`, `goal`, `search`, `read`, `finish`) behind new protocol actions; the
+old actions stay until 15c. All errors at once (#9): up to `error_passes_max` = 3 extra probe passes replace the
+failing steps by `sorry` to reveal later errors and their goals, filing no replacement nodes; the list is marked
+incomplete on a timeout or at the limit. Cross-version results inside the call (#17) wait up to
+`cross_version_wait_seconds`. Reviewer clarification: the shared fake Lean (`tests/graph_support.py`) gained opt-in,
+off-by-default cascading errors instead of a second fake. Review fix: the in-call wait drained the whole background
+queue (salvage first, `max_seconds` checked only between jobs, so a salvage job of earlier drafts could block the
+reply for a minute); `autocheck` now takes `kinds`, and the compile call passes `("full",)`.
+
 ## 5. Candidate graph v7: the agent writes, the harness keeps the books and steers (D7)
 
 ### 5a. What v6 shows

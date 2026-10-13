@@ -4,7 +4,7 @@
 
 **Blocked by:** 05b: Agent text: campaign/engine/TS messages moved verbatim, literal lint; 11: Routes, K1 archive, map, stall; 12: Salvage chain and auto-assembly; 13: Price engine and instant token quotes; 14: Declaration index and search (all lower tickets are committed below your branch).
 
-**Status:** needs-review
+**Status:** done
 
 **Branch:** `v7/15a-tool-handlers` (stacked on `v7/14-search`)
 
