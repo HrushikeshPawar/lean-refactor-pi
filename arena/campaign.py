@@ -3434,10 +3434,18 @@ def _run_step_goals(name: str, run_id: str, proof_id: str) -> None:
     write_state(run_id)
 
 
-def autocheck(name: str, run_id: str, max_seconds: float | None = None, closing: bool = False) -> dict:
+def autocheck(
+    name: str,
+    run_id: str,
+    max_seconds: float | None = None,
+    closing: bool = False,
+    kinds: tuple[str, ...] | None = None,
+) -> dict:
     """Drain salvage, assembly, full checks and step goals in the background lane.
 
     With ``closing`` (the model has stopped) it drains only full checks, then assemblies.
+    ``kinds`` restricts the drain to those job kinds (in the usual order), e.g. ``("full",)``
+    for the compile tool's short in-call wait, which must not spend it on salvage.
     Only one checker runs per run; all queues are derived from the ledger, so a
     killed checker loses nothing.
     """
@@ -3459,6 +3467,8 @@ def autocheck(name: str, run_id: str, max_seconds: float | None = None, closing:
             # results become new candidates) matter; salvage, step goals and profiles (which only
             # feed price tables) only serve the model.
             order = ("full", "assembly") if closing else ("salvage", "assembly", "full", "step_goals", "profiles")
+            if kinds is not None:
+                order = tuple(kind for kind in order if kind in kinds)
             for kind in order:
                 if kind == "salvage" and (salvage_jobs := _salvage_jobs(history, directory, projection)):
                     _run_salvage(name, run_id, salvage_jobs[0])

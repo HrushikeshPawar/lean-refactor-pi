@@ -138,3 +138,24 @@ class MissingGoalTests(NoGoalCase):
         result = tools.compile_tool("T", "logic", {"drafts": ["by\n  bad"]})
         self.assertTrue(result["items"][0]["ok"])
         self.assertIsNone(result["items"][0]["errors"][0]["goal"])
+
+
+class CompileWaitTests(FakeRunCase):
+    cascade_errors = True
+
+    def test_in_call_wait_full_checks_closed_node_without_salvaging(self):
+        with (
+            patch.object(campaign, "problem", return_value=ROW),
+            patch.object(campaign, "_probe_workers", return_value=1),
+            patch.object(campaign.lean_health, "tripped", return_value=False),
+        ):
+            with patch.object(campaign, "autocheck", return_value={"checked": []}):
+                tools.compile_tool("T", "logic", {"drafts": ["by\n  bad\n  exact True.intro"]})
+            history = campaign.events(self.directory)
+            self.assertTrue(campaign._salvage_jobs(history, self.directory, tools._nodes("logic")[1]))
+            before = len(history)
+            result = tools.compile_tool("T", "logic", {"drafts": ["by\n  trivial"]})
+        self.assertEqual(result["items"][0]["status"], "closed")
+        after = campaign.events(self.directory)[before:]
+        self.assertFalse(any(item.get("kind") == "salvage" for item in after))
+        self.assertTrue(any(item.get("kind") == "evaluation" and item.get("trigger") == "auto" for item in after))

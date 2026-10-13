@@ -493,7 +493,7 @@ def compile_tool(theorem: str, run_id: str, request: dict) -> dict:
     closed_nodes = [item.get("node") for item in items if item.get("status") == "closed"]
     if closed_nodes:
         seconds = float(text.numbers().get("cross_version_wait_seconds", 10))
-        campaign.autocheck(theorem, run_id, max_seconds=seconds)
+        campaign.autocheck(theorem, run_id, max_seconds=seconds, kinds=("full",))
     result = reply.reply(facts=facts, items=items, handles=handles)
     return reply.attach_context(run_id, result, include_map=True)
 

@@ -157,7 +157,7 @@ class SalvageCampaignTests(FakeRunCase):
             self.assertEqual(campaign.autocheck("T", "logic")["checked"], [])
             self.assertTrue(first["ok"])
 
-    def autocheck_kinds(self, closing):
+    def autocheck_kinds(self, closing, kinds=None):
         """Salvage, step-goal and auto full-check events in ledger order after one autocheck."""
         with (
             patch.object(campaign.lean_health, "tripped", return_value=False),
@@ -165,7 +165,7 @@ class SalvageCampaignTests(FakeRunCase):
         ):
             campaign.probe("T", "logic", "bad\nexact True.intro")
             self.evaluate("theorem t : True := by\n  a")
-            outcome = campaign.autocheck("T", "logic", closing=closing)
+            outcome = campaign.autocheck("T", "logic", closing=closing, kinds=kinds)
         kinds = [
             "full" if item.get("kind") == "evaluation" else item["kind"]
             for item in campaign.events(self.directory)
@@ -178,6 +178,14 @@ class SalvageCampaignTests(FakeRunCase):
         outcome, kinds = self.autocheck_kinds(closing=True)
         self.assertEqual(outcome["checked"], ["#2"])
         self.assertEqual(kinds, ["full"])
+
+    def test_full_only_drain_skips_salvage_step_goals_and_profiles(self):
+        outcome, kinds = self.autocheck_kinds(closing=False, kinds=("full",))
+        self.assertEqual(outcome["checked"], ["#2"])
+        self.assertEqual(kinds, ["full"])
+        self.assertFalse(
+            any(item.get("kind") in ("profile", "profile_error") for item in campaign.events(self.directory))
+        )
 
     def test_background_drain_runs_salvage_before_full_checks(self):
         outcome, kinds = self.autocheck_kinds(closing=False)
