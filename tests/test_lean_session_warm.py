@@ -108,6 +108,11 @@ class Base(unittest.TestCase):
         patcher = patch.object(lean_session, "_available_gb", return_value=100.0)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # Nothing a test does may reach the machine-wide service directory: a memory marker left there holds back
+        # every real run's route extraction for two minutes (and every later test that extracts routes).
+        patcher = patch.dict(os.environ, {lean_session.SERVICE_DIR_ENV: str(self.dir / "machine")})
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.sessions = []
         self.addCleanup(lambda: [s.shutdown() for s in self.sessions])
 
@@ -440,6 +445,9 @@ class BackgroundWorkerTests(Base):
                 )
         self.assertEqual(self.events("didClose"), [])
         self.assertEqual(len(session.entries[primary].lane_slots("model")), 2)
+        # The refusals mark this session's own directory, not the machine-wide one.
+        self.assertTrue((self.dir / "run" / lean_session.WAITING_NAME).exists())
+        self.assertFalse((self.dir / "machine" / lean_session.WAITING_NAME).exists())
 
     def test_background_is_guaranteed_even_when_model_workers_hold_every_machine_token(self):
         session = self.session(limit=2)

@@ -1131,7 +1131,7 @@ class Session:
         _log(f"refused {entry.project.name}: no room for a Lean worker: {blocked}; {self._workers()} workers open")
         if blocked.startswith("memory"):
             with suppress(OSError):
-                (service_dir() / WAITING_NAME).touch()
+                (self.directory / WAITING_NAME).touch()  # this session's own directory, never another's
 
     def _evict_background(self, keep: _Entry) -> bool:
         """Close the longest-idle background worker of another project, never a busy or model worker."""
