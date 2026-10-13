@@ -4,7 +4,7 @@
 
 **Blocked by:** 08c: Lean service callers, tests, speed gate (all lower tickets, 08d included, are committed below your branch).
 
-**Status:** ready-for-agent
+**Status:** needs-review
 
 **Branch:** `v7/09-scheduler` (stacked on `v7/08d-repl-pool`)
 
