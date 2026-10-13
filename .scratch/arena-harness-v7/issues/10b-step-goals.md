@@ -4,7 +4,7 @@
 
 **Blocked by:** 10a: Graph core: steps, edges, focus, operations; 08c: Lean service callers, tests, speed gate. (Everything below is committed below this branch.)
 
-**Status:** ready-for-agent
+**Status:** needs-review
 
 **Branch:** `v7/10b-step-goals` (stacked on `v7/10a-graph-core`)
 
@@ -32,7 +32,7 @@ Names are as of ticket 10a. If a name below no longer exists and you cannot find
 - [ ] 6. Pure part: the parse of `ARENA_STEPS` output into `[{"id","before","after"}]` on a canned Lean output (middle steps get the next step's `before` as `after`; the last step of a closed proof gets `after: None`; a missing record gives `before: None`).
 - [ ] 7. Projection (in `tests/test_graph.py`): a `step_goals` event fills `before`/`after` into `Node.steps` by id; an `error` event leaves them `None`; a later successful event wins.
 - [ ] 8. Queue (fake Lean, `FakeRunCase`, patch `step_goals.step_goals`): the autocheck queue offers a closed or sketch node until a `step_goals` event (success or `error` form) exists for it, so a checker killed before it wrote the event loses nothing and a recorded error is not retried; broken nodes are never offered; the job is run with `lane="background"`; full checks are drained before step goals.
-- [ ] 9. One `@slow` Lean test in `tests/test_protocol.py` (Strata fixture `FIXTURE`, class style of `CampaignCliTests`): `step_goals(NAME, FIXTURE.read_text())` returns one entry per top-level step, the first `before` contains `Hup`, and the last `after` is `None`. Run it once and put its output in the hand-back.
+- [ ] 9. One `@slow` Lean test in `tests/test_protocol.py` (Strata fixture `FIXTURE`, class style of `CampaignCliTests`): `step_goals(NAME, FIXTURE.read_text())` returns one entry per top-level step; the first `before` is non-null and does not contain `Hup`; the first `after` contains `Hup` and `Hinit` and equals the second step's `before`; and the last `after` is `None`. Run it once and put its output in the hand-back.
 - [ ] 10. Run `uv run ruff check` and `uv run ruff format` on every file you touched, and `uv run ty check arena/steps.py arena/graph.py arena/step_goals.py` plus the files you touched (fix only diagnostics in lines you wrote).
 
 **D. Speed gate (once, at the end)**

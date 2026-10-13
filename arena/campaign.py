@@ -2903,9 +2903,55 @@ def _autocheck_jobs(rows: list[dict], closing: bool = False) -> list[dict]:
     return sorted(jobs, key=lambda r: (r["score"] if r["score"] is not None else float("-inf"), r["n"]), reverse=True)
 
 
+def _step_goal_jobs(history: list[dict], directory: Path) -> list[str]:
+    """Proof ids whose closed or sketch states have no terminal step-goal event."""
+    done = {
+        event["proof_id"]
+        for event in history
+        if event.get("kind") == "step_goals" and ("goals" in event or "error" in event)
+    }
+    candidate_ids = _candidate_ids(history)
+    rows = {row["id"]: row for row in _summaries(history)}
+    jobs: list[str] = []
+    for proof_id in candidate_ids:
+        if proof_id in done:
+            continue
+        row = rows[proof_id]
+        eligible = [item for item in row["evaluations"] if item["status"] in ("full", "primary")]
+        if not eligible:
+            continue
+        full = [item for item in eligible if item["status"] == "full"]
+        selected = max(full or eligible, key=lambda item: item["score"] if item["score"] is not None else -1)
+        proof = (directory / "proofs" / f"{proof_id}.lean").read_text()
+        if goalstate.closed(selected["result"]) and not re.search(r"\bsorry\b", proof):
+            jobs.append(proof_id)
+
+    seen = set(candidate_ids)
+    latest_probes: dict[str, dict] = {}
+    for event in history:
+        if event.get("kind") == "probe":
+            latest_probes[event["proof_id"]] = event["result"]
+    for proof_id, result in latest_probes.items():
+        if proof_id in seen or proof_id in done:
+            continue
+        proof_path = directory / "proofs" / f"{proof_id}.lean"
+        if not proof_path.is_file():
+            continue
+        proof = proof_path.read_text()
+        passed = next(iter((result.get("compat") or {}).values()), {}).get("passed", False)
+        if (goalstate.closed(result) and not re.search(r"\bsorry\b", proof)) or (
+            passed and re.search(r"\bsorry\b", proof)
+        ):
+            jobs.append(proof_id)
+    return jobs
+
+
 def autocheck(name: str, run_id: str, max_seconds: float | None = None, closing: bool = False) -> dict:
-    """Drain the full-check queue in the background lane. Only one checker runs per run;
-    the queue is derived from the ledger, so a killed checker loses nothing."""
+    """Drain full checks, then per-step goals, in the background lane.
+
+    Only one checker runs per run; both queues are derived from the ledger, so a
+    killed checker loses nothing.
+    """
     directory = run_dir(run_id)
     directory.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
@@ -2920,25 +2966,43 @@ def autocheck(name: str, run_id: str, max_seconds: float | None = None, closing:
                 break  # Lean is unhealthy: background checks pause with the model's work
             history = events(directory)
             jobs = _autocheck_jobs(_summaries(history), closing=closing)
-            if not jobs:
+            if jobs:
+                job = jobs[0]
+                try:
+                    proof = (directory / "proofs" / f"{job['id']}.lean").read_text()
+                    record_evaluation(name, run_id, proof, "full", materialize_live=False, lane="batch", trigger="auto")
+                except Exception as error:  # record the failure so the queue moves on
+                    _append(
+                        directory,
+                        {
+                            "kind": "evaluation",
+                            "candidate_id": job["id"],
+                            "key": f"auto-error-{job['id']}",
+                            "mode": "full",
+                            "trigger": "auto",
+                            "result": {"ok": False, "mode": "full", "error": str(error)[:300], "compat": {}},
+                        },
+                    )
+                checked.append(f"#{job['n']}")
+                write_state(run_id)
+                continue
+
+            goal_jobs = _step_goal_jobs(history, directory)
+            if not goal_jobs:
                 break
-            job = jobs[0]
+            proof_id = goal_jobs[0]
             try:
-                proof = (directory / "proofs" / f"{job['id']}.lean").read_text()
-                record_evaluation(name, run_id, proof, "full", materialize_live=False, lane="batch", trigger="auto")
-            except Exception as error:  # record the failure so the queue moves on
+                proof = (directory / "proofs" / f"{proof_id}.lean").read_text()
+                from arena import step_goals
+
+                with lean_lock(directory, "background"):
+                    goals = step_goals.step_goals(name, proof, lane="background")
+                _append(directory, {"kind": "step_goals", "proof_id": proof_id, "goals": goals})
+            except Exception as error:  # record the failure so this node does not block later jobs
                 _append(
                     directory,
-                    {
-                        "kind": "evaluation",
-                        "candidate_id": job["id"],
-                        "key": f"auto-error-{job['id']}",
-                        "mode": "full",
-                        "trigger": "auto",
-                        "result": {"ok": False, "mode": "full", "error": str(error)[:300], "compat": {}},
-                    },
+                    {"kind": "step_goals", "proof_id": proof_id, "error": str(error)[:300]},
                 )
-            checked.append(f"#{job['n']}")
             write_state(run_id)
     return {
         "ok": True,

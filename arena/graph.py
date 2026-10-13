@@ -2,7 +2,9 @@
 
 The graph ledger adds two events: ``edge`` records node lineage and operation
 provenance, while ``focus`` records the current filing point independently of
-lineage. These records are append-only and do not replace legacy campaign rows.
+lineage. ``step_goals`` records before/after states for each proof step, or an
+error when background extraction fails. These records are append-only and do
+not replace legacy campaign rows.
 """
 
 from __future__ import annotations
@@ -10,7 +12,7 @@ from __future__ import annotations
 import re
 import textwrap
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 from functools import cache
 
@@ -121,6 +123,7 @@ class Graph:
         evaluations: dict[str, list[tuple[str, dict]]] = {}
         probe_results: dict[str, dict] = {}
         edges: dict[str, dict] = {}
+        step_goals: dict[str, list[dict]] = {}
         focus = None
         for event in history:
             kind = event.get("kind")
@@ -141,6 +144,8 @@ class Graph:
                 edges[event["proof_id"]] = event
             elif kind == "focus":
                 focus = event["proof_id"]
+            elif kind == "step_goals" and isinstance(event.get("goals"), list):
+                step_goals[event["proof_id"]] = event["goals"]
 
         ids = {proof_id: f"n{index}" for index, proof_id in enumerate(proof_ids, 1)}
         nodes: list[Node] = []
@@ -186,6 +191,14 @@ class Graph:
             depth = depths.get(parents[0], -1) + 1 if parents else 0
             depths[proof_id] = depth
             verified = bool(best and best[0] == "full")
+            steps = split_steps(proof)
+            goals_by_id = {goal.get("id"): goal for goal in step_goals.get(proof_id, [])}
+            steps = [
+                replace(step, before=goals_by_id[step.id].get("before"), after=goals_by_id[step.id].get("after"))
+                if step.id in goals_by_id
+                else step
+                for step in steps
+            ]
             nodes.append(
                 Node(
                     ids[proof_id],
@@ -198,7 +211,7 @@ class Graph:
                     result.get("heartbeat"),
                     {version: bool(value.get("passed")) for version, value in (result.get("compat") or {}).items()},
                     edge,
-                    split_steps(proof),
+                    steps,
                     depth,
                 )
             )

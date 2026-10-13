@@ -25,6 +25,8 @@ class Step:
     text: str
     hash: str
     indent: int
+    before: str | None = None
+    after: str | None = None
 
 
 def hdr_index(lines: list[str]) -> int | None:

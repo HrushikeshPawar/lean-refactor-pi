@@ -70,6 +70,33 @@ class StepTests(unittest.TestCase):
         self.assertEqual(graph.focus, b)
         self.assertEqual(graph.order, ["n1", "n2", "n3"])
 
+    def test_projection_joins_latest_successful_step_goals_by_step_id(self):
+        proof_id = "a" * 64
+        result = {"compat": {"v1": {"passed": True}}, "tokens": 1, "heartbeat": 1, "metrics": {"proxy": 1}}
+        history = [
+            {"kind": "candidate", "candidate_id": proof_id},
+            {"kind": "evaluation", "candidate_id": proof_id, "mode": "fast", "result": result},
+            {"kind": "step_goals", "proof_id": proof_id, "error": "temporary failure"},
+            {"kind": "step_goals", "proof_id": proof_id, "goals": [{"id": "s1", "before": "P", "after": None}]},
+            {"kind": "step_goals", "proof_id": proof_id, "error": "later failure"},
+        ]
+
+        node = Graph.from_history(history, lambda _ident: "theorem t := by\n  exact h\n").nodes[0]
+        self.assertEqual([(step.before, step.after) for step in node.steps], [("P", None)])
+
+    def test_projection_leaves_steps_without_successful_goal_events_empty(self):
+        proof_id = "a" * 64
+        result = {"compat": {"v1": {"passed": True}}, "tokens": 1, "heartbeat": 1, "metrics": {"proxy": 1}}
+        history = [
+            {"kind": "candidate", "candidate_id": proof_id},
+            {"kind": "evaluation", "candidate_id": proof_id, "mode": "fast", "result": result},
+            {"kind": "step_goals", "proof_id": proof_id, "error": "temporary failure"},
+            {"kind": "step_goals", "proof_id": proof_id, "goals": [{"id": "missing", "before": "P", "after": "Q"}]},
+        ]
+
+        node = Graph.from_history(history, lambda _ident: "theorem t := by\n  exact h\n").nodes[0]
+        self.assertEqual([(step.before, step.after) for step in node.steps], [(None, None)])
+
     def test_splice_reindents_replacement_and_preserves_other_lines(self):
         proof = "theorem t : P := by\n  intro h\n  exact h\n  done\n"
         self.assertEqual(

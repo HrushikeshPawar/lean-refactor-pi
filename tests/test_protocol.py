@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 from arena import campaign
 from arena.engine import ROOT
+from arena.steps import split_steps
 from tests.graph_support import FakeRunCase
 from tests.slow import slow
 
@@ -22,6 +23,25 @@ FIXTURE = ROOT / "runs/baseline/Core_InitsUpdatesComm/arena-candidate-126.txt"
 LEAN = unittest.skipUnless(
     (ROOT / "workspaces/strata-v4.29.1").is_dir() and FIXTURE.exists(), "Strata fixture environment is not provisioned"
 )
+
+
+class StepGoalParserTests(unittest.TestCase):
+    def test_parse_step_goal_lines_aligns_records_and_missing_steps(self):
+        from arena.step_goals import parse_step_goals
+
+        proof = "theorem t := by\n  intro h\n  exact h\n  assumption\n"
+        output = """ARENA_STEPS {"line":12,"endLine":12,"text":"P"}
+ARENA_STEPS {"line":14,"endLine":14,"text":"Q"}
+"""
+        goals = parse_step_goals(output, proof, shift=10, start_line=1)
+        self.assertEqual(
+            goals,
+            [
+                {"id": "s1", "before": "P", "after": None},
+                {"id": "s2", "before": None, "after": "Q"},
+                {"id": "s3", "before": "Q", "after": None},
+            ],
+        )
 
 
 def cli(run_id: str, action: str, *args: str, theorem: str = NAME) -> dict:
@@ -147,6 +167,18 @@ class CampaignCliTests(unittest.TestCase):
         self.assertEqual(evaluated["candidate"], "#2")
         self.assertEqual(evaluated["metrics"]["proxy"], 76.72)
         self.assertEqual(evaluated["full_check"], "#2 passes all 3 versions: proxy 76.72")
+
+    def test_step_goals_on_strata_fixture(self):
+        from arena.step_goals import step_goals
+
+        goals = step_goals(NAME, FIXTURE.read_text())
+        self.assertEqual(len(goals), len(split_steps(FIXTURE.read_text())))
+        self.assertIsNotNone(goals[0]["before"])
+        self.assertNotIn("Hup", goals[0]["before"])
+        self.assertIn("Hup", goals[0]["after"])
+        self.assertIn("Hinit", goals[0]["after"])
+        self.assertEqual(goals[0]["after"], goals[1]["before"])
+        self.assertIsNone(goals[-1]["after"])
 
     def test_probe_accepts_body_only_and_assignment_bodies_with_exact_statement(self):
         statement = campaign.problem(NAME)["statement"]
@@ -564,6 +596,82 @@ class ProtocolLogicTests(FakeRunCase):
         result = self.evaluate("theorem t := by\n  a")
         self.assertNotIn("next_experiment", result)
         self.assertNotIn("proof", json.dumps(result).replace("proof_line", ""))
+
+
+class StepGoalAutocheckTests(FakeRunCase):
+    def test_autocheck_drains_full_checks_before_step_goals_and_records_terminal_outcomes(self):
+        from arena import step_goals
+
+        self.evaluate("theorem closed := by\n  exact h\n  assumption")
+        self.evaluate("theorem broken := by\n  bad")
+        sketch_proof = "theorem sketch := by\n  sorry"
+        sketch_id = "e" * 64
+        campaign._snapshot(self.directory, sketch_id, sketch_proof)
+        campaign._append(
+            self.directory,
+            {
+                "kind": "probe",
+                "proof_id": sketch_id,
+                "result": {"compat": {"v1": {"passed": True}}, "contains_sorry": True},
+            },
+        )
+        calls = []
+
+        def fake_step_goals(name, proof, lane="model"):
+            calls.append((name, proof, lane))
+            if "sorry" in proof:
+                raise ValueError("goal extraction failed")
+            return [{"id": "s1", "before": "P", "after": None}]
+
+        with patch.object(step_goals, "step_goals", side_effect=fake_step_goals):
+            campaign.autocheck("T", "logic")
+            second = campaign.autocheck("T", "logic")
+
+        self.assertEqual({lane for _, _, lane in calls}, {"background"})
+        self.assertEqual(
+            {proof for _, proof, _ in calls},
+            {"theorem t := by\n  ref", "theorem closed := by\n  exact h\n  assumption", sketch_proof},
+        )
+        self.assertEqual(second["checked"], [])
+        events = campaign.events(self.directory)
+        outcomes = {event["proof_id"]: event for event in events if event.get("kind") == "step_goals"}
+        closed_id = campaign._candidate_ids(events)[-2]
+        broken_id = campaign._candidate_ids(events)[-1]
+        self.assertEqual(outcomes[closed_id]["goals"][0]["before"], "P")
+        self.assertEqual(outcomes[sketch_id]["error"], "goal extraction failed")
+        self.assertNotIn(broken_id, outcomes)
+        first_goal_event = next(i for i, event in enumerate(events) if event.get("kind") == "step_goals")
+        last_full_check = max(
+            i for i, event in enumerate(events) if event.get("kind") == "evaluation" and event.get("trigger") == "auto"
+        )
+        self.assertLess(last_full_check, first_goal_event)
+
+    def test_interrupted_goal_job_is_retried_until_a_ledger_event_is_written(self):
+        from arena import step_goals
+
+        self.evaluate("theorem closed := by\n  exact h")
+        interrupted = []
+
+        def stop_before_record(_name, _proof, lane="model"):
+            interrupted.append(lane)
+            raise KeyboardInterrupt
+
+        with (
+            patch.object(step_goals, "step_goals", side_effect=stop_before_record),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            campaign.autocheck("T", "logic")
+        self.assertEqual(interrupted, ["background"])
+        self.assertFalse(any(event.get("kind") == "step_goals" for event in campaign.events(self.directory)))
+
+        with patch.object(
+            step_goals,
+            "step_goals",
+            return_value=[{"id": "s1", "before": "P", "after": None}],
+        ) as run:
+            campaign.autocheck("T", "logic")
+        self.assertEqual(run.call_args.kwargs["lane"], "background")
+        self.assertTrue(any(event.get("kind") == "step_goals" for event in campaign.events(self.directory)))
 
 
 class LockTests(unittest.TestCase):
