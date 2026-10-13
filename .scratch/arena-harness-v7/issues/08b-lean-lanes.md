@@ -4,7 +4,7 @@
 
 **Blocked by:** 08a: Machine-wide Lean service process (all lower tickets are committed below your branch).
 
-**Status:** needs-review
+**Status:** done
 
 **Branch:** `v7/08b-lean-lanes` (stacked on `v7/08a-lean-service`)
 

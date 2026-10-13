@@ -1233,6 +1233,20 @@ only Putnam's multi-second checks cross the gate. The i5-1135G7 runs `powersave`
 every 2 s while the checks run, shows them per row ("CPU MHz / C") and, once a baseline holds them, warns when a
 row's median clock is more than 10% below the baseline's. Re-record the baseline at the next deliberate re-record so
 the warning can fire.
+**Built (ticket 08b, 2026-10-13):** lanes (a model request for a project only in a lease's `others` runs on the
+background lane), `PRIMARY_MIN_WORKERS = 2` / `PRIMARY_MAX_WORKERS = 3` / `OTHER_WORKERS = 1`, no model worker is ever
+evicted (only idle background workers of other projects), `warm` with `"wait": false`, per-worker PSS in `status` and
+`pss.jsonl` (workers matched to documents by the URI Lean passes to `lean --worker`), the gate on the primary toolchain
+only plus `check_others`, limit floor 60 s (all seven baseline rows get 60 s; Putnam's slowest reference, 18.3 s, gives
+55 s), partial messages on timeout, and the `goal` / `try` ops (one worker per request). Review fixes: `goal` checked
+twice on possibly different workers; the memory marker went to the machine-wide directory, so fast tests made every
+real run's route extraction (and `test_routes`) wait 2 minutes. Gate: Core and CSLib pass; Putnam `edit` +14% and
+ArkLib v4.31 `reference` +14% / `splice_late` +19% failed at a clock 17-25% below Core's in the same run (3000 and
+2700 MHz vs 3573; 69-73 C). **Revised RCA:** the firmware's long-term power limit is 15 W over 28 s
+(`intel-rapl-mmio`, short-term 40 W), so any load longer than about 28 s runs at 2.5-3.0 GHz instead of 3.8 GHz; heat is
+not the limit. Owner decision 2026-10-13: gate on clock-adjusted figures (seconds x MHz / baseline MHz) from the next
+Lean review (08c): re-record the baseline with CPU figures on ticket 07's code (v6 machinery) plus the CPU logging,
+then gate 08b's and 08c's code against it. Raising the power limit (root) stays an option for later.
  (Lean-only benchmark, phase 0/3):
 - Lean v4.32's experimental `--incr-header-save` / `--incr-load` cross-process header snapshots, on the ≥v4.32 rows.
 - REPL tags: **verified** for v4.25.0 through v4.33.0 (`git ls-remote`), including v4.33.0-rc2. **No `v4.29.1` tag**:
