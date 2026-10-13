@@ -67,7 +67,7 @@ FAKE = textwrap.dedent("""
         elif method == "textDocument/didClose":
             docs.pop(p["textDocument"]["uri"], None); log(method="didClose", uri=p["textDocument"]["uri"])
         elif method in ("$/lean/plainGoal", "$/lean/plainTermGoal"):
-            log(method="goal_position", position=p["position"])
+            log(method="goal_position", position=p["position"], uri=p["textDocument"]["uri"])
             uri = p["textDocument"]["uri"]
             text = docs[uri][1]
             if method == "$/lean/plainGoal":
@@ -335,6 +335,20 @@ class LaneTests(Base):
         # The emoji takes two UTF-16 code units before the requested codepoint column.
         self.assertTrue(any(event["position"] == {"line": 2, "character": 2} for event in self.events("goal_position")))
 
+    def test_goal_asks_the_worker_that_checked_the_text_and_sends_the_text_once(self):
+        session = self.session()
+        primary = str(self.dir / "proj")
+        self.assertTrue(session.lease({"run_id": "run", "pid": os.getpid(), "primary": primary, "others": []})["ok"])
+        session.warm({**self.request(), "run_id": "run", "slots": lean_session.PRIMARY_MIN_WORKERS, "timeout": 30})
+        text = HEADER + "theorem t : True := by\n  sorry\n"
+        reply = session.goal({**self.request(), "text": text, "position": {"line": 3, "column": 2}, "op": "goal"})
+        self.assertEqual(reply["goals"], ["h : True\n⊢ True"])
+        self.settled("didOpen", lean_session.PRIMARY_MAX_WORKERS)  # the first model check grows the primary
+        sent = [e["uri"] for e in self.events() if e["method"] in ("didOpen", "didChange") and e["size"] == len(text)]
+        asked = {e["uri"] for e in self.events("goal_position")}
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(asked, set(sent))
+
     def test_try_runs_ordered_snippets_and_continues_after_a_timeout(self):
         session = self.session()
         request = {
@@ -486,6 +500,39 @@ class AsyncWarmAndPssTests(Base):
         self.assertLess(time.monotonic() - started, 0.25)
         self.assertEqual(self.settled("didOpen", 1), 1)
 
+    def test_a_failed_warm_up_nobody_waits_for_is_logged(self):
+        session = self.session()
+        logged = []
+        with patch.object(lean_session, "_log", logged.append):
+            stale = {**self.request(), "fingerprint": {"code": "old"}, "slots": 1, "wait": False}
+            self.assertEqual(session.warm(stale), {"ok": True, "started": True})
+            deadline = time.monotonic() + 3
+            while not logged and time.monotonic() < deadline:
+                time.sleep(0.02)
+        self.assertTrue(any(line.startswith("background warm-up proj failed: stale") for line in logged), logged)
+
+    def test_status_names_each_workers_lane_by_the_document_it_serves_not_by_pid_order(self):
+        documents = {}
+        session = lean_session.Session(
+            self.dir / "lanes",
+            budget=lean_session.WorkerBudget(self.dir / "tokens", 4),
+            mem_fn=lambda: (8.5, None),
+            pss_fn=lambda _: {10: 1.0, 20: 2.0, 30: 0.5},
+            external_fn=lambda _: {},
+            document_fn=lambda pid: documents.get(pid),
+        )
+        self.sessions.append(session)
+        with patch.object(lean_session, "process_tree", return_value=[]):
+            session.warm({**self.request(), "slots": 1})
+            session.warm({**self.request(), "slots": 1, "lane": "background"})
+            slots = {slot.lane: slot.uri for entry in session.entries.values() for slot in entry.slots}
+            # The background document's worker has the lower pid: pid order says nothing about which is which.
+            documents.update({10: slots["background"], 20: slots["model"]})
+            workers = session.status()["servers"][0]["workers"]
+        self.assertEqual(
+            [(worker["pid"], worker["lane"]) for worker in workers], [(10, "background"), (20, "model"), (30, None)]
+        )
+
     def test_status_and_log_include_injected_worker_and_external_memory_and_rotate(self):
         session = lean_session.Session(
             self.dir / "pss",
@@ -493,6 +540,7 @@ class AsyncWarmAndPssTests(Base):
             mem_fn=lambda: (8.5, 1.25),
             pss_fn=lambda _: {456: 1.5},
             external_fn=lambda _: {789: 0.75},
+            document_fn=lambda _: next(iter(session.entries.values())).slots[0].uri,
         )
         self.sessions.append(session)
         with patch.object(lean_session, "process_tree", return_value=[]):

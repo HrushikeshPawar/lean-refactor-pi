@@ -326,7 +326,6 @@ class _Doc:
         self.display: str | None = None
         self.stale = False  # its file prefix changed while it was busy: closed when released
         self.token: _Token | None = None
-        self.worker_pid: int | None = None
 
 
 class LeanServer:
@@ -638,7 +637,6 @@ class LeanServer:
         doc.text = None
         doc.result = None
         doc.header = None
-        doc.worker_pid = None
         doc.version += 1  # a reopened document must not reuse a version the server has seen
 
 
@@ -737,6 +735,16 @@ def worker_pss(root_pid: int | None) -> dict[int, float]:
     return result
 
 
+def worker_document(pid: int) -> str | None:
+    """The document URI a `lean --worker` process serves: Lean passes it as the worker's last argument."""
+    try:
+        words = Path(f"/proc/{pid}/cmdline").read_bytes().decode(errors="replace").split("\0")
+    except OSError:
+        return None
+    words = [word for word in words if word]
+    return words[-1] if "--worker" in words[:-1] else None
+
+
 def external_lean_pss(own_pids: set[int]) -> dict[int, float]:
     """PSS for Lean processes not owned by this service."""
     result = {}
@@ -806,7 +814,14 @@ class _Entry:
 
 class Session:
     def __init__(
-        self, directory: Path, budget: WorkerBudget | None = None, *, mem_fn=None, pss_fn=None, external_fn=None
+        self,
+        directory: Path,
+        budget: WorkerBudget | None = None,
+        *,
+        mem_fn=None,
+        pss_fn=None,
+        external_fn=None,
+        document_fn=None,
     ):
         self.directory = directory
         self.budget = budget if budget is not None else WorkerBudget()
@@ -823,6 +838,7 @@ class Session:
         self.mem_fn = mem_fn or _mem_snapshot
         self.pss_fn = pss_fn or worker_pss
         self.external_fn = external_fn or external_lean_pss
+        self.document_fn = document_fn or worker_document
         self.last_pss_log = time.monotonic()
 
     @staticmethod
@@ -1223,7 +1239,9 @@ class Session:
             entry.condition.notify_all()
 
     # request
-    def check(self, request: dict) -> dict:
+    def check(self, request: dict, then: Callable[[_Entry, _Doc], dict] | None = None) -> dict:
+        """One check. `then` runs on the same worker while it is still held, after a check that did not time out;
+        its fields are added to the reply."""
         if request.get("protocol") != PROTOCOL:
             return {"ok": False, "reason": "protocol mismatch"}
         project = Path(request["project"]).resolve()
@@ -1249,6 +1267,7 @@ class Session:
             fresh = slot.text is None
             slot.display = request["display"]
             outcome = entry.server.check(slot, request["text"], timeout, header_end, run_id=request.get("run_id"))
+            extra = then(entry, slot) if then is not None and not outcome.get("timeout") else {}
         except SessionError as error:
             return {"ok": False, "reason": str(error)}
         finally:
@@ -1286,53 +1305,24 @@ class Session:
             "changed_from_line": outcome.get("changed_from_line"),
             "unchanged": bool(outcome.get("unchanged")),
             "messages": len(outcome["diagnostics"]),
+            **extra,
         }
 
     def goal(self, request: dict) -> dict:
-        checked = self.check({**request, "op": "check"})
-        if not checked.get("ok") or checked.get("timeout"):
-            return checked
-        project = Path(request["project"]).resolve()
-        entry = self.entries.get(str(project))
-        if entry is None:
-            return {"ok": False, "reason": "Lean session disappeared"}
-        lane = checked.get("lane", "model")
-        try:
-            slot = self._acquire(entry, MODEL_QUEUE_TIMEOUT, lane, request["text"][: request["header_end"]])
-            slot.display = request["display"]
-            outcome = entry.server.check(
-                slot, request["text"], float(request.get("timeout", 180)), request.get("header_end")
-            )
-            if outcome.get("timeout"):
-                return {"ok": True, **outcome, "lane": lane}
+        """The check's reply plus the goals at a position, asked on the worker that just checked the text."""
+        timeout = float(request.get("timeout", 180))
+
+        def ask(entry: _Entry, slot: _Doc) -> dict:
             position = _position(request["text"], request["position"]["line"], request["position"]["column"])
             params = {"textDocument": {"uri": slot.uri}, "position": position}
-            plain = (
-                entry.server._request("$/lean/plainGoal", params, float(request.get("timeout", 180))).get("result")
-                or {}
-            )
-            term = (
-                entry.server._request("$/lean/plainTermGoal", params, float(request.get("timeout", 180))).get("result")
-                or {}
-            )
-            self._measure(entry)
-            return {
-                "ok": True,
-                "goals": plain.get("goals") or [],
-                "rendered": plain.get("rendered"),
-                "term_goal": term.get("goal"),
-                "seconds": checked.get("seconds"),
-                "lane": lane,
-                "new_worker": checked.get("new_worker"),
-                "header_seconds": checked.get("header_seconds"),
-            }
-        except TimeoutError:
-            return {"ok": True, "timeout": True, "partial": [], "progress_line": None, "lane": lane}
-        except (SessionError, OSError) as error:
-            return {"ok": False, "stale": str(error).startswith("stale"), "reason": str(error)}
-        finally:
-            if "slot" in locals():
-                self._release(entry, slot)
+            try:
+                plain = entry.server._request("$/lean/plainGoal", params, timeout).get("result") or {}
+                term = entry.server._request("$/lean/plainTermGoal", params, timeout).get("result") or {}
+            except TimeoutError:
+                return {"timeout": True, "warm_kept": True, "goals": [], "rendered": None, "term_goal": None}
+            return {"goals": plain.get("goals") or [], "rendered": plain.get("rendered"), "term_goal": term.get("goal")}
+
+        return self.check(request, then=ask)
 
     def try_snippets(self, request: dict) -> dict:
         if request.get("protocol") != PROTOCOL:
@@ -1404,18 +1394,23 @@ class Session:
         finally:
             self._release(entry, slot)
 
+    def _warm_unwaited(self, request: dict) -> None:
+        """A warm-up nobody waits for: its reply is dropped, so a failure goes to the service log."""
+        reply = self.warm(request)
+        if not reply.get("ok") or reply.get("failed"):
+            _log(
+                f"background warm-up {Path(request['project']).name} failed: "
+                f"{reply.get('reason') or '; '.join(map(str, reply.get('failed') or []))}"
+            )
+
     def warm(self, request: dict) -> dict:
         """Open up to `slots` model-lane workers on one project, each loaded with the header only, in parallel.
         With `"lane": "background"` it warms that toolchain's background worker (one) instead."""
         if request.get("protocol") != PROTOCOL:
             return {"ok": False, "reason": "protocol mismatch"}
         if request.get("wait", True) is False:
-            background_request = {**request, "wait": True}
             threading.Thread(
-                target=self.warm,
-                args=(background_request,),
-                daemon=True,
-                name="lean-background-warm",
+                target=self._warm_unwaited, args=({**request, "wait": True},), daemon=True, name="lean-background-warm"
             ).start()
             return {"ok": True, "started": True}
         project = Path(request["project"]).resolve()
@@ -1493,14 +1488,8 @@ class Session:
 
     def _measure(self, entry: _Entry) -> None:
         opened = len([s for s in entry.slots if s.text is not None])
-        readings = self.pss_fn(entry.server.pgid)
-        known = {slot.worker_pid for slot in entry.slots if slot.worker_pid is not None}
-        available = [pid for pid in sorted(readings) if pid not in known]
-        for slot in entry.slots:
-            if slot.text is not None and slot.worker_pid is None and available:
-                slot.worker_pid = available.pop(0)
         if opened and entry.worker_gb == WORKER_GB:
-            used = sum(readings.values())
+            used = sum(self.pss_fn(entry.server.pgid).values())
             if used:
                 entry.worker_gb = max(0.5, used / opened)
 
@@ -1509,28 +1498,26 @@ class Session:
             leases = {key: dict(value) for key, value in self.leases.items()}
             holds = {key: dict(value) for key, value in self.holds.items()}
             entries = list(self.entries.values())
-        own_pids = {pid for e in entries for pid in process_tree(e.server.pgid)}
+        # /proc is read outside the lock, once per server: a status call must stay quick while the service is busy
+        trees = {id(entry): process_tree(entry.server.pgid) for entry in entries}
         available, swap = self.mem_fn()
-        external = self.external_fn(own_pids)
+        external = self.external_fn({pid for tree in trees.values() for pid in tree})
         servers = []
         for entry in entries:
-            self._measure(entry)
             readings = self.pss_fn(entry.server.pgid)
-            slots = [slot for slot in entry.slots if slot.text is not None]
+            lanes = {slot.uri: slot.lane for slot in list(entry.slots) if slot.text is not None}
             workers = [
-                {"pid": slot.worker_pid, "gb": round(pss, 3), "lane": slot.lane}
-                for slot in slots
-                if slot.worker_pid is not None
-                for pss in self.pss_fn(slot.worker_pid).values()
+                {"pid": pid, "gb": round(gb, 3), "lane": lanes.get(self.document_fn(pid) or "")}
+                for pid, gb in sorted(readings.items())
             ]
             servers.append(
                 {
                     "project": str(entry.project),
                     "workers": workers,
-                    "busy": len([s for s in slots if s.busy]),
+                    "busy": len([s for s in entry.slots if s.busy]),
                     "gb": round(sum(readings.values()), 2),
                     "pgid": entry.server.pgid,
-                    "pids": process_tree(entry.server.pgid),
+                    "pids": trees[id(entry)],
                     "closes_in_s": None
                     if entry.unreferenced_since is None
                     else max(0, round(RELEASE_GRACE_S - (time.monotonic() - entry.unreferenced_since))),

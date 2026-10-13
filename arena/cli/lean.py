@@ -48,7 +48,7 @@ def status(json_output: bool = False) -> int:
             str(len(server["workers"])),
             str(server["busy"]),
             str(server["gb"]),
-            ", ".join(f"{worker['lane']}:{worker['gb']:.2f}GB" for worker in server["workers"]),
+            ", ".join(f"{worker['lane'] or '-'}:{worker['gb']:.2f}GB" for worker in server["workers"]),
             "-" if closes is None else f"{closes} s",
         )
     Console().print(table)
