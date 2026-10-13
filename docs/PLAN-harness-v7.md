@@ -564,6 +564,25 @@ The four layers, all measured and none advising:
 - Whether `+suggestions` prints usable names.
 - The size of the index dump per row.
 
+**Built (ticket 14, 2026-10-13):** `arena/lean/index.lean` walks the environment once per (row, measure toolchain,
+header) into a SQLite index (`arena/index.py`); `arena/search.py` answers name, type and text queries offline
+(never Lean). Review and owner-requested optimisation ("optimise for the campaigns"):
+- **Schema v2:** link tables keyed by integer ids, one `WITHOUT ROWID` copy each, trigrams per distinct last
+  component, constants with their idf; fuzzy and type queries drive from the grams and constants. Core 427 MB ->
+  81.9 MB; identical results on 120 queries.
+- **Walker:** generated and private declarations (search never shows them) keep name, kind, module, range and flags
+  only; auxiliary recursors, noConfusion, matchers and `match_N`/`eq_N`/`proof_N` count as generated; ranges come
+  from one hash map per module. `INDEX_TIMEOUT` 1800 s. Fixed: `build_index` crashed after every fresh build
+  (`path` keyword clash in its log call).
+- **Campaign:** provisioning builds only the measure toolchain's index (search reads no other), and `arena
+  campaign` aborts before any paid run if a row's index is missing.
+- **Measured** (ticket limits: 30 min, 1.5 GB, 1 s p95): putnam_1964_b2 v4.26.0 (Mathlib) 677,956 declarations,
+  598 MB, 21.7 min, 8.6 GB peak RSS, name p95 544-660 ms, type p95 706 ms; CSLib v4.33.0-rc2 130,088, 85.5 MB, 100 s;
+  Core v4.29.1 101,999, 81.9 MB, 4.5 min. Both campaign rows' indexes are built. Packets byte-identical to ticket 13.
+- **Later, if needed:** name queries on Mathlib still scan all rows twice (prefix `LIKE`, substring `instr`, about
+  450 ms); a range query on `folded_name` and a substring scan over distinct components would cut that. The Mathlib
+  walk's 8.6 GB peak means one index build at a time on this machine.
+
 ### 4e. Pricing a change: one interface, everywhere
 Every reply that contains proof text carries its price. Wording lives in `agent-text/replies/`.
 

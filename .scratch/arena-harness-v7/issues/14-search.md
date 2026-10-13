@@ -4,7 +4,7 @@
 
 **Blocked by:** 04: Move the remaining tools into the CLI; arena doctor; 05a: Agent text: format, renderers, numbers.yaml (all lower tickets, 05b to 13, are also committed below your branch).
 
-**Status:** needs-review
+**Status:** done
 
 **Branch:** `v7/14-search` (stacked on `v7/13-prices`)
 
