@@ -668,6 +668,15 @@ only a paid run shows adoption. That goes into the phase 5 measurement (operatio
 - **Routes are internal**, computed synchronously at compile time from proof shape (§5j), as the harness's map for
   archive cells and parent selection (5e). They are not a model-facing concept (#5, #32).
 - **Declared ideas are dropped** (D16). An optional `note` on a node remains for the model's own memory.
+- **Built (ticket 10a, 2026-10-13):** `arena/steps.py` splits a proof into top-level steps `s1..sK` (a term-mode proof
+  is one step); `graph.splice_text` / `merge_steps` (a merge take replaces the base's step with the **same** id).
+  The ledger gains `edge` (one per distinct proof text, written after its compile result) and `focus` (`start`,
+  `batch_best`, `restore`) events; `Graph.from_history` projects stable `n1..nK` ids, status and depth. A free-text
+  draft is `filed_under_focus` at similarity ≥ 0.50, else a non-exact `root`; every draft of a batch files under the
+  focus as it was before the batch, and the batch's best non-broken node becomes the focus. Operations (`draft`,
+  `splice`, `merge`) reach Lean only through the hidden protocol action `operation`; old tools reply as before. Note
+  for 10b: `Graph.from_history` re-splits every node's steps on each filing, focus settle and `graph_state`, so
+  per-step goals should be cached rather than recomputed there.
 
 ### 5d. Harness → agent: what the agent sees
 The agent never has to remember the graph. Each compile reply (when changed) and `read view:"map"` carry a compact

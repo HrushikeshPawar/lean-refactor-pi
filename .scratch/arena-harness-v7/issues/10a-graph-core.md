@@ -4,7 +4,7 @@
 
 **Blocked by:** 04: Move the remaining tools into the CLI; arena doctor; 05b: Agent text: campaign/engine/TS messages moved verbatim, literal lint. (Tickets 06-09 are committed below this branch too.)
 
-**Status:** needs-review
+**Status:** done
 
 **Branch:** `v7/10a-graph-core` (stacked on `v7/09-scheduler`)
 
