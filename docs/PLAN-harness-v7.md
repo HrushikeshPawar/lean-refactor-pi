@@ -677,6 +677,14 @@ only a paid run shows adoption. That goes into the phase 5 measurement (operatio
   `splice`, `merge`) reach Lean only through the hidden protocol action `operation`; old tools reply as before. Note
   for 10b: `Graph.from_history` re-splits every node's steps on each filing, focus settle and `graph_state`, so
   per-step goals should be cached rather than recomputed there.
+- **Built (ticket 10b, 2026-10-13):** `arena/step_goals.py` plus the Lean wrapper `arena/lean/steps.lean` record the
+  goal state before each top-level tactic (`before`; `after` is the next step's `before`, `None` after the last step).
+  `autocheck` drains the full checks first, then one background-lane `step_goals` job per closed or sketch node,
+  queued from the ledger; a failure is an `error` event, so the queue moves on. `Graph.from_history` only joins the
+  events. Ticket correction (reviewer): the fixture's `s1` is `intros Hup Hinit`, so `Hup` appears in `s1`'s
+  `after`, not its `before`. Quick gate: 0 regressions. `tests/test_lean_speed_gate.py` measures every baseline row
+  and toolchain, so it is the full gate (about 25 min, silent under `-q`) and runs after 12 with it. Watch in the
+  first campaign: every closed or sketch node now costs one background Lean job (60 s limit).
 
 ### 5d. Harness → agent: what the agent sees
 The agent never has to remember the graph. Each compile reply (when changed) and `read view:"map"` carry a compact

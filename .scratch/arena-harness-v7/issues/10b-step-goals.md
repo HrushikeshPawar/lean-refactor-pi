@@ -4,7 +4,7 @@
 
 **Blocked by:** 10a: Graph core: steps, edges, focus, operations; 08c: Lean service callers, tests, speed gate. (Everything below is committed below this branch.)
 
-**Status:** needs-review
+**Status:** done
 
 **Branch:** `v7/10b-step-goals` (stacked on `v7/10a-graph-core`)
 
