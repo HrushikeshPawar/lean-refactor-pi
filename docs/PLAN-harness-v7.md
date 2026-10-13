@@ -890,6 +890,15 @@ D27 (archive key) rests on the archive probe. Hand labels are dropped (D29). D23
 - **Validation by outcome, not labels (D29).** Separation of v6's distinct routes is low (0.21). v6 often split on
   lemma choice, which a neutral signature should not separate, so this is expected. Routes only shape the archive
   cells, whose probe passes (§5d). Phase 5 checks attempt diversity.
+- **Built (ticket 11, 2026-10-13):** routes are assigned synchronously in `_file_node` from the 50/50 signature
+  (`routes.signature`, `routes.assign`); the Lean route extraction (`route_features`, `route.lean`, the route worker
+  and queue) is deleted, and the three model-facing "routes are fingerprinted" clauses are gone. Archive cells, the
+  hidden `map` action and the stall detector are in `arena/graph.py`. Reviewer decisions: (1) a fire is a pure
+  function of the node sequence (the counter resets on every fire, moved or not); every new fire appends an audit
+  `{"kind":"stall","root","count","mode","target"}` that nothing reads, so `map_only` and no-target fires stay
+  measurable for the A/B; only a `focus` event with reason `stall` renders the fact line. (2) Equal quality (or
+  visits) breaks by the lower cell letter and still moves; no move only when the target already is the focus. The
+  old tools still default to `_current`, so the stall line is information only until 15a.
 
 ## 6. Outer loop: autoresearch for the harness itself
 
