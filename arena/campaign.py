@@ -3188,7 +3188,7 @@ def _run_profile_job(name: str, run_id: str, node: Node) -> None:
                 "seconds": round(time.monotonic() - started, 2),
             },
         )
-    except ValueError as error:
+    except Exception as error:  # any failure is terminal for this node; the loop keeps going
         _append(
             directory,
             {
@@ -3422,12 +3422,9 @@ def autocheck(name: str, run_id: str, max_seconds: float | None = None, closing:
             history = events(directory)
             projection = Graph.from_history(history, _proof_reader(directory))
             # Closing drain: the model has stopped, so only full checks (and assemblies, whose
-            # results become new candidates) matter; salvage and step goals only serve the model.
-            order = (
-                ("full", "assembly", "profiles")
-                if closing
-                else ("salvage", "assembly", "full", "step_goals", "profiles")
-            )
+            # results become new candidates) matter; salvage, step goals and profiles (which only
+            # feed price tables) only serve the model.
+            order = ("full", "assembly") if closing else ("salvage", "assembly", "full", "step_goals", "profiles")
             for kind in order:
                 if kind == "salvage" and (salvage_jobs := _salvage_jobs(history, directory, projection)):
                     _run_salvage(name, run_id, salvage_jobs[0])

@@ -315,6 +315,34 @@ class CampaignPriceTests(FakeRunCase):
             campaign.profile_request("T", "logic", "#2")
         self.assertEqual(profile.call_count, 1)
 
+    def test_closing_drain_skips_profiles(self):
+        self.evaluate("theorem t := by\n  x")
+        with (
+            patch.object(campaign, "problem", return_value={"name": "T", "statement": "theorem t : True"}),
+            patch.object(campaign, "profile", side_effect=AssertionError("profile compile used")) as profile,
+            patch.object(campaign, "_autocheck_jobs", return_value=[]),
+        ):
+            campaign.autocheck("T", "logic", closing=True)
+        self.assertEqual(profile.call_count, 0)
+        kinds = {event.get("kind") for event in campaign.events(campaign.run_dir("logic"))}
+        self.assertFalse(kinds & {"profile", "profile_error"})
+
+    def test_profile_os_error_is_recorded_and_not_retried(self):
+        self.evaluate("theorem t := by\n  x")
+        with (
+            patch.object(campaign, "problem", return_value={"name": "T", "statement": "theorem t : True"}),
+            patch.object(campaign, "profile", side_effect=OSError("disk gone")) as profile,
+            patch.object(campaign, "_autocheck_jobs", return_value=[]),
+            patch.object(campaign, "_step_goal_jobs", return_value=[]),
+        ):
+            self.assertTrue(campaign.autocheck("T", "logic")["ok"])
+            self.assertTrue(campaign.autocheck("T", "logic")["ok"])
+        self.assertEqual(profile.call_count, 1)
+        errors = [event for event in campaign.events(campaign.run_dir("logic")) if event.get("kind") == "profile_error"]
+        self.assertEqual(len(errors), 1)
+        self.assertIn("disk gone", errors[0]["error"])
+        self.assertIn("seconds", errors[0])
+
 
 class ProtocolPriceTests(unittest.TestCase):
     def test_protocol_exposes_only_the_hidden_prices_and_quote_actions(self):
