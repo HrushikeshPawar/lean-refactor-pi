@@ -685,7 +685,6 @@ def cli_execute(options: CampaignOptions, passthrough: tuple[str, ...] = ()) -> 
 
 def _run_campaign(args, rows, models, specs, passthrough_tokens, lock_info, run_fn=subprocess.run) -> int:
     out = RUNS / f"{args.prefix}-campaign"
-    out.mkdir(parents=True)
     settings = {
         "prefix": args.prefix,
         "rows": rows,
@@ -703,20 +702,22 @@ def _run_campaign(args, rows, models, specs, passthrough_tokens, lock_info, run_
         "mem_total_gb": scheduler.mem_total_default(),
         "lock": lock_info,
     }
-    campaign_path = out / "campaign.json"
-    campaign_path.write_text(json.dumps({"settings": settings}, indent=2) + "\n")
     try:
         expected = check_packets(rows)
         print("preflight:", check_preflight(models, args.skip_preflight))
     except CampaignAbort as error:
         print(f"aborted before any paid run: {error}", file=sys.stderr)
         return 1
+    out.mkdir(parents=True)
+    campaign_path = out / "campaign.json"
+    campaign_path.write_text(json.dumps({"settings": settings}, indent=2) + "\n")
+    row_order = list(dict.fromkeys(spec["row"] for spec in specs))
     housekeeping = Housekeeping(args.min_free_gb, args.cleanup_wait)
     sampler = scheduler.ResourceSampler()
     sampler.start()
     prewarm = (
         scheduler.Prewarm(
-            list(dict.fromkeys(spec["row"] for spec in specs)),
+            row_order,
             args.replicates * len(models),
             lead_s=60 * args.prewarm_minutes,
             warm_fn=lambda name: _warm_row(name),
@@ -730,7 +731,6 @@ def _run_campaign(args, rows, models, specs, passthrough_tokens, lock_info, run_
     stop_helpers = threading.Event()
     helper_thread = None
     try:
-        row_order = list(dict.fromkeys(spec["row"] for spec in specs))
         row_info = [(name, scheduler.row_projects(engine.problem(name))) for name in row_order]
         try:
             socket_path = lean_session.ensure_service()
@@ -744,13 +744,15 @@ def _run_campaign(args, rows, models, specs, passthrough_tokens, lock_info, run_
         except Exception as error:
             print(f"Lean service hold unavailable ({error}); continuing with cold fallback", flush=True)
         if prewarm:
-            prewarm.rows = row_order
 
             def poll_prewarm():
                 while not stop_helpers.wait(30):
                     next_row = prewarm.due(time.monotonic())
                     if next_row:
-                        prewarm.warm_fn(next_row)
+                        try:
+                            prewarm.warm_fn(next_row)
+                        except Exception as error:
+                            print(f"pre-warm {next_row} failed: {error}", flush=True)
 
             helper_thread = threading.Thread(target=poll_prewarm, daemon=True)
             helper_thread.start()
@@ -824,8 +826,6 @@ def _run_campaign(args, rows, models, specs, passthrough_tokens, lock_info, run_
 
 
 def _warm_row(name: str) -> None:
-    from arena import engine
-
     row = engine.problem(name)
     primary_version, primary_commit = engine.measure_version(row)
     result = engine.warm_session(row, primary_version, primary_commit, slots=1, lane="model")

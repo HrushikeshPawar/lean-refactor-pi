@@ -4,6 +4,7 @@ import contextlib
 import importlib
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -120,8 +121,9 @@ class ProvisionTests(unittest.TestCase):
 class PrewarmTests(unittest.TestCase):
     def setUp(self):
         self.clock = 0.0
+        self.logged = []
         self.prewarm = scheduler.Prewarm(
-            ["A", "B", "C"], 2, lead_s=10, now_fn=lambda: self.clock, warm_fn=lambda _: None
+            ["A", "B", "C"], 2, lead_s=10, now_fn=lambda: self.clock, warm_fn=lambda _: None, log=self.logged.append
         )
         self.a1, self.a2 = {"row": "A", "run_id": "a1"}, {"row": "A", "run_id": "a2"}
 
@@ -130,6 +132,8 @@ class PrewarmTests(unittest.TestCase):
         self.assertIsNone(self.prewarm.due(100))
         self.prewarm.started(self.a2)
         self.assertIsNone(self.prewarm.due(100))  # no runtime estimate
+        self.assertIsNone(self.prewarm.due(130))
+        self.assertEqual(self.logged, ["pre-warm B: no runtime estimate yet"])
         self.prewarm.finished(self.a1, 30)
         self.clock = 10
         self.assertIsNone(self.prewarm.due(19))
@@ -260,6 +264,7 @@ class CampaignRecordTests(unittest.TestCase):
                 mock.patch.object(scheduler, "row_projects", return_value=[]),
                 mock.patch.object(campaigns.lean_session, "ensure_service", return_value="/fake/socket"),
                 mock.patch.object(campaigns.lean_session, "request", return_value={"ok": True}),
+                mock.patch.dict(os.environ),
                 contextlib.redirect_stdout(io.StringIO()),
             ):
                 code = campaigns._run_campaign(

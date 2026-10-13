@@ -156,7 +156,7 @@ class GateTests(unittest.TestCase):
             )
             self.assertEqual((got, len(calls)), ("ran preflight", 1))
 
-    def test_main_keeps_settings_when_gate_fails(self):
+    def test_main_aborts_without_creating_runs_when_gate_fails(self):
         err = io.StringIO()
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp)
@@ -172,9 +172,7 @@ class GateTests(unittest.TestCase):
                 code = rc.cli_execute(
                     rc.CampaignOptions(prefix="zz-offline-test", rows="A", models="deepseek-v4.1-flash", replicates=1)
                 )
-            settings = json.loads((runs / "zz-offline-test-campaign" / "campaign.json").read_text())
-            self.assertIn("settings", settings)
-            self.assertNotIn("observed", settings)
+            self.assertFalse((runs / "zz-offline-test-campaign").exists())
             execute.assert_not_called()
         self.assertEqual(code, 1)
         self.assertIn("aborted before any paid run", err.getvalue())

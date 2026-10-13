@@ -124,15 +124,18 @@ class HoldKeeper:
         self.projects: dict[str, list[Path]] = {}
         self.unfinished: set[str] = set()
         self.failed = False
+        self.lock = threading.Lock()
 
     def start(self, rows: list[tuple[str, list[Path]]]) -> None:
-        self.projects = dict(rows)
-        self.unfinished = set(self.projects)
-        self._send("hold")
+        with self.lock:
+            self.projects = dict(rows)
+            self.unfinished = set(self.projects)
+            self._send("hold")
 
     def row_finished(self, row: str) -> None:
-        self.unfinished.discard(row)
-        self._send("hold")
+        with self.lock:
+            self.unfinished.discard(row)
+            self._send("hold")
 
     def _send(self, op: str) -> None:
         if self.failed:
@@ -154,11 +157,12 @@ class HoldKeeper:
             self.log(f"Lean service holds unavailable ({error}); continuing with cold fallback")
 
     def close(self) -> None:
-        try:
-            self.request_fn({"op": "unhold", "owner": self.owner, "pid": self.pid}, 5.0)
-        except Exception as error:
-            if not self.failed:
-                self.log(f"Lean service unhold failed: {error}")
+        with self.lock:
+            try:
+                self.request_fn({"op": "unhold", "owner": self.owner, "pid": self.pid}, 5.0)
+            except Exception as error:
+                if not self.failed:
+                    self.log(f"Lean service unhold failed: {error}")
 
 
 class Prewarm:
@@ -180,6 +184,7 @@ class Prewarm:
         self.finished_times: dict[str, list[float]] = {row: [] for row in rows}
         self.finished_counts: dict[str, int] = dict.fromkeys(rows, 0)
         self.warmed: set[str] = set()
+        self.no_estimate_logged: set[str] = set()
         self.lock = threading.Lock()
 
     def started(self, spec: dict) -> None:
@@ -208,7 +213,10 @@ class Prewarm:
             own = self.finished_times[current]
             estimate_pool = own or previous
             if not estimate_pool:
-                self.log(f"pre-warm {self.rows[current_index + 1]}: no runtime estimate yet")
+                next_row = self.rows[current_index + 1]
+                if next_row not in self.no_estimate_logged:
+                    self.no_estimate_logged.add(next_row)
+                    self.log(f"pre-warm {next_row}: no runtime estimate yet")
                 return None
             estimate = statistics.median(estimate_pool)
             if not active:
