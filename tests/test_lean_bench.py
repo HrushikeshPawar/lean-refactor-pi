@@ -68,6 +68,46 @@ class PlanAndSummaryTests(unittest.TestCase):
         self.assertEqual(summary, {"workers_idle_gb": [0.4, 0.5], "worker_peak_gb": 0.8})
 
 
+class CpuTests(unittest.TestCase):
+    def write(self, root: Path, relative: str, text: str) -> None:
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+
+    def test_reads_the_fastest_core_and_the_package_temperature(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write(root, "devices/system/cpu/cpu0/cpufreq/scaling_cur_freq", "1800000\n")
+            self.write(root, "devices/system/cpu/cpu1/cpufreq/scaling_cur_freq", "3800000\n")
+            self.write(root, "class/thermal/thermal_zone0/type", "acpitz\n")
+            self.write(root, "class/thermal/thermal_zone0/temp", "20000\n")
+            self.write(root, "class/thermal/thermal_zone1/type", "x86_pkg_temp\n")
+            self.write(root, "class/thermal/thermal_zone1/temp", "77000\n")
+
+            self.assertEqual(lean_bench.read_cpu(root), {"mhz": 3800.0, "temp_c": 77.0})
+
+    def test_a_machine_without_the_files_reports_nothing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(lean_bench.read_cpu(Path(directory)), {"mhz": None, "temp_c": None})
+
+    def test_summary_takes_median_and_lowest_clock_and_hottest_temperature(self):
+        samples = [{"mhz": 3800.0, "temp_c": 70.0}, {"mhz": 3000.0, "temp_c": 81.0}, {"mhz": 3600.0, "temp_c": None}]
+
+        self.assertEqual(lean_bench.summarise_cpu(samples), {"mhz_p50": 3600.0, "mhz_min": 3000.0, "temp_max_c": 81.0})
+        self.assertEqual(lean_bench.summarise_cpu([]), {"mhz_p50": None, "mhz_min": None, "temp_max_c": None})
+
+    def test_a_clock_well_below_the_baseline_is_named(self):
+        def result(mhz):
+            cpu = {"mhz_p50": mhz, "mhz_min": mhz, "temp_max_c": 80.0} if mhz else None
+            return {"rows": {"putnam": {"v4.25.0": {"cpu": cpu}}}}
+
+        self.assertEqual(lean_bench.cpu_speed_warnings(result(3800.0), result(3500.0)), [])
+        warnings = lean_bench.cpu_speed_warnings(result(3800.0), result(3000.0))
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("putnam | v4.25.0 | CPU clock 3000 MHz vs 3800 MHz", warnings[0])
+        self.assertEqual(lean_bench.cpu_speed_warnings(result(None), result(3000.0)), [])
+
+
 class ComparisonTests(unittest.TestCase):
     def baseline(self, p50: float = 1.0, p95: float = 1.0) -> dict:
         return {

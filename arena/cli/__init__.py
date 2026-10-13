@@ -251,7 +251,7 @@ def bench(
 ) -> int:
     """Measure Lean speed and compare it with a recorded baseline.
 
-    Run once at the end of every ticket that touches Lean machinery: 08a, 08b, 08c, 08d, 10b, 12. Never in the fast suite. If it fails right after other large Lean work (another workspace, a campaign, a reboot), run it once more: the first run refills the page cache. A figure that fails both runs is a regression.
+    Run once at the end of every ticket that touches Lean machinery: 08a, 08b, 08c, 08d, 10b, 12. Never in the fast suite. If it fails right after other large Lean work (another workspace, a campaign, a reboot), run it once more: the first run refills the page cache. A figure that fails both runs is a regression. The table shows each row's CPU clock and temperature while its checks ran: a hot laptop runs every long check slower by about as much as its clock fell.
     """
     from datetime import datetime
 
@@ -301,6 +301,8 @@ def bench(
         for warning in lean_bench.cold_cache_warnings(measured):
             print(warning)
         if baseline is not None:
+            for warning in lean_bench.cpu_speed_warnings(baseline, measured):
+                print(warning)
             regressions = lean_bench.compare(baseline, measured, tolerance_p50, tolerance_p95)
             print(lean_bench.format_report(regressions))
             return 1 if regressions else 0

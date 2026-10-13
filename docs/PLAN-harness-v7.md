@@ -1224,6 +1224,15 @@ Gate on an idle machine: Core and CSLib pass; ArkLib (4 toolchains) repeats with
 figures (a p95 from 5 repeats, and +0.26 s on a 1.9 s split); Putnam varies about ±20% between runs on the same
 code, and an A/B on one idle machine showed 08a within ±3% of 07 on every Putnam figure. Run the gate on an idle
 machine (no backup, browser or second agent running Lean); a busy machine read as a +30% Putnam regression.
+**Putnam variance RCA (2026-10-13):** the cause is the laptop's CPU clock, not Putnam or the code. Within one run
+every long Putnam check (splice, edit, reference: the 300-line proof) slowed by the same factor (x1.08 to x1.26 across
+runs), while the sorry and error checks (0.22 s, from line 14) never moved, and one run fell back to the clean
+figures on its last repeat. Core's long checks slowed as much (x1.27 to x1.43) but stay under the 0.25 s floor, so
+only Putnam's multi-second checks cross the gate. The i5-1135G7 runs `powersave`/`balance_performance` and reached
+94 C within seconds of a Core check. Since 08b the bench samples the fastest core's clock and the package temperature
+every 2 s while the checks run, shows them per row ("CPU MHz / C") and, once a baseline holds them, warns when a
+row's median clock is more than 10% below the baseline's. Re-record the baseline at the next deliberate re-record so
+the warning can fire.
  (Lean-only benchmark, phase 0/3):
 - Lean v4.32's experimental `--incr-header-save` / `--incr-load` cross-process header snapshots, on the ≥v4.32 rows.
 - REPL tags: **verified** for v4.25.0 through v4.33.0 (`git ls-remote`), including v4.33.0-rc2. **No `v4.29.1` tag**:

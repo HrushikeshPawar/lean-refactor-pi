@@ -21,6 +21,10 @@ NOISE_FLOOR_S = 0.25
 # The first open of a session measures how much of the library the page cache holds, not Lean: after other
 # large workspaces evict it, it is several times slower. Reported and recorded, never gated.
 UNGATED_FIGURES = frozenset({"open_cold_s"})
+# A Lean check runs on one core, so its time follows that core's clock: on a laptop the turbo clock falls by a
+# fifth when the package is hot, and every long check slows by as much. The fastest core is the busy one.
+CPU_SLOWER = 0.10
+TEMPERATURE_ZONES = ("x86_pkg_temp", "TCPU")
 BENCHMARK_ROWS = (
     "Core.InitsUpdatesComm",
     "putnam_1964_b2",
@@ -116,6 +120,34 @@ def summarise_pss(samples: list[dict[int, float]], worker_pids: set[int]) -> dic
     return {"workers_idle_gb": idle, "worker_peak_gb": max(values) if values else None}
 
 
+def read_cpu(root: Path = Path("/sys")) -> dict[str, float | None]:
+    """The fastest core's current clock and the CPU package temperature; None where the machine does not say."""
+    clocks = []
+    for path in root.glob("devices/system/cpu/cpu[0-9]*/cpufreq/scaling_cur_freq"):
+        with suppress(OSError, ValueError):
+            clocks.append(int(path.read_text()) / 1000)
+    temperature = None
+    for zone in sorted(root.glob("class/thermal/thermal_zone*")):
+        try:
+            if zone.joinpath("type").read_text().strip() in TEMPERATURE_ZONES:
+                temperature = int(zone.joinpath("temp").read_text()) / 1000
+                break
+        except (OSError, ValueError):
+            continue
+    return {"mhz": max(clocks) if clocks else None, "temp_c": temperature}
+
+
+def summarise_cpu(samples: list[dict[str, float | None]]) -> dict[str, float | None]:
+    """Median and lowest clock, and hottest temperature, over the samples taken while the checks ran."""
+    clocks = [clock for sample in samples if (clock := sample.get("mhz")) is not None]
+    temperatures = [heat for sample in samples if (heat := sample.get("temp_c")) is not None]
+    return {
+        "mhz_p50": lean_load.percentile(clocks, 50) if clocks else None,
+        "mhz_min": min(clocks) if clocks else None,
+        "temp_max_c": max(temperatures) if temperatures else None,
+    }
+
+
 def _figure_values(result: dict) -> dict[str, float | None]:
     figures: dict[str, float | None] = {}
     for kind, summary in result.get("checks", {}).items():
@@ -182,6 +214,23 @@ def cold_cache_warnings(result: dict, ratio: float = 2.0) -> list[str]:
                 warnings.append(
                     f"{row} | {toolchain} | first open {cold:.2f}s vs repeat {warm:.2f}s: the page cache was cold; "
                     "if the gate fails, run it once more"
+                )
+    return warnings
+
+
+def cpu_speed_warnings(baseline: dict, current: dict, slower: float = CPU_SLOWER) -> list[str]:
+    """Name each row and toolchain whose CPU clock was well below the baseline's: its checks were slower for that."""
+    warnings = []
+    for row, toolchains in current.get("rows", {}).items():
+        for toolchain, item in toolchains.items():
+            before = (baseline.get("rows", {}).get(row, {}).get(toolchain, {}).get("cpu") or {}).get("mhz_p50")
+            after = (item.get("cpu") or {}).get("mhz_p50")
+            if before and after is not None and after < before * (1 - slower):
+                hottest = (item.get("cpu") or {}).get("temp_max_c")
+                heat = f", up to {hottest:.0f} C" if hottest is not None else ""
+                warnings.append(
+                    f"{row} | {toolchain} | CPU clock {after:.0f} MHz vs {before:.0f} MHz in the baseline{heat}: "
+                    "checks run slower by about as much; let the machine cool and run the gate once more"
                 )
     return warnings
 
@@ -273,6 +322,7 @@ class _WorkerSampler(threading.Thread):
         self.run_session, self.recorder = run, recorder
         self.stop_event = threading.Event()
         self.samples: list[dict[int, float]] = []
+        self.cpu: list[dict[str, float | None]] = []
         self.worker_pids: set[int] = set()
         self.available: list[float] = []
         self.error: Exception | None = None
@@ -281,7 +331,9 @@ class _WorkerSampler(threading.Thread):
         while not self.stop_event.is_set():
             try:
                 values, workers, free = _sample_workers(self.run_session)
+                cpu = read_cpu()
                 self.samples.append(values)
+                self.cpu.append(cpu)
                 self.worker_pids.update(workers)
                 if free is not None:
                     self.available.append(free)
@@ -295,6 +347,8 @@ class _WorkerSampler(threading.Thread):
                         "pss_gb": values,
                         "worker_pids": sorted(workers),
                         "mem_available_gb": free,
+                        "cpu_mhz": cpu["mhz"],
+                        "cpu_temp_c": cpu["temp_c"],
                     }
                 )
             except Exception as error:
@@ -403,6 +457,7 @@ def _measure_pair(
             "checks": summarise_checks(records),
             "pss_gb": summarise_pss(sampler.samples, sampler.worker_pids),
             "min_available_gb": min(sampler.available) if sampler.available else None,
+            "cpu": summarise_cpu(sampler.cpu),
         }
         for splice in ("splice_early", "splice_late"):
             if make_splice(row, splice.removeprefix("splice_"), 0) is None:
@@ -500,8 +555,17 @@ def write_baseline(path: Path, result: dict, force: bool = False) -> dict | None
     return old
 
 
+def _cpu_display(cpu: dict | None) -> str:
+    """Median clock and hottest temperature; '-' for results recorded before the CPU was sampled."""
+    if not cpu:
+        return "-"
+    clock = f"{cpu['mhz_p50']:.0f}" if cpu.get("mhz_p50") is not None else "-"
+    heat = f"{cpu['temp_max_c']:.0f}" if cpu.get("temp_max_c") is not None else "-"
+    return f"{clock} / {heat}"
+
+
 def render_table(result: dict) -> str:
-    lines = ["row | toolchain | cold | warm | checks (p50 / p95) | worker PSS idle / peak | min free"]
+    lines = ["row | toolchain | cold | warm | checks (p50 / p95) | worker PSS idle / peak | min free | CPU MHz / C"]
     for row, toolchains in result["rows"].items():
         for toolchain, item in toolchains.items():
             checks = ", ".join(
@@ -513,7 +577,8 @@ def render_table(result: dict) -> str:
             idle = ",".join(f"{value:.2f}" for value in pss["workers_idle_gb"])
             lines.append(
                 f"{row} | {toolchain} | {item['open_cold_s']:.2f} | {item['open_warm_s']:.2f} | {checks} | "
-                f"{idle} / {_display(pss['worker_peak_gb'])} | {_display(item['min_available_gb'])}"
+                f"{idle} / {_display(pss['worker_peak_gb'])} | {_display(item['min_available_gb'])} | "
+                f"{_cpu_display(item.get('cpu'))}"
             )
     return "\n".join(lines)
 
@@ -532,6 +597,7 @@ def print_table(result: dict) -> None:
         "Splice early / late",
         "Worker PSS idle / peak",
         "Min free GB",
+        "CPU MHz / C",
     ):
         table.add_column(heading)
     for row, toolchains in result["rows"].items():
@@ -556,5 +622,6 @@ def print_table(result: dict) -> None:
                 splice or "-",
                 f"{idle} / {_display(pss['worker_peak_gb'])}",
                 _display(item["min_available_gb"]),
+                _cpu_display(item.get("cpu")),
             )
     Console().print(table)
