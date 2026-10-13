@@ -1294,6 +1294,15 @@ on the first run (one slow sample), 0 regressions on the Core rerun; Putnam and 
   - workers owned by one run's `Session`;
   - per-replicate document ownership;
   - a fair-share rule across rows. `WorkerBudget` already counts workers machine-wide.
+- **Built (ticket 09, 2026-10-13):** `arena/scheduler.py`. `arena campaign` plans row-major, grouped by (source,
+  toolchains), replicate before model inside a row. A machine-wide `flock` at `runs/campaign.lock` stops a second
+  campaign; `arena provision` refuses while it is held and takes it while building, so no campaign starts mid-build.
+  `campaign.json` gets `settings` once the packet and preflight gates pass (an aborted campaign leaves nothing, so the
+  prefix can be reused) and `observed` (min free memory, max load, swap, disk, peak concurrent runs) at the end. A
+  `hold` keeps every queued row's toolchains open, narrowed as rows finish. The next row's primary header is pre-warmed
+  when the current row's longest run is within `--prewarm-minutes` (default 12) of the median run time, then its other
+  toolchains on the background lane. Slow test: a pre-warmed primary serves the run's first compile from the session
+  with no new worker and no header load. Swap and disk are recorded only; thresholds stay an open owner question.
 
 ## 10. Order of work
 

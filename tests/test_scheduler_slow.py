@@ -40,8 +40,9 @@ class SchedulerWarmIntegrationTests(unittest.TestCase):
             try:
                 with patch.dict(os.environ, {lean_session.RUN_ID_ENV: run_id}):
                     result = engine.compile_version(row, proof, version, commit, probe=True)
-                self.assertFalse(result["lean"]["new_worker"])
-                self.assertIsNone(result["lean"]["header_seconds"])
+                self.assertEqual(result["lean"]["path"], "session", result["lean"])
+                self.assertIs(result["lean"]["new_worker"], False)
+                self.assertIsNone(result["lean"].get("header_seconds"))
             finally:
                 lean_session.request(
                     {"op": "release", "protocol": lean_session.PROTOCOL, "run_id": run_id}, 5, socket_path
