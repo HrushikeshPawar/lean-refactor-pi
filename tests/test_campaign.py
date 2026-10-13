@@ -77,6 +77,44 @@ class PlanTests(unittest.TestCase):
         self.assertRegex(spec["run_id"], r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?")
 
 
+class ColdVerificationTests(unittest.TestCase):
+    def test_cold_verification_compiles_every_version_and_rejects_one_failure(self):
+        from arena import campaign
+
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            (directory / "proofs").mkdir()
+            (directory / "proofs" / "c1.lean").write_text("theorem t : True := by trivial\n")
+            history = [{"theorem": "T", "versions": ["v1", "v2"]}]
+            calls = []
+
+            def compile_version(_row, _proof, version, _commit, **_kwargs):
+                calls.append(version)
+                return {"passed": version == "v1", "heartbeats": 10, "lean": {"path": "cold"}}
+
+            with (
+                mock.patch.object(campaign, "run_dir", return_value=directory),
+                mock.patch.object(campaign, "events", return_value=history),
+                mock.patch.object(campaign.lean_health, "tripped", return_value=None),
+                mock.patch.object(campaign, "lean_lock", return_value=contextlib.nullcontext()),
+                mock.patch.object(campaign, "force_cold", return_value=contextlib.nullcontext()),
+                mock.patch("arena.engine.problem", return_value={"name": "T", "proof_length": 1}),
+                mock.patch("arena.engine.versions", return_value=[("v1", "c1"), ("v2", "c2")]),
+                mock.patch("arena.engine.measure_version", return_value=("v1", "c1")),
+                mock.patch("arena.engine.validate_proof", return_value=1),
+                mock.patch("arena.engine.candidate_file", return_value={"start_line": 1}),
+                mock.patch("arena.engine.compile_version", side_effect=compile_version),
+                mock.patch("arena.scoring.metrics", return_value={}),
+                mock.patch("arena.scoring.local_proxy", return_value=0.0),
+                mock.patch.object(campaign, "_append"),
+            ):
+                result = campaign.cold_verify("run", {"id": "c1", "heartbeats": 10})
+
+            self.assertEqual(calls, ["v1", "v2"])
+            self.assertFalse(result["confirmed"])
+            self.assertEqual(result["passed"], {"v1": True, "v2": False})
+
+
 class GateTests(unittest.TestCase):
     def test_packet_failure_aborts_before_any_run(self):
         def packet(row):

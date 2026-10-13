@@ -4,7 +4,7 @@
 
 **Blocked by:** 08b: Lean service lanes, memory, goals/snippets on the LSP lane (all lower tickets are committed below your branch).
 
-**Status:** ready-for-agent
+**Status:** needs-review
 
 **Branch:** `v7/08c-lean-callers` (stacked on `v7/08b-lean-lanes`)
 

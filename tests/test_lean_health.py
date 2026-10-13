@@ -358,6 +358,47 @@ class CleanupTests(unittest.TestCase):
 
 
 class HousekeepingTests(unittest.TestCase):
+    def test_warm_service_memory_counts_toward_the_campaign_threshold(self):
+        hk = rc.Housekeeping(
+            20.0,
+            30.0,
+            0.0,
+            mem_fn=lambda: 8.0,
+            service_gb_fn=lambda: 20.0,
+            lingering_fn=lambda _directory: [],
+            sleep_fn=lambda _seconds: self.fail("waited despite available service memory"),
+            now_fn=lambda: 0.0,
+            log=lambda _message: None,
+        )
+        hk.before_run("warm")
+        self.assertEqual(hk.in_flight, 1)
+
+    def test_housekeeping_still_waits_when_no_warm_service_memory_is_available(self):
+        clock = [0.0]
+        naps = []
+        lines = []
+        hk = rc.Housekeeping(
+            20.0,
+            10.0,
+            0.0,
+            mem_fn=lambda: 8.0,
+            service_gb_fn=lambda: 0.0,
+            lingering_fn=lambda _directory: [],
+            sleep_fn=lambda seconds: (naps.append(seconds), clock.__setitem__(0, clock[0] + seconds)),
+            now_fn=lambda: clock[0],
+            log=lines.append,
+        )
+        hk.before_run("cold")
+        self.assertTrue(naps)
+        self.assertEqual(hk.in_flight, 1)
+        self.assertTrue(any("MemAvailable 8.0 GB + Lean service 0.0 GB" in line for line in lines))
+
+    def test_service_memory_sums_server_process_trees_and_defaults_to_zero(self):
+        status = {"ok": True, "servers": [{"gb": 1.25}, {"gb": 2.75}]}
+        self.assertEqual(rc.service_gb(lambda: status), 4.0)
+        self.assertEqual(rc.service_gb(lambda: None), 0.0)
+        self.assertEqual(rc.service_gb(lambda: {"ok": False}), 0.0)
+
     def test_waits_for_stray_lean_and_memory_then_starts_and_logs(self):
         lines, clock, naps = [], [0.0], []
         left = [[7], [7], []]

@@ -828,6 +828,9 @@ class RunnerSessionTests(unittest.TestCase):
         probes = [e for e in run.jsonl("ledger.jsonl") if e.get("kind") == "probe"]
         self.assertEqual(len(probes), 1, run.stdout[-1000:])
         self.assertEqual(probes[0]["result"]["compat"]["v4.29.1"]["lean"]["path"], "session")
+        health = json.loads((run.directory / "lean-health.json").read_text())
+        self.assertTrue(health["versions"]["v4.29.1"]["checked"])
+        self.assertTrue(health["versions"]["v4.29.1"]["passed"])
         self.assertIn("Lean session pid=", run.stdout)
         for leftover in ("service.sock", "service.json"):
             self.assertFalse((run.directory / leftover).exists(), leftover)

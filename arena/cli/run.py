@@ -18,6 +18,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TypedDict
 
 from arena import lean_health, lean_session
 from arena import models as model_config
@@ -189,6 +190,57 @@ def log_event(event: dict) -> None:
 _LEAN: dict = {"socket": None, "run_id": None, "directory": None}
 
 
+class BackgroundChecks(TypedDict):
+    thread: threading.Thread | None
+    stop: threading.Event
+    failed: threading.Event
+
+
+_BACKGROUND: BackgroundChecks = {"thread": None, "stop": threading.Event(), "failed": threading.Event()}
+
+
+def start_background_checks(
+    theorem: str, directory: Path, report: dict | None, check_fn=None
+) -> threading.Thread | None:
+    """Check pending toolchains after the primary gate, without delaying the model."""
+    if not report or not report.get("pending"):
+        return None
+
+    def check() -> None:
+        kwargs = {"cancelled": _BACKGROUND["stop"].is_set}
+        if check_fn is not None:
+            kwargs["check_fn"] = check_fn
+        failed = lean_health.check_others(theorem, directory, **kwargs)
+        if any(not item.get("passed") for item in failed) or lean_health.tripped(directory) is not None:
+            _BACKGROUND["failed"].set()
+
+    thread = threading.Thread(target=check, name="arena-lean-background-checks", daemon=True)
+    _BACKGROUND["thread"] = thread
+    thread.start()
+    return thread
+
+
+def reference_failure_message(directory: Path) -> str:
+    marker = lean_health.tripped(directory) or {}
+    return (
+        f"Lean unhealthy on {marker.get('version', 'unknown')}: "
+        f"{marker.get('detail') or 'reference check failed'}; stopping before further spend"
+    )
+
+
+def watch_background_failure(failed: threading.Event, directory: Path, stop_fn) -> threading.Thread:
+    """Stop Pi once a background reference check records an unhealthy toolchain."""
+
+    def watch() -> None:
+        if not failed.wait():
+            return
+        stop_fn(reference_failure_message(directory))
+
+    thread = threading.Thread(target=watch, name="arena-lean-failure-watcher", daemon=True)
+    thread.start()
+    return thread
+
+
 def start_lean_session(directory: Path, row: dict, run_id: str) -> None:
     """Lease this run's toolchains on the shared Lean service; failure only costs speed."""
     try:
@@ -233,8 +285,8 @@ def lean_gate(theorem: str, directory: Path, gate_fn=None) -> dict | None:
         return None
     slots = lean_session.PRIMARY_MIN_WORKERS
     print(
-        f"Lean health gate: warming {slots} workers per version and checking the reference proof "
-        f"(blocks until done; no model request is made before it passes)",
+        f"Lean health gate: warming {slots} primary workers and checking its reference proof first; "
+        "other toolchains are checked in the background",
         flush=True,
     )
     report = (gate_fn or lean_health.gate)(theorem, slots, directory)
@@ -305,6 +357,7 @@ def execute(options: RunOptions) -> int:
     try:
         return run(options)
     finally:
+        _BACKGROUND["stop"].set()
         stop_lean_session()
 
 
@@ -312,6 +365,9 @@ def run(options: RunOptions) -> int:
     global _request_count, _tool_result_count, _retry_count
     _tool_started.clear()
     _request_count = _tool_result_count = _retry_count = 0
+    _BACKGROUND["stop"].clear()
+    _BACKGROUND["failed"].clear()
+    _BACKGROUND["thread"] = None
     args = SimpleNamespace(**asdict(options))
     if args.model not in MODELS:
         print(f"error: unknown model {args.model!r}; choose from {', '.join(MODELS)}", file=sys.stderr)
@@ -448,6 +504,7 @@ def run(options: RunOptions) -> int:
     health = lean_gate(args.theorem, directory)
     if health is not None and health["verdict"] != "healthy":
         return stop_unhealthy(args, directory, health["reasons"])
+    start_background_checks(args.theorem, directory, health)
     shadow = directory / "scratch" / "project"
     env = os.environ.copy()
     env["ARENA_BUDGET_REQUIRED"] = "1"
@@ -467,6 +524,7 @@ def run(options: RunOptions) -> int:
         try:
             env.update(langfuse_environment())
         except RuntimeError as error:
+            _BACKGROUND["stop"].set()
             print(error, file=sys.stderr)
             return 1
     worker = None
@@ -499,6 +557,7 @@ def run(options: RunOptions) -> int:
     for _ in range(30 if worker else 0):
         if worker is not None and worker.poll() is not None:
             print("Merge worker exited before Pi started; inspect merge-worker.log", file=sys.stderr)
+            _BACKGROUND["stop"].set()
             return 1
         if worker is not None and status_path.exists() and json.loads(status_path.read_text()).get("pid") == worker.pid:
             break
@@ -506,6 +565,7 @@ def run(options: RunOptions) -> int:
     else:
         if worker:
             print("Merge worker did not become ready; inspect merge-worker.log", file=sys.stderr)
+            _BACKGROUND["stop"].set()
             return 1
     # Pi reads the project's .pi/settings.json. Compaction is the only thing allowed to rewrite
     # history, and only once the context passes --compact-at-tokens.
@@ -526,6 +586,7 @@ def run(options: RunOptions) -> int:
     event_log = directory / "events.jsonl"
     event_offset = event_log.stat().st_size if event_log.exists() else 0
     state: dict = {"process": None, "signal": None, "timer": None, "tripped": False}
+    stop_lock = threading.Lock()
     segment_started = time.time()
 
     def force_stop() -> None:
@@ -554,6 +615,19 @@ def run(options: RunOptions) -> int:
             state["timer"].daemon = True
             state["timer"].start()
 
+    def stop_for_lean(message: str) -> None:
+        with stop_lock:
+            if state["tripped"]:
+                return
+            state["tripped"] = True
+        print(message, file=sys.stderr, flush=True)
+        process = state["process"]
+        if process is not None and process.poll() is None:
+            process.terminate()
+            state["timer"] = threading.Timer(STOP_GRACE_S, force_stop)
+            state["timer"].daemon = True
+            state["timer"].start()
+
     for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(number, interrupt)
     with event_log.open("a") as output:
@@ -568,6 +642,8 @@ def run(options: RunOptions) -> int:
             start_new_session=True,
         )
         state["process"] = process
+        if _BACKGROUND["thread"] is not None:
+            watch_background_failure(_BACKGROUND["failed"], directory, stop_for_lean)
         if state["signal"] is not None:
             process.terminate()
         assert process.stdout is not None
@@ -580,19 +656,15 @@ def run(options: RunOptions) -> int:
             except (json.JSONDecodeError, TypeError, ValueError):
                 print(f"[{datetime.now().astimezone().strftime('%H:%M:%S')}] non-JSON Pi output recorded", flush=True)
             if not state["tripped"] and lean_health.tripped(directory):
-                # The Lean circuit breaker fired while a tool result was recorded: no further model requests.
-                state["tripped"] = True
-                print(
-                    f"Lean circuit breaker tripped ({lean_health.BREAKER_LIMIT} consecutive Lean timeouts or "
-                    f"failures); stopping Pi cleanly",
-                    file=sys.stderr,
-                    flush=True,
-                )
-                if process.poll() is None:
-                    process.terminate()
-                    state["timer"] = threading.Timer(STOP_GRACE_S, force_stop)
-                    state["timer"].daemon = True
-                    state["timer"].start()
+                marker = lean_health.tripped(directory) or {}
+                if marker.get("source") == "reference_check":
+                    message = reference_failure_message(directory)
+                else:
+                    message = (
+                        f"Lean circuit breaker tripped ({lean_health.BREAKER_LIMIT} consecutive Lean timeouts or "
+                        "failures); stopping Pi cleanly"
+                    )
+                stop_for_lean(message)
         try:
             exit_code = process.wait(timeout=STOP_GRACE_S)
         except subprocess.TimeoutExpired:
@@ -604,6 +676,7 @@ def run(options: RunOptions) -> int:
     kill_group(process, signal.SIGTERM)
     if worker is not None and worker.poll() is None:
         worker.terminate()
+    _BACKGROUND["stop"].set()
     return finish(
         args,
         directory,

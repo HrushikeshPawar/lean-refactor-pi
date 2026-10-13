@@ -36,6 +36,7 @@ from types import SimpleNamespace
 from rich.console import Console
 from rich.table import Table
 
+from arena import lean_session
 from arena.cli.run import CONFIG, MODELS
 from arena.engine import ROOT
 
@@ -350,6 +351,18 @@ def mem_available_gb() -> float | None:
     return None
 
 
+def service_gb(status_fn=None) -> float:
+    """Return memory held by shared Lean workers, or zero when the service is unavailable."""
+    status = (
+        status_fn()
+        if status_fn is not None
+        else lean_session.request({"op": "status", "protocol": lean_session.PROTOCOL}, 5)
+    )
+    if not status or not status.get("ok"):
+        return 0.0
+    return sum(float(server.get("gb", 0.0)) for server in status.get("servers", []))
+
+
 def read_session_info(directory: Path) -> dict:
     """Legacy run directories do not own or record the machine-wide Lean service."""
     return {}
@@ -465,6 +478,7 @@ class Housekeeping:
         evaluations: Path = EVALUATIONS,
         *,
         mem_fn=mem_available_gb,
+        service_gb_fn=service_gb,
         reap_fn=reap_run,
         lingering_fn=lingering,
         sweep_fn=sweep_candidate_dirs,
@@ -474,7 +488,8 @@ class Housekeeping:
     ):
         self.min_free_gb, self.max_wait, self.evaluations = min_free_gb, max_wait, evaluations
         self.started = time.time() if started is None else started
-        self.mem_fn, self.reap_fn, self.lingering_fn, self.sweep_fn = mem_fn, reap_fn, lingering_fn, sweep_fn
+        self.mem_fn, self.service_gb_fn = mem_fn, service_gb_fn
+        self.reap_fn, self.lingering_fn, self.sweep_fn = reap_fn, lingering_fn, sweep_fn
         self.sleep_fn, self.now_fn, self.log = sleep_fn, now_fn, log
         self.lock = threading.Lock()
         self.in_flight = 0
@@ -494,21 +509,23 @@ class Housekeeping:
                 finished = list(self.finished)
             stray = [pid for directory in finished for pid in self.lingering_fn(directory)]
             free = self.mem_fn()
-            low = alone and free is not None and free < self.min_free_gb
+            service = self.service_gb_fn()
+            low = alone and free is not None and free + service < self.min_free_gb
             shown = "?" if free is None else f"{free:.1f}"
             if not stray and not low:
                 break
             if self.now_fn() >= deadline:
                 self.say(
                     f"cleanup: starting {run_id} anyway after {self.max_wait:.0f}s "
-                    f"(Lean pids left {stray}, MemAvailable {shown} GB)"
+                    f"(Lean pids left {stray}, MemAvailable {shown} GB, Lean service {service:.1f} GB)"
                 )
                 break
             state = (tuple(stray), low)
             if state != last:
                 self.say(
                     f"waiting before {run_id}: {len(stray)} Lean process(es) of finished runs still alive, "
-                    f"MemAvailable {shown} GB (need {self.min_free_gb:g})"
+                    f"MemAvailable {shown} GB + Lean service {service:.1f} GB "
+                    f"(need {self.min_free_gb:g} GB total)"
                 )
                 last = state
             self.sleep_fn(5)
