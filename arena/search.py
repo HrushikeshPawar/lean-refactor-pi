@@ -76,20 +76,22 @@ def _hit(row: sqlite3.Row, theorem: dict, why: str, match: str | None = None) ->
 
 
 def _trigram_candidates(connection: sqlite3.Connection, component: str) -> list[sqlite3.Row]:
+    """Visible declarations whose folded last component is within the length band and either is short,
+    shares a trigram with the query, or (for queries of 4+ characters) contains it as a subsequence."""
     folded = component.casefold()
     grams = sorted(index._trigrams(folded))
     placeholders = ",".join("?" for _ in grams)
     query_length = len(folded)
     predicate = (
-        f"length(folded_last) BETWEEN ? AND ? AND (length(folded_last) <= 4 OR "
-        f"EXISTS (SELECT 1 FROM trigrams WHERE trigrams.name = declarations.name AND gram IN ({placeholders}))"
+        f"length BETWEEN ? AND ? AND (length <= 4 OR "
+        f"id IN (SELECT component_id FROM component_grams WHERE gram IN ({placeholders}))"
     )
     parameters: tuple = (max(0, query_length - 2), query_length + 2, *grams)
     if query_length >= 4:
         predicate += " OR folded_last GLOB ?"
         parameters += (_subsequence_pattern(folded),)
     predicate += ")"
-    return _visible_rows(connection, predicate, parameters)
+    return _visible_rows(connection, f"component_id IN (SELECT id FROM components WHERE {predicate})", parameters)
 
 
 def _name_query(connection: sqlite3.Connection, theorem: dict, query: str, after: str | None, limit: int) -> dict:
@@ -146,9 +148,12 @@ def _name_query(connection: sqlite3.Connection, theorem: dict, query: str, after
         substring.sort(key=lambda row: (len(row["name"]), row["name"]))
         candidates.extend((row, "substring") for row in substring)
         fuzzy = []
+        distances: dict[str, int] = {}
         for row in _trigram_candidates(connection, lookup.rsplit(".", 1)[-1]):
             component = row["folded_last"]
-            distance = _edit_distance(folded.rsplit(".", 1)[-1], component)
+            if component not in distances:
+                distances[component] = _edit_distance(folded.rsplit(".", 1)[-1], component)
+            distance = distances[component]
             if distance <= 2 or (len(folded) >= 4 and _is_subsequence(folded, row["folded_name"])):
                 fuzzy.append((distance, row))
         fuzzy.sort(key=lambda item: (item[0], len(item[1]["name"]), item[1]["name"]))
@@ -210,33 +215,27 @@ def _type_query(connection: sqlite3.Connection, theorem: dict, query: str, limit
         result["error"] = {"code": "no_constants", "input": query}
         return result
 
+    placeholders = ",".join("?" for _ in resolved)
     weights = {
-        row["constant"]: row["value"]
+        row["name"]: row["idf"]
         for row in connection.execute(
-            f"SELECT idf.constant, idf.value FROM idf JOIN decl_consts USING (constant) WHERE idf.constant IN ({','.join('?' for _ in resolved)})",
-            tuple(resolved),
+            f"SELECT name, idf FROM constants WHERE name IN ({placeholders})", tuple(resolved)
         )
     }
     candidates: dict[str, tuple[sqlite3.Row, float]] = {}
-    for constant in resolved:
-        for row in _visible_rows(
-            connection,
-            "(head = ? OR name IN (SELECT name FROM decl_consts WHERE constant = ?))",
-            (constant, constant),
-        ):
-            score = sum(
-                weights.get(value, 0.0)
-                for value in resolved
-                if value == row["head"]
-                or connection.execute(
-                    "SELECT 1 FROM decl_consts WHERE name = ? AND constant = ?", (row["name"], value)
-                ).fetchone()
-            )
-            if row["head"] in resolved:
-                score += 2.0
-            previous = candidates.get(row["name"])
-            if previous is None or score > previous[1]:
-                candidates[row["name"]] = (row, score)
+    # decl_consts holds each declaration's consts plus its head, so this covers `head = constant` too.
+    for row in _visible_rows(
+        connection,
+        "id IN (SELECT decl_id FROM decl_consts WHERE constant_id IN "
+        f"(SELECT id FROM constants WHERE name IN ({placeholders})))",
+        tuple(resolved),
+    ):
+        present = set(json.loads(row["consts"]))
+        present.add(row["head"])
+        score = sum(weights.get(value, 0.0) for value in resolved if value in present)
+        if row["head"] in resolved:
+            score += 2.0
+        candidates[row["name"]] = (row, score)
     ranked = sorted(candidates.values(), key=lambda item: (-item[1], item[0]["name"]))
     result["hits"] = [_hit(row, theorem, "type") for row, _score in ranked[:limit]]
     result["truncated"] = len(ranked) > limit

@@ -17,10 +17,15 @@ class IndexLoaderTests(unittest.TestCase):
             database = Path(temporary) / "index.sqlite"
             index._log_build(database, "lean_started", timeout_seconds=900)
             index._log_build(database, "build_failed", error="example")
+            # build_index logs its whole result, which has its own "path" field.
+            index._log_build(database, "build_finished", path=str(database), declarations=3)
             records = [json.loads(line) for line in database.with_suffix(".log.jsonl").read_text().splitlines()]
-            self.assertEqual([record["event"] for record in records], ["lean_started", "build_failed"])
+            self.assertEqual(
+                [record["event"] for record in records], ["lean_started", "build_failed", "build_finished"]
+            )
             self.assertEqual(records[0]["timeout_seconds"], 900)
             self.assertEqual(records[1]["error"], "example")
+            self.assertEqual(records[2]["path"], str(database))
 
     def test_loader_builds_search_indexes_and_idf_from_jsonl(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -33,10 +38,13 @@ class IndexLoaderTests(unittest.TestCase):
                     "Nat.add_comm",
                 )
                 self.assertGreater(
-                    connection.execute("SELECT count(*) FROM trigrams WHERE gram = 'add'").fetchone()[0], 1
+                    connection.execute(
+                        "SELECT count(*) FROM declarations JOIN component_grams USING (component_id) WHERE gram = 'add'"
+                    ).fetchone()[0],
+                    1,
                 )
                 self.assertIsNotNone(
-                    connection.execute("SELECT value FROM idf WHERE constant = 'HAppend.hAppend'").fetchone()
+                    connection.execute("SELECT idf FROM constants WHERE name = 'HAppend.hAppend'").fetchone()
                 )
 
     def test_current_file_ranges_drop_only_the_inserted_wrapper_lines(self):

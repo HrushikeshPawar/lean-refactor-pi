@@ -17,10 +17,10 @@ from arena import engine
 
 LEAN_FILE = Path(__file__).with_name("lean") / "index.lean"
 INDEX_TIMEOUT = 900
-SCHEMA_VERSION = "declaration-index-v1"
+SCHEMA_VERSION = "declaration-index-v2"
 
 
-def _log_build(path: Path, event: str, **fields: object) -> None:
+def _log_build(path: Path, event: str, /, **fields: object) -> None:
     """Append one durable stage event beside the generated index."""
     log_path = path.with_suffix(".log.jsonl")
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -92,7 +92,11 @@ def _restore_current_file_lines(jsonl_path: Path, insertion_line: int, shift: in
 
 
 def load_index(jsonl_path: Path, db_path: Path) -> int:
-    """Load Lean JSONL into the same indexed SQLite schema used by production builds."""
+    """Load Lean JSONL into the same indexed SQLite schema used by production builds.
+
+    Link tables hold integer ids only, keyed in their lookup direction: trigrams of each
+    distinct folded last component (fuzzy name search) and declarations per constant (type search).
+    """
     db_path.parent.mkdir(parents=True, exist_ok=True)
     if db_path.exists():
         db_path.unlink()
@@ -102,12 +106,19 @@ def load_index(jsonl_path: Path, db_path: Path) -> int:
             """
             PRAGMA journal_mode = OFF;
             PRAGMA synchronous = OFF;
+            CREATE TABLE components (
+              id INTEGER PRIMARY KEY,
+              folded_last TEXT NOT NULL UNIQUE,
+              length INTEGER NOT NULL
+            );
             CREATE TABLE declarations (
-              name TEXT PRIMARY KEY,
+              id INTEGER PRIMARY KEY,
+              name TEXT NOT NULL UNIQUE,
               folded_name TEXT NOT NULL,
               normalized_name TEXT NOT NULL,
               last_component TEXT NOT NULL,
               folded_last TEXT NOT NULL,
+              component_id INTEGER NOT NULL REFERENCES components(id),
               kind TEXT NOT NULL,
               module TEXT NOT NULL,
               line INTEGER,
@@ -118,33 +129,49 @@ def load_index(jsonl_path: Path, db_path: Path) -> int:
               head TEXT NOT NULL,
               consts TEXT NOT NULL
             );
-            CREATE TABLE trigrams (name TEXT NOT NULL, gram TEXT NOT NULL, PRIMARY KEY(name, gram));
-            CREATE INDEX trigrams_by_gram ON trigrams(gram, name);
-            CREATE INDEX declarations_folded_name ON declarations(folded_name);
-            CREATE INDEX declarations_folded_last ON declarations(folded_last);
-            CREATE INDEX declarations_head ON declarations(head);
-            CREATE TABLE decl_consts (name TEXT NOT NULL, constant TEXT NOT NULL, PRIMARY KEY(name, constant));
-            CREATE INDEX decl_consts_by_constant ON decl_consts(constant, name);
-            CREATE TABLE idf (constant TEXT PRIMARY KEY, value REAL NOT NULL);
+            CREATE TABLE component_grams (
+              gram TEXT NOT NULL,
+              component_id INTEGER NOT NULL,
+              PRIMARY KEY(gram, component_id)
+            ) WITHOUT ROWID;
+            CREATE TABLE constants (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, idf REAL NOT NULL);
+            CREATE TABLE decl_consts (
+              constant_id INTEGER NOT NULL,
+              decl_id INTEGER NOT NULL,
+              PRIMARY KEY(constant_id, decl_id)
+            ) WITHOUT ROWID;
             """
         )
-        documents: dict[str, set[str]] = {}
+        components: dict[str, int] = {}
+        documents: dict[str, set[int]] = {}
         count = 0
         with jsonl_path.open(encoding="utf-8") as source:
             for raw in source:
                 record = json.loads(raw)
                 name = str(record["name"])
                 last = name.rsplit(".", 1)[-1]
+                folded_last = last.casefold()
                 normalized = unicodedata.normalize("NFKC", name).casefold()
                 consts = list(dict.fromkeys(str(value) for value in record.get("consts", [])))
-                connection.execute(
-                    "INSERT INTO declarations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                component_id = components.get(folded_last)
+                if component_id is None:
+                    component_id = components[folded_last] = len(components) + 1
+                    connection.execute(
+                        "INSERT INTO components VALUES (?, ?, ?)", (component_id, folded_last, len(folded_last))
+                    )
+                    connection.executemany(
+                        "INSERT INTO component_grams VALUES (?, ?)",
+                        ((gram, component_id) for gram in _trigrams(folded_last)),
+                    )
+                decl_id = connection.execute(
+                    "INSERT INTO declarations VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         name,
                         name.casefold(),
                         normalized,
                         last,
-                        last.casefold(),
+                        folded_last,
+                        component_id,
                         str(record["kind"]),
                         str(record["module"]),
                         record.get("line"),
@@ -155,16 +182,30 @@ def load_index(jsonl_path: Path, db_path: Path) -> int:
                         str(record.get("head", "")),
                         json.dumps(consts, ensure_ascii=False),
                     ),
-                )
+                ).lastrowid
+                assert decl_id is not None
                 for constant in set(consts) | ({str(record["head"])} if record.get("head") else set()):
-                    documents.setdefault(constant, set()).add(name)
-                    connection.execute("INSERT OR IGNORE INTO decl_consts VALUES (?, ?)", (name, constant))
-                connection.executemany("INSERT INTO trigrams VALUES (?, ?)", ((name, gram) for gram in _trigrams(last)))
+                    documents.setdefault(constant, set()).add(decl_id)
                 count += 1
         total = max(count, 1)
-        connection.executemany(
-            "INSERT INTO idf VALUES (?, ?)",
-            ((constant, math.log((total + 1) / (len(names) + 0.5))) for constant, names in documents.items()),
+        for constant_id, (constant, decl_ids) in enumerate(documents.items(), 1):
+            connection.execute(
+                "INSERT INTO constants VALUES (?, ?, ?)",
+                (constant_id, constant, math.log((total + 1) / (len(decl_ids) + 0.5))),
+            )
+            connection.executemany(
+                "INSERT INTO decl_consts VALUES (?, ?)", ((constant_id, decl_id) for decl_id in sorted(decl_ids))
+            )
+        connection.executescript(
+            """
+            CREATE INDEX declarations_folded_name ON declarations(folded_name);
+            CREATE INDEX declarations_folded_last ON declarations(folded_last);
+            CREATE INDEX declarations_component ON declarations(component_id);
+            CREATE INDEX declarations_head ON declarations(head);
+            CREATE INDEX declarations_last_component ON declarations(last_component);
+            CREATE INDEX declarations_normalized_name ON declarations(normalized_name);
+            CREATE INDEX components_length ON components(length);
+            """
         )
         connection.commit()
         return count
