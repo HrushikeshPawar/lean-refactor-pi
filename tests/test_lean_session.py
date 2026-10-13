@@ -510,7 +510,7 @@ class CoreSessionTests(SessionHarness, unittest.TestCase):
         status = lean_session.request({"op": "status"}, 5, self.socket)
         self.assertEqual(len(status["servers"]), 1)
         server = status["servers"][0]
-        self.assertGreaterEqual(server["workers"], 1)
+        self.assertGreaterEqual(len(server["workers"]), 1)
         self.assertLess(server["gb"], 4.0)
 
     def test_concurrent_drafts_get_their_own_documents(self):
@@ -525,7 +525,7 @@ class CoreSessionTests(SessionHarness, unittest.TestCase):
         self.assertTrue(all(r["lean"]["path"] == "session" for r in results))
         self.assertTrue(all(r["goals"] for r in results))
         status = lean_session.request({"op": "status"}, 5, self.socket)
-        self.assertGreaterEqual(status["servers"][0]["workers"], 2)
+        self.assertGreaterEqual(len(status["servers"][0]["workers"]), 2)
 
     @unittest.skipIf((lean_session._available_gb() or 0) < 12, "not enough free memory to grow the session")
     def test_remaining_documents_warm_up_in_the_background_so_a_batch_is_incremental(self):
@@ -535,10 +535,10 @@ class CoreSessionTests(SessionHarness, unittest.TestCase):
         compile_version(self.row, statement + " := by\n  sorry", self.version, self.commit, probe=True)
 
         def workers() -> int:
-            return status_of(self.socket, 5)["servers"][0]["workers"]
+            return len(status_of(self.socket, 5)["servers"][0]["workers"])
 
         self.assertTrue(
-            wait_until(lambda: workers() >= lean_session.MAX_SLOTS, 120),
+            wait_until(lambda: workers() >= lean_session.PRIMARY_MAX_WORKERS, 120),
             "the session did not open its remaining documents",
         )
         proofs = [statement + f" := by\n  intros\n  sorry\n  -- batch {n}" for n in range(4)]
@@ -607,6 +607,59 @@ class CoreSessionTests(SessionHarness, unittest.TestCase):
         self.assertTrue(reply["ok"] and reply.get("timeout"), reply)
         ok = compile_version(self.row, self.row["src"], self.version, self.commit, measure=True)
         self.assertTrue(ok["passed"])
+
+    def test_timeout_returns_partial_output_and_reuses_the_worker(self):
+        from arena.cli.lean_load import make_proof
+
+        proof = make_proof("slow", self.row, 1, 1.0)
+        with patch.dict(os.environ, {"ARENA_LEAN_TIMEOUT": "1"}):
+            timed_out = compile_version(self.row, proof, self.version, self.commit)
+        self.assertFalse(timed_out["passed"])
+        self.assertEqual(timed_out["lean"]["path"], "session")
+        self.assertTrue(timed_out["lean"]["warm_kept"])
+        self.assertIsInstance(timed_out["lean"]["partial_output"], str)
+        quick = compile_version(self.row, self.row["src"], self.version, self.commit, measure=True)
+        self.assertEqual(quick["lean"]["path"], "session")
+        self.assertFalse(quick["lean"]["new_worker"])
+        self.assertIsNone(quick["lean"].get("header_seconds"))
+
+    def test_goals_are_available_at_a_hole_and_absent_after_a_complete_proof(self):
+        proof = self.row["statement"] + " := by\n  sorry"
+        built = engine.candidate_file(self.row, proof, self.version, self.commit)
+        line = built["text"].splitlines().index("  sorry")
+        reply = engine.lean_goals(self.row, built["path"], built["text"], built["head"], line, 2)
+        self.assertTrue(reply and reply["ok"], reply)
+        self.assertTrue(reply["goals"])
+        complete = engine.candidate_file(self.row, self.row["src"], self.version, self.commit)
+        reply = engine.lean_goals(
+            self.row,
+            complete["path"],
+            complete["text"],
+            complete["head"],
+            len(complete["text"].splitlines()),
+            0,
+        )
+        self.assertTrue(reply and reply["ok"], reply)
+        self.assertEqual(reply["goals"], [])
+
+    def test_try_runs_a_closing_snippet_and_a_snippet_that_leaves_a_goal(self):
+        proof = self.row["statement"] + " := by\n  sorry"
+        built = engine.candidate_file(self.row, proof, self.version, self.commit)
+        line = built["text"].splitlines().index("  sorry")
+        close = self.row["src"].split(":= by", 1)[1]
+        reply = engine.lean_try(
+            self.row,
+            built["path"],
+            built["text"],
+            built["head"],
+            {"line": line, "column": 2, "end_line": line, "end_column": 7},
+            [close, "intro"],
+        )
+        self.assertTrue(reply and reply["ok"], reply)
+        self.assertEqual(len(reply["results"]), 2)
+        self.assertEqual(reply["results"][0]["returncode"], 0)
+        self.assertIsNone(reply["results"][0]["goals_after"])
+        self.assertTrue(reply["results"][1]["goals_after"])
 
 
 @slow

@@ -493,7 +493,7 @@ class SimRun:
         reply = None
         try:
             budget = float(getattr(lean_session, "OPEN_TIMEOUT", WARM_BUDGET))
-            slots = int(self.config.get("slots") or getattr(lean_session, "MAX_SLOTS", 4))
+            slots = int(self.config.get("slots") or lean_session.PRIMARY_MAX_WORKERS)
             reply = (
                 lean_session.request(
                     self.payload(version, split_proof(self.row)[1], budget, "model", "warm", slots),

@@ -39,19 +39,25 @@ def status(json_output: bool = False) -> int:
     table.add_column("Workers", justify="right")
     table.add_column("Busy", justify="right")
     table.add_column("GB", justify="right")
+    table.add_column("Lanes")
     table.add_column("Closes in", justify="right")
     for server in reply.get("servers", []):
         closes = server.get("closes_in_s")
         table.add_row(
             server["project"],
-            str(server["workers"]),
+            str(len(server["workers"])),
             str(server["busy"]),
             str(server["gb"]),
+            ", ".join(f"{worker['lane']}:{worker['gb']:.2f}GB" for worker in server["workers"]),
             "-" if closes is None else f"{closes} s",
         )
     Console().print(table)
     Console().print(f"Leases: {json.dumps(reply.get('leases', {}), sort_keys=True)}")
     Console().print(f"Holds: {json.dumps(reply.get('holds', {}), sort_keys=True)}")
+    Console().print(
+        f"MemAvailable: {reply.get('mem_available_gb')} GB; swap used: {reply.get('swap_used_gb')} GB; "
+        f"external Lean: {reply.get('external_lean_gb')} GB"
+    )
     return 0
 
 

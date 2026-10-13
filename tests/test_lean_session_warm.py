@@ -29,6 +29,12 @@ FAKE = textwrap.dedent("""
         if first: t += sum(float(x) for x in re.findall(r"-- IMPORT ([0-9.]+)", text))
         return t
     def finish(uri, version, wait):
+        send({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
+              "params": {"uri": uri, "version": version, "diagnostics": [
+                  {"severity": 3, "message": "partial", "range": {"start": {"line": 2, "character": 0}}}]}})
+        send({"jsonrpc": "2.0", "method": "$/lean/fileProgress",
+              "params": {"textDocument": {"uri": uri}, "processing": [
+                  {"range": {"start": {"line": 3}}}]}})
         time.sleep(wait)
         if docs.get(uri, (0,))[0] == version:
             send({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
@@ -60,6 +66,15 @@ FAKE = textwrap.dedent("""
             threading.Thread(target=finish, args=(td["uri"], td["version"], delay(text, opened)), daemon=True).start()
         elif method == "textDocument/didClose":
             docs.pop(p["textDocument"]["uri"], None); log(method="didClose", uri=p["textDocument"]["uri"])
+        elif method in ("$/lean/plainGoal", "$/lean/plainTermGoal"):
+            log(method="goal_position", position=p["position"])
+            uri = p["textDocument"]["uri"]
+            text = docs[uri][1]
+            if method == "$/lean/plainGoal":
+                result = {"goals": ["h : True\\n⊢ True"] if "sorry" in text else [], "rendered": "h : True\\n⊢ True" if "sorry" in text else None}
+            else:
+                result = {"goal": "⊢ True" if "sorry" in text else None}
+            send({"jsonrpc": "2.0", "id": m["id"], "result": result})
         elif method == "textDocument/waitForDiagnostics":
             threading.Thread(target=waiter, args=(p["uri"], p["version"], m["id"]), daemon=True).start()
 """)
@@ -99,7 +114,7 @@ class Base(unittest.TestCase):
     def session(self, name="run", limit=6, **options):
         max_slots = options.pop("max_slots", None)
         if max_slots is not None:
-            patcher = patch.object(lean_session, "MAX_SLOTS", max_slots)
+            patcher = patch.object(lean_session, "PRIMARY_MAX_WORKERS", max_slots)
             patcher.start()
             self.addCleanup(patcher.stop)
         session = lean_session.Session(self.dir / name, budget=lean_session.WorkerBudget(self.dir / "tokens", limit))
@@ -219,6 +234,25 @@ class WarmOpTests(Base):
             os.environ.pop(lean_session.ENV, None)
             self.assertIsNone(engine.warm_session({}, "v", "c", 2))
 
+    def test_goal_and_try_wrappers_send_the_session_operations(self):
+        sent = []
+
+        def fake(payload, timeout, path=None):
+            sent.append((payload, timeout))
+            return {"ok": True}
+
+        row = {"name": "T", "file_path": "A.lean"}
+        with (
+            patch.dict(os.environ, {lean_session.ENV: "/x"}),
+            patch.object(lean_session, "request", fake),
+            patch.object(engine, "_fingerprint", return_value={"code": "x"}),
+        ):
+            engine.lean_goals(row, Path("/p"), "abcdef", 3, 1, 2, timeout=12)
+            engine.lean_try(row, Path("/p"), "abcdef", 3, {"line": 1}, ["x"], timeout=13)
+        self.assertEqual([request[0]["op"] for request in sent], ["goal", "try"])
+        self.assertEqual(sent[0][0]["position"], {"line": 1, "column": 2})
+        self.assertEqual(sent[1][0]["snippets"], ["x"])
+
 
 class LaneTests(Base):
     def test_background_has_one_slot_of_its_own_and_model_slots_are_untouched(self):
@@ -269,6 +303,48 @@ class LaneTests(Base):
             engine.run_lean({"name": "T", "file_path": "A.lean"}, Path("/p"), "abcdef", prefix_end=3, lane="background")
         self.assertEqual((sent["lane"], sent["header_end"], sent["timeout"]), ("background", 3, 180))
         self.assertEqual(engine.last_lean_run()["header_seconds"], 2.0)
+
+    def test_timeout_returns_partial_diagnostics_and_progress_but_keeps_worker(self):
+        session = self.session()
+        reply = session.check(self.request("-- PROOF 30\n", timeout=0.4))
+        self.assertTrue(reply["timeout"] and reply["warm_kept"])
+        self.assertEqual(reply["partial"][0]["message"], "partial")
+        self.assertEqual(reply["progress_line"], 3)
+        self.assertIn("partial", reply["partial_output"])
+        again = session.check(self.request("-- PROOF 0\n", timeout=5))
+        self.assertTrue(again["ok"] and not again["new_worker"])
+
+    def test_goal_maps_codepoint_column_to_utf16_and_returns_goal_forms(self):
+        session = self.session()
+        text = HEADER + "😀 sorry\n"
+        request = {
+            **self.request(),
+            "text": text,
+            "header_end": len(HEADER),
+            "position": {"line": 2, "column": 1},
+            "op": "goal",
+        }
+        reply = session.goal(request)
+        self.assertEqual(reply["goals"], ["h : True\n⊢ True"])
+        self.assertEqual(reply["term_goal"], "⊢ True")
+        # The emoji takes two UTF-16 code units before the requested codepoint column.
+        self.assertTrue(any(event["position"] == {"line": 2, "character": 2} for event in self.events("goal_position")))
+
+    def test_try_runs_ordered_snippets_and_continues_after_a_timeout(self):
+        session = self.session()
+        request = {
+            **self.request("sorry\n"),
+            "hole": {"line": 2, "column": 0, "end_line": 2, "end_column": 6},
+            "snippets": ["-- PROOF 1.0\n", "exact True\n"],
+            "timeout": 0.4,
+        }
+        reply = session.try_snippets(request)
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(len(reply["results"]), 2)
+        self.assertTrue(reply["results"][0]["timeout"])
+        self.assertIn("returncode", reply["results"][1])
+        refused = session.try_snippets({**request, "snippets": ["x"] * 9})
+        self.assertFalse(refused["ok"])
 
 
 class BackgroundWorkerTests(Base):
@@ -346,6 +422,25 @@ class BackgroundWorkerTests(Base):
         model = first.entries[str(self.dir / "proj")]
         self.assertEqual([s.text is not None for s in model.lane_slots("model")], [True])
 
+    def test_cross_version_warmup_with_no_memory_never_closes_primary_workers(self):
+        session = self.session(limit=8)
+        primary = str(self.dir / "proj")
+        self.assertTrue(session.lease({"run_id": "run", "pid": os.getpid(), "primary": primary, "others": []})["ok"])
+        self.assertEqual(
+            session.warm({**self.request(), "run_id": "run", "slots": lean_session.PRIMARY_MIN_WORKERS})["workers"],
+            2,
+        )
+        with patch.object(lean_session, "_available_gb", return_value=5.0):
+            for name in ("v2", "v3", "v4"):
+                self.assertEqual(
+                    session.warm({**self.request(), "project": self.other(name), "lane": "background", "slots": 1})[
+                        "workers"
+                    ],
+                    0,
+                )
+        self.assertEqual(self.events("didClose"), [])
+        self.assertEqual(len(session.entries[primary].lane_slots("model")), 2)
+
     def test_background_is_guaranteed_even_when_model_workers_hold_every_machine_token(self):
         session = self.session(limit=2)
         self.assertEqual(session.warm({**self.request(), "slots": 4, "timeout": 30})["workers"], 2)
@@ -355,13 +450,58 @@ class BackgroundWorkerTests(Base):
         reply = self.background(session, self.other("v2"))
         self.assertTrue(reply["ok"], reply)
 
-    def test_model_requests_do_not_evict_for_background_but_may_for_another_model_request(self):
-        session = self.session(limit=1)  # force the documented idle-worker eviction path
-        self.assertEqual(session.warm({**self.request(), "slots": 1, "timeout": 30})["workers"], 1)
-        reply = session.check({**self.request("-- PROOF 0\n", timeout=10), "project": self.other("v2")})
-        self.assertTrue(reply["ok"], reply)  # a model request on another toolchain evicts the idle model worker
+    def test_another_projects_idle_background_worker_is_the_only_eviction_target(self):
+        session = self.session(limit=1)
+        v2, v3 = self.other("v2"), self.other("v3")
+        self.assertTrue(self.background(session, v2)["ok"])
+        hog = lean_session.WorkerBudget(self.dir / "tokens", 1)
+        _held = [hog.acquire(background=True) for _ in range(lean_session.BACKGROUND_TOKENS - 1)]
+        self.assertTrue(self.background(session, v3)["ok"])
         self.assertEqual(len(self.events("didClose")), 1)
-        self.assertEqual(len(session.entries[str(self.dir / "v2")].lane_slots("model")), 1)
+        self.assertEqual(len(session.entries[v2].lane_slots("background")), 0)
+        self.assertEqual(len(session.entries[v3].lane_slots("background")), 1)
+
+    def test_model_request_is_refused_instead_of_evicting_a_model_worker(self):
+        session = self.session(limit=1)
+        self.assertEqual(session.warm({**self.request(), "slots": 1})["workers"], 1)
+        reply = session.check({**self.request(), "project": self.other("v2")})
+        self.assertFalse(reply["ok"])
+        self.assertEqual(self.events("didClose"), [])
+
+
+class AsyncWarmAndPssTests(Base):
+    def test_nonblocking_warm_returns_before_header_open_finishes(self):
+        session = self.session()
+        started = time.monotonic()
+        reply = session.warm({**self.request(), "slots": 1, "wait": False})
+        self.assertEqual(reply, {"ok": True, "started": True})
+        self.assertLess(time.monotonic() - started, 0.25)
+        self.assertEqual(self.settled("didOpen", 1), 1)
+
+    def test_status_and_log_include_injected_worker_and_external_memory_and_rotate(self):
+        session = lean_session.Session(
+            self.dir / "pss",
+            budget=lean_session.WorkerBudget(self.dir / "tokens", 4),
+            mem_fn=lambda: (8.5, 1.25),
+            pss_fn=lambda _: {456: 1.5},
+            external_fn=lambda _: {789: 0.75},
+        )
+        self.sessions.append(session)
+        with patch.object(lean_session, "process_tree", return_value=[]):
+            session.warm({**self.request(), "slots": 1})
+            status = session.status()
+            self.assertEqual(status["servers"][0]["workers"], [{"pid": 456, "gb": 1.5, "lane": "model"}])
+            self.assertEqual(
+                (status["mem_available_gb"], status["swap_used_gb"], status["external_lean_gb"]), (8.5, 1.25, 0.75)
+            )
+            session.last_pss_log = 0
+            session.log_pss()
+            line = json.loads((self.dir / "pss" / "pss.jsonl").read_text())
+            self.assertEqual((line["external_lean_gb"], line["servers"][0]["workers"][0]["gb"]), (0.75, 1.5))
+            with patch.object(lean_session, "PSS_LOG_MAX_BYTES", 1):
+                session.last_pss_log = 0
+                session.log_pss()
+            self.assertTrue((self.dir / "pss" / "pss.jsonl.1").exists())
 
 
 class QueueTests(Base):
@@ -563,6 +703,23 @@ class ServiceLeaseTests(Base):
             self.assertFalse(self.reap(session, project, closed=False, within=0.5))  # a queued row holds it
             session.unhold("queue")
             self.assertTrue(self.reap(session, project))
+
+    def test_model_request_for_other_project_uses_background_while_a_hold_stays_model(self):
+        session = self.session(limit=8)
+        primary, other = str(self.dir / "proj"), str(self.dir / "v2")
+        (self.dir / "v2").mkdir()
+        self.lease(session, "run", primary, [other])
+        request = {**self.request(), "project": other, "lane": "model", "run_id": "run"}
+        reply = session.check(request)
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(reply["lane"], "background")
+        entry = session.entries[other]
+        self.assertEqual((len(entry.lane_slots("model")), len(entry.lane_slots("background"))), (0, 1))
+        held = str(self.dir / "v3")
+        (self.dir / "v3").mkdir()
+        session.hold({"owner": "queued", "pid": os.getpid(), "projects": [held]})
+        held_reply = session.check({**request, "project": held})
+        self.assertEqual(held_reply["lane"], "model")
 
     def test_dead_pids_are_refused_and_their_leases_and_holds_dropped(self):
         session = self.session()

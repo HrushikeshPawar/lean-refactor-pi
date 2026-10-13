@@ -604,8 +604,12 @@ def run_lean(
                 "seconds": round(time.monotonic() - started, 2),
                 "new_worker": reply.get("new_worker"),
                 "changed_from_line": reply.get("changed_from_line"),
-                "lane": lane,
+                "lane": reply.get("lane", lane),
             }
+            if reply.get("partial_output") is not None:
+                _LAST.info["partial_output"] = reply["partial_output"]
+            if reply.get("progress_line") is not None:
+                _LAST.info["progress_line"] = reply["progress_line"]
             if reply.get("header_seconds") is not None:
                 _LAST.info["header_seconds"] = reply["header_seconds"]
             if reply.get("warm_kept"):
@@ -617,7 +621,9 @@ def run_lean(
     return done
 
 
-def warm_session(row: dict, version: str, commit: str, slots: int, lane: str = "model") -> dict | None:
+def warm_session(
+    row: dict, version: str, commit: str, slots: int, lane: str = "model", wait: bool = True
+) -> dict | None:
     """Ask the run's Lean session to load the file header into `slots` workers, in parallel, before anything is
     checked. Builds the candidate file as `run_lean` does (the reference proof stands in for a draft). None when no
     session is configured; otherwise the daemon's reply (`ok`, `workers`, `seconds`, `failed`)."""
@@ -633,10 +639,59 @@ def warm_session(row: dict, version: str, commit: str, slots: int, lane: str = "
         "slots": slots,
         "timeout": lean_session.OPEN_TIMEOUT,
         "lane": lane,
+        "wait": wait,
     }
     if run_id := os.environ.get(lean_session.RUN_ID_ENV):
         payload["run_id"] = run_id
     return lean_session.request(payload, lean_session.OPEN_TIMEOUT + 120)
+
+
+def lean_goals(
+    row: dict, project: Path, text: str, prefix_end: int, line: int, column: int, timeout: int | None = None
+) -> dict | None:
+    """Ask the configured LSP session for goals at a code-point position; no cold fallback."""
+    from arena import lean_session
+
+    if not lean_session.configured():
+        return None
+    payload = {
+        **_session_request(row, project, text, prefix_end),
+        "op": "goal",
+        "protocol": lean_session.PROTOCOL,
+        "position": {"line": line, "column": column},
+        "timeout": lean_timeout() if timeout is None else timeout,
+        "lane": "model",
+    }
+    if run_id := os.environ.get(lean_session.RUN_ID_ENV):
+        payload["run_id"] = run_id
+    return lean_session.request(
+        payload, lean_session.MODEL_QUEUE_TIMEOUT + lean_session.OPEN_TIMEOUT + 2 * payload["timeout"] + 60
+    )
+
+
+def lean_try(
+    row: dict, project: Path, text: str, prefix_end: int, hole: dict, snippets: list[str], timeout: int | None = None
+) -> dict | None:
+    """Run snippets at a hole on the configured LSP session; no cold fallback."""
+    from arena import lean_session
+
+    if not lean_session.configured():
+        return None
+    payload = {
+        **_session_request(row, project, text, prefix_end),
+        "op": "try",
+        "protocol": lean_session.PROTOCOL,
+        "hole": hole,
+        "snippets": snippets,
+        "timeout": lean_timeout() if timeout is None else timeout,
+        "lane": "model",
+    }
+    if run_id := os.environ.get(lean_session.RUN_ID_ENV):
+        payload["run_id"] = run_id
+    return lean_session.request(
+        payload,
+        lean_session.MODEL_QUEUE_TIMEOUT + lean_session.OPEN_TIMEOUT + (len(snippets) + 1) * payload["timeout"] + 60,
+    )
 
 
 def compile_version(
