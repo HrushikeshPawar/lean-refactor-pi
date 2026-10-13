@@ -4,7 +4,7 @@
 
 **Blocked by:** 10a: Graph core: steps, edges, focus, operations; 08c: Lean service callers, tests, speed gate. (Tickets 10b and 11 are also committed below this branch; this ticket uses 11's route filing and `map_view`, and 10b's step-goal job in the autocheck queue, but needs nothing else from them.)
 
-**Status:** needs-review
+**Status:** done
 
 **Branch:** `v7/12-salvage` (stacked on `v7/11-routes`)
 
