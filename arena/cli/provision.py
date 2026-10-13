@@ -337,6 +337,18 @@ def _execute(options: ProvisionOptions) -> int:
                     options.allow_full_fallback,
                 )
                 print(f"ok      {step['worktree'].name}", flush=True)
+                try:
+                    from arena.index import build_index
+
+                    result = build_index(row["name"], step["version"])
+                    print(
+                        f"index   {step['worktree'].name}: {result['declarations']} declarations, "
+                        f"{result['bytes']} bytes in {result['seconds']:.3f}s",
+                        flush=True,
+                    )
+                except (OSError, RuntimeError, ValueError) as error:
+                    failed += 1
+                    print(f"index FAILED: {error}", file=sys.stderr, flush=True)
             except (RuntimeError, subprocess.TimeoutExpired) as error:
                 failed += 1
                 print(f"FAILED  {step['worktree'].name}: {error}", file=sys.stderr, flush=True)

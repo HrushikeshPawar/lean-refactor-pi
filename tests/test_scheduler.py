@@ -113,9 +113,14 @@ class ProvisionTests(unittest.TestCase):
                 ),
                 mock.patch.object(provision, "LOGS", Path(tmp) / "logs"),
                 mock.patch.object(provision, "provision") as provision_fn,
+                mock.patch(
+                    "arena.index.build_index",
+                    return_value={"declarations": 1, "bytes": 128, "seconds": 0.01, "cached": False},
+                ) as index_fn,
             ):
                 self.assertEqual(provision.execute(provision.ProvisionOptions(row="known")), 0)
                 provision_fn.assert_called_once()
+                index_fn.assert_called_once_with("known", "v1")
 
 
 class PrewarmTests(unittest.TestCase):

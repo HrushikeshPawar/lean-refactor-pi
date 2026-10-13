@@ -5,3 +5,5 @@ max_failures: 3
 max_drafts: 4
 source_lines_per_call: 400
 find_files_per_query: 30
+search_hits_default: 10
+search_hits_max: 30

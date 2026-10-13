@@ -5,10 +5,13 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Annotated, Literal
 
 from cyclopts import App, Parameter
+from rich.console import Console
+from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
 from arena import engine
 from arena.cli.campaigns import CampaignOptions
@@ -184,6 +187,77 @@ def smoke(*rows: str) -> int:
 
 graph_app = App(name="graph", help="Export graph data.")
 app.command(graph_app)
+
+index_app = App(name="index", help="Build and inspect offline declaration indexes.")
+app.command(index_app)
+
+
+@index_app.command(name="build")
+def index_build(
+    row: str,
+    version: str | None = None,
+    json_output: Annotated[bool, Parameter(name="json")] = False,
+) -> int:
+    from arena import index
+
+    try:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("{task.description}"),
+            BarColumn(pulse_style="cyan"),
+            TimeElapsedColumn(),
+            transient=True,
+            console=Console(stderr=True),
+        ) as progress:
+            task = progress.add_task(f"Indexing {row} declarations", total=None)
+            result = index.build_index(row, version)
+            progress.update(task, description="Declaration index ready")
+            progress.stop_task(task)
+    except (OSError, RuntimeError, ValueError) as error:
+        print(f"index FAILED: {error}", file=sys.stderr)
+        return 1
+    if json_output:
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    else:
+        cached = " cached" if result["cached"] else ""
+        print(
+            f"{result['path']}  {result['declarations']} declarations  {result['bytes']} bytes  "
+            f"{result['seconds']:.3f}s{cached}"
+        )
+    return 0
+
+
+@index_app.command(name="status")
+def index_status(
+    row: str | None = None,
+    json_output: Annotated[bool, Parameter(name="json")] = False,
+) -> int:
+    from arena import index
+
+    rows = [engine.problem(row)] if row else [json.loads(line) for line in engine.BENCHMARK.read_text().splitlines()]
+    items = []
+    for item in rows:
+        for version, _commit in engine.versions(item):
+            path = index.index_path(item["name"], version)
+            exists = path is not None
+            items.append(
+                {
+                    "row": item["name"],
+                    "version": version,
+                    "present": exists,
+                    "path": str(path) if exists else None,
+                    "bytes": path.stat().st_size if exists else None,
+                    "age_seconds": max(0.0, time.time() - path.stat().st_mtime) if exists else None,
+                }
+            )
+    if json_output:
+        print(json.dumps({"items": items}, ensure_ascii=False, sort_keys=True))
+    else:
+        for item in items:
+            state = "present" if item["present"] else "missing"
+            detail = f"{item['path']}  {item['bytes']} bytes  {item['age_seconds']:.0f}s old" if item["present"] else ""
+            print(f"{item['row']} {item['version']}: {state} {detail}".rstrip())
+    return 0
 
 
 @graph_app.command(name="export")

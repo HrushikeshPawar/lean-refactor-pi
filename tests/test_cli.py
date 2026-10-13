@@ -51,6 +51,7 @@ class CommandTreeTests(unittest.TestCase):
             )
         ] + [["graph", "export", "--help"]]
         commands.extend([["lean", name, "--help"] for name in ("serve", "health", "load-test")])
+        commands.extend([["index", name, "--help"] for name in ("build", "status")])
         commands.append(["protocol", "--help"])
         for command in commands:
             with self.subTest(command=command), patch("sys.stdout", io.StringIO()), patch("sys.stderr", io.StringIO()):
