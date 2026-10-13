@@ -2636,9 +2636,7 @@ def autocheck(name: str, run_id: str, max_seconds: float | None = None, closing:
             job = jobs[0]
             try:
                 proof = (directory / "proofs" / f"{job['id']}.lean").read_text()
-                record_evaluation(
-                    name, run_id, proof, "full", materialize_live=False, lane="background", trigger="auto"
-                )
+                record_evaluation(name, run_id, proof, "full", materialize_live=False, lane="batch", trigger="auto")
             except Exception as error:  # record the failure so the queue moves on
                 _append(
                     directory,

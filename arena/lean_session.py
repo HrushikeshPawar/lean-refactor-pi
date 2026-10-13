@@ -839,6 +839,9 @@ class Session:
         self.pss_fn = pss_fn or worker_pss
         self.external_fn = external_fn or external_lean_pss
         self.document_fn = document_fn or worker_document
+        from arena.lean_repl import ReplPool
+
+        self.repl = ReplPool(pss_fn=lambda pid: pid_pss_gb(pid) or 0.0, opening=self.budget.opening)
         self.last_pss_log = time.monotonic()
 
     @staticmethod
@@ -932,6 +935,9 @@ class Session:
         with self.lock:
             lease = self.leases.pop(run_id, None)
             closing = self._unclaim([lease["primary"], *lease["others"]]) if lease else []
+            unreferenced = [name for name in closing if not self._referenced_locked(name)]
+        for name in unreferenced:
+            self.repl.close_project(name)
         return {"ok": True, "closing": closing}
 
     def unhold(self, owner: str) -> dict:
@@ -939,6 +945,11 @@ class Session:
             hold = self.holds.pop(owner, None)
             if hold:
                 self._unclaim(hold["projects"])
+                unreferenced = [name for name in hold["projects"] if not self._referenced_locked(name)]
+            else:
+                unreferenced = []
+        for name in unreferenced:
+            self.repl.close_project(name)
         return {"ok": True}
 
     def _close_unreferenced(self, entry: _Entry) -> None:
@@ -950,7 +961,8 @@ class Session:
                 if self._referenced_locked(name) or self.entries.get(name) is not entry:
                     return
                 self.entries.pop(name)
-            self._stop_entry(entry)
+        self._stop_entry(entry)
+        self.repl.close_project(entry.project)
         _log(f"closed: no run or queued row needs it ({entry.project.name})")
 
     def reap_dead(self) -> None:
@@ -1250,6 +1262,8 @@ class Session:
             return {"ok": False, "stale": True, "reason": "stale session: the evaluator changed since the run started"}
         timeout = float(request.get("timeout", 180))
         lane = "background" if request.get("lane") == "background" else "model"
+        if request.get("lane") == "batch":
+            return self._batch_check(request, project, timeout)
         header_end = request.get("header_end")
         header_end = header_end if isinstance(header_end, int) and 0 < header_end <= len(request["text"]) else None
         try:
@@ -1307,6 +1321,52 @@ class Session:
             "messages": len(outcome["diagnostics"]),
             **extra,
         }
+
+    def _batch_check(self, request: dict, project: Path, timeout: float) -> dict:
+        """Use the REPL only for supported, unmeasured whole-proof checks; preserve LSP as fallback."""
+        from arena import lean_repl
+
+        header_end = request.get("header_end")
+        header = (
+            request["text"][:header_end]
+            if isinstance(header_end, int) and 0 < header_end <= len(request["text"])
+            else ""
+        )
+        toolchain = str(request.get("toolchain", ""))
+        metadata = lean_repl.repl_dir(toolchain) / "build.json" if toolchain else None
+        supported = metadata is not None and metadata.is_file()
+        if supported:
+            try:
+                supported = bool(json.loads(metadata.read_text()).get("ok"))
+            except (OSError, ValueError):
+                supported = False
+        if (
+            lean_repl.REPL_ENABLED
+            and supported
+            and header
+            and not request.get("measure")
+            and not request.get("per_tactic")
+        ):
+            try:
+                result = self.repl.check(
+                    project,
+                    toolchain,
+                    header,
+                    request["text"][header_end:],
+                    request["display"],
+                    timeout,
+                    verification=lean_repl.ReplPool.verification_drafts(str(request.get("row", ""))),
+                )
+                return {**result, "engine": "repl", "lane": "batch"}
+            except (lean_repl.ReplError, SessionError, OSError, ValueError) as error:
+                fallback = {"fallback": "repl"}
+                _log(f"REPL batch fallback for {project.name}: {error}")
+            else:
+                fallback = {}
+        else:
+            fallback = {}
+        reply = self.check({**request, "lane": "background"})
+        return {**reply, "engine": "lsp", "lane": "background", **fallback}
 
     def goal(self, request: dict) -> dict:
         """The check's reply plus the goals at a position, asked on the worker that just checked the text."""
@@ -1530,6 +1590,15 @@ class Session:
             "leases": leases,
             "holds": holds,
             "servers": servers,
+            "repls": [
+                {
+                    "project": item.project,
+                    "pid": item.process.pgid,
+                    "gb": round(self.repl.pss_fn(item.process.pgid), 3) if item.process.pgid else 0.0,
+                    "busy": item.busy,
+                }
+                for item in list(self.repl.items.values())
+            ],
             "mem_available_gb": available,
             "swap_used_gb": swap,
             "external_lean_gb": round(sum(external.values()), 3),
@@ -1589,6 +1658,7 @@ class Session:
             entries, self.entries = list(self.entries.values()), {}
         for entry in entries:
             self._stop_entry(entry)
+        self.repl.close()
 
 
 class _Handler(socketserver.StreamRequestHandler):

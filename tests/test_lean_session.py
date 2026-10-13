@@ -452,6 +452,74 @@ class SessionHarness:
 @slow
 @unittest.skipUnless(CORE_READY, "Strata fixture environment is not provisioned")
 class CoreSessionTests(SessionHarness, unittest.TestCase):
+    def test_batch_repl_matches_background_lsp_for_core_and_cslib(self):
+        from arena import lean_repl
+
+        def available(toolchain: str) -> bool:
+            metadata = lean_repl.repl_dir(toolchain) / "build.json"
+            binary = lean_repl.repl_dir(toolchain) / ".lake/build/bin/repl"
+            try:
+                return binary.is_file() and bool(json.loads(metadata.read_text()).get("ok"))
+            except (OSError, ValueError):
+                return False
+
+        if not available(self.version):
+            self.skipTest(f"REPL is not built for Core toolchain {self.version}")
+        directory = Path(tempfile.mkdtemp(prefix="arena-repl-seam-c-"))
+        self.addCleanup(shutil.rmtree, directory, True)
+        session = lean_session.Session(directory, budget=lean_session.WorkerBudget(directory / "tokens"))
+        self.addCleanup(session.shutdown)
+        rows = [(self.row, self.version, self.commit)]
+        cslib = problem("Cslib.SKI.parallelReduction_diamond")
+        cslib_version, cslib_commit = versions(cslib)[0]
+        if available(cslib_version):
+            rows.append((cslib, cslib_version, cslib_commit))
+
+        for row, toolchain, commit in rows:
+            project = engine.workspace(row, toolchain, commit)
+            statement = row["statement"]
+            drafts = (
+                ("compiling", row["src"]),
+                ("failing", statement + " := by\n  exact arena_repl_missing_name"),
+                ("hole", engine.instrument_sorries(statement + " := by\n  sorry")),
+            )
+            for label, proof in drafts:
+                with self.subTest(row=row["name"], draft=label):
+                    built = engine.candidate_file(row, proof, toolchain, commit)
+                    text = built["text"]
+                    header_end = built["head"] + len(engine.HEARTBEAT_WRAPPER)
+                    wrapped = text[: built["head"]] + engine.HEARTBEAT_WRAPPER + text[built["head"] :]
+                    request = {
+                        "protocol": lean_session.PROTOCOL,
+                        "fingerprint": lean_session.fingerprint(project),
+                        "project": str(project),
+                        "display": engine.source_path(row),
+                        "text": wrapped,
+                        "header_end": header_end,
+                        "timeout": 600,
+                        "toolchain": toolchain,
+                        "row": row["name"],
+                        "measure": False,
+                    }
+                    lsp = session.check({**request, "lane": "background"})
+                    with patch.object(lean_repl, "REPL_ENABLED", True):
+                        repl = session.check({**request, "lane": "batch"})
+                    self.assertEqual(repl["engine"], "repl")
+                    self.assertEqual(repl["returncode"] == 0, lsp["returncode"] == 0)
+                    lsp_shape = engine.structure_diagnostics(
+                        lsp["output"], text, built["start_line"], built["end_line"], built["start_line"]
+                    )
+                    repl_shape = engine.structure_diagnostics(
+                        repl["output"], text, built["start_line"], built["end_line"], built["start_line"]
+                    )
+                    for key in ("diagnostic_counts", "goals"):
+                        self.assertEqual(repl_shape[key], lsp_shape[key], key)
+                    lsp_heartbeats = lean_repl._heartbeat(lsp["output"])
+                    repl_heartbeats = lean_repl._heartbeat(repl["output"])
+                    if lsp_heartbeats is None or repl_heartbeats is None:
+                        self.fail("the heartbeat wrapper did not report a count")
+                    self.assertLessEqual(abs(repl_heartbeats - lsp_heartbeats), max(5, 0.05 * lsp_heartbeats))
+
     def test_sequential_leases_reuse_the_core_header(self):
         project = str(engine.workspace(self.row, self.version, self.commit))
         proof = self.row["statement"] + " := by\n  intros\n  sorry"

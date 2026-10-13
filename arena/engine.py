@@ -591,7 +591,14 @@ def run_lean(
             "protocol": lean_session.PROTOCOL,
             "timeout": timeout,
             "lane": lane,
+            "row": row.get("name", "") if lane == "batch" else "",
+            "toolchain": (project / "lean-toolchain").read_text().strip()
+            if lane == "batch" and (project / "lean-toolchain").is_file()
+            else "",
+            "measure": "arena_measure_heartbeats" in text,
         }
+        if payload["toolchain"].startswith("leanprover/lean4:"):
+            payload["toolchain"] = payload["toolchain"].removeprefix("leanprover/lean4:")
         if run_id := os.environ.get(lean_session.RUN_ID_ENV):
             payload["run_id"] = run_id
         # queue for a worker + header open + the check (+ a restore after a timeout) + slack
@@ -605,6 +612,7 @@ def run_lean(
                 "new_worker": reply.get("new_worker"),
                 "changed_from_line": reply.get("changed_from_line"),
                 "lane": reply.get("lane", lane),
+                "engine": reply.get("engine", "lsp"),
             }
             if reply.get("partial_output") is not None:
                 _LAST.info["partial_output"] = reply["partial_output"]
@@ -614,6 +622,8 @@ def run_lean(
                 _LAST.info["header_seconds"] = reply["header_seconds"]
             if reply.get("warm_kept"):
                 _LAST.info["warm_kept"] = True
+            if reply.get("fallback"):
+                _LAST.info["fallback"] = reply["fallback"]
             return None if reply.get("timeout") else (reply["returncode"], reply["output"])
         info = {"path": "cold-fallback", "reason": str(reply.get("reason") or "session unavailable")[:200]}
     done = _run_cold(row, project, text, timeout)

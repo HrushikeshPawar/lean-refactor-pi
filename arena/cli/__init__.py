@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -235,6 +236,49 @@ def load_test(
     return cli_execute(options)
 
 
+@lean_app.command(name="repl-build")
+def repl_build(
+    toolchain: Annotated[list[str] | None, Parameter(name="toolchain", consume_multiple=True)] = None,
+    clean: bool = False,
+    json_output: Annotated[bool, Parameter(name="json")] = False,
+) -> int:
+    """Build the tagged Lean REPL for every toolchain used by the benchmark rows."""
+    import shutil
+
+    from arena import lean_repl
+
+    if toolchain is None:
+        names = []
+        for line in engine.BENCHMARK.read_text(encoding="utf-8").splitlines():
+            row = json.loads(line)
+            names.extend(version for version, _commit in engine.versions(row))
+        toolchain = list(dict.fromkeys(names))
+    results = []
+    for version in toolchain:
+        if clean:
+            shutil.rmtree(lean_repl.pickle_dir(version), ignore_errors=True)
+        binary = lean_repl.build(version, log=lambda _line: None)
+        metadata_path = lean_repl.repl_dir(version) / "build.json"
+        metadata = json.loads(metadata_path.read_text())
+        if version == "v4.29.1" and metadata.get("ok") and binary.is_file():
+            metadata["smoke"] = lean_repl.smoke(version)
+            metadata["ok"] = bool(metadata["smoke"].get("ok"))
+            metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")
+        results.append(metadata)
+    if json_output:
+        print(json.dumps(results, indent=2))
+    else:
+        from rich.console import Console
+
+        console = Console()
+        for result in results:
+            seconds = result.get("seconds")
+            elapsed = f" ({seconds}s)" if seconds is not None else ""
+            note = f"; smoke={result['smoke']}" if result.get("smoke") else ""
+            console.print(f"{result['toolchain']}: {'ok' if result['ok'] else 'failed'}{elapsed}{note}")
+    return 0
+
+
 @lean_app.command()
 def bench(
     rows: Annotated[list[str] | None, Parameter(name="rows", consume_multiple=True)] = None,
@@ -248,6 +292,8 @@ def bench(
     tolerance_p95: float = 0.20,
     force: bool = False,
     full: bool = False,
+    engine_choice: Annotated[Literal["lsp", "repl", "both"] | None, Parameter(name="engine")] = None,
+    trial: Literal["header-snapshot"] | None = None,
     json_output: Annotated[bool, Parameter(name="json")] = False,
 ) -> int:
     """Measure Lean speed and compare it with a recorded baseline.
@@ -260,7 +306,45 @@ def bench(
     """
     from datetime import datetime
 
+    from arena import lean_repl
     from arena.cli import lean_bench
+
+    if trial == "header-snapshot":
+        results = []
+        for line in engine.BENCHMARK.read_text(encoding="utf-8").splitlines():
+            row = json.loads(line)
+            if row["source"].lower() not in ("physlib", "cslib"):
+                continue
+            for version, commit in engine.versions(row):
+                if engine.toolchain_key(version) < engine.toolchain_key("v4.32.0"):
+                    continue
+                try:
+                    project = engine.workspace(row, version, commit)
+                except FileNotFoundError:
+                    continue
+                built = engine.candidate_file(row, row["src"], version, commit)
+                result = lean_repl.header_snapshot_trial(project, built["text"][: built["head"]], timeout)
+                results.append({"row": row["name"], "toolchain": version, **result})
+        if json_output:
+            print(json.dumps(results, indent=2))
+        else:
+            for result in results:
+                status = result if result.get("available") else "not available"
+                print(f"{result['row']} {result['toolchain']}: {status}")
+        return 0
+    if engine_choice is not None and not full and compare is None:
+        try:
+            comparison = lean_repl.compare_engines(engine_choice or "both", timeout)
+        except (OSError, ValueError, RuntimeError) as error:
+            print(error)
+            return 2
+        lean_repl.REPL_ENABLED = comparison["adopt"]
+        if json_output:
+            print(json.dumps(comparison, indent=2))
+        else:
+            print(json.dumps(comparison, indent=2))
+            print(f"REPL adoption: {'yes' if comparison['adopt'] else 'no'}")
+        return 0
 
     chosen: str | dict[str, list[str]] = versions
     if full:
@@ -308,8 +392,6 @@ def bench(
         if record is not None:
             old_record = lean_bench.write_baseline(record, measured, force)
         if json_output:
-            import json
-
             print(json.dumps(measured, indent=2))
         else:
             print(measured["measurement_note"])
