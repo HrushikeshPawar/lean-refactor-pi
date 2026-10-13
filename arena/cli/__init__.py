@@ -247,9 +247,14 @@ def bench(
     tolerance_p50: float = 0.10,
     tolerance_p95: float = 0.20,
     force: bool = False,
+    full: bool = False,
     json_output: Annotated[bool, Parameter(name="json")] = False,
 ) -> int:
     """Measure Lean speed and compare it with a recorded baseline.
+
+    The quick gate (`--compare` alone: Core, Putnam and CSLib on their first toolchain, about 6 minutes) runs at the end
+    of every Lean ticket. The full gate (`--full --compare`: every row and toolchain the baseline holds, ArkLib's four
+    included, about 25 minutes) runs after 08d and 12, and whenever the quick gate fails.
 
     Run once at the end of every ticket that touches Lean machinery: 08a, 08b, 08c, 08d, 10b, 12. Never in the fast suite. If it fails right after other large Lean work (another workspace, a campaign, a reboot), run it once more: the first run refills the page cache. A figure that fails both runs is a regression. The table shows each row's CPU clock and temperature while its checks ran: a hot laptop runs every long check slower by about as much as its clock fell.
     """
@@ -257,8 +262,18 @@ def bench(
 
     from arena.cli import lean_bench
 
+    chosen: str | dict[str, list[str]] = versions
+    if full:
+        if compare is None:
+            print("--full measures the toolchains the baseline holds: pass --compare <baseline>")
+            return 2
+        try:
+            chosen = lean_bench.baseline_versions(lean_bench.load_baseline(compare))
+        except ValueError as error:
+            print(error)
+            return 2
     requested_rows = rows is not None
-    selected_rows = rows or list(lean_bench.BENCHMARK_ROWS)
+    selected_rows = rows or list(chosen if isinstance(chosen, dict) else lean_bench.QUICK_ROWS)
     selected_out = out or ROOT / "runs/analysis/bench" / datetime.now().strftime("%Y%m%d-%H%M%S")
     if not requested_rows:
         available = []
@@ -266,7 +281,10 @@ def bench(
             try:
                 row = engine.problem(name)
                 toolchains = engine.versions(row)
-                selected = toolchains if versions == "all" else toolchains[:1]
+                if isinstance(chosen, dict):
+                    selected = [pair for pair in toolchains if pair[0] in chosen.get(name, [])]
+                else:
+                    selected = toolchains if versions == "all" else toolchains[:1]
                 if any(engine.workspace(row, v, c).is_dir() for v, c in selected):
                     available.append(name)
                 else:
@@ -285,7 +303,7 @@ def bench(
             raise ValueError(
                 f"baseline repeats ({baseline['settings']['repeats']}) differ from requested repeats ({repeats})"
             )
-        measured = lean_bench.measure(selected_rows, versions, repeats, timeout, selected_out)
+        measured = lean_bench.measure(selected_rows, chosen, repeats, timeout, selected_out)
         old_record = None
         if record is not None:
             old_record = lean_bench.write_baseline(record, measured, force)

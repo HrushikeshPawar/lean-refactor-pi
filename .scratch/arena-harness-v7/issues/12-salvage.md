@@ -57,7 +57,7 @@ Names are as of ticket 11. Lean calls in this ticket go through the machine-wide
 - [ ] 24. Seam A, TS contract: the existing Pi-extension tests still pass; add no TS test (the kick change has no pure function to test).
 - [ ] 25. One `@slow` Lean test in `tests/test_protocol.py` (Strata fixture, `CampaignCliTests` style): take `FIXTURE.read_text()`, replace `exact updatedStateUpdate (InitStatesSomeMonotone Hold Hinits)` with `exact rfl` (as `test_06_failed_evaluation_reports_aligned_lines` does), run `salvage` with the real compile function and assert status `salvaged`, `compiles <= 6`, at least one `sorry` in the sketch, the statement line unchanged and the sketch compiling with an `ok` result. Paste its output (status, compiles, rounds, holes, seconds) in the hand-back.
 - [ ] 26. Run `uv run ruff check` / `uv run ruff format` on every file you touched and `uv run ty check arena/salvage.py arena/graph.py` (fix only diagnostics in lines you wrote).
-- [ ] 27. **Speed gate, once, at the end.** This ticket adds background Lean work, so after every other item is done and committed run the gate of ticket 07 **once**: `uv run arena lean bench --compare benchmark/derived/lean-baseline.json` and `ARENA_SLOW_TESTS=1 uv run pytest -q -p no:cacheprovider tests/test_lean_speed_gate.py`, one command at a time, machine otherwise idle. A figure fails only if it exceeds BOTH the relative tolerance (+10% p50, +20% p95) AND the 0.25 s absolute noise floor. Paste both results in the hand-back. If it fails, do not change the baseline or tolerances: stop and report.
+- [ ] 27. **Speed gate, once, at the end.** This ticket adds background Lean work, so after every other item is done and committed run the gate of ticket 07 **once**: `uv run arena lean bench --full --compare benchmark/derived/lean-baseline.json` (the full gate, about 25 minutes: this is the last Lean ticket, a milestone, owner decision 2026-10-13) and `ARENA_SLOW_TESTS=1 uv run pytest -q -p no:cacheprovider tests/test_lean_speed_gate.py`, one command at a time, machine otherwise idle. A figure fails only if it exceeds BOTH the relative tolerance (+10% p50, +20% p95) AND the 0.25 s absolute noise floor. Paste both results in the hand-back. If it fails, do not change the baseline or tolerances: stop and report.
 
 ## Do NOT
 - Do not add a size threshold, a retry loop or an LLM call to salvage. Do not change the strategy order or the 6-compile limit.
@@ -86,7 +86,7 @@ Test budget: targeted files, the fast suite once, one named slow file, the gate 
 - `uv run ruff check arena tests && uv run ruff format --check arena tests` -> clean for the files you touched.
 - The ticket-05a template tests (find them with `grep -rln 'agent-text' tests`; run those files) -> both new templates parse and every placeholder is supplied. `grep -rn 'def render' arena/` finds the renderer.
 - `uv run pytest -q -p no:cacheprovider` -> the fast suite, once: all pass.
-- `uv run arena lean bench --compare benchmark/derived/lean-baseline.json` -> exit 0 (item 27).
+- `uv run arena lean bench --full --compare benchmark/derived/lean-baseline.json` -> exit 0 (item 27).
 - `ARENA_SLOW_TESTS=1 uv run pytest -q -p no:cacheprovider tests/test_lean_speed_gate.py` -> passes (item 27).
 
 ## Stop and report if

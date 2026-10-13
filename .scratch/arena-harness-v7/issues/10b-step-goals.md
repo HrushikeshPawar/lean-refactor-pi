@@ -36,7 +36,7 @@ Names are as of ticket 10a. If a name below no longer exists and you cannot find
 - [ ] 10. Run `uv run ruff check` and `uv run ruff format` on every file you touched, and `uv run ty check arena/steps.py arena/graph.py arena/step_goals.py` plus the files you touched (fix only diagnostics in lines you wrote).
 
 **D. Speed gate (once, at the end)**
-- [ ] 11. This ticket adds Lean work, so run the gate of ticket 07 **once**, after every other item is done and committed: `uv run arena lean bench --compare benchmark/derived/lean-baseline.json` and `ARENA_SLOW_TESTS=1 uv run pytest -q -p no:cacheprovider tests/test_lean_speed_gate.py`, one command at a time, machine otherwise idle. A figure fails only if it exceeds BOTH the relative tolerance (+10% p50, +20% p95) AND the 0.25 s absolute noise floor. Paste both results in the hand-back. If it fails, do not change the baseline or the tolerances: stop and report.
+- [ ] 11. This ticket adds Lean work, so run the gate of ticket 07 **once**, after every other item is done and committed: `uv run arena lean bench --compare benchmark/derived/lean-baseline.json` (the quick gate: Core, Putnam and CSLib, about 6 minutes; owner decision 2026-10-13) and `ARENA_SLOW_TESTS=1 uv run pytest -q -p no:cacheprovider tests/test_lean_speed_gate.py`, one command at a time, machine otherwise idle. A figure fails only if it exceeds BOTH the relative tolerance (+10% p50, +20% p95) AND the 0.25 s absolute noise floor. Paste both results in the hand-back. If it fails, do not change the baseline or the tolerances: stop and report.
 
 ## Do NOT
 - Do not change any model-facing string or old reply field. This ticket adds no model-facing text.

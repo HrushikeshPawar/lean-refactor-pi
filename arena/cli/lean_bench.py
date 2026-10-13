@@ -31,6 +31,9 @@ BENCHMARK_ROWS = (
     "Cslib.SKI.parallelReduction_diamond",
     "Binius.BinaryBasefold.fiberwise_dist_lt_imp_dist_lt_unique_decoding_radius",
 )
+# The quick gate of every Lean ticket (owner decision 2026-10-13): Putnam has the long checks, Core and CSLib show
+# overhead added to every check. ArkLib's four toolchains are three quarters of the time; they run in the full gate.
+QUICK_ROWS = BENCHMARK_ROWS[:3]
 
 
 @dataclass(frozen=True)
@@ -42,6 +45,11 @@ class Regression:
     current: float | str
     ratio: float | None
     limit: float | None
+
+
+def baseline_versions(baseline: dict) -> dict[str, list[str]]:
+    """The toolchains the baseline holds for each row: what the full gate measures, each exactly once."""
+    return {row: list(toolchains) for row, toolchains in baseline.get("rows", {}).items()}
 
 
 def make_splice(row: dict, where: str, serial: int) -> str | None:

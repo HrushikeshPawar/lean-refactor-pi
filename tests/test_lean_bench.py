@@ -181,3 +181,51 @@ class ComparisonTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GateTierTests(unittest.TestCase):
+    """The quick gate measures three rows on their first toolchain; --full measures what the baseline holds."""
+
+    def run_bench(self, arguments: list[str], baseline_rows: dict) -> tuple[int, list]:
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from unittest.mock import patch
+
+        from arena import engine
+        from arena.cli import app
+
+        listed = {"A": [("v1", "c1"), ("v2", "c2"), ("v3", "c3")], "B": [("v2", "c2")]}
+        calls = []
+
+        def measure(rows, versions, repeats, timeout, out):
+            calls.append((list(rows), versions))
+            return {"settings": {"repeats": repeats}, "rows": {}, "measurement_note": ""}
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "baseline.json"
+            path.write_text(json.dumps({"schema": 1, "settings": {"repeats": 5}, "rows": baseline_rows}))
+            arguments = [part.replace("BASELINE", str(path)) for part in arguments]
+            with (
+                redirect_stdout(StringIO()),
+                patch.object(engine, "problem", lambda name: {"name": name}),
+                patch.object(engine, "versions", lambda row: listed.get(row["name"], [("v1", "c1")])),
+                patch.object(engine, "workspace", lambda row, version, commit: Path(directory)),
+                patch.object(lean_bench, "measure", measure),
+            ):
+                status = app(["lean", "bench", *arguments, "--out", directory])
+        return status, calls
+
+    def test_full_measures_each_baseline_toolchain_once_and_nothing_else(self):
+        baseline = {"A": {"v1": {"checks": {}}, "v3": {"checks": {}}}, "B": {"v2": {"checks": {}}}}
+        status, calls = self.run_bench(["--full", "--compare", "BASELINE"], baseline)
+        self.assertEqual(status, 0)
+        self.assertEqual(calls, [(["A", "B"], {"A": ["v1", "v3"], "B": ["v2"]})])
+
+    def test_full_without_a_baseline_is_refused(self):
+        status, calls = self.run_bench(["--full"], {})
+        self.assertEqual((status, calls), (2, []))
+
+    def test_the_quick_gate_measures_the_three_quick_rows_on_their_first_toolchain(self):
+        status, calls = self.run_bench(["--compare", "BASELINE"], {})
+        self.assertEqual(status, 0)
+        self.assertEqual(calls, [(list(lean_bench.QUICK_ROWS), "first")])

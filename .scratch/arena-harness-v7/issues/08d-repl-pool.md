@@ -41,7 +41,7 @@
   - releasing the last lease and hold of a project stops its REPL processes;
   - `render_repl` equals `render` (checkbox 5).
 - [ ] 14. Seam C slow test in `tests/test_lean_session.py` (needs a built REPL for the Core row's toolchain, skip with a clear message otherwise): for a compiling, a failing and a hole draft of the Core row, the batch lane (force `REPL_ENABLED` for the test) and the LSP background lane return the same `passed`, `diagnostic_counts`, `goals`, and heartbeats within `TOLERANCE` (use `SessionHarness.assertSameResult` style comparison with `measure=True`). Add the same for one Cslib row if its REPL is built.
-- [ ] 15. Speed gate, run **once, at the end** (owner decision 4): `uv run arena lean bench --compare benchmark/derived/lean-baseline.json` (other flags as ticket 07 recorded the baseline with; `--help`). A figure fails only if it exceeds BOTH the relative tolerance (+10% p50, +20% p95) AND the 0.25 s absolute noise floor; the command already applies this. Paste the table in the hand-back. If a figure fails, stop and report; do not loosen the tolerance or the floor. The model lane is untouched here, so a failure points at the pool's memory or start-up cost.
+- [ ] 15. Speed gate, run **once, at the end** (owner decision 4): `uv run arena lean bench --full --compare benchmark/derived/lean-baseline.json` (the full gate: every row and toolchain the baseline holds, ArkLib's four included, about 25 minutes; this ticket closes the service work, a milestone, owner decision 2026-10-13). A figure fails only if it exceeds BOTH the relative tolerance (+10% p50, +20% p95) AND the 0.25 s absolute noise floor; the command already applies this. Paste the table in the hand-back. If a figure fails, stop and report; do not loosen the tolerance or the floor. The model lane is untouched here, so a failure points at the pool's memory or start-up cost.
 
 ## Do NOT
 - Do not change the model lane, the background lane's behaviour when a request is not `batch`, `render`, the heartbeat wrapper, `_run_cold`, or the cold lane. The LSP lane stays the source of truth for scoring heartbeats (D32); `batch` requests are pass/fail checks plus, in tests only, heartbeats.
@@ -67,7 +67,7 @@ TEST BUDGET: targeted files, then the fast suite once, then one slow file, then 
 - `uv run arena lean bench --engine both ...` (rows and flags per ticket 07; `--help`) -> writes `repl-compare.json`, prints the table and the adoption verdict.
 - `uv run arena lean bench --trial header-snapshot ...` -> numbers or `not available`.
 - `ARENA_SLOW_TESTS=1 uv run pytest -q -p no:cacheprovider tests/test_lean_session.py` -> all pass, one at a time (the REPL tests of checkbox 14 skip with a clear message if no REPL is built).
-- `uv run arena lean bench --compare benchmark/derived/lean-baseline.json` (checkbox 15) -> exit 0, no figure over both tolerance and 0.25 s.
+- `uv run arena lean bench --full --compare benchmark/derived/lean-baseline.json` (checkbox 15) -> exit 0, no figure over both tolerance and 0.25 s.
 - `uv run pytest -q -p no:cacheprovider` (fast suite, once, at the end) -> all pass (baseline plus the new fast tests).
 - `uv run arena lean stop && uv run arena lean status` -> "no service".
 
