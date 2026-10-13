@@ -21,20 +21,20 @@ from arena import engine, lean_session
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _adoption_record() -> bool:
-    try:
-        return bool(json.loads((ROOT / "benchmark/derived/repl-compare.json").read_text()).get("adopt"))
-    except (OSError, ValueError):
-        return False
-
-
-REPL_ENABLED = _adoption_record()
+# Set by hand from the adoption verdict in benchmark/derived/repl-compare.json (owner decision 9): rerunning the
+# benchmark must never switch the production lane on or off by itself.
+REPL_ENABLED = False
 REPL_MAX_PROCESSES = 5
 REPL_MAX_GB = 4.0
 
 
 class ReplError(RuntimeError):
     pass
+
+
+def process_gb(pgid: int) -> float:
+    """PSS of a REPL's whole process group in GB: the group leader is `lake env`, the REPL is its child."""
+    return lean_session.tree_pss_gb(pgid)
 
 
 def repl_dir(toolchain: str) -> Path:
@@ -220,12 +220,12 @@ def compare_engines(engine_choice: str = "both", timeout: float = 180) -> dict:
                 session = lean_session.Session(
                     Path(scratch), budget=lean_session.WorkerBudget(Path(scratch) / "tokens")
                 )
-                pool = ReplPool(
-                    pss_fn=lambda pid: lean_session.pid_pss_gb(pid) or 0.0,
-                    opening=session.budget.opening,
-                )
+                pool = ReplPool(pss_fn=process_gb, opening=session.budget.opening)
                 lsp_records, repl_records = [], []
-                disagreements, heartbeat_diffs = 0, []
+                disagreements, heartbeat_diffs, repl_errors = 0, [], []
+                # The service verifies a header's first unpickle (a bad pickle is marked .nopickle and re-imported);
+                # the comparison must do the same or it measures a broken restored header.
+                verification = ReplPool.verification_drafts(name)
                 drafts = [(kind, serial) for serial, (kind, _measured) in enumerate(lean_bench.plan_checks(5))]
                 additional_start = len(drafts)
                 drafts.extend(
@@ -261,7 +261,13 @@ def compare_engines(engine_choice: str = "both", timeout: float = 180) -> dict:
                         }
                     )
                     if engine_choice != "lsp":
-                        repl = pool.check(project, toolchain, header, body, engine.source_path(row), timeout)
+                        try:
+                            repl = pool.check(
+                                project, toolchain, header, body, engine.source_path(row), timeout, verification
+                            )
+                        except ReplError as error:  # recorded, never fatal: one timeout must not lose a long run
+                            repl_errors.append(f"{kind}: {error}"[:200])
+                            continue
                         repl_records.append(
                             {
                                 "seconds": repl["seconds"],
@@ -279,25 +285,43 @@ def compare_engines(engine_choice: str = "both", timeout: float = 180) -> dict:
                             heartbeat_diffs.append(abs(a - b) / max(a, b, 1))
                 if engine_choice != "lsp":
                     pool.close_project(project)
-                    reload_check = pool.check(project, toolchain, header, body, engine.source_path(row), timeout)
+                    try:
+                        reload_check = pool.check(
+                            project, toolchain, header, body, engine.source_path(row), timeout, verification
+                        )
+                    except ReplError as error:
+                        repl_errors.append(f"reload: {error}"[:200])
+                        reload_check = {"header_seconds": None}
                     pss = max((item["pss_gb"] for item in repl_records), default=0)
                     entry = session.entries.get(str(project.resolve()))
-                    lsp_pss = lean_session.pid_pss_gb(entry.server.pgid) if entry and entry.server.pgid else 0.0
+                    workers = lean_session.worker_pss(entry.server.pgid) if entry and entry.server.pgid else {}
+                    lsp_pss = max(workers.values(), default=0.0)  # per LSP worker, as rule (d) compares
                     lsp_times = [item["seconds"] for item in lsp_records]
                     repl_times = [item["seconds"] for item in repl_records]
+                    cold_header = repl_records[0]["header_seconds"] if repl_records else None
+                    reload_header = reload_check["header_seconds"]
+                    pickle_ok = bool(reload_check.get("unpickled"))  # False: the pickle failed verification
                     adopted = (
-                        disagreements == 0
+                        not repl_errors
+                        and bool(repl_records)
+                        and disagreements == 0
                         and max(heartbeat_diffs, default=1) <= 0.05
                         and (lean_load.percentile(repl_times, 50) or 0.0)
                         <= (lean_load.percentile(lsp_times, 50) or 0.0) * 1.10
                         and (
-                            reload_check["header_seconds"] <= repl_records[0]["header_seconds"] / 2
+                            (
+                                pickle_ok
+                                and cold_header is not None
+                                and reload_header is not None
+                                and reload_header <= cold_header / 2
+                            )
                             or pss < (lsp_pss or 0.0)
                         )
                     )
                     rows[name][toolchain] = {
-                        "header_cold_s": repl_records[0]["header_seconds"],
-                        "header_unpickle_s": reload_check["header_seconds"],
+                        "header_cold_s": cold_header,
+                        "header_unpickle_s": reload_header,
+                        "pickle_ok": pickle_ok,
                         "check_p50": {
                             "lsp": lean_load.percentile(lsp_times, 50),
                             "repl": lean_load.percentile(repl_times, 50),
@@ -307,8 +331,9 @@ def compare_engines(engine_choice: str = "both", timeout: float = 180) -> dict:
                             "repl": lean_load.percentile(repl_times, 95),
                         },
                         "pss_gb": {"lsp": lsp_pss, "repl": pss},
-                        "pickle_bytes": repl_records[-1]["pickle_bytes"],
+                        "pickle_bytes": repl_records[-1]["pickle_bytes"] if repl_records else None,
                         "disagreements": disagreements,
+                        "repl_errors": repl_errors,
                         "max_heartbeat_difference": max(heartbeat_diffs, default=None),
                         "adopt": adopted,
                     }
@@ -322,10 +347,19 @@ def compare_engines(engine_choice: str = "both", timeout: float = 180) -> dict:
                     }
                 pool.close()
                 session.shutdown()
+            _write_comparison(rows, adopts_by_toolchain, complete=False)  # a long run keeps what it measured
+    return _write_comparison(rows, adopts_by_toolchain, complete=True)
+
+
+def _write_comparison(rows: dict, adopts_by_toolchain: dict[str, list[bool]], complete: bool) -> dict:
     toolchains = {toolchain: all(decisions) for toolchain, decisions in adopts_by_toolchain.items()}
-    result = {"rows": rows, "toolchains": toolchains, "adopt": bool(toolchains) and all(toolchains.values())}
-    output = ROOT / "benchmark/derived/repl-compare.json"
-    output.write_text(json.dumps(result, indent=2) + "\n")
+    result = {
+        "complete": complete,
+        "rows": rows,
+        "toolchains": toolchains,
+        "adopt": complete and bool(toolchains) and all(toolchains.values()),
+    }
+    (ROOT / "benchmark/derived/repl-compare.json").write_text(json.dumps(result, indent=2) + "\n")
     return result
 
 
@@ -475,7 +509,7 @@ class _Pooled:
     project: str
     header: str
     used: float
-    busy: bool = True
+    busy: int = 0  # checks using the process now; only an idle one (0) is evicted
     command_lock: threading.Lock = field(default_factory=threading.Lock)
     header_seconds: float = 0.0
     unpickled: bool = False
@@ -493,6 +527,7 @@ class ReplPool:
         self.factory, self.pss_fn = factory, pss_fn or (lambda _pid: 0.0)
         self.opening = opening or (lambda _need_gb, _timeout: nullcontext(0.0))
         self.items: dict[tuple[str, str], _Pooled] = {}
+        self.starting: dict[tuple[str, str], threading.Lock] = {}
         self.lock = threading.RLock()
 
     @staticmethod
@@ -500,19 +535,36 @@ class ReplPool:
         return hashlib.sha256(header.encode()).hexdigest()[:16]
 
     def _new(self, project: Path, toolchain: str, header: str, verification: tuple[str, str] | None = None) -> _Pooled:
+        """Start and import a process for `header`, holding a use of it. The pool lock is held only to take the
+        slot (evicting the least recently used idle process): a header import takes seconds and other keys' checks
+        must not wait behind it."""
         key = (str(project.resolve()), self._hash(header))
-        if len(self.items) >= REPL_MAX_PROCESSES:
-            idle = [(item.used, old_key, item) for old_key, item in self.items.items() if not item.busy]
-            if not idle:
-                raise ReplError("all REPL processes are busy")
-            _, old_key, old = min(idle)
-            old.process.stop()
-            del self.items[old_key]
-        process = self.factory(project, toolchain)
+        with self.lock:
+            if len(self.items) >= REPL_MAX_PROCESSES:
+                idle = [(item.used, old_key, item) for old_key, item in self.items.items() if not item.busy]
+                if not idle:
+                    raise ReplError("all REPL processes are busy")
+                _, old_key, old = min(idle)
+                del self.items[old_key]
+                old.process.stop()
+            process = self.factory(project, toolchain)
+            pool = _Pooled(process, 0, str(project.resolve()), header, time.monotonic(), busy=1)
+            self.items[key] = pool
+        try:
+            self._load(pool, toolchain, key, verification)
+        except BaseException:
+            with self.lock:
+                if self.items.get(key) is pool:
+                    del self.items[key]
+            pool.process.stop()
+            raise
+        return pool
+
+    def _load(self, pool: _Pooled, toolchain: str, key: tuple[str, str], verification: tuple[str, str] | None) -> None:
+        process, header = pool.process, pool.header
         started = time.monotonic()
         process.start()
         process.pss_fn = self.pss_fn
-        pool = _Pooled(process, 0, str(project.resolve()), header, time.monotonic())
         pickle = pickle_dir(toolchain) / f"{key[1]}.olean"
         bad = pickle.with_suffix(".nopickle")
         if pickle.is_file() and not bad.exists():
@@ -543,8 +595,6 @@ class ReplPool:
                 pickle.parent.mkdir(parents=True, exist_ok=True)
                 process.pickle(pool.env, pickle, lean_session.OPEN_TIMEOUT)
         pool.header_seconds = round(time.monotonic() - started, 3)
-        self.items[key] = pool
-        return pool
 
     @staticmethod
     def _result(reply: dict) -> tuple[bool, list[dict]]:
@@ -594,10 +644,19 @@ class ReplPool:
     ) -> dict:
         key = (str(project.resolve()), self._hash(header))
         with self.lock:
-            pool = self.items.get(key)
-            if pool is None or not pool.process.alive():
+            starting = self.starting.setdefault(key, threading.Lock())
+        with starting:  # one import per header: a second check of it waits for the first and then shares it
+            with self.lock:
+                pool = self.items.get(key)
+                if pool is not None and pool.process.alive():
+                    pool.busy += 1
+                else:
+                    if pool is not None:
+                        del self.items[key]
+                        pool.process.stop()
+                    pool = None
+            if pool is None:
                 pool = self._new(project, toolchain, header, verification)
-            pool.busy = True
         started = time.monotonic()
         try:
             with pool.command_lock:
@@ -623,20 +682,22 @@ class ReplPool:
             }
         except ReplError:
             with self.lock:
-                pool.process.stop()
-                self.items.pop(key, None)
+                if self.items.get(key) is pool:
+                    del self.items[key]
+            pool.process.stop()
             raise
         finally:
+            over = getattr(pool.process, "over_limit", False) or (
+                pool.process.pgid is not None and self.pss_fn(pool.process.pgid) > REPL_MAX_GB
+            )
             with self.lock:
-                pool.busy = False
+                pool.busy -= 1
                 pool.used = time.monotonic()
-                if (
-                    not pool.process.alive()
-                    or getattr(pool.process, "over_limit", False)
-                    or (pool.process.pgid is not None and self.pss_fn(pool.process.pgid) > REPL_MAX_GB)
-                ):
-                    pool.process.stop()
-                    self.items.pop(key, None)
+                drop = not pool.process.alive() or (over and not pool.busy)
+                if drop and self.items.get(key) is pool:
+                    del self.items[key]
+            if drop:
+                pool.process.stop()
 
     def close_project(self, project: Path | str) -> None:
         name = str(Path(project).resolve())

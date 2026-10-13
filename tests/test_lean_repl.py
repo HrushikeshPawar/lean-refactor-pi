@@ -87,6 +87,41 @@ class ReplPoolTests(unittest.TestCase):
         self.assertFalse(getattr(first.process, "stopped", False))
         self.assertEqual(len(self.pool.items), 5)
 
+    def test_a_slow_header_import_does_not_hold_up_a_check_of_another_header(self):
+        import threading
+
+        importing, release = threading.Event(), threading.Event()
+
+        class SlowImport(FakeRepl):
+            def run(self, cmd, env=None, timeout=180):
+                if cmd == "import Slow\n":
+                    importing.set()
+                    release.wait(5)
+                return super().run(cmd, env, timeout)
+
+        pool = lean_repl.ReplPool(SlowImport)
+        pool.check(self.project, "v4.30.0", "import Fast\n", "warm", "A.lean", 1)
+        slow = threading.Thread(target=pool.check, args=(self.project, "v4.30.0", "import Slow\n", "b", "A.lean", 1))
+        slow.start()
+        self.assertTrue(importing.wait(5))
+        done = threading.Event()
+        threading.Thread(
+            target=lambda: (pool.check(self.project, "v4.30.0", "import Fast\n", "c", "A.lean", 1), done.set())
+        ).start()
+        self.assertTrue(done.wait(2), "a check of a loaded header waited for another header's import")
+        release.set()
+        slow.join(5)
+
+    def test_a_process_shared_by_two_checks_stays_busy_until_both_end(self):
+        self.check("import X\n")
+        (item,) = self.pool.items.values()
+        item.busy += 1  # another check is still running on it
+        self.check("import X\n", "second")
+        self.assertEqual(item.busy, 1)
+        for index in range(5):
+            self.check(f"import H{index}\n")
+        self.assertFalse(item.process.stopped, "the process in use was evicted")
+
     def test_over_limit_process_is_dropped_after_reply(self):
         pss = [5.0]
         pool = lean_repl.ReplPool(FakeRepl, pss_fn=lambda _pid: pss[0])

@@ -487,7 +487,9 @@ class CoreSessionTests(SessionHarness, unittest.TestCase):
                 with self.subTest(row=row["name"], draft=label):
                     built = engine.candidate_file(row, proof, toolchain, commit)
                     text = built["text"]
-                    header_end = built["head"] + len(engine.HEARTBEAT_WRAPPER)
+                    # The wrapper ends with the start of the theorem's command, so it belongs to the body: a REPL
+                    # header must end on a command boundary (the LSP lane sees one file and does not care).
+                    header_end = built["head"]
                     wrapped = text[: built["head"]] + engine.HEARTBEAT_WRAPPER + text[built["head"] :]
                     request = {
                         "protocol": lean_session.PROTOCOL,

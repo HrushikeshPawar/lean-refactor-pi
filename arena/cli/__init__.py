@@ -338,7 +338,6 @@ def bench(
         except (OSError, ValueError, RuntimeError) as error:
             print(error)
             return 2
-        lean_repl.REPL_ENABLED = comparison["adopt"]
         if json_output:
             print(json.dumps(comparison, indent=2))
         else:

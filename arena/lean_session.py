@@ -839,9 +839,9 @@ class Session:
         self.pss_fn = pss_fn or worker_pss
         self.external_fn = external_fn or external_lean_pss
         self.document_fn = document_fn or worker_document
-        from arena.lean_repl import ReplPool
+        from arena.lean_repl import ReplPool, process_gb
 
-        self.repl = ReplPool(pss_fn=lambda pid: pid_pss_gb(pid) or 0.0, opening=self.budget.opening)
+        self.repl = ReplPool(pss_fn=process_gb, opening=self.budget.opening)
         self.last_pss_log = time.monotonic()
 
     @staticmethod
@@ -961,7 +961,7 @@ class Session:
                 if self._referenced_locked(name) or self.entries.get(name) is not entry:
                     return
                 self.entries.pop(name)
-        self._stop_entry(entry)
+            self._stop_entry(entry)  # under the condition, as before: no waiter takes a slot of a closing entry
         self.repl.close_project(entry.project)
         _log(f"closed: no run or queued row needs it ({entry.project.name})")
 
