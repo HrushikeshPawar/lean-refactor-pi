@@ -432,6 +432,21 @@ class ProtocolLogicTests(FakeRunCase):
         self.assertEqual(set(result), {"best", "archive", "recent", "effort", "open"})
         self.assertEqual(result["best"]["label"], "#1")
 
+    def test_new_tool_actions_load_request_files_and_keep_old_actions(self):
+        from types import SimpleNamespace
+
+        protocol = importlib.import_module("arena.cli.protocol")
+        self.assertTrue({"init", "frontier", "state", "autocheck", "submission", "memory"}.issubset(protocol.ACTIONS))
+        self.assertTrue({"compile", "goal", "search", "read", "finish", "reset_delivered"}.issubset(protocol.ACTIONS))
+        with tempfile.TemporaryDirectory() as temporary:
+            request = Path(temporary) / "request.json"
+            request.write_text(json.dumps({"drafts": ["by trivial"]}))
+            with patch("arena.cli.protocol.v7_tools.compile_tool", return_value={"ok": True, "facts": [], "items": []}):
+                result = protocol.run(
+                    SimpleNamespace(action="compile", theorem="T", run_id="logic", request_file=request)
+                )
+        self.assertTrue(result["ok"])
+
     def test_probe_and_operation_routes_are_filed_before_they_return_without_lean(self):
         from contextlib import nullcontext
 

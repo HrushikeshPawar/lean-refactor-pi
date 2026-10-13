@@ -76,6 +76,7 @@ class AmbiguousDeclaration(ValueError):
 
 
 _SESSION: ContextVar[_Session | None] = ContextVar("arena_source_session", default=None)
+_NAMED_PARENT_UNSET = object()
 _BATCH_FOCUS: ContextVar[tuple[bool, str | None]] = ContextVar("arena_batch_focus", default=(False, None))
 _BATCH_NEWLY_FILED: ContextVar[set[str] | None] = ContextVar("arena_batch_newly_filed", default=None)
 _SALVAGE_DIRECTORY: ContextVar[Path | None] = ContextVar("arena_salvage_directory", default=None)
@@ -1867,6 +1868,7 @@ def record_evaluation(
     trigger: str = "model",
     precomputed: dict | None = None,
     operation: dict | None = None,
+    named_parent: str | object | None = _NAMED_PARENT_UNSET,
 ) -> dict:
     """Record a candidate and its evaluation. `precomputed` is a result the caller already
     compiled for this exact proof and mode; `trigger` says whether the model or the
@@ -2003,7 +2005,10 @@ def record_evaluation(
         filing_history,
         candidate_id,
         proof,
-        _named_parent_id(filing_history, (parents or [None])[0]),
+        _named_parent_id(
+            filing_history,
+            (parents or [None])[0] if named_parent is _NAMED_PARENT_UNSET else named_parent,
+        ),
         operation,
         None if in_batch else projection_out,
     )
@@ -2209,6 +2214,8 @@ def probe(
     parent: str | None = None,
     operation: dict | None = None,
     mode: str = "fast",
+    note: str | None = None,
+    named_parent: str | object | None = _NAMED_PARENT_UNSET,
 ) -> dict:
     """Compile a draft (sorry allowed) in the shadow project without creating a candidate."""
     proof = normalize_draft(name, proof)
@@ -2249,8 +2256,10 @@ def probe(
                 mode,
                 [parent] if parent else None,
                 idea_id=idea_id,
+                hypothesis=note or "",
                 precomputed=result if mode == "fast" else None,
                 operation=operation,
+                named_parent=named_parent,
             )
             view = _model_view(
                 {**recorded, "full_check": _full_check_status(events(directory), recorded["candidate_id"])}
@@ -2264,7 +2273,15 @@ def probe(
         _snapshot(directory, proof_id, proof)
         _append(
             directory,
-            {"kind": "probe", "proof_id": proof_id, "idea_id": idea_id, "parent": parent_id, "result": result},
+            {
+                "kind": "probe",
+                "proof_id": proof_id,
+                "idea_id": idea_id,
+                "parent": parent_id,
+                "named_parent": None if named_parent is _NAMED_PARENT_UNSET else named_parent,
+                "note": note,
+                "result": result,
+            },
         )
         filing_history = events(directory)
         in_batch, _ = _BATCH_FOCUS.get()
@@ -2274,7 +2291,7 @@ def probe(
             filing_history,
             proof_id,
             proof,
-            _named_parent_id(history, parent),
+            _named_parent_id(history, parent if named_parent is _NAMED_PARENT_UNSET else named_parent),
             operation,
             None if in_batch else projection_out,
         )
@@ -2291,7 +2308,7 @@ def probe(
             filing_history,
             proof_id,
             proof,
-            _named_parent_id(history, parent),
+            _named_parent_id(history, parent if named_parent is _NAMED_PARENT_UNSET else named_parent),
             operation,
             None if in_batch else projection_out,
         )
@@ -2335,7 +2352,13 @@ def normalize_draft(name: str, draft: str) -> str:
 
 
 def probe_batch(
-    name: str, run_id: str, drafts: list[str], idea_id: str | None = None, parent: str | None = None
+    name: str,
+    run_id: str,
+    drafts: list[str],
+    idea_id: str | None = None,
+    parent: str | None = None,
+    note: str | None = None,
+    named_parent: str | object | None = _NAMED_PARENT_UNSET,
 ) -> dict:
     """Probe one to four drafts in order, keeping their parent fixed across promotions."""
     if not isinstance(drafts, list) or not 1 <= len(drafts) <= MAX_DRAFTS:
@@ -2352,7 +2375,7 @@ def probe_batch(
     try:
         for index, draft in enumerate(drafts, 1):
             try:
-                outcome = probe(name, run_id, draft, idea_id, fixed_parent)
+                outcome = probe(name, run_id, draft, idea_id, fixed_parent, note=note, named_parent=named_parent)
             except (OSError, ValueError, RuntimeError) as error:
                 outcome = {"ok": False, "mode": "probe", "error": " ".join(str(error).split())[:400]}
             outcomes.append({"index": index, **outcome})
@@ -2381,6 +2404,8 @@ def compile_operation(
     operation: dict,
     mode: str = "fast",
     idea_id: str | None = None,
+    note: str | None = None,
+    named_parent: str | object | None = _NAMED_PARENT_UNSET,
 ) -> dict:
     """Build, compile and file one operation-derived proof."""
     if mode not in ("fast", "full"):
@@ -2456,7 +2481,16 @@ def compile_operation(
         raise ValueError(text.render("messages/errors.operation_type_invalid", kind=kind))
 
     proof = normalize_draft(name, proof)
-    result = probe(name, run_id, proof, idea_id=idea_id, operation=edge_operation, mode=mode)
+    result = probe(
+        name,
+        run_id,
+        proof,
+        idea_id=idea_id,
+        operation=edge_operation,
+        mode=mode,
+        note=note,
+        named_parent=named_parent,
+    )
     proof_id = hashlib.sha256((name + "\0" + proof).encode()).hexdigest()
     filed = next(
         event for event in events(directory) if event.get("kind") == "edge" and event.get("proof_id") == proof_id

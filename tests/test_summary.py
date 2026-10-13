@@ -461,6 +461,36 @@ class LeanStatsTests(unittest.TestCase):
             self.assertIn("lean: 1 model-lane checks", (directory / "summary.txt").read_text())
             self.assertIn("ALARM", (directory / "summary.txt").read_text())
 
+    def test_v7_compile_counters_and_new_bookkeeping_views(self):
+        def call(turn, name, arguments):
+            return {
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "usage": {"totalTokens": 1, "input": 1, "cacheRead": 0, "cacheWrite": 0},
+                    "content": [{"type": "toolCall", "id": turn, "name": name, "arguments": arguments}],
+                },
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            write(
+                directory / "events.jsonl",
+                [
+                    call("a", "read", {"node": "n1", "view": "source"}),
+                    call("b", "goal", {"node": "n1", "hole": "h1"}),
+                    call("c", "read", {"view": "map"}),
+                    call("d", "compile", {"drafts": ["by trivial"]}),
+                    call("e", "compile", {"splice": {"steps": "s1", "text": "trivial"}}),
+                ],
+            )
+            data = summary.build_summary(directory)
+        self.assertEqual(data["tools"]["compile_calls"], 2)
+        self.assertEqual(data["tools"]["compile_calls_with_operation"], 1)
+        self.assertEqual(data["tools"]["calls_before_first_compile"], 3)
+        turns = summary._turns([call("f", "read", {"view": "source"}), call("g", "read", {"view": "map"})], [])
+        self.assertEqual([turn["kind"] for turn in turns], ["context", "bookkeeping"])
+
 
 if __name__ == "__main__":
     unittest.main()

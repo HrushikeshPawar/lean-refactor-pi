@@ -11,6 +11,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal
 
+from arena import reply as tool_reply
+from arena import tools as v7_tools
 from arena.campaign import (
     autocheck,
     candidate,
@@ -56,10 +58,33 @@ ACTIONS = (
     "map",
     "submission",
     "memory",
+    "compile",
+    "goal",
+    "search",
+    "read",
+    "finish",
+    "reset_delivered",
 )
 
 
 def run(args: SimpleNamespace) -> dict:
+    if args.action in ("compile", "goal", "search", "read", "finish", "reset_delivered"):
+        if args.request_file is None:
+            raise ValueError("request-file is required")
+        request = json.loads(args.request_file.read_text())
+        if not isinstance(request, dict):
+            raise ValueError("request-file must contain an object")
+        if args.action == "reset_delivered":
+            tool_reply.reset_delivered(args.run_id)
+            return tool_reply.reply()
+        handler = {
+            "compile": v7_tools.compile_tool,
+            "goal": v7_tools.goal_tool,
+            "search": v7_tools.search_tool,
+            "read": v7_tools.read_tool,
+            "finish": v7_tools.finish_tool,
+        }[args.action]
+        return tool_reply.attach_context(args.run_id, handler(args.theorem, args.run_id, request))
     if args.action == "init":
         return init(args.theorem, args.run_id)
     if args.action == "evaluate":
@@ -158,6 +183,7 @@ class ProtocolOptions:
     action: str
     theorem: str
     run_id: str
+    request_file: Path | None = None
     proof_file: Path | None = None
     draft_file: list[Path] = field(default_factory=list)
     mode: Literal["fast", "full"] = "fast"
@@ -197,5 +223,16 @@ def execute(options: ProtocolOptions) -> int:
         return 0
     except (OSError, ValueError, RuntimeError, KeyError, subprocess.SubprocessError) as error:
         message = " ".join(str(error).split()) or type(error).__name__
+        if args.action in ("compile", "goal", "search", "read", "finish", "reset_delivered"):
+            forms = v7_tools.TOOL_FORMS.get(args.action, [])
+            print(json.dumps(tool_reply.error_reply("internal_error", message[:400], [], forms), ensure_ascii=False))
+            return 2
         print(json.dumps({"ok": False, "error": message[:400]}, ensure_ascii=False))
         return 2
+    except Exception as error:
+        message = " ".join(str(error).split()) or type(error).__name__
+        if args.action in ("compile", "goal", "search", "read", "finish", "reset_delivered"):
+            forms = v7_tools.TOOL_FORMS.get(args.action, [])
+            print(json.dumps(tool_reply.error_reply("internal_error", message[:400], [], forms), ensure_ascii=False))
+            return 2
+        raise

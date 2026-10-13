@@ -61,6 +61,9 @@ packet:
     where: "Initial theorem packet"
     per_run: "once per run"
 replies:
+  tools:
+    where: "Tool replies"
+    per_run: "when the matching tool result occurs"
   candidate:
     where: "Tool replies"
     per_run: "when the matching tool result occurs"

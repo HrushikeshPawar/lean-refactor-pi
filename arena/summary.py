@@ -41,8 +41,8 @@ def stop_reason_of(directory: Path, controls: list[dict]) -> str:
     return noted or (controls[-1].get("stop") if controls else None) or "model_stopped"
 
 
-COMPILE_TOOLS = {"arena_evaluate", "arena_probe", "arena_profile"}
-BOOKKEEPING_TOOLS = {"arena_idea", "arena_frontier", "arena_state", "arena_finish"}
+COMPILE_TOOLS = {"arena_evaluate", "arena_probe", "arena_profile", "compile"}
+BOOKKEEPING_TOOLS = {"arena_idea", "arena_frontier", "arena_state", "arena_finish", "read", "goal", "finish"}
 LOCAL_EDIT_MAX_LINES = 2
 WARMUP_REQUESTS = 2
 
@@ -204,7 +204,9 @@ def _turns(events: list[dict], settles: list[dict]) -> list[dict]:
             kind = "rejected"
         elif any(name in COMPILE_TOOLS for name in names):
             kind = "compile"
-        elif any(name in BOOKKEEPING_TOOLS for name in names):
+        elif any(name in (BOOKKEEPING_TOOLS - {"read", "goal", "finish"}) for name in names) or (
+            names and all(_new_bookkeeping_call(call) for call in calls)
+        ):
             kind = "bookkeeping"
         elif names:
             kind = "context"
@@ -228,6 +230,39 @@ def _turns(events: list[dict], settles: list[dict]) -> list[dict]:
             }
         )
     return turns
+
+
+def _new_bookkeeping_call(call: dict) -> bool:
+    name = call.get("name")
+    arguments = call.get("arguments") or {}
+    if not isinstance(arguments, dict):
+        return False
+    if name == "read":
+        return arguments.get("view", "source") in ("map", "outline")
+    if name == "goal":
+        return not arguments.get("try")
+    return name == "finish"
+
+
+def _compile_counters(events: list[dict]) -> dict:
+    calls = []
+    for event in events:
+        message = event.get("message") or {}
+        if event.get("type") == "message_end" and message.get("role") == "assistant":
+            calls.extend(block for block in message.get("content", []) if block.get("type") == "toolCall")
+    selected = [call for call in calls if call.get("name") in COMPILE_TOOLS]
+    first = next((index for index, call in enumerate(calls) if call.get("name") in COMPILE_TOOLS), None)
+    operation_names = {"splice", "fill", "merge"}
+    with_operation = sum(
+        bool(set((call.get("arguments") or {}).keys()) & operation_names or (call.get("arguments") or {}).get("base"))
+        for call in selected
+        if call.get("name") == "compile"
+    )
+    return {
+        "compile_calls": len(selected),
+        "compile_calls_with_operation": with_operation,
+        "calls_before_first_compile": len(calls[:first]) if first is not None else len(calls),
+    }
 
 
 def hit_rate_pct(read: int, write: int, uncached: int) -> float | None:
@@ -488,6 +523,7 @@ def build_summary(directory: Path) -> dict:
             "results": sum(event.get("type") == "tool_execution_end" for event in events),
             "errors": dict(errors),
             "error_total": sum(errors.values()),
+            **_compile_counters(events),
         },
         "ideas": list(ideas.values()),
         "routes": route_rows,
