@@ -2964,6 +2964,7 @@ def _salvage_compile(name: str, text_value: str) -> dict:
 
 def _run_salvage(name: str, run_id: str, node: Node) -> dict:
     directory = run_dir(run_id)
+    started = time.monotonic()
     proof = node.proof_text
     token = _SALVAGE_DIRECTORY.set(directory)
     try:
@@ -3004,6 +3005,7 @@ def _run_salvage(name: str, run_id: str, node: Node) -> dict:
             "rounds": outcome["rounds"],
             "kept": outcome["kept"],
             "sketch_id": sketch_id,
+            "seconds": round(time.monotonic() - started, 2),
         },
     )
     write_state(run_id)
@@ -3012,6 +3014,7 @@ def _run_salvage(name: str, run_id: str, node: Node) -> dict:
 
 def _run_assembly(name: str, run_id: str, sketch: Node) -> None:
     directory = run_dir(run_id)
+    started = time.monotonic()
     fills: dict[str, str] = {}
     alternatives: dict[str, list[str]] = {}
     chosen: list[tuple[dict, Node]] = []
@@ -3055,6 +3058,7 @@ def _run_assembly(name: str, run_id: str, sketch: Node) -> None:
                 "fills": fills,
                 "alternatives": alternatives,
                 "status": status,
+                "seconds": round(time.monotonic() - started, 2),
             },
         )
     except Exception as error:
@@ -3068,6 +3072,52 @@ def _run_assembly(name: str, run_id: str, sketch: Node) -> None:
                 "alternatives": alternatives,
                 "status": "error",
                 "error": str(error)[:300],
+                "seconds": round(time.monotonic() - started, 2),
+            },
+        )
+    write_state(run_id)
+
+
+def _run_full_check(name: str, run_id: str, job: dict) -> str:
+    directory = run_dir(run_id)
+    try:
+        proof = (directory / "proofs" / f"{job['id']}.lean").read_text()
+        record_evaluation(name, run_id, proof, "full", materialize_live=False, lane="batch", trigger="auto")
+    except Exception as error:  # record the failure so the queue moves on
+        _append(
+            directory,
+            {
+                "kind": "evaluation",
+                "candidate_id": job["id"],
+                "key": f"auto-error-{job['id']}",
+                "mode": "full",
+                "trigger": "auto",
+                "result": {"ok": False, "mode": "full", "error": str(error)[:300], "compat": {}},
+            },
+        )
+    write_state(run_id)
+    return f"#{job['n']}"
+
+
+def _run_step_goals(name: str, run_id: str, proof_id: str) -> None:
+    directory = run_dir(run_id)
+    started = time.monotonic()
+    try:
+        proof = (directory / "proofs" / f"{proof_id}.lean").read_text()
+        from arena import step_goals
+
+        with lean_lock(directory, "background"):
+            goals = step_goals.step_goals(name, proof, lane="background")
+        seconds = round(time.monotonic() - started, 2)
+        _append(directory, {"kind": "step_goals", "proof_id": proof_id, "goals": goals, "seconds": seconds})
+    except Exception as error:  # record the failure so this node does not block later jobs
+        _append(
+            directory,
+            {
+                "kind": "step_goals",
+                "proof_id": proof_id,
+                "error": str(error)[:300],
+                "seconds": round(time.monotonic() - started, 2),
             },
         )
     write_state(run_id)
@@ -3076,7 +3126,8 @@ def _run_assembly(name: str, run_id: str, sketch: Node) -> None:
 def autocheck(name: str, run_id: str, max_seconds: float | None = None, closing: bool = False) -> dict:
     """Drain salvage, assembly, full checks and step goals in the background lane.
 
-    Only one checker runs per run; both queues are derived from the ledger, so a
+    With ``closing`` (the model has stopped) it drains only full checks, then assemblies.
+    Only one checker runs per run; all queues are derived from the ledger, so a
     killed checker loses nothing.
     """
     directory = run_dir(run_id)
@@ -3093,53 +3144,24 @@ def autocheck(name: str, run_id: str, max_seconds: float | None = None, closing:
                 break  # Lean is unhealthy: background checks pause with the model's work
             history = events(directory)
             projection = Graph.from_history(history, _proof_reader(directory))
-            salvage_jobs = _salvage_jobs(history, directory, projection)
-            if salvage_jobs:
-                _run_salvage(name, run_id, salvage_jobs[0])
-                continue
-            assembly_jobs = _assembly_jobs(history, directory, projection)
-            if assembly_jobs:
-                _run_assembly(name, run_id, assembly_jobs[0])
-                continue
-            jobs = _autocheck_jobs(_summaries(history), closing=closing)
-            if jobs:
-                job = jobs[0]
-                try:
-                    proof = (directory / "proofs" / f"{job['id']}.lean").read_text()
-                    record_evaluation(name, run_id, proof, "full", materialize_live=False, lane="batch", trigger="auto")
-                except Exception as error:  # record the failure so the queue moves on
-                    _append(
-                        directory,
-                        {
-                            "kind": "evaluation",
-                            "candidate_id": job["id"],
-                            "key": f"auto-error-{job['id']}",
-                            "mode": "full",
-                            "trigger": "auto",
-                            "result": {"ok": False, "mode": "full", "error": str(error)[:300], "compat": {}},
-                        },
-                    )
-                checked.append(f"#{job['n']}")
-                write_state(run_id)
-                continue
-
-            goal_jobs = _step_goal_jobs(history, directory)
-            if not goal_jobs:
+            # Closing drain: the model has stopped, so only full checks (and assemblies, whose
+            # results become new candidates) matter; salvage and step goals only serve the model.
+            order = ("full", "assembly") if closing else ("salvage", "assembly", "full", "step_goals")
+            for kind in order:
+                if kind == "salvage" and (salvage_jobs := _salvage_jobs(history, directory, projection)):
+                    _run_salvage(name, run_id, salvage_jobs[0])
+                    break
+                if kind == "assembly" and (assembly_jobs := _assembly_jobs(history, directory, projection)):
+                    _run_assembly(name, run_id, assembly_jobs[0])
+                    break
+                if kind == "full" and (jobs := _autocheck_jobs(_summaries(history), closing=closing)):
+                    checked.append(_run_full_check(name, run_id, jobs[0]))
+                    break
+                if kind == "step_goals" and (goal_jobs := _step_goal_jobs(history, directory)):
+                    _run_step_goals(name, run_id, goal_jobs[0])
+                    break
+            else:
                 break
-            proof_id = goal_jobs[0]
-            try:
-                proof = (directory / "proofs" / f"{proof_id}.lean").read_text()
-                from arena import step_goals
-
-                with lean_lock(directory, "background"):
-                    goals = step_goals.step_goals(name, proof, lane="background")
-                _append(directory, {"kind": "step_goals", "proof_id": proof_id, "goals": goals})
-            except Exception as error:  # record the failure so this node does not block later jobs
-                _append(
-                    directory,
-                    {"kind": "step_goals", "proof_id": proof_id, "error": str(error)[:300]},
-                )
-            write_state(run_id)
     return {
         "ok": True,
         "checked": checked,

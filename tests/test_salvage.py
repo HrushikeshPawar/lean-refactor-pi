@@ -146,6 +146,7 @@ class SalvageCampaignTests(FakeRunCase):
             salvage_event = next(item for item in history if item.get("kind") == "salvage")
             sketch_id = salvage_event["sketch_id"]
             self.assertEqual(salvage_event["status"], "salvaged")
+            self.assertIsInstance(salvage_event["seconds"], float)
             edge = next(item for item in history if item.get("kind") == "edge" and item.get("proof_id") == sketch_id)
             self.assertEqual((edge["type"], edge["from"], edge["exact"]), ("salvaged_from", [proof_id], True))
             self.assertTrue(any(item.get("kind") == "route" and item.get("proof_id") == sketch_id for item in history))
@@ -155,6 +156,33 @@ class SalvageCampaignTests(FakeRunCase):
             self.assertIn("1 hole", notice)
             self.assertEqual(campaign.autocheck("T", "logic")["checked"], [])
             self.assertTrue(first["ok"])
+
+    def autocheck_kinds(self, closing):
+        """Salvage, step-goal and auto full-check events in ledger order after one autocheck."""
+        with (
+            patch.object(campaign.lean_health, "tripped", return_value=False),
+            patch.object(campaign, "problem", return_value={"name": "T", "statement": "theorem t : True"}),
+        ):
+            campaign.probe("T", "logic", "bad\nexact True.intro")
+            self.evaluate("theorem t : True := by\n  a")
+            outcome = campaign.autocheck("T", "logic", closing=closing)
+        kinds = [
+            "full" if item.get("kind") == "evaluation" else item["kind"]
+            for item in campaign.events(self.directory)
+            if item.get("kind") in ("salvage", "step_goals")
+            or (item.get("kind") == "evaluation" and item.get("trigger") == "auto")
+        ]
+        return outcome, kinds
+
+    def test_closing_drain_runs_full_checks_and_skips_salvage_and_step_goals(self):
+        outcome, kinds = self.autocheck_kinds(closing=True)
+        self.assertEqual(outcome["checked"], ["#2"])
+        self.assertEqual(kinds, ["full"])
+
+    def test_background_drain_runs_salvage_before_full_checks(self):
+        outcome, kinds = self.autocheck_kinds(closing=False)
+        self.assertEqual(outcome["checked"], ["#2"])
+        self.assertEqual(kinds[:2], ["salvage", "full"])
 
     def test_interrupted_job_is_requeued_and_unavailable_is_terminal_without_notice(self):
         with (

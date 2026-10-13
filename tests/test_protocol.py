@@ -700,6 +700,8 @@ class StepGoalAutocheckTests(FakeRunCase):
         broken_id = campaign._candidate_ids(events)[-1]
         self.assertEqual(outcomes[closed_id]["goals"][0]["before"], "P")
         self.assertEqual(outcomes[sketch_id]["error"], "goal extraction failed")
+        self.assertIsInstance(outcomes[closed_id]["seconds"], float)
+        self.assertIsInstance(outcomes[sketch_id]["seconds"], float)
         self.assertNotIn(broken_id, outcomes)
         first_goal_event = next(i for i, event in enumerate(events) if event.get("kind") == "step_goals")
         last_full_check = max(
