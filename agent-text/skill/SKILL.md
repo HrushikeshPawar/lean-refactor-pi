@@ -74,7 +74,7 @@ top-level commands or auxiliary declarations, and anything outside the one theor
    explicitly choose another. You can also pass `idea` (a one-line route title) to your first
    `arena_probe` or `arena_evaluate` to create it and link that attempt in one call. Update or abandon it with a short reason when evidence changes your plan.
 2. `arena_probe`: develop a structural rewrite hole by hole. `sorry` is allowed; you get the goal at each
-   tactic-position `sorry`. Routes are fingerprinted from complete proofs that compile; drafts with `sorry` holes are not fingerprinted. A draft without `sorry` that compiles is recorded and scored as a candidate.
+   tactic-position `sorry`. A draft without `sorry` that compiles is recorded and scored as a candidate.
 3. `lean_goal` / `lean_multi_attempt` / `lean_diagnostic_messages` / `lean_hover_info` on the candidate file the harness
    materializes. Diagnostic `file_line` values refer to exactly that file; `proof_line` counts from the
    statement's first line.

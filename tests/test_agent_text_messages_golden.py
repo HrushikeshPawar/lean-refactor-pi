@@ -97,7 +97,6 @@ class _Run:
             "problem": lambda name: ROW,
             "versions": lambda row: list(self.versions),
             "_check_breaker": lambda directory: None,
-            "_record_route_later": lambda *args: None,
             "lean_lock": lambda *args, **kwargs: contextlib.nullcontext(),
             "_evaluate": lambda *args, **kwargs: copy.deepcopy(self.compiled),
             "_compile_probe": lambda *args, **kwargs: copy.deepcopy(self.compiled),

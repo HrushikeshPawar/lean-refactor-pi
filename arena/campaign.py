@@ -11,15 +11,14 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
 
-from arena import goalstate, lean_health, lean_session, text
+from arena import goalstate, lean_health, lean_session, routes, text
 from arena import text as agent_text
 from arena.engine import (
     ROOT,
@@ -45,7 +44,10 @@ from arena.graph import (
     ranked_frontier,
     similarity,
     splice_text,
+    stall_fires,
+    stall_target,
 )
+from arena.graph import map_view as graph_map_view
 from arena.profile import heartbeat_floor, profile
 
 
@@ -67,6 +69,7 @@ class AmbiguousDeclaration(ValueError):
 
 _SESSION: ContextVar[_Session | None] = ContextVar("arena_source_session", default=None)
 _BATCH_FOCUS: ContextVar[tuple[bool, str | None]] = ContextVar("arena_batch_focus", default=(False, None))
+_BATCH_NEWLY_FILED: ContextVar[set[str] | None] = ContextVar("arena_batch_newly_filed", default=None)
 
 
 class _Session:
@@ -1064,217 +1067,6 @@ def _check_breaker(directory: Path) -> None:
     lean_health.trip_if_unhealthy(directory, events(directory))
 
 
-def _route_features(directory: Path, name: str, proof_id: str, proof: str) -> dict | None:
-    """Kernel-term features of an attempt (a compiled proof, or a draft whose declaration Lean still added, with
-    `sorryAx` where holes or errors are), read by Lean in the background lane after it was scored, so they never
-    count toward its metrics. None when the term could not be read; the route then uses text features."""
-    from arena import route_features
-
-    try:
-        with lean_lock(directory, "background"):
-            features = route_features.extract(name, {proof_id: proof})[proof_id]
-    except Exception:
-        return None
-    return features if features.get("ok") or features.get("read") else None
-
-
-def _record_route_later(directory: Path, name: str, proof_id: str, proof: str) -> None:
-    """Queue the attempt for fingerprinting by the run's one background worker: extraction recompiles the file
-    prefix (seconds to minutes), and the model's call must not wait for a bookkeeping result it only sees later.
-    One process per attempt piled up 130 waiting processes once every probe draft was fingerprinted."""
-    if os.environ.get("ARENA_ROUTES_INLINE") == "1":
-        _record_route(directory, name, proof_id, proof)
-        return
-    _snapshot(directory, proof_id, proof)
-    with (directory / "route-queue.jsonl").open("a") as queue:
-        fcntl.flock(queue, fcntl.LOCK_EX)
-        queue.write(json.dumps({"proof_id": proof_id, "name": name}) + "\n")
-    if _worker_running(directory):
-        return  # it re-reads the queue before exiting, so this entry is not stranded
-    # not-model-facing: subprocess bootstrap source for the background route worker.
-    code = "import sys; from pathlib import Path; from arena.campaign import _route_worker; _route_worker(Path(sys.argv[1]))"
-    with suppress(OSError):
-        subprocess.Popen(
-            [sys.executable, "-c", code, str(directory)],
-            cwd=ROOT,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-
-
-def _worker_running(directory: Path) -> bool:
-    with (directory / "route-worker.lock").open("a") as handle:
-        try:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return True
-        return False
-
-
-def _route_queue(directory: Path) -> list[dict]:
-    """Queued attempts with no route event yet, oldest first, the reference proof's before any other: every later
-    route is compared against it, so it is fingerprinted first."""
-    try:
-        lines = (directory / "route-queue.jsonl").read_text().splitlines()
-    except OSError:
-        return []
-    filed = {item["proof_id"] for item in events(directory) if item.get("kind") == "route"}
-    pending, seen = [], set()
-    for line in lines:
-        entry = json.loads(line)
-        if entry["proof_id"] not in filed and entry["proof_id"] not in seen:
-            seen.add(entry["proof_id"])
-            pending.append(entry)
-    references = {
-        item["candidate_id"]
-        for item in events(directory)
-        if item.get("kind") == "candidate" and item.get("origin") == "reference"
-    }
-    return sorted(pending, key=lambda entry: entry["proof_id"] not in references)  # stable
-
-
-def _route_worker(directory: Path) -> None:
-    """Drain the run's route queue in one process. An attempt whose extraction fails is not retried in this
-    process (the reference proof is, REFERENCE_ROUNDS times); a later worker (or a backfill) tries it again."""
-    tried: set[str] = set()
-    failed: dict[str, int] = {}
-    while True:
-        with (directory / "route-worker.lock").open("a") as handle:
-            try:
-                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                return
-            while pending := [entry for entry in _route_queue(directory) if entry["proof_id"] not in tried]:
-                if lean_health.tripped(directory):
-                    return
-                entry = pending[0]
-                _yield_to_lean_session(directory)
-                _room_for_extraction(wait=float("inf"))
-                try:
-                    proof = (directory / "proofs" / f"{entry['proof_id']}.lean").read_text()
-                except OSError:
-                    tried.add(entry["proof_id"])
-                    continue
-                filed = _record_route(directory, entry["name"], entry["proof_id"], proof)
-                failed[entry["proof_id"]] = failed.get(entry["proof_id"], 0) + 1
-                if filed is not None or failed[entry["proof_id"]] >= (
-                    REFERENCE_ROUNDS if _origin(directory, entry["proof_id"]) == "reference" else 1
-                ):
-                    tried.add(entry["proof_id"])
-        # Released: an entry queued while the lock was held saw a running worker, so look once more.
-        if not [entry for entry in _route_queue(directory) if entry["proof_id"] not in tried]:
-            return
-
-
-ROUTE_SLOTS = 2
-ROUTE_EXTRACT_GB = 2.0  # one cold Lean process with the theorem's imports
-ROUTE_WAIT_SECONDS = 180.0
-REFERENCE_TRIES = 3  # kernel extractions of the reference proof per _record_route call
-REFERENCE_ROUNDS = 3  # worker passes over a reference that still has no kernel print
-REFERENCE_RETRY_SECONDS = 20.0
-
-
-def _origin(directory: Path, proof_id: str) -> str | None:
-    return next(
-        (
-            item.get("origin", "model")
-            for item in events(directory)
-            if item.get("kind") == "candidate" and item["candidate_id"] == proof_id
-        ),
-        None,
-    )
-
-
-def _yield_to_lean_session(directory: Path) -> None:
-    """Hold route extraction back while the run's own Lean session is refusing workers for memory (it leaves a
-    marker, see lean_session.memory_pressure): the model's probes come first, extraction is bookkeeping. The marker
-    ages out 2 minutes after the last refusal, so this ends by itself."""
-    from arena.lean_session import memory_pressure
-
-    while memory_pressure():
-        time.sleep(5)
-
-
-def _room_for_extraction(wait: float = ROUTE_WAIT_SECONDS) -> bool:
-    """Wait until an extraction leaves the Lean session daemons their reserve plus one more worker (else an
-    extraction started at 7 GB free starves the session, which needs 8 GB to open a worker); False if never."""
-    from arena.lean_session import RESERVE_GB, WORKER_GB, _available_gb
-
-    deadline = time.monotonic() + wait
-    while True:
-        free = _available_gb()
-        if free is None or free - ROUTE_EXTRACT_GB >= RESERVE_GB + WORKER_GB:
-            return True
-        if time.monotonic() >= deadline:
-            return False
-        time.sleep(5)
-
-
-def _record_route(directory: Path, name: str, proof_id: str, proof: str) -> dict | None:
-    """Fingerprint an attempt (compiled candidate or probe draft, with holes or errors) and file it under a route.
-    Harness-only: the model sees the result in finish reviews and pushes, never as a tool argument. Once per proof;
-    failures are ignored. An attempt opens a credited route only through a kernel fingerprint that matches no
-    existing route; one without (the term could not be read) joins the route its text features match best."""
-    from arena import routes
-    from arena.context import cached_context
-
-    try:
-        if lean_health.tripped(directory):
-            return None
-        if any(item.get("kind") == "route" and item["proof_id"] == proof_id for item in events(directory)):
-            return None
-        # Each probe draft is now fingerprinted, and one extraction is a cold Lean process of 1-2 GB: one at a time
-        # per run, and at most ROUTE_SLOTS across the parallel runs of a campaign.
-        slot = (
-            directory.parent
-            / f".route-extract-{int(proof_id[:8], 16) % ROUTE_SLOTS if re.fullmatch(r'[0-9a-f]{8}.*', proof_id) else 0}.lock"
-        )
-        # The reference proof is every route's yardstick: it is never filed from text. Without a kernel print it
-        # stays unfiled (the worker tries again later) rather than become an exemplar that absorbs kernel attempts.
-        reference = _origin(directory, proof_id) == "reference"
-        features = None
-        inline = os.environ.get("ARENA_ROUTES_INLINE") == "1"
-        for attempt in range(REFERENCE_TRIES if reference and not inline else 1):
-            if attempt:
-                time.sleep(REFERENCE_RETRY_SECONDS)
-            with (directory / "route-extract.lock").open("a") as own, slot.open("a") as shared:
-                fcntl.flock(own, fcntl.LOCK_EX)
-                fcntl.flock(shared, fcntl.LOCK_EX)
-                if not inline:
-                    _yield_to_lean_session(directory)
-                    if not _room_for_extraction():
-                        continue  # the run's own Lean workers come first; the attempt simply gets no route (yet)
-                features = _route_features(directory, name, proof_id, proof)
-            if features:
-                break
-        if reference and not features:
-            return None
-        with (directory / "route.lock").open("a") as handle:
-            fcntl.flock(handle, fcntl.LOCK_EX)
-            history = events(directory)
-            earlier = [item for item in history if item.get("kind") == "route"]
-            if any(item["proof_id"] == proof_id for item in earlier):
-                return None
-            context = cached_context(name)
-            print_ = routes.fingerprint(proof, routes.vocabulary(context), name, features)
-            origin = next(
-                (
-                    item.get("origin", "model")
-                    for item in history
-                    if item.get("kind") == "candidate" and item["candidate_id"] == proof_id
-                ),
-                None,
-            )
-            probe = routes.attempt_results(history).get(proof_id, ("candidate",))[0] == "probe"
-            event = routes.file_attempt(earlier, proof_id, print_, features, origin, probe)
-            _append(directory, event)
-            return event
-    except Exception:
-        return None
-
-
 def events(directory: Path) -> list[dict]:
     file = directory / "ledger.jsonl"
     if not file.exists():
@@ -1394,7 +1186,6 @@ def init(name: str, run_id: str, extra: str = "") -> dict:
     _append(directory, {"kind": "focus", "proof_id": reference_id, "reason": "start"})
     materialize(name, run_id, row["src"])
     _append(directory, {"kind": "current", "candidate_id": reference_id})
-    _record_route_later(directory, name, reference_id, row["src"])
     return {
         "packet": str(directory / "packet.txt"),
         "shadow": str(shadow),
@@ -1436,6 +1227,12 @@ def _candidate_ids(history: list[dict]) -> list[str]:
 def _label(history: list[dict], candidate_id: str) -> str | None:
     ids = _candidate_ids(history)
     return f"#{ids.index(candidate_id) + 1}" if candidate_id in ids else None
+
+
+def node_label(history: list[dict], proof_id: str) -> str:
+    """Return the stable candidate or probe label used by graph views."""
+    candidate = _label(history, proof_id)
+    return candidate or _probe_numbers(history).get(proof_id, f"p{proof_id[:8]}")
 
 
 def resolve_candidate_ref(history: list[dict], reference: str) -> str:
@@ -1565,7 +1362,7 @@ def _file_node(
     proof: str,
     named_parent: str | None = None,
     operation: dict | None = None,
-) -> dict:
+) -> tuple[dict, bool]:
     """Append exactly one graph edge per proof id under the run's graph lock."""
     directory.mkdir(parents=True, exist_ok=True)
     with (directory / "graph.lock").open("a") as handle:
@@ -1575,7 +1372,7 @@ def _file_node(
             (event for event in history if event.get("kind") == "edge" and event.get("proof_id") == proof_id), None
         )
         if existing:
-            return existing
+            return existing, False
         read = _proof_reader(directory)
         graph = Graph.from_history(history, read)
         recent = [
@@ -1614,16 +1411,60 @@ def _file_node(
             "operation": operation_data,
         }
         _append(directory, event)
-        return event
+        earlier: dict[str, list[dict]] = {}
+        graph_nodes = {node.proof_id: node for node in graph.nodes}
+        for node in graph.nodes:
+            if node.route is not None:
+                earlier.setdefault(node.route, []).append(node.signature)
+        parent = sources[0] if sources else None
+        parent_node = graph_nodes.get(parent)
+        assignment = routes.assign(
+            earlier,
+            routes.signature(proof),
+            parent_node.route if parent_node else None,
+            routes.line_diff(parent_node.proof_text, proof) if parent_node and parent_node.route else None,
+        )
+        origin = next(
+            (
+                item.get("origin", "model")
+                for item in history
+                if item.get("kind") == "candidate" and item.get("candidate_id") == proof_id
+            ),
+            "model",
+        )
+        attempt_kind = (
+            "probe"
+            if any(item.get("kind") == "probe" and item.get("proof_id") == proof_id for item in history)
+            else "candidate"
+        )
+        _append(
+            directory,
+            {
+                "kind": "route",
+                "proof_id": proof_id,
+                **assignment,
+                "assigned_by": "signature",
+                "parent": parent,
+                "holes": len(re.findall(r"\bsorry\b", proof)),
+                "credited": assignment["new"] and origin == "model",
+                "label": assignment["route"],
+                "short_label": assignment["route"],
+                "attempt_kind": attempt_kind,
+            },
+        )
+        batch_newly_filed = _BATCH_NEWLY_FILED.get()
+        if batch_newly_filed is not None:
+            batch_newly_filed.add(proof_id)
+        return event, True
 
 
-def _settle_focus(directory: Path, proof_ids: list[str]) -> str | None:
+def _settle_focus(directory: Path, proof_ids: list[str]) -> Graph:
     history = events(directory)
     graph = Graph.from_history(history, _proof_reader(directory))
     nodes = {node.proof_id: node for node in graph.nodes}
     eligible = [nodes[ident] for ident in proof_ids if ident in nodes and nodes[ident].status in ("closed", "sketch")]
     if not eligible:
-        return graph.focus
+        return graph
 
     def rank(node: Node) -> tuple[int, float]:
         if node.status == "closed":
@@ -1634,8 +1475,48 @@ def _settle_focus(directory: Path, proof_ids: list[str]) -> str | None:
     winner = max(eligible, key=rank)
     if winner.proof_id != graph.focus:
         _append(directory, {"kind": "focus", "proof_id": winner.proof_id, "reason": "batch_best"})
-        return winner.proof_id
-    return graph.focus
+        graph.focus = winner.proof_id
+    return graph
+
+
+def _check_stall(directory: Path, graph: Graph, newly_filed: set[str]) -> None:
+    raw_threshold = os.environ.get("ARENA_STALL_M", "12")
+    try:
+        threshold = int(raw_threshold)
+    except ValueError as error:
+        raise ValueError(text.render("messages/errors.stall_threshold")) from error
+    mode = os.environ.get("ARENA_STALL_TARGET", "best_other_cell")
+    if mode not in ("best_other_cell", "least_visited", "map_only"):
+        raise ValueError(text.render("messages/errors.stall_target", mode=mode))
+    current_focus = graph.focus
+    for fired in stall_fires(graph, threshold):
+        if fired["after"] not in newly_filed:
+            continue
+        target = stall_target(graph, fired, mode)
+        _append(
+            directory,
+            {
+                "kind": "stall",
+                "root": fired["root"],
+                "count": fired["count"],
+                "mode": mode,
+                "target": target.node.proof_id if target else None,
+            },
+        )
+        if target is None or target.node.proof_id == current_focus:
+            continue
+        _append(
+            directory,
+            {
+                "kind": "focus",
+                "proof_id": target.node.proof_id,
+                "reason": "stall",
+                "root": fired["root"],
+                "cell": target.letter,
+                "visits": target.visits,
+            },
+        )
+        current_focus = target.node.proof_id
 
 
 IDEA_STATUSES = ("active", "parked", "succeeded", "abandoned")
@@ -2074,23 +1955,22 @@ def record_evaluation(
             )
     if lane == "model" and trigger == "model" and not prior:
         _check_breaker(directory)
-    if result.get("tokens") is not None and goalstate.closed(result):
-        # Route credit is for compiled proofs only: a failed compile is not queued for extraction.
-        _record_route_later(directory, name, candidate_id, proof)
     location = materialize(name, run_id, proof) if materialize_live and result.get("tokens") is not None else {}
     if location:
         _append(directory, {"kind": "current", "candidate_id": candidate_id})
-    _file_node(
+    filing_history = events(directory)
+    _, newly_filed = _file_node(
         directory,
-        events(directory),
+        filing_history,
         candidate_id,
         proof,
-        _named_parent_id(events(directory), (parents or [None])[0]),
+        _named_parent_id(filing_history, (parents or [None])[0]),
         operation,
     )
     in_batch, _ = _BATCH_FOCUS.get()
     if not in_batch:
-        _settle_focus(directory, [candidate_id])
+        graph = _settle_focus(directory, [candidate_id])
+        _check_stall(directory, graph, {candidate_id} if newly_filed else set())
     history = events(directory)
     rows = _summaries(history)
     me = next((r for r in rows if r["id"] == candidate_id), None)
@@ -2283,6 +2163,7 @@ def probe(
     earlier = next(
         (item for item in reversed(history) if item.get("kind") == "probe" and item["proof_id"] == proof_id), None
     )
+    newly_filed: set[str] = set()
     idea_id = idea_id or (earlier or {}).get("idea_id") or _current_active_idea(history)
     if earlier:
         result = earlier["result"]
@@ -2318,14 +2199,25 @@ def probe(
             directory,
             {"kind": "probe", "proof_id": proof_id, "idea_id": idea_id, "parent": parent_id, "result": result},
         )
-        _file_node(directory, events(directory), proof_id, proof, _named_parent_id(history, parent), operation)
+        filing_history = events(directory)
+        _, new_node = _file_node(
+            directory, filing_history, proof_id, proof, _named_parent_id(history, parent), operation
+        )
+        if new_node:
+            newly_filed.add(proof_id)
         _check_breaker(directory)
         # A draft (holes, errors or a failed compile) never opens a route, so it is not queued for extraction.
     if earlier:
-        _file_node(directory, events(directory), proof_id, proof, _named_parent_id(history, parent), operation)
+        filing_history = events(directory)
+        _, new_node = _file_node(
+            directory, filing_history, proof_id, proof, _named_parent_id(history, parent), operation
+        )
+        if new_node:
+            newly_filed.add(proof_id)
     in_batch, _ = _BATCH_FOCUS.get()
     if not in_batch:
-        _settle_focus(directory, [proof_id])
+        graph = _settle_focus(directory, [proof_id])
+        _check_stall(directory, graph, newly_filed)
     location = materialize(name, run_id, proof) if result.get("tokens") is not None else {}
     label = _probe_numbers(events(directory))[proof_id]
     return _model_view(
@@ -2372,6 +2264,8 @@ def probe_batch(
     outcomes = []
     token = _PRECOMPILED.set(_compile_probes(name, run_dir(run_id), drafts) if len(drafts) > 1 else {})
     focus_token = _BATCH_FOCUS.set((True, starting_focus))
+    newly_filed: set[str] = set()
+    filed_token = _BATCH_NEWLY_FILED.set(newly_filed)
     try:
         for index, draft in enumerate(drafts, 1):
             try:
@@ -2381,6 +2275,7 @@ def probe_batch(
             outcomes.append({"index": index, **outcome})
     finally:
         _BATCH_FOCUS.reset(focus_token)
+        _BATCH_NEWLY_FILED.reset(filed_token)
         _PRECOMPILED.reset(token)
     directory = run_dir(run_id)
     filed = []
@@ -2392,7 +2287,8 @@ def probe_batch(
         proof_id = hashlib.sha256((name + "\0" + proof).encode()).hexdigest()
         if proof_id not in filed:
             filed.append(proof_id)
-    _settle_focus(directory, filed)
+    graph = _settle_focus(directory, filed)
+    _check_stall(directory, graph, newly_filed)
     return {"ok": True, "drafts": outcomes}
 
 
@@ -2555,6 +2451,13 @@ def set_decision(run_id: str, candidate_id: str, decision: str, reason: str) -> 
     record = {"kind": "decision", "candidate_id": candidate_id, "decision": decision, "reason": reason.strip()}
     _append(directory, record)
     return record
+
+
+def map_view(run_id: str) -> dict:
+    """Return the hidden JSON map without rendering it into model-facing prose."""
+    directory = run_dir(run_id)
+    graph = Graph.from_history(events(directory), _proof_reader(directory))
+    return graph_map_view(graph)
 
 
 def graph_state(run_id: str) -> dict:
@@ -3030,6 +2933,35 @@ def state(run_id: str) -> dict:
         for seq, item in enumerate(history)
         if item.get("kind") == "evaluation" and item.get("trigger") == "auto" and item["candidate_id"] in numbers
     ]
+    candidate_rows = {row["id"]: row for row in rows}
+    probes = {item["proof_id"]: item for item in history if item.get("kind") == "probe"}
+    route_events = {item["proof_id"]: item for item in history if item.get("kind") == "route"}
+    for seq, item in enumerate(history):
+        if item.get("kind") != "focus" or item.get("reason") != "stall":
+            continue
+        proof_id = item["proof_id"]
+        row = candidate_rows.get(proof_id)
+        probe_event = probes.get(proof_id)
+        result = (
+            row["evaluations"][-1]["result"] if row and row["evaluations"] else (probe_event or {}).get("result", {})
+        )
+        hole_count = (route_events.get(proof_id) or {}).get("holes", 0)
+        score = "sketch" if hole_count else _metric_score(result.get("metrics"))
+        if score is None:
+            score = 0.0
+        updates.append(
+            {
+                "seq": seq,
+                "text": text.render(
+                    "messages/phase.stall_focus",
+                    label=node_label(history, proof_id),
+                    letter=item["cell"],
+                    score=score,
+                    visits=item["visits"],
+                ),
+            }
+        )
+    updates.sort(key=lambda update: update["seq"])
     reference_row = next((r for r in rows if r["origin"] == "reference"), None)
     baseline = None
     if reference_row:

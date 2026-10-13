@@ -1,10 +1,10 @@
 """Pure candidate graph operations shared by the worker, frontier and viewer.
 
-The graph ledger adds two events: ``edge`` records node lineage and operation
-provenance, while ``focus`` records the current filing point independently of
-lineage. ``step_goals`` records before/after states for each proof step, or an
-error when background extraction fails. These records are append-only and do
-not replace legacy campaign rows.
+The graph ledger adds ``edge`` events for lineage, ``route`` events for frozen
+text signatures, ``focus`` events for the current filing point, ``stall`` audit
+events for each stall fire, and ``step_goals`` for before/after states. The
+archive and stall helpers are pure projections; ``map_view`` leaves effort and
+open-hole rows empty for later tickets.
 """
 
 from __future__ import annotations
@@ -16,8 +16,9 @@ from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 from functools import cache
 
-from arena import goalstate
+from arena import goalstate, text
 from arena.routes import proof_body
+from arena.routes import signature as route_signature
 from arena.steps import Step, hdr_index, split_steps, step_range
 
 
@@ -107,6 +108,11 @@ class Node:
     edge: dict | None
     steps: list[Step]
     depth: int
+    route: str | None
+    signature: dict
+    label: str
+    holes: int
+    proof_text: str
 
 
 @dataclass
@@ -114,6 +120,7 @@ class Graph:
     nodes: list[Node]
     focus: str | None
     order: list[str]
+    stall_events: list[dict]
 
     @classmethod
     def from_history(cls, history: list[dict], read_text: Callable[[str], str | None]) -> Graph:
@@ -124,6 +131,10 @@ class Graph:
         probe_results: dict[str, dict] = {}
         edges: dict[str, dict] = {}
         step_goals: dict[str, list[dict]] = {}
+        routes: dict[str, str] = {}
+        labels: dict[str, str] = {}
+        candidate_number = probe_number = 0
+        stall_events: list[dict] = []
         focus = None
         for event in history:
             kind = event.get("kind")
@@ -131,12 +142,16 @@ class Graph:
                 proof_id = event["candidate_id"]
                 if proof_id not in entries:
                     proof_ids.append(proof_id)
+                    candidate_number += 1
+                    labels[proof_id] = f"#{candidate_number}"
                 entries[proof_id] = event
             elif kind == "probe":
                 proof_id = event["proof_id"]
                 if proof_id not in entries:
                     proof_ids.append(proof_id)
                     entries[proof_id] = {"origin": "model"}
+                    probe_number += 1
+                    labels[proof_id] = f"p{probe_number}"
                 probe_results[proof_id] = event["result"]
             elif kind == "evaluation":
                 evaluations.setdefault(event["candidate_id"], []).append((event["mode"], event["result"]))
@@ -144,6 +159,10 @@ class Graph:
                 edges[event["proof_id"]] = event
             elif kind == "focus":
                 focus = event["proof_id"]
+            elif kind == "stall":
+                stall_events.append({key: event.get(key) for key in ("root", "count", "mode", "target")})
+            elif kind == "route":
+                routes[event["proof_id"]] = event["route"]
             elif kind == "step_goals" and isinstance(event.get("goals"), list):
                 step_goals[event["proof_id"]] = event["goals"]
 
@@ -177,6 +196,7 @@ class Graph:
             )
             result = best[2] if best else probe_results.get(proof_id, {})
             proof = read_text(proof_id) or ""
+            holes = len(re.findall(r"\bsorry\b", proof))
             passed_primary = next(iter((result.get("compat") or {}).values()), {}).get("passed", False)
             has_sorry = re.search(r"\bsorry\b", proof) is not None
             status = (
@@ -213,15 +233,215 @@ class Graph:
                     edge,
                     steps,
                     depth,
+                    routes.get(proof_id),
+                    route_signature(proof),
+                    labels.get(proof_id, f"p{proof_id[:8]}"),
+                    holes,
+                    proof,
                 )
             )
-        return cls(nodes, focus, [node.id for node in nodes])
+        return cls(nodes, focus, [node.id for node in nodes], stall_events)
 
 
 def _score(result: dict) -> float | None:
     metrics = result.get("metrics") or {}
     value = metrics.get("proxy")
     return value if value is not None else metrics.get("estimated_proxy")
+
+
+@dataclass
+class Cell:
+    route: str
+    depth_bucket: str
+    status: str
+    node: Node
+    visits: int
+    letter: str
+
+
+def depth_bucket(depth: int) -> str:
+    if depth <= 2:
+        return "0-2"
+    if depth <= 7:
+        return "3-7"
+    if depth <= 15:
+        return "8-15"
+    return "16+"
+
+
+def quality(node: Node) -> float | None:
+    if node.status == "broken":
+        return None
+    if node.score is not None:
+        return node.score
+    if node.status == "closed":
+        return 0.0
+    if node.status == "sketch":
+        return -1.0 - node.holes
+    return None
+
+
+def archive(graph: Graph) -> list[Cell]:
+    """Return first-seen route/depth/status cells and their best non-broken node."""
+    cells: dict[tuple[str, str, str], Cell] = {}
+    for node in graph.nodes:
+        score = quality(node)
+        if score is None or node.route is None:
+            continue
+        key = (node.route, depth_bucket(node.depth), node.status)
+        cell = cells.get(key)
+        if cell is None:
+            letter = _cell_letter(len(cells))
+            cells[key] = Cell(*key, node, 1, letter)
+        else:
+            cell.visits += 1
+            current_quality = quality(cell.node)
+            if current_quality is not None and score > current_quality:
+                cell.node = node
+    return list(cells.values())
+
+
+def _cell_letter(index: int) -> str:
+    """Excel-style letters keep cell names stable beyond the first alphabet."""
+    result = ""
+    while True:
+        index, remainder = divmod(index, 26)
+        result = chr(65 + remainder) + result
+        if index == 0:
+            return result
+        index -= 1
+
+
+def keeps(graph: Graph) -> list[Node]:
+    """Nodes whose score strictly exceeds every earlier scored node."""
+    result: list[Node] = []
+    best: float | None = None
+    for node in graph.nodes:
+        if node.score is not None and (best is None or node.score > best):
+            result.append(node)
+            best = node.score
+    return result
+
+
+def _descends_from(graph: Graph, ancestor: str, node: Node, by_id: dict[str, Node] | None = None) -> bool:
+    """Follow each node's first recorded parent to test lineage membership."""
+    if by_id is None:
+        by_id = {item.proof_id: item for item in graph.nodes}
+    current = node
+    seen: set[str] = set()
+    while current.proof_id not in seen:
+        seen.add(current.proof_id)
+        parents = (current.edge or {}).get("from") or []
+        if not parents:
+            return False
+        parent = parents[0]
+        if parent == ancestor:
+            return True
+        current = by_id.get(parent)
+        if current is None:
+            return False
+    return False
+
+
+def stall_fires(graph: Graph, m: int) -> list[dict]:
+    """Replay every lineage-scoped fire from the node sequence alone."""
+    if not isinstance(m, int) or isinstance(m, bool) or m <= 0:
+        raise ValueError(text.render("messages/errors.stall_threshold"))
+    if not graph.nodes:
+        return []
+    keep_ids = {node.proof_id for node in keeps(graph)}
+    root = graph.nodes[0].proof_id
+    count = 0
+    fires: list[tuple[str, int, str, int]] = []
+    lineage = {root}
+    for index, node in enumerate(graph.nodes):
+        if node.proof_id in keep_ids:
+            root, count = node.proof_id, 0
+            lineage = {root}
+            continue
+        parents = (node.edge or {}).get("from") or []
+        if parents and parents[0] in lineage:
+            lineage.add(node.proof_id)
+            count += 1
+            if count >= m:
+                fires.append((root, count, node.proof_id, index + 1))
+                count = 0
+    return [{"root": fire_root, "count": fire_count, "after": after} for fire_root, fire_count, after, _ in fires]
+
+
+def stall_fire(graph: Graph, m: int) -> dict | None:
+    """Return the most recent fire for callers expecting one threshold."""
+    fires = stall_fires(graph, m)
+    return fires[-1] if fires else None
+
+
+def stall_target(graph: Graph, fired: dict, mode: str) -> Cell | None:
+    """Choose a different archive region, while excluding cells descended from the stalled root."""
+    if mode not in ("best_other_cell", "least_visited", "map_only"):
+        raise ValueError(text.render("messages/errors.stall_target", mode=mode))
+    if mode == "map_only":
+        return None
+    by_id = {node.proof_id: node for node in graph.nodes}
+    candidates = [
+        cell
+        for cell in archive(graph)
+        if cell.node.proof_id != fired["root"] and not _descends_from(graph, fired["root"], cell.node, by_id)
+    ]
+    if not candidates:
+        return None
+
+    def cell_quality(cell: Cell) -> float:
+        value = quality(cell.node)
+        assert value is not None
+        return value
+
+    if mode == "best_other_cell":
+        return min(candidates, key=lambda cell: (-cell_quality(cell), cell.letter))
+    return min(candidates, key=lambda cell: (cell.visits, cell.letter))
+
+
+def map_view(graph: Graph) -> dict:
+    """Hidden JSON map projection; effort and open-hole rows are reserved for later tickets."""
+    scored = [node for node in graph.nodes if node.score is not None]
+    best_node = max(scored, key=lambda node: node.score) if scored else None
+    best = (
+        {
+            "node": best_node.id,
+            "label": best_node.label,
+            "score": best_node.score,
+            "tokens": best_node.tokens,
+            "heartbeats": best_node.heartbeats,
+            "versions": best_node.versions,
+        }
+        if best_node
+        else None
+    )
+    archive_rows = [
+        {
+            "letter": cell.letter,
+            "route": cell.route,
+            "depth_bucket": cell.depth_bucket,
+            "status": cell.status,
+            "node": cell.node.id,
+            "label": cell.node.label,
+            "score": cell.node.score,
+            "visits": cell.visits,
+        }
+        for cell in archive(graph)
+    ]
+    keep_ids = {node.proof_id for node in keeps(graph)}
+    recent = [
+        {
+            "node": node.id,
+            "label": node.label,
+            "edge": (node.edge or {}).get("type"),
+            "from": list((node.edge or {}).get("from") or []),
+            "status": "broken" if node.status == "broken" else "keep" if node.proof_id in keep_ids else "discard",
+            "score": node.score,
+        }
+        for node in graph.nodes[-8:]
+    ]
+    return {"best": best, "archive": archive_rows, "recent": recent, "effort": [], "open": []}
 
 
 def common_base(left: str, right: str, parents: dict[str, list[str]]) -> dict:

@@ -1,5 +1,6 @@
 """Seam A: the campaign JSON CLI, with real Lean on the Strata fixture plus mock-backed logic."""
 
+import importlib
 import json
 import shutil
 import subprocess
@@ -379,6 +380,56 @@ class TruncationEquivalenceTests(unittest.TestCase):
 class ProtocolLogicTests(FakeRunCase):
     """Behaviour that needs no Lean: lineage defaults, advisory, idea lifecycle."""
 
+    def test_hidden_map_action_returns_the_archive_projection(self):
+        from types import SimpleNamespace
+
+        protocol = importlib.import_module("arena.cli.protocol")
+        self.assertIn("map", protocol.ACTIONS)
+        result = protocol.run(SimpleNamespace(action="map", run_id="logic"))
+        self.assertEqual(set(result), {"best", "archive", "recent", "effort", "open"})
+        self.assertEqual(result["best"]["label"], "#1")
+
+    def test_probe_and_operation_routes_are_filed_before_they_return_without_lean(self):
+        from contextlib import nullcontext
+
+        class NoLean:
+            def __getattr__(self, name):
+                raise AssertionError(f"unexpected Lean service access: {name}")
+
+        failed = {"ok": True, "tokens": 1, "compat": {"v1": {"passed": False}}}
+        with (
+            patch.object(campaign, "lean_session", NoLean()),
+            patch.object(campaign, "lean_lock", return_value=nullcontext()),
+            patch.object(campaign.subprocess, "Popen", side_effect=AssertionError("unexpected subprocess")),
+            patch.object(campaign, "normalize_draft", side_effect=lambda _name, proof: proof),
+            patch.object(campaign, "_compile_probe", return_value=failed),
+            patch.object(campaign, "validate_proof"),
+        ):
+            campaign.probe("T", "logic", "theorem t := by\n  sorry")
+        probe_route = [item for item in campaign.events(self.directory) if item.get("kind") == "route"][-1]
+        self.assertEqual(probe_route["attempt_kind"], "probe")
+
+        passed = {
+            "ok": True,
+            "tokens": 1,
+            "heartbeat": 1,
+            "compat": {"v1": {"passed": True}},
+            "metrics": {"estimated_proxy": 50},
+        }
+        with (
+            patch.object(campaign, "lean_session", NoLean()),
+            patch.object(campaign, "lean_lock", return_value=nullcontext()),
+            patch.object(campaign.subprocess, "Popen", side_effect=AssertionError("unexpected subprocess")),
+            patch.object(campaign, "normalize_draft", side_effect=lambda _name, proof: proof),
+            patch.object(campaign, "_compile_probe", return_value=passed),
+            patch.object(campaign, "validate_proof"),
+        ):
+            campaign.compile_operation(
+                "T", "logic", {"type": "draft", "base": "n1", "text": "theorem t := by\n  exact True.intro"}
+            )
+        operation_route = [item for item in campaign.events(self.directory) if item.get("kind") == "route"][-1]
+        self.assertEqual(operation_route["assigned_by"], "signature")
+
     def test_run_project_copies_only_tracked_files_so_old_candidates_cannot_leak(self):
         project, shadow = Path(self.temporary.name) / "ws", Path(self.temporary.name) / "shadow"
         (project / "Src").mkdir(parents=True)
@@ -454,24 +505,6 @@ class ProtocolLogicTests(FakeRunCase):
         self.assertEqual((listed["status"], listed["attempts"]), ("succeeded", 1))
         self.assertEqual(listed["best"]["candidate"], "#2")
         self.assertIn("recent_failures", campaign.frontier("logic"))
-
-    def test_only_a_compiled_candidate_is_queued_for_a_route(self):
-        # Route credit is for compiled proofs only: probe drafts and failed compiles are never fingerprinted.
-        compiled = {"ok": True, "tokens": 5, "compat": {"v1": {"passed": False}}}
-        with (
-            patch.object(campaign, "normalize_draft", side_effect=lambda name, text: text),
-            patch.object(campaign, "validate_proof"),
-            patch.object(campaign, "materialize", return_value={}),
-            patch.object(campaign, "_record_route_later") as filed,
-        ):
-            with patch.object(campaign, "_compile_probe", return_value=compiled):
-                campaign.probe("T", "logic", "theorem t := by\n  sorry")
-            self.assertEqual(filed.call_count, 0)
-            self.evaluate("theorem t := by\n  bad")
-            self.assertEqual(filed.call_count, 0)
-            self.evaluate("theorem t := by\n  good")
-            self.assertEqual(filed.call_count, 1)
-            self.assertEqual(filed.call_args.args[1], "T")
 
     def test_latest_active_idea_is_inherited_by_probes_and_evaluations(self):
         campaign.record_idea("logic", "Factor repeated cases")

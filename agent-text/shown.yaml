@@ -17,6 +17,12 @@ messages:
   notices:
     where: "Agent messages and notices"
     per_run: "when the matching event occurs"
+  phase:
+    where: "Agent messages and notices"
+    per_run: "when the matching event occurs"
+    stall_focus:
+      where: "Agent messages and notices"
+      per_run: "when the matching event occurs"
   refusals:
     where: "Agent messages and notices"
     per_run: "when the matching event occurs"

@@ -20,6 +20,7 @@ from arena.campaign import (
     find,
     frontier,
     init,
+    map_view,
     probe,
     probe_batch,
     profile_request,
@@ -48,6 +49,7 @@ ACTIONS = (
     "profile",
     "autocheck",
     "state",
+    "map",
     "submission",
     "memory",
 )
@@ -115,6 +117,8 @@ def run(args: SimpleNamespace) -> dict:
         return autocheck(args.theorem, args.run_id, args.max_seconds)
     if args.action == "state":
         return state(args.run_id)
+    if args.action == "map":
+        return map_view(args.run_id)
     if args.action == "memory":
         return memory(args.run_id, args.spent_usd, args.cap_usd)
     if args.action == "submission":

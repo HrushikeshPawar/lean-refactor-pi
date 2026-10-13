@@ -118,6 +118,8 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `messages/errors.source_range_order` | 5 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.source_search_failed` | 4 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.source_versions_changed` | 7 | Agent messages and notices | when the matching event occurs |
+| `messages/errors.stall_target` | 5 | Agent messages and notices | when the matching event occurs |
+| `messages/errors.stall_threshold` | 7 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.standalone_row` | 8 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.statement_modified_first` | 28 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.statement_modified_suffix` | 11 | Agent messages and notices | when the matching event occurs |
@@ -150,6 +152,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `messages/notices.profile_degraded` | 7 | Agent messages and notices | when the matching event occurs |
 | `messages/notices.profile_trimmed` | 25 | Agent messages and notices | when the matching event occurs |
 | `messages/notices.stale_route` | 14 | Agent messages and notices | when the matching event occurs |
+| `messages/phase.stall_focus` | 12 | Agent messages and notices | when the matching event occurs |
 | `messages/refusals.allowance` | 21 | Agent messages and notices | when the matching event occurs |
 | `messages/refusals.axes` | 26 | Agent messages and notices | when the matching event occurs |
 | `messages/refusals.continuation` | 11 | Agent messages and notices | when the matching event occurs |
@@ -223,7 +226,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `packet/sections.titles.scope` | 13 | Initial theorem packet | once per run |
 | `packet/sections.titles.source` | 2 | Initial theorem packet | once per run |
 | `packet/sections.titles.types` | 9 | Initial theorem packet | once per run |
-| `packet/task` | 184 | Initial theorem packet | once per run |
+| `packet/task` | 168 | Initial theorem packet | once per run |
 | `replies/candidate.original_reference` | 4 | Tool replies | when the matching tool result occurs |
 | `replies/check.could_not_run` | 7 | Tool replies | when the matching tool result occurs |
 | `replies/check.failed` | 6 | Tool replies | when the matching tool result occurs |
@@ -253,7 +256,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/state.cold_compile_without_session` | 5 | Tool replies | when the matching tool result occurs |
 | `replies/state.no_candidate_cold_passed` | 14 | Tool replies | when the matching tool result occurs |
 | `replies/state.no_candidate_passed` | 10 | Tool replies | when the matching tool result occurs |
-| `skill/SKILL` | 1202 | Agent skill instructions | once per run |
+| `skill/SKILL` | 1187 | Agent skill instructions | once per run |
 | `tools/arena_candidate.description` | 23 | Model tool definitions | every request |
 | `tools/arena_candidate.params.candidate` | 3 | Model tool definitions | every request |
 | `tools/arena_declarations.description` | 29 | Model tool definitions | every request |
@@ -265,7 +268,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `tools/arena_find.description` | 48 | Model tool definitions | every request |
 | `tools/arena_finish.description` | 86 | Model tool definitions | every request |
 | `tools/arena_idea.description` | 103 | Model tool definitions | every request |
-| `tools/arena_probe.description` | 104 | Model tool definitions | every request |
+| `tools/arena_probe.description` | 89 | Model tool definitions | every request |
 | `tools/arena_probe.params.idea` | 12 | Model tool definitions | every request |
 | `tools/arena_profile.description` | 59 | Model tool definitions | every request |
 | `tools/arena_skill_read.description` | 24 | Model tool definitions | every request |

@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from arena import campaign
+from arena import graph as graph_module
 from arena.cli.graph import build_snapshot
 from arena.cli.run import attempt_has_model_error
 from arena.cli.serve import graph_payload
@@ -20,6 +21,211 @@ from arena.graph import (
 )
 from arena.steps import split_steps, step_range
 from tests.graph_support import FakeRunCase
+
+
+class ArchiveTests(unittest.TestCase):
+    def project(self, specs):
+        history = []
+        proofs = {}
+        for proof_id, route, score, status, parent in specs:
+            proof = (
+                "theorem t : True := by\n  sorry\n"
+                if status == "sketch"
+                else "theorem t : True := by\n  exact True.intro\n"
+            )
+            proofs[proof_id] = proof
+            history.append({"kind": "candidate", "candidate_id": proof_id, "origin": "model"})
+            passed = status in ("closed", "sketch")
+            history.append(
+                {
+                    "kind": "evaluation",
+                    "candidate_id": proof_id,
+                    "mode": "fast",
+                    "result": {
+                        "compat": {"v": {"passed": passed}},
+                        "contains_sorry": status == "sketch",
+                        "metrics": {"estimated_proxy": score},
+                    },
+                }
+            )
+            history.append({"kind": "edge", "proof_id": proof_id, "from": [parent] if parent else []})
+            history.append({"kind": "route", "proof_id": proof_id, "route": route})
+        return graph_module.Graph.from_history(history, proofs.get), history
+
+    def test_depth_buckets_follow_the_four_boundaries(self):
+        self.assertEqual(
+            [graph_module.depth_bucket(depth) for depth in (0, 2, 3, 7, 8, 15, 16)],
+            ["0-2", "0-2", "3-7", "3-7", "8-15", "8-15", "16+"],
+        )
+
+    def test_archive_keeps_best_counts_visits_splits_status_and_stabilizes_letters(self):
+        graph, _ = self.project(
+            [
+                ("a", "r1", 50, "closed", None),
+                ("b", "r1", 60, "closed", "a"),
+                ("c", "r1", None, "sketch", "b"),
+                ("d", "r2", None, "broken", "c"),
+            ]
+        )
+        cells = graph_module.archive(graph)
+        self.assertEqual(
+            [(cell.letter, cell.route, cell.status) for cell in cells], [("A", "r1", "closed"), ("B", "r1", "sketch")]
+        )
+        self.assertEqual((cells[0].node.proof_id, cells[0].visits), ("b", 2))
+        graph, _ = self.project([("a", "r1", 50, "closed", None), ("b", "r2", 40, "closed", "a")])
+        self.assertEqual([cell.letter for cell in graph_module.archive(graph)], ["A", "B"])
+
+    def test_keeps_are_only_strict_new_highs(self):
+        graph, _ = self.project(
+            [("a", "r1", 50, "closed", None), ("b", "r1", 50, "closed", "a"), ("c", "r1", 51, "closed", "b")]
+        )
+        self.assertEqual([node.proof_id for node in graph_module.keeps(graph)], ["a", "c"])
+
+    def test_stall_counts_only_descendants_and_resets_on_keeps_and_fires(self):
+        specs = [("root", "r1", 60, "closed", None)]
+        specs += [(f"n{i}", "r1", 60 - i, "closed", specs[-1][0]) for i in range(1, 13)]
+        graph, history = self.project(specs)
+        self.assertEqual(graph_module.stall_fire(graph, 12), {"root": "root", "count": 12, "after": "n12"})
+        self.assertIsNone(graph_module.stall_fire(graph_module.Graph.from_history([], lambda _: None), 12))
+        after_fire = [
+            *history,
+            {"kind": "candidate", "candidate_id": "n13", "origin": "model"},
+            {
+                "kind": "evaluation",
+                "candidate_id": "n13",
+                "mode": "fast",
+                "result": {"compat": {"v": {"passed": True}}, "metrics": {"estimated_proxy": 80}},
+            },
+            {"kind": "edge", "proof_id": "n13", "from": ["n12"]},
+            {"kind": "route", "proof_id": "n13", "route": "r1"},
+        ]
+        self.assertEqual(
+            graph_module.stall_fire(Graph.from_history(after_fire, lambda _: "proof"), 12),
+            {"root": "root", "count": 12, "after": "n12"},
+        )
+        after_fire.append(
+            {"kind": "stall", "root": "root", "count": 12, "mode": "best_other_cell", "target": "elsewhere"}
+        )
+        replay = Graph.from_history(after_fire, lambda _: "proof")
+        self.assertEqual(graph_module.stall_fire(replay, 12), {"root": "root", "count": 12, "after": "n12"})
+        self.assertEqual(
+            replay.stall_events,
+            [{"root": "root", "count": 12, "mode": "best_other_cell", "target": "elsewhere"}],
+        )
+
+        branches = [("root", "r1", 60, "closed", None), ("sibling", "r1", 59, "closed", None)]
+        branches += [(f"n{i}", "r1", 59 - i, "closed", branches[-1][0]) for i in range(1, 12)]
+        graph, _ = self.project(branches)
+        self.assertIsNone(graph_module.stall_fire(graph, 12))
+        short_chain = [("root", "r1", 60, "closed", None)]
+        short_chain += [(f"n{i}", "r1", 60 - i, "closed", short_chain[-1][0]) for i in range(1, 12)]
+        graph, _ = self.project(short_chain)
+        self.assertEqual(graph_module.stall_fire(graph, 11), {"root": "root", "count": 11, "after": "n11"})
+
+    def test_stall_target_modes_choose_archive_cells_and_validate_inputs(self):
+        graph, _ = self.project(
+            [
+                ("root", "r1", 100, "closed", None),
+                ("x", "r2", 30, "closed", None),
+                ("y", "r2", 25, "closed", None),
+                ("z", "r3", 25, "closed", None),
+            ]
+        )
+        fired = {"root": "root", "count": 12}
+        self.assertEqual(graph_module.stall_target(graph, fired, "best_other_cell").node.proof_id, "x")
+        self.assertEqual(graph_module.stall_target(graph, fired, "least_visited").node.proof_id, "z")
+        self.assertIsNone(graph_module.stall_target(graph, fired, "map_only"))
+        with self.assertRaises(ValueError):
+            graph_module.stall_target(graph, fired, "unknown")
+
+        tied, _ = self.project(
+            [
+                ("root", "r1", 100, "closed", None),
+                ("x", "r2", 30, "closed", None),
+                ("y", "r3", 30, "closed", None),
+            ]
+        )
+        self.assertEqual(graph_module.stall_target(tied, fired, "best_other_cell").letter, "B")
+        self.assertEqual(graph_module.stall_target(tied, fired, "least_visited").letter, "B")
+
+        only_lineage, _ = self.project([("root", "r1", 100, "closed", None), ("child", "r1", 90, "closed", "root")])
+        self.assertIsNone(graph_module.stall_target(only_lineage, fired, "best_other_cell"))
+
+    def test_stall_fires_depend_only_on_nodes_and_reset_on_each_crossing(self):
+        specs = [("root", "r1", 100, "closed", None)]
+        specs += [(f"n{i}", "r1", 100 - i, "closed", specs[-1][0]) for i in range(1, 13)]
+        graph, history = self.project(specs)
+        self.assertEqual(graph_module.stall_fire(graph, 12), {"root": "root", "count": 12, "after": "n12"})
+        history.append({"kind": "focus", "proof_id": "elsewhere", "reason": "stall", "root": "root"})
+        self.assertEqual(
+            graph_module.stall_fire(Graph.from_history(history, lambda _: "proof"), 12),
+            {"root": "root", "count": 12, "after": "n12"},
+        )
+        history += [
+            event
+            for proof_id in (f"m{i}" for i in range(1, 13))
+            for event in (
+                {"kind": "candidate", "candidate_id": proof_id, "origin": "model"},
+                {
+                    "kind": "evaluation",
+                    "candidate_id": proof_id,
+                    "mode": "fast",
+                    "result": {"compat": {"v": {"passed": True}}, "metrics": {"estimated_proxy": 80}},
+                },
+                {"kind": "edge", "proof_id": proof_id, "from": ["root"]},
+                {"kind": "route", "proof_id": proof_id, "route": "r1"},
+            )
+        ]
+        self.assertEqual(
+            graph_module.stall_fire(Graph.from_history(history, lambda _: "proof"), 12),
+            {"root": "root", "count": 12, "after": "m12"},
+        )
+
+    def test_batch_replay_preserves_every_threshold_crossing(self):
+        specs = [("root", "r1", 100, "closed", None)]
+        specs += [(f"n{i}", "r1", 100 - i, "closed", specs[-1][0]) for i in range(1, 25)]
+        graph, history = self.project(specs)
+        fires = graph_module.stall_fires(graph, 12)
+        self.assertEqual(
+            fires,
+            [
+                {"root": "root", "count": 12, "after": "n12"},
+                {"root": "root", "count": 12, "after": "n24"},
+            ],
+        )
+        history.extend(
+            {
+                "kind": "stall",
+                "root": fire["root"],
+                "count": fire["count"],
+                "mode": "map_only",
+                "target": None,
+            }
+            for fire in fires
+        )
+        replay = Graph.from_history(history, lambda _: "proof")
+        self.assertEqual(graph_module.stall_fires(replay, 12), fires)
+        self.assertEqual(
+            replay.stall_events,
+            [
+                {"root": "root", "count": 12, "mode": "map_only", "target": None},
+                {"root": "root", "count": 12, "mode": "map_only", "target": None},
+            ],
+        )
+
+    def test_map_has_exact_shape_and_marks_recent_nodes(self):
+        graph, _ = self.project(
+            [("a", "r1", 50, "closed", None), ("b", "r1", 40, "closed", "a"), ("c", "r1", None, "broken", "b")]
+        )
+        view = graph_module.map_view(graph)
+        self.assertEqual(set(view), {"best", "archive", "recent", "effort", "open"})
+        self.assertEqual(view["best"]["node"], "n1")
+        self.assertEqual([row["status"] for row in view["recent"]], ["keep", "discard", "broken"])
+        self.assertEqual((view["effort"], view["open"]), ([], []))
+
+    def test_map_has_no_best_before_a_scored_node(self):
+        graph, _ = self.project([("a", "r1", None, "closed", None)])
+        self.assertIsNone(graph_module.map_view(graph)["best"])
 
 
 class StepTests(unittest.TestCase):
@@ -121,11 +327,33 @@ class StepTests(unittest.TestCase):
 class GraphCampaignTests(FakeRunCase):
     def setUp(self):
         super().setUp()
-        route_patch = patch.object(campaign, "_record_route_later")
-        route_patch.start()
-        self.addCleanup(route_patch.stop)
         reference = campaign._candidate_ids(campaign.events(self.directory))[0]
         campaign._append(self.directory, {"kind": "focus", "proof_id": reference, "reason": "start"})
+
+    def test_routes_are_filed_synchronously_and_one_line_edit_keeps_parent_route(self):
+        initial = campaign.events(self.directory)
+        first_routes = [item for item in initial if item.get("kind") == "route"]
+        first_route_line = next(
+            line
+            for line in (self.directory / "ledger.jsonl").read_bytes().splitlines()
+            if json.loads(line).get("kind") == "route"
+        )
+        reference = campaign._candidate_ids(campaign.events(self.directory))[0]
+        self.evaluate("theorem t := by\n  ref2")
+        history = campaign.events(self.directory)
+        routes = [event for event in history if event.get("kind") == "route"]
+        route_lines = [
+            line
+            for line in (self.directory / "ledger.jsonl").read_bytes().splitlines()
+            if json.loads(line).get("kind") == "route"
+        ]
+        self.assertEqual(len(routes), 2)
+        self.assertEqual(routes[0], first_routes[0])
+        self.assertEqual(route_lines[0], first_route_line)
+        self.assertEqual(routes[1]["parent"], reference)
+        self.assertEqual(routes[1]["route"], routes[0]["route"])
+        self.assertEqual(routes[1]["assigned_by"], "signature")
+        self.assertFalse((self.directory / "route-queue.jsonl").exists())
 
     def test_operation_creates_exact_edge_and_stable_node_projection(self):
         with patch.object(campaign, "normalize_draft", side_effect=lambda _name, proof: proof):
@@ -144,6 +372,209 @@ class GraphCampaignTests(FakeRunCase):
         )
         self.assertEqual([node.id for node in projection.nodes], ["n1", "n2"])
         self.assertEqual(projection.nodes[1].status, "closed")
+
+
+class StallCampaignTests(FakeRunCase):
+    def test_stall_threshold_rejects_an_invalid_environment_value(self):
+        graph = Graph.from_history(campaign.events(self.directory), campaign._proof_reader(self.directory))
+        with (
+            patch.dict("os.environ", {"ARENA_STALL_M": "zero"}),
+            self.assertRaisesRegex(ValueError, "Stall threshold must be a positive integer"),
+        ):
+            campaign._check_stall(self.directory, graph, set())
+
+    def test_stall_moves_focus_to_another_cell_and_adds_one_state_update(self):
+        history = campaign.events(self.directory)
+        root = campaign._candidate_ids(history)[0]
+
+        def add(proof_id, route, score, parent):
+            proof = "theorem t : True := by\n  exact True.intro\n"
+            proof_path = self.directory / "proofs" / f"{proof_id}.lean"
+            proof_path.parent.mkdir(parents=True, exist_ok=True)
+            proof_path.write_text(proof)
+            campaign._append(self.directory, {"kind": "candidate", "candidate_id": proof_id, "origin": "model"})
+            campaign._append(
+                self.directory,
+                {
+                    "kind": "evaluation",
+                    "candidate_id": proof_id,
+                    "mode": "fast",
+                    "result": {
+                        "compat": {"v1": {"passed": True}},
+                        "metrics": {"estimated_proxy": score},
+                    },
+                },
+            )
+            campaign._append(self.directory, {"kind": "edge", "proof_id": proof_id, "from": [parent] if parent else []})
+            campaign._append(self.directory, {"kind": "route", "proof_id": proof_id, "route": route})
+
+        target = "a" * 64
+        add(target, "r2", 5, None)
+        add("b" * 64, "r1", 4, root)
+        add("c" * 64, "r1", 3, root)
+        graph = Graph.from_history(campaign.events(self.directory), campaign._proof_reader(self.directory))
+        with patch.dict("os.environ", {"ARENA_STALL_M": "2", "ARENA_STALL_TARGET": "map_only"}):
+            campaign._check_stall(self.directory, graph, {"c" * 64})
+        history = campaign.events(self.directory)
+        self.assertEqual(
+            [
+                {key: item[key] for key in ("root", "count", "mode", "target")}
+                for item in history
+                if item.get("kind") == "stall"
+            ],
+            [{"root": root, "count": 2, "mode": "map_only", "target": None}],
+        )
+        self.assertFalse(any(item.get("kind") == "focus" and item.get("reason") == "stall" for item in history))
+        self.assertFalse(campaign.state("logic")["updates"])
+        campaign._check_stall(self.directory, graph, set())
+        self.assertEqual(len([item for item in campaign.events(self.directory) if item.get("kind") == "stall"]), 1)
+
+        add("d" * 64, "r1", 2, "c" * 64)
+        add("e" * 64, "r1", 1, "d" * 64)
+        graph = Graph.from_history(campaign.events(self.directory), campaign._proof_reader(self.directory))
+        with patch.dict("os.environ", {"ARENA_STALL_M": "2", "ARENA_STALL_TARGET": "best_other_cell"}):
+            campaign._check_stall(self.directory, graph, {"d" * 64, "e" * 64})
+        history = campaign.events(self.directory)
+        focus = [item for item in history if item.get("kind") == "focus" and item.get("reason") == "stall"][-1]
+        self.assertEqual(
+            (focus["proof_id"], focus["reason"], focus["root"], focus["cell"]), (target, "stall", root, "B")
+        )
+        replayed = Graph.from_history(history, campaign._proof_reader(self.directory))
+        self.assertEqual(graph_module.stall_fires(replayed, 2), graph_module.stall_fires(graph, 2))
+        self.assertEqual(
+            replayed.stall_events,
+            [
+                {"root": root, "count": 2, "mode": "map_only", "target": None},
+                {"root": root, "count": 2, "mode": "best_other_cell", "target": target},
+            ],
+        )
+        self.assertEqual(
+            campaign.state("logic")["updates"][-1],
+            {
+                "seq": next(index for index, event in enumerate(history) if event == focus),
+                "text": "Focus set to #2 (archive B, 5, 1 nodes in its region).",
+            },
+        )
+
+    def test_stall_without_an_other_cell_is_audited_once_without_focus_or_update(self):
+        root = campaign._candidate_ids(campaign.events(self.directory))[0]
+        proof = "theorem t : True := by\n  exact True.intro\n"
+        parent = root
+        filed = set()
+        for index in range(1, 3):
+            proof_id = f"{index:064x}"
+            proof_path = self.directory / "proofs" / f"{proof_id}.lean"
+            proof_path.parent.mkdir(parents=True, exist_ok=True)
+            proof_path.write_text(proof)
+            campaign._append(self.directory, {"kind": "candidate", "candidate_id": proof_id, "origin": "model"})
+            campaign._append(
+                self.directory,
+                {
+                    "kind": "evaluation",
+                    "candidate_id": proof_id,
+                    "mode": "fast",
+                    "result": {"compat": {"v1": {"passed": True}}, "metrics": {"estimated_proxy": 1}},
+                },
+            )
+            campaign._append(self.directory, {"kind": "edge", "proof_id": proof_id, "from": [parent]})
+            campaign._append(self.directory, {"kind": "route", "proof_id": proof_id, "route": "r1"})
+            filed.add(proof_id)
+            parent = proof_id
+
+        graph = Graph.from_history(campaign.events(self.directory), campaign._proof_reader(self.directory))
+        expected_fires = graph_module.stall_fires(graph, 2)
+        with patch.dict("os.environ", {"ARENA_STALL_M": "2", "ARENA_STALL_TARGET": "best_other_cell"}):
+            campaign._check_stall(self.directory, graph, filed)
+        history = campaign.events(self.directory)
+        self.assertFalse(any(item.get("kind") == "focus" and item.get("reason") == "stall" for item in history))
+        self.assertEqual(
+            [
+                {key: item[key] for key in ("root", "count", "mode", "target")}
+                for item in history
+                if item.get("kind") == "stall"
+            ],
+            [{"root": root, "count": 2, "mode": "best_other_cell", "target": None}],
+        )
+        self.assertFalse(campaign.state("logic")["updates"])
+        replayed = Graph.from_history(history, campaign._proof_reader(self.directory))
+        self.assertEqual(graph_module.stall_fires(replayed, 2), expected_fires)
+        self.assertEqual(
+            replayed.stall_events,
+            [{"root": root, "count": 2, "mode": "best_other_cell", "target": None}],
+        )
+
+        target = "a" * 64
+        target_path = self.directory / "proofs" / f"{target}.lean"
+        target_path.write_text(proof)
+        campaign._append(self.directory, {"kind": "candidate", "candidate_id": target, "origin": "model"})
+        campaign._append(
+            self.directory,
+            {
+                "kind": "evaluation",
+                "candidate_id": target,
+                "mode": "fast",
+                "result": {"compat": {"v1": {"passed": True}}, "metrics": {"estimated_proxy": 0}},
+            },
+        )
+        campaign._append(self.directory, {"kind": "edge", "proof_id": target, "from": []})
+        campaign._append(self.directory, {"kind": "route", "proof_id": target, "route": "r2"})
+        later_graph = Graph.from_history(campaign.events(self.directory), campaign._proof_reader(self.directory))
+        with patch.dict("os.environ", {"ARENA_STALL_M": "2", "ARENA_STALL_TARGET": "best_other_cell"}):
+            campaign._check_stall(self.directory, later_graph, {target})
+        later_history = campaign.events(self.directory)
+        self.assertEqual(len([item for item in later_history if item.get("kind") == "stall"]), 1)
+        self.assertFalse(any(item.get("kind") == "focus" and item.get("reason") == "stall" for item in later_history))
+
+    def test_stall_records_each_crossing_from_a_multi_threshold_batch(self):
+        root = campaign._candidate_ids(campaign.events(self.directory))[0]
+
+        def add(proof_id, route, score, parent):
+            proof = "theorem t : True := by\n  exact True.intro\n"
+            proof_path = self.directory / "proofs" / f"{proof_id}.lean"
+            proof_path.parent.mkdir(parents=True, exist_ok=True)
+            proof_path.write_text(proof)
+            campaign._append(self.directory, {"kind": "candidate", "candidate_id": proof_id, "origin": "model"})
+            campaign._append(
+                self.directory,
+                {
+                    "kind": "evaluation",
+                    "candidate_id": proof_id,
+                    "mode": "fast",
+                    "result": {"compat": {"v1": {"passed": True}}, "metrics": {"estimated_proxy": score}},
+                },
+            )
+            campaign._append(self.directory, {"kind": "edge", "proof_id": proof_id, "from": [parent] if parent else []})
+            campaign._append(self.directory, {"kind": "route", "proof_id": proof_id, "route": route})
+
+        add("a" * 64, "r2", 0, None)
+        parent = root
+        for index in range(1, 25):
+            proof_id = f"{index:064x}"
+            add(proof_id, "r1", 0, parent)
+            parent = proof_id
+
+        graph = Graph.from_history(campaign.events(self.directory), campaign._proof_reader(self.directory))
+        with patch.dict("os.environ", {"ARENA_STALL_M": "12", "ARENA_STALL_TARGET": "best_other_cell"}):
+            campaign._check_stall(self.directory, graph, {f"{index:064x}" for index in range(1, 25)})
+
+        history = campaign.events(self.directory)
+        stall_events = [event for event in history if event.get("kind") == "stall"]
+        self.assertEqual([(event["root"], event["count"]) for event in stall_events], [(root, 12), (root, 12)])
+        self.assertEqual([event["target"] for event in stall_events], ["a" * 64, "a" * 64])
+        self.assertEqual(
+            len([event for event in history if event.get("kind") == "focus" and event.get("reason") == "stall"]),
+            1,
+        )
+        replayed = Graph.from_history(history, campaign._proof_reader(self.directory))
+        self.assertEqual(graph_module.stall_fires(replayed, 12), graph_module.stall_fires(graph, 12))
+        self.assertEqual(
+            replayed.stall_events,
+            [
+                {"root": root, "count": 12, "mode": "best_other_cell", "target": "a" * 64},
+                {"root": root, "count": 12, "mode": "best_other_cell", "target": "a" * 64},
+            ],
+        )
+        self.assertEqual(graph_module.stall_fires(replayed, 12), graph_module.stall_fires(graph, 12))
 
     def test_operation_honors_full_mode_after_fast_probe_passes(self):
         with patch.object(campaign, "normalize_draft", side_effect=lambda _name, proof: proof):
@@ -189,6 +620,10 @@ class GraphCampaignTests(FakeRunCase):
         self.assertEqual([edge["from"] for edge in edges[1:]], [[reference]] * 4)
         focuses = [item for item in campaign.events(self.directory) if item.get("kind") == "focus"]
         self.assertEqual(focuses[-1]["reason"], "batch_best")
+        winner = focuses[-1]["proof_id"]
+        campaign._append(self.directory, {"kind": "focus", "proof_id": reference, "reason": "restore"})
+        settled = campaign._settle_focus(self.directory, [winner])
+        self.assertEqual(settled.focus, winner)
 
     def test_named_parent_does_not_control_filing(self):
         first = self.evaluate("theorem t := by\n  ref2")
@@ -210,8 +645,12 @@ class GraphCampaignTests(FakeRunCase):
         proof = "theorem t := by\n  entirely different approach\n  another distinct line\n  third separate tactic\n  fourth unrelated statement"
         proof_id = "f" * 64
         campaign._snapshot(self.directory, proof_id, proof)
-        edge = campaign._file_node(self.directory, campaign.events(self.directory), proof_id, proof)
+        edge, created = campaign._file_node(self.directory, campaign.events(self.directory), proof_id, proof)
+        self.assertTrue(created)
         self.assertEqual((edge["type"], edge["from"], edge["exact"]), ("root", [], False))
+        duplicate, created = campaign._file_node(self.directory, campaign.events(self.directory), proof_id, proof)
+        self.assertFalse(created)
+        self.assertEqual(duplicate["proof_id"], edge["proof_id"])
 
         campaign.candidate("T", "logic", "#1")
         last_focus = next(item for item in reversed(campaign.events(self.directory)) if item.get("kind") == "focus")

@@ -697,11 +697,9 @@ if __name__ == "__main__":
 
 
 class RouteRuleAgreementTests(unittest.TestCase):
-    """The packet, the arena_probe description and SKILL.md state the route rule once each; they must agree."""
+    """The packet, the arena_probe description and SKILL.md no longer describe the retired extractor."""
 
-    RULE = "drafts with `sorry` holes are not fingerprinted"
-
-    def test_packet_tool_description_and_skill_state_the_same_route_rule(self):
+    def test_agent_text_does_not_claim_routes_use_compiled_fingerprints(self):
         sources = {
             "packet": ROOT / "agent-text" / "packet" / "task.md",
             "tool": ROOT / "agent-text" / "tools" / "arena_probe.yaml",
@@ -710,5 +708,5 @@ class RouteRuleAgreementTests(unittest.TestCase):
         for label, path in sources.items():
             text = " ".join(path.read_text(encoding="utf-8").split())
             with self.subTest(label):
-                self.assertIn(self.RULE, text)
-                self.assertNotIn("opens a route, and filling the holes", text)
+                self.assertNotIn("Routes are fingerprinted from complete proofs", text)
+                self.assertNotIn("routes are fingerprinted from complete proofs", text)
