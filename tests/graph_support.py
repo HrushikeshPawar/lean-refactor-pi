@@ -12,6 +12,9 @@ from arena.engine import instrument_sorries
 
 
 class FakeRunCase(unittest.TestCase):
+    cascade_errors: ClassVar[bool] = False
+    no_goal_marker: ClassVar[str | None] = None
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -40,6 +43,8 @@ class FakeRunCase(unittest.TestCase):
         cls.calls.append((proof, mode, sorted(known or {})))
         tokens = len(proof)
         bad_lines = [index for index, line in enumerate(proof.splitlines(), 1) if "bad" in line.split()]
+        if cls.cascade_errors:
+            bad_lines = bad_lines[:1]
         diagnostics = [
             {"severity": "error", "proof_line": line, "file_line": line, "message": "fixture error"}
             for line in bad_lines
@@ -70,7 +75,12 @@ class FakeRunCase(unittest.TestCase):
         }
         if mode == "probe":
             result["contains_sorry"] = bool(re.search(r"\bsorry\b", proof))
-            result["goals"] = [{"proof_line": line, "goals": [f"goal at line {line}"]} for line in sorry_lines]
+            lines = proof.splitlines()
+            result["goals"] = [
+                {"proof_line": line, "goals": [f"goal at line {line}"]}
+                for line in sorry_lines
+                if cls.no_goal_marker is None or cls.no_goal_marker not in lines[line - 1]
+            ]
         return result
 
     def evaluate(self, text, **kwargs):
