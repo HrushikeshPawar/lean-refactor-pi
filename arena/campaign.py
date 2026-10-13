@@ -2595,7 +2595,7 @@ def _check_text(number: int, result: dict, total: int) -> str:
     )
 
 
-def _autocheck_jobs(rows: list[dict]) -> list[dict]:
+def _autocheck_jobs(rows: list[dict], closing: bool = False) -> list[dict]:
     """Candidates that compile on the primary version but were never checked on every version,
     most promising first."""
     jobs = [
@@ -2605,10 +2605,16 @@ def _autocheck_jobs(rows: list[dict]) -> list[dict]:
         and r["status"] == "primary"
         and not any(e["mode"] == "full" for e in r["evaluations"])
     ]
+    if not closing:
+        verified = [row for row in rows if row["verified"]]
+        best_verified = _best(verified) if verified else None
+        bar = best_verified["score"] if best_verified else None
+        if bar is not None:
+            jobs = [row for row in jobs if row["score"] is None or row["score"] >= bar]
     return sorted(jobs, key=lambda r: (r["score"] if r["score"] is not None else float("-inf"), r["n"]), reverse=True)
 
 
-def autocheck(name: str, run_id: str, max_seconds: float | None = None) -> dict:
+def autocheck(name: str, run_id: str, max_seconds: float | None = None, closing: bool = False) -> dict:
     """Drain the full-check queue in the background lane. Only one checker runs per run;
     the queue is derived from the ledger, so a killed checker loses nothing."""
     directory = run_dir(run_id)
@@ -2624,7 +2630,7 @@ def autocheck(name: str, run_id: str, max_seconds: float | None = None) -> dict:
             if lean_health.tripped(directory):
                 break  # Lean is unhealthy: background checks pause with the model's work
             history = events(directory)
-            jobs = _autocheck_jobs(_summaries(history))
+            jobs = _autocheck_jobs(_summaries(history), closing=closing)
             if not jobs:
                 break
             job = jobs[0]
@@ -2650,7 +2656,7 @@ def autocheck(name: str, run_id: str, max_seconds: float | None = None) -> dict:
     return {
         "ok": True,
         "checked": checked,
-        "remaining": [f"#{r['n']}" for r in _autocheck_jobs(_summaries(events(directory)))],
+        "remaining": [f"#{r['n']}" for r in _autocheck_jobs(_summaries(events(directory)), closing=closing)],
     }
 
 

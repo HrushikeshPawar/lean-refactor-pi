@@ -667,7 +667,7 @@ def finish(
         # Checks still queued when the model stopped are finished here (no model cost), unless the
         # run was interrupted, so the submission reflects every candidate the model produced.
         if interrupted is None and not tripped:
-            drained = autocheck(args.theorem, args.run_id, DRAIN_S)
+            drained = autocheck(args.theorem, args.run_id, DRAIN_S, closing=True)
             if drained["checked"] or drained.get("remaining"):
                 print(
                     f"Background checks after Pi exited: {drained['checked']}; still pending {drained.get('remaining', [])}",

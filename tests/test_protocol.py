@@ -557,16 +557,33 @@ class ProtocolLogicTests(unittest.TestCase):
         self.calls.clear()
         self.assertEqual(campaign.state("logic")["checking"], ["#3", "#2"])
         outcome = campaign.autocheck("T", "logic")
-        self.assertEqual(outcome["checked"], ["#3", "#2"])
-        self.assertEqual([(mode, known) for _, mode, known in self.calls], [("full", ["v1"]), ("full", ["v1"])])
+        self.assertEqual(outcome["checked"], ["#3"])
+        self.assertEqual([(mode, known) for _, mode, known in self.calls], [("full", ["v1"])])
         state = campaign.state("logic")
         self.assertEqual(state["best"]["candidate"], "#3")
         self.assertIsNone(state["leading_unverified"])
         self.assertEqual(
             [u["text"].split(":")[0] for u in state["updates"]],
-            ["#3 passes all 2 versions", "#2 passes all 2 versions"],
+            ["#3 passes all 2 versions"],
         )
         self.assertEqual(campaign.autocheck("T", "logic")["checked"], [])
+
+    def test_autocheck_only_queues_candidates_that_can_reach_the_verified_bar(self):
+        def candidate(number, score, verified=False):
+            return {
+                "n": number,
+                "id": str(number),
+                "origin": "model",
+                "status": "full" if verified else "primary",
+                "score": score,
+                "verified": verified,
+                "evaluations": [],
+            }
+
+        rows = [candidate(1, 70, True), candidate(2, 69), candidate(3, 70), candidate(4, None)]
+        self.assertEqual([r["n"] for r in campaign._autocheck_jobs(rows)], [3, 4])
+        self.assertEqual([r["n"] for r in campaign._autocheck_jobs(rows, closing=True)], [3, 2, 4])
+        self.assertEqual([r["n"] for r in campaign._autocheck_jobs([candidate(2, 1), candidate(3, 2)])], [3, 2])
 
     def test_failed_transfer_is_reported_with_its_headline_and_not_submitted(self):
         self.evaluate("theorem t := by\n  old")
