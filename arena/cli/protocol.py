@@ -14,6 +14,7 @@ from typing import Literal
 from arena.campaign import (
     autocheck,
     candidate,
+    compile_operation,
     declarations,
     evaluate_request,
     find,
@@ -36,6 +37,7 @@ ACTIONS = (
     "init",
     "evaluate",
     "probe",
+    "operation",
     "idea",
     "frontier",
     "candidate",
@@ -78,6 +80,16 @@ def run(args: SimpleNamespace) -> dict:
         if args.proof_file:
             return probe(args.theorem, args.run_id, args.proof_file.read_text(), args.idea_id, parent)
         raise ValueError("Pass proof-file or one to four draft-file values")
+    if args.action == "operation":
+        if not args.operation:
+            raise ValueError("Pass --operation with a JSON object")
+        return compile_operation(
+            args.theorem,
+            args.run_id,
+            json.loads(args.operation),
+            args.mode,
+            args.idea_id,
+        )
     if args.action == "idea":
         return record_idea(
             args.run_id,
@@ -138,6 +150,7 @@ class ProtocolOptions:
     idea_id: str | None = None
     candidate: str | None = None
     from_probe: str | None = None
+    operation: str | None = None
     handle: str | None = None
     first: int | None = None
     last: int | None = None

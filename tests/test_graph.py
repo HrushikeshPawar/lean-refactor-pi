@@ -8,7 +8,245 @@ from arena import campaign
 from arena.cli.graph import build_snapshot
 from arena.cli.run import attempt_has_model_error
 from arena.cli.serve import graph_payload
-from arena.graph import common_base, merge_text, ranked_frontier
+from arena.graph import (
+    Graph,
+    common_base,
+    measured_parent,
+    merge_steps,
+    merge_text,
+    ranked_frontier,
+    similarity,
+    splice_text,
+)
+from arena.steps import split_steps, step_range
+from tests.graph_support import FakeRunCase
+
+
+class StepTests(unittest.TestCase):
+    def test_steps_keep_nested_bullets_together_and_report_source_lines(self):
+        proof = "theorem t : P := by\n  have h := by\n    · exact h\n  exact h\n"
+        steps = split_steps(proof)
+        self.assertEqual([(step.id, step.first_line, step.last_line) for step in steps], [("s1", 2, 3), ("s2", 4, 4)])
+        self.assertEqual(steps[0].text, "  have h := by\n    · exact h")
+
+    def test_term_mode_is_one_step_and_invalid_range_lists_valid_ids(self):
+        steps = split_steps("theorem t : P := exact h\n")
+        self.assertEqual(len(steps), 1)
+        with self.assertRaisesRegex(ValueError, "unknown step s3; steps are s1-s1"):
+            step_range(steps, "s3")
+
+    def test_comment_only_lines_do_not_start_steps_and_reversed_ranges_fail(self):
+        steps = split_steps("theorem t : P := by\n  -- context\n  exact h\n  assumption\n")
+        self.assertEqual([step.text for step in steps], ["  exact h", "  assumption"])
+        indented = split_steps("theorem t : P := by\n-- context\n  exact h\n  assumption\n")
+        self.assertEqual([step.text for step in indented], ["  exact h", "  assumption"])
+        with self.assertRaisesRegex(ValueError, "reversed step range s2-s1; steps are s1-s2"):
+            step_range(steps, "s2-s1")
+
+    def test_projection_assigns_stable_ids_status_and_depth_from_ledger_events(self):
+        a, b, c = "a" * 64, "b" * 64, "c" * 64
+        passed = {"compat": {"v1": {"passed": True}}, "tokens": 8, "heartbeat": 3, "metrics": {"proxy": 80}}
+        history = [
+            {"kind": "init", "versions": [["v1", "a"], ["v2", "b"]]},
+            {"kind": "candidate", "candidate_id": a, "origin": "reference"},
+            {"kind": "evaluation", "candidate_id": a, "mode": "fast", "result": passed},
+            {"kind": "edge", "proof_id": a, "type": "root", "from": [], "exact": True},
+            {
+                "kind": "probe",
+                "proof_id": b,
+                "result": {"compat": {"v1": {"passed": True, "contains_sorry": True}}, "tokens": 6},
+            },
+            {"kind": "edge", "proof_id": b, "type": "edited_from", "from": [a], "exact": True},
+            {"kind": "probe", "proof_id": c, "result": {"compat": {"v1": {"passed": False}}, "tokens": 4}},
+            {"kind": "edge", "proof_id": c, "type": "edited_from", "from": [b], "exact": True},
+            {"kind": "focus", "proof_id": b, "reason": "start"},
+        ]
+        texts = {a: "theorem t := by\n  exact h", b: "theorem t := by\n  sorry", c: "theorem t := by\n  bad"}
+        graph = Graph.from_history(history, texts.get)
+        self.assertEqual(
+            [(node.id, node.status, node.depth) for node in graph.nodes],
+            [("n1", "closed", 0), ("n2", "sketch", 1), ("n3", "broken", 2)],
+        )
+        self.assertEqual(graph.focus, b)
+        self.assertEqual(graph.order, ["n1", "n2", "n3"])
+
+    def test_splice_reindents_replacement_and_preserves_other_lines(self):
+        proof = "theorem t : P := by\n  intro h\n  exact h\n  done\n"
+        self.assertEqual(
+            splice_text(proof, "s2", "exact\n  h"),
+            "theorem t : P := by\n  intro h\n  exact\n    h\n  done\n",
+        )
+        self.assertEqual(splice_text("theorem t : P := rfl\n", "s1", "exact h"), "theorem t : P := exact h\n")
+
+    def test_merge_steps_uses_matching_ids_and_rejects_duplicate_take(self):
+        base = "theorem t : P := by\n  intro h\n  exact h\n"
+        donor = "theorem t : P := by\n  intro z\n  assumption\n"
+        self.assertIn("  assumption\n", merge_steps(base, [{"text": donor, "step": "s2"}]))
+        with self.assertRaisesRegex(ValueError, "duplicate step s2"):
+            merge_steps(base, [{"text": donor, "step": "s2"}, {"text": donor, "step": "s2"}])
+
+    def test_similarity_and_measured_parent_use_recent_lines(self):
+        self.assertEqual(similarity("  tactic alpha", "tactic alpha"), 1.0)
+        old = [(str(index), f"unique proof line {index}") for index in range(21)]
+        self.assertEqual(measured_parent(old, "unique proof line 0")[0], "20")
+
+
+class GraphCampaignTests(FakeRunCase):
+    def setUp(self):
+        super().setUp()
+        route_patch = patch.object(campaign, "_record_route_later")
+        route_patch.start()
+        self.addCleanup(route_patch.stop)
+        reference = campaign._candidate_ids(campaign.events(self.directory))[0]
+        campaign._append(self.directory, {"kind": "focus", "proof_id": reference, "reason": "start"})
+
+    def test_operation_creates_exact_edge_and_stable_node_projection(self):
+        with patch.object(campaign, "normalize_draft", side_effect=lambda _name, proof: proof):
+            result = campaign.compile_operation(
+                "T",
+                "logic",
+                {"type": "draft", "base": "n1", "text": "theorem t := by\n  good"},
+            )
+        self.assertEqual(result["node"], "n2")
+        self.assertEqual(
+            result["edge"],
+            {"type": "edited_from", "from": [campaign._candidate_ids(campaign.events(self.directory))[0]]},
+        )
+        projection = Graph.from_history(
+            campaign.events(self.directory), lambda ident: (self.directory / "proofs" / f"{ident}.lean").read_text()
+        )
+        self.assertEqual([node.id for node in projection.nodes], ["n1", "n2"])
+        self.assertEqual(projection.nodes[1].status, "closed")
+
+    def test_operation_honors_full_mode_after_fast_probe_passes(self):
+        with patch.object(campaign, "normalize_draft", side_effect=lambda _name, proof: proof):
+            result = campaign.compile_operation(
+                "T", "logic", {"type": "draft", "base": "n1", "text": "theorem t := by\n  good"}, mode="full"
+            )
+        self.assertEqual(result["mode"], "full")
+        evaluations = [item for item in campaign.events(self.directory) if item.get("kind") == "evaluation"]
+        self.assertEqual(evaluations[-1]["mode"], "full")
+
+    def test_free_text_uses_focus_and_failed_compile_still_has_node(self):
+        result = self.evaluate("theorem t := by\n  ref2")
+        graph = campaign.graph_state("logic")
+        edge = graph["nodes"][-1]["edge"]
+        self.assertEqual(edge["type"], "filed_under_focus")
+        self.assertEqual(edge["from"], [campaign._candidate_ids(campaign.events(self.directory))[0]])
+        self.assertEqual(result["candidate"], "#2")
+
+        failed = self.evaluate("theorem t := by\n  bad")
+        graph = campaign.graph_state("logic")
+        self.assertEqual(graph["nodes"][-1]["edge"]["type"], "filed_under_focus")
+        self.assertEqual(failed["candidate"], "#3")
+
+    def test_probe_batch_files_all_drafts_under_original_focus_then_settles_once(self):
+        reference = campaign._candidate_ids(campaign.events(self.directory))[0]
+        compiled = {"ok": True, "tokens": 1, "heartbeat": 1, "compat": {"v1": {"passed": True}}}
+        with (
+            patch.object(campaign, "normalize_draft", side_effect=lambda _name, proof: proof),
+            patch.object(campaign, "_compile_probes", return_value={}),
+            patch.object(campaign, "_compile_probe", return_value=compiled),
+        ):
+            campaign.probe_batch(
+                "T",
+                "logic",
+                [
+                    "theorem t := by\n  alpha",
+                    "theorem t := by\n  beta",
+                    "theorem t := by\n  gamma",
+                    "theorem t := by\n  delta",
+                ],
+            )
+        edges = [item for item in campaign.events(self.directory) if item.get("kind") == "edge"]
+        self.assertEqual([edge["from"] for edge in edges[1:]], [[reference]] * 4)
+        focuses = [item for item in campaign.events(self.directory) if item.get("kind") == "focus"]
+        self.assertEqual(focuses[-1]["reason"], "batch_best")
+
+    def test_named_parent_does_not_control_filing(self):
+        first = self.evaluate("theorem t := by\n  ref2")
+        result = campaign.record_evaluation(
+            "T", "logic", "theorem t := by\n  ref3", "fast", parents=["#1"], materialize_live=False
+        )
+        reference_id = campaign._candidate_ids(campaign.events(self.directory))[0]
+        first_id = campaign._candidate_ids(campaign.events(self.directory))[1]
+        event = next(
+            item
+            for item in campaign.events(self.directory)
+            if item.get("kind") == "edge" and item.get("proof_id") == result["candidate_id"]
+        )
+        self.assertEqual(event["named_parent"], reference_id)
+        self.assertEqual(event["from"], [first_id])
+        self.assertEqual(first["candidate"], "#2")
+
+    def test_dissimilar_free_text_is_a_root_and_restore_moves_focus(self):
+        proof = "theorem t := by\n  entirely different approach\n  another distinct line\n  third separate tactic\n  fourth unrelated statement"
+        proof_id = "f" * 64
+        campaign._snapshot(self.directory, proof_id, proof)
+        edge = campaign._file_node(self.directory, campaign.events(self.directory), proof_id, proof)
+        self.assertEqual((edge["type"], edge["from"], edge["exact"]), ("root", [], False))
+
+        campaign.candidate("T", "logic", "#1")
+        last_focus = next(item for item in reversed(campaign.events(self.directory)) if item.get("kind") == "focus")
+        self.assertEqual(
+            (last_focus["proof_id"], last_focus["reason"]),
+            (campaign._candidate_ids(campaign.events(self.directory))[0], "restore"),
+        )
+
+    def test_splice_and_merge_operations_record_exact_lineage(self):
+        with patch.object(campaign, "normalize_draft", side_effect=lambda _name, proof: proof):
+            base = self.evaluate("theorem t := by\n  intro h\n  exact h")
+            splice = campaign.compile_operation(
+                "T", "logic", {"type": "splice", "base": base["candidate"], "steps": "s2", "text": "trivial"}
+            )
+            donor = self.evaluate("theorem t := by\n  intro z\n  assumption")
+            merged = campaign.compile_operation(
+                "T",
+                "logic",
+                {"type": "merge", "base": base["candidate"], "take": [{"from": donor["candidate"], "step": "s2"}]},
+            )
+        self.assertEqual(splice["edge"]["type"], "edited_from")
+        current_graph = Graph.from_history(
+            campaign.events(self.directory), lambda ident: (self.directory / "proofs" / f"{ident}.lean").read_text()
+        )
+        splice_event = next(
+            item
+            for item in campaign.events(self.directory)
+            if item.get("kind") == "edge" and item.get("proof_id") == current_graph.nodes[2].proof_id
+        )
+        self.assertTrue(splice_event["exact"])
+        self.assertEqual(merged["edge"]["type"], "merged_from")
+        merge_node = next(item.proof_id for item in current_graph.nodes if item.id == merged["node"])
+        merge_event = next(
+            item
+            for item in campaign.events(self.directory)
+            if item.get("kind") == "edge" and item.get("proof_id") == merge_node
+        )
+        donor_id = campaign._candidate_ids(campaign.events(self.directory))[3]
+        self.assertEqual(merge_event["operation"]["take"], [{"from": donor_id, "step": "s2"}])
+
+    def test_bad_node_and_step_references_name_the_input(self):
+        with self.assertRaisesRegex(ValueError, "unknown node nope; use nK, #N, pN or a hash prefix"):
+            campaign.resolve_node_ref(campaign.events(self.directory), "nope")
+        with (
+            patch.object(campaign, "normalize_draft", side_effect=lambda _name, proof: proof),
+            self.assertRaisesRegex(ValueError, "unknown step s8; steps are s1-s1"),
+        ):
+            campaign.compile_operation("T", "logic", {"type": "splice", "base": "n1", "steps": "s8", "text": "exact h"})
+
+    def test_repeated_text_does_not_create_another_node_or_edge(self):
+        proof = "theorem t := by\n  good"
+        first = self.evaluate(proof)
+        edges_before = len([item for item in campaign.events(self.directory) if item.get("kind") == "edge"])
+        self.evaluate(proof, mode="full")
+        graph = Graph.from_history(
+            campaign.events(self.directory), lambda ident: (self.directory / "proofs" / f"{ident}.lean").read_text()
+        )
+        self.assertEqual(len(graph.nodes), 2)
+        self.assertEqual(
+            len([item for item in campaign.events(self.directory) if item.get("kind") == "edge"]), edges_before
+        )
+        self.assertEqual(first["candidate"], "#2")
 
 
 class MergeTests(unittest.TestCase):

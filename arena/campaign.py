@@ -32,7 +32,19 @@ from arena.engine import (
     versions,
     workspace,
 )
-from arena.graph import common_base, edit_fingerprint, merge_text, ranked_frontier
+from arena.graph import (
+    FILING_MIN_SIMILARITY,
+    Graph,
+    Node,
+    common_base,
+    edit_fingerprint,
+    measured_parent,
+    merge_steps,
+    merge_text,
+    ranked_frontier,
+    similarity,
+    splice_text,
+)
 from arena.profile import heartbeat_floor, profile
 
 
@@ -53,6 +65,7 @@ class AmbiguousDeclaration(ValueError):
 
 
 _SESSION: ContextVar[_Session | None] = ContextVar("arena_source_session", default=None)
+_BATCH_FOCUS: ContextVar[tuple[bool, str | None]] = ContextVar("arena_batch_focus", default=(False, None))
 
 
 class _Session:
@@ -1376,6 +1389,8 @@ def init(name: str, run_id: str, extra: str = "") -> dict:
             "evaluator_sha256": hashlib.sha256(Path(__file__).with_name("engine.py").read_bytes()).hexdigest(),
         },
     )
+    _file_node(directory, events(directory), reference_id, row["src"], operation={"type": "root", "from": []})
+    _append(directory, {"kind": "focus", "proof_id": reference_id, "reason": "start"})
     materialize(name, run_id, row["src"])
     _append(directory, {"kind": "current", "candidate_id": reference_id})
     _record_route_later(directory, name, reference_id, row["src"])
@@ -1481,6 +1496,154 @@ def resolve_parent_ref(history: list[dict], reference: str) -> str:
             return parent
         raise ValueError(text.render("messages/errors.probe_parent_missing", reference=reference.strip()))
     return resolve_candidate_ref(history, reference)
+
+
+def _graph_proof_ids(history: list[dict]) -> list[str]:
+    found: list[str] = []
+    for event in history:
+        if event.get("kind") == "candidate":
+            proof_id = event["candidate_id"]
+        elif event.get("kind") == "probe":
+            proof_id = event["proof_id"]
+        else:
+            continue
+        if proof_id not in found:
+            found.append(proof_id)
+    return found
+
+
+def resolve_node_ref(history: list[dict], reference: str) -> str:
+    value = reference.strip()
+    proof_ids = _graph_proof_ids(history)
+    if re.fullmatch(r"n[1-9][0-9]*", value):
+        index = int(value[1:])
+        if index <= len(proof_ids):
+            return proof_ids[index - 1]
+    elif re.fullmatch(r"#[1-9][0-9]*", value):
+        try:
+            return resolve_candidate_ref(history, value)
+        except ValueError:
+            pass
+    elif re.fullmatch(r"[pP][1-9][0-9]*", value):
+        try:
+            return resolve_probe_ref(history, value)
+        except ValueError:
+            pass
+    elif re.fullmatch(r"[0-9a-fA-F]{8,64}", value):
+        matches = [proof_id for proof_id in proof_ids if proof_id.startswith(value.lower())]
+        if len(matches) == 1:
+            return matches[0]
+    raise ValueError(text.render("messages/errors.node_reference_invalid", reference=value))
+
+
+def _named_parent_id(history: list[dict], reference: str | None) -> str | None:
+    if not reference:
+        return None
+    try:
+        if re.fullmatch(r"\s*[pP][1-9][0-9]*\s*", reference):
+            return resolve_probe_ref(history, reference)
+        return resolve_candidate_ref(history, reference)
+    except ValueError:
+        return None
+
+
+def _file_node(
+    directory: Path,
+    history: list[dict],
+    proof_id: str,
+    proof: str,
+    named_parent: str | None = None,
+    operation: dict | None = None,
+) -> dict:
+    """Append exactly one graph edge per proof id under the run's graph lock."""
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / "graph.lock").open("a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        history = events(directory)
+        existing = next(
+            (event for event in history if event.get("kind") == "edge" and event.get("proof_id") == proof_id), None
+        )
+        if existing:
+            return existing
+        graph = Graph.from_history(
+            history,
+            lambda ident: (
+                (directory / "proofs" / f"{ident}.lean").read_text()
+                if (directory / "proofs" / f"{ident}.lean").is_file()
+                else None
+            ),
+        )
+        prior_texts = [
+            (
+                node.proof_id,
+                (directory / "proofs" / f"{node.proof_id}.lean").read_text(),
+            )
+            for node in graph.nodes
+            if node.proof_id != proof_id and (directory / "proofs" / f"{node.proof_id}.lean").is_file()
+        ]
+        measured_id, measured_score = measured_parent(prior_texts, proof)
+        focus_similarity = None
+        if operation is not None:
+            edge_type = operation["type"]
+            sources = list(operation.get("from", []))
+            exact = True
+            operation_data = dict(operation)
+        else:
+            in_batch, batch_focus = _BATCH_FOCUS.get()
+            focus_id = batch_focus if in_batch else graph.focus
+            focus_proof = (
+                (directory / "proofs" / f"{focus_id}.lean").read_text()
+                if focus_id and (directory / "proofs" / f"{focus_id}.lean").is_file()
+                else None
+            )
+            focus_similarity = similarity(focus_proof, proof) if focus_proof is not None else None
+            if focus_id and focus_similarity is not None and focus_similarity >= FILING_MIN_SIMILARITY:
+                edge_type, sources, exact = "filed_under_focus", [focus_id], False
+            else:
+                edge_type, sources, exact = "root", [], False
+            operation_data = None
+        event = {
+            "kind": "edge",
+            "proof_id": proof_id,
+            "type": edge_type,
+            "from": sources,
+            "exact": exact,
+            "similarity": focus_similarity,
+            "named_parent": named_parent,
+            "measured_parent": measured_id,
+            "measured_similarity": measured_score,
+            "operation": operation_data,
+        }
+        _append(directory, event)
+        return event
+
+
+def _settle_focus(directory: Path, proof_ids: list[str]) -> str | None:
+    history = events(directory)
+    graph = Graph.from_history(
+        history,
+        lambda ident: (
+            (directory / "proofs" / f"{ident}.lean").read_text()
+            if (directory / "proofs" / f"{ident}.lean").is_file()
+            else None
+        ),
+    )
+    nodes = {node.proof_id: node for node in graph.nodes}
+    eligible = [nodes[ident] for ident in proof_ids if ident in nodes and nodes[ident].status in ("closed", "sketch")]
+    if not eligible:
+        return graph.focus
+
+    def rank(node: Node) -> tuple[int, float]:
+        if node.status == "closed":
+            return (1, node.score if node.score is not None else 0.0)
+        proof = (directory / "proofs" / f"{node.proof_id}.lean").read_text()
+        return (0, -len(re.findall(r"\bsorry\b", proof)))
+
+    winner = max(eligible, key=rank)
+    if winner.proof_id != graph.focus:
+        _append(directory, {"kind": "focus", "proof_id": winner.proof_id, "reason": "batch_best"})
+        return winner.proof_id
+    return graph.focus
 
 
 IDEA_STATUSES = ("active", "parked", "succeeded", "abandoned")
@@ -1793,6 +1956,7 @@ def record_evaluation(
     lane: str = "model",
     trigger: str = "model",
     precomputed: dict | None = None,
+    operation: dict | None = None,
 ) -> dict:
     """Record a candidate and its evaluation. `precomputed` is a result the caller already
     compiled for this exact proof and mode; `trigger` says whether the model or the
@@ -1924,6 +2088,17 @@ def record_evaluation(
     location = materialize(name, run_id, proof) if materialize_live and result.get("tokens") is not None else {}
     if location:
         _append(directory, {"kind": "current", "candidate_id": candidate_id})
+    _file_node(
+        directory,
+        events(directory),
+        candidate_id,
+        proof,
+        _named_parent_id(events(directory), (parents or [None])[0]),
+        operation,
+    )
+    in_batch, _ = _BATCH_FOCUS.get()
+    if not in_batch:
+        _settle_focus(directory, [candidate_id])
     history = events(directory)
     rows = _summaries(history)
     me = next((r for r in rows if r["id"] == candidate_id), None)
@@ -2087,7 +2262,15 @@ def _compile_probes(name: str, directory: Path, drafts: list[str]) -> dict[str, 
     return compiled
 
 
-def probe(name: str, run_id: str, proof: str, idea_id: str | None = None, parent: str | None = None) -> dict:
+def probe(
+    name: str,
+    run_id: str,
+    proof: str,
+    idea_id: str | None = None,
+    parent: str | None = None,
+    operation: dict | None = None,
+    mode: str = "fast",
+) -> dict:
     """Compile a draft (sorry allowed) in the shadow project without creating a candidate."""
     proof = normalize_draft(name, proof)
     directory = run_dir(run_id)
@@ -2104,7 +2287,7 @@ def probe(name: str, run_id: str, proof: str, idea_id: str | None = None, parent
     parent_id = parent_id or _current(history)
     proof_id = hashlib.sha256((name + "\0" + proof).encode()).hexdigest()
     if proof_id in set(_candidate_ids(history)):
-        return evaluate_request(name, run_id, proof, idea_id=idea_id, parents=[parent] if parent else None)
+        return evaluate_request(name, run_id, proof, mode, parents=[parent] if parent else None, idea_id=idea_id)
     earlier = next(
         (item for item in reversed(history) if item.get("kind") == "probe" and item["proof_id"] == proof_id), None
     )
@@ -2120,7 +2303,14 @@ def probe(name: str, run_id: str, proof: str, idea_id: str | None = None, parent
                 result = _compile_probe(name, row, proof)
         if complete and next(iter((result.get("compat") or {}).values()), {}).get("passed"):
             recorded = record_evaluation(
-                name, run_id, proof, "fast", [parent] if parent else None, idea_id=idea_id, precomputed=result
+                name,
+                run_id,
+                proof,
+                mode,
+                [parent] if parent else None,
+                idea_id=idea_id,
+                precomputed=result if mode == "fast" else None,
+                operation=operation,
             )
             view = _model_view(
                 {**recorded, "full_check": _full_check_status(events(directory), recorded["candidate_id"])}
@@ -2136,8 +2326,14 @@ def probe(name: str, run_id: str, proof: str, idea_id: str | None = None, parent
             directory,
             {"kind": "probe", "proof_id": proof_id, "idea_id": idea_id, "parent": parent_id, "result": result},
         )
+        _file_node(directory, events(directory), proof_id, proof, _named_parent_id(history, parent), operation)
         _check_breaker(directory)
         # A draft (holes, errors or a failed compile) never opens a route, so it is not queued for extraction.
+    if earlier:
+        _file_node(directory, events(directory), proof_id, proof, _named_parent_id(history, parent), operation)
+    in_batch, _ = _BATCH_FOCUS.get()
+    if not in_batch:
+        _settle_focus(directory, [proof_id])
     location = materialize(name, run_id, proof) if result.get("tokens") is not None else {}
     label = _probe_numbers(events(directory))[proof_id]
     return _model_view(
@@ -2180,8 +2376,10 @@ def probe_batch(
         raise ValueError(text.render("messages/errors.draft_limit", max_drafts_word=word))
     history = events(run_dir(run_id))
     fixed_parent = resolve_parent_ref(history, parent) if parent else _current(history)
+    starting_focus = next((item["proof_id"] for item in reversed(history) if item.get("kind") == "focus"), None)
     outcomes = []
     token = _PRECOMPILED.set(_compile_probes(name, run_dir(run_id), drafts) if len(drafts) > 1 else {})
+    focus_token = _BATCH_FOCUS.set((True, starting_focus))
     try:
         for index, draft in enumerate(drafts, 1):
             try:
@@ -2190,8 +2388,91 @@ def probe_batch(
                 outcome = {"ok": False, "mode": "probe", "error": " ".join(str(error).split())[:400]}
             outcomes.append({"index": index, **outcome})
     finally:
+        _BATCH_FOCUS.reset(focus_token)
         _PRECOMPILED.reset(token)
+    directory = run_dir(run_id)
+    filed = []
+    for draft in drafts:
+        try:
+            proof = normalize_draft(name, draft)
+        except ValueError:
+            continue
+        proof_id = hashlib.sha256((name + "\0" + proof).encode()).hexdigest()
+        if proof_id not in filed:
+            filed.append(proof_id)
+    _settle_focus(directory, filed)
     return {"ok": True, "drafts": outcomes}
+
+
+def compile_operation(
+    name: str,
+    run_id: str,
+    operation: dict,
+    mode: str = "fast",
+    idea_id: str | None = None,
+) -> dict:
+    """Build, compile and file one operation-derived proof."""
+    if mode not in ("fast", "full"):
+        raise ValueError(text.render("messages/errors.evaluation_mode"))
+    directory = run_dir(run_id)
+    history = events(directory)
+
+    def proof_for(reference: str) -> str:
+        proof_id = resolve_node_ref(history, reference)
+        return (directory / "proofs" / f"{proof_id}.lean").read_text()
+
+    kind = operation.get("type")
+    if kind == "draft":
+        base_id = resolve_node_ref(history, operation.get("base", ""))
+        proof = operation.get("text")
+        if not isinstance(proof, str):
+            raise ValueError(text.render("messages/errors.draft_operation_text"))
+        edge_operation = {"type": "edited_from", "from": [base_id]}
+    elif kind == "splice":
+        base_id = resolve_node_ref(history, operation.get("base", ""))
+        base = proof_for(operation.get("base", ""))
+        proof = splice_text(base, operation.get("steps", ""), operation.get("text", ""))
+        edge_operation = {
+            "type": "edited_from",
+            "from": [base_id],
+            "steps": operation["steps"],
+        }
+    elif kind == "merge":
+        base_ref = operation.get("base", "")
+        base_id = resolve_node_ref(history, base_ref)
+        base = proof_for(base_ref)
+        takes = operation.get("take")
+        if not isinstance(takes, list):
+            raise ValueError(text.render("messages/errors.merge_operation_take"))
+        resolved_takes = []
+        sources = [base_id]
+        operation_takes = []
+        for take in takes:
+            donor_id = resolve_node_ref(history, take.get("from", ""))
+            sources.append(donor_id)
+            resolved_takes.append({"text": proof_for(take["from"]), "step": take.get("step", "")})
+            operation_takes.append({"from": donor_id, "step": take.get("step")})
+        proof = merge_steps(base, resolved_takes)
+        edge_operation = {"type": "merged_from", "from": sources, "take": operation_takes}
+    else:
+        raise ValueError(text.render("messages/errors.operation_type_invalid", kind=kind))
+
+    proof = normalize_draft(name, proof)
+    result = probe(name, run_id, proof, idea_id=idea_id, operation=edge_operation, mode=mode)
+    proof_id = hashlib.sha256((name + "\0" + proof).encode()).hexdigest()
+    filed = next(
+        event for event in events(directory) if event.get("kind") == "edge" and event.get("proof_id") == proof_id
+    )
+    projection = Graph.from_history(
+        events(directory),
+        lambda ident: (
+            (directory / "proofs" / f"{ident}.lean").read_text()
+            if (directory / "proofs" / f"{ident}.lean").is_file()
+            else None
+        ),
+    )
+    node = next(item.id for item in projection.nodes if item.proof_id == proof_id)
+    return {**result, "node": node, "edge": {"type": filed["type"], "from": filed["from"]}}
 
 
 def candidate(name: str, run_id: str, reference: str) -> dict:
@@ -2202,6 +2483,7 @@ def candidate(name: str, run_id: str, reference: str) -> dict:
         proof_id = resolve_probe_ref(history, reference)
         proof = (directory / "proofs" / f"{proof_id}.lean").read_text()
         entry = next(item for item in reversed(history) if item.get("kind") == "probe" and item["proof_id"] == proof_id)
+        _append(directory, {"kind": "focus", "proof_id": proof_id, "reason": "restore"})
         return {
             "ok": True,
             "probe": reference.strip().lower(),
@@ -2216,6 +2498,7 @@ def candidate(name: str, run_id: str, reference: str) -> dict:
     proof = proof_path.read_text()
     location = materialize(name, run_id, proof)
     _append(directory, {"kind": "current", "candidate_id": candidate_id})
+    _append(directory, {"kind": "focus", "proof_id": candidate_id, "reason": "restore"})
     row = next((r for r in _summaries(events(directory)) if r["id"] == candidate_id), None)
     return {
         "ok": True,
@@ -2293,7 +2576,15 @@ def graph_state(run_id: str) -> dict:
     directory = run_dir(run_id)
     history = events(directory)
     if not history:
-        return {"run_id": run_id, "nodes": [], "evaluations": 0, "merge_checks": [], "milestones": [], "frontier": []}
+        return {
+            "run_id": run_id,
+            "nodes": [],
+            "evaluations": 0,
+            "merge_checks": [],
+            "milestones": [],
+            "frontier": [],
+            "focus": None,
+        }
     theorem = history[0]["theorem"]
     total_versions = len(history[0].get("versions") or versions(problem(theorem)))
     nodes: dict[str, dict] = {}
@@ -2456,6 +2747,23 @@ def graph_state(run_id: str) -> dict:
         idea["attempts"] = sum(1 for node in rows if node["idea_id"] == idea["id"] and node["origin"] == "model")
         idea["probes"] = sum(1 for item in probes if item["idea_id"] == idea["id"])
     idea_rows = ideas
+    projection = Graph.from_history(
+        history,
+        lambda ident: (
+            (directory / "proofs" / f"{ident}.lean").read_text()
+            if (directory / "proofs" / f"{ident}.lean").is_file()
+            else None
+        ),
+    )
+    projected = {node.proof_id: node for node in projection.nodes}
+    for node in rows:
+        graph_node = projected.get(node["id"])
+        node["node"] = graph_node.id if graph_node else None
+        node["edge"] = graph_node.edge if graph_node else None
+    for probe_row in probes:
+        graph_node = projected.get(probe_row["proof_id"])
+        probe_row["node"] = graph_node.id if graph_node else None
+        probe_row["edge"] = graph_node.edge if graph_node else None
     return {
         "run_id": run_id,
         "theorem": theorem,
@@ -2470,6 +2778,7 @@ def graph_state(run_id: str) -> dict:
         "probes": probes,
         "routes": (route_rows := route_table(history)),
         "route_progress": _route_progress(route_rows),
+        "focus": projection.focus,
     }
 
 
@@ -2520,6 +2829,7 @@ def merge_once(run_id: str, graph: dict | None = None) -> dict | None:
                             "edits": outcome["edits"],
                         },
                         materialize_live=False,
+                        operation={"type": "merged_from", "from": pair},
                     )
                     outcome["candidate_id"] = recorded["candidate_id"]
                     outcome["node_number"] = recorded["node_number"]
@@ -2539,6 +2849,7 @@ def merge_once(run_id: str, graph: dict | None = None) -> dict | None:
                                 "edits": outcome["edits"],
                             },
                             materialize_live=False,
+                            operation={"type": "merged_from", "from": pair},
                         )
                         outcome["full_passed"] = all(v.get("passed") for v in full.get("compat", {}).values())
             _append(directory, outcome)

@@ -59,6 +59,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `messages/errors.declarations_usage` | 20 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.draft_limit` | 6 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.draft_missing` | 6 | Agent messages and notices | when the matching event occurs |
+| `messages/errors.draft_operation_text` | 4 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.evaluation_mode` | 6 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.evaluation_proof_missing` | 7 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.evaluation_reference` | 8 | Agent messages and notices | when the matching event occurs |
@@ -80,12 +81,15 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `messages/errors.library_path` | 9 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.measure_version_missing` | 8 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.measurement_version_missing` | 8 | Agent messages and notices | when the matching event occurs |
+| `messages/errors.merge_operation_take` | 4 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.mode_invalid` | 7 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.module_missing` | 16 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.name_not_visible` | 19 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.no_candidate_cold_passed` | 14 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.no_candidate_passed` | 10 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.no_source_declaration` | 7 | Agent messages and notices | when the matching event occurs |
+| `messages/errors.node_reference_invalid` | 11 | Agent messages and notices | when the matching event occurs |
+| `messages/errors.operation_type_invalid` | 9 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.parent_ignored` | 4 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.pinned_project_path` | 10 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.pinned_statement_missing` | 9 | Agent messages and notices | when the matching event occurs |
