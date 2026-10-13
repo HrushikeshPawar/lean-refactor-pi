@@ -63,6 +63,12 @@ For each of the six runs and then per cell, from the local journals and ledgers 
 - **Calls before the first compile:** tool calls issued before the first compile of a draft.
 - **Share of compiles using an operation:** among v7 compiles, the share using `splice`, `fill` or `merge` instead of a free-text draft (cells B and C only; v6 has no operations).
 - **Nodes and best-node depth, stall events, harness-made nodes** (v7 cells).
+- **Background step-goal load** (v7 cells; ticket 10b runs one background Lean job per closed or sketch node, and the
+  speed gate does not measure it): per run, the number of `step_goals` events (goals / error), their summed `seconds`,
+  that sum as a share of the run's wall time and of its model-lane Lean seconds, and the longest job. Also per row
+  the model-lane check p50 in runs against the bench figure, to see whether the background jobs slow the model's own
+  checks. Decide from these figures (owner): keep as is, run step goals only when the model lane is idle, or limit
+  them to the focus's lineage.
 - **MiMo (cell C):** thinking on tool-result turns working as configured, no request rejected for history shape, spend per call against DeepSeek.
 - **Verdicts:** B against A on both rows (ceiling row: no regression; weak row: gain), with the caveat of one replicate per cell; C reported as a check, not a ranking.
 - Anything that looks like a harness defect (not a model failure) is listed with its run id and turn, for tickets, never fixed inside the campaign.
