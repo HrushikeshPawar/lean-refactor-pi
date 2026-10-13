@@ -37,6 +37,8 @@ node_reference_invalid: "unknown node {reference}; use nK, #N, pN or a hash pref
 draft_operation_text: "draft operation requires text"
 merge_operation_take: "merge operation requires take"
 operation_type_invalid: "unknown operation type {kind}; use draft, splice or merge"
+fill_hole: "unknown or invalid hole {hole}; valid sketch holes are {valid}"
+fill_text: "fill operation requires text"
 run_theorem_mismatch: "Run is uninitialized or theorem differs"
 source_versions_changed: "Pinned source versions changed since run initialization"
 evaluation_reference: "Pass exactly one of proof, candidate, or from_probe"

@@ -137,6 +137,34 @@ class CampaignCliTests(unittest.TestCase):
         self.assertTrue((campaign.run_dir(self.run_id) / info["full_diagnostics_ref"]).exists())
         self.assertEqual(result["metrics"], {"compiled": False})
 
+    def test_12_salvage_repairs_a_failed_fixture_without_changing_its_statement(self):
+        from arena.salvage import holes, salvage
+
+        broken = self.good.replace("exact updatedStateUpdate (InitStatesSomeMonotone Hold Hinits)", "exact rfl")
+        original_statement = broken.splitlines()[0]
+        directory = campaign.run_dir(self.run_id)
+        token = campaign._SALVAGE_DIRECTORY.set(directory)
+        started = time.monotonic()
+        try:
+            outcome = salvage(NAME, broken, lambda proof: campaign._salvage_compile(NAME, proof))
+        finally:
+            campaign._SALVAGE_DIRECTORY.reset(token)
+        elapsed = time.monotonic() - started
+        self.assertEqual(outcome["status"], "salvaged", outcome)
+        self.assertLessEqual(outcome["compiles"], 6)
+        self.assertIn("sorry", outcome["text"])
+        self.assertEqual(outcome["text"].splitlines()[0], original_statement)
+        self.assertTrue(next(iter(outcome["result"]["compat"].values()))["passed"])
+        print(
+            {
+                "status": outcome["status"],
+                "compiles": outcome["compiles"],
+                "rounds": outcome["rounds"],
+                "holes": len(holes(outcome["text"], outcome["result"].get("goals", []))),
+                "seconds": round(elapsed, 2),
+            }
+        )
+
     def test_09_background_check_state_and_submission(self):
         fresh = cli(self.run_id, "evaluate", "--proof-file", self.proof(self.good + "\n  -- checked later"))
         self.assertIn(fresh["candidate"], cli(self.run_id, "state")["checking"])
@@ -571,7 +599,7 @@ class ProtocolLogicTests(FakeRunCase):
         self.assertEqual(campaign.state("logic")["checking"], ["#3", "#2"])
         outcome = campaign.autocheck("T", "logic")
         self.assertEqual(outcome["checked"], ["#3"])
-        self.assertEqual([(mode, known) for _, mode, known in self.calls], [("full", ["v1"])])
+        self.assertEqual([(mode, known) for _, mode, known in self.calls], [("probe", []), ("full", ["v1"])])
         state = campaign.state("logic")
         self.assertEqual(state["best"]["candidate"], "#3")
         self.assertIsNone(state["leading_unverified"])

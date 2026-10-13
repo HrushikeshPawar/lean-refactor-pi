@@ -19,6 +19,8 @@ from functools import cache
 from arena import goalstate, text
 from arena.routes import proof_body
 from arena.routes import signature as route_signature
+from arena.salvage import fill_cost
+from arena.salvage import holes as find_holes
 from arena.steps import Step, hdr_index, split_steps, step_range
 
 
@@ -111,7 +113,7 @@ class Node:
     route: str | None
     signature: dict
     label: str
-    holes: int
+    holes: list[dict]
     proof_text: str
 
 
@@ -196,7 +198,7 @@ class Graph:
             )
             result = best[2] if best else probe_results.get(proof_id, {})
             proof = read_text(proof_id) or ""
-            holes = len(re.findall(r"\bsorry\b", proof))
+            hole_rows = find_holes(proof, result.get("goals") or [])
             passed_primary = next(iter((result.get("compat") or {}).values()), {}).get("passed", False)
             has_sorry = re.search(r"\bsorry\b", proof) is not None
             status = (
@@ -236,10 +238,43 @@ class Graph:
                     routes.get(proof_id),
                     route_signature(proof),
                     labels.get(proof_id, f"p{proof_id[:8]}"),
-                    holes,
+                    hole_rows,
                     proof,
                 )
             )
+        closing_fills: dict[tuple[str, str], list[Node]] = {}
+        for node in nodes:
+            operation = (node.edge or {}).get("operation") or {}
+            if (
+                (node.edge or {}).get("type") != "filled_from"
+                or not (node.edge or {}).get("exact")
+                or node.status == "broken"
+            ):
+                continue
+            hole_id, fill = operation.get("hole"), operation.get("text", "")
+            sources = (node.edge or {}).get("from") or []
+            if not hole_id or len(sources) != 1 or find_holes(fill, []):
+                continue
+            closing_fills.setdefault((sources[0], hole_id), []).append(node)
+        for node in nodes:
+            if node.status != "sketch":
+                continue
+            for hole in node.holes:
+                hole_id = f"{node.id}.h{hole['index']}"
+                fills = closing_fills.get((node.proof_id, hole_id), [])
+                ordered = sorted(
+                    fills,
+                    key=lambda fill: (
+                        fill_cost(((fill.edge or {}).get("operation") or {}).get("text", "")),
+                        nodes.index(fill),
+                    ),
+                )
+                hole.update(
+                    id=hole_id,
+                    status="filled" if ordered else "open",
+                    filled_by=ordered[0].id if ordered else None,
+                    fills=[fill.id for fill in ordered],
+                )
         return cls(nodes, focus, [node.id for node in nodes], stall_events)
 
 
@@ -277,7 +312,7 @@ def quality(node: Node) -> float | None:
     if node.status == "closed":
         return 0.0
     if node.status == "sketch":
-        return -1.0 - node.holes
+        return -1.0 - len(node.holes)
     return None
 
 
@@ -401,7 +436,7 @@ def stall_target(graph: Graph, fired: dict, mode: str) -> Cell | None:
 
 
 def map_view(graph: Graph) -> dict:
-    """Hidden JSON map projection; effort and open-hole rows are reserved for later tickets."""
+    """Hidden JSON map projection over the archive and its currently open sketch holes."""
     scored = [node for node in graph.nodes if node.score is not None]
     best_node = max(scored, key=lambda node: node.score) if scored else None
     best = (
@@ -441,7 +476,21 @@ def map_view(graph: Graph) -> dict:
         }
         for node in graph.nodes[-8:]
     ]
-    return {"best": best, "archive": archive_rows, "recent": recent, "effort": [], "open": []}
+    open_holes = [
+        {
+            "node": node.id,
+            "label": node.label,
+            "hole": hole["id"],
+            "line": hole["line"],
+            "goal": (hole["goal"] or "")[:120] or None,
+        }
+        for cell in archive(graph)
+        if cell.node.status == "sketch"
+        for node in [cell.node]
+        for hole in node.holes
+        if hole["status"] == "open"
+    ]
+    return {"best": best, "archive": archive_rows, "recent": recent, "effort": [], "open": open_holes}
 
 
 def common_base(left: str, right: str, parents: dict[str, list[str]]) -> dict:

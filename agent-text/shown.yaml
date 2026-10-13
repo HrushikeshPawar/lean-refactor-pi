@@ -2,6 +2,9 @@ messages:
   arena_line:
     where: "Agent messages and notices"
     per_run: "when the matching event occurs"
+  assembly:
+    where: "Agent messages and notices"
+    per_run: "when the matching event occurs"
   compaction_memory:
     where: "Agent messages and notices"
     per_run: "when the matching event occurs"
@@ -24,6 +27,9 @@ messages:
       where: "Agent messages and notices"
       per_run: "when the matching event occurs"
   refusals:
+    where: "Agent messages and notices"
+    per_run: "when the matching event occurs"
+  salvage:
     where: "Agent messages and notices"
     per_run: "when the matching event occurs"
   trim:

@@ -29,6 +29,8 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `messages/arena-line.none` | 1 | Agent messages and notices | when the matching event occurs |
 | `messages/arena-line.not_yet_checked` | 3 | Agent messages and notices | when the matching event occurs |
 | `messages/arena-line.only_spend` | 2 | Agent messages and notices | when the matching event occurs |
+| `messages/assembly.assembled` | 13 | Agent messages and notices | when the matching event occurs |
+| `messages/assembly.assembly_failed` | 6 | Agent messages and notices | when the matching event occurs |
 | `messages/compaction-memory.allowance` | 7 | Agent messages and notices | when the matching event occurs |
 | `messages/compaction-memory.best_verified` | 9 | Agent messages and notices | when the matching event occurs |
 | `messages/compaction-memory.blocker` | 2 | Agent messages and notices | when the matching event occurs |
@@ -64,6 +66,8 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `messages/errors.evaluation_proof_missing` | 7 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.evaluation_reference` | 8 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.extra_command` | 7 | Agent messages and notices | when the matching event occurs |
+| `messages/errors.fill_hole` | 10 | Agent messages and notices | when the matching event occurs |
+| `messages/errors.fill_text` | 4 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.find_limit` | 4 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.find_queries` | 11 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.forbidden_construct` | 2 | Agent messages and notices | when the matching event occurs |
@@ -163,6 +167,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `messages/refusals.routes_none` | 1 | Agent messages and notices | when the matching event occurs |
 | `messages/refusals.routes_row` | 6 | Agent messages and notices | when the matching event occurs |
 | `messages/refusals.routes_tried` | 3 | Agent messages and notices | when the matching event occurs |
+| `messages/salvage.salvaged` | 8 | Agent messages and notices | when the matching event occurs |
 | `messages/trim.repeated` | 7 | Agent messages and notices | when the matching event occurs |
 | `messages/trim.result_stub` | 14 | Agent messages and notices | when the matching event occurs |
 | `messages/trim.skill_stub` | 15 | Agent messages and notices | when the matching event occurs |

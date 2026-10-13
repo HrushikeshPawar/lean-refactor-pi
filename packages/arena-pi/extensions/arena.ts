@@ -771,7 +771,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
           if (params.parent) args.push("--parent", params.parent);
           return campaign("probe", args);
         });
-        if (result.candidate) kickAutocheck();
+        kickAutocheck();
         return withIdea(result);
       }
       const result = await withProofFiles(plan.drafts!, files => {
@@ -781,7 +781,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
         if (params.parent) args.push("--parent", params.parent);
         return campaign("probe", args);
       });
-      if (result.drafts?.some((draft: any) => draft.candidate)) kickAutocheck();
+      kickAutocheck();
       return withIdea(result);
     },
   });

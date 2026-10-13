@@ -1,5 +1,6 @@
 """Shared fake-Lean seam for graph and campaign protocol tests."""
 
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,6 +8,7 @@ from typing import ClassVar
 from unittest.mock import patch
 
 from arena import campaign
+from arena.engine import instrument_sorries
 
 
 class FakeRunCase(unittest.TestCase):
@@ -37,19 +39,27 @@ class FakeRunCase(unittest.TestCase):
     def fake_eval(cls, _name, proof, mode, known=None):
         cls.calls.append((proof, mode, sorted(known or {})))
         tokens = len(proof)
-        compat = {"v1": (known or {}).get("v1") or {"passed": "bad" not in proof}}
+        bad_lines = [index for index, line in enumerate(proof.splitlines(), 1) if "bad" in line.split()]
+        diagnostics = [
+            {"severity": "error", "proof_line": line, "file_line": line, "message": "fixture error"}
+            for line in bad_lines
+        ]
+        instrumented = instrument_sorries(proof)
+        sorry_lines = [int(match.group(1)) for match in re.finditer(r"ARENA_SORRY (\d+)", instrumented)]
+        compat = {"v1": (known or {}).get("v1") or {"passed": not bad_lines, "diagnostics": diagnostics}}
         if mode == "full":
             compat["v2"] = {
-                "passed": "bad" not in proof and "old" not in proof,
+                "passed": not bad_lines and "old" not in proof,
+                "diagnostics": diagnostics,
                 "error_headlines": [] if "old" not in proof else ["line 3 (proof line 2): unknown tactic"],
             }
         score = round(100 - tokens, 2)
-        metrics = {"tokens": tokens, "heartbeats": 10, "compiled": "bad" not in proof}
+        metrics = {"tokens": tokens, "heartbeats": 10, "compiled": not bad_lines}
         if metrics["compiled"]:
             metrics["axes"] = {"tokens": {"value": tokens}}
             metrics["proxy" if mode == "full" else "estimated_proxy"] = score
             metrics["deltas"] = {}
-        return {
+        result = {
             "ok": True,
             "mode": mode,
             "tokens": tokens,
@@ -58,6 +68,10 @@ class FakeRunCase(unittest.TestCase):
             "local_proxy": score if mode == "full" else None,
             "metrics": metrics,
         }
+        if mode == "probe":
+            result["contains_sorry"] = bool(re.search(r"\bsorry\b", proof))
+            result["goals"] = [{"proof_line": line, "goals": [f"goal at line {line}"]} for line in sorry_lines]
+        return result
 
     def evaluate(self, text, **kwargs):
         return campaign.evaluate_request("T", "logic", text, kwargs.pop("mode", "fast"), **kwargs)

@@ -49,6 +49,9 @@ from arena.graph import (
 )
 from arena.graph import map_view as graph_map_view
 from arena.profile import heartbeat_floor, profile
+from arena.salvage import fill_cost, fill_text
+from arena.salvage import holes as find_holes
+from arena.salvage import salvage as salvage_proof
 
 
 def run_dir(run_id: str) -> Path:
@@ -70,6 +73,7 @@ class AmbiguousDeclaration(ValueError):
 _SESSION: ContextVar[_Session | None] = ContextVar("arena_source_session", default=None)
 _BATCH_FOCUS: ContextVar[tuple[bool, str | None]] = ContextVar("arena_batch_focus", default=(False, None))
 _BATCH_NEWLY_FILED: ContextVar[set[str] | None] = ContextVar("arena_batch_newly_filed", default=None)
+_SALVAGE_DIRECTORY: ContextVar[Path | None] = ContextVar("arena_salvage_directory", default=None)
 
 
 class _Session:
@@ -1235,6 +1239,24 @@ def node_label(history: list[dict], proof_id: str) -> str:
     return candidate or _probe_numbers(history).get(proof_id, f"p{proof_id[:8]}")
 
 
+def _graph_node_id(history: list[dict], proof_id: str) -> str:
+    """Resolve the projection's nK id without rebuilding route signatures."""
+    seen: set[str] = set()
+    for item in history:
+        if item.get("kind") == "candidate":
+            current = item["candidate_id"]
+        elif item.get("kind") == "probe":
+            current = item["proof_id"]
+        else:
+            continue
+        if current in seen:
+            continue
+        seen.add(current)
+        if current == proof_id:
+            return f"n{len(seen)}"
+    raise KeyError(proof_id)
+
+
 def resolve_candidate_ref(history: list[dict], reference: str) -> str:
     candidates = _candidate_ids(history)
     reference = reference.strip()
@@ -1362,6 +1384,7 @@ def _file_node(
     proof: str,
     named_parent: str | None = None,
     operation: dict | None = None,
+    projection_out: list[Graph] | None = None,
 ) -> tuple[dict, bool]:
     """Append exactly one graph edge per proof id under the run's graph lock."""
     directory.mkdir(parents=True, exist_ok=True)
@@ -1372,6 +1395,8 @@ def _file_node(
             (event for event in history if event.get("kind") == "edge" and event.get("proof_id") == proof_id), None
         )
         if existing:
+            if projection_out is not None:
+                projection_out.append(Graph.from_history(history, _proof_reader(directory)))
             return existing, False
         read = _proof_reader(directory)
         graph = Graph.from_history(history, read)
@@ -1387,7 +1412,11 @@ def _file_node(
             edge_type = operation["type"]
             sources = list(operation.get("from", []))
             exact = True
-            operation_data = dict(operation)
+            operation_data = (
+                {"hole": operation["hole"], "text": operation["text"]}
+                if edge_type == "filled_from"
+                else dict(operation)
+            )
         else:
             in_batch, batch_focus = _BATCH_FOCUS.get()
             focus_id = batch_focus if in_batch else graph.focus
@@ -1455,12 +1484,14 @@ def _file_node(
         batch_newly_filed = _BATCH_NEWLY_FILED.get()
         if batch_newly_filed is not None:
             batch_newly_filed.add(proof_id)
+        if projection_out is not None:
+            projection_out.append(Graph.from_history(events(directory), read))
         return event, True
 
 
-def _settle_focus(directory: Path, proof_ids: list[str]) -> Graph:
+def _settle_focus(directory: Path, proof_ids: list[str], graph: Graph | None = None) -> Graph:
     history = events(directory)
-    graph = Graph.from_history(history, _proof_reader(directory))
+    graph = graph or Graph.from_history(history, _proof_reader(directory))
     nodes = {node.proof_id: node for node in graph.nodes}
     eligible = [nodes[ident] for ident in proof_ids if ident in nodes and nodes[ident].status in ("closed", "sketch")]
     if not eligible:
@@ -1959,6 +1990,8 @@ def record_evaluation(
     if location:
         _append(directory, {"kind": "current", "candidate_id": candidate_id})
     filing_history = events(directory)
+    in_batch, _ = _BATCH_FOCUS.get()
+    projection_out: list[Graph] = []
     _, newly_filed = _file_node(
         directory,
         filing_history,
@@ -1966,10 +1999,10 @@ def record_evaluation(
         proof,
         _named_parent_id(filing_history, (parents or [None])[0]),
         operation,
+        None if in_batch else projection_out,
     )
-    in_batch, _ = _BATCH_FOCUS.get()
     if not in_batch:
-        graph = _settle_focus(directory, [candidate_id])
+        graph = _settle_focus(directory, [candidate_id], projection_out[0] if projection_out else None)
         _check_stall(directory, graph, {candidate_id} if newly_filed else set())
     history = events(directory)
     rows = _summaries(history)
@@ -2200,8 +2233,16 @@ def probe(
             {"kind": "probe", "proof_id": proof_id, "idea_id": idea_id, "parent": parent_id, "result": result},
         )
         filing_history = events(directory)
+        in_batch, _ = _BATCH_FOCUS.get()
+        projection_out: list[Graph] = []
         _, new_node = _file_node(
-            directory, filing_history, proof_id, proof, _named_parent_id(history, parent), operation
+            directory,
+            filing_history,
+            proof_id,
+            proof,
+            _named_parent_id(history, parent),
+            operation,
+            None if in_batch else projection_out,
         )
         if new_node:
             newly_filed.add(proof_id)
@@ -2209,14 +2250,22 @@ def probe(
         # A draft (holes, errors or a failed compile) never opens a route, so it is not queued for extraction.
     if earlier:
         filing_history = events(directory)
+        in_batch, _ = _BATCH_FOCUS.get()
+        projection_out = []
         _, new_node = _file_node(
-            directory, filing_history, proof_id, proof, _named_parent_id(history, parent), operation
+            directory,
+            filing_history,
+            proof_id,
+            proof,
+            _named_parent_id(history, parent),
+            operation,
+            None if in_batch else projection_out,
         )
         if new_node:
             newly_filed.add(proof_id)
     in_batch, _ = _BATCH_FOCUS.get()
     if not in_batch:
-        graph = _settle_focus(directory, [proof_id])
+        graph = _settle_focus(directory, [proof_id], projection_out[0] if projection_out else None)
         _check_stall(directory, graph, newly_filed)
     location = materialize(name, run_id, proof) if result.get("tokens") is not None else {}
     label = _probe_numbers(events(directory))[proof_id]
@@ -2342,6 +2391,33 @@ def compile_operation(
             operation_takes.append({"from": donor_id, "step": take.get("step")})
         proof = merge_steps(base, resolved_takes)
         edge_operation = {"type": "merged_from", "from": sources, "take": operation_takes}
+    elif kind == "fill":
+        hole_ref = operation.get("hole", "")
+        if not isinstance(hole_ref, str):
+            hole_ref = str(hole_ref)
+        projection = Graph.from_history(history, _proof_reader(directory))
+        sketch = next((node for node in projection.nodes if hole_ref.startswith(f"{node.id}.h")), None)
+        valid_holes = [
+            f"{hole['id']} line {hole['line']}"
+            for node in projection.nodes
+            if node.status == "sketch"
+            for hole in node.holes
+        ]
+        if sketch is None or sketch.status != "sketch":
+            raise ValueError(
+                text.render("messages/errors.fill_hole", hole=hole_ref, valid=", ".join(valid_holes) or "none")
+            )
+        hole = next((row for row in sketch.holes if row["id"] == hole_ref), None)
+        if hole is None:
+            raise ValueError(
+                text.render("messages/errors.fill_hole", hole=hole_ref, valid=", ".join(valid_holes) or "none")
+            )
+        fill = operation.get("text")
+        if not isinstance(fill, str):
+            raise ValueError(text.render("messages/errors.fill_text"))
+        base_id = sketch.proof_id
+        proof = fill_text(sketch.proof_text, hole, fill)
+        edge_operation = {"type": "filled_from", "from": [base_id], "hole": hole_ref, "text": fill}
     else:
         raise ValueError(text.render("messages/errors.operation_type_invalid", kind=kind))
 
@@ -2351,8 +2427,7 @@ def compile_operation(
     filed = next(
         event for event in events(directory) if event.get("kind") == "edge" and event.get("proof_id") == proof_id
     )
-    projection = Graph.from_history(events(directory), _proof_reader(directory))
-    node = next(item.id for item in projection.nodes if item.proof_id == proof_id)
+    node = _graph_node_id(events(directory), proof_id)
     return {**result, "node": node, "edge": {"type": filed["type"], "from": filed["from"]}}
 
 
@@ -2849,8 +2924,157 @@ def _step_goal_jobs(history: list[dict], directory: Path) -> list[str]:
     return jobs
 
 
+def _salvage_jobs(history: list[dict], directory: Path, graph: Graph | None = None) -> list[Node]:
+    """Broken, filed graph nodes with no terminal salvage event yet."""
+    done = {item.get("proof_id") for item in history if item.get("kind") == "salvage"}
+    graph = graph or Graph.from_history(history, _proof_reader(directory))
+    return [node for node in graph.nodes if node.status == "broken" and node.edge and node.proof_id not in done]
+
+
+def _assembly_jobs(history: list[dict], directory: Path, graph: Graph | None = None) -> list[Node]:
+    """Sketch nodes whose every hole has a closing fill and no assembly event."""
+    done = {item.get("sketch") for item in history if item.get("kind") == "assembly"}
+    graph = graph or Graph.from_history(history, _proof_reader(directory))
+    return [
+        node
+        for node in graph.nodes
+        if node.status == "sketch"
+        and node.holes
+        and all(hole["status"] == "filled" for hole in node.holes)
+        and node.proof_id not in done
+    ]
+
+
+def _salvage_compile(name: str, text_value: str) -> dict:
+    """Compile one salvage attempt in the background lane and normalize its diagnostics."""
+    directory = _SALVAGE_DIRECTORY.get()
+    if directory is None:
+        raise ValueError
+    with lean_lock(directory, "background"):
+        result = _evaluate(name, text_value, "probe", lane="background")
+    compat = result.get("compat") or {}
+    first = next(iter(compat.values()), {})
+    diagnostics = first.get("diagnostics") or []
+    clean = bool(first.get("passed")) and not any(item.get("severity") == "error" for item in diagnostics)
+    lines = [
+        item.get("proof_line") for item in diagnostics if item.get("severity") == "error" and item.get("proof_line")
+    ]
+    return {"clean": clean, "error_lines": lines, "unlocated": not clean and not lines, "result": result}
+
+
+def _run_salvage(name: str, run_id: str, node: Node) -> dict:
+    directory = run_dir(run_id)
+    proof = node.proof_text
+    token = _SALVAGE_DIRECTORY.set(directory)
+    try:
+        outcome = salvage_proof(name, proof, lambda candidate: _salvage_compile(name, candidate))
+    except (ValueError, FileNotFoundError):
+        outcome = {"status": "unavailable", "compiles": 0, "rounds": [], "text": None, "result": None, "kept": None}
+    finally:
+        _SALVAGE_DIRECTORY.reset(token)
+    sketch_id = None
+    if outcome["status"] == "salvaged":
+        sketch_text = outcome["text"]
+        sketch_id = hashlib.sha256((name + "\0" + sketch_text).encode()).hexdigest()
+        _snapshot(directory, sketch_id, sketch_text)
+        history = events(directory)
+        has_node = any(
+            item.get("proof_id") == sketch_id and item.get("kind") in ("probe", "candidate") for item in history
+        )
+        if not has_node:
+            result = dict(outcome["result"] or {})
+            result["mode"] = "probe"
+            result["scored"] = False
+            result["salvaged"] = True
+            _append(directory, {"kind": "probe", "proof_id": sketch_id, "parent": node.proof_id, "result": result})
+            _file_node(
+                directory,
+                events(directory),
+                sketch_id,
+                sketch_text,
+                operation={"type": "salvaged_from", "from": [node.proof_id]},
+            )
+    _append(
+        directory,
+        {
+            "kind": "salvage",
+            "proof_id": node.proof_id,
+            "status": outcome["status"],
+            "compiles": outcome["compiles"],
+            "rounds": outcome["rounds"],
+            "kept": outcome["kept"],
+            "sketch_id": sketch_id,
+        },
+    )
+    write_state(run_id)
+    return outcome
+
+
+def _run_assembly(name: str, run_id: str, sketch: Node) -> None:
+    directory = run_dir(run_id)
+    fills: dict[str, str] = {}
+    alternatives: dict[str, list[str]] = {}
+    chosen: list[tuple[dict, Node]] = []
+    try:
+        graph = Graph.from_history(events(directory), _proof_reader(directory))
+        by_id = {node.id: node for node in graph.nodes}
+        for hole in sketch.holes:
+            candidates = [by_id[node_id] for node_id in hole["fills"]]
+            chosen_node = candidates[0]
+            chosen.append((hole, chosen_node))
+            fills[hole["id"]] = chosen_node.proof_id
+            alternatives[hole["id"]] = [node.proof_id for node in candidates[1:]]
+        proof = sketch.proof_text
+        operation_fills = []
+        for hole, fill_node in chosen:
+            operation = (fill_node.edge or {}).get("operation") or {}
+            operation_fills.append((hole, operation.get("text", ""), fill_node))
+        for hole, value, _ in sorted(operation_fills, key=lambda item: item[0]["line"], reverse=True):
+            proof = fill_text(proof, hole, value)
+        sources = [sketch.proof_id, *(node.proof_id for _, node in chosen)]
+        result = record_evaluation(
+            name,
+            run_id,
+            proof,
+            "fast",
+            lane="background",
+            trigger="auto",
+            origin="assembly",
+            materialize_live=False,
+            operation={"type": "merged_from", "from": sources, "assembly": True},
+        )
+        proof_id = hashlib.sha256((name + "\0" + proof).encode()).hexdigest()
+        passed = next(iter((result.get("compat") or {}).values()), {}).get("passed", False)
+        status = "closed" if passed and not _has_hole(problem(name), proof) else "broken"
+        _append(
+            directory,
+            {
+                "kind": "assembly",
+                "sketch": sketch.proof_id,
+                "node": proof_id,
+                "fills": fills,
+                "alternatives": alternatives,
+                "status": status,
+            },
+        )
+    except Exception as error:
+        _append(
+            directory,
+            {
+                "kind": "assembly",
+                "sketch": sketch.proof_id,
+                "node": None,
+                "fills": fills,
+                "alternatives": alternatives,
+                "status": "error",
+                "error": str(error)[:300],
+            },
+        )
+    write_state(run_id)
+
+
 def autocheck(name: str, run_id: str, max_seconds: float | None = None, closing: bool = False) -> dict:
-    """Drain full checks, then per-step goals, in the background lane.
+    """Drain salvage, assembly, full checks and step goals in the background lane.
 
     Only one checker runs per run; both queues are derived from the ledger, so a
     killed checker loses nothing.
@@ -2868,6 +3092,15 @@ def autocheck(name: str, run_id: str, max_seconds: float | None = None, closing:
             if lean_health.tripped(directory):
                 break  # Lean is unhealthy: background checks pause with the model's work
             history = events(directory)
+            projection = Graph.from_history(history, _proof_reader(directory))
+            salvage_jobs = _salvage_jobs(history, directory, projection)
+            if salvage_jobs:
+                _run_salvage(name, run_id, salvage_jobs[0])
+                continue
+            assembly_jobs = _assembly_jobs(history, directory, projection)
+            if assembly_jobs:
+                _run_assembly(name, run_id, assembly_jobs[0])
+                continue
             jobs = _autocheck_jobs(_summaries(history), closing=closing)
             if jobs:
                 job = jobs[0]
@@ -2923,6 +3156,9 @@ def state(run_id: str) -> dict:
     rows = _summaries(history)
     total = len(history[0].get("versions") or [1])
     numbers = {r["id"]: r["n"] for r in rows}
+    assembly_candidates = {
+        item["candidate_id"] for item in history if item.get("kind") == "candidate" and item.get("origin") == "assembly"
+    }
     verified = _best([r for r in rows if r["verified"]])
     unverified = _best([r for r in rows if not r["verified"]])
     leading = (
@@ -2931,10 +3167,83 @@ def state(run_id: str) -> dict:
     updates = [
         {"seq": seq, "text": _check_text(numbers[item["candidate_id"]], item["result"], total)}
         for seq, item in enumerate(history)
-        if item.get("kind") == "evaluation" and item.get("trigger") == "auto" and item["candidate_id"] in numbers
+        if item.get("kind") == "evaluation"
+        and item.get("trigger") == "auto"
+        and item["candidate_id"] in numbers
+        and not (item.get("mode") == "fast" and item["candidate_id"] in assembly_candidates)
     ]
-    candidate_rows = {row["id"]: row for row in rows}
+    graph_ids: dict[str, str] = {}
+    for item in history:
+        proof_id = item.get("candidate_id") if item.get("kind") == "candidate" else item.get("proof_id")
+        if item.get("kind") not in ("candidate", "probe") or proof_id in graph_ids.values():
+            continue
+        graph_ids[f"n{len(graph_ids) + 1}"] = proof_id
     probes = {item["proof_id"]: item for item in history if item.get("kind") == "probe"}
+    directory = run_dir(run_id)
+    for seq, item in enumerate(history):
+        if item.get("kind") == "salvage" and item.get("status") == "salvaged" and item.get("sketch_id"):
+            sketch_id = item["sketch_id"]
+            sketch_path = directory / "proofs" / f"{sketch_id}.lean"
+            sketch_text = sketch_path.read_text() if sketch_path.is_file() else ""
+            compile_result = (probes.get(sketch_id) or {}).get("result", {})
+            hole_rows = find_holes(sketch_text, compile_result.get("goals") or [])
+            line_numbers = [hole["line"] for hole in hole_rows]
+            lines_text = (
+                f"line {line_numbers[0]}" if len(line_numbers) == 1 else "lines " + ", ".join(map(str, line_numbers))
+            )
+            count = len(hole_rows)
+            updates.append(
+                {
+                    "seq": seq,
+                    "text": text.render(
+                        "messages/salvage.salvaged",
+                        sketch=node_label(history, sketch_id),
+                        source=node_label(history, item["proof_id"]),
+                        holes=f"{count} hole" if count == 1 else f"{count} holes",
+                        lines=lines_text,
+                    ),
+                }
+            )
+        elif item.get("kind") == "assembly" and item.get("status") in ("closed", "broken"):
+            sketch_id = item["sketch"]
+            sketch_ref = next((key for key, value in graph_ids.items() if value == sketch_id), "")
+            sketch_path = directory / "proofs" / f"{sketch_id}.lean"
+            sketch_text = sketch_path.read_text() if sketch_path.is_file() else ""
+            sketch_goals = (probes.get(sketch_id) or {}).get("result", {}).get("goals") or []
+            sketch_holes = find_holes(sketch_text, sketch_goals)
+            holes_by_id = {f"{sketch_ref}.h{hole['index']}": hole for hole in sketch_holes}
+            fill_events = {
+                event.get("proof_id"): event
+                for event in history
+                if event.get("kind") == "edge" and event.get("type") == "filled_from"
+            }
+            used = []
+            alternatives = []
+            for hole_id, fill_id in (item.get("fills") or {}).items():
+                hole = holes_by_id.get(hole_id, {})
+                label = node_label(history, fill_id)
+                used.append(f"line {hole.get('line', '?')}: {label}")  # not-model-facing
+                for alternate in (item.get("alternatives") or {}).get(hole_id, []):
+                    operation = (fill_events.get(alternate) or {}).get("operation") or {}
+                    cost = fill_cost(operation.get("text", ""))
+                    alternatives.append(
+                        f"line {hole.get('line', '?')}: {node_label(history, alternate)} ({cost} tokens)"  # not-model-facing
+                    )
+            if item["status"] == "broken":
+                notice = text.render("messages/assembly.assembly_failed", sketch=node_label(history, sketch_id))
+            else:
+                row = next((row for row in rows if row["id"] == item.get("node")), {})
+                notice = text.render(
+                    "messages/assembly.assembled",
+                    node=node_label(history, item["node"]),
+                    sketch=node_label(history, sketch_id),
+                    tokens=row.get("tokens") or 0,
+                    score=row.get("score") or 0,
+                    used=", ".join(used) or "none",
+                    alternatives=", ".join(alternatives) or "none",
+                )
+            updates.append({"seq": seq, "text": notice})
+    candidate_rows = {row["id"]: row for row in rows}
     route_events = {item["proof_id"]: item for item in history if item.get("kind") == "route"}
     for seq, item in enumerate(history):
         if item.get("kind") != "focus" or item.get("reason") != "stall":
