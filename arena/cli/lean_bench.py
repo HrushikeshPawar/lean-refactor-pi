@@ -45,6 +45,7 @@ class Regression:
     current: float | str
     ratio: float | None
     limit: float | None
+    raw: float | None = None  # the measured seconds when `current` is clock-adjusted
 
 
 def baseline_versions(baseline: dict) -> dict[str, list[str]]:
@@ -170,6 +171,15 @@ def _figure_values(result: dict) -> dict[str, float | None]:
     return figures
 
 
+def clock_ratio(base_result: dict, current_result: dict) -> float | None:
+    """Current over baseline median CPU clock, when both were sampled (owner decision 2026-10-13). A check's seconds
+    scale with the clock of the one core it runs on, so `seconds x ratio` is what the check would have taken at the
+    baseline's clock: a laptop held to its 15 W long-term power limit otherwise reads as a code regression."""
+    before = (base_result.get("cpu") or {}).get("mhz_p50")
+    after = (current_result.get("cpu") or {}).get("mhz_p50")
+    return after / before if before and after else None
+
+
 def compare(
     baseline: dict,
     current: dict,
@@ -191,6 +201,7 @@ def compare(
                 raise ValueError(f"toolchain {toolchain!r} for row {row_name!r} is missing from baseline")
             base_result = baseline["rows"][row_name][toolchain]
             before, after = _figure_values(base_result), _figure_values(current_result)
+            clock = clock_ratio(base_result, current_result)
             for figure in sorted((set(before) | set(after)) - UNGATED_FIGURES):
                 old, new = before.get(figure), after.get(figure)
                 if new is None and old is None:
@@ -204,10 +215,15 @@ def compare(
                     continue
                 if old is None:
                     continue
+                raw = None
+                if clock is not None:
+                    raw, new = new, round(new * clock, 3)
                 tolerance = tolerance_p95 if figure.endswith(".p95") or figure.startswith("open_") else tolerance_p50
                 if new > old * (1 + tolerance) and new - old > floor_s:
                     regressions.append(
-                        Regression(row_name, toolchain, figure, old, new, new / old - 1 if old else None, tolerance)
+                        Regression(
+                            row_name, toolchain, figure, old, new, new / old - 1 if old else None, tolerance, raw
+                        )
                     )
     return regressions
 
@@ -256,6 +272,7 @@ def format_report(regressions: list[Regression]) -> str:
         lines.append(
             f"{item.row} | {item.toolchain} | {item.figure} | "
             f"{_display(item.baseline)} -> {_display(item.current)} | {amount} (limit {limit})"
+            + (f" | clock-adjusted from {item.raw:.2f}" if item.raw is not None else "")
         )
     return "\n".join(lines) if lines else "0 regressions"
 

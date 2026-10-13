@@ -131,6 +131,21 @@ class ComparisonTests(unittest.TestCase):
         self.assertEqual(len(lean_bench.compare(self.baseline(p95=10.0), self.current(p95=12.1))), 1)
         self.assertEqual(lean_bench.compare(baseline, self.current(p50=0.5, p95=0.5)), [])
 
+    def test_figures_are_gated_at_the_baselines_clock_when_both_sides_sampled_it(self):
+        baseline, current = self.baseline(p50=10.0, p95=10.0), self.current(p50=12.0, p95=12.0)
+        baseline["rows"]["sample"]["v4.1.0"]["cpu"] = {"mhz_p50": 3600.0}
+        # 20% slower at a clock 25% lower: no slower at the baseline's clock.
+        current["rows"]["sample"]["v4.1.0"]["cpu"] = {"mhz_p50": 2700.0}
+        self.assertEqual(lean_bench.compare(baseline, current), [])
+        # 20% slower at the same clock is a regression, reported with the measured figure.
+        current["rows"]["sample"]["v4.1.0"]["cpu"] = {"mhz_p50": 3600.0}
+        (regression,) = [item for item in lean_bench.compare(baseline, current) if item.figure == "reference.p50"]
+        self.assertEqual((regression.current, regression.raw), (12.0, 12.0))
+        self.assertIn("clock-adjusted from 12.00", lean_bench.format_report([regression]))
+        # A side without a clock is compared as measured.
+        del baseline["rows"]["sample"]["v4.1.0"]["cpu"]
+        self.assertEqual(len(lean_bench.compare(baseline, current)), 1)
+
     def test_first_open_is_reported_but_not_gated(self):
         baseline, current = self.baseline(), self.current()
         baseline["rows"]["sample"]["v4.1.0"].update(open_cold_s=4.0, open_warm_s=4.0)
