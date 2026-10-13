@@ -1,3 +1,0 @@
-description: "Restore node \"#N\" or probe \"pN\" into the Lean scratch project (so lean_goal reads it) and return its exact proof and recorded results."
-params:
-  candidate: "#N or pN"

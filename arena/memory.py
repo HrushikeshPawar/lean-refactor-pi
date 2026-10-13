@@ -8,7 +8,6 @@ nothing; the text is rebuilt from `frontier` each time and injected once, right 
 
 from __future__ import annotations
 
-from arena.routes import routes_text
 from arena.text import numbers, render
 
 MAX_IDEAS = int(numbers()["max_ideas"])
@@ -60,27 +59,12 @@ def memory_text(front: dict, spent_usd: float | None = None, cap_usd: float | No
         best_line = render(
             "messages/compaction-memory.best_verified",
             metrics=_metrics(verified[0]),
-            candidate=verified[0]["candidate"],
         )
     else:
         best_line = render("messages/compaction-memory.none_verified")
         if best:
             best_line += render("messages/compaction-memory.leading_unverified", metrics=_metrics(best))
     lines.append(best_line)
-    lines.append(render("messages/compaction-memory.routes", routes=routes_text(front.get("routes") or [])))
-    ideas = front.get("ideas") or []
-    shown = sorted(ideas, key=lambda idea: (idea.get("status") != "active", -idea.get("attempts", 0)))[:MAX_IDEAS]
-    lines.append(
-        render(
-            "messages/compaction-memory.ideas",
-            ideas="; ".join(_idea(idea) for idea in shown) if shown else "none recorded",
-            more=(
-                render("messages/compaction-memory.idea_more", count=len(ideas) - len(shown))
-                if len(ideas) > len(shown)
-                else ""
-            ),
-        )
-    )
     failures = (front.get("recent_failures") or [])[-MAX_FAILURES:]
     lines.append(
         render(
@@ -90,7 +74,6 @@ def memory_text(front: dict, spent_usd: float | None = None, cap_usd: float | No
                     render(
                         "messages/compaction-memory.failure",
                         ref=row["ref"],
-                        idea=row.get("idea_id") or "no idea",
                         error=row["error"],
                     )
                     for row in failures
@@ -107,7 +90,6 @@ def memory_text(front: dict, spent_usd: float | None = None, cap_usd: float | No
             "messages/compaction-memory.work",
             candidates=front.get("candidates", 0),
             evaluations=front.get("evaluations", 0),
-            probes=front.get("probes", 0),
         )
     )
     if spent_usd is not None and cap_usd is not None:

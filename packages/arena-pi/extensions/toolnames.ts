@@ -1,6 +1,6 @@
-const PREFIXES = ["mcparenalean", "arena", "lean"];
+const PREFIXES = ["arena", "lean"];
 
-/** Lowercase, drop separators, then drop each known prefix (`mcp__arena_lean__`, `arena_`, `lean_`) once, in order. */
+/** Lowercase, drop separators, then drop each recognized legacy prefix once, in order. */
 export function toolCore(name: string): string {
   let core = name.toLowerCase().replace(/[^a-z0-9]/g, "");
   for (const prefix of PREFIXES) if (core.startsWith(prefix) && core.length > prefix.length) core = core.slice(prefix.length);
@@ -46,8 +46,7 @@ function listFromText(text: string): string[] {
  * Some models fill every optional field with an empty value ("", [""]) and send arrays as strings.
  * Treat empty values as absent and parse stringified arrays, using the tool's object schema.
  */
-// Names models use for a schema field that has another name (some send `idea` for arena_idea's `title`).
-const KEY_SYNONYMS: Record<string, string[]> = { title: ["idea", "name"], proof: ["code", "lean", "body"] };
+const KEY_SYNONYMS: Record<string, string[]> = { drafts: ["draft", "proof"] };
 
 /** The schema field an unknown key stands for: a synonym, else the nearest name within one edit (`draft` → `drafts`). */
 function schemaKey(key: string, properties: Record<string, unknown>, present: Set<string>): string {
@@ -79,10 +78,8 @@ export function normalizeToolArguments<T>(params: T, schema: { properties?: Reco
   return cleaned as T;
 }
 
-export const MISSING_ARGUMENTS_ERROR = "the tool call arrived without arguments; resend it with its arguments";
-
-/** Pi calls this before schema validation; a dropped (null) argument object gets one clear error instead of a validation dump. */
-export function requireToolArguments(args: unknown): unknown {
-  if (args === null || args === undefined) throw new Error(MISSING_ARGUMENTS_ERROR);
+/** Pi calls this before schema validation; malformed arguments get a template-rendered error. */
+export function requireToolArguments(args: unknown, missingError: string): unknown {
+  if (args === null || args === undefined) throw new Error(missingError);
   return args;
 }

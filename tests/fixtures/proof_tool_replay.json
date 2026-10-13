@@ -79,7 +79,7 @@
     {
       "run": "v5-accept-20261006-r2-model-qwen3.8-flash",
       "call": 1,
-      "old_tool": "mcp__arena_lean__lean_declaration",
+      "old_tool": "legacy_lsp_declaration",
       "preventable": true,
       "class": "retired_mcp_declaration_name",
       "tool": "arena_declarations",
@@ -356,10 +356,10 @@
     {
       "run": "v5-gen-20261007-subst-model-qwen3.8-flash",
       "call": 6,
-      "old_tool": "mcp__arena_lean__lean_goal",
+      "old_tool": "legacy_lsp_goal",
       "preventable": false,
       "class": "invalid_goal_line",
-      "tool": "mcp__arena_lean__lean_goal",
+      "tool": "legacy_lsp_goal",
       "request": {
         "line": 3095,
         "path_kind": "candidate"
@@ -504,10 +504,10 @@
     {
       "run": "v5-rep-20261006-r4-model-qwen3.8-flash",
       "call": 1,
-      "old_tool": "mcp__arena_lean__lean_hover_info",
+      "old_tool": "legacy_lsp_hover_info",
       "preventable": false,
       "class": "invalid_hover_location",
-      "tool": "mcp__arena_lean__lean_hover_info",
+      "tool": "legacy_lsp_hover_info",
       "request": {
         "line": 1,
         "column": 1
@@ -518,10 +518,10 @@
     {
       "run": "v5-rep-20261006-r4-model-qwen3.8-flash",
       "call": 2,
-      "old_tool": "mcp__arena_lean__lean_hover_info",
+      "old_tool": "legacy_lsp_hover_info",
       "preventable": false,
       "class": "invalid_hover_location",
-      "tool": "mcp__arena_lean__lean_hover_info",
+      "tool": "legacy_lsp_hover_info",
       "request": {
         "line": 200,
         "column": 1

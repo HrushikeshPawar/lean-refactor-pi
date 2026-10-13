@@ -1,6 +1,7 @@
 """Post-compaction memory: built from the harness's own state, no model bookkeeping."""
 
 import unittest
+from typing import cast
 
 from arena.memory import memory_text
 
@@ -50,21 +51,21 @@ FRONT = {
 
 
 class MemoryTests(unittest.TestCase):
-    def test_memory_states_best_routes_ideas_failures_and_allowance(self):
+    def test_memory_keeps_best_node_failure_and_allowance_without_ideas_or_routes(self):
         text = memory_text(FRONT, 1.25, 3)
         self.assertIn("#4 proxy 61.5 (verified)", text)
-        self.assertIn("r2 \u00b7 3 attempts \u00b7 best proxy 61.5 (#4)", text)
-        self.assertNotIn("updatedStatesComm", text)
-        self.assertIn('i2 "induct" [active]: 3 attempts, best #4', text)
-        self.assertIn("#3 (i1): unsolved goals", text)
+        self.assertNotIn("r2", text)
+        self.assertNotIn("induct", text)
+        self.assertNotIn("i1", text)
+        self.assertIn("#3: unsolved goals", text)
         self.assertIn("$1.2500 of $3 spent, $1.7500 left", text)
 
-    def test_active_ideas_come_first_and_the_list_is_capped(self):
+    def test_internal_idea_state_is_not_injected_after_compaction(self):
         ideas = [{"id": f"i{n}", "title": "t", "status": "parked", "attempts": n} for n in range(12)]
         ideas.append({"id": "act", "title": "t", "status": "active", "attempts": 0})
         text = memory_text({**FRONT, "ideas": ideas})
-        self.assertLess(text.index('act "t"'), text.index("i11"))
-        self.assertIn("(+5 more)", text)
+        self.assertNotIn('act "t"', text)
+        self.assertNotIn("i11", text)
 
     def test_depth_fields_on_route_rows_add_only_neutral_facts(self):
         depth = {
@@ -78,11 +79,11 @@ class MemoryTests(unittest.TestCase):
             "credited": True,
             "skeleton": True,
         }
-        deeper = {**FRONT, "routes": [{**row, **depth} for row in FRONT["routes"]]}
-        self.assertIn(
-            "r2 (credited) \u00b7 3 attempts \u00b7 4 goal states \u00b7 best proxy 61.5 (#4)",
-            memory_text(deeper, 1.25, 3),
-        )
+        routes = cast(list[dict], FRONT["routes"])
+        deeper = {**FRONT, "routes": [{**row, **depth} for row in routes]}
+        text = memory_text(deeper, 1.25, 3)
+        self.assertNotIn("r2", text)
+        self.assertIn("Work so far", text)
 
     def test_empty_run_still_renders(self):
         text = memory_text({})

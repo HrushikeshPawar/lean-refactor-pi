@@ -47,7 +47,7 @@ class ProofToolReplayTests(unittest.TestCase):
         calls = self.fixture["calls"]
         declarations = [call for call in calls if call["replay"] == "map_symbol_to_items"]
         self.assertEqual(len(declarations), 1)
-        self.assertEqual(declarations[0]["old_tool"], "mcp__arena_lean__lean_declaration")
+        self.assertEqual(declarations[0]["old_tool"], "legacy_lsp_declaration")
         self.assertEqual(declarations[0]["legacy_tool"], "arena_declaration")
         self.assertEqual(declarations[0]["old_request"], {"symbol": "Imperative.UpdateState"})
         self.assertEqual(declarations[0]["tool"], "arena_declarations")

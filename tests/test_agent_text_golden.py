@@ -1,4 +1,4 @@
-"""The text moved by ticket 05a must render exactly as it did before the move."""
+"""Agent-facing text renders exactly as recorded in its migration fixtures."""
 
 import json
 import unittest
@@ -13,7 +13,7 @@ FIXTURES = ROOT / "tests" / "fixtures"
 
 
 class AgentTextGoldenTests(unittest.TestCase):
-    def test_skill_packet_and_memory_outputs_match_the_pre_move_bytes(self):
+    def test_skill_packet_and_memory_outputs_match_the_migrated_fixtures(self):
         cases = json.loads((FIXTURES / "agent_text_golden.json").read_text())
         for case in cases:
             with self.subTest(case=case["id"]):

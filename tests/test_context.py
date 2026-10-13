@@ -630,7 +630,10 @@ class PortabilityTests(unittest.TestCase):
             }
             for label, inserted in sources.items():
                 text = built["text"][: built["offset"]] + inserted + built["text"][built["offset"] :]
-                _code, output = run_lean(row, built["path"], text)
+                result = run_lean(row, built["path"], text)
+                if result is None:
+                    self.fail(f"{label} wrapper timed out on {version}")
+                _code, output = result
                 marker = '"kind":"end"' if label == "context" else "ARENA_PROFILE_TOTAL"
                 self.assertIn(marker, output, f"{label} wrapper failed on {version}: {output[:300]}")
             ran += 1
@@ -697,12 +700,12 @@ if __name__ == "__main__":
 
 
 class RouteRuleAgreementTests(unittest.TestCase):
-    """The packet, the arena_probe description and SKILL.md no longer describe the retired extractor."""
+    """The packet, compile description and SKILL.md agree on the current workflow."""
 
     def test_agent_text_does_not_claim_routes_use_compiled_fingerprints(self):
         sources = {
             "packet": ROOT / "agent-text" / "packet" / "task.md",
-            "tool": ROOT / "agent-text" / "tools" / "arena_probe.yaml",
+            "tool": ROOT / "agent-text" / "tools" / "compile.yaml",
             "skill": ROOT / "agent-text" / "skill" / "SKILL.md",
         }
         for label, path in sources.items():

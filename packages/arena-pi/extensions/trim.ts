@@ -1,18 +1,12 @@
 import { createHash } from "node:crypto";
 import { render } from "./text.ts";
 
-/** Read-only context tools whose identical repeat can be replaced by a stub; proof results never are. */
-export const STUBBABLE_TOOLS = new Set(["arena_source", "arena_declarations", "arena_find", "arena_candidate",
-  "arena_skill_read", "mcp__arena_lean__lean_local_search", "mcp__arena_lean__lean_hover_info"]);
+/** Read-only context tools whose identical repeat can be replaced by a stub; compile and goal results never are. */
+export const STUBBABLE_TOOLS = new Set(["search", "read"]);
 const STUB_MIN_CHARS = 200;
-const WARNING_LIMIT = 600;
-const REPEATED_MESSAGE_MIN = 120;
 
 /**
- * Model-facing trimming of tool results. Errors are never shortened and nothing a proof needs is removed:
- * a repeat of an earlier identical read becomes a stub, JSON is written compactly without empty fields,
- * a diagnostic message that repeats earlier in the same result points back to it, and only long
- * non-error messages (warnings, infos) are cut. Call `forget` when Pi compacts, since the earlier text is then gone.
+ * A repeated identical context result becomes a stub. Call `forget` when Pi compacts because the earlier text is gone.
  */
 export class ResultTrimmer {
   private seen = new Map<string, string>();
@@ -25,50 +19,12 @@ export class ResultTrimmer {
       const key = `${toolName}:${JSON.stringify(input ?? {})}`;
       const digest = createHash("sha256").update(text).digest("hex");
       if (this.seen.get(key) === digest) {
-        return JSON.stringify({ ok: true, unchanged: true,
-          note: await render(toolName === "arena_skill_read" ? "messages/trim.skill_stub" : "messages/trim.result_stub") });
+        return JSON.stringify({ ok: true, unchanged: true, note: await render("messages/trim.result_stub") });
       }
       this.seen.set(key, digest);
     }
-    return toolName.startsWith("mcp__arena_lean__") ? compactDiagnostics(text) : text;
+    return text;
   }
-}
-
-const isDiagnostic = (value: any) => value && typeof value === "object" && typeof value.severity === "string" && typeof value.message === "string";
-
-/** Compact JSON from a Lean tool: no indentation or null fields, repeated long messages pointed back, long warnings cut. */
-export async function compactDiagnostics(text: string): Promise<string> {
-  let parsed: unknown;
-  try { parsed = JSON.parse(text); } catch { return text; }
-  const messages = new Map<string, string>();
-  const walk = async (value: any): Promise<any> => {
-    if (Array.isArray(value)) return Promise.all(value.map(walk));
-    if (!value || typeof value !== "object") return value;
-    const out: Record<string, any> = {};
-    for (const [key, item] of Object.entries(value)) {
-      if (item === null || (key === "category" && item === "diagnostic")) continue;
-      out[key] = await walk(item);
-    }
-    if (isDiagnostic(value)) {
-      const where = `${value.line ?? "?"}:${value.column ?? "?"}`;
-      const signature = `${value.severity}\u0000${value.message}`;
-      const earlier = messages.get(signature);
-      if (value.message.length >= REPEATED_MESSAGE_MIN && earlier !== undefined) {
-        out.message = await render("messages/trim.repeated", { severity: value.severity, where: earlier });
-      } else {
-        messages.set(signature, where);
-        if (value.severity !== "error" && value.message.length > WARNING_LIMIT) {
-          out.message = await render("messages/trim.warning_cut", {
-            message: value.message.slice(0, WARNING_LIMIT), omitted: value.message.length - WARNING_LIMIT,
-            severity: value.severity,
-          });
-        }
-      }
-    }
-    return out;
-  };
-  const compact = JSON.stringify(await walk(parsed));
-  return compact.length < text.length ? compact : text;
 }
 
 /**

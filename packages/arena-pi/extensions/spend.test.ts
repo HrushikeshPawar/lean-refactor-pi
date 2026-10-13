@@ -24,9 +24,9 @@ test("finish becomes available once ten percent or less of the limit is left", (
 });
 
 test("the finish tool is listed only when allowed, and never twice", () => {
-  assert.deepEqual(toolsForSpend(["a", "arena_finish", "b"], "arena_finish", false), ["a", "b"]);
-  assert.deepEqual(toolsForSpend(["a", "b"], "arena_finish", true), ["a", "b", "arena_finish"]);
-  assert.deepEqual(toolsForSpend(["a", "arena_finish"], "arena_finish", true), ["a", "arena_finish"]);
+  assert.deepEqual(toolsForSpend(["a", "finish", "b"], "finish", false), ["a", "b"]);
+  assert.deepEqual(toolsForSpend(["a", "b"], "finish", true), ["a", "b", "finish"]);
+  assert.deepEqual(toolsForSpend(["a", "finish"], "finish", true), ["a", "finish"]);
 });
 
 test("a call without a usable cost adds nothing", () => {

@@ -114,54 +114,26 @@ def attempt_has_model_error(event_log: Path, offset: int, intentional_stop: bool
     return pending_error
 
 
-def _describe_result(item: dict) -> str:
-    """One probe or evaluation outcome for the live log: label, outcome, size and versions checked."""
-    if item.get("ok") is False:
-        return f"draft {item.get('index', '?')} rejected: {str(item.get('error', 'unknown error'))[:100]}"
-    compat = item.get("compat") or {}
-    passed = sum(bool(entry.get("passed")) for entry in compat.values())
-    paths = sorted({str(entry["lean"]).split(" ")[0] for entry in compat.values() if entry.get("lean")})
-    label = item.get("candidate") or item.get("probe") or "unrecorded"
-    holes = f" {len(item['goals'])} holes" if item.get("goals") else ""
-    versions = f" {passed}/{len(compat)} versions" if compat else ""
-    via = f" lean={'+'.join(paths)}" if paths else ""
-    return (
-        f"{label} idea={item.get('idea_id', '?')} {item.get('tokens', '?')} tok "
-        f"{item.get('heartbeat', '?')} HB{holes}{versions}{via}"
-    )
-
-
 def log_event(event: dict) -> None:
     global _request_count, _tool_result_count, _retry_count
     kind = event.get("type")
     note = None
     if kind == "tool_execution_start":
         name = event.get("toolName", "tool")
-        if name in ("arena_evaluate", "arena_probe"):
+        if name == "compile":
             args = event.get("args") or {}
             _tool_started[event.get("toolCallId", "")] = (time.monotonic(), args)
-            parent = (args.get("parents") or [args.get("parent", "?")])[0]
-            note = f"{name} started idea={args.get('idea_id', '?')} parent={str(parent)[:12]} mode={args.get('mode', 'fast')}"
+            parent = args.get("base") or args.get("from") or "?"
+            note = f"{name} started drafts={len(args.get('drafts') or [])} base={str(parent)[:12]}"
     elif kind == "tool_execution_end":
         _tool_result_count += 1
         name = event.get("toolName", "tool")
         started = _tool_started.pop(event.get("toolCallId", ""), None)
         elapsed = f" in {time.monotonic() - started[0]:.1f}s" if started else ""
-        if name in ("arena_evaluate", "arena_probe"):
-            try:
-                result = json.loads(event["result"]["content"][0]["text"].splitlines()[0])
-                args = started[1] if started else {}
-                if result.get("ok") is False:
-                    note = (
-                        f"{name} rejected idea={args.get('idea_id', '?')} "
-                        f"parent={str((args.get('parents') or [args.get('parent', '?')])[0])[:12]}"
-                        f"{elapsed}; {result.get('error', 'unknown error')[:130]}"
-                    )
-                else:
-                    items = result.get("drafts") or [result]
-                    note = f"{name}{elapsed}: " + "; ".join(_describe_result(item) for item in items)
-            except (KeyError, IndexError, TypeError, ValueError):
-                note = "arena_evaluate returned an unreadable result"
+        if name == "compile":
+            content = event.get("result", {}).get("content") or []
+            detail = content[0].get("text", "") if content else ""
+            note = f"compile{elapsed}: {detail[:180]}" if detail else f"compile{elapsed} completed"
         elif event.get("isError"):
             note = f"tool {name} returned an error"
         elif note is None:
@@ -345,7 +317,6 @@ class RunOptions:
     merge_worker: bool = False
     no_lean_session: bool = False
     no_skill: bool = False
-    no_mcp: bool = False
     preflight: bool = False
     no_langfuse: bool = False
     test_extension: list[Path] = field(default_factory=list)
@@ -421,7 +392,7 @@ def run(options: RunOptions) -> int:
         prompt = "Resume the existing Arena run from its recorded candidate frontier. Continue improving the proof."
     else:
         prompt = (
-            "Call the arena_skill_read tool once with no arguments, then stop. Do not evaluate, edit, or search."
+            'Call read once with {"node":"n1"}, then stop.'
             if args.preflight
             else packet(args.theorem) + ("\nAdditional instructions:\n" + extra + "\n" if extra else "")
         )
@@ -440,7 +411,6 @@ def run(options: RunOptions) -> int:
         "--no-extensions",
         "--no-skills",
         "--no-prompt-templates",
-        *([] if args.no_mcp else ["--extension", "builtin:mcp"]),
         *[item for path in args.test_extension for item in ("--extension", str(path.resolve()))],
         "--extension",
         str(ROOT / "packages/arena-pi/extensions/arena.ts"),
@@ -517,8 +487,6 @@ def run(options: RunOptions) -> int:
     env["ARENA_REQUEST_OUTPUT_TOKENS"] = str(CONFIG["models"][args.model]["request_output_tokens"])
     env.setdefault("ARENA_OUTAGE_LIMIT_MS", str(CONFIG["outage_limit_ms"]))
     env["ARENA_SKILL_DIR"] = "" if args.no_skill else str(SKILL_DIR)
-    if args.no_mcp:
-        env["ARENA_NO_MCP"] = "1"
     env["ARENA_BUDGET_REPORT_PATH"] = str(directory / "cost.json")
     if plugin is not None:
         try:

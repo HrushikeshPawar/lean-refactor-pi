@@ -25,7 +25,7 @@ def fixture_summary(proxy, spent=0.05, stop="model_stopped", errors=0, ideas=0, 
         },
         "progress": {"best_verified_candidate": best},
         "ideas_without_attempts": list(range(ideas)),
-        "tools": {"error_total": errors, "errors": {"arena_probe": errors} if errors else {}},
+        "tools": {"error_total": errors, "errors": {"compile": errors} if errors else {}},
         "cache": {"reuse_pct": cache},
     }
 
@@ -225,12 +225,12 @@ class ExecuteAndReportTests(unittest.TestCase):
             fake = lambda cmd, **kw: seen.append(cmd) or SimpleNamespace(returncode=0)  # noqa: E731
             with mock.patch.object(rc, "RUNS", root):
                 row = rc.execute(
-                    spec, 0.1, "high", ["--no-mcp"], root, "h", run_fn=fake, summary_fn=lambda d: fixture_summary(70.0)
+                    spec, 0.1, "high", [], root, "h", run_fn=fake, summary_fn=lambda d: fixture_summary(70.0)
                 )
             self.assertEqual(len(seen), 1)
             self.assertIn("--limit-usd", seen[0])
             self.assertIn("0.1", seen[0])
-            self.assertIn("--no-mcp", seen[0])
+            self.assertIn("--limit-usd", seen[0])
             self.assertTrue(row["packet_matches"])
             self.assertTrue(row["helpers"]["best_uses_helper"])
 

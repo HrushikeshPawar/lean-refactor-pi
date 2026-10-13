@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Cheap live proof that one Arena run is readable in Langfuse before a paid matrix.
 
-One real request per selected model, plus the read-only arena_skill_read tool. arena_state
-belongs to a later ticket, so the harmless model-visible tool is the skill listing.
+One real request per selected model, plus a read of the initial node.
 """
 
 from __future__ import annotations
@@ -59,7 +58,6 @@ def execute(theorem: str = "Core.InitsUpdatesComm", models_csv: str | None = Non
                 "0.10",
                 "--thinking",
                 "off",
-                "--no-mcp",
                 "--preflight",
             ],
             cwd=ROOT,

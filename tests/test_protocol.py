@@ -287,7 +287,7 @@ class CampaignCliTests(unittest.TestCase):
             campaign.evaluate_request(NAME, "unused", "complete", candidate_ref="#2")
         with (
             patch("arena.campaign.record_evaluation", side_effect=ValueError("FORBIDDEN: sorry")),
-            self.assertRaisesRegex(ValueError, "use arena_probe"),
+            self.assertRaisesRegex(ValueError, "use compile"),
         ):
             campaign.evaluate_request(NAME, "unused", campaign.problem(NAME)["statement"] + " := by sorry")
 
@@ -411,10 +411,16 @@ class TruncationEquivalenceTests(unittest.TestCase):
         full = candidate_file(row, proof, version, commit, truncate=False)
         self.assertGreater(len(full["text"]), len(short["text"]))
         self.assertTrue(full["text"].startswith(short["text"].rstrip("\n")))
-        code, output = run_lean(
+        compiled = run_lean(
             row, full["path"], full["text"][: full["offset"]] + HEARTBEAT_WRAPPER + full["text"][full["offset"] :]
         )
-        untruncated = int(__import__("re").search(r"ARENA_HEARTBEATS (\d+)", output)[1])
+        if compiled is None:
+            self.fail("the untruncated proof compile timed out")
+        code, output = compiled
+        match = __import__("re").search(r"ARENA_HEARTBEATS (\d+)", output)
+        if match is None:
+            self.fail("the heartbeat wrapper did not report a count")
+        untruncated = int(match[1])
         result = evaluate(NAME, proof, "fast")
         self.assertEqual((code, result["compat"][version]["passed"]), (0, True))
         self.assertAlmostEqual(result["heartbeat"], untruncated, delta=max(5, untruncated * 0.02))

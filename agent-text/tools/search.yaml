@@ -1,0 +1,5 @@
+description: "Search the pinned declaration index by name, type or text."
+params:
+  queries: "One or more search strings."
+  kind: "Search by name, type or text."
+  after: "Prefix used for name completion."

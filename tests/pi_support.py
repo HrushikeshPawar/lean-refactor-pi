@@ -10,6 +10,7 @@ import sys
 import tempfile
 import uuid
 from pathlib import Path
+from typing import Any
 
 from arena.campaign import run_dir
 from arena.engine import ROOT
@@ -58,7 +59,6 @@ class FakeRun:
             self.run_id,
             "--limit-usd",
             limit,
-            "--no-mcp",
             "--test-extension",
             str(FAKE),
             *([] if langfuse else ["--no-langfuse"]),
@@ -160,7 +160,7 @@ class AnthropicWire:
         wire = self
 
         class Handler(BaseHTTPRequestHandler):
-            def log_message(self, *_args):
+            def log_message(self, format: str, *args: object) -> None:
                 pass
 
             def do_POST(self):
@@ -225,7 +225,8 @@ class AnthropicWire:
             "cache_read_input_tokens": 4000,
             "cache_creation_input_tokens": 100,
         }
-        events = [
+        usage.update(reply.get("usage") or {})
+        events: list[dict[str, Any]] = [
             {
                 "type": "message_start",
                 "message": {
@@ -282,7 +283,7 @@ class AnthropicWire:
             {
                 "type": "message_delta",
                 "delta": {"stop_reason": stop, "stop_sequence": None},
-                "usage": {"output_tokens": 40},
+                "usage": {"output_tokens": (reply.get("usage") or {}).get("output_tokens", 40)},
             },
             {"type": "message_stop"},
         ]

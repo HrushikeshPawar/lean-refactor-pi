@@ -10,7 +10,7 @@ packet certifies with its mandatory sections. `--dry-run` prints the plan and wo
 
 `--preset v6-matrix` is the standing comparison: the configured models x the Core and PhysLib rows x 3 replicates at the preset's spend limit.
 
-Arguments after `--` are passed to every run (for example `--no-mcp`).
+Arguments after `--` are passed to every run.
 """
 
 from __future__ import annotations

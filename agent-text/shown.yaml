@@ -1,13 +1,6 @@
 messages:
-  arena_line:
-    where: "Agent messages and notices"
-    per_run: "when the matching event occurs"
-  assembly:
-    where: "Agent messages and notices"
-    per_run: "when the matching event occurs"
-  compaction_memory:
-    where: "Agent messages and notices"
-    per_run: "when the matching event occurs"
+  where: "Agent messages and notices"
+  per_run: "when the matching event occurs"
   continuation:
     where: "Agent messages and notices"
     per_run: "when the matching event occurs"
@@ -16,116 +9,49 @@ messages:
     per_run: "when the matching event occurs"
   footer:
     where: "Agent messages and notices"
-    per_run: "when the matching event occurs"
-  notices:
-    where: "Agent messages and notices"
-    per_run: "when the matching event occurs"
-  phase:
-    where: "Agent messages and notices"
-    per_run: "when the matching event occurs"
-    stall_focus:
-      where: "Agent messages and notices"
-      per_run: "when the matching event occurs"
-  refusals:
-    where: "Agent messages and notices"
-    per_run: "when the matching event occurs"
-  salvage:
-    where: "Agent messages and notices"
-    per_run: "when the matching event occurs"
+    per_run: "after each tool result"
   trim:
     where: "Agent messages and notices"
-    per_run: "when the matching event occurs"
+    per_run: "when a repeat is shortened"
 packet:
-  inventory:
-    where: "Initial theorem packet"
-    per_run: "once per run"
-  library:
-    where: "Initial theorem packet"
-    per_run: "once per run"
-  profile:
-    where: "Initial theorem packet"
-    per_run: "once per run"
+  where: "Initial theorem packet"
+  per_run: "once per run"
   price_table:
     where: "Prices action replies"
     per_run: "when the table is requested"
-  rates:
-    where: "Initial theorem packet"
-    per_run: "once per run"
-  scoring:
-    where: "Initial theorem packet"
-    per_run: "once per run"
-  sections:
-    where: "Initial theorem packet"
-    per_run: "once per run"
   task:
     where: "Initial theorem packet"
     per_run: "once per run"
 replies:
+  where: "Tool replies"
+  per_run: "when the matching tool result occurs"
   tools:
-    where: "Tool replies"
-    per_run: "when the matching tool result occurs"
-  candidate:
-    where: "Tool replies"
-    per_run: "when the matching tool result occurs"
-  check:
-    where: "Tool replies"
-    per_run: "when the matching tool result occurs"
-  evaluate:
-    where: "Tool replies"
-    per_run: "when the matching tool result occurs"
-  merge:
-    where: "Tool replies"
-    per_run: "when the matching tool result occurs"
-  probe:
-    where: "Tool replies"
-    per_run: "when the matching tool result occurs"
-  profile:
     where: "Tool replies"
     per_run: "when the matching tool result occurs"
   price_row:
     where: "Compile replies"
     per_run: "when a scored proof is compiled"
-  routes:
-    where: "Tool replies"
-    per_run: "when the matching tool result occurs"
-  state:
-    where: "Tool replies"
-    per_run: "when the matching tool result occurs"
 skill:
+  where: "Agent skill instructions"
+  per_run: "once per run"
   skill:
     where: "Agent skill instructions"
     per_run: "once per run"
 tools:
-  arena_candidate:
+  where: "Model tool definitions"
+  per_run: "every request"
+  compile:
     where: "Model tool definitions"
     per_run: "every request"
-  arena_declarations:
+  finish:
     where: "Model tool definitions"
     per_run: "every request"
-  arena_evaluate:
+  goal:
     where: "Model tool definitions"
     per_run: "every request"
-  arena_find:
+  read:
     where: "Model tool definitions"
     per_run: "every request"
-  arena_finish:
-    where: "Model tool definitions"
-    per_run: "every request"
-  arena_idea:
-    where: "Model tool definitions"
-    per_run: "every request"
-  arena_probe:
-    where: "Model tool definitions"
-    per_run: "every request"
-  arena_profile:
-    where: "Model tool definitions"
-    per_run: "every request"
-  arena_skill_read:
-    where: "Model tool definitions"
-    per_run: "every request"
-  arena_source:
-    where: "Model tool definitions"
-    per_run: "every request"
-  arena_state:
+  search:
     where: "Model tool definitions"
     per_run: "every request"

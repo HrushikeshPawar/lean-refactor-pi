@@ -7,7 +7,7 @@ differences in the report are attributable to that factor. Use a small limit ($0
     python -m arena.cli experiment --theorem Core.InitsUpdatesComm --prefix think-ab \\
         --factor thinking --values medium,high --model deepseek-v4.1-flash --limit-usd 0.1
 
-Arguments after `--` are passed to every run (for example `--no-mcp`).
+Arguments after `--` are passed to every run.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ from arena.summary import build_summary
 from arena.traces import preflight_block
 
 FACTORS = ("model", "thinking", "skill")
-PER_RUN_GB = 4.5  # Pi, the Lean MCP server, and one Lean process in each of the model and background lanes
+PER_RUN_GB = 4.5  # Pi and one Lean process in each of the model and background lanes
 
 
 def parallelism(requested: str, runs: int, available_kb: int, per_run_gb: float = PER_RUN_GB) -> int:

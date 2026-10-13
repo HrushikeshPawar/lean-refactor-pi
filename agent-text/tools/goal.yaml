@@ -1,0 +1,6 @@
+description: "Read the goal at a node position or hole and optionally try snippets."
+params:
+  node: "Existing node handle."
+  hole: "Existing hole handle, such as n2.h1."
+  line: "One-based proof line within the node."
+  try: "Snippets to test at the selected position."

@@ -129,7 +129,6 @@ class MatrixRunTests(unittest.TestCase):
                     "--parallel",
                     "2",
                     "--",
-                    "--no-mcp",
                     "--no-langfuse",
                     "--test-extension",
                     str(FAKE),

@@ -1,0 +1,1 @@
+description: "Request to stop the run. Available only when {finish_remaining_pct}% or less of the spend allowance remains."

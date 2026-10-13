@@ -8,54 +8,46 @@ import sys
 
 def execute(rows: list[str]) -> int:
     try:
-        from arena.campaign import problem, run_dir
-        from arena.engine import candidate_file, versions
-        from tests.pi_support import FakeRun, message_text
+        from arena.campaign import problem
+        from tests.pi_support import FakeRun
     except ImportError:
         print("arena smoke needs a source checkout (tests/pi_support.py)", file=sys.stderr)
         return 2
 
-    def tool(name, args):
+    def tool(name, args, output=40):
         return {
             "tool_calls": [{"name": name, "arguments": args}],
-            "usage": {"input": 300, "output": 40, "cacheRead": 4000, "cacheWrite": 100},
+            "usage": {"input": 300, "output": output, "cacheRead": 4000, "cacheWrite": 100},
         }
 
     ok = True
     for name in rows:
         row = problem(name)
         run = FakeRun([], timeout=1500)
-        run.command = [item for item in run.command if item != "--no-mcp"]
         run.command[run.command.index("--theorem") + 1] = name
-        built = candidate_file(row, row["src"], *versions(row)[0])
-        path = str(run_dir(run.run_id) / "scratch" / "project" / (row.get("file_path") or ""))
         calls = [
-            ("arena_declarations", {"items": [name]}),
-            ("arena_source", {"handle": f"decl:{name}"}),
-            (
-                "arena_probe",
-                {"drafts": [row["src"] + "\n-- route smoke draft 1", row["src"] + "\n-- route smoke draft 2"]},
-            ),
-            ("arena_evaluate", {"proof": row["src"]}),
-            ("mcp__arena_lean__lean_goal", {"file_path": path, "line": built["start_line"] + 1}),
-            ("arena_profile", {"proof": row["src"]}),
+            ("compile", {"drafts": [row["src"]], "check": "lean"}),
+            ("goal", {"node": "n1", "line": 1}),
+            ("search", {"queries": [name], "kind": "name"}),
+            ("read", {"node": "n1"}),
+            ("read", {"view": "prices"}),
+            ("finish", {}),
         ]
-        run.script.write_text(json.dumps([tool(n, a) for n, a in calls] + [{"text": "done"}]))
+        steps = [tool(n, args, 150_000 if n == "read" and args.get("view") == "prices" else 40) for n, args in calls]
+        run.script.write_text(json.dumps(steps))
         try:
             run.run()
-            last = run.requests[-1]["messages"] if run.requests else []
-            results = {message["toolName"]: message for message in last if message["role"] == "toolResult"}
-            errors = {
-                n: message_text(results[n])[:160] for n, _ in calls if n not in results or results[n].get("isError")
-            }
             summary = run.json("summary.json")
+            errors = summary["tools"]["errors"]
+            missing = {n for n, _ in calls} - set(summary["tools"]["calls"])
+            failed = {**errors, **dict.fromkeys(missing, "not called")}
             print(
-                f"{'PASS' if not errors else 'FAIL'}  {name}  requests {len(run.requests)}  "
+                f"{'PASS' if not failed else 'FAIL'}  {name}  requests {len(run.requests)}  "
                 f"tool errors {summary['tools']['error_total']}  evaluations {summary['evaluations']}  "
-                f"{errors if errors else ''}",
+                f"{failed if failed else ''}",
                 flush=True,
             )
-            ok &= not errors
+            ok &= not failed and summary["stop_reason"] == "finished"
         except Exception as error:
             print(f"FAIL  {name}  {error}  {run.result.stderr[-400:] if run.result else ''}", flush=True)
             ok = False
