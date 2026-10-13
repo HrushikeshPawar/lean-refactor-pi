@@ -75,10 +75,15 @@ class GateTests(unittest.TestCase):
 
     def test_no_worker_ready_is_unhealthy_and_no_session_is_tolerated(self):
         dead = {"ok": False, "workers": 0, "seconds": [], "failed": ["boom"]}
-        report, _ = run_gate({"v1": ok(5.0), "v2": ok(5.0)}, warms={"v1": dead, "v2": None})
+        report, lines = run_gate({"v1": ok(5.0), "v2": ok(5.0)}, warms={"v1": dead, "v2": None})
         self.assertEqual(report["verdict"], "unhealthy")
         self.assertEqual(len(report["reasons"]), 1)
         self.assertIsNone(report["versions"]["v2"]["workers"])
+        self.assertIn("lean warm v1: NO worker ready (boom)", lines)
+
+    def test_a_gate_without_a_session_says_the_check_includes_the_import(self):
+        _, lines = run_gate({"v1": ok(5.0)}, warms={"v1": None}, versions=(("v1", "c1"),))
+        self.assertTrue(any(line.startswith("lean warm v1: no session configured") for line in lines))
 
     def test_other_versions_are_warmed_without_waiting_or_checking(self):
         calls = []

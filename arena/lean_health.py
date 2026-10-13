@@ -136,6 +136,7 @@ def gate(
         warmed = {"ok": False, "workers": 0, "seconds": [], "failed": [f"{type(error).__name__}: {error}"]}
     if warmed is None:
         entry.update(workers=None, header_seconds=None, warm_failed=[])
+        _say(log, f"lean warm {version}: no session configured; the reference check below includes the import")
     else:
         warm_result = warmed if isinstance(warmed, dict) else {}
         seconds_value = warm_result.get("seconds")
@@ -148,14 +149,15 @@ def gate(
             warm_failed=failed,
             warm_ok=bool(warm_result.get("ok")),
         )
-    warm_result = warmed if isinstance(warmed, dict) else {}
-    seconds_value = warm_result.get("seconds")
-    warm_seconds = [float(s) for s in seconds_value] if isinstance(seconds_value, list) else []
-    _say(
-        log,
-        f"lean warm {version}: {entry.get('workers')} workers ready"
-        + (f" in {max(warm_seconds):.0f} s" if warm_seconds else ""),
-    )
+        if entry["workers"]:
+            took = f" in {max(seconds):.0f} s" if seconds else ""
+            _say(
+                log,
+                f"lean warm {version}: {entry['workers']} workers ready{took}"
+                + (f"; {len(failed)} failed" if failed else ""),
+            )
+        else:
+            _say(log, f"lean warm {version}: NO worker ready ({'; '.join(failed)[:160]})")
     checked = check_fn(row, version, commit, lane="model")
     entry.update(
         check_seconds=checked["seconds"],
@@ -212,8 +214,7 @@ def gate(
         finished=now_fn(),
     )
     if directory is not None:
-        with contextlib.suppress(OSError):
-            (Path(directory) / HEALTH_FILE).write_text(json.dumps(report, indent=2) + "\n")
+        _write_health(directory, report)
     _say(log, f"lean gate {report['verdict']}: limit {limit} s" + (" (" + "; ".join(reasons) + ")" if reasons else ""))
     return report
 
@@ -270,7 +271,7 @@ def check_others(
         )
         report["versions"][version] = entry
         report["pending"] = [pending for pending in report.get("pending", []) if pending != version]
-        (Path(directory) / HEALTH_FILE).write_text(json.dumps(report, indent=2) + "\n")
+        _write_health(directory, report)
         completed.append({"version": version, **entry})
         detail = entry["detail"] or ("timed out" if entry["timed_out"] else "reference failed")
         if (
@@ -283,6 +284,15 @@ def check_others(
             break
         _say(log, f"reference {version}: {entry['check_seconds']:.0f} s passed")
     return completed
+
+
+def _write_health(directory: Path, report: dict) -> None:
+    """Replace lean-health.json whole: check_others rewrites it while the run may be reading it."""
+    path = Path(directory) / HEALTH_FILE
+    temporary = path.with_name(f".{HEALTH_FILE}.{os.getpid()}.tmp")
+    with contextlib.suppress(OSError):
+        temporary.write_text(json.dumps(report, indent=2) + "\n")
+        os.replace(temporary, path)
 
 
 def read_health(directory: Path) -> dict | None:
