@@ -34,6 +34,11 @@ BENCHMARK_ROWS = (
 # The quick gate of every Lean ticket (owner decision 2026-10-13): Putnam has the long checks, Core and CSLib show
 # overhead added to every check. ArkLib's four toolchains are three quarters of the time; they run in the full gate.
 QUICK_ROWS = BENCHMARK_ROWS[:3]
+# A multi-GB Lean worker takes a while to unmap its memory and exit after a signal: wait this long after SIGTERM,
+# and again after SIGKILL, before calling it an orphan.
+ORPHAN_TERM_WAIT_S = 2.0
+ORPHAN_KILL_WAIT_S = 5.0
+ORPHAN_POLL_S = 0.05
 
 
 @dataclass(frozen=True)
@@ -387,16 +392,25 @@ class _WorkerSampler(threading.Thread):
         self.join()
 
 
+def _wait_gone(pids: list[int], timeout_s: float) -> list[int]:
+    """Poll until every pid has exited or `timeout_s` passes; the pids still running."""
+    deadline = time.monotonic() + timeout_s
+    alive = [pid for pid in pids if lean_session.running(pid)]
+    while alive and time.monotonic() < deadline:
+        time.sleep(ORPHAN_POLL_S)
+        alive = [pid for pid in alive if lean_session.running(pid)]
+    return alive
+
+
 def _kill_orphans(pids: list[int]) -> list[int]:
     for pid in pids:
         with suppress(ProcessLookupError, PermissionError):
             os.kill(pid, signal.SIGTERM)
-    time.sleep(0.1)
-    still_running = [pid for pid in pids if lean_session.running(pid)]
+    still_running = _wait_gone(pids, ORPHAN_TERM_WAIT_S)
     for pid in still_running:
         with suppress(ProcessLookupError, PermissionError):
             os.kill(pid, signal.SIGKILL)
-    return [pid for pid in still_running if lean_session.running(pid)]
+    return _wait_gone(still_running, ORPHAN_KILL_WAIT_S)
 
 
 def _stop_checked(run: lean_load.SimRun, service: Path, baseline_processes: set[int]) -> None:

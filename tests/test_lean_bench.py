@@ -1,9 +1,11 @@
 """Pure behavior of the Lean speed benchmark and regression gate."""
 
 import json
+import signal
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from arena.cli import lean_bench
 
@@ -244,3 +246,33 @@ class GateTierTests(unittest.TestCase):
         status, calls = self.run_bench(["--compare", "BASELINE"], {})
         self.assertEqual(status, 0)
         self.assertEqual(calls, [(list(lean_bench.QUICK_ROWS), "first")])
+
+
+class KillOrphansTests(unittest.TestCase):
+    def test_waits_for_slow_exits_before_reporting(self):
+        # Fake clock: pid 1 exits 0.5 s after SIGTERM; pid 2 ignores SIGTERM and exits 1 s after SIGKILL.
+        clock = [0.0]
+        dies_at: dict[int, float] = {1: 0.5}
+        sent = []
+
+        def kill(pid, sig):
+            sent.append((pid, sig))
+            if sig == signal.SIGKILL:
+                dies_at[pid] = clock[0] + 1.0
+
+        def sleep(seconds):
+            clock[0] += seconds
+
+        def running(pid):
+            return clock[0] < dies_at.get(pid, float("inf"))
+
+        with (
+            mock.patch.object(lean_bench.os, "kill", kill),
+            mock.patch.object(lean_bench.time, "sleep", sleep),
+            mock.patch.object(lean_bench.time, "monotonic", lambda: clock[0]),
+            mock.patch.object(lean_bench.lean_session, "running", running),
+        ):
+            remaining = lean_bench._kill_orphans([1, 2])
+
+        self.assertEqual(remaining, [])
+        self.assertEqual([(pid, sig) for pid, sig in sent if sig == signal.SIGKILL], [(2, signal.SIGKILL)])
