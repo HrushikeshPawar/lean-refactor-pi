@@ -886,7 +886,7 @@ class RunnerSessionTests(unittest.TestCase):
         statement = problem(CORE)["statement"]
         call = {
             "tool_calls": [
-                {"name": "arena_probe", "arguments": {"proof": statement + " := by\n  intros Hup Hinit\n  sorry"}}
+                {"name": "compile", "arguments": {"drafts": [statement + " := by\n  intros Hup Hinit\n  sorry"]}}
             ],
             "usage": {"input": 300, "output": 40, "cacheRead": 4000, "cacheWrite": 100},
         }

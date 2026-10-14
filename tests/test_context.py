@@ -573,7 +573,7 @@ class FixturePacketTests(unittest.TestCase):
         indexed = context.constant_index(context.lean_context(NAME), name="Core.updatedStates")
         self.assertEqual(len(indexed), 1)
         entry = indexed[0]
-        source = campaign.declaration(NAME, "decl:Core.updatedStates")
+        source = campaign.source_range(NAME, "decl:Core.updatedStates")
         self.assertEqual((entry["start_line"], entry["end_line"]), (source["line"], source["end_line"]))
 
     def test_tags_classify_generated_instance_core_and_project_constants(self):

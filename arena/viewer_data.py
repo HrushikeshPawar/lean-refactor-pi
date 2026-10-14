@@ -383,48 +383,6 @@ def tool_timeline(directory: Path, start: float | None) -> list[dict]:
     return ordered
 
 
-def ideas_view(ledger: list[dict]) -> list[dict]:
-    labels = _candidate_labels(ledger)
-    ideas: dict[str, dict] = {}
-    for event in ledger:
-        kind = event.get("kind")
-        if kind == "idea":
-            ideas[event["id"]] = {
-                "id": event["id"],
-                "title": event.get("title"),
-                "hypothesis": event.get("hypothesis"),
-                "region": event.get("region"),
-                "expected_effect": event.get("expected_effect"),
-                "status": event.get("status"),
-                "reason": event.get("reason"),
-                "attempts": [],
-                "probes": 0,
-                "best_proxy": None,
-            }
-        elif kind == "idea_update" and event.get("id") in ideas:
-            ideas[event["id"]].update({k: event[k] for k in ("status", "title", "reason") if k in event})
-        elif kind == "candidate" and event.get("idea_id") in ideas:
-            ideas[event["idea_id"]]["attempts"].append(
-                {
-                    "candidate": labels.get(event["candidate_id"]),
-                    "id": event["candidate_id"],
-                    "parents": [labels.get(p, p) for p in event.get("parents", [])],
-                }
-            )
-        elif kind == "probe" and event.get("idea_id") in ideas:
-            ideas[event["idea_id"]]["probes"] += 1
-    owner = {a["id"]: i for i, idea in ideas.items() for a in idea["attempts"]}
-    for event in ledger:
-        metrics = (event.get("result") or {}).get("metrics") or {} if event.get("kind") == "evaluation" else {}
-        idea = ideas.get(owner.get(event.get("candidate_id")))
-        if idea and event.get("mode") == "full" and metrics.get("compiled") and metrics.get("proxy") is not None:
-            idea["best_proxy"] = max(idea["best_proxy"] or metrics["proxy"], metrics["proxy"])
-    for idea in ideas.values():
-        for attempt in idea["attempts"]:
-            attempt.pop("id")
-    return list(ideas.values())
-
-
 def control_events(directory: Path, start: float | None) -> list[dict]:
     rows = []
     limit_reached = False
@@ -521,7 +479,6 @@ def run_dashboard(run_id: str, directory: Path) -> dict:
         "scores": score_timeline(ledger, start),
         "spend": spend_series(directory, start, limit),
         "tools": tool_timeline(directory, start),
-        "ideas": ideas_view(ledger),
         "routes": (route_rows := route_table(ledger)),
         "route_progress": route_progress(route_rows),
         "controls": control_events(directory, start),

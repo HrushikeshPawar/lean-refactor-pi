@@ -1,6 +1,5 @@
 """Pricing units and protocol behavior at the fake-campaign seam."""
 
-import importlib
 import unittest
 from unittest.mock import patch
 
@@ -265,8 +264,7 @@ class CampaignPriceTests(FakeRunCase):
         self.assertIn("rates:", table["text"])
         self.assertTrue(all(row["incl_hb"] is None for row in table["rows"]))
         before = len(campaign.events(campaign.run_dir("logic")))
-        with patch.object(campaign, "problem", return_value={"name": "T", "statement": "theorem t : True"}):
-            response = campaign.quote("T", "logic", ["trivial"])
+        response = prices.quote_tokens("T", ["trivial"], statement="theorem t : True")
         self.assertEqual(response["items"][0]["kind"], "snippet")
         self.assertEqual(len(campaign.events(campaign.run_dir("logic"))), before)
 
@@ -307,12 +305,6 @@ class CampaignPriceTests(FakeRunCase):
         self.assertTrue(
             any(event.get("kind") == "profile_error" for event in campaign.events(campaign.run_dir("logic")))
         )
-        with (
-            patch.object(campaign, "problem", return_value={"name": "T", "statement": "theorem t : True"}),
-            patch.object(campaign, "profile", return_value={"ok": True, "entries": []}) as profile,
-            patch.object(campaign, "heartbeat_floor", return_value={"heartbeats": 0}),
-        ):
-            campaign.profile_request("T", "logic", "#2")
         self.assertEqual(profile.call_count, 1)
 
     def test_closing_drain_skips_profiles(self):
@@ -342,14 +334,6 @@ class CampaignPriceTests(FakeRunCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("disk gone", errors[0]["error"])
         self.assertIn("seconds", errors[0])
-
-
-class ProtocolPriceTests(unittest.TestCase):
-    def test_protocol_exposes_only_the_hidden_prices_and_quote_actions(self):
-        protocol = importlib.import_module("arena.cli.protocol")
-
-        self.assertIn("prices", protocol.ACTIONS)
-        self.assertIn("quote", protocol.ACTIONS)
 
 
 if __name__ == "__main__":

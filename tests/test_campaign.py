@@ -13,7 +13,7 @@ from unittest import mock
 rc = importlib.import_module("arena.cli.campaigns")
 
 
-def fixture_summary(proxy, spent=0.05, stop="model_stopped", errors=0, ideas=0, cache=80.0, overhead=10.0):
+def fixture_summary(proxy, spent=0.05, stop="model_stopped", errors=0, cache=80.0, overhead=10.0):
     best = {"candidate": "#2", "tokens": 50, "heartbeats": 100, "proxy": proxy} if proxy is not None else None
     return {
         "stop_reason": stop,
@@ -24,7 +24,6 @@ def fixture_summary(proxy, spent=0.05, stop="model_stopped", errors=0, ideas=0, 
             "retries": 1,
         },
         "progress": {"best_verified_candidate": best},
-        "ideas_without_attempts": list(range(ideas)),
         "tools": {"error_total": errors, "errors": {"compile": errors} if errors else {}},
         "cache": {"reuse_pct": cache},
     }
@@ -249,7 +248,7 @@ class ExecuteAndReportTests(unittest.TestCase):
         runs = [
             rc.run_row(
                 s,
-                fixture_summary(p, spent=0.05 * (i + 1), stop="finished" if i else "cap", errors=i, ideas=i),
+                fixture_summary(p, spent=0.05 * (i + 1), stop="finished" if i else "cap", errors=i),
                 0,
                 "h",
                 "h",
@@ -260,7 +259,7 @@ class ExecuteAndReportTests(unittest.TestCase):
         group = report["groups"][0]
         self.assertEqual(group["best_proxy"], {"min": 60.0, "median": 70.0, "max": 80.0})
         self.assertEqual((group["replicates"], group["verified_runs"]), (3, 2))
-        self.assertEqual((group["tool_errors"], group["ideas_never_attempted"]), (3, 3))
+        self.assertEqual(group["tool_errors"], 3)
         self.assertEqual(group["stop_reasons"], {"cap": 1, "finished": 2})
         self.assertAlmostEqual(group["spent_usd"]["total"], 0.05 * 6)
         self.assertTrue(report["identical_packets"])

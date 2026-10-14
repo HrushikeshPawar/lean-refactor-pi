@@ -1,8 +1,8 @@
 """Harness-built memory for after a context compaction.
 
 Pi compacts older turns into a model-written summary, which can drop what the run has already found.
-The harness therefore restates it from its own ledger: the best verified candidate, the routes tried,
-the ideas and how they went, the latest failures and the allowance left. The model writes and maintains
+The harness therefore restates it from its own ledger: the best verified candidate, the latest failures,
+and the allowance left. The model writes and maintains
 nothing; the text is rebuilt from `frontier` each time and injected once, right after a compaction.
 """
 
@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from arena.text import numbers, render
 
-MAX_IDEAS = int(numbers()["max_ideas"])
 MAX_FAILURES = int(numbers()["max_failures"])
 
 
@@ -25,29 +24,6 @@ def _metrics(row: dict | None) -> str:
     }
     key = "metrics_verified" if row.get("proxy") is not None else "metrics_estimated"
     return render(f"messages/compaction-memory.{key}", **values)
-
-
-def _idea(idea: dict) -> str:
-    attempts = idea.get("attempts", 0)
-    best = idea.get("best")
-    outcome = (
-        render("messages/compaction-memory.idea_best", metrics=_metrics(best))
-        if best
-        else (
-            render("messages/compaction-memory.idea_failure", failure=idea["last_failure"])
-            if idea.get("last_failure")
-            else render("messages/compaction-memory.idea_empty")
-        )
-    )
-    return render(
-        "messages/compaction-memory.idea",
-        id=idea["id"],
-        title=idea.get("title", ""),
-        status=idea.get("status", "?"),
-        attempts=attempts,
-        s="" if attempts == 1 else "s",
-        outcome=outcome,
-    )
 
 
 def memory_text(front: dict, spent_usd: float | None = None, cap_usd: float | None = None) -> str:

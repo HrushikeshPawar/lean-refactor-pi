@@ -50,9 +50,8 @@ class SummaryTests(unittest.TestCase):
             [
                 {"kind": "init", "ts": 100.0, "theorem": "T"},
                 {"kind": "candidate", "candidate_id": "ref", "origin": "reference", "parents": []},
-                {"kind": "idea", "id": "i1", "title": "Idea", "status": "active"},
-                {"kind": "candidate", "candidate_id": "local", "origin": "model", "parents": ["ref"], "idea_id": "i1"},
-                {"kind": "candidate", "candidate_id": "struct", "origin": "model", "parents": ["ref"], "idea_id": "i1"},
+                {"kind": "candidate", "candidate_id": "local", "origin": "model", "parents": ["ref"]},
+                {"kind": "candidate", "candidate_id": "struct", "origin": "model", "parents": ["ref"]},
                 {
                     "kind": "evaluation",
                     "ts": 110.0,
@@ -100,12 +99,12 @@ class SummaryTests(unittest.TestCase):
         write(
             self.dir / "events.jsonl",
             [
-                assistant([("a", "arena_idea")], 0, 3000),
-                result("a", "arena_idea", {"ok": True}),
-                assistant([("b", "arena_evaluate")], 3000, 100),
-                result("b", "arena_evaluate", {"ok": True}),
-                assistant([("c", "arena_source")], 3100, 50),
-                result("c", "arena_source", {"ok": False, "error": "bad range"}),
+                assistant([("a", "finish")], 0, 3000),
+                result("a", "finish", {"ok": True}),
+                assistant([("b", "compile")], 3000, 100),
+                result("b", "compile", {"ok": True}),
+                assistant([("c", "read")], 3100, 50),
+                result("c", "read", {"ok": False, "error": "bad range"}),
                 assistant([], 3150, 20, "stop"),
             ],
         )
@@ -157,9 +156,9 @@ class SummaryTests(unittest.TestCase):
 
     def test_rejection_classification_survives_appended_status_text(self):
         rows = [
-            assistant([("x", "arena_evaluate")], 0, 20),
+            assistant([("x", "compile")], 0, 20),
             {
-                **result("x", "arena_evaluate", {"ok": False, "error": "invalid"}),
+                **result("x", "compile", {"ok": False, "error": "invalid"}),
                 "result": {
                     "content": [{"type": "text", "text": '{"ok":false,"error":"invalid"}\n[arena] best verified: #1'}]
                 },
@@ -178,13 +177,13 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(data["cache"]["reuse_pct"], round(100 * 9250 / (9250 + 3170 + 400), 1))
         self.assertEqual(data["cache"]["input_tokens"], 400)
         self.assertIsNone(data["cache"]["savings_pct"])  # these settles carry no component costs
-        self.assertEqual(data["tools"]["errors"], {"arena_source": 1})
+        self.assertEqual(data["tools"]["errors"], {"read": 1})
 
     def test_deepseek_hit_rate_and_cache_cost_savings(self):
         # DeepSeek never writes cache: read/(read+write) would be 100%; the real hit rate is 79%.
         self.assertEqual(summary.hit_rate_pct(7900, 0, 2100), 79.0)
         self.assertIsNone(summary.hit_rate_pct(0, 0, 0))
-        events = [assistant([("a", "arena_idea")], 7900, 0)]
+        events = [assistant([("a", "finish")], 7900, 0)]
         events[0]["message"]["usage"]["input"] = 2100
         settle = {
             "usd": 0.0004,
@@ -210,23 +209,6 @@ class SummaryTests(unittest.TestCase):
             {"candidate": "#3", "tokens": 70, "heartbeats": 800, "proxy": 60.5},
         )
         self.assertIn("best verified candidate: #3 proxy 60.5 (70 tok, 800 HB)", summary.render_text(data))
-
-    def test_probe_is_a_linked_idea_attempt(self):
-        with (self.dir / "ledger.jsonl").open("a") as handle:
-            handle.write(
-                json.dumps(
-                    {
-                        "kind": "probe",
-                        "proof_id": "draft-1",
-                        "idea_id": "i1",
-                        "result": {"ok": False, "error": "failed skeleton"},
-                    }
-                )
-                + "\n"
-            )
-        ideas = summary.build_summary(self.dir)["ideas"]
-        self.assertEqual(ideas[0]["attempts"], 3)
-        self.assertEqual(ideas[0]["probes"], 1)
 
     def test_routes_are_summarised_from_the_ledger(self):
         with (self.dir / "ledger.jsonl").open("a") as handle:
@@ -265,18 +247,29 @@ class SummaryTests(unittest.TestCase):
     def test_state_and_finish_requests_are_bookkeeping(self):
         data = summary._turns(
             [
-                assistant([("s", "arena_state")], 0, 20),
-                result("s", "arena_state", {"ok": True}),
-                assistant([("f", "arena_finish")], 20, 20),
-                result("f", "arena_finish", {"ok": True}),
+                assistant([("s", "goal")], 0, 20),
+                result("s", "goal", {"ok": True}),
+                assistant([("f", "finish")], 20, 20),
+                result("f", "finish", {"ok": True}),
             ],
             [{"usd": 0.01}, {"usd": 0.01}],
         )
         self.assertEqual([turn["kind"] for turn in data], ["bookkeeping", "bookkeeping"])
 
-    def test_trace_accounting_reports_retries_results_idle_ideas_and_post_best_spend(self):
+    def test_old_ledger_idea_and_tool_call_load_as_an_other_call(self):
         with (self.dir / "ledger.jsonl").open("a") as handle:
-            handle.write(json.dumps({"kind": "idea", "id": "unused", "title": "Untried", "status": "active"}) + "\n")
+            handle.write(json.dumps({"kind": "idea", "id": "old", "title": "Historical", "status": "active"}) + "\n")
+        old_tool = "arena_" + "idea"
+        write(
+            self.dir / "events.jsonl",
+            [assistant([("old", old_tool)], 0, 1), result("old", old_tool, {"ok": True})],
+        )
+        data = summary.build_summary(self.dir)
+        self.assertNotIn("ideas", data)
+        self.assertEqual(data["tools"]["calls"][old_tool], 1)
+        self.assertEqual(data["cost"]["by_turn_type"]["context"]["requests"], 1)
+
+    def test_trace_accounting_reports_retries_results_and_post_best_spend(self):
         with (self.dir / "cost-ledger.jsonl").open("a") as handle:
             handle.write(
                 json.dumps({"kind": "settle", "id": "post-best", "usd": 0.005, "usage_known": True, "ts": 131000})
@@ -299,19 +292,12 @@ class SummaryTests(unittest.TestCase):
             ),
             (2, 4, 1, 3),
         )
-        self.assertEqual(data["ideas_without_attempts"], ["unused"])
         self.assertEqual(data["cost"]["requests_after_best"], 2)
         self.assertAlmostEqual(data["cost"]["spent_after_best_usd"], 0.005)
 
     def test_edits_split_into_local_and_structural(self):
         edits = summary.build_summary(self.dir)["edits"]
         self.assertEqual((edits["local"], edits["structural"]), (1, 1))
-
-    def test_ideas_attempts_are_counted(self):
-        self.assertEqual(
-            summary.build_summary(self.dir)["ideas"],
-            [{"id": "i1", "title": "Idea", "status": "active", "attempts": 2, "probes": 0}],
-        )
 
     def test_cost_report_is_rebuilt_when_pi_never_wrote_one(self):
         report = summary.cost_report_from_ledger(self.dir)
@@ -378,7 +364,7 @@ class SummaryTests(unittest.TestCase):
             {"kind": "settle", "id": "s", "usd": 0.5, "usage_known": True, "source": "compaction"},
             {"kind": "settle", "id": "a", "usd": 0.01, "usage_known": True},
         ]
-        turns = summary._turns([assistant([("c1", "arena_state")], 0, 0)], settles)
+        turns = summary._turns([assistant([("c1", "goal")], 0, 0)], settles)
         self.assertEqual([t["usd"] for t in turns], [0.01])
 
 

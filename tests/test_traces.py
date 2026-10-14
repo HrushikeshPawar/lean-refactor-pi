@@ -74,7 +74,7 @@ def _joined(payload: dict | None = None, text: str = "done") -> tuple[list[dict]
         "messages": [{"role": "user", "content": "hi"}],
     }
     usage = {"input": 300, "output": 40, "cache_read": 4000, "cache_write": 100}
-    call = {"type": "toolCall", "id": "c1", "name": "arena_skill_read", "arguments": {"page": 1}}
+    call = {"type": "toolCall", "id": "c1", "name": "read", "arguments": {"page": 1}}
     journal = [
         _request("a", payload, 1),
         _wire("a", payload),
@@ -89,8 +89,8 @@ def _joined(payload: dict | None = None, text: str = "done") -> tuple[list[dict]
             "price_tier": "base",
             "pi_cost_usd": 0.01,
         },
-        {"kind": "tool_call", "id": "a", "tool_call_id": "c1", "name": "arena_skill_read", "args": {"page": 1}},
-        {"kind": "tool_result", "id": "a", "tool_call_id": "c1", "name": "arena_skill_read", "text": "SKILL.md"},
+        {"kind": "tool_call", "id": "a", "tool_call_id": "c1", "name": "read", "args": {"page": 1}},
+        {"kind": "tool_result", "id": "a", "tool_call_id": "c1", "name": "read", "text": "SKILL.md"},
         _request("b", payload, 2),
         _wire("b", payload),
         {
@@ -106,16 +106,16 @@ def _joined(payload: dict | None = None, text: str = "done") -> tuple[list[dict]
         },
     ]
     observations = [
-        _generation(payload, "", "2026-10-07T00:00:01Z", tool_calls=[{"id": "c1", "name": "arena_skill_read"}]),
+        _generation(payload, "", "2026-10-07T00:00:01Z", tool_calls=[{"id": "c1", "name": "read"}]),
         {
             "type": "TOOL",
-            "name": "Tool: arena_skill_read",
+            "name": "Tool: read",
             "id": "tool-1",
             "traceId": "trace-1",
             "startTime": "2026-10-07T00:00:02Z",
             "input": json.dumps({"page": 1}),
             "output": json.dumps("SKILL.md"),
-            "metadata": {"tool_id": "c1", "tool_name": "arena_skill_read"},
+            "metadata": {"tool_id": "c1", "tool_name": "read"},
         },
         _generation(payload, text, "2026-10-07T00:00:03Z"),
     ]
@@ -166,9 +166,7 @@ class JudgeTests(unittest.TestCase):
 
     def test_a_tool_call_only_turn_is_still_compared(self):
         journal, observations = _joined()
-        observations[0]["output"] = json.dumps(
-            {"role": "assistant", "tool_calls": [{"id": "c9", "name": "arena_skill_read"}]}
-        )
+        observations[0]["output"] = json.dumps({"role": "assistant", "tool_calls": [{"id": "c9", "name": "read"}]})
         self.assertTrue(any("tool calls do not match" in item for item in judge(journal, observations)))
         journal, observations = _joined()
         observations[0]["output"] = json.dumps({"role": "assistant", "content": "stray"})

@@ -62,8 +62,8 @@ details{border:1px solid var(--line);border-radius:8px;background:var(--panel);p
 .fold{margin-top:10px}
 .warn{border:1px solid var(--mid);color:var(--mid);border-radius:8px;padding:6px 10px;background:var(--panel);font-size:13px}
 .bars{display:inline-block;width:80px;height:6px;border-radius:3px;background:var(--panel2);vertical-align:middle;overflow:hidden;margin-right:6px}.bars span{display:block;height:100%;background:var(--blue)}
-.idea{padding:6px 0;border-bottom:1px solid var(--line)}.idea:last-child{border-bottom:0}
-.idea .t{font-weight:600;overflow-wrap:anywhere}
+.route-group{padding:6px 0;border-bottom:1px solid var(--line)}.route-group:last-child{border-bottom:0}
+.route-group .t{font-weight:600;overflow-wrap:anywhere}
 .mini{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:2px 0 6px}
 .mini div{min-width:0}.mini .l{font-size:12px;color:var(--muted)}.mini .v{font-size:17px;font-weight:650;white-space:nowrap}
 .kv{display:grid;grid-template-columns:auto 1fr;gap:2px 12px;font-size:13px;margin:4px 0}.kv span:nth-child(odd){color:var(--muted)}
@@ -117,6 +117,6 @@ circle.pick{cursor:pointer}
 .errn{fill:var(--bad);font:600 11px system-ui}
 .stackcol{position:relative;min-width:0}.stackin{position:absolute;inset:0;display:flex;flex-direction:column;gap:12px}
 .stackin>.card{margin:0;min-height:0;flex:0 0 auto}
-.stackin>.ideacard{flex:1 1 0;display:flex;flex-direction:column}.ideacard .scroll-body{flex:1;min-height:0;max-height:none}
+.stackin>.routecard{flex:1 1 0;display:flex;flex-direction:column}.routecard .scroll-body{flex:1;min-height:0;max-height:none}
 .line1{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:4px 0;font-size:13px}.line1 .lbl{width:78px;color:var(--muted);font-size:12px;flex:none}
 .line1 .stack{flex:1;min-width:60px;margin:0}

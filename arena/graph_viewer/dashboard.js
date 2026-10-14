@@ -6,7 +6,7 @@
   const money = v => v == null ? '—' : '$' + (Math.abs(v) >= 0.1 ? v.toFixed(3) : v.toFixed(4));
   const num = (v, d = 0) => v == null ? '—' : Number(v).toLocaleString(undefined, {maximumFractionDigits: d});
   const dur = s => s == null ? '—' : C.dur(s);
-  const TABS = [['tools', 'Tool calls'], ['ideas', 'Ideas and evaluations'], ['spend', 'Spend and cache'], ['langfuse', 'Langfuse']];
+  const TABS = [['tools', 'Tool calls'], ['evaluations', 'Evaluations'], ['spend', 'Spend and cache'], ['langfuse', 'Langfuse']];
   let data = null, lf = null, tab = 'tools', selectedTool = null, obsType = 'GENERATION';
   try { tab = localStorage.getItem('arena-dash-tab') || tab; } catch {}
   if (!TABS.some(([id]) => id === tab)) tab = 'tools';
@@ -221,13 +221,11 @@
   }
   $('c-tools').addEventListener('click', e => { const bar = e.target.closest('[data-tool]'); if (bar) openTool(+bar.dataset.tool); });
 
-  function ideasCard() {
-    const ideas = data.ideas, kind = s => s === 'succeeded' ? 'good' : s === 'failed' || s === 'abandoned' ? 'bad' : 'mid';
-    $('h-ideas').textContent = `${ideas.length} idea${ideas.length === 1 ? '' : 's'}`;
+  function routesCard() {
     const routes = (data.routes || []).filter(r => r.attempts || r.original);
-    const routeHtml = routes.length ? `<div class="idea"><div class="t">Routes (harness fingerprints)</div>${routes.map(r => `<div class="small muted">${esc(r.route)} ${esc(r.label)}${r.original ? ' · original proof' : ''} · ${r.attempts} attempt${r.attempts === 1 ? '' : 's'} · ${r.depth ?? 0} goal state${r.depth === 1 ? '' : 's'}${r.min_holes != null ? ` · min holes ${r.min_holes}` : ''}${r.stale_streak ? ` · stale streak ${r.stale_streak}` : ''} · ${r.explored ? 'explored' : 'opened'}${r.credited ? ` · credited${r.skeleton ? ' (skeleton)' : ''}` : ''} · best proxy ${r.best_proxy ?? '—'}</div>`).join('')}</div>` : '';
-    place('c-ideas', routeHtml + (ideas.length ? ideas.map(i => `<div class="idea"><div class="t">${esc(i.title || i.id)} ${badge(i.status || '?', kind(i.status))}</div>
-      <div class="small muted">${i.attempts.length} attempt${i.attempts.length === 1 ? '' : 's'} · ${i.probes} probe${i.probes === 1 ? '' : 's'} · best proxy ${i.best_proxy ?? '—'}${i.attempts.length ? ' · ' + esc(i.attempts.map(a => a.candidate).join(', ')) : ''}</div></div>`).join('') : '<p class="muted">No ideas recorded.</p>'));
+    const routeHtml = routes.length ? `<div class="route-group"><div class="t">Routes (harness fingerprints)</div>${routes.map(r => `<div class="small muted">${esc(r.route)} ${esc(r.label)}${r.original ? ' · original proof' : ''} · ${r.attempts} attempt${r.attempts === 1 ? '' : 's'} · ${r.depth ?? 0} goal state${r.depth === 1 ? '' : 's'}${r.min_holes != null ? ` · min holes ${r.min_holes}` : ''}${r.stale_streak ? ` · stale streak ${r.stale_streak}` : ''} · ${r.explored ? 'explored' : 'opened'}${r.credited ? ` · credited${r.skeleton ? ' (skeleton)' : ''}` : ''} · best proxy ${r.best_proxy ?? '—'}</div>`).join('')}</div>` : '';
+    $('h-routes').textContent = `${routes.length} route${routes.length === 1 ? '' : 's'}`;
+    place('c-routes', routeHtml || '<p class="muted">No routes recorded.</p>');
   }
 
   function leanCard() {
@@ -264,16 +262,10 @@
     $('panel').querySelectorAll('tr[data-tool]').forEach(el => el.onclick = () => { selectedTool = +el.dataset.tool; renderPanel(); toolsTimeline(); });
   }
 
-  function ideasPanel() {
-    const rows = data.scores, ideas = data.ideas, without = data.summary.ideas_without_attempts || [];
-    $('panel').innerHTML = `${without.length ? `<div class="warn">Ideas without attempts: ${esc(without.join(', '))}</div><br>` : ''}
-      <div class="grid2"><div>${ideas.length ? ideas.map(i => `<details open><summary>${esc(i.title || i.id)} ${badge(i.status || '?', i.status === 'succeeded' ? 'good' : i.status === 'failed' || i.status === 'abandoned' ? 'bad' : 'mid')}
-      <span class="muted small">${i.attempts.length} attempt${i.attempts.length === 1 ? '' : 's'} · ${i.probes} probe${i.probes === 1 ? '' : 's'} · best ${i.best_proxy ?? '—'}</span></summary>
-      <p class="small muted">${esc(i.id)}${i.region ? ' · lines ' + esc(i.region.join('–')) : ''}</p><p>${esc(i.hypothesis)}</p>${i.reason ? `<p><b>Outcome:</b> ${esc(i.reason)}</p>` : ''}
-      ${i.expected_effect ? `<p class="small muted">Expected: ${esc(Object.entries(i.expected_effect).map(([k, v]) => `${k}: ${v}`).join(' · '))}</p>` : ''}
-      <p class="small">Lineage: ${i.attempts.length ? i.attempts.map(a => `${esc(a.candidate)}${a.parents.length ? ` <span class="muted">← ${esc(a.parents.join(', '))}</span>` : ''}`).join(' · ') : '<span class="muted">no candidate attached to this idea</span>'}</p></details>`).join('') : '<p class="muted">No ideas recorded.</p>'}</div>
-      <div class="card"><div class="head"><h2>Evaluations (${rows.length})</h2></div><div class="scroll"><table><thead><tr><th>t</th><th>candidate</th><th>mode</th><th class="num">proxy</th><th class="num">est.</th><th class="num">tokens</th><th class="num">heartbeats</th><th>compiled</th></tr></thead><tbody>
-      ${rows.map(r => `<tr><td>${dur(r.t)}</td><td>${esc(r.candidate)}</td><td>${esc(r.mode)}</td><td class="num">${r.proxy ?? '—'}</td><td class="num">${r.estimated_proxy ?? '—'}</td><td class="num">${num(r.tokens)}</td><td class="num">${num(r.heartbeats)}</td><td>${r.compiled ? 'yes' : badge('no', 'bad')}</td></tr>`).join('')}</tbody></table></div></div></div>`;
+  function evaluationsPanel() {
+    const rows = data.scores;
+    $('panel').innerHTML = `<div class="card"><div class="head"><h2>Evaluations (${rows.length})</h2></div><div class="scroll"><table><thead><tr><th>t</th><th>candidate</th><th>mode</th><th class="num">proxy</th><th class="num">est.</th><th class="num">tokens</th><th class="num">heartbeats</th><th>compiled</th></tr></thead><tbody>
+      ${rows.map(r => `<tr><td>${dur(r.t)}</td><td>${esc(r.candidate)}</td><td>${esc(r.mode)}</td><td class="num">${r.proxy ?? '—'}</td><td class="num">${r.estimated_proxy ?? '—'}</td><td class="num">${num(r.tokens)}</td><td class="num">${num(r.heartbeats)}</td><td>${r.compiled ? 'yes' : badge('no', 'bad')}</td></tr>`).join('')}</tbody></table></div></div>`;
   }
 
   function spendPanel() {
@@ -323,7 +315,7 @@
   // The graph (an iframe) asks to be brought fully into view before it opens a detail modal.
   addEventListener('message', e => { if (e.origin === location.origin && e.data && e.data.type === 'arena-focus') $('graph-frame').scrollIntoView({behavior: 'instant', block: 'center'}); });
 
-  const panels = {tools: toolsPanel, ideas: ideasPanel, spend: spendPanel, langfuse: lfPanel};
+  const panels = {tools: toolsPanel, evaluations: evaluationsPanel, spend: spendPanel, langfuse: lfPanel};
   // The panel is rebuilt by polls (new data, Langfuse refresh); doing that while a <select> inside it has focus
   // tears down its open menu and snaps it to the first option, so the rebuild waits until the control blurs.
   function renderPanel(force = false) {
@@ -344,7 +336,7 @@
 
   function render() {
     if (!data) return;
-    for (const fn of [header, kpis, widgets, toolsTimeline, ideasCard, leanCard, lfCard, folds, renderPanel, renderModal]) safely(fn);
+    for (const fn of [header, kpis, widgets, toolsTimeline, routesCard, leanCard, lfCard, folds, renderPanel, renderModal]) safely(fn);
   }
 
   async function loadLangfuse(refresh = false) {

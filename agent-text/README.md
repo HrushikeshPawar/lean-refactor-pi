@@ -37,12 +37,6 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `messages/compaction-memory.failure` | 2 | Agent messages and notices | when the matching event occurs |
 | `messages/compaction-memory.failures` | 3 | Agent messages and notices | when the matching event occurs |
 | `messages/compaction-memory.header` | 24 | Agent messages and notices | when the matching event occurs |
-| `messages/compaction-memory.idea` | 6 | Agent messages and notices | when the matching event occurs |
-| `messages/compaction-memory.idea_best` | 2 | Agent messages and notices | when the matching event occurs |
-| `messages/compaction-memory.idea_empty` | 3 | Agent messages and notices | when the matching event occurs |
-| `messages/compaction-memory.idea_failure` | 3 | Agent messages and notices | when the matching event occurs |
-| `messages/compaction-memory.idea_more` | 2 | Agent messages and notices | when the matching event occurs |
-| `messages/compaction-memory.ideas` | 2 | Agent messages and notices | when the matching event occurs |
 | `messages/compaction-memory.leading_unverified` | 4 | Agent messages and notices | when the matching event occurs |
 | `messages/compaction-memory.metrics_estimated` | 8 | Agent messages and notices | when the matching event occurs |
 | `messages/compaction-memory.metrics_none` | 2 | Agent messages and notices | when the matching event occurs |
@@ -58,10 +52,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `messages/errors.cold_verification_paused` | 5 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.command_failed` | 3 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.command_no_result` | 6 | Agent messages and notices | when the matching event occurs |
-| `messages/errors.decision_invalid` | 9 | Agent messages and notices | when the matching event occurs |
-| `messages/errors.declaration_items` | 11 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.declaration_missing` | 7 | Agent messages and notices | when the matching event occurs |
-| `messages/errors.declarations_usage` | 20 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.draft_limit` | 6 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.draft_missing` | 6 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.draft_operation_text` | 4 | Agent messages and notices | when the matching event occurs |
@@ -72,16 +63,8 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `messages/errors.extra_command` | 7 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.fill_hole` | 10 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.fill_text` | 4 | Agent messages and notices | when the matching event occurs |
-| `messages/errors.find_limit` | 4 | Agent messages and notices | when the matching event occurs |
-| `messages/errors.find_queries` | 11 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.forbidden_construct` | 2 | Agent messages and notices | when the matching event occurs |
-| `messages/errors.idea_id_label` | 11 | Agent messages and notices | when the matching event occurs |
-| `messages/errors.idea_id_unknown` | 12 | Agent messages and notices | when the matching event occurs |
-| `messages/errors.idea_reason` | 9 | Agent messages and notices | when the matching event occurs |
-| `messages/errors.idea_statuses` | 6 | Agent messages and notices | when the matching event occurs |
-| `messages/errors.idea_title_missing` | 6 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.invalid_declaration` | 3 | Agent messages and notices | when the matching event occurs |
-| `messages/errors.invalid_declaration_cursor` | 3 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.invalid_run_id` | 3 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.lean_context_timeout` | 6 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.lean_timeout` | 6 | Agent messages and notices | when the matching event occurs |
@@ -92,7 +75,6 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `messages/errors.merge_operation_take` | 4 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.mode_invalid` | 7 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.module_missing` | 16 | Agent messages and notices | when the matching event occurs |
-| `messages/errors.name_not_visible` | 19 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.no_candidate_cold_passed` | 14 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.no_candidate_passed` | 10 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.no_source_declaration` | 7 | Agent messages and notices | when the matching event occurs |
@@ -103,7 +85,6 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `messages/errors.pinned_statement_missing` | 9 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.probe_forbidden` | 8 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.probe_parent_missing` | 7 | Agent messages and notices | when the matching event occurs |
-| `messages/errors.profile_candidate_missing` | 10 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.profile_compile_failed` | 4 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.profile_instrumentation_failed` | 7 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.profile_proof_compile` | 11 | Agent messages and notices | when the matching event occurs |
@@ -112,7 +93,6 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `messages/errors.project_file_missing` | 10 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.proof_utility_parse` | 8 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.request` | 7 | Agent messages and notices | when the matching event occurs |
-| `messages/errors.resolve_name_timeout` | 7 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.run_exists` | 5 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.run_theorem_mismatch` | 6 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.run_uninitialized` | 3 | Agent messages and notices | when the matching event occurs |
@@ -133,7 +113,6 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `messages/errors.toolchains_missing` | 4 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.turn_cut` | 8 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.unknown_candidate` | 6 | Agent messages and notices | when the matching event occurs |
-| `messages/errors.unknown_candidate_short` | 2 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.unknown_probe` | 6 | Agent messages and notices | when the matching event occurs |
 | `messages/footer` | 8 | Agent messages and notices | after each tool result |
 | `messages/notices.block_shell` | 16 | Agent messages and notices | when the matching event occurs |

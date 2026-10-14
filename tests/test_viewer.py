@@ -121,20 +121,20 @@ def make_run(root: Path, run_id: str, finished: bool = True, theorem: str = "Cor
     write(
         directory / "trace-journal.jsonl",
         [
-            {"ts": ms(6), "kind": "tool_call", "tool_call_id": "t1", "name": "arena_evaluate", "args": {"x": 1}},
+            {"ts": ms(6), "kind": "tool_call", "tool_call_id": "t1", "name": "compile", "args": {"x": 1}},
             {
                 "ts": ms(7.5),
                 "kind": "tool_result",
                 "tool_call_id": "t1",
-                "name": "arena_evaluate",
+                "name": "compile",
                 "result": {"isError": False, "content": [{"type": "text", "text": '{"ok":true}'}]},
             },
-            {"ts": ms(8), "kind": "tool_call", "tool_call_id": "t2", "name": "arena_probe", "args": {}},
+            {"ts": ms(8), "kind": "tool_call", "tool_call_id": "t2", "name": "compile", "args": {}},
             {
                 "ts": ms(8.2),
                 "kind": "tool_result",
                 "tool_call_id": "t2",
-                "name": "arena_probe",
+                "name": "compile",
                 "result": {"isError": False, "content": [{"type": "text", "text": '{"ok":false}'}]},
             },
         ],
@@ -240,19 +240,20 @@ class DataTests(unittest.TestCase):
         self.assertEqual(board["spend"]["limit_usd"], 0.1)
         self.assertEqual(
             [(t["name"], t["is_error"], t["duration_s"]) for t in board["tools"]],
-            [("arena_evaluate", False, 1.5), ("arena_probe", True, 0.2)],
+            [("compile", False, 1.5), ("compile", True, 0.2)],
         )
-        idea = board["ideas"][0]
-        self.assertEqual(
-            (idea["status"], idea["probes"], idea["best_proxy"], idea["reason"]), ("succeeded", 1, 60.5, "worked")
-        )
-        self.assertEqual(idea["attempts"], [{"candidate": "#2", "parents": ["#1"]}])
+        self.assertNotIn("ideas", board)
         kinds = [c["kind"] for c in board["controls"]]
         self.assertEqual(kinds, ["limit", "finish", "control"])
         self.assertEqual(board["lean"]["paths"]["session"]["runs"], 2)
         self.assertEqual(board["lean"]["paths"]["cold"]["by_check"], {"probe": 1})
         self.assertTrue(board["lean"]["cold_verification"]["confirmed"])
         self.assertEqual(board["packet"], "kickoff packet text")
+
+    def test_dashboard_ignores_legacy_idea_events(self):
+        directory = make_run(self.root, "legacy-run")
+        board = run_dashboard("legacy-run", directory)
+        self.assertNotIn("ideas", board)
         json.dumps(board)
 
     def test_tool_text_is_clipped(self):
@@ -316,7 +317,7 @@ OBSERVATIONS = [
         "traceId": "tr1",
         "parentObservationId": "o1",
         "type": "TOOL",
-        "name": "Tool: arena_probe",
+        "name": "Tool: compile",
         "startTime": "2026-10-08T05:00:06.000Z",
         "latency": 1.0,
         "level": "ERROR",
@@ -492,7 +493,6 @@ class GraphViewerUpgradeTests(unittest.TestCase):
         }
         return {
             "proof_id": ident,
-            "idea_id": "i1",
             "parent": parent,
             "ts": 1.0,
             "result": {"tokens": 12, "compat": compat},

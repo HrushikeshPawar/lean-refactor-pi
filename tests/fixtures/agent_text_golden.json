@@ -77,31 +77,9 @@
           "credited": false
         }
       ],
-      "ideas": [
-        {
-          "id": "i1",
-          "title": "reduce repeats",
-          "status": "active",
-          "attempts": 2,
-          "best": {
-            "candidate": "n12",
-            "proxy": 0.82,
-            "tokens": 43,
-            "heartbeats": 910
-          }
-        },
-        {
-          "id": "i2",
-          "title": "shorten",
-          "status": "done",
-          "attempts": 1,
-          "last_failure": "did not compile"
-        }
-      ],
       "recent_failures": [
         {
           "ref": "n13",
-          "idea_id": "i1",
           "error": "type mismatch"
         }
       ],
@@ -135,7 +113,6 @@
           "credited": true
         }
       ],
-      "ideas": [],
       "recent_failures": [],
       "candidates": 4,
       "evaluations": 3,

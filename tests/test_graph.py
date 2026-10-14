@@ -641,24 +641,6 @@ class StallCampaignTests(FakeRunCase):
         self.assertEqual(event["from"], [first_id])
         self.assertEqual(first["candidate"], "#2")
 
-    def test_dissimilar_free_text_is_a_root_and_restore_moves_focus(self):
-        proof = "theorem t := by\n  entirely different approach\n  another distinct line\n  third separate tactic\n  fourth unrelated statement"
-        proof_id = "f" * 64
-        campaign._snapshot(self.directory, proof_id, proof)
-        edge, created = campaign._file_node(self.directory, campaign.events(self.directory), proof_id, proof)
-        self.assertTrue(created)
-        self.assertEqual((edge["type"], edge["from"], edge["exact"]), ("root", [], False))
-        duplicate, created = campaign._file_node(self.directory, campaign.events(self.directory), proof_id, proof)
-        self.assertFalse(created)
-        self.assertEqual(duplicate["proof_id"], edge["proof_id"])
-
-        campaign.candidate("T", "logic", "#1")
-        last_focus = next(item for item in reversed(campaign.events(self.directory)) if item.get("kind") == "focus")
-        self.assertEqual(
-            (last_focus["proof_id"], last_focus["reason"]),
-            (campaign._candidate_ids(campaign.events(self.directory))[0], "restore"),
-        )
-
     def test_splice_and_merge_operations_record_exact_lineage(self):
         with patch.object(campaign, "normalize_draft", side_effect=lambda _name, proof: proof):
             base = self.evaluate("theorem t := by\n  intro h\n  exact h")
@@ -881,18 +863,6 @@ class PacketTests(unittest.TestCase):
         self.assertNotIn("at least three", text)
         self.assertNotIn("witness before versus after induction", text)
         self.assertNotIn("arena-candidate-126", text)
-
-    def test_primed_lean_declaration_is_source_verified(self):
-        for symbol in ("UpdateStateNotDefMonotone'", "UpdateStates", "isDefined"):
-            with self.subTest(symbol=symbol):
-                found = campaign.declarations("Core.InitsUpdatesComm", [symbol])["items"][0]
-                self.assertEqual(found["kind"], "declaration")
-                self.assertIn(symbol, found["source_text"])
-
-    def test_declaration_keeps_named_argument_inside_type(self):
-        declaration = campaign.declarations("Core.InitsUpdatesComm", ["UpdateStatesLength"])["items"][0]
-        self.assertIn("UpdateStates (P:=P)", declaration["source_text"])
-        self.assertIn("List.length ks = List.length vs", declaration["source_text"])
 
 
 class ViewerTests(unittest.TestCase):

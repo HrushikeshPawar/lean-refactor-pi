@@ -25,24 +25,7 @@ FRONT = {
             "best_candidate": "#4",
         },
     ],
-    "ideas": [
-        {
-            "id": "i1",
-            "title": "rewrite",
-            "status": "parked",
-            "attempts": 2,
-            "best": None,
-            "last_failure": "#3: unsolved goals",
-        },
-        {
-            "id": "i2",
-            "title": "induct",
-            "status": "active",
-            "attempts": 3,
-            "best": {"candidate": "#4", "tokens": 120, "heartbeats": 900, "proxy": 61.5},
-        },
-    ],
-    "recent_failures": [{"ref": "#3", "idea_id": "i1", "error": "unsolved goals"}],
+    "recent_failures": [{"ref": "#3", "error": "unsolved goals"}],
     "advisory": None,
     "candidates": 5,
     "evaluations": 7,
@@ -59,13 +42,6 @@ class MemoryTests(unittest.TestCase):
         self.assertNotIn("i1", text)
         self.assertIn("#3: unsolved goals", text)
         self.assertIn("$1.2500 of $3 spent, $1.7500 left", text)
-
-    def test_internal_idea_state_is_not_injected_after_compaction(self):
-        ideas = [{"id": f"i{n}", "title": "t", "status": "parked", "attempts": n} for n in range(12)]
-        ideas.append({"id": "act", "title": "t", "status": "active", "attempts": 0})
-        text = memory_text({**FRONT, "ideas": ideas})
-        self.assertNotIn('act "t"', text)
-        self.assertNotIn("i11", text)
 
     def test_depth_fields_on_route_rows_add_only_neutral_facts(self):
         depth = {

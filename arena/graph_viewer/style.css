@@ -3,7 +3,7 @@
 #graph-wrap{position:relative}
 .chart .axis{fill:none}
 .workspace{grid-template-columns:minmax(480px,1fr) minmax(420px,600px)}
-/* Graph encoding: fill = route / idea / status (SVG attribute), border = result, size = tokens, diamond = probe */
+/* Graph encoding: fill = route / status (SVG attribute), border = result, size = tokens, diamond = probe */
 :root{--st-verified:#7de7ad;--st-compiled:#f6d37f;--st-skeleton:#b9a0ff;--st-failed:#f098a4;--st-unevaluated:#8fc9ff;--best:#f9e27a}
 .edge{fill:none;stroke:#8da6bd;stroke-width:2;opacity:.5}
 .edge.unrelated{opacity:.1}
@@ -53,7 +53,7 @@
 .linkish{background:none;border:0;color:var(--blue);padding:2px 4px}
 button:disabled{opacity:.45;cursor:default}button:disabled:hover{border-color:var(--line)}
 
-/* Legend panel (also the route / idea / status filter) */
+/* Legend panel (also the route / status filter) */
 .legend-panel{position:absolute;left:12px;top:12px;width:340px;max-height:calc(100% - 24px);display:flex;flex-direction:column;background:#0b1520ee;border:1px solid var(--line);border-radius:10px;box-shadow:0 6px 24px #0009;font-size:12px;backdrop-filter:blur(3px);cursor:default}
 .lp-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 8px}
 .lp-toggle{border:0;background:none;font-weight:700;padding:2px 4px}
@@ -161,9 +161,6 @@ button:disabled{opacity:.45;cursor:default}button:disabled:hover{border-color:va
 .lower{position:relative;z-index:1;background:var(--bg);min-width:0}
 .lower .panel{min-width:0;overflow-wrap:anywhere}
 
-.idea-row{padding:10px 9px;border-top:1px solid var(--line);border-left:3px solid transparent}
-.idea-row:first-child{border-top:0}.idea-row.scheduled{background:#173146;border-left-color:var(--blue)}
-.idea-row p{margin:5px 0 8px;color:var(--muted)}.idea-row button{margin-right:8px}
 .cost-note{margin:10px 0;padding:8px;border:1px solid var(--line);border-radius:6px;color:var(--muted)}
 .chart svg{height:auto;aspect-ratio:350/96}
 .chart .x-tick,.modal-grid .x-tick{stroke:#5d7489;stroke-width:1}
@@ -223,7 +220,7 @@ body.embed #detail{padding:10px}
 .facts button{padding:1px 7px;font-size:12px}
 .actions{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}.actions button{padding:5px 4px;font-size:12px}.actions .primary{border-color:var(--blue);color:#cfe7ff}
 .hypcard{flex:0 1 auto;min-height:0;overflow:auto;max-height:30%}.hyp{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;color:#d4e2f0}
-.side .card .evals{max-height:200px;overflow:auto}.side .ancard{flex:1 1 0;min-height:90px;display:flex;flex-direction:column}.side .ancard .evals{flex:1;max-height:none;min-height:0}.side .ideainfo .hyp{font-size:12px;max-height:110px;overflow:auto}.side .ideainfo h3 .tag{font-weight:400}.eval-line button{padding:0 6px;font-size:12px}
+.side .card .evals{max-height:200px;overflow:auto}.side .ancard{flex:1 1 0;min-height:90px;display:flex;flex-direction:column}.side .ancard .evals{flex:1;max-height:none;min-height:0}.eval-line button{padding:0 6px;font-size:12px}
 .eval-line{display:flex;gap:6px;flex-wrap:wrap;align-items:baseline;padding:5px 0;border-top:1px solid var(--line);font-size:12px}.eval-line:first-child{border-top:0}
 body.embed #detail{overflow:hidden}
 

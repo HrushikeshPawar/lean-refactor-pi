@@ -24,24 +24,6 @@
     "expected": "Only relative .lean paths inside the pinned project are allowed"
   },
   {
-    "id": "errors.declarations_usage",
-    "source": "arena/campaign.py:150",
-    "call": "campaign.declarations with neither items nor cursor",
-    "expected": "Pass exactly one of items (a nonempty list of declaration names or handles) or cursor (next_cursor from a previous page)"
-  },
-  {
-    "id": "errors.invalid_declaration_cursor",
-    "source": "arena/campaign.py:168",
-    "call": "campaign._declarations with an undecodable cursor",
-    "expected": "Invalid declaration cursor"
-  },
-  {
-    "id": "errors.declaration_items",
-    "source": "arena/campaign.py:172",
-    "call": "campaign._declarations with an empty item name",
-    "expected": "items must be a nonempty list of declaration names or handles"
-  },
-  {
     "id": "errors.project_file_missing",
     "source": "arena/campaign.py:326",
     "call": "campaign._source_range when git cannot show the file",
@@ -58,18 +40,6 @@
     "source": "arena/campaign.py:333",
     "call": "campaign._source_range with last before first",
     "expected": "last must not precede first"
-  },
-  {
-    "id": "errors.find_queries",
-    "source": "arena/campaign.py:349",
-    "call": "campaign.find with no queries",
-    "expected": "queries must be a nonempty list of names or search strings"
-  },
-  {
-    "id": "errors.find_limit",
-    "source": "arena/campaign.py:351",
-    "call": "campaign.find with a zero limit",
-    "expected": "limit must be positive"
   },
   {
     "id": "errors.source_commit_mismatch",
@@ -120,36 +90,6 @@
     "expected": "Declaration not found in pinned project: foo"
   },
   {
-    "id": "errors.invalid_declaration@source",
-    "source": "arena/campaign.py:941",
-    "call": "campaign._source_declaration with a malformed name",
-    "expected": "Invalid declaration name"
-  },
-  {
-    "id": "errors.no_source_declaration",
-    "source": "arena/campaign.py:975",
-    "call": "campaign._source_declaration for a name no source holds",
-    "expected": "No pinned source declaration matched this name."
-  },
-  {
-    "id": "errors.resolve_name_timeout",
-    "source": "arena/campaign.py:989",
-    "call": "campaign._declaration_in_lean when Lean times out",
-    "expected": "Lean timed out while resolving the name"
-  },
-  {
-    "id": "errors.name_not_visible",
-    "source": "arena/campaign.py:996",
-    "call": "campaign._declaration_in_lean when Lean prints no declaration",
-    "expected": "No declaration of that name is visible where the theorem is stated; try the full name or a prefix."
-  },
-  {
-    "id": "errors.stopped_run",
-    "source": "arena/campaign.py:1041",
-    "call": "campaign._refuse_if_tripped after the Lean breaker tripped",
-    "expected": "The harness has stopped this run"
-  },
-  {
     "id": "errors.run_exists",
     "source": "arena/campaign.py:1338",
     "call": "campaign.init on a run directory that already holds a ledger",
@@ -178,42 +118,6 @@
     "source": "arena/campaign.py:1474",
     "call": "campaign.resolve_parent_ref for a probe with no parent",
     "expected": "Probe p1 has no recorded parent candidate"
-  },
-  {
-    "id": "errors.run_uninitialized@record_idea",
-    "source": "arena/campaign.py:1514",
-    "call": "campaign.record_idea on an empty ledger",
-    "expected": "Run is uninitialized"
-  },
-  {
-    "id": "errors.idea_statuses",
-    "source": "arena/campaign.py:1516",
-    "call": "campaign.record_idea with an unknown status",
-    "expected": "status must be one of active, parked, succeeded, abandoned"
-  },
-  {
-    "id": "errors.idea_reason",
-    "source": "arena/campaign.py:1518",
-    "call": "campaign.record_idea parking without a reason",
-    "expected": "Give a one-line reason when marking an idea parked"
-  },
-  {
-    "id": "errors.idea_id_unknown@none",
-    "source": "arena/campaign.py:1528",
-    "call": "campaign.record_idea updating an idea when none exist",
-    "expected": "Unknown idea zz; give a title to create it (recorded ideas: none yet)"
-  },
-  {
-    "id": "errors.idea_id_unknown@known",
-    "source": "arena/campaign.py:1528",
-    "call": "campaign.record_idea updating an unknown idea when one exists",
-    "expected": "Unknown idea zz; give a title to create it (recorded ideas: i1)"
-  },
-  {
-    "id": "errors.idea_title_missing",
-    "source": "arena/campaign.py:1547",
-    "call": "campaign.record_idea creating an idea with no title",
-    "expected": "A new idea needs a title"
   },
   {
     "id": "state.advisory@scored",
@@ -257,14 +161,6 @@
     "call": "campaign.record_evaluation with a parent that does not exist",
     "expected": [
       "parent #9 ignored: Unknown candidate #9; candidates are #1-#0"
-    ]
-  },
-  {
-    "id": "errors.idea_id_label",
-    "source": "arena/campaign.py:1825",
-    "call": "campaign.record_evaluation with an idea id nobody recorded",
-    "expected": [
-      "idea_id zz is not a recorded idea; kept as a label"
     ]
   },
   {
@@ -318,24 +214,6 @@
     "source": "arena/campaign.py:2165",
     "call": "campaign.probe_batch with no drafts",
     "expected": "Pass between one and four drafts"
-  },
-  {
-    "id": "errors.unknown_candidate_short",
-    "source": "arena/campaign.py:2201",
-    "call": "campaign.candidate for a candidate with no proof file",
-    "expected": "Unknown candidate"
-  },
-  {
-    "id": "errors.profile_candidate_missing",
-    "source": "arena/campaign.py:2242",
-    "call": "campaign.profile_request with no candidate on record",
-    "expected": "No candidate to profile; give candidate (#N) or probe (pN)"
-  },
-  {
-    "id": "errors.decision_invalid",
-    "source": "arena/campaign.py:2270",
-    "call": "campaign.set_decision with an unknown decision",
-    "expected": "Decision must be pursue or park with a reason"
   },
   {
     "id": "merge.hypothesis@fast",

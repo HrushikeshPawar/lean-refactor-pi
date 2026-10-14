@@ -9,9 +9,9 @@
       selected = store.get('arena-selected') || null, hadStored = store.get('arena-selected') !== null,
       view = null, dragging = null, lastRevision = '', collapsed = new Set(), chartSpecs = [],
       showProbes = store.get('arena-probes') !== '0', showBest = store.get('arena-bestpath') !== '0',
-      colorBy = ['route','idea','status'].includes(store.get('arena-colorby')) ? store.get('arena-colorby') : 'route',
+      colorBy = ['route','status'].includes(store.get('arena-colorby')) ? store.get('arena-colorby') : 'route',
       legendOpen = store.get('arena-legend') !== '0', hoverGroup = null,
-      off = {kind: new Set(), status: new Set(), route: new Set(), idea: new Set()},
+      off = {kind: new Set(), status: new Set(), route: new Set()},
       bestPath = {nodes: new Set(), edges: new Set()}, tokenRange = [0, 1], routeById = new Map();
   const graph = $('graph'), wrap = $('graph-wrap'), minimap = $('minimap'), tip = $('node-tip');
   const STEP_X = 90, STEP_Y = 100;
@@ -142,23 +142,20 @@
   // ---- colour, grouping and filters -------------------------------------------------------------
   const GREY = '#6f7f93';
   const routeColor = id => { const n = Number(String(id ?? '').replace(/\D/g, '')); return !id ? GREY : n <= 1 ? '#7a869a' : `hsl(${Math.round((n * 137.508) % 360)} 62% 52%)`; };
-  const ideaIndex = id => (data.ideas || []).findIndex(i => i.id === id);
-  const ideaColor = id => { const i = ideaIndex(id); return i < 0 ? GREY : `hsl(${Math.round((i * 137.508 + 40) % 360)} 58% 55%)`; };
   const STATUS_FILL = {verified:'#1d644b', compiled:'#796029', skeleton:'#4b3a78', failed:'#783a49', unevaluated:'#24465f'};
-  const fillOf = it => colorBy === 'route' ? routeColor(it.route) : colorBy === 'idea' ? ideaColor(it.idea_id) : STATUS_FILL[stat(it)];
-  const ideaName = id => id ? ((data.ideas || []).find(i => i.id === id)?.title || id) : '';
+  const fillOf = it => colorBy === 'route' ? routeColor(it.route) : STATUS_FILL[stat(it)];
   const clip = (text, n) => { text = String(text ?? '').replace(/\s+/g, ' ').trim(); return text.length > n ? text.slice(0, n - 1) + '…' : text; };
-  const groupKey = (group, it) => group === 'route' ? (it.route || 'none') : group === 'idea' ? (it.idea_id || 'none') : group === 'kind' ? kindOf(it) : stat(it);
+  const groupKey = (group, it) => group === 'route' ? (it.route || 'none') : group === 'kind' ? kindOf(it) : stat(it);
   function visible(it) {
-    if (off.kind.has(kindOf(it)) || off.status.has(stat(it)) || off.route.has(it.route || 'none') || off.idea.has(it.idea_id || 'none')) return false;
+    if (off.kind.has(kindOf(it)) || off.status.has(stat(it)) || off.route.has(it.route || 'none')) return false;
     const query = $('search').value.trim().toLowerCase();
-    return !query || [it.id, it.hypothesis, it.proof, it.origin, it.route, ideaName(it.idea_id), ...(it.headlines || [])].some(x => String(x ?? '').toLowerCase().includes(query));
+    return !query || [it.id, it.hypothesis, it.proof, it.origin, it.route, ...(it.headlines || [])].some(x => String(x ?? '').toLowerCase().includes(query));
   }
   const anyFilter = () => Object.values(off).some(set => set.size) || $('search').value.trim() || !showProbes;
   function toggleGroup(group, key, solo) {
     const set = off[group];
     if (solo) {
-      const keys = group === 'route' ? [...routeById.keys(), 'none'] : group === 'idea' ? [...(data.ideas || []).map(i => i.id), 'none'] : group === 'status' ? STATUSES.map(x => x[0]) : KINDS.map(x => x[0]);
+      const keys = group === 'route' ? [...routeById.keys(), 'none'] : group === 'status' ? STATUSES.map(x => x[0]) : KINDS.map(x => x[0]);
       const only = keys.every(k => k === key ? !set.has(k) : set.has(k));
       set.clear(); if (!only) keys.forEach(k => { if (k !== key) set.add(k); });
     } else set.has(key) ? set.delete(key) : set.add(key);
@@ -193,12 +190,12 @@
     toggleGroup(group, key, e.shiftKey);
   });
   $('reset-filters').onclick = resetFilters;
-  // The legend doubles as the route / idea / status filter: swatch = colour, click = show or hide that group,
+  // The legend doubles as the route / status filter: swatch = colour, click = show or hide that group,
   // shift-click = show only it, hover = spotlight it on the graph.
   function renderLegend() {
     const panel = $('legend'); if (!data) return;
-    const seg = [['route','Route'],['idea','Idea'],['status','Status']].map(([id, label]) => `<button type="button" data-color="${id}" aria-pressed="${colorBy === id}">${label}</button>`).join('');
-    const n = counts(colorBy === 'route' ? 'route' : colorBy === 'idea' ? 'idea' : 'status');
+    const seg = [['route','Route'],['status','Status']].map(([id, label]) => `<button type="button" data-color="${id}" aria-pressed="${colorBy === id}">${label}</button>`).join('');
+    const n = counts(colorBy);
     let rows = '';
     if (colorBy === 'route') {
       const list = (data.routes || []).slice(); if (n.get('none')) list.push({route: 'none', label: 'no route recorded'});
@@ -207,9 +204,6 @@
         const tags = `${r.original ? '<span class="lp-tag">original</span>' : ''}${r.credited ? '<span class="lp-tag good" title="credited: verified structure and new goal states">credited</span>' : r.explored ? '<span class="lp-tag" title="explored but not credited">explored</span>' : ''}`;
         return `<button type="button" class="lp-item${off.route.has(key) ? ' off' : ''}" data-group="route" data-key="${esc(key)}" aria-pressed="${!off.route.has(key)}" title="${esc(r.label || '')}"><i class="sw" data-bg="${routeColor(r.route === 'none' ? null : r.route)}"></i><span class="lp-name"><b>${esc(key)}</b> ${esc(clip(r.short_label || r.label, 44))}</span><span class="lp-stats">${tags}${esc(stats)} · ${n.get(key) ?? 0} nodes</span></button>`;
       }).join('');
-    } else if (colorBy === 'idea') {
-      const list = (data.ideas || []).map(i => ({id: i.id, title: i.title, st: i.status, attempts: i.attempts, probes: i.probes})); if (n.get('none')) list.push({id: 'none', title: 'no idea recorded'});
-      rows = list.map(i => `<button type="button" class="lp-item${off.idea.has(i.id) ? ' off' : ''}" data-group="idea" data-key="${esc(i.id)}" aria-pressed="${!off.idea.has(i.id)}" title="${esc(i.title || '')}"><i class="sw" data-bg="${ideaColor(i.id === 'none' ? null : i.id)}"></i><span class="lp-name"><b>${esc(i.id === 'none' ? '—' : i.id)}</b> ${esc(clip(i.title, 44))}</span><span class="lp-stats">${i.st ? `<span class="lp-tag">${esc(i.st)}</span>` : ''}${n.get(i.id) ?? 0} nodes</span></button>`).join('');
     } else {
       rows = STATUSES.map(([key, label]) => `<button type="button" class="lp-item${off.status.has(key) ? ' off' : ''}" data-group="status" data-key="${key}" aria-pressed="${!off.status.has(key)}"><i class="sw" data-bg="${STATUS_FILL[key]}"></i><span class="lp-name">${esc(label)}</span><span class="lp-stats">${n.get(key) ?? 0} nodes</span></button>`).join('');
     }
@@ -290,7 +284,7 @@
       }));
       const R = radius(it), st = stat(it);
       const cls = `node k-${probe ? 'probe' : 'candidate'} st-${st}${it.origin === 'auto_merge' ? ' auto_merge' : ''}${milestone.has(it.id) ? ' best' : ''}${showBest && bestPath.nodes.has(it.id) ? ' onbest' : ''}${lineage.nodes.has(it.id) && selected !== it.id ? ' ancestor' : ''}${selected === it.id ? ' selected' : ''}${selected && !lineage.nodes.has(it.id) ? ' unrelated' : ''}${dim}${hoverGroup && groupKey(hoverGroup.group, it) !== hoverGroup.key ? ' spot-off' : ''}`;
-      const data_ = `data-id="${esc(it.id)}" data-route="${esc(it.route || 'none')}" data-idea="${esc(it.idea_id || 'none')}" data-status="${st}" data-kind="${kindOf(it)}"`;
+      const data_ = `data-id="${esc(it.id)}" data-route="${esc(it.route || 'none')}" data-status="${st}" data-kind="${kindOf(it)}"`;
       const fill = fillOf(it);
       if (probe) boxes.push(`<g class="${cls}" ${data_} transform="translate(${p.x},${p.y})"><circle class="hit" r="15"/><path class="node-body" fill="${fill}" d="M0,${-R} L${R},0 L0,${R} L${-R},0Z"/></g>`);
       else boxes.push(`<g class="${cls}" ${data_} transform="translate(${p.x},${p.y})"><circle class="hit" r="${R + 4}"/>${it.origin === 'auto_merge' ? `<circle class="merge-ring" r="${R + 6}"/><text class="merge-badge" x="${R - 1}" y="${-R + 2}">⊕</text>` : ''}<circle class="node-body" r="${R}" fill="${fill}"/><text class="node-number${String(it.index).length > 2 ? ' small' : ''}" text-anchor="middle" dominant-baseline="central">#${esc(it.index)}</text>${it.id === topBest ? `<text class="best-star" x="${-R + 2}" y="${-R + 4}">★</text>` : ''}</g>`);
@@ -312,13 +306,13 @@
     if (isProbe(it)) {
       return `<div class="tip-head">Probe · ${esc(it.id.slice(0, 8))} ${stTag(stat(it))}</div>${row('Tokens', it.tokens != null ? esc(it.tokens) : null)}${row('Heartbeats', it.heartbeat != null ? esc(it.heartbeat) : null)}
         ${row('Open goals', it.status === 'skeleton' ? `${esc(it.goals)} ${it.goals === 1 ? 'hole' : 'holes'}` : it.status === 'fail' ? `${esc(it.errors ?? '?')} error${it.errors === 1 ? '' : 's'}` : 'none')}
-        ${row('Route', route)}${row('Route state', esc(routeState))}${row('Idea', esc(clip(ideaName(it.idea_id), 50)))}${row('Parent', it.parent ? esc(numberForId(it.parent)) : null)}
+        ${row('Route', route)}${row('Route state', esc(routeState))}${row('Parent', it.parent ? esc(numberForId(it.parent)) : null)}
         ${it.headlines?.[0] ? `<div class="tip-note">${esc(clip(it.headlines[0], 160))}</div>` : it.first_goal ? `<div class="tip-note mono">${esc(clip(it.first_goal, 160))}</div>` : ''}`;
     }
     const proxy = it.local_proxy?.toFixed?.(2);
     return `<div class="tip-head">${esc(nodeLabel(it))} ${stTag(stat(it))}${it.origin === 'auto_merge' ? ' <span class="merge-mark">⊕ merge</span>' : ''}${data.milestones.at(-1)?.candidate_id === it.id ? ' <span class="tag good">best verified</span>' : ''}</div>
       ${row('Tokens', it.tokens != null ? esc(it.tokens) : null)}${row('Heartbeats', it.heartbeat != null ? esc(it.heartbeat) : null)}${row('Proxy', proxy ? esc(proxy) : null)}
-      ${row('Route', route)}${row('Route state', esc(routeState))}${row('Idea', esc(clip(ideaName(it.idea_id), 50)))}${row('Parents', it.parents.length ? it.parents.map(x => esc(numberForId(x))).join(', ') : 'root')}
+      ${row('Route', route)}${row('Route state', esc(routeState))}${row('Parents', it.parents.length ? it.parents.map(x => esc(numberForId(x))).join(', ') : 'root')}
       ${it.hypothesis ? `<div class="tip-note">${esc(clip(it.hypothesis, 170))}</div>` : ''}`;
   }
   graph.addEventListener('mousemove', e => {
@@ -390,7 +384,7 @@
     const tag=(text,kind='')=>`<span class="tag ${kind}">${esc(text)}</span>`,st=stat(p);
     $('detail').innerHTML=`<div class="side"><div class="card sumcard"><h2>Probe ${esc(p.id.slice(0,8))} ${stTag(st)}</h2>
       ${facts([['Tokens',esc(p.tokens??'?')],['Heartbeats',esc(p.heartbeat??'—')],['Open goals',p.status==='skeleton'?`${esc(p.goals)} (sorry skeleton)`:p.status==='fail'?`${esc(p.errors??'?')} error(s)`:'none'],
-        ['Route',p.route?routeBadge(p.route):'<span class="muted">none</span>'],['Idea',p.idea_id?esc(ideaName(p.idea_id)):'<span class="muted">none</span>'],['Parent',p.parent?goBtn(p.parent):'<span class="muted">none</span>']])}
+        ['Route',p.route?routeBadge(p.route):'<span class="muted">none</span>'],['Parent',p.parent?goBtn(p.parent):'<span class="muted">none</span>']])}
       <div class="muted small">A probe is a quick compile of a proof sketch; it is not an evaluated candidate and has no score.</div></div>
       ${p.headlines?.length?`<div class="card hypcard"><h3>Lean errors</h3>${p.headlines.map(h=>`<p class="hyp">${esc(h)}</p>`).join('')}</div>`:''}
       ${p.first_goal?`<div class="card hypcard"><h3>First open goal</h3><pre class="hyp mono">${esc(p.first_goal)}</pre></div>`:''}</div>`;
@@ -403,16 +397,15 @@
     if (!node) { overview(); return; }
     const parents=[...new Set((node.derivations?.length?node.derivations:[{parents:node.parents}]).flatMap(d=>d.parents||[]))];
     const tag=(text,kind='')=>`<span class="tag ${kind}">${esc(text)}</span>`;
-    const proxy=node.local_proxy?.toFixed?.(2),idea=(data.ideas||[]).find(i=>i.id===node.idea_id),chain=[...lineageOf(node.id).nodes].map(id=>byId.get(id)).sort((x,y)=>x.index-y.index);
+    const proxy=node.local_proxy?.toFixed?.(2),chain=[...lineageOf(node.id).nodes].map(id=>byId.get(id)).sort((x,y)=>x.index-y.index);
     const evals=node.evaluations.map(e=>`<div class="eval-line"><strong>#${e.number}</strong> <span class="muted">${esc(e.mode)}</span> <span>${esc(e.result.tokens ?? '?')} tok · ${esc(e.result.heartbeat ?? '?')} hb · ${esc(e.result.local_proxy?.toFixed?.(2) ?? '—')}</span>${Object.entries(e.result.compat||{}).map(([v,r])=>`<span class="tag ${r.passed?'good':'bad'}">${esc(v)} ${r.passed?'✓':'✗'}</span>`).join('')}</div>`).join('');
     $('detail').innerHTML=`<div class="side">
       <div class="card sumcard"><h2>${esc(nodeLabel(node))} ${node.origin==='auto_merge'?'<span class="merge-mark">⊕ merge</span>':''}</h2>
         ${facts([['Status',tag(status(node),node.status==='full'?'good':node.status==='fail'?'bad':'')],['Tokens',esc(node.tokens ?? '?')],['Heartbeats',esc(node.heartbeat ?? '?')],['Score',esc(proxy ?? '—')],
-                 ['Route',node.route?routeBadge(node.route):'<span class="muted">none</span>'],['Idea',node.idea_id?esc(ideaName(node.idea_id)):'<span class="muted">none</span>'],['Parent',parents.length?parents.map(goBtn).join(' '):'<span class="muted">root</span>'],
+                 ['Route',node.route?routeBadge(node.route):'<span class="muted">none</span>'],['Parent',parents.length?parents.map(goBtn).join(' '):'<span class="muted">root</span>'],
                  ['Children',node.children.length?node.children.map(goBtn).join(' '):'<span class="muted">none</span>'],...((probeKids.get(node.id)||[]).length?[['Probes',(probeKids.get(node.id)).map(goBtn).join(' ')]]:[])])}
         <div class="actions"><button type="button" data-open="overview" class="primary">Details ↗</button><button type="button" data-open="diff">Diff ↗</button><button type="button" data-open="proof">Proof ↗</button><button type="button" data-open="lineage">Lineage ↗</button></div></div>
       ${node.hypothesis||node.origin==='auto_merge'?`<div class="card hypcard"><h3>Reasoning</h3><p class="hyp">${esc(node.hypothesis||'Deterministic combination of disjoint edits')}</p></div>`:''}
-      ${idea?`<div class="card ideainfo"><h3>Idea · ${esc(idea.title||idea.id)} <span class="tag">${esc(idea.status||'?')}</span></h3><p class="hyp">${esc(idea.hypothesis||'')}</p>${idea.reason?`<p class="hyp muted">${esc(idea.reason)}</p>`:''}</div>`:''}
       <div class="card"><h3>Evaluations (${node.evaluations.length})</h3><div class="evals">${evals||'<p class="muted">None yet.</p>'}</div></div>
       <div class="card ancard"><h3>Ancestry (${chain.length})</h3><div class="evals">${chain.map(n=>`<div class="eval-line"><button data-go="${esc(n.id)}" class="${n.id===node.id?'primary':''}">#${esc(n.index)}</button><span class="tag ${n.status==='full'?'good':n.status==='fail'?'bad':''}">${esc(status(n))}</span><span>${esc(n.tokens ?? '?')} tok · ${esc(n.heartbeat ?? '?')} hb · ${esc(n.local_proxy?.toFixed?.(2) ?? '—')}</span></div>`).join('')}</div></div></div>`;
     $('detail').querySelectorAll('[data-go]').forEach(el=>el.onclick=()=>select(el.dataset.go));
@@ -436,7 +429,7 @@
     if(tab==='overview'){
       const relations=derived.map((d,i)=>`<div>${i?'Alternate derivation':'Recorded parents'}: ${d.parents.length?d.parents.map(goBtn).join(' '):'root'}${d.merge?.base?` · base ${goBtn(d.merge.base)}`:''}</div>`).join('');
       box.innerHTML=`<code>${esc(node.id)}</code><h3>Reasoning</h3><p class="hyp">${esc(node.hypothesis||(node.origin==='auto_merge'?'Deterministic combination of disjoint edits':'No hypothesis recorded'))}</p>
-        ${node.idea_id?`<p>Idea: <strong>${esc(ideaName(node.idea_id))}</strong></p>`:''}<h3>Relationships</h3><div class="row">${relations}</div>
+        <h3>Relationships</h3><div class="row">${relations}</div>
         <p class="muted">Children: ${node.children.length?node.children.map(goBtn).join(' '):'none'} · Decision: ${esc(node.decision)}</p><button id="collapse" type="button">${collapsed.has(node.id)?'Expand descendants':'Collapse descendants'}</button>`;
       $('collapse').onclick=()=>{collapsed.has(node.id)?collapsed.delete(node.id):collapsed.add(node.id);view=null;layout();renderGraph();detail();openDetail(tab)};
     } else if(tab==='diff'){
@@ -543,7 +536,6 @@
 
   // Hover: one tooltip per container (the dialog is in the top layer, so it needs its own).
   const chartGeometry=new Map();
-  const ideaTitle=id=>(data.ideas||[]).find(i=>i.id===id)?.title;
   function delta(value,base) {
     if(value==null||base==null)return '';
     const d=value-base;return ` <span class="${d<0?'good':d>0?'bad':'muted'}">(${d>0?'+':''}${Number.isInteger(d)?d:d.toFixed(2)} vs original)</span>`;
@@ -564,8 +556,6 @@
     if(p.local_proxy!=null)rows.push(['Score',`${esc(p.local_proxy.toFixed(2))}${p.is_reference?'':delta(p.local_proxy,base.local_proxy)}`]);
     if(p.tokens!=null)rows.push(['Tokens',`${esc(p.tokens)}${p.is_reference?'':delta(p.tokens,base.tokens)}`]);
     if(p.heartbeat!=null)rows.push(['Heartbeats',`${esc(p.heartbeat)}${p.is_reference?'':delta(p.heartbeat,base.heartbeat)}`]);
-    const idea=node?.idea_id&&(ideaTitle(node.idea_id)||node.idea_id);
-    if(idea)rows.push(['Idea',esc(idea)]);
     if(p.ts)rows.push(['Time',esc(new Date(p.ts*1000).toLocaleTimeString())]);
     const hyp=!p.is_reference&&node?.hypothesis?`<div class="tip-note">${esc(node.hypothesis.slice(0,140))}${node.hypothesis.length>140?'…':''}</div>`:'';
     return `<div class="tip-head">${title}${p.is_best?' <span class="good">★ best so far</span>':''}</div>${rows.map(([k,v])=>`<div class="tip-row"><span>${k}</span><b>${v}</b></div>`).join('')}${hyp}`;
@@ -654,15 +644,14 @@
   function renderMeta() {
     $('run-label').textContent=`${data.theorem || ''} · ${data.run_id} · ${data.nodes.length} recorded nodes`;
     const full=data.nodes.filter(n=>n.status==='full').length, autos=data.nodes.filter(n=>n.origin==='auto_merge').length;
-    const tested=(data.ideas||[]).filter(idea=>idea.attempts).length;
     const rp=data.route_progress||{},routes=data.routes||[],top=data.milestones.at(-1),probes=probeItems.length;
     const pass=probeItems.filter(p=>p.status==='pass').length,skel=probeItems.filter(p=>p.status==='skeleton').length;
     $('metrics').innerHTML=[['Candidates',data.nodes.length,`${full} verified 3/3 · ${autos} auto merges`],['Probes',probes,`${pass} compiled · ${skel} skeletons · ${probes-pass-skel} failed`],
       ['Routes',routes.length,`${routes.filter(r=>r.attempts).length} with attempts`],['Credited routes',`${rp.credited_routes??0} / ${rp.explored_routes??0}`,'credited / explored'],
       ['Best proxy',top?.local_proxy!=null?top.local_proxy.toFixed(2):'—',top?`${numberForId(top.candidate_id)} · ${top.tokens??'?'} tokens`:'no verified candidate'],
-      ['Evaluations',data.evaluations,`${tested}/${data.ideas?.length||0} ideas tested`],['New goal state',rp.new_state_share==null?'—':`${Math.round(100*rp.new_state_share)}%`,'of model attempts'],['Merge checks',data.merge_checks.length,'']]
+      ['Evaluations',data.evaluations,''],['New goal state',rp.new_state_share==null?'—':`${Math.round(100*rp.new_state_share)}%`,'of model attempts'],['Merge checks',data.merge_checks.length,'']]
       .map(([k,v,t])=>`<span class="metric" title="${esc(t)}">${esc(k)} <b>${esc(v)}</b></span>`).join('');
-        $('frontier').innerHTML=(data.ideas?.length ? data.ideas.map(idea=>`<div class="idea-row"><div><strong>${esc(idea.title)}</strong><span class="muted"> · ${esc(idea.status)} · ${esc(idea.attempts)} nodes · ${esc(idea.probes)} probes</span></div><p>${esc(idea.hypothesis||'')}${idea.reason?` — ${esc(idea.reason)}`:''}</p></div>`).join('') : (data.frontier||[]).slice(0,8).map(r=>`<div class="frontier-row"><button data-go="${r.candidate_id}">${esc(numberForId(r.candidate_id))}</button><span>${esc(r.status)} · priority ${esc(r.priority_total)} · ${esc(r.tokens ?? '?')} tokens</span></div>`).join(''))||'<p class="muted">No eligible seeds yet.</p>';
+        $('frontier').innerHTML=(data.frontier||[]).slice(0,8).map(r=>`<div class="frontier-row"><button data-go="${r.candidate_id}">${esc(numberForId(r.candidate_id))}</button><span>${esc(r.status)} · priority ${esc(r.priority_total)} · ${esc(r.tokens ?? '?')} tokens</span></div>`).join('')||'<p class="muted">No eligible seeds yet.</p>';
     $('frontier').querySelectorAll('[data-go]').forEach(el=>el.onclick=()=>select(el.dataset.go));
     $('worker').innerHTML=`<span class="tag">${esc(data.worker?.state ?? 'not running')}</span> <span class="muted">${data.worker?.updated_at ? esc(new Date(data.worker.updated_at*1000).toLocaleTimeString()) : ''}</span>${data.worker?.detail?.candidate_id ? `<span>${esc(numberForId(data.worker.detail.candidate_id))}</span>` : ''}${data.worker?.detail?.error ? `<pre>${esc(data.worker.detail.error)}</pre>` : ''}`;
     // Ledger and Pi now price requests identically; only a real disagreement is worth showing.

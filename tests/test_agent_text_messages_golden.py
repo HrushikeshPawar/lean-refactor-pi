@@ -142,21 +142,6 @@ def _():
     return raised(campaign._canonical_source_path, ROW, "/abs.lean")
 
 
-@case("errors.declarations_usage", "campaign.declarations with neither items nor cursor")
-def _():
-    return raised(campaign.declarations, "nm")
-
-
-@case("errors.invalid_declaration_cursor", "campaign._declarations with an undecodable cursor")
-def _():
-    return raised(campaign._declarations, "nm", None, "zzzz")
-
-
-@case("errors.declaration_items", "campaign._declarations with an empty item name")
-def _():
-    return raised(campaign._declarations, "nm", [""], None)
-
-
 def _source_range(read, **kwargs):
     with (
         patch.object(campaign, "problem", lambda name: ROW),
@@ -185,16 +170,6 @@ def _():
 @case("errors.source_range_order", "campaign._source_range with last before first")
 def _():
     return _source_range(lambda *args: "a\nb\nc", first=3, last=1)
-
-
-@case("errors.find_queries", "campaign.find with no queries")
-def _():
-    return raised(campaign.find, "nm", [])
-
-
-@case("errors.find_limit", "campaign.find with a zero limit")
-def _():
-    return raised(campaign.find, "nm", ["a"], 0)
 
 
 @case("errors.source_commit_mismatch", "campaign._split_source_handle with another commit in the handle")
@@ -251,12 +226,6 @@ def _():
     return _resolve("this file", scanned=([], []))
 
 
-@case("errors.invalid_declaration@source", "campaign._source_declaration with a malformed name")
-def _():
-    return raised(campaign._source_declaration, "nm", "1bad")
-
-
-@case("errors.no_source_declaration", "campaign._source_declaration for a name no source holds")
 def _():
     def not_found(*args):
         raise ValueError("not found")
@@ -269,7 +238,6 @@ def _():
         return campaign._source_declaration("nm", "foo")["hint"]
 
 
-@case("errors.resolve_name_timeout", "campaign._declaration_in_lean when Lean times out")
 def _():
     built = {"text": "text", "head": 0, "path": Path("."), "start_line": 1}
     with (
@@ -281,7 +249,6 @@ def _():
         return raised(campaign._declaration_in_lean, "nm", "foo")
 
 
-@case("errors.name_not_visible", "campaign._declaration_in_lean when Lean prints no declaration")
 def _():
     built = {"text": "text", "head": 0, "path": Path("."), "start_line": 1}
     with (
@@ -293,7 +260,6 @@ def _():
         return campaign._declaration_in_lean("nm", "foo")["hint"]
 
 
-@case("errors.stopped_run", "campaign._refuse_if_tripped after the Lean breaker tripped")
 def _():
     with patch.object(campaign.lean_health, "tripped", lambda directory: True):
         return raised(campaign._refuse_if_tripped, Path("."))
@@ -339,47 +305,6 @@ def _():
 @case("errors.probe_parent_missing", "campaign.resolve_parent_ref for a probe with no parent")
 def _():
     return raised(campaign.resolve_parent_ref, [{"kind": "probe", "proof_id": "x"}], "p1")
-
-
-@case("errors.run_uninitialized@record_idea", "campaign.record_idea on an empty ledger")
-def _():
-    with _Run():
-        return raised(campaign.record_idea, "run", title="x")
-
-
-@case("errors.idea_statuses", "campaign.record_idea with an unknown status")
-def _():
-    with _Run() as run:
-        run.seed(INIT)
-        return raised(campaign.record_idea, "run", title="x", status="bogus")
-
-
-@case("errors.idea_reason", "campaign.record_idea parking without a reason")
-def _():
-    with _Run() as run:
-        run.seed(INIT)
-        return raised(campaign.record_idea, "run", title="x", status="parked")
-
-
-@case("errors.idea_id_unknown@none", "campaign.record_idea updating an idea when none exist")
-def _():
-    with _Run() as run:
-        run.seed(INIT)
-        return raised(campaign.record_idea, "run", idea_id="zz")
-
-
-@case("errors.idea_id_unknown@known", "campaign.record_idea updating an unknown idea when one exists")
-def _():
-    with _Run() as run:
-        run.seed(INIT, {"kind": "idea", "id": "i1", "title": "t"})
-        return raised(campaign.record_idea, "run", idea_id="zz")
-
-
-@case("errors.idea_title_missing", "campaign.record_idea creating an idea with no title")
-def _():
-    with _Run() as run:
-        run.seed(INIT)
-        return raised(campaign.record_idea, "run")
 
 
 def _advisory_rows(score):
@@ -435,13 +360,6 @@ def _():
         return campaign.record_evaluation("nm", "run", STATEMENT + " := trivial", "fast", parents=["#9"])["notes"]
 
 
-@case("errors.idea_id_label", "campaign.record_evaluation with an idea id nobody recorded")
-def _():
-    with _Run() as run:
-        run.seed(INIT)
-        return campaign.record_evaluation("nm", "run", STATEMENT + " := trivial", "fast", idea_id="zz")["notes"]
-
-
 @case("errors.evaluation_reference", "campaign.evaluate_request with nothing to evaluate")
 def _():
     return raised(campaign.evaluate_request, "nm", "run")
@@ -495,25 +413,6 @@ def _():
 @case("errors.draft_limit", "campaign.probe_batch with no drafts")
 def _():
     return raised(campaign.probe_batch, "nm", "run", [])
-
-
-@case("errors.unknown_candidate_short", "campaign.candidate for a candidate with no proof file")
-def _():
-    with _Run() as run:
-        run.seed(INIT, CANDIDATE)
-        return raised(campaign.candidate, "nm", "run", "#1")
-
-
-@case("errors.profile_candidate_missing", "campaign.profile_request with no candidate on record")
-def _():
-    with _Run() as run:
-        run.seed(INIT)
-        return raised(campaign.profile_request, "nm", "run")
-
-
-@case("errors.decision_invalid", "campaign.set_decision with an unknown decision")
-def _():
-    return raised(campaign.set_decision, "run", "#1", "bad", "")
 
 
 def _merge_hypotheses():

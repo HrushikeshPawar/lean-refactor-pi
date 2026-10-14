@@ -125,7 +125,6 @@ def compare(rows: list[dict], expected_packet: str) -> dict:
                 "retries": cost.get("retries"),
                 "spent_after_best_usd": cost.get("spent_after_best_usd"),
                 "requests_after_best": cost.get("requests_after_best"),
-                "ideas_without_attempts": len(summary.get("ideas_without_attempts", [])),
                 "best_candidate": coherent.get("candidate") if coherent else None,
                 "best_tokens": coherent.get("tokens") if coherent else pick("tokens"),
                 "best_heartbeats": coherent.get("heartbeats") if coherent else pick("heartbeats"),
@@ -151,7 +150,6 @@ def render(report: dict, factor: str) -> str:
                 f"tokens {row['best_tokens']}  hb {row['best_heartbeats']}  proxy {row['best_proxy']}/"
                 f"{row['best_estimated_proxy']}  overhead {row['bookkeeping_and_rejected_pct']}%  "
                 f"cache {row['cache_reuse_pct']}%  post-best ${row['spent_after_best_usd']} "
-                f"({row['requests_after_best']} req)  zero-attempt ideas {row['ideas_without_attempts']}  "
                 f"stop {row['stop_reason']}"
             ]
         )

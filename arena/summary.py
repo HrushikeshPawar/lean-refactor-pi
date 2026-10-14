@@ -41,8 +41,8 @@ def stop_reason_of(directory: Path, controls: list[dict]) -> str:
     return noted or (controls[-1].get("stop") if controls else None) or "model_stopped"
 
 
-COMPILE_TOOLS = {"arena_evaluate", "arena_probe", "arena_profile", "compile"}
-BOOKKEEPING_TOOLS = {"arena_idea", "arena_frontier", "arena_state", "arena_finish", "read", "goal", "finish"}
+COMPILE_TOOLS = {"compile"}
+BOOKKEEPING_TOOLS = {"read", "goal", "finish"}
 LOCAL_EDIT_MAX_LINES = 2
 WARMUP_REQUESTS = 2
 
@@ -420,27 +420,6 @@ def build_summary(directory: Path) -> dict:
                     if result_ok.get(str(block["id"])) is False:
                         errors[block["name"]] += 1
     controls = [e for e in cost_events if e.get("kind") == "control"]
-    ideas: dict[str, dict] = {}
-    idea_attempts: dict[str, set[str]] = {}
-    for event in ledger:
-        if event.get("kind") == "idea":
-            ideas[event["id"]] = {
-                "id": event["id"],
-                "title": event["title"],
-                "status": event["status"],
-                "attempts": 0,
-                "probes": 0,
-            }
-            idea_attempts[event["id"]] = set()
-        elif event.get("kind") == "idea_update" and event["id"] in ideas:
-            ideas[event["id"]].update({k: event[k] for k in ("status", "title") if k in event})
-        elif event.get("kind") == "candidate" and event.get("idea_id") in ideas:
-            idea_attempts[event["idea_id"]].add(event["candidate_id"])
-        elif event.get("kind") == "probe" and event.get("idea_id") in ideas:
-            idea_attempts[event["idea_id"]].add(event["proof_id"])
-    for idea_id, idea in ideas.items():
-        idea["attempts"] = len(idea_attempts[idea_id])
-        idea["probes"] = sum(1 for event in ledger if event.get("kind") == "probe" and event.get("idea_id") == idea_id)
     overshoot = max(0.0, spent - cap) if cap else 0.0
     progress = _progress(ledger)
     if submission_result and submission_result.get("candidate"):
@@ -470,7 +449,6 @@ def build_summary(directory: Path) -> dict:
     later_requests = [
         event for event in request_events if best_at is not None and float(event.get("ts", 0)) / 1000 > best_at
     ]
-    ideas_without_attempts = [idea["id"] for idea in ideas.values() if idea["attempts"] == 0]
     stopped = stop_reason_of(directory, controls)
     route_rows = route_table(ledger)
     return {
@@ -525,11 +503,9 @@ def build_summary(directory: Path) -> dict:
             "error_total": sum(errors.values()),
             **_compile_counters(events),
         },
-        "ideas": list(ideas.values()),
         "routes": route_rows,
         "route_progress": route_progress(route_rows),
         "merge_report": merge_report(ledger),
-        "ideas_without_attempts": ideas_without_attempts,
         "submission": submission_result,
     }
 
@@ -657,7 +633,6 @@ def render_text(summary: dict) -> str:
                 f"evaluations {summary['evaluations']}, probes {summary['probes']}, edits "
                 f"structural {summary['edits']['structural']} / local {summary['edits']['local']}",
                 f"post-best spend ${cost['spent_after_best_usd']:.4f} over {cost['requests_after_best']} requests; "
-                f"ideas without attempts {len(summary['ideas_without_attempts'])}",
                 "routes tried: " + routes_detail_text(summary.get("routes") or []),
                 route_depth_text(summary.get("route_progress")),
                 "harness merge check: " + merge_text(summary.get("merge_report") or []),

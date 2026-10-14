@@ -224,7 +224,6 @@ def run_row(
         "best_candidate": best.get("candidate") if best else None,
         "best_proxy": best.get("proxy") if best else None,
         "helpers": helper_discovery(directory, best.get("candidate") if best else None) if directory else None,
-        "ideas_without_attempts": len(summary.get("ideas_without_attempts") or []),
         "routes": [
             {key: row[key] for key in ("route", "label", "attempts", "best_proxy")}
             for row in summary.get("routes") or []
@@ -269,7 +268,6 @@ def aggregate(runs: list[dict], expected: dict[str, str]) -> dict:
                 "best_proxy": _stats([item["best_proxy"] for item in items]),
                 "helper_runs": sum(bool((item["helpers"] or {}).get("candidates_with_helpers")) for item in items),
                 "best_uses_helper_runs": sum(bool((item["helpers"] or {}).get("best_uses_helper")) for item in items),
-                "ideas_never_attempted": sum(item["ideas_without_attempts"] for item in items),
                 "routes_tried": _stats([len(item.get("routes") or []) for item in items]),
                 "credited_routes": _stats(
                     [(item.get("route_progress") or {}).get("credited_routes") for item in items]
@@ -320,7 +318,6 @@ def render(report: dict) -> str:
             f"  routes tried per run min/median/max: {span(g['routes_tried'])}; runs with a single route: {g['single_route_runs']}",
             f"  route depth credited/explored min/median/max: {span(g['credited_routes'])} / {span(g['explored_routes'])}; "
             f"new-goal-state share: {span(g['new_state_share'], '{:.2f}')}",
-            f"  ideas never attempted: {g['ideas_never_attempted']}; tool errors: {g['tool_errors']}",
             f"  cache reuse %: {span(g['cache_reuse_pct'])}; bookkeeping+rejected %: {span(g['bookkeeping_and_rejected_pct'])}",
             f"  spend per problem min/median/max: {span(g['spent_usd'], '${:.4f}')} (total ${g['spent_usd']['total']:.4f})",
             f"  stop reasons: {g['stop_reasons']}",

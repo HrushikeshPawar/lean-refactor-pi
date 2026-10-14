@@ -1,6 +1,5 @@
 finish_remaining_pct: 10
 original_candidate: 1
-max_ideas: 8
 max_failures: 3
 max_drafts: 4
 compile_max_drafts: 4

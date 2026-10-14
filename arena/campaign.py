@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import fcntl
 import hashlib
 import inspect
@@ -51,9 +50,9 @@ from arena.graph import (
     stall_target,
 )
 from arena.graph import map_view as graph_map_view
-from arena.prices import changed_steps, fmt_hb, fmt_signed, quote_tokens, rates, snippet_tokens, step_table
+from arena.prices import changed_steps, fmt_hb, fmt_signed, rates, snippet_tokens, step_table
 from arena.prices import price_row as build_price_row
-from arena.profile import heartbeat_floor, profile
+from arena.profile import profile
 from arena.salvage import fill_cost, fill_text
 from arena.salvage import holes as find_holes
 from arena.salvage import salvage as salvage_proof
@@ -172,147 +171,6 @@ def _context(name: str) -> dict:
 
 MAX_SOURCE_LINES = int(text.numbers()["source_lines_per_call"])
 MAX_DRAFTS = int(text.numbers()["max_drafts"])
-MAX_DECLARATION_PAGE_CHARS = 16_000
-
-
-def declarations(name: str, items: list[str] | None = None, cursor: str | None = None) -> dict:
-    """Resolve a batch of declaration handles against the kickoff's tagged constant index."""
-    if bool(items) == bool(cursor):
-        raise ValueError(text.render("messages/errors.declarations_usage"))
-    with _session():
-        return _declarations(name, items, cursor)
-
-
-def _declarations(name: str, items: list[str] | None, cursor: str | None) -> dict:
-    from arena.context import constant_index
-
-    if cursor:
-        try:
-            state = json.loads(base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)))
-            if state.get("version") != 1 or state.get("theorem") != name:
-                raise ValueError
-            items, offset = state["items"], state["offset"]
-        except (ValueError, KeyError, TypeError, json.JSONDecodeError):
-            raise ValueError(text.render("messages/errors.invalid_declaration_cursor")) from None
-    else:
-        offset = 0
-    if not isinstance(items, list) or not items or not all(isinstance(item, str) and item for item in items):
-        raise ValueError(text.render("messages/errors.declaration_items"))
-
-    inventory = _context(name)
-    if inventory.get("error"):
-        return {
-            "items": [
-                {"input": item, "kind": "unavailable", "reason": "unavailable", "detail": inventory["error"]}
-                for item in items[offset:]
-            ],
-            "next_cursor": None,
-        }
-    constants = constant_index(inventory)
-    locals_by_name = {item["name"]: item for item in inventory.get("local", [])}
-    results: list[dict] = []
-    size = 0
-    index = offset
-    while index < len(items):
-        original = items[index]
-        query = original[5:] if original.startswith("decl:") else original
-        if query in locals_by_name:
-            local = locals_by_name[query]
-            result = {"input": original, "kind": "local", "name": query, "type": local["type"], "scope": local["scope"]}
-        else:
-            matches = constant_index(inventory, name=query)
-            if not matches and "." not in query:
-                matches = [item for item in constants if item["name"].split(".")[-1] == query]
-            if len(matches) > 1:
-                result = {
-                    "input": original,
-                    "kind": "ambiguous",
-                    "suggestions": [item["name"] for item in matches[:12]],
-                }
-            elif not matches:
-                found = _source_declaration(name, query)
-                if not found.get("found") and re.search(r"(?:^|\.)_[A-Za-z0-9_']", query):
-                    # Generated elaborator names can be absent from source indexes and still resolve in Lean.
-                    found = declaration(name, query)
-                if found.get("ambiguous"):
-                    result = {"input": original, "kind": "ambiguous", "suggestions": found["ambiguous"]}
-                elif not found.get("found"):
-                    result = {
-                        "input": original,
-                        "kind": "error",
-                        "error": "not_found",
-                        "hint": found.get("hint"),
-                        "suggestions": _declaration_suggestions(query, constants),
-                    }
-                elif found.get("alternatives"):
-                    result = {
-                        "input": original,
-                        "kind": "ambiguous",
-                        "suggestions": [found["name"], *found["alternatives"]],
-                    }
-                elif found.get("source_text"):
-                    result = {"input": original, "kind": "declaration", **found}
-                else:
-                    entry = {"name": found.get("name", query), "kind": found.get("kind", "generated")}
-                    result = {
-                        "input": original,
-                        **found,
-                        "kind": "unavailable",
-                        "reason": _unavailable_reason(entry, found),
-                        "handle": f"decl:{entry['name']}",
-                    }
-            else:
-                entry = matches[0]
-                found = declaration(name, entry["name"])
-                if found.get("source_text"):
-                    result = {"input": original, "kind": "declaration", **found, "index": entry}
-                else:
-                    result = {
-                        "input": original,
-                        "kind": "unavailable",
-                        "reason": _unavailable_reason(entry, found),
-                        "name": entry["name"],
-                        "handle": f"decl:{entry['name']}",
-                        "index": entry,
-                        "module": found.get("module") or entry.get("module"),
-                        "signature": found.get("signature") or entry.get("sig"),
-                        "location": found.get("source"),
-                    }
-        encoded_size = len(json.dumps(result, ensure_ascii=False))
-        if results and size + encoded_size > MAX_DECLARATION_PAGE_CHARS:
-            break
-        results.append(result)
-        size += encoded_size
-        index += 1
-    next_cursor = None
-    if index < len(items):
-        raw = json.dumps({"version": 1, "theorem": name, "items": items, "offset": index}).encode()
-        next_cursor = base64.urlsafe_b64encode(raw).decode().rstrip("=")
-    return {"items": results, "next_cursor": next_cursor}
-
-
-def _declaration_suggestions(query: str, constants: list[dict]) -> list[str]:
-    """Offer qualified-name suggestions using name overlap, without claiming lemma relevance."""
-    parts = {part.lower() for part in query.split(".") if part}
-    ranked = []
-    for item in constants:
-        name = item["name"]
-        overlap = len(parts & {part.lower() for part in name.split(".")})
-        if overlap:
-            ranked.append((-overlap, name))
-    return [name for _, name in sorted(ranked)[:8]]
-
-
-def _unavailable_reason(entry: dict, found: dict) -> str:
-    if entry.get("tag") == "generated" or "._" in entry["name"]:
-        return "generated"
-    if entry["name"].startswith("_private."):
-        return "private"
-    if found.get("kind") == "opaque" or entry.get("kind") == "opaque":
-        return "opaque"
-    if found.get("module") not in (None, "this file"):
-        return "external"
-    return "unavailable"
 
 
 def source_range(name: str, path: str, first: int | None = None, last: int | None = None) -> dict:
@@ -369,203 +227,6 @@ def _source_range(name: str, path: str, first: int | None, last: int | None) -> 
         "next_first": end + 1 if end < len(lines) and wanted > end else None,
         "text": "\n".join(f"{i}: {lines[i - 1]}" for i in range(first, end + 1)),
     }
-
-
-def find(name: str, queries: list[str], limit: int = 20) -> dict:
-    """Search declaration lines of the pinned trees and the kickoff index, counting each qualified declaration once."""
-    if not queries or not all(isinstance(query, str) and query.strip() for query in queries):
-        raise ValueError(text.render("messages/errors.find_queries"))
-    if limit < 1:
-        raise ValueError(text.render("messages/errors.find_limit"))
-    limit = min(limit, 100)
-    with _session():
-        return _find(name, queries, limit)
-
-
-def _find(name: str, queries: list[str], limit: int) -> dict:
-    from arena.context import constant_index
-
-    inventory = _context(name)
-    indexed = constant_index(inventory) if not inventory.get("error") else []
-    entries = indexed + [
-        {**item, "kind": item.get("decl")} for item in inventory.get("source", []) if not inventory.get("error")
-    ]
-    row = problem(name)
-    version, commit = measure_version(row)
-    project = workspace(row, version, commit)
-    roots = _roots(project, commit)
-    needles = [query[5:] if query.startswith("decl:") else query for query in queries]
-    named = [bool(re.fullmatch(_LEAN_NAME, needle)) for needle in needles]
-    # A name the kickoff index holds exactly resolves without searching the source trees.
-    pending = [
-        needle
-        for needle, is_name in zip(needles, named, strict=False)
-        if not (is_name and any(item["name"] == needle for item in entries))
-    ]
-    hits = _declaration_hits(roots, list(dict.fromkeys(pending))) if pending else []
-    per_query = []
-    for query, needle, is_name in zip(queries, needles, named, strict=False):
-        exact_only = query.startswith("decl:")
-        folded = needle.casefold()
-        found: dict[str, dict] = {}
-        if is_name:
-            for item in entries:
-                if (
-                    not (item["name"] == needle if exact_only else folded in item["name"].casefold())
-                    or item["name"] in found
-                ):
-                    continue
-                matched = _indexed_row(item, roots, (project, commit, row["file_path"]))
-                if matched is None and item["name"] == needle:
-                    matched = _unavailable_row(item)
-                if matched is not None:
-                    found[item["name"]] = matched
-        files_truncated = False
-        scanned = 0
-        if needle in pending:
-            candidates = _candidate_files(hits, needle, is_name, exact_only)
-            files_truncated = len(candidates) > MAX_SCAN_FILES
-            for index, pin, path in candidates[:MAX_SCAN_FILES]:
-                read = _scan(roots[index][0], pin, path)
-                if read is None:
-                    continue
-                scanned += 1
-                lines, starts = read
-                for number, (line_number, qualified) in enumerate(starts):
-                    if qualified in found:
-                        continue
-                    end = _declaration_end(lines, starts, number)
-                    if exact_only:
-                        matched = qualified == needle
-                    elif is_name:
-                        matched = folded in qualified.casefold()
-                    else:
-                        matched = folded in "\n".join(lines[line_number - 1 : end]).casefold()
-                    if matched:
-                        found[qualified] = _declaration_row(
-                            pin, path, lines, qualified, _declaration_start(lines, line_number), end
-                        )
-        if not found:
-            per_query.append(
-                {
-                    "query": query,
-                    "matches": [],
-                    "error": "not_found",
-                    "suggestions": _declaration_suggestions(needle, indexed),
-                    "files_scanned": scanned,
-                    "files_truncated": files_truncated,
-                }
-            )
-            continue
-        selected = sorted(
-            found.values(),
-            key=lambda item: (
-                0 if item["name"].casefold() == folded else 1 if item["name"].casefold().endswith("." + folded) else 2,
-                item["name"],
-            ),
-        )[:limit]
-        per_query.append(
-            {
-                "query": query,
-                "matches": selected,
-                "distinct_count": len(found),
-                "truncated": len(found) > len(selected),
-                "files_scanned": scanned,
-                "files_truncated": files_truncated,
-            }
-        )
-    return {"queries": per_query, "pin": commit, "limit": limit}
-
-
-def _indexed_row(item: dict, roots: list[tuple[Path, str, str]], own_file: tuple) -> dict | None:
-    """Locate one kickoff-index declaration in pinned source, or None when its source cannot be found."""
-    module = item.get("module")
-    if item.get("tag") == "generated" or module is None:
-        return None
-    if module == "this file":
-        read = _scan(*own_file)
-        if read is None:
-            return None
-        lines, starts = read
-        for number, (line_number, qualified) in enumerate(starts):
-            if qualified == item["name"] or qualified.endswith("." + item["name"]):
-                return _declaration_row(
-                    own_file[1],
-                    own_file[2],
-                    lines,
-                    item["name"],
-                    _declaration_start(lines, line_number),
-                    _declaration_end(lines, starts, number),
-                )
-        return None
-    if "start_line" not in item:
-        return None
-    located = _module_file(roots, module)
-    if located is None:
-        return None
-    root, pin, path = located
-    lines = _git_source(root, pin, path).splitlines()
-    return _declaration_row(pin, path, lines, item["name"], item["start_line"], item["end_line"])
-
-
-def _unavailable_row(item: dict) -> dict:
-    """An index-only match for a declaration whose source is not in the pinned trees (core, generated)."""
-    matched = {
-        "name": item["name"],
-        "handle": f"decl:{item['name']}",
-        "kind": item.get("kind"),
-        "module": item.get("module"),
-        "source_unavailable": _unavailable_reason(item, item),
-    }
-    for key in ("type", "signature"):
-        if item.get(key):
-            matched[key] = item[key]
-    return matched
-
-
-def _declaration_row(pin: str, path: str, lines: list[str], qualified: str, start: int, end: int) -> dict:
-    return {
-        "name": qualified,
-        "handle": f"decl:{qualified}",
-        "path": path,
-        "line": start,
-        "end_line": end,
-        "pin": pin,
-        "signature": _signature(lines, start, end),
-    }
-
-
-def _candidate_files(
-    hits: list[tuple[int, str, str, int, str]], needle: str, is_name: bool, exact_only: bool
-) -> list[tuple[int, str, str]]:
-    """Files worth reading for one query, best first: exact leaf names, then prefixes, then substrings."""
-    folded = needle.casefold()
-    parts = needle.split(".")
-    leaf = parts[-1].casefold()
-    namespaced = {
-        (index, path)
-        for index, _, path, _, source_text in hits
-        if len(parts) > 1
-        and re.match(r"^\s*namespace\s", source_text, re.I)
-        and parts[-2].casefold() in source_text.casefold()
-    }
-    ranked: dict[tuple[int, str, str], int] = {}
-    for index, pin, path, _, source_text in hits:
-        declared = _DECLARATION_PATTERN.match(source_text)
-        if is_name:
-            if not declared:
-                continue
-            local = declared.group(1).casefold()
-            if leaf not in local or (len(parts) > 1 and folded not in local and (index, path) not in namespaced):
-                continue
-            tier = 0 if local.split(".")[-1] == leaf else 1 if local.split(".")[-1].startswith(leaf) else 2
-        elif folded in source_text.casefold():
-            tier = 2
-        else:
-            continue
-        key = (index, pin, path)
-        ranked[key] = min(ranked.get(key, tier), tier)
-    return [key for key, _ in sorted(ranked.items(), key=lambda item: (item[1], item[0][0], item[0][2]))]
 
 
 _HANDLE_SUFFIX = re.compile(r"^(.*\.lean):(\d+)(?:-(\d+))?$")
@@ -749,17 +410,6 @@ def _declaration_end(lines: list[str], starts: list[tuple[int, str]], index: int
     return end
 
 
-def _signature(lines: list[str], start: int, end: int) -> str:
-    """The first declaration lines after any doc comment and attributes, up to the line that opens the body."""
-    shown = []
-    keyword = next((i for i in range(start, end + 1) if _DECLARATION_PATTERN.match(lines[i - 1])), start)
-    for line_text in lines[keyword - 1 : min(end, keyword + 5)]:
-        shown.append(line_text.rstrip())
-        if ":=" in line_text or line_text.rstrip().endswith("where") or line_text.strip().startswith("|"):
-            break
-    return "\n".join(shown)
-
-
 def _roots(project: Path, commit: str) -> list[tuple[Path, str, str]]:
     session = _SESSION.get()
     key = str(project)
@@ -830,18 +480,12 @@ def _declaration_hits(roots: list[tuple[Path, str, str]], needles: list[str]) ->
 
 
 def _scan(root: Path, pin: str, path: str) -> tuple[list[str], list[tuple[int, str]]] | None:
-    session = _SESSION.get()
-    key = (str(root), pin, path)
-    if session is not None and key in session.scans:
-        return session.scans[key]
+    """Read one pinned Lean file and index its declaration starts for source handles."""
     try:
         lines = _git_source(root, pin, path).splitlines()
     except subprocess.CalledProcessError:
         return None
-    scanned = lines, _source_declarations(lines)
-    if session is not None:
-        session.scans[key] = scanned
-    return scanned
+    return lines, _source_declarations(lines)
 
 
 def _resolve_declaration_source(
@@ -951,93 +595,6 @@ def _source_hint(name: str, symbol: str) -> tuple[str, str | None, tuple[int, in
         return symbol.rsplit(".", 1)[0], module, None
     span = (entry["start_line"], entry["end_line"]) if "start_line" in entry and "end_line" in entry else None
     return symbol, module, span
-
-
-def declaration(name: str, symbol: str) -> dict:
-    with _session():
-        return _declaration(name, symbol)
-
-
-def _declaration(name: str, symbol: str) -> dict:
-    found = _source_declaration(name, symbol)
-    if found.get("found"):
-        return found
-    return _declaration_in_lean(name, symbol.removeprefix("decl:"))
-
-
-def _source_declaration(name: str, symbol: str) -> dict:
-    """Resolve a source-backed declaration without invoking Lean for a missing name."""
-    if symbol.startswith("decl:"):
-        symbol = symbol[5:]
-    if not re.fullmatch(_LEAN_NAME, symbol):
-        raise ValueError(text.render("messages/errors.invalid_declaration"))
-    source_symbol, module, span = _source_hint(name, symbol)
-    try:
-        located = _resolve_declaration_source(name, source_symbol, module, span)
-    except AmbiguousDeclaration as error:
-        return {"symbol": symbol, "found": True, "ambiguous": error.candidates}
-    except ValueError:
-        located = None
-    if located is not None:
-        lines = _git_source(located["root"], located["pin"], located["path"]).splitlines()
-        qualified = located["qualified"] if module is None else symbol
-        return {
-            "symbol": symbol,
-            "handle": f"decl:{qualified}",
-            "name": qualified,
-            "found": True,
-            "pin": located["pin"],
-            "path": located["path"],
-            "line": located["line"],
-            "end_line": located["end"],
-            "file_lines": located["file_lines"],
-            "source_text": "\n".join(lines[located["line"] - 1 : located["end"]]),
-        }
-    entry = _indexed_entry(name, symbol)
-    if entry is not None and module not in (None, "this file"):
-        # Indexed, but no pinned source root holds its module (for example the Lean toolchain).
-        return {
-            "symbol": symbol,
-            "found": True,
-            "name": symbol,
-            "kind": entry.get("kind"),
-            "module": module,
-            "signature": entry.get("sig"),
-        }
-    return {"symbol": symbol, "found": False, "hint": text.render("messages/errors.no_source_declaration")}
-
-
-def _declaration_in_lean(name: str, symbol: str) -> dict:
-    """Resolve a name the way the theorem's own file does (namespaces, opens, imported libraries)."""
-    from arena.engine import candidate_file, run_lean
-
-    row = problem(name)
-    version, commit = measure_version(row)
-    built = candidate_file(row, row["src"], version, commit)
-    inserted = (Path(__file__).with_name("lean") / "declaration.lean").read_text() + f"arena_decl {symbol}\n\n"
-    text = built["text"][: built["head"]] + inserted + built["text"][built["head"] :]
-    ran = run_lean(row, built["path"], text, prefix_end=built["head"])
-    if ran is None:
-        raise ValueError(agent_text.render("messages/errors.resolve_name_timeout"))
-    records = [json.loads(raw) for raw in re.findall(r"^ARENA_DECL (\{.*\})$", ran[1], re.M)]
-    found = [item for item in records if item.get("found")]
-    if not found:
-        return {
-            "symbol": symbol,
-            "found": False,
-            "hint": agent_text.render("messages/errors.name_not_visible"),
-        }
-    best = found[0]
-    return {
-        "symbol": symbol,
-        "found": True,
-        "name": best["name"],
-        "kind": best["kind"],
-        "module": best["module"],
-        "source": f"{best['module']}" + (f":{best['line']}" if best.get("line") else ""),
-        "signature": best["signature"],
-        **({"alternatives": [item["name"] for item in found[1:]]} if len(found) > 1 else {}),
-    }
 
 
 def packet(name: str) -> str:
@@ -1556,92 +1113,6 @@ def _check_stall(directory: Path, graph: Graph, newly_filed: set[str]) -> None:
         current_focus = target.node.proof_id
 
 
-IDEA_STATUSES = ("active", "parked", "succeeded", "abandoned")
-
-
-def _current_active_idea(history: list[dict]) -> str | None:
-    """The latest idea still marked active, derived from append-only idea events."""
-    statuses: dict[str, str] = {}
-    for item in history:
-        if item.get("kind") == "idea":
-            statuses[item["id"]] = item.get("status", "active")
-        elif item.get("kind") == "idea_update" and item.get("id") in statuses:
-            statuses[item["id"]] = item.get("status", statuses[item["id"]])
-    return next((idea_id for idea_id, status in reversed(list(statuses.items())) if status == "active"), None)
-
-
-def _region(text: str) -> list[int] | str:
-    """Proof lines such as "12-30", "lines 12–30", "L12..L30" or "line 7"; anything else is kept as text."""
-    numbers = [int(n) for n in re.findall(r"\d+", text)][:2]
-    if not numbers:
-        return text.strip()[:120]
-    return [min(numbers), max(numbers)]
-
-
-def record_idea(
-    run_id: str,
-    title: str | None = None,
-    hypothesis: str = "",
-    region: str | None = None,
-    expected_effect: dict | None = None,
-    idea_id: str | None = None,
-    status: str | None = None,
-    reason: str = "",
-) -> dict:
-    """Create or update a model-owned idea. The harness never authors or schedules ideas."""
-    directory = run_dir(run_id)
-    history = events(directory)
-    if not history or not history[0].get("theorem"):
-        raise ValueError(text.render("messages/errors.run_uninitialized"))
-    if status is not None and status not in IDEA_STATUSES:
-        raise ValueError(text.render("messages/errors.idea_statuses", statuses=", ".join(IDEA_STATUSES)))
-    if status in ("parked", "abandoned", "succeeded") and not reason.strip():
-        raise ValueError(text.render("messages/errors.idea_reason", status=status))
-    effect = {
-        str(k): str(v)[:80] for k, v in (expected_effect or {}).items() if k in ("tokens", "heartbeats", "compat")
-    }
-    span = _region(region) if region and region.strip() else None
-    known = {item["id"]: item for item in history if item.get("kind") == "idea"}
-    if idea_id:
-        idea_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", idea_id.strip())[:40] or None
-    if idea_id and idea_id not in known and not (title and title.strip()):
-        raise ValueError(
-            text.render("messages/errors.idea_id_unknown", idea_id=idea_id, ideas=", ".join(known) or "none yet")
-        )
-    if idea_id and idea_id in known:
-        update = {"kind": "idea_update", "id": idea_id}
-        if title:
-            update["title"] = title.strip()[:120]
-        if hypothesis:
-            update["hypothesis"] = hypothesis.strip()[:600]
-        if span:
-            update["region"] = span
-        if effect:
-            update["expected_effect"] = effect
-        if status:
-            update["status"] = status
-        if reason.strip():
-            update["reason"] = reason.strip()[:300]
-        _append(directory, update)
-        return {"ok": True, **{k: v for k, v in update.items() if k != "kind"}}
-    if not title or not title.strip():
-        raise ValueError(text.render("messages/errors.idea_title_missing"))
-    # Models often name their own ideas; keep that name so later updates by it work.
-    identifier = idea_id or next(f"i{n}" for n in range(len(known) + 1, len(known) + 1000) if f"i{n}" not in known)
-    item = {
-        "kind": "idea",
-        "id": identifier,
-        "title": title.strip()[:120],
-        "hypothesis": hypothesis.strip()[:600],
-        "region": span,
-        "expected_effect": effect,
-        "status": status or "active",
-        "reason": reason.strip()[:300],
-    }
-    _append(directory, item)
-    return {"ok": True, **{k: v for k, v in item.items() if k != "kind"}}
-
-
 def _metric_score(metrics: dict | None) -> float | None:
     if not metrics:
         return None
@@ -1665,7 +1136,6 @@ def _summaries(history: list[dict]) -> list[dict]:
             rows[item["candidate_id"]] = {
                 "id": item["candidate_id"],
                 "n": len(rows) + 1,
-                "idea_id": item.get("idea_id"),
                 "origin": item.get("origin", "model"),
                 "parents": item.get("parents", []),
                 "evaluations": [],
@@ -1783,7 +1253,6 @@ def _model_view(result: dict) -> dict:
             "probe",
             "tokens",
             "heartbeat",
-            "idea_id",
             "cached",
             "candidate_path",
             "start_line",
@@ -1863,7 +1332,6 @@ def record_evaluation(
     origin: str = "model",
     merge: dict | None = None,
     materialize_live: bool = True,
-    idea_id: str | None = None,
     lane: str = "model",
     trigger: str = "model",
     precomputed: dict | None = None,
@@ -1891,8 +1359,6 @@ def record_evaluation(
         if history[0].get("versions") and history[0]["versions"] != [list(pair) for pair in versions(row)]:
             raise ValueError(text.render("messages/errors.source_versions_changed"))
         known = set(_candidate_ids(history))
-        if candidate_id not in known and idea_id is None:
-            idea_id = _current_active_idea(history)
         explicit: list[str] = []
         for reference in parents or []:
             try:
@@ -1904,14 +1370,6 @@ def record_evaluation(
                 explicit.append(resolved)
         lineage = explicit or ([_current(history)] if candidate_id not in known and _current(history) else [])
         lineage = [parent for parent in lineage if parent != candidate_id]
-        if candidate_id in known and idea_id is None:
-            idea_id = next(
-                item.get("idea_id")
-                for item in history
-                if item.get("kind") == "candidate" and item["candidate_id"] == candidate_id
-            )
-        if idea_id and idea_id not in {item["id"] for item in history if item.get("kind") == "idea"}:
-            notes.append(text.render("messages/errors.idea_id_label", idea_id=idea_id))
         _snapshot(directory, candidate_id, proof)
         if candidate_id not in known:
             _append(
@@ -1923,7 +1381,6 @@ def record_evaluation(
                     "hypothesis": hypothesis,
                     "origin": origin,
                     "merge": merge,
-                    "idea_id": idea_id,
                     "source_versions": versions(row),
                     "evaluator_sha256": _evaluator_sha(),
                 },
@@ -2042,7 +1499,6 @@ def record_evaluation(
         "candidate_id": candidate_id,
         "candidate": _label(history, candidate_id),
         "node_number": _candidate_ids(history).index(candidate_id) + 1,
-        "idea_id": idea_id,
         "cached": prior is not None,
         "notes": notes,
         "best_so_far": best_line,
@@ -2086,7 +1542,6 @@ def evaluate_request(
     mode: str = "fast",
     parents: list[str] | None = None,
     hypothesis: str = "",
-    idea_id: str | None = None,
     candidate_ref: str | None = None,
     from_probe: str | None = None,
 ) -> dict:
@@ -2108,12 +1563,11 @@ def evaluate_request(
             item for item in reversed(history) if item.get("kind") == "probe" and item["proof_id"] == proof_id
         )
         proof = (directory / "proofs" / f"{proof_id}.lean").read_text()
-        idea_id = idea_id or source.get("idea_id")
         parents = parents or ([source["parent"]] if source.get("parent") else None)
     if not proof:
         raise ValueError(text.render("messages/errors.evaluation_proof_missing"))
     try:
-        result = record_evaluation(name, run_id, proof, mode, parents, hypothesis, idea_id=idea_id)
+        result = record_evaluation(name, run_id, proof, mode, parents, hypothesis)
     except ValueError as error:
         if str(error) in ("FORBIDDEN: sorry", "FORBIDDEN: admit"):
             raise ValueError(text.render("messages/errors.probe_forbidden", error=error)) from None
@@ -2210,7 +1664,6 @@ def probe(
     name: str,
     run_id: str,
     proof: str,
-    idea_id: str | None = None,
     parent: str | None = None,
     operation: dict | None = None,
     mode: str = "fast",
@@ -2233,12 +1686,11 @@ def probe(
     parent_id = parent_id or _current(history)
     proof_id = hashlib.sha256((name + "\0" + proof).encode()).hexdigest()
     if proof_id in set(_candidate_ids(history)):
-        return evaluate_request(name, run_id, proof, mode, parents=[parent] if parent else None, idea_id=idea_id)
+        return evaluate_request(name, run_id, proof, mode, parents=[parent] if parent else None)
     earlier = next(
         (item for item in reversed(history) if item.get("kind") == "probe" and item["proof_id"] == proof_id), None
     )
     newly_filed: set[str] = set()
-    idea_id = idea_id or (earlier or {}).get("idea_id") or _current_active_idea(history)
     if earlier:
         result = earlier["result"]
     else:
@@ -2255,7 +1707,6 @@ def probe(
                 proof,
                 mode,
                 [parent] if parent else None,
-                idea_id=idea_id,
                 hypothesis=note or "",
                 precomputed=result if mode == "fast" else None,
                 operation=operation,
@@ -2276,7 +1727,6 @@ def probe(
             {
                 "kind": "probe",
                 "proof_id": proof_id,
-                "idea_id": idea_id,
                 "parent": parent_id,
                 "named_parent": None if named_parent is _NAMED_PARENT_UNSET else named_parent,
                 "note": note,
@@ -2324,7 +1774,6 @@ def probe(
         {
             **result,
             "probe": label,
-            "idea_id": idea_id or (earlier or {}).get("idea_id"),
             "cached": earlier is not None,
             "notes": notes,
             **location,
@@ -2355,7 +1804,6 @@ def probe_batch(
     name: str,
     run_id: str,
     drafts: list[str],
-    idea_id: str | None = None,
     parent: str | None = None,
     note: str | None = None,
     named_parent: str | object | None = _NAMED_PARENT_UNSET,
@@ -2375,7 +1823,7 @@ def probe_batch(
     try:
         for index, draft in enumerate(drafts, 1):
             try:
-                outcome = probe(name, run_id, draft, idea_id, fixed_parent, note=note, named_parent=named_parent)
+                outcome = probe(name, run_id, draft, fixed_parent, note=note, named_parent=named_parent)
             except (OSError, ValueError, RuntimeError) as error:
                 outcome = {"ok": False, "mode": "probe", "error": " ".join(str(error).split())[:400]}
             outcomes.append({"index": index, **outcome})
@@ -2403,7 +1851,6 @@ def compile_operation(
     run_id: str,
     operation: dict,
     mode: str = "fast",
-    idea_id: str | None = None,
     note: str | None = None,
     named_parent: str | object | None = _NAMED_PARENT_UNSET,
 ) -> dict:
@@ -2485,7 +1932,6 @@ def compile_operation(
         name,
         run_id,
         proof,
-        idea_id=idea_id,
         operation=edge_operation,
         mode=mode,
         note=note,
@@ -2497,93 +1943,6 @@ def compile_operation(
     )
     node = _graph_node_id(events(directory), proof_id)
     return {**result, "node": node, "edge": {"type": filed["type"], "from": filed["from"]}}
-
-
-def candidate(name: str, run_id: str, reference: str) -> dict:
-    """Restore a candidate (`#N`) or a probe (`pN`) into the shadow project."""
-    directory = run_dir(run_id)
-    history = events(directory)
-    if re.fullmatch(r"p[0-9]+", reference.strip().lower()):
-        proof_id = resolve_probe_ref(history, reference)
-        proof = (directory / "proofs" / f"{proof_id}.lean").read_text()
-        entry = next(item for item in reversed(history) if item.get("kind") == "probe" and item["proof_id"] == proof_id)
-        _append(directory, {"kind": "focus", "proof_id": proof_id, "reason": "restore"})
-        return {
-            "ok": True,
-            "probe": reference.strip().lower(),
-            "proof": proof,
-            "last_result": _model_view({**entry["result"], "probe": reference}),
-            **materialize(name, run_id, proof),
-        }
-    candidate_id = resolve_candidate_ref(history, reference)
-    proof_path = directory / "proofs" / f"{candidate_id}.lean"
-    if not proof_path.exists():
-        raise ValueError(text.render("messages/errors.unknown_candidate_short"))
-    proof = proof_path.read_text()
-    location = materialize(name, run_id, proof)
-    _append(directory, {"kind": "current", "candidate_id": candidate_id})
-    _append(directory, {"kind": "focus", "proof_id": candidate_id, "reason": "restore"})
-    row = next((r for r in _summaries(events(directory)) if r["id"] == candidate_id), None)
-    return {
-        "ok": True,
-        "candidate": _label(history, candidate_id),
-        "proof": proof,
-        "idea_id": row and row["idea_id"],
-        "evaluations": [
-            {
-                "mode": e["mode"],
-                "status": e["status"],
-                "tokens": e["result"].get("tokens"),
-                "heartbeats": e["result"].get("heartbeat"),
-                "score": e["score"],
-            }
-            for e in (row["evaluations"] if row else [])
-        ],
-        **location,
-    }
-
-
-def profile_request(name: str, run_id: str, reference: str | None = None, proof: str | None = None) -> dict:
-    """Per-tactic heartbeat profile of a compiling candidate (`#N`), probe (`pN`) or proof text.
-
-    Defaults to the candidate whose file is currently materialized.
-    """
-    directory = run_dir(run_id)
-    history = events(directory)
-    label = None
-    if proof is not None and not proof.strip():
-        proof = None  # models often send an empty optional string alongside `candidate`
-    if proof is None:
-        if reference and re.fullmatch(r"p[0-9]+", reference.strip().lower()):
-            proof_id = resolve_probe_ref(history, reference)
-            label = reference.strip().lower()
-        else:
-            proof_id = resolve_candidate_ref(history, reference) if reference else _current(history)
-            if proof_id is None:
-                raise ValueError(text.render("messages/errors.profile_candidate_missing"))
-            label = _label(history, proof_id)
-        proof = (directory / "proofs" / f"{proof_id}.lean").read_text()
-    proof_id = hashlib.sha256((name + "\0" + proof).encode()).hexdigest()
-    cached = next(
-        (item for item in reversed(history) if item.get("kind") == "profile" and item["proof_id"] == proof_id), None
-    )
-    if cached:
-        return {**cached["result"], "target": label, "cached": True}
-    measured = next(
-        (
-            e["result"].get("heartbeat")
-            for row in _summaries(history)
-            if row["id"] == proof_id
-            for e in row["evaluations"]
-            if e["result"].get("heartbeat") is not None
-        ),
-        None,
-    )
-    with lean_lock(directory):
-        result = profile(name, proof, measured)
-        result["statement_floor_hb"] = heartbeat_floor(name)["heartbeats"]
-    _append(directory, {"kind": "profile", "proof_id": proof_id, "result": result})
-    return {**result, "target": label, "cached": False}
 
 
 def _cached_profiles(name: str, history: list[dict]) -> dict[str, dict]:
@@ -2762,34 +2121,6 @@ def price_table(name: str, run_id: str, reference: str | None = None) -> dict:
     return {**table, "text": render_price_table(table), "profiled": profiled}
 
 
-def quote(name: str, run_id: str, items: list, against: dict | None = None) -> dict:
-    """Count draft/snippet tokens without Lean, locks, or ledger writes."""
-    resolved = None
-    if against is not None:
-        history = events(run_dir(run_id))
-        proof_id = resolve_node_ref(history, against.get("node", ""))
-        directory = run_dir(run_id)
-        proof = (directory / "proofs" / f"{proof_id}.lean").read_text()
-        from arena.steps import split_steps, step_range
-
-        first, last = step_range(split_steps(proof), against.get("steps", ""))
-        step_list = split_steps(proof)
-        resolved = {
-            "text": "\n".join(step.text for step in step_list[step_list.index(first) : step_list.index(last) + 1])
-        }
-    return quote_tokens(name, items, resolved, problem(name)["statement"])
-
-
-def set_decision(run_id: str, candidate_id: str, decision: str, reason: str) -> dict:
-    if decision not in ("pursue", "park") or not reason.strip():
-        raise ValueError(text.render("messages/errors.decision_invalid"))
-    directory = run_dir(run_id)
-    candidate_id = resolve_candidate_ref(events(directory), candidate_id)
-    record = {"kind": "decision", "candidate_id": candidate_id, "decision": decision, "reason": reason.strip()}
-    _append(directory, record)
-    return record
-
-
 def map_view(run_id: str) -> dict:
     """Return the hidden JSON map without rendering it into model-facing prose."""
     directory = run_dir(run_id)
@@ -2827,27 +2158,14 @@ def graph_state(run_id: str) -> dict:
     nodes: dict[str, dict] = {}
     order: list[str] = []
     checks: list[dict] = []
-    ideas: list[dict] = []
     probes: list[dict] = []
     timeline: list[dict] = []
     for event in history:
         kind = event.get("kind")
-        if kind == "idea":
-            ideas.append(
-                {
-                    key: event.get(key)
-                    for key in ("id", "title", "hypothesis", "region", "expected_effect", "status", "reason")
-                }
-            )
-        elif kind == "idea_update":
-            target = next((i for i in ideas if i["id"] == event["id"]), None)
-            if target:
-                target.update({k: v for k, v in event.items() if k not in ("kind", "id", "ts")})
-        elif kind == "probe":
+        if kind == "probe":
             probes.append(
                 {
                     "proof_id": event["proof_id"],
-                    "idea_id": event.get("idea_id"),
                     "parent": event.get("parent"),
                     "result": event["result"],
                     "ts": event.get("ts"),
@@ -2862,7 +2180,6 @@ def graph_state(run_id: str) -> dict:
                 "derivations": [event],
                 "origin": event.get("origin", "model"),
                 "hypothesis": event.get("hypothesis", ""),
-                "idea_id": event.get("idea_id"),
                 "merge": event.get("merge"),
                 "evaluations": [],
                 "source_versions": event.get("source_versions", []),
@@ -2980,10 +2297,6 @@ def graph_state(run_id: str) -> dict:
                 right["merge_partners"] += 1
     rows = [nodes[identifier] for identifier in order]
     ranked = ranked_frontier(rows)
-    for idea in ideas:
-        idea["attempts"] = sum(1 for node in rows if node["idea_id"] == idea["id"] and node["origin"] == "model")
-        idea["probes"] = sum(1 for item in probes if item["idea_id"] == idea["id"])
-    idea_rows = ideas
     projection = Graph.from_history(history, _proof_reader(directory))
     projected = {node.proof_id: node for node in projection.nodes}
     for node in rows:
@@ -3004,7 +2317,6 @@ def graph_state(run_id: str) -> dict:
         "merge_checks": checks,
         "milestones": milestones,
         "frontier": ranked,
-        "ideas": idea_rows,
         "probes": probes,
         "routes": (route_rows := route_table(history)),
         "route_progress": _route_progress(route_rows),
@@ -3818,37 +3130,16 @@ def route_table(history: list[dict]) -> list[dict]:
 
 
 def frontier(run_id: str) -> dict:
-    """Compact status: best candidates, the model's ideas with their attempts, recent failures."""
+    """Compact status: best candidates and recent failures."""
     history = events(run_dir(run_id))
     if not history:
         raise ValueError(text.render("messages/errors.run_uninitialized"))
     rows = _summaries(history)
-    ideas: dict[str, dict] = {}
-    for item in history:
-        if item.get("kind") == "idea":
-            ideas[item["id"]] = {
-                "id": item["id"],
-                "title": item["title"],
-                "status": item["status"],
-                "reason": item.get("reason") or None,
-            }
-        elif item.get("kind") == "idea_update" and item["id"] in ideas:
-            ideas[item["id"]].update({k: item[k] for k in ("title", "status", "reason") if k in item})
     probe_numbers = _probe_numbers(history)
     failures: list[dict] = []
-    for idea in ideas.values():
-        mine = [r for r in rows if r["idea_id"] == idea["id"] and r["origin"] == "model"]
-        drafts = [item for item in history if item.get("kind") == "probe" and item.get("idea_id") == idea["id"]]
-        idea["attempts"] = len({r["id"] for r in mine} | {d["proof_id"] for d in drafts})
-        idea["probes"] = len({d["proof_id"] for d in drafts})
-        idea["best"] = _brief(_best(mine))
-        failed = [r for r in mine if r["status"] == "fail" and r["evaluations"]]
-        last = failed[-1] if failed else None
-        idea["last_failure"] = (f"#{last['n']}: " + _failure_text(last["evaluations"][-1]["result"])) if last else None
     failures.extend(
         {
             "ref": f"#{row['n']}",
-            "idea_id": row["idea_id"],
             "error": _failure_text(row["evaluations"][-1]["result"]),
         }
         for row in rows
@@ -3857,7 +3148,6 @@ def frontier(run_id: str) -> dict:
     failures.extend(
         {
             "ref": probe_numbers[item["proof_id"]],
-            "idea_id": item.get("idea_id"),
             "error": _failure_text(item["result"]),
         }
         for item in history
@@ -3869,14 +3159,10 @@ def frontier(run_id: str) -> dict:
         reverse=True,
     )[:5]
     evaluations = sum(len(r["evaluations"]) for r in rows)
-    current_id = _current_active_idea(history)
-    current_idea = next((idea for idea in ideas.values() if idea["id"] == current_id), None)
     return {
         "best": _brief(_best(rows)),
-        "top": [_brief(r) | {"idea_id": r["idea_id"]} for r in top],
-        "ideas": list(ideas.values()),
+        "top": [_brief(r) for r in top],
         "recent_failures": failures[-3:],
-        "current_idea": current_idea,
         "candidates": len(rows),
         "evaluations": evaluations,
         "probes": len(probe_numbers),
