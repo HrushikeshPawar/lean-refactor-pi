@@ -48,6 +48,46 @@ class ReplyTests(unittest.TestCase):
         shown_again = reply.deduplicate_diagnostics(self.run_id, "n3", [{**second, "id": "n3.e1"}])[0]
         self.assertEqual(shown_again["goal"], second["goal"])
 
+    def test_compaction_reset_needs_no_request_file(self):
+        from types import SimpleNamespace
+
+        from arena.cli.protocol import run as protocol_run
+
+        reply.deduplicate_diagnostics(self.run_id, "n1", [{"id": "n1.e1", "goal": "⊢ True", "message": "m"}])
+        result = protocol_run(SimpleNamespace(action="reset_delivered", run_id=self.run_id, request_file=None))
+        self.assertTrue(result["ok"])
+        shown = reply.deduplicate_diagnostics(self.run_id, "n2", [{"id": "n2.e1", "goal": "⊢ True", "message": "m"}])
+        self.assertEqual(shown[0]["goal"], "⊢ True")
+
+    def test_map_lines_show_node_ids_reference_and_route_legend_but_never_none(self):
+        lines = reply._map_lines(
+            {
+                "best": {"node": "n2", "score": 33.31, "tokens": 407, "heartbeats": 1384},
+                "reference": {"node": "n1", "tokens": 407, "heartbeats": 1383},
+                "archive": [{"letter": "B", "node": "n9", "status": "sketch", "score": None, "visits": 1}],
+                "recent": [
+                    {"node": "n4", "edge": "edited_from", "from": ["n2"], "status": "broken", "score": None},
+                    {"node": "n5", "edge": "root", "from": [], "status": "broken", "score": None},
+                ],
+                "effort": [{"step": "s1", "at_stake": 0.49, "variants": 1, "best_dtok": None, "last_gain": None}],
+                "open": [],
+            }
+        )
+        self.assertEqual(
+            lines,
+            [
+                "best n2 score 33.31 tokens 407 heartbeats 1384",
+                "n1 original proof tokens 407 heartbeats 1383",
+                "Letters: each marks the best node of one proof shape, depth band and status; visits counts the nodes "
+                "sharing them.",
+                "B n9 sketch score - visits 1",
+                "n4 edited from n2 broken score -",
+                "n5 new root broken score -",
+                "s1 at stake 0.49 variants 1 best delta - last gain -",
+            ],
+        )
+        self.assertNotIn("None", "\n".join(lines))
+
     def test_pending_update_and_changed_map_are_delivered_once(self):
         with (
             patch.object(campaign, "state", return_value={"updates": [{"seq": 4, "text": "update"}]}),
@@ -61,3 +101,15 @@ class ReplyTests(unittest.TestCase):
         self.assertEqual(second["facts"], [])
         self.assertEqual(first["map"], [])
         self.assertIsNone(second["map"])
+
+    def test_an_update_names_its_source_node_only_once_the_model_has_seen_it(self):
+        update = {"seq": 1, "text": "n11 salvaged from n7: 1 hole at line 3.", "source": "n7"}
+        update["unseen_text"] = "n11 salvaged from an earlier broken node: 1 hole at line 3."
+        with patch.object(campaign, "state", return_value={"updates": [update]}):
+            unseen = reply.attach_context(self.run_id, reply.reply())
+        self.assertEqual(unseen["facts"], [update["unseen_text"]])
+        (campaign.run_dir(self.run_id) / reply.DELIVERY_FILE).write_text('{"delivered_seq": -1}\n')
+        shown = reply.reply(items=[{"ref": "d1", "ok": True, "lines": ["n7 <- n2 draft status broken."]}])
+        with patch.object(campaign, "state", return_value={"updates": [update]}):
+            seen = reply.attach_context(self.run_id, shown)
+        self.assertEqual(seen["facts"], [update["text"]])

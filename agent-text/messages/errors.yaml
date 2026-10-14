@@ -1,5 +1,7 @@
 empty_arguments: "The call arrived empty or malformed. Valid keys: {valid}."
 request: "{code}: {input}. Valid values: {valid}. Forms: {forms}."
+request_bare: "{code}: {input}. Forms: {forms}."
+goal_position: "goal needs line or hole to place snippets; whole proofs go to compile drafts"
 invalid_run_id: "Invalid run id."
 ambiguous_symbol: "{symbol} matches several declarations: {candidates}."
 pinned_project_path: "Valid paths: relative .lean paths inside the pinned project."

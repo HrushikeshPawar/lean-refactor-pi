@@ -2111,7 +2111,7 @@ def map_view_from(history: list[dict], directory: Path) -> dict:
     price_rates = rates(reference_tokens, reference_heartbeats, total_versions)
     profiles = _cached_profiles(name, history)
     tables = {node.proof_id: _table_for_node(name, node, profiles, price_rates, total_versions) for node in graph.nodes}
-    return graph_map_view(graph, effort_table(graph, tables))
+    return graph_map_view(graph, effort_table(graph, tables), (reference_tokens, reference_heartbeats))
 
 
 def graph_state(run_id: str) -> dict:
@@ -2829,15 +2829,19 @@ def state(run_id: str) -> dict:
                 f"line {line_numbers[0]}" if len(line_numbers) == 1 else "lines " + ", ".join(map(str, line_numbers))
             )
             count = len(hole_rows)
+            holes_text = f"{count} hole" if count == 1 else f"{count} holes"
+            source = _update_id(history, item["proof_id"])
+            sketch = _update_id(history, sketch_id)
+            # `source` lets the delivery name the broken node only when the model has seen its id.
             updates.append(
                 {
                     "seq": seq,
                     "text": text.render(
-                        "messages/salvage.salvaged",
-                        sketch=_update_id(history, sketch_id),
-                        source=_update_id(history, item["proof_id"]),
-                        holes=f"{count} hole" if count == 1 else f"{count} holes",
-                        lines=lines_text,
+                        "messages/salvage.salvaged", sketch=sketch, source=source, holes=holes_text, lines=lines_text
+                    ),
+                    "source": source,
+                    "unseen_text": text.render(
+                        "messages/salvage.salvaged_unseen", sketch=sketch, holes=holes_text, lines=lines_text
                     ),
                 }
             )

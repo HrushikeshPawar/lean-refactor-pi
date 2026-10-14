@@ -81,6 +81,21 @@ def reset_delivered(run_id: str) -> None:
     _save(run_id, state)
 
 
+def shown(value: object) -> object:
+    """A value as the model sees it: a missing one is "-", never Python's None."""
+    return "-" if value is None or value == "" else value
+
+
+def _origin(item: dict) -> str:
+    parents = ", ".join(item.get("from") or [])
+    edge = str(item.get("edge") or "root")
+    if not parents or edge == "root":
+        return text.render("replies/tools.map_origin_root")
+    return text.render(
+        "replies/tools.map_origin_from", edge=edge.removesuffix("_from").replace("_", " "), parents=parents
+    )
+
+
 def _map_lines(data: dict) -> list[str]:
     lines: list[str] = []
     best = data.get("best")
@@ -88,34 +103,46 @@ def _map_lines(data: dict) -> list[str]:
         lines.append(
             text.render(
                 "replies/tools.map_best",
-                node=best.get("node", ""),
-                score=best.get("score", "n/a"),
-                tokens=best.get("tokens", "n/a"),
-                heartbeats=best.get("heartbeats", "n/a"),
+                node=shown(best.get("node")),
+                score=shown(best.get("score")),
+                tokens=shown(best.get("tokens")),
+                heartbeats=shown(best.get("heartbeats")),
             )
         )
+    original = data.get("reference")
+    if original:
+        lines.append(
+            text.render(
+                "replies/tools.map_reference",
+                node=shown(original.get("node")),
+                tokens=shown(original.get("tokens")),
+                heartbeats=shown(original.get("heartbeats")),
+            )
+        )
+    archive = data.get("archive", [])
+    if archive:
+        lines.append(text.render("replies/tools.map_routes"))
     lines.extend(
         [
             text.render(
                 "replies/tools.map_archive",
-                letter=item.get("letter", ""),
-                node=item.get("node", ""),
-                status=item.get("status", ""),
-                score=item.get("score", "n/a"),
-                visits=item.get("visits", 0),
+                letter=shown(item.get("letter")),
+                node=shown(item.get("node")),
+                status=shown(item.get("status")),
+                score=shown(item.get("score")),
+                visits=item.get("visits") or 0,
             )
-            for item in data.get("archive", [])
+            for item in archive
         ]
     )
     lines.extend(
         [
             text.render(
                 "replies/tools.map_recent",
-                node=item.get("node", ""),
-                edge=item.get("edge") or "root",
-                parent=",".join(item.get("from") or []) or "none",
-                status=item.get("status", ""),
-                score=item.get("score", "n/a"),
+                node=shown(item.get("node")),
+                origin=_origin(item),
+                status=shown(item.get("status")),
+                score=shown(item.get("score")),
             )
             for item in data.get("recent", [])
         ]
@@ -124,11 +151,11 @@ def _map_lines(data: dict) -> list[str]:
         [
             text.render(
                 "replies/tools.map_effort",
-                step=item.get("step", ""),
-                at_stake=item.get("at_stake", "n/a"),
-                variants=item.get("variants", 0),
-                best_delta=item.get("best_dtok", "n/a"),
-                last_gain=item.get("last_gain", "n/a"),
+                step=shown(item.get("step")),
+                at_stake=shown(item.get("at_stake")),
+                variants=item.get("variants") or 0,
+                best_delta=shown(item.get("best_dtok")),
+                last_gain=shown(item.get("last_gain")),
             )
             for item in data.get("effort", [])
         ]
@@ -137,9 +164,9 @@ def _map_lines(data: dict) -> list[str]:
         [
             text.render(
                 "replies/tools.map_hole",
-                hole=item.get("hole", ""),
-                line=item.get("line", ""),
-                goal=item.get("goal") or "n/a",
+                hole=shown(item.get("hole")),
+                line=shown(item.get("line")),
+                goal=shown(item.get("goal")),
             )
             for item in data.get("open", [])
         ]
@@ -156,18 +183,35 @@ def attach_context(run_id: str, result: dict, *, include_map: bool = False, forc
         updates = []
     delivered = int(state.get("delivered_seq", -1))
     fresh = [item for item in updates if int(item.get("seq", -1)) > delivered]
-    facts = [item["text"] for item in fresh if isinstance(item.get("text"), str)] + result.get("facts", [])
-    if fresh:
-        state["delivered_seq"] = max(int(item.get("seq", -1)) for item in fresh)
-    result["facts"] = facts
     if include_map or force_map:
         lines = _map_lines(campaign.map_view(run_id))
         digest = hashlib.sha256("\n".join(lines).encode()).hexdigest()
         if force_map or digest != state.get("map_hash"):
             result["map"] = lines
             state["map_hash"] = digest
+    # Node ids the model has been shown; an update never names a node outside them.
+    seen = set(state.get("seen_nodes", [])) | _node_ids(result)
+    facts = [_update_text(item, seen) for item in fresh if isinstance(item.get("text"), str)] + result.get("facts", [])
+    if fresh:
+        state["delivered_seq"] = max(int(item.get("seq", -1)) for item in fresh)
+    result["facts"] = facts
+    state["seen_nodes"] = sorted(seen | _node_ids(result))
     _save(run_id, state)
     return result
+
+
+def _node_ids(result: dict) -> set[str]:
+    shown_text = [*result.get("facts", []), *(result.get("map") or []), *result.get("handles", [])]
+    shown_text += [
+        line for item in result.get("items", []) for line in item.get("lines") or [] if isinstance(line, str)
+    ]
+    return set(re.findall(r"\bn[1-9][0-9]*\b", "\n".join(shown_text)))
+
+
+def _update_text(update: dict, seen: set[str]) -> str:
+    if update.get("source") and update["source"] not in seen and isinstance(update.get("unseen_text"), str):
+        return update["unseen_text"]
+    return update["text"]
 
 
 def deduplicate_diagnostics(run_id: str, node: str, errors: list[dict]) -> list[dict]:

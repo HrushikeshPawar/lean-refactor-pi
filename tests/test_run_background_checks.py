@@ -140,6 +140,46 @@ class BackgroundCheckTests(unittest.TestCase):
             self.assertEqual(result, lean_health.EXIT_CODE)
             write_summary.assert_called_once_with(directory, lean_health.STOP_REASON)
 
+    def finish_with(self, directory, interrupted, autocheck):
+        calls = []
+        with (
+            mock.patch.object(run_module, "cost_report_from_ledger", return_value={"spent_usd": 0}),
+            mock.patch.object(
+                run_module, "autocheck", side_effect=lambda *a, **k: calls.append("drain") or autocheck()
+            ),
+            mock.patch.object(
+                run_module, "submission", side_effect=lambda _run: calls.append("submission") or {"reason": "none"}
+            ),
+            mock.patch.object(run_module, "write_state"),
+            mock.patch.object(run_module, "write_summary", return_value={}),
+            mock.patch.object(run_module, "render_text", return_value="summary\n"),
+        ):
+            result = run_module.finish(
+                mock.Mock(theorem="T", run_id="run"), directory, directory / "events.jsonl", 0, 0, interrupted
+            )
+        return result, calls
+
+    def test_operator_interrupt_still_drains_before_choosing_the_submission(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result, calls = self.finish_with(Path(tmp), 2, lambda: {"checked": ["#3"], "remaining": []})
+        self.assertEqual(result, 130)
+        self.assertEqual(calls, ["drain", "submission"])
+
+    def test_a_further_stop_request_skips_the_drain_but_still_chooses(self):
+        import os
+        import signal
+
+        def interrupted_drain():
+            os.kill(os.getpid(), signal.SIGINT)
+            raise AssertionError("the drain should have been cut")
+
+        previous = signal.getsignal(signal.SIGINT)
+        with tempfile.TemporaryDirectory() as tmp:
+            result, calls = self.finish_with(Path(tmp), 2, interrupted_drain)
+        self.assertEqual(result, 130)
+        self.assertEqual(calls, ["drain", "submission"])
+        self.assertIs(signal.getsignal(signal.SIGINT), previous)
+
 
 if __name__ == "__main__":
     unittest.main()

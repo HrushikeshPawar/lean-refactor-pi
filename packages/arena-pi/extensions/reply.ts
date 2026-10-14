@@ -22,8 +22,12 @@ async function errorLine(error: unknown, validKeys: string[]): Promise<string | 
   if (value.code === "empty_arguments") {
     return render("messages/errors.empty_arguments", { valid: validKeys.join(", ") || "none" });
   }
-  return render("messages/errors.request", { code: String(value.code ?? "error"), input: String(value.input ?? "") || "none",
-    valid: listText(value.valid), forms: listText(value.forms) });
+  // The template ends the input with its own period, and an empty valid list is left out rather than shown as "none".
+  const input = String(value.input ?? "").trim().replace(/\.+$/, "") || "none";
+  const code = String(value.code ?? "error");
+  const valid = Array.isArray(value.valid) ? value.valid.map(String).filter(Boolean) : [];
+  if (!valid.length) return render("messages/errors.request_bare", { code, input, forms: listText(value.forms) });
+  return render("messages/errors.request", { code, input, valid: valid.join(", "), forms: listText(value.forms) });
 }
 
 export async function renderReply(reply: Reply, footer: string, validKeys: string[] = []) {

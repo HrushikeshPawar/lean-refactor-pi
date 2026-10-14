@@ -15,7 +15,7 @@ test("renders facts, ordered item lines, map, handles and footer while retaining
 
 test("omits an empty handles line and marks only a top-level failure as an error", async () => {
   const itemFailure = await renderReply({ ok: true, facts: [], items: [{ ok: false, lines: [], error: { code: "bad" } }] }, "");
-  assert.equal(itemFailure.content[0]?.text, "bad: none. Valid values: none. Forms: none.");
+  assert.equal(itemFailure.content[0]?.text, "bad: none. Forms: none.");
   assert.equal(itemFailure.isError, false);
   const failure = await renderReply({ ok: false, error: { code: "bad" }, facts: [], items: [] }, "");
   assert.equal(failure.isError, true);
@@ -34,4 +34,10 @@ test("renders empty-argument replies with the tool's valid keys", async () => {
   const result = await renderReply({ ok: false, error: { code: "empty_arguments" }, facts: [], items: [] }, "", ["drafts", "check"]);
   assert.match(result.content[0]?.text ?? "", /arrived empty or malformed/);
   assert.match(result.content[0]?.text ?? "", /drafts, check/);
+});
+
+test("an error input never doubles the template's period and an empty valid list is left out", async () => {
+  const result = await renderReply({ ok: false, facts: [], items: [], error: { code: "unknown_handle",
+    input: "X is not a declaration of the pinned project.", valid: [], forms: ["node:nN"] } }, "");
+  assert.equal(result.content[0]?.text, "unknown_handle: X is not a declaration of the pinned project. Forms: node:nN.");
 });

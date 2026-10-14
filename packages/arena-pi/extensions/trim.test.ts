@@ -1,15 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { render } from "./text.ts";
 import { nothingToSummarize, objectToolArguments, ResultTrimmer } from "./trim.ts";
 
 const context = "# Pinned source\n".repeat(40);
 
 test("repeated identical search and read results become stubs until compaction", async () => {
   const trimmer = new ResultTrimmer();
+  const stub = await render("messages/trim.result_stub");
   assert.equal(await trimmer.trim("search", { queries: ["Core.a"] }, context), context);
-  assert.equal(JSON.parse(await trimmer.trim("search", { queries: ["Core.a"] }, context)).unchanged, true);
+  assert.equal(await trimmer.trim("search", { queries: ["Core.a"] }, context), stub);
   assert.equal(await trimmer.trim("read", { node: "n1" }, context), context);
-  assert.equal(JSON.parse(await trimmer.trim("read", { node: "n1" }, context)).unchanged, true);
+  assert.equal(await trimmer.trim("read", { node: "n1" }, context), stub);
+  assert.doesNotMatch(stub, /[{}]/);
   trimmer.forget();
   assert.equal(await trimmer.trim("read", { node: "n1" }, context), context);
 });

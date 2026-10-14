@@ -43,15 +43,16 @@ ACTIONS = (
 
 
 def run(args: SimpleNamespace) -> dict:
-    if args.action in ("compile", "goal", "search", "read", "finish", "reset_delivered"):
+    if args.action == "reset_delivered":
+        # Compaction calls this with no request: it only forgets what was delivered.
+        tool_reply.reset_delivered(args.run_id)
+        return tool_reply.reply()
+    if args.action in ("compile", "goal", "search", "read", "finish"):
         if args.request_file is None:
             raise ValueError("request-file is required")
         request = json.loads(args.request_file.read_text())
         if not isinstance(request, dict):
             raise ValueError("request-file must contain an object")
-        if args.action == "reset_delivered":
-            tool_reply.reset_delivered(args.run_id)
-            return tool_reply.reply()
         handler = {
             "compile": v7_tools.compile_tool,
             "goal": v7_tools.goal_tool,

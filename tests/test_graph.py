@@ -224,10 +224,22 @@ class ArchiveTests(unittest.TestCase):
             [("a", "r1", 50, "closed", None), ("b", "r1", 40, "closed", "a"), ("c", "r1", None, "broken", "b")]
         )
         view = graph_module.map_view(graph)
-        self.assertEqual(set(view), {"best", "archive", "recent", "effort", "open"})
+        self.assertEqual(set(view), {"best", "reference", "archive", "recent", "effort", "open"})
         self.assertEqual(view["best"]["node"], "n1")
-        self.assertEqual([row["status"] for row in view["recent"]], ["keep", "discard", "broken"])
+        self.assertEqual([row["status"] for row in view["recent"]], ["closed", "closed", "broken"])
         self.assertEqual((view["effort"], view["open"]), ([], []))
+
+    def test_map_names_parents_by_node_id_and_lists_the_original_as_reference(self):
+        graph, history = self.project(
+            [("a" * 64, "r1", 50, "closed", None), ("b" * 64, "r1", None, "sketch", "a" * 64)]
+        )
+        history[0]["origin"] = "reference"
+        graph = Graph.from_history(history, lambda _: "theorem t : True := by\n  sorry\n")
+        view = graph_module.map_view(graph, reference=(407, 1383))
+        self.assertEqual(view["reference"], {"node": "n1", "tokens": 407, "heartbeats": 1383})
+        self.assertEqual(
+            [(row["node"], row["from"], row["status"]) for row in view["recent"]], [("n2", ["n1"], "sketch")]
+        )
 
     def test_map_has_no_best_before_a_scored_node(self):
         graph, _ = self.project([("a", "r1", None, "closed", None)])

@@ -435,8 +435,14 @@ def stall_target(graph: Graph, fired: dict, mode: str) -> Cell | None:
     return min(candidates, key=lambda cell: (cell.visits, cell.letter))
 
 
-def map_view(graph: Graph, effort: list[dict] | None = None) -> dict:
-    """Hidden JSON map projection over the archive and its currently open sketch holes."""
+def map_view(graph: Graph, effort: list[dict] | None = None, reference: tuple[int, int] | None = None) -> dict:
+    """Hidden JSON map projection over the archive and its currently open sketch holes.
+
+    Edges name parents by node id. The pinned original is its own `reference` row (with the published
+    `reference` tokens and heartbeats when known), not a recent row: it has no evaluation of its own.
+    """
+    node_ids = {node.proof_id: node.id for node in graph.nodes}
+    original = next((node for node in graph.nodes if node.origin == "reference"), None)
     scored = [node for node in graph.nodes if node.score is not None]
     best_node = max(scored, key=lambda node: node.score) if scored else None
     best = (
@@ -464,18 +470,28 @@ def map_view(graph: Graph, effort: list[dict] | None = None) -> dict:
         }
         for cell in archive(graph)
     ]
-    keep_ids = {node.proof_id for node in keeps(graph)}
+    # Each recent node shows its own status (closed, sketch, broken: the words the skill defines), so a node that
+    # holds a route letter is never also called discarded.
     recent = [
         {
             "node": node.id,
             "label": node.label,
             "edge": (node.edge or {}).get("type"),
-            "from": list((node.edge or {}).get("from") or []),
-            "status": "broken" if node.status == "broken" else "keep" if node.proof_id in keep_ids else "discard",
+            "from": [node_ids.get(parent, parent) for parent in (node.edge or {}).get("from") or []],
+            "status": node.status,
             "score": node.score,
         }
-        for node in graph.nodes[-8:]
+        for node in [item for item in graph.nodes if item is not original][-8:]
     ]
+    reference_row = (
+        {
+            "node": original.id,
+            "tokens": reference[0] if reference else original.tokens,
+            "heartbeats": reference[1] if reference else original.heartbeats,
+        }
+        if original is not None
+        else None
+    )
     open_holes = [
         {
             "node": node.id,
@@ -490,7 +506,14 @@ def map_view(graph: Graph, effort: list[dict] | None = None) -> dict:
         for hole in node.holes
         if hole["status"] == "open"
     ]
-    return {"best": best, "archive": archive_rows, "recent": recent, "effort": effort or [], "open": open_holes}
+    return {
+        "best": best,
+        "reference": reference_row,
+        "archive": archive_rows,
+        "recent": recent,
+        "effort": effort or [],
+        "open": open_holes,
+    }
 
 
 def changed_lines(old: str, new: str) -> int:

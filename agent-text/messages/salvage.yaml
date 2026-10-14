@@ -1,1 +1,2 @@
 salvaged: "{sketch} salvaged from {source}: {holes} at {lines}."
+salvaged_unseen: "{sketch} salvaged from an earlier broken node: {holes} at {lines}."

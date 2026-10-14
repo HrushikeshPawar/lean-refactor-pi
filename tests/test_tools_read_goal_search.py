@@ -202,3 +202,78 @@ class ReadGoalSearchTests(CascadeToolCase):
         self.assertTrue(result["stop"])
         self.assertTrue(any("Archive:" in fact for fact in result["facts"]))
         self.assertTrue(any("Points left:" in fact for fact in result["facts"]))
+
+
+class ToolReplyTextTests(CascadeToolCase):
+    def goal_with_tries(self, results: list[dict], request: dict) -> dict:
+        with (
+            patch(
+                "arena.tools.engine.candidate_file",
+                return_value={"path": "T.lean", "text": "theorem t : True := by\n  sorry", "head": 0, "start_line": 1},
+            ),
+            patch("arena.tools.engine.lean_goals", return_value={"goals": ["⊢ True"], "rendered": "⊢ True"}),
+            patch("arena.tools.engine.lean_try", return_value={"results": results}),
+        ):
+            return tools.goal_tool("T", "logic", request)
+
+    def test_goal_try_reports_each_snippet_verdict_and_tokens_only(self):
+        node = self.sketch()
+        result = self.goal_with_tries(
+            [
+                {"returncode": 0, "goals_after": None},
+                {"returncode": 0, "goals_after": "case a\n⊢ True\n\ncase b\nh : True\n⊢ True"},
+                {"returncode": 1, "output": "T.lean:2:2: error: unknown tactic\n  near x\nT.lean:3:2: error: later"},
+                {"timeout": True},
+            ],
+            {"hole": f"{node}.h1", "try": ["trivial", "constructor", "bogus x", "skip"]},
+        )
+        lines = [line for item in result["items"][1:] for line in item["lines"]]
+        self.assertEqual(
+            [line.split(", tokens")[0] for line in lines],
+            ["t1 closed", "t2 open goals 2", "t3 error: unknown tactic near x", "t4 timed out"],
+        )
+        self.assertTrue(all(", tokens " in line for line in lines))
+        self.assertNotRegex("\n".join(lines), r"delta|n/a|heartbeats|None")
+
+    def test_goal_try_without_line_or_hole_names_both(self):
+        node = self.sketch()
+        result = tools.goal_tool("T", "logic", {"node": node, "try": ["trivial"]})
+        self.assertEqual(result["error"]["code"], "missing_position")
+        self.assertIn("line or hole", result["error"]["input"])
+        self.assertNotEqual(result["error"]["input"], "None")
+
+    def test_compile_token_check_shows_each_draft_count(self):
+        with patch("arena.tools.engine._proof_length", side_effect=lambda proof, _statement=None: len(proof.split())):
+            result = tools.compile_tool("T", "logic", {"check": "tokens", "drafts": ["by\n  exact x", "by\n  trivial"]})
+        lines = [line for item in result["items"] for line in item["lines"]]
+        self.assertEqual(len(lines), 2)
+        self.assertRegex(lines[0], r"^d1 tokens \d+; n1 has \d+\.$")
+
+    def test_read_of_the_own_theorem_shows_the_reference_node(self):
+        with patch("arena.tools.search.resolve_handle", return_value=None) as resolve:
+            result = tools.read_tool("T", "logic", {"handle": "decl:T:3-9"})
+        resolve.assert_not_called()
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["items"][0]["ref"], "n1")
+        self.assertIn("node n1", result["facts"][0])
+
+    def test_read_of_an_indexed_handle_without_source_is_unknown_with_hints(self):
+        missing = ValueError("X.y is not a declaration of the pinned project.")
+        with (
+            patch("arena.tools.search.resolve_handle", return_value={"line": 1}),
+            patch.object(campaign, "source_range", side_effect=missing),
+        ):
+            result = tools.read_tool("T", "logic", {"handle": "decl:X.y"})
+        self.assertEqual(result["error"]["code"], "unknown_handle")
+        self.assertEqual(result["error"]["input"], "X.y is not a declaration of the pinned project")
+        self.assertTrue(result["error"]["valid"])
+
+    def test_outline_shows_recorded_step_goals_and_no_placeholder(self):
+        node = tools.compile_tool("T", "logic", {"drafts": ["by\n  skip\n  trivial"]})["items"][0]["node"]
+        bare = tools.read_tool("T", "logic", {"node": node, "view": "outline"})["items"][0]["lines"]
+        self.assertEqual(bare, ["s1 lines 2-2", "s2 lines 3-3"])
+        proof_id = campaign.resolve_node_ref(campaign.events(self.directory), node)
+        goals = [{"id": "s1", "before": "⊢ True", "after": "⊢ True"}, {"id": "s2", "before": "⊢ True", "after": None}]
+        campaign._append(self.directory, {"kind": "step_goals", "proof_id": proof_id, "goals": goals})
+        shown = tools.read_tool("T", "logic", {"node": node, "view": "outline"})["items"][0]["lines"]
+        self.assertEqual(shown, ["s1 lines 2-2", "before: ⊢ True", "after: ⊢ True", "s2 lines 3-3", "before: ⊢ True"])

@@ -724,6 +724,25 @@ def kill_group(process: subprocess.Popen, number: int) -> None:
         os.killpg(process.pid, number)
 
 
+def closing_drain(theorem: str, run_id: str) -> dict | None:
+    """Full-check queued candidates for up to DRAIN_S; a further stop request skips the rest (None)."""
+
+    def skip(_signum, _frame):
+        raise KeyboardInterrupt
+
+    previous = {}
+    if threading.current_thread() is threading.main_thread():
+        previous = {number: signal.signal(number, skip) for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
+    try:
+        return autocheck(theorem, run_id, DRAIN_S, closing=True)
+    except KeyboardInterrupt:
+        print("Closing checks skipped by a further stop request", file=sys.stderr, flush=True)
+        return None
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, handler)
+
+
 def finish(
     args,
     directory: Path,
@@ -741,15 +760,15 @@ def finish(
         report_path.write_text(json.dumps(cost_report_from_ledger(directory), indent=2) + "\n")
         print("Pi wrote no cost report for this segment; reconstructed it from the cost journal", file=sys.stderr)
     try:
-        # Checks still queued when the model stopped are finished here (no model cost), unless the
-        # run was interrupted, so the submission reflects every candidate the model produced.
-        if interrupted is None and not tripped:
-            drained = autocheck(args.theorem, args.run_id, DRAIN_S, closing=True)
-            if drained["checked"] or drained.get("remaining"):
-                print(
-                    f"Background checks after Pi exited: {drained['checked']}; still pending {drained.get('remaining', [])}",
-                    flush=True,
-                )
+        # Checks still queued when the model stopped are finished here (no model cost), on a normal end
+        # and on an operator stop alike, so the submission reflects every candidate the model produced.
+        # Only an unhealthy Lean skips them.
+        drained = closing_drain(args.theorem, args.run_id) if not tripped else None
+        if drained and (drained["checked"] or drained.get("remaining")):
+            print(
+                f"Background checks after Pi exited: {drained['checked']}; still pending {drained.get('remaining', [])}",
+                flush=True,
+            )
         write_state(args.run_id)
         answer = submission(args.run_id)
         print(

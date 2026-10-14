@@ -19,7 +19,8 @@ export class ResultTrimmer {
       const key = `${toolName}:${JSON.stringify(input ?? {})}`;
       const digest = createHash("sha256").update(text).digest("hex");
       if (this.seen.get(key) === digest) {
-        return JSON.stringify({ ok: true, unchanged: true, note: await render("messages/trim.result_stub") });
+        // Plain reply text like every other result: the model never sees a raw JSON payload.
+        return render("messages/trim.result_stub");
       }
       this.seen.set(key, digest);
     }

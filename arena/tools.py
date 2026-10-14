@@ -277,6 +277,7 @@ def _token_items(name: str, run_id: str, request: dict, op: str | None) -> dict:
         operation = dict(request[op])
         base = operation.get("base") or focus_id
         base_node = _node(run_id, base)
+        focus_id, focus_text = base_node.id, base_node.proof_text
         takes = [
             {"text": _node(run_id, take["from"]).proof_text, "step": take["step"]} for take in operation.get("take", [])
         ]
@@ -293,8 +294,14 @@ def _token_items(name: str, run_id: str, request: dict, op: str | None) -> dict:
         new_text = data.get("text", "")
         count = snippet_tokens(new_text)
         old_count = snippet_tokens(old_text)
+        base_id = _node(run_id, base).id
+        line = _render(
+            "token_splice", ref="op1", tokens=count, steps=data.get("steps", ""), base=base_id, old_tokens=old_count
+        )
         return reply.reply(
-            items=[{"ref": "op1", "ok": True, "lines": [], "error": None, "tokens": count, "delta": count - old_count}]
+            items=[
+                {"ref": "op1", "ok": True, "lines": [line], "error": None, "tokens": count, "delta": count - old_count}
+            ]
         )
     if op == "fill":
         data = request["fill"]
@@ -309,7 +316,7 @@ def _token_items(name: str, run_id: str, request: dict, op: str | None) -> dict:
                 {
                     "ref": "op1",
                     "ok": True,
-                    "lines": [],
+                    "lines": [_render("token_fill", ref="op1", tokens=count, hole=data.get("hole", ""))],
                     "error": None,
                     "tokens": count,
                     "delta": count - snippet_tokens("sorry"),
@@ -319,16 +326,17 @@ def _token_items(name: str, run_id: str, request: dict, op: str | None) -> dict:
     normalized = []
     errors = []
     statement = campaign.problem(name)["statement"]
+    old_count = engine._proof_length(focus_text, statement)
     for index, draft in enumerate(drafts or [], 1):
         try:
             proof = campaign.normalize_draft(name, draft)
             count = engine._proof_length(proof, statement)
-            old_count = engine._proof_length(focus_text, statement)
+            line = _render("token_draft", ref=f"d{index}", tokens=count, base=focus_id, base_tokens=old_count)
             normalized.append(
                 {
                     "ref": f"d{index}",
                     "ok": True,
-                    "lines": [],
+                    "lines": [line],
                     "error": None,
                     "tokens": count,
                     "delta": count - old_count,
@@ -529,7 +537,12 @@ def goal_tool(theorem: str, run_id: str, request: dict) -> dict:
         else:
             line_value = request.get("line")
             if line_value is None:
-                raise ValueError(line_value)
+                return _invalid(
+                    "missing_position",
+                    text.render("messages/errors.goal_position"),
+                    ["line (1-based proof line)", "hole (nN.hK)"],
+                    TOOL_FORMS["goal"],
+                )
             proof_line = int(line_value)
         earlier = [
             item
@@ -635,16 +648,8 @@ def goal_tool(theorem: str, run_id: str, request: dict) -> dict:
             )
             for index, item in zip(valid_indexes, (tested or {}).get("results", []), strict=False):
                 snippet = tries[index - 1]
-                lines = [
-                    _render(
-                        "try_item",
-                        index=index,
-                        status="closed" if item.get("returncode") == 0 and not item.get("goals_after") else "open",
-                        tokens=snippet_tokens(snippet),
-                        delta=snippet_tokens(snippet) - snippet_tokens("sorry"),
-                        heartbeats="n/a",
-                    )
-                ]
+                # The try lane measures no heartbeats, so the line shows only what was measured: the verdict and tokens.
+                lines = [_render("try_item", index=index, verdict=_try_verdict(item), tokens=snippet_tokens(snippet))]
                 items.append(
                     {
                         "ref": f"t{index}",
@@ -666,9 +671,33 @@ def goal_tool(theorem: str, run_id: str, request: dict) -> dict:
                 )
         return reply.attach_context(run_id, reply.reply(items=items), include_map=False)
     except (IndexError, KeyError, OSError, StopIteration, TypeError, ValueError, RuntimeError) as error:
+        detail = str(error)
+        if not detail or detail == "None":
+            detail = " ".join(f"{key} {request[key]}" for key in ("node", "hole", "line") if request.get(key)) or "{}"
         return _invalid(
-            "invalid_goal", error, ["existing node id", "existing hole id", "1-based proof line"], TOOL_FORMS["goal"]
+            "invalid_goal", detail, ["existing node id", "existing hole id", "1-based proof line"], TOOL_FORMS["goal"]
         )
+
+
+def _try_verdict(item: dict) -> str:
+    """One snippet's outcome: timed out, its first error, the goals it leaves open, or closed."""
+    if item.get("timeout"):
+        return _render("try_timeout")
+    if item.get("returncode") != 0:
+        output = str(item.get("output") or "")
+        found = re.search(r"\berror: (.*)", output)
+        if found:
+            rest = output[found.start(1) :].splitlines()
+            message = " ".join(
+                line.strip() for line in rest[:2] if line.strip() and not re.match(r"\S+:\d+:\d+: ", line)
+            )
+            return _render("try_error", message=message or found.group(1).strip())
+        return _render("try_error", message=output.strip().splitlines()[0] if output.strip() else "-")
+    goals = str(item.get("goals_after") or "")
+    count = len(re.findall(r"^⊢", goals, re.M))
+    if goals.strip():
+        return _render("try_open", count=count or 1)
+    return _render("try_closed")
 
 
 def search_tool(theorem: str, run_id: str, request: dict) -> dict:
@@ -771,12 +800,26 @@ def _decl_read(theorem: str, run_id: str, handle: str) -> dict:
     if not match:
         return _invalid("bad_handle", handle, ["decl:<qualified-name>[:first-last]"], TOOL_FORMS["read"])
     canonical, first, last = match.groups()
+    name = canonical.removeprefix("decl:")
+    if name == theorem or theorem.endswith("." + name):
+        # The run's own theorem is not in the search index: its pinned proof is the reference node.
+        projection = _nodes(run_id)[1]
+        original = next((node for node in projection.nodes if node.origin == "reference"), None)
+        node_id = original.id if original else "n1"
+        shown = read_tool(theorem, run_id, {"node": node_id, "view": "source"})
+        shown["facts"] = [_render("own_theorem", handle=canonical, node=node_id), *shown.get("facts", [])]
+        return shown
     resolved = search.resolve_handle(theorem, canonical)
+    unknown_valid = ["decl:<name> from search", "node:n1"]
     if resolved is None:
-        return _invalid("unknown_handle", canonical, [], TOOL_FORMS["read"])
+        return _invalid("unknown_handle", canonical, unknown_valid, TOOL_FORMS["read"])
     start = int(first) if first else resolved.get("line", 1)
     end = int(last) if last else start + int(text.numbers().get("read_source_lines", 400)) - 1
-    result = campaign.source_range(theorem, canonical, start, end)
+    try:
+        result = campaign.source_range(theorem, canonical, start, end)
+    except ValueError as error:
+        # Indexed but without pinned source (e.g. a generated or syntax declaration).
+        return _invalid("unknown_handle", str(error).rstrip("."), unknown_valid, TOOL_FORMS["read"])
     campaign._append(
         campaign.run_dir(run_id),
         {"kind": "read", "handle": canonical, "first": result.get("first"), "last": result.get("last")},
@@ -892,19 +935,16 @@ def read_tool(theorem: str, run_id: str, request: dict) -> dict:
         lines = [_render("read_diff", node=node.id, against=other.id, change=f"{len(diff)} lines"), *diff]
         data["diff"] = diff
     elif view == "outline":
-        steps = split_steps(node.proof_text)
+        steps = node.steps  # carries the recorded step goals; split_steps(proof) would drop them
         holes = node.holes
-        lines = [
-            _render(
-                "read_step",
-                step=step.id,
-                first=step.first_line,
-                last=step.last_line,
-                before=step.before or "n/a",
-                after=step.after or "n/a",
-            )
-            for step in steps
-        ]
+        # Goals come from the recorded step goals; a step without them shows its lines only.
+        lines = []
+        for step in steps:
+            lines.append(_render("read_step", step=step.id, first=step.first_line, last=step.last_line))
+            if step.before:
+                lines.append(_render("read_step_before", goal=step.before))
+            if step.after:
+                lines.append(_render("read_step_after", goal=step.after))
         data["steps"] = [step.__dict__ for step in steps]
         data["holes"] = holes
     elif view == "map":
@@ -930,7 +970,11 @@ def finish_tool(theorem: str, run_id: str, request: dict | None = None) -> dict:
     history, _projection = _nodes(run_id)
     map_data = campaign.map_view(run_id)
     archive = (
-        ", ".join(f"{row['letter']}:{row['node']} {row['score']}" for row in map_data.get("archive", [])) or "empty"
+        ", ".join(
+            f"{row['letter']}:{row['node']} {'-' if row['score'] is None else row['score']}"
+            for row in map_data.get("archive", [])
+        )
+        or "empty"
     )
     state = campaign.state(run_id)
     baseline = state.get("baseline") or {}

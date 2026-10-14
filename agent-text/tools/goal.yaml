@@ -1,6 +1,6 @@
-description: "Return a goal at a node line or hole. Optional snippets return their compile results and prices."
+description: "Return a goal at a node line or hole. Snippets in try replace that line's step or that hole; each returns closed, open goals, or its first error, with tokens."
 params:
   node: "Node identifier containing the position."
   hole: "Open hole identifier, such as n2.h1."
   line: "One-based line number in the node proof."
-  try: "Proof snippets to compile at the selected position."
+  try: "Proof snippets for the selected position; needs line or hole."
