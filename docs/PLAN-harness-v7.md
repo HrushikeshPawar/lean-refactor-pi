@@ -621,6 +621,17 @@ off-by-default cascading errors instead of a second fake. Review fix: the in-cal
 queue (salvage first, `max_seconds` checked only between jobs, so a salvage job of earlier drafts could block the
 reply for a minute); `autocheck` now takes `kinds`, and the compile call passes `("full",)`.
 
+**Built (ticket 15b, 2026-10-14):** Pi exposes the five tools (schemas from `agent-text/tools/`, no required keys so
+an empty call reaches Python's `empty_arguments`), `reply.ts` renders the reply schema, `finish` stops in one call,
+the Lean MCP server is gone. Continuations use `request_failed` or `turn_ended_with_text` with shared spend facts.
+The null-argument re-request (#27c) is not built: Pi 1.1.0 has no supported way to re-issue a turn. Review fixes:
+- Pi's `tool_execution_end` has no `input`, so a proof attempt was never recorded; `check` is now taken from
+  `tool_execution_start` and a missing `check` counts as lean (the test had been edited to hide this).
+- Every error renders through `errors.request` with its valid values and forms, not as a bare code.
+- `read {view:"map"}` without a target is the whole-graph map (owner decision); other views still need a target.
+- `prepareArguments` normalises before Pi's schema validation (empty optional enums failed validation).
+- Weakened and deleted slow tests restored; unused templates and `ARENA_SKILL_DIR` removed. Slow file 34/34.
+
 ## 5. Candidate graph v7: the agent writes, the harness keeps the books and steers (D7)
 
 ### 5a. What v6 shows
@@ -1569,3 +1580,21 @@ reasoning replay, and MiMo thinking.
 - **The top 60 earns its place on the rows where it matters.** The key lemmas of the PhysLib, b2, CCS and CallElim
   rows came from it. Hits sit at ranks 1–58, so the section stays at 60 and gains the tokens column (§3e).
 - **Model knowledge (29%) and search (15%) together beat the packet.** `search` stays first-class (§4d).
+
+### 12f. Manual push learnings (2026-10-13): queued until after the phase 5 campaign
+The orchestrator golfed the weakest rows by hand with sub-agents (`runs/analysis/claude-push/LOG.md`, per-row
+`notes.md`). It gained five rows, +25.3 row-points, from about 84.4% to about 86.1% (staged as
+`submission-v4-candidate.jsonl`; not submitted). Owner decision (2026-10-14): **none of this enters v7 before the
+phase 5 campaign.** The campaign stays a clean v6-against-v7 A/B. The items below become one follow-up ticket, and
+the outer loop (§6) measures them against the campaign's v7 cell.
+
+| # | Learning | Where it lands in v7 |
+|---|---|---|
+| L1 | The token rule wins most: deleting `set`/`let` abbreviations, explicit arguments and type ascriptions that `_` fills gained on every row. | `agent-text/packet/`: state the rule (names count 1, punctuation counts, whitespace is free) with one example |
+| L2 | Heartbeats per token vary by row (fiber 10.7, inter 6.8, FieldSpec ~35). Failing or wide `grind`/`simp_all`/`linarith` calls cost 1–20k hb (one Fsub attempt dropped from 72 to 66). | Price row (ticket 13): show the row's exchange rate; the compile reply flags a draft whose hb change exceeds the token saving at that rate |
+| L3 | Locating heartbeat cost by truncation (cut at line N, end with `all_goals done`) works because the scorer reports hb on a failed proof. | Profile job (13) already gives per-step hb; check it covers this use, else expose a cheap prefix-cost operation |
+| L4 | Rewrites that won repeatedly: `refine f (?_ : T)`, inline `show T by …` inside `rw`, one final `all_goals simp [*]` for side goals, `Nat.le_induction`, `Exists.imp'`/`Or.imp`. | Skill text (ticket 16 owns the wording; neutral framing, no route terms) |
+| L5 | A per-case goal map after `induction`/`cases` is what golfing needs; info messages (`trace_state`) reach only `raw_output`. | `goal` tool: return every case's goals after a case split; engine keeps info messages |
+| L6 | Fresh sub-agents per row, each starting from the earlier rows' lessons, beat one long foreground session (+2 to +6 points each in 10–28 min). | §6 outer loop: a short, row-independent lesson list carried into every new run (D22 b seed) |
+| L7 | Gains followed each row's remaining slack, not its rank: rows from short runs halved their tokens; SKI, already golfed hard, did not move. | Campaign row choice (§6): rank rows by slack (tokens over the best known proof), not by worst score |
+| L8 | `submission-v3/cands/field_ds.lean` was not the submitted proof (that was `field_v6ark2.lean`). | `arena submit` (phase 6) writes a manifest from each row to its submitted file |

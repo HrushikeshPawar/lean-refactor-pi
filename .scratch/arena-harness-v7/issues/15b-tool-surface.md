@@ -4,7 +4,7 @@
 
 **Blocked by:** 02: Actual-cost stop; 15a: Five-tool Python handlers and reply schema (all lower tickets are committed below your branch).
 
-**Status:** needs-review
+**Status:** done
 
 **Branch:** `v7/15b-tool-surface` (stacked on `v7/15a-tool-handlers`)
 
