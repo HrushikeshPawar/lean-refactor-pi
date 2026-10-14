@@ -8,9 +8,10 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from arena.cli import app
+from arena.package import load_manifest
 from arena.submit import SubmitError, build_submission
-from arena.submit.gates import cold_check
-from arena.submit.select import resolve_runs
+from arena.submit.gates import cold_check, gate
+from arena.submit.select import load_runs, resolve_runs
 
 STATEMENTS = {
     "A.one": "theorem one : 1 = 1",
@@ -212,6 +213,8 @@ class SubmitTests(unittest.TestCase):
                             "graph_id": "n4",
                             "label": "#4",
                             "candidate_id": "old",
+                            "spend_usd": 0.3,
+                            "contributing_runs": ["gone"],
                         }
                     ]
                 }
@@ -230,22 +233,108 @@ class SubmitTests(unittest.TestCase):
         self.assertEqual(manifest["missing"], ["C.three"])
         names = {json.loads(line)["name"] for line in (result.directory / "proofs.jsonl").read_text().splitlines()}
         self.assertEqual(names, {"A.one", "B.two"})
+        provenance = json.loads((result.directory / "provenance.json").read_text())
+        self.assertAlmostEqual(provenance["problems"]["B.two"]["spend_usd"], 0.3)
+        self.assertEqual(provenance["problems"]["B.two"]["run_ids"], ["gone"])
 
-    def test_a_named_run_with_no_eligible_candidate_does_not_keep_the_previous_proof(self):
-        self.add_run("only", theorem="A.one", proxy=80.0)
-        self.add_run("empty", theorem="B.two", proxy=90.0)
+    def write_previous(self, rows, name="prev"):
+        previous = self.out / name
+        previous.mkdir(parents=True)
+        (previous / "proofs.jsonl").write_text(
+            "".join(json.dumps({"name": row["name"], "proof": row["proof"]}) + "\n" for row in rows)
+        )
+        described = [{key: value for key, value in row.items() if key != "proof"} for row in rows]
+        (previous / "manifest.json").write_text(json.dumps({"rows": described}) + "\n")
+
+    def test_a_carried_row_counts_its_runs_against_the_ceiling(self):
+        self.add_run("only", theorem="A.one", proxy=80.0, spend=(0.1,))
+        self.add_run("earlier", theorem="B.two", proxy=70.0, spend=(2.0,))
+        carried = STATEMENTS["B.two"] + " := by\n  rfl\n"
+        self.write_previous(
+            [{"name": "B.two", "proof": carried, "proxy": 70.0, "spend_usd": 0.1, "contributing_runs": ["earlier"]}]
+        )
+        # The run is still on disk, so its settle rows are summed again rather than trusting the record.
+        result = self.build("only", previous="prev")
+        self.assertEqual(result.code, 0)
+        row = json.loads((result.directory / "provenance.json").read_text())["problems"]["B.two"]
+        self.assertAlmostEqual(row["spend_usd"], 2.0)
+        self.assertEqual(row["unlisted_runs"], {})
+        over = self.build("only", previous="prev", name="over", ceiling_usd=1.5)
+        self.assertEqual(over.code, 1)
+        self.assertEqual([item["row"] for item in over.blocked], ["B.two"])
+        self.assertIn("2.0000", over.blocked[0]["reasons"][0])
+        self.write_previous([{"name": "B.two", "proof": carried, "proxy": 70.0}], name="unpriced")
+        unknown = self.build("only", previous="unpriced", name="unknown")
+        self.assertEqual(unknown.code, 1)
+        self.assertEqual([item["row"] for item in unknown.blocked], ["B.two"])
+
+    def test_a_named_run_with_no_verified_candidate_carries_the_previous_proof_and_its_spend(self):
+        self.add_run("only", theorem="A.one", proxy=80.0, spend=(0.1,))
+        self.add_run("empty", theorem="B.two", proxy=90.0, spend=(0.4,))
         ledger = (self.runs / "empty" / "ledger.jsonl").read_text().replace('"mode": "full"', '"mode": "sketch"')
         (self.runs / "empty" / "ledger.jsonl").write_text(ledger)
         carried = STATEMENTS["B.two"] + " := by\n  rfl\n"
-        previous = self.out / "prev"
-        previous.mkdir(parents=True)
-        (previous / "proofs.jsonl").write_text(json.dumps({"name": "B.two", "proof": carried}) + "\n")
-        (previous / "manifest.json").write_text(json.dumps({"rows": [{"name": "B.two", "proxy": 70.0}]}) + "\n")
+        self.plan[carried] = {"proxy": 70.0}
+        self.write_previous(
+            [{"name": "B.two", "proof": carried, "proxy": 70.0, "spend_usd": 0.25, "contributing_runs": ["gone"]}]
+        )
         result = self.build("only", "empty", previous="prev", name="owned")
         self.assertEqual(result.code, 0)
-        self.assertIn("B.two", result.missing)
+        self.assertNotIn("B.two", result.missing)
+        manifest = {row["name"]: row for row in json.loads((result.directory / "manifest.json").read_text())["rows"]}
+        self.assertEqual(manifest["B.two"]["source"], "previous")
+        self.assertAlmostEqual(manifest["B.two"]["spend_usd"], 0.65)
+        self.assertEqual(sorted(manifest["B.two"]["contributing_runs"]), ["empty", "gone"])
         names = {json.loads(line)["name"] for line in (result.directory / "proofs.jsonl").read_text().splitlines()}
-        self.assertEqual(names, {"A.one"})
+        self.assertEqual(names, {"A.one", "B.two"})
+        without = self.build("only", "empty", name="without")
+        self.assertEqual(without.code, 0)
+        self.assertIn("B.two", without.missing)
+        self.plan[carried] = {"proxy": 70.0, "passed": {"v1": False}}
+        regated = self.build("only", "empty", previous="prev", name="regated")
+        self.assertEqual(regated.code, 1)
+        self.assertEqual([item["row"] for item in regated.blocked], ["B.two"])
+        self.assertFalse((regated.directory / "proofs.jsonl").exists())
+
+    def test_static_gate_failures_never_reach_the_cold_compile(self):
+        forbidden = STATEMENTS["A.one"] + " := by\n  native_decide\n"
+        good = STATEMENTS["A.one"] + " := by\n  rfl\n"
+        self.plan[good] = {"proxy": 70.0}
+        self.add_run("forbidden", proof=forbidden, proxy=95.0)
+        self.add_run("good", proof=good, proxy=70.0)
+        compiled = []
+
+        def recording(name, proof):
+            compiled.append(proof)
+            return self.cold(name, proof)
+
+        result = build_submission(
+            "static",
+            ["forbidden", "good"],
+            max_cold=1,
+            cold_check=recording,
+            runs_root=self.runs,
+            output_root=self.out,
+            manifest_path=self.manifest,
+        )
+        self.assertEqual(result.code, 0)
+        self.assertEqual(compiled, [good])
+        rejected = json.loads((result.directory / "manifest.json").read_text())["rejected"]
+        self.assertEqual([item["row"] for item in rejected], ["A.one"])
+        self.assertTrue(any("native_decide" in reason for reason in rejected[0]["reasons"]))
+
+    def test_a_blocked_rebuild_keeps_the_last_good_submission(self):
+        good = STATEMENTS["A.one"] + " := by\n  rfl\n"
+        self.add_run("good", proof=good, proxy=80.0)
+        first = self.build("good", name="keep")
+        self.assertEqual(first.code, 0)
+        kept = {path.name: path.read_bytes() for path in first.directory.iterdir()}
+        self.add_run("bad", proof=STATEMENTS["A.one"] + " := by\n  sorry\n", proxy=90.0)
+        second = self.build("bad", name="keep", previous="keep", overwrite=True)
+        self.assertEqual(second.code, 1)
+        for name, body in kept.items():
+            self.assertEqual((second.directory / name).read_bytes(), body, name)
+        self.assertIn("sorry", (second.directory / "blocked.json").read_text())
 
     def test_provenance_sums_selected_and_discarded_calls_and_the_ceiling_blocks(self):
         winner, _proof, directory = self.add_run(
@@ -453,6 +542,43 @@ class SubmitTests(unittest.TestCase):
         with patch("arena.engine.evaluate", return_value=canned):
             cold_check("A.one", "proof", memory_reader=lambda: next(free), sleep=lambda _seconds: sleeps.append(1))
         self.assertEqual(sleeps, [1])
+
+    def test_cold_check_gives_up_when_memory_stays_low(self):
+        sleeps = []
+
+        def sleep(_seconds):
+            sleeps.append(1)
+            if len(sleeps) > 10:
+                raise AssertionError("still waiting past the timeout")
+
+        with patch("arena.engine.evaluate", side_effect=AssertionError("compiled under low memory")):
+            result = cold_check("A.one", "proof", memory_reader=lambda: 1.0, sleep=sleep, memory_timeout=3)
+        self.assertEqual(len(sleeps), 3)
+        self.assertIn("free memory", result["error"])
+        row = load_manifest(self.manifest)["A.one"]
+        reasons = gate(row, STATEMENTS["A.one"] + " := by\n  rfl\n", {**result, "recorded_proxy": 80.0})
+        self.assertTrue(any("free memory" in reason for reason in reasons))
+
+    def test_an_oversized_proof_fails_the_official_filter_gate(self):
+        row = load_manifest(self.manifest)["A.one"]
+        proof = STATEMENTS["A.one"] + " := by\n  rfl\n-- " + "a" * (256 * 1024) + "\n"
+        cold = {**self.cold("A.one", proof), "recorded_proxy": 80.0}
+        self.assertEqual(gate(row, proof, cold), ["official filter: too large (> 256 KB)"])
+
+    def test_a_run_the_graph_reader_cannot_build_is_rejected_not_raised(self):
+        self.add_run("good", proxy=80.0)
+        _candidate, _proof, directory = self.add_run("old", proxy=90.0)
+        rows = [json.loads(line) for line in (directory / "ledger.jsonl").read_text().splitlines()]
+        rows[-1]["result"]["compat"]["v1"]["diagnostics"] = ["Foo.lean:1:2: error: unknown identifier"]
+        (directory / "ledger.jsonl").write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+        loaded, rejected = load_runs(["old", "good"], self.runs)
+        self.assertEqual([item["run_id"] for item in rejected], ["old"])
+        self.assertEqual([run.run_id for run in loaded if run.reason is None], ["good"])
+        result = self.build("old", "good")
+        self.assertEqual(result.code, 0)
+        provenance = json.loads((result.directory / "provenance.json").read_text())
+        self.assertEqual([item["run_id"] for item in provenance["rejected_runs"]], ["old"])
+        self.assertEqual(provenance["problems"]["A.one"]["run_id"], "good")
 
     def test_help_lists_the_upload_checklist_and_a_bad_name_exits_2(self):
         output = io.StringIO()

@@ -77,6 +77,20 @@ def _code(row: dict) -> dict | None:
     return code if isinstance(code, dict) else None
 
 
+def _carried(row: dict, runs_root: Path) -> tuple[list[str], float | None, str | None]:
+    """A carried row's earlier spend: re-summed from its runs when they are all still on disk,
+    else the spend recorded in the previous manifest. Unknown spend is a reason to block."""
+    if row.get("source") != "previous":
+        return [], None, None
+    earlier = list(row.get("previous_run_ids") or [])
+    if earlier and all((runs_root / run_id).is_dir() for run_id in earlier):
+        return earlier, None, None
+    recorded = row.get("previous_spend_usd")
+    if isinstance(recorded, (int, float)) and not isinstance(recorded, bool):
+        return [], float(recorded), None
+    return [], None, "spend of the previous submission's row is unknown"
+
+
 def build(
     rows: list[dict], runs_root: Path, ceiling: float, discover: bool, named: set[str]
 ) -> tuple[dict, list[dict]]:
@@ -84,11 +98,14 @@ def build(
     problems = {}
     blocked = []
     for row in rows:
-        contributors = list(row.get("contributing_run_ids") or [])
-        others = unlisted_runs(row["name"], named, runs_root)
+        earlier, recorded, unknown = _carried(row, runs_root)
+        recorded_ids = [] if earlier or recorded is None else list(row.get("previous_run_ids") or [])
+        contributors = list(dict.fromkeys(earlier + list(row.get("contributing_run_ids") or [])))
+        contributors = [run_id for run_id in contributors if run_id not in recorded_ids]
+        others = unlisted_runs(row["name"], named | set(earlier) | set(recorded_ids), runs_root)
         spend_ids = contributors + (list(others) if discover else [])
         calls, spend = _calls(spend_ids, runs_root, row.get("run_id"))
-        spend = round(spend, 6)
+        spend = round(spend + (recorded or 0.0), 6)
         entry = {
             "source": row["source"],
             "run_id": row.get("run_id"),
@@ -121,8 +138,11 @@ def build(
             "ceiling_usd": ceiling,
             "calls": calls,
             "unlisted_runs": others,
-            "run_ids": spend_ids,
+            "run_ids": spend_ids + recorded_ids,
         }
+        if recorded is not None:
+            entry["carried_spend_usd"] = recorded
+            entry["carried_run_ids"] = recorded_ids
         code = _code(row)
         if code is not None:
             entry["code"] = code
@@ -134,8 +154,21 @@ def build(
                 name: str(path / name)
                 for name in ("ledger.jsonl", "cost-ledger.jsonl", "trace-journal.jsonl", "submission.json")
             }
-        if spend > ceiling + 1e-9:
-            run_list = ", ".join(f"{call['run_id']} ${call['settled_usd']:.4f}" for call in calls) or "none"
+        if unknown:
+            blocked.append(
+                {
+                    "row": row["name"],
+                    "candidate": row.get("graph_id"),
+                    "candidate_id": row.get("candidate_id"),
+                    "label": row.get("label"),
+                    "reasons": [unknown],
+                }
+            )
+        elif spend > ceiling + 1e-9:
+            parts = [f"{call['run_id']} ${call['settled_usd']:.4f}" for call in calls]
+            if recorded is not None:
+                parts.append(f"previous submission ${recorded:.4f}")
+            run_list = ", ".join(parts) or "none"
             blocked.append(
                 {
                     "row": row["name"],

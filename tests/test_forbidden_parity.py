@@ -39,6 +39,11 @@ SAMPLES = [
 ]
 
 
+# Pattern triples (label, source, flags) on one side only. The byte cap is the official filter's
+# only other check and is asserted separately; the patterns themselves agree on this vendored commit.
+KNOWN_PATTERN_DIFFERENCES: set[tuple[str, str, int]] = set()
+
+
 def harness_label(text: str) -> str | None:
     clean = remove_comments(text)
     for label, pattern in FORBIDDEN:
@@ -77,6 +82,17 @@ class OfficialFilterParityTests(unittest.TestCase):
         for label, sample in SAMPLES:
             self.assertIsNotNone(official_patterns[label].search(sample), label)
             self.assertIsNotNone(our_patterns[label].search(sample), label)
+
+    def test_pattern_sources_and_flags_match_except_known_differences(self):
+        official = [
+            (label, pattern.pattern, pattern.flags)
+            for label, pattern in cast(list[tuple], _official_globals()["_FORBIDDEN_PATTERNS"])
+        ]
+        ours = [(label, pattern.pattern, pattern.flags) for label, pattern in FORBIDDEN]
+        self.assertEqual(set(official) ^ set(ours), KNOWN_PATTERN_DIFFERENCES)
+        # Order decides which label is reported first, so it must match too.
+        shared = set(official) & set(ours)
+        self.assertEqual([item for item in official if item in shared], [item for item in ours if item in shared])
 
 
 if __name__ == "__main__":

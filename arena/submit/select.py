@@ -10,7 +10,7 @@ from pathlib import Path
 from arena.campaign import _graph_node_id, _update_id, node_label
 from arena.graph import Graph, Node
 from arena.package import RUNS, _json, _jsonl
-from arena.submit.gates import gate
+from arena.submit.gates import cold_gate, static_gate
 
 
 class SubmitError(Exception):
@@ -127,7 +127,9 @@ def _candidate(run: LoadedRun, node: Node, event: dict, proof: str) -> Candidate
 
 
 def load_runs(run_ids: list[str], runs_root: Path) -> tuple[list[LoadedRun], list[dict]]:
-    """Load named runs. A directory with no `run-config.json` is rejected as unknown provenance."""
+    """Load named runs. A directory with no `run-config.json` is rejected as unknown provenance,
+    and one whose ledger the graph reader cannot build (older ledger shapes) is rejected with the error.
+    """
     loaded, rejected = [], []
     for run_id in run_ids:
         directory = runs_root / run_id
@@ -154,7 +156,14 @@ def load_runs(run_ids: list[str], runs_root: Path) -> tuple[list[LoadedRun], lis
 
         # `verified` is the full evaluation that passed every toolchain. The graph's own
         # status is closed/sketch/broken, which is a later cut than "full".
-        graph = Graph.from_history(history, read_text)
+        try:
+            graph = Graph.from_history(history, read_text)
+        except Exception as error:
+            reason = f"graph unreadable: {type(error).__name__}: {error}"
+            run.reason = reason
+            rejected.append({"run_id": run_id, "reasons": [reason]})
+            loaded.append(run)
+            continue
         for node in graph.nodes:
             if node.origin == "reference" or not node.verified:
                 continue
@@ -233,7 +242,16 @@ def _recorded_proxy(carried: dict) -> object:
     return carried.get("proxy")
 
 
+def _previous_runs(carried: dict) -> list[str]:
+    runs = carried.get("contributing_runs")
+    if isinstance(runs, list):
+        return [run for run in runs if isinstance(run, str)]
+    return [carried["run_id"]] if isinstance(carried.get("run_id"), str) else []
+
+
 def _previous_row(theorem: str, carried: dict, cold: dict, run_ids: list[str]) -> dict:
+    """A carried row. `contributing_run_ids` are the named runs on this theorem that left no
+    candidate; the previous submission's own runs and spend ride along for the ceiling gate."""
     return {
         "name": theorem,
         "source": "previous",
@@ -259,6 +277,8 @@ def _previous_row(theorem: str, carried: dict, cold: dict, run_ids: list[str]) -
         "request_id": None,
         "turn": None,
         "contributing_run_ids": list(run_ids),
+        "previous_run_ids": _previous_runs(carried),
+        "previous_spend_usd": carried.get("spend_usd"),
         "code": carried.get("code"),
     }
 
@@ -271,26 +291,31 @@ def select_rows(
     previous: dict[str, dict],
     progress: Callable[[dict], None] | None,
 ) -> Selection:
-    """Walk each row by recorded proxy and keep the first candidate that passes the gate."""
+    """Walk each row by recorded proxy and keep the first candidate that passes the gate.
+
+    The static gates run first; a candidate that fails them is never cold-compiled and does
+    not count against `max_cold`.
+    """
     rows, blocked, missing, rejected = [], [], [], []
     for theorem in sorted(manifest):
         benchmark = manifest[theorem]
         named = [run.run_id for run in runs if run.theorem == theorem and run.reason is None]
         ranked = sorted(pool(theorem, runs), key=_rank)
-        # A named run owns the row. Carry the previous proof only when none of the named runs
-        # is on this theorem, even if those runs produced no eligible candidate.
-        if not named:
+        # With no verified candidate from the named runs, carry the previous proof. The named
+        # runs' spend on this theorem still counts. Candidates that all fail gates block instead.
+        if not ranked:
             carried = previous.get(theorem)
             if carried is None:
                 missing.append(theorem)
                 continue
-            if progress:
-                progress(
-                    {"row": theorem, "candidate": carried.get("graph_id") or carried.get("label"), "phase": "cold"}
-                )
-            cold = _checked(checker, theorem, carried["proof"])
-            cold["recorded_proxy"] = _recorded_proxy(carried)
-            reasons = gate(benchmark, carried["proof"], cold)
+            shown = carried.get("graph_id") or carried.get("label")
+            reasons = static_gate(benchmark, carried["proof"])
+            if not reasons:
+                if progress:
+                    progress({"row": theorem, "candidate": shown, "phase": "cold"})
+                cold = _checked(checker, theorem, carried["proof"])
+                cold["recorded_proxy"] = _recorded_proxy(carried)
+                reasons = cold_gate(benchmark, cold)
             if reasons:
                 if progress:
                     progress(
@@ -308,13 +333,16 @@ def select_rows(
                 continue
             rows.append(_previous_row(theorem, carried, cold, named))
             continue
-        if not ranked:
-            missing.append(theorem)
-            continue
         chosen = None
         tried = 0
         failures = []
         for candidate in ranked:
+            reasons = static_gate(benchmark, candidate.proof)
+            if reasons:
+                if progress:
+                    progress({"row": theorem, "candidate": candidate.graph_id, "phase": "fail", "reasons": reasons})
+                failures.append(_failure(theorem, candidate, reasons))
+                continue
             if tried >= max_cold:
                 failures.append(_failure(theorem, None, [f"stopped after {max_cold} cold compiles"]))
                 break
@@ -323,7 +351,7 @@ def select_rows(
                 progress({"row": theorem, "candidate": candidate.graph_id, "phase": "cold"})
             cold = _checked(checker, theorem, candidate.proof)
             cold["recorded_proxy"] = candidate.proxy
-            reasons = gate(benchmark, candidate.proof, cold)
+            reasons = cold_gate(benchmark, cold)
             if reasons:
                 if progress:
                     progress({"row": theorem, "candidate": candidate.graph_id, "phase": "fail", "reasons": reasons})

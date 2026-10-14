@@ -114,7 +114,7 @@ def merge(run_id: str, parent_pid: int | None = None, once: bool = False) -> int
 def submit(
     *,
     name: str,
-    runs: Annotated[list[str], Parameter(name="runs", consume_multiple=True)],
+    runs: Annotated[list[str], Parameter(name="runs", consume_multiple=True, negative=())],
     previous: str | None = None,
     max_cold: int = 5,
     ceiling_usd: float = 3.0,
@@ -123,7 +123,7 @@ def submit(
     overwrite: bool = False,
     json_output: Annotated[bool, Parameter(name="json")] = False,
 ) -> int:
-    """Prepare a competition submission under runs/submission/<name>/.
+    """Prepare a competition submission under `runs/submission/<name>/`.
 
     Prepares files only. The owner uploads. Nothing in this command contacts a network service.
 

@@ -74,7 +74,8 @@ def build_submission(
     """Select, gate and write `runs/submission/<name>/`. Exit code 0 passes; 1 is blocked.
 
     `cold_check` and `memory_reader` are injection points. The default cold check runs Lean,
-    one proof at a time. A blocked submission writes only `blocked.json`.
+    one proof at a time. A blocked submission writes only `blocked.json`, beside the files of
+    an existing submission of the same name when there is one (it is left intact).
     """
     if not _NAME.fullmatch(name):
         raise SubmitError("invalid submission name")
@@ -113,7 +114,8 @@ def build_submission(
                 }
             )
     if blocked_rows:
-        _replace(destination, overwrite)
+        # A blocked build never removes an earlier good submission: `blocked.json` goes beside
+        # its files, and the next passing build replaces the whole directory.
         blocked(destination, blocked_rows)
         return SubmissionResult(destination, 1, [], blocked_rows, selection.missing, [])
     provenance = {
