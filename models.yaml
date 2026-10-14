@@ -33,7 +33,7 @@ presets:
 
 # Order here is the order of --model choices and of `arena_preflight` runs.
 models:
-  deepseek-v4.1-flash:         # OpenAI chat completions on opencode-go (Pi 1.1.0 catalog)
+  deepseek-v4.1-flash:         # OpenAI chat completions on opencode-go (Pi 1.2.0 catalog)
     # Automatic caching: cache writes are free and not reported (cache_write 0 is expected).
     price: {input: 0.15, output: 0.60, cache_read: 0.003, cache_write: 0}
     context_window: 1000000
