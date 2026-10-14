@@ -4,7 +4,7 @@
 
 **Blocked by:** 05b: Agent text: campaign/engine/TS messages moved verbatim, literal lint; 10a: Graph core: steps, edges, focus, operations (both are committed below your branch).
 
-**Status:** ready-for-agent
+**Status:** needs-review
 
 **Branch:** `v7/17-replay` (stacked on `v7/16-text`)
 
