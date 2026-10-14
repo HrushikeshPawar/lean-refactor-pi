@@ -42,7 +42,8 @@ def _subsequence_pattern(query: str) -> str:
 
 
 def _visible_rows(connection: sqlite3.Connection, sql: str, parameters: tuple = ()) -> list[sqlite3.Row]:
-    return list(connection.execute(f"SELECT * FROM declarations WHERE {_VISIBLE} AND {sql}", parameters))
+    rows = connection.execute(f"SELECT * FROM declarations WHERE {_VISIBLE} AND {sql}", parameters)
+    return [row for row in rows if not index.is_harness_name(row["name"])]
 
 
 def _file_for(row: sqlite3.Row, theorem: dict) -> str:
@@ -314,7 +315,7 @@ def _text_query(
             result["dropped"] += 1
             continue
         declaration = max(enclosing, key=lambda decl: decl["line"])
-        if declaration["generated"] or declaration["private"]:
+        if declaration["generated"] or declaration["private"] or index.is_harness_name(declaration["name"]):
             result["dropped"] += 1
             continue
         found.setdefault(declaration["name"], (declaration, raw["lines"].get("text", "").strip()))

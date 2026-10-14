@@ -1232,6 +1232,8 @@ any paid run.
     45 at high**, so it reduces thinking but does not remove it. To get 0 on tool turns, the extension sets
     `reasoning_effort:"none"` in `before_provider_request` when the last message is a tool result. Phase 2; A/B in
     phase 5.
+  - **Reversed 2026-10-14 (v7solo-ski4):** with `none`, 647 of 652 turns had no reasoning and one fill repeated 344
+    times. MiMo now runs `tool_turn_reasoning_effort: high` (§12g).
 - **DeepSeek reasoning replay (D25, #11), probe 2026-10-10.**
   - opencode-go accepted a tool-call continuation **without** the earlier turn's `reasoning_content`, with the same
     outcome as with it (`tool_calls`).
@@ -1669,3 +1671,18 @@ the outer loop (§6) measures them against the campaign's v7 cell.
 | L6 | Fresh sub-agents per row, each starting from the earlier rows' lessons, beat one long foreground session (+2 to +6 points each in 10–28 min). | §6 outer loop: a short, row-independent lesson list carried into every new run (D22 b seed) |
 | L7 | Gains followed each row's remaining slack, not its rank: rows from short runs halved their tokens; SKI, already golfed hard, did not move. | Campaign row choice (§6): rank rows by slack (tokens over the best known proof), not by worst score |
 | L8 | `submission-v3/cands/field_ds.lean` was not the submitted proof (that was `field_v6ark2.lean`). | `arena submit` (phase 6) writes a manifest from each row to its submitted file |
+
+### 12g. Trial runs on the lowest row (2026-10-14, `Cslib.SKI.parallelReduction_diamond`)
+Fresh runs with only the theorem and reference proof, $0.50 each, before the phase 5 campaign.
+- **v7solo-ski2 (DeepSeek, 60.12 against v6's 70.32):** fixes in commit `umu` (packet heartbeat profile and
+  self-reference line, `<;>` branch goal, one-line salvage, stall targets on another route).
+- **Backstop removed (owner, D42 strict):** the 6-turn no-work stop is gone. Before the final tenth only the spend
+  limit, `error_loop` and `provider_unreachable` end a run; a turn without work moves the focus (`stopDecision` in
+  `control.ts`). Slow tests now end their scripts inside the final tenth.
+- **v7solo-ski4 (MiMo, failed, $0.52, 651 requests):** no reasoning on tool turns (reversed in §9a); one `fill`
+  sent 344 times; the error dedup pointed a node at itself ("same as n66.e1"); 54 rate-limit errors; harness
+  declarations found by search. Fixed: a repeated compile says "identical to an earlier attempt (seen N times)",
+  carries `repeat`, and does not count as work, so it moves the focus; dedup refers only to other nodes; search
+  hides `arenaGenerated`/`arenaNumbered`/`arena_index`/`arena_moduleRanges`.
+- **Still open:** a draft identical to the reference is filed as a new root; hole goals can print "n/a"; the model
+  never uses splice, fill or merge in DeepSeek runs; stall focus moves are ignored by the model.

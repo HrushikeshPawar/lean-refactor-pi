@@ -1,3 +1,4 @@
+import json
 import shutil
 import sqlite3
 import tempfile
@@ -114,8 +115,51 @@ class SearchTests(unittest.TestCase):
         self.assertTrue(private["private"])
         self.assertEqual(search.resolve_handle(ROW_NAME, "source:Nat.add_comm"), None)
 
-    def _enable_fixture_text(self):
+    @unittest.skipUnless(shutil.which("rg"), "rg is required for source text search")
+    def test_harness_generated_names_never_reach_name_or_text_results(self):
+        source_root = Path(self.temporary.name) / "source"
+        source_root.mkdir()
+        (source_root / "Harness.lean").write_text(
+            'meta def arenaGeneratedSuffixes : List String := ["arena-harness-marker"]\n'
+            "meta unsafe def arena_indexModuleRanges (x : Nat) : Nat := x\n"
+            "theorem real_lemma : True := trivial -- arena-harness-marker\n",
+            encoding="utf-8",
+        )
+        harness = [
+            {"name": "Harness.arenaGeneratedSuffixes", "module": "Harness", "line": 1, "end_line": 1},
+            {"name": "Harness.arena_indexModuleRanges", "module": "Harness", "line": 2, "end_line": 2},
+            {"name": "Harness.real_lemma", "module": "Harness", "line": 3, "end_line": 3},
+        ]
+        records = [
+            json.dumps(
+                {
+                    **item,
+                    "kind": "def",
+                    "generated": False,
+                    "private": False,
+                    "type": "True",
+                    "head": "True",
+                    "consts": [],
+                }
+            )
+            for item in harness
+        ]
+        jsonl = Path(self.temporary.name) / "with_harness.jsonl"
+        jsonl.write_text((FIXTURES / "declaration_index.jsonl").read_text(encoding="utf-8") + "\n".join(records) + "\n")
+        index.load_index(jsonl, self.database)
+        self._enable_fixture_text(source_root)
+
+        name_results = search.search(ROW_NAME, ["arena", "arenaGeneratedSuffixes", "arena_indexModuleRanges"])
+        text_result = search.search(ROW_NAME, ["arena-harness-marker"], kind="text")["queries"][0]
+        for result in [*name_results["queries"], text_result]:
+            for hit in result["hits"]:
+                parts = hit["name"].split(".")
+                self.assertFalse(any(part.startswith(index.HARNESS_NAME_PREFIXES) for part in parts), hit["name"])
+        self.assertEqual([hit["handle"] for hit in text_result["hits"]], ["decl:Harness.real_lemma"])
+        self.assertEqual(text_result["dropped"], 1)
+
+    def _enable_fixture_text(self, root=SOURCE_ROOT):
         self.addCleanup(patch.stopall)
-        patch.object(engine, "workspace", return_value=SOURCE_ROOT).start()
-        patch.object(search.campaign, "_roots", return_value=[(SOURCE_ROOT, "fixture-commit", "")]).start()
+        patch.object(engine, "workspace", return_value=root).start()
+        patch.object(search.campaign, "_roots", return_value=[(root, "fixture-commit", "")]).start()
         patch.object(search.Path, "home", return_value=Path(self.temporary.name)).start()

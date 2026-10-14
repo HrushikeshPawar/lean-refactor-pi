@@ -219,6 +219,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/tools.read_step` | 3 | Tool replies | when the matching tool result occurs |
 | `replies/tools.read_step_after` | 2 | Tool replies | when the matching tool result occurs |
 | `replies/tools.read_step_before` | 2 | Tool replies | when the matching tool result occurs |
+| `replies/tools.repeat_fact` | 16 | Tool replies | when the matching tool result occurs |
 | `replies/tools.same_diagnostic` | 4 | Tool replies | when the matching tool result occurs |
 | `replies/tools.same_goal` | 4 | Tool replies | when the matching tool result occurs |
 | `replies/tools.search_hint` | 1 | Tool replies | when the matching tool result occurs |

@@ -64,7 +64,7 @@ class ModelConfigTests(unittest.TestCase):
 
     def test_retry_and_optional_tool_turn_effort_are_validated_and_exported(self):
         self.assertEqual(GOOD["retry"], {"max_retries": 3, "base_delay_ms": 2000, "max_delay_ms": 60000})
-        self.assertEqual(json.loads(models.pi_json())["models"]["mimo-v2.6-pro"]["toolTurnReasoningEffort"], "none")
+        self.assertEqual(json.loads(models.pi_json())["models"]["mimo-v2.6-pro"]["toolTurnReasoningEffort"], "high")
         self.broken(lambda config: config["models"]["mimo-v2.6-pro"].update(tool_turn_reasoning_effort=""))
         self.broken(lambda config: config["retry"].update(base_delay_ms=0))
 

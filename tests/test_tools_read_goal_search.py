@@ -220,6 +220,15 @@ class ReadGoalSearchTests(CascadeToolCase):
         self.assertFalse(invalid["ok"])
         self.assertEqual(invalid["error"]["valid"], ["source"])
 
+    def test_prices_of_an_unmeasured_node_say_n_a_not_none(self):
+        node = self.sketch()
+        total = {"tokens": 290, "heartbeats": None, "versions": "0/3"}
+        with patch.object(campaign, "price_table", return_value={"total": total}):
+            result = tools.read_tool("T", "logic", {"node": node, "view": "prices"})
+        line = result["items"][0]["lines"][0]
+        self.assertIn("heartbeats n/a", line)
+        self.assertNotIn("None", line)
+
     def test_read_map_needs_no_target(self):
         node = self.sketch()
         with patch.object(campaign, "map_view", return_value={"recent": [{"node": node, "status": "open"}]}):

@@ -48,6 +48,25 @@ class ReplyTests(unittest.TestCase):
         shown_again = reply.deduplicate_diagnostics(self.run_id, "n3", [{**second, "id": "n3.e1"}])[0]
         self.assertEqual(shown_again["goal"], second["goal"])
 
+    def test_a_node_returned_twice_shows_its_full_error_both_times(self):
+        message = "Application type mismatch: " + "the argument has the wrong type. " * 5
+        error = {"id": "n66.e1", "goal": "x : Nat\n⊢ x = x", "message": message}
+        first = reply.deduplicate_diagnostics(self.run_id, "n66", [dict(error)])[0]
+        again = reply.deduplicate_diagnostics(self.run_id, "n66", [dict(error)])[0]
+        for shown_error in (first, again):
+            self.assertEqual(shown_error["goal"], error["goal"])
+            self.assertEqual(shown_error["message"], message)
+            self.assertNotIn("same as", str(shown_error))
+
+    def test_two_different_nodes_with_the_same_error_still_deduplicate(self):
+        message = "Application type mismatch: " + "the argument has the wrong type. " * 5
+        reply.deduplicate_diagnostics(self.run_id, "n66", [{"id": "n66.e1", "goal": "⊢ True", "message": message}])
+        other = reply.deduplicate_diagnostics(
+            self.run_id, "n67", [{"id": "n67.e1", "goal": "⊢ True", "message": message}]
+        )[0]
+        self.assertEqual(other["goal"], "same goal as n66.e1")
+        self.assertEqual(other["message"], f"{message} same as n66.e1")
+
     def test_compaction_reset_needs_no_request_file(self):
         from types import SimpleNamespace
 

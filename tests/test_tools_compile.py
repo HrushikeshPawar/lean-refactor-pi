@@ -78,6 +78,19 @@ class CompileToolTests(CascadeCase):
         self.assertEqual(len(set(proof_ids)), 1)
         self.assertEqual(sum(event.get("kind") == "edge" for event in campaign.events(self.directory)), 3)
 
+    def test_repeated_identical_fill_says_so_and_marks_the_item(self):
+        sketch = tools.compile_tool("T", "logic", {"drafts": ["by\n  sorry"]})["items"][0]["node"]
+        request = {"fill": {"hole": f"{sketch}.h1", "text": "bad\n  bad"}}
+        first, second, third = (tools.compile_tool("T", "logic", request) for _ in range(3))
+        self.assertFalse(first["items"][0]["repeat"])
+        self.assertNotIn("identical", str(first["facts"]))
+        node = first["items"][0]["node"]
+        self.assertTrue(second["items"][0]["repeat"])
+        self.assertTrue(third["items"][0]["repeat"])
+        self.assertEqual(third["items"][0]["node"], node)
+        self.assertIn(f"{node} is identical to an earlier attempt (seen 3 times)", "\n".join(third["facts"]))
+        self.assertIn("seen 2 times", "\n".join(second["facts"]))
+
     def test_tokens_do_not_file_or_compile(self):
         before = len(campaign.events(self.directory))
         with patch("arena.engine._proof_length", side_effect=lambda proof, *_: len(proof)):

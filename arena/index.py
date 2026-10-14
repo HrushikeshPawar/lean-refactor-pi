@@ -18,6 +18,13 @@ from arena import engine
 LEAN_FILE = Path(__file__).with_name("lean") / "index.lean"
 INDEX_TIMEOUT = 1800
 SCHEMA_VERSION = "declaration-index-v2"
+# Names the harness inserts into the pinned project (arena/lean/index.lean, arena/lean/context.lean).
+HARNESS_NAME_PREFIXES = ("arenaGenerated", "arenaNumbered", "arena_index", "arena_moduleRanges")
+
+
+def is_harness_name(name: str) -> bool:
+    """True when any dotted component of a declaration name starts with a harness-generated prefix."""
+    return any(part.startswith(HARNESS_NAME_PREFIXES) for part in name.split("."))
 
 
 def _log_build(path: Path, event: str, /, **fields: object) -> None:

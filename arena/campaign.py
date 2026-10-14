@@ -1768,6 +1768,8 @@ def probe(
         _check_breaker(directory)
         # A draft (holes, errors or a failed compile) never opens a route, so it is not queued for extraction.
     if earlier:
+        # A repeat leaves its own row, so the reply can say how often this text has been tried.
+        _append(directory, {"kind": "repeat", "proof_id": proof_id})
         filing_history = events(directory)
         in_batch, _ = _BATCH_FOCUS.get()
         projection_out = []

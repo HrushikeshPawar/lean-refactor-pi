@@ -543,7 +543,9 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     compileChecks.delete(event.toolCallId);
     // Every draft the harness filed as a node (with holes or errors too) carries `node`; a rejected one does not.
     if (event.toolName === "compile" && check === "lean") {
-      turnHadProofAttempt ||= Boolean(payload?.ok !== false && (payload?.items ?? []).some((item: any) => item?.node));
+      turnHadProofAttempt ||= Boolean(
+        payload?.ok !== false && (payload?.items ?? []).some((item: any) => item?.node && item?.repeat !== true),
+      );
     }
     // The trimmer only shortens the model-facing text; `details` keep the full payload, so a repeated identical
     // result yields signatures already in `discoveries` and does not count as novel context.

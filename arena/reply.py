@@ -217,6 +217,12 @@ def _update_text(update: dict, seen: set[str]) -> str:
     return update["text"]
 
 
+def _cross_node_ref(store: dict, digest: str, node: str) -> str | None:
+    """The first id that showed this text, when it belongs to another node; a node never refers to itself."""
+    ref = store.get(digest)
+    return ref if ref and str(ref).split(".", 1)[0] != node else None
+
+
 def deduplicate_diagnostics(run_id: str, node: str, errors: list[dict]) -> list[dict]:
     """Store full diagnostics and abbreviate repeated goals and long messages."""
     state = _load(run_id)
@@ -234,19 +240,21 @@ def deduplicate_diagnostics(run_id: str, node: str, errors: list[dict]) -> list[
             if isinstance(goal, str) and goal.strip():
                 normalized = re.sub(r"\s+", " ", goal).strip()
                 digest = hashlib.sha256(normalized.encode()).hexdigest()
-                if digest in goals:
-                    row["goal"] = text.render("replies/tools.same_goal", ref=goals[digest])
+                ref = _cross_node_ref(goals, digest, node)
+                if ref:
+                    row["goal"] = text.render("replies/tools.same_goal", ref=ref)
                 else:
-                    goals[digest] = row.get("id")
+                    goals.setdefault(digest, row.get("id"))
             message = row.get("message")
             if isinstance(message, str) and len(message) >= 120:
                 digest = hashlib.sha256(message.encode()).hexdigest()
-                if digest in diagnostics:
+                ref = _cross_node_ref(diagnostics, digest, node)
+                if ref:
                     row["message"] = text.render(
-                        "replies/tools.same_diagnostic", first=message.splitlines()[0], ref=diagnostics[digest]
+                        "replies/tools.same_diagnostic", first=message.splitlines()[0], ref=ref
                     )
                 else:
-                    diagnostics[digest] = row.get("id")
+                    diagnostics.setdefault(digest, row.get("id"))
             result.append(row)
     _save(run_id, state)
     return result

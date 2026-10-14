@@ -57,7 +57,7 @@ models:
     id: primalabs-ai/MiMo-V2.6-Pro
     name: MiMo V2.6 Pro (PrimaLabs)
     reasoning: true
-    tool_turn_reasoning_effort: none # plan §9a: API honours reasoning_effort none after tool results
+    tool_turn_reasoning_effort: high # v7solo-ski4: with none, 647 of 652 turns had no reasoning and one fill repeated 344 times
     # primalab dashboard prices (authoritative over its docs table); no cache-write charge.
     price: {input: 0.43, output: 0.87, cache_read: 0.0036, cache_write: 0}
     context_window: 1048576

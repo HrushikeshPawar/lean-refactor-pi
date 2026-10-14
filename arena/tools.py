@@ -268,6 +268,16 @@ def _compile_item(name: str, run_id: str, node_ref: str, result: dict, filing: s
                 )
             )
     facts = [_render("errors_incomplete")] if incomplete else []
+    # Every attempt on this proof text leaves one ledger row, this one included.
+    attempts = sum(
+        1
+        for event in _history_rows
+        if event.get("kind") in ("probe", "repeat", "candidate")
+        and (event.get("proof_id") or event.get("candidate_id")) == node.proof_id
+    )
+    repeat = attempts > 1
+    if repeat:
+        facts.append(_render("repeat_fact", node=node.id, count=attempts))
     return {
         "item": {
             "ref": node.id,
@@ -279,6 +289,7 @@ def _compile_item(name: str, run_id: str, node_ref: str, result: dict, filing: s
             "errors": errors,
             "holes": holes,
             "price": result.get("price_row"),
+            "repeat": repeat,
         },
         "facts": facts,
     }
@@ -923,13 +934,15 @@ def read_tool(theorem: str, run_id: str, request: dict) -> dict:
         data["source"] = node.proof_text
     elif view == "prices":
         price = campaign.price_table(theorem, run_id, node.id)
+        # A value not measured yet is stored as None; the model sees "n/a", never Python's None.
+        total = {key: "n/a" if value is None else value for key, value in price.get("total", {}).items()}
         lines = [
             _render(
                 "read_price_row",
                 node=node.id,
-                tokens=price.get("total", {}).get("tokens", "n/a"),
-                heartbeats=price.get("total", {}).get("heartbeats", "n/a"),
-                versions=price.get("total", {}).get("versions", "n/a"),
+                tokens=total.get("tokens", "n/a"),
+                heartbeats=total.get("heartbeats", "n/a"),
+                versions=total.get("versions", "n/a"),
             )
         ]
         data["prices"] = price

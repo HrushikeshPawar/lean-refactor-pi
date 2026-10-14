@@ -17,7 +17,8 @@ from arena.skill import SKILL_DIR, skill_hash, skill_prompt
 from tests.pi_support import LIVE_LANGFUSE, NAME, PI_AVAILABLE, AnthropicWire, FakeRun, message_text
 from tests.slow import slow
 
-STOP = [{"text": "done"}]
+# Two text-only turns end a run only inside the final tenth, so they follow a turn that spends to 90%.
+STOP = [{"text": "done"}] * 2
 # Words that name ending the run; none may reach the model before the final tenth of the spend (plan D42).
 STOP_TEXT = re.compile(r"\b(?:finish\w*|stop\w*|threshold\w*|tenth|end(?:s|ing)? the run)\b", re.I)
 
@@ -30,7 +31,7 @@ class SkillAndThinkingTests(unittest.TestCase):
             run.cleanup()
 
     def start(self, *extra: str) -> FakeRun:
-        run = FakeRun(STOP * 6)
+        run = FakeRun([cheap_tool("read", {"node": "n1"}, output=SPEND_90_PCT), *STOP])
         self.runs = [*getattr(self, "runs", []), run]
         return run.run(*extra)
 
@@ -74,7 +75,10 @@ class LifecycleTests(unittest.TestCase):
 
     def test_a_finished_run_writes_cost_report_and_summary(self):
         run = self.fake(
-            [{"text": "done", "usage": {"input": 500, "output": 20, "cacheRead": 0, "cacheWrite": 500}}] * 3
+            [
+                cheap_tool("read", {"node": "n1"}, output=SPEND_90_PCT),
+                *[{"text": "done", "usage": {"input": 500, "output": 20, "cacheRead": 0, "cacheWrite": 500}}] * 2,
+            ]
         ).run()
         assert run.result is not None
         self.assertEqual(run.result.returncode, 0, run.result.stderr)
@@ -206,6 +210,8 @@ class CacheDisciplineTests(unittest.TestCase):
                 cheap_tool("search", {"queries": ["InitsUpdatesComm"], "kind": "name"}),
                 cheap_tool("read", {"node": "n1"}),
                 cheap_tool("compile", {"drafts": []}),
+                cheap_tool("read", {"node": "n1", "view": "source"}, output=SPEND_90_PCT),
+                {"text": "done"},
                 {"text": "done"},
             ]
         )
@@ -240,12 +246,22 @@ class CacheDisciplineTests(unittest.TestCase):
     def test_cache_alarm_fires_when_a_warm_request_writes_more_than_it_reads(self):
         bad = {"input": 100, "output": 10, "cacheRead": 100, "cacheWrite": 5000}
         good = {"input": 100, "output": 10, "cacheRead": 5000, "cacheWrite": 100}
-        alarmed = self.fake([cheap_tool("read", {"node": "n1"}, **bad)] * 4 + [{"text": "done", "usage": bad}])
+        alarmed = self.fake(
+            [cheap_tool("read", {"node": "n1"}, **bad)] * 4
+            + [{"text": "done", "usage": bad}]
+            + [cheap_tool("read", {"node": "n1", "view": "source"}, **{**bad, "output": SPEND_90_PCT})]
+            + [{"text": "done", "usage": bad}] * 2
+        )
         summary = alarmed.json("summary.json")
         self.assertGreaterEqual(summary["cache"]["alarms"], 1)
         kinds = [e["kind"] for e in alarmed.jsonl("cost-ledger.jsonl")]
         self.assertIn("cache_alarm", kinds)
-        healthy = self.fake([cheap_tool("read", {"node": "n1"}, **good)] * 4 + [{"text": "done", "usage": good}])
+        healthy = self.fake(
+            [cheap_tool("read", {"node": "n1"}, **good)] * 4
+            + [{"text": "done", "usage": good}]
+            + [cheap_tool("read", {"node": "n1", "view": "source"}, **{**good, "output": SPEND_90_PCT})]
+            + [{"text": "done", "usage": good}] * 2
+        )
         self.assertEqual(healthy.json("summary.json")["cache"]["alarms"], 0)
         self.assertGreater(healthy.json("summary.json")["cache"]["reuse_pct"], 90)
 
@@ -317,6 +333,9 @@ class AutomaticChecksTests(unittest.TestCase):
                 cheap_tool("compile", {"drafts": [FIXTURE.read_text()], "check": "lean"}),
                 cheap_tool("read", {"node": "n1"}),
                 {"text": "done"},
+                cheap_tool("read", {"view": "map"}, output=SPEND_90_PCT),
+                {"text": "done"},
+                {"text": "done"},
             ]
         )
         requests = run.requests
@@ -384,7 +403,13 @@ class AutomaticChecksTests(unittest.TestCase):
             re.sub(r"(?m)^cross_version_wait_seconds: .*$", "cross_version_wait_seconds: 0", numbers.read_text())
         )
         run = self.fake(
-            [cheap_tool("compile", {"drafts": [FIXTURE.read_text()], "check": "lean"}), {"text": "done"}],
+            [
+                cheap_tool("compile", {"drafts": [FIXTURE.read_text()], "check": "lean"}),
+                {"text": "done"},
+                cheap_tool("read", {"view": "map"}, output=SPEND_90_PCT),
+                {"text": "done"},
+                {"text": "done"},
+            ],
             env={"ARENA_TEXT_DIR": str(texts)},
         )
         [compiled] = tool_results(run.requests[-1], "compile")
@@ -408,6 +433,9 @@ class AutomaticChecksTests(unittest.TestCase):
             [
                 cheap_tool("compile", {"drafts": [fixture], "check": "lean"}),
                 cheap_tool("compile", {"base": "n2", "drafts": [variant], "check": "lean"}),
+                {"text": "done"},
+                cheap_tool("read", {"view": "map"}, output=SPEND_90_PCT),
+                {"text": "done"},
                 {"text": "done"},
             ],
             session=True,
@@ -438,6 +466,9 @@ class AutomaticChecksTests(unittest.TestCase):
             [
                 cheap_tool("compile", {"drafts": [FIXTURE.read_text()], "check": "lean"}),
                 {"text": "done", "delay_ms": 150_000},
+                cheap_tool("read", {"view": "map"}, output=SPEND_90_PCT),
+                {"text": "done"},
+                {"text": "done"},
             ],
             env={"ARENA_TEXT_DIR": str(texts)},
             timeout=600,
@@ -490,7 +521,14 @@ class ToolArgumentUxTests(unittest.TestCase):
 
     def test_empty_and_null_arguments_report_valid_keys(self):
         run = self.fake(
-            [cheap_tool("compile", {}), {"tool_calls": [{"name": "compile", "arguments": None}]}, {"text": "done"}]
+            [
+                cheap_tool("compile", {}),
+                {"tool_calls": [{"name": "compile", "arguments": None}]},
+                {"text": "done"},
+                cheap_tool("read", {"view": "map"}, output=SPEND_90_PCT),
+                {"text": "done"},
+                {"text": "done"},
+            ]
         )
         results = tool_results(run.requests[-1], "compile")
         self.assertEqual(len(results), 2)
@@ -503,6 +541,9 @@ class ToolArgumentUxTests(unittest.TestCase):
             [
                 {"tool_calls": [{"name": "compile", "arguments": {}, "raw_arguments": '{"drafts": ["' + draft[:40]}]},
                 {"text": "done"},
+                cheap_tool("read", {"view": "map"}, output=SPEND_90_PCT),
+                {"text": "done"},
+                {"text": "done"},
             ]
         )
         results = tool_results(run.requests[-1], "compile")
@@ -510,7 +551,15 @@ class ToolArgumentUxTests(unittest.TestCase):
         self.assert_rejected_before_running(run, results)
 
     def test_a_misnamed_tool_gets_the_nearest_registered_name(self):
-        run = self.fake([cheap_tool("compil", {"drafts": [FIXTURE.read_text()]}), {"text": "done"}])
+        run = self.fake(
+            [
+                cheap_tool("compil", {"drafts": [FIXTURE.read_text()]}),
+                {"text": "done"},
+                cheap_tool("read", {"view": "map"}, output=SPEND_90_PCT),
+                {"text": "done"},
+                {"text": "done"},
+            ]
+        )
         [result] = tool_results(run.requests[-1], "compil")
         self.assertTrue(result["isError"])
         named = set(re.findall(r"\b(?:compile|goal|search|read|finish)\b", message_text(result)))
@@ -534,7 +583,13 @@ class AnthropicWireTests(unittest.TestCase):
         for thinking in ("low", "medium", "high"):
             with self.subTest(thinking=thinking):
                 run, wire = self.run_wire(
-                    thinking, [{"tool": "search", "input": {"queries": ["Core"]}}, {"text": "done"}]
+                    thinking,
+                    [
+                        {"tool": "search", "input": {"queries": ["Core"]}},
+                        {"tool": "read", "input": {"view": "map"}, "usage": {"output_tokens": 150_000}},
+                        {"text": "done"},
+                        {"text": "done"},
+                    ],
                 )
                 assert run.result is not None
                 self.assertEqual(wire.rejections, [], run.stdout[-800:])
@@ -552,6 +607,7 @@ class AnthropicWireTests(unittest.TestCase):
             "low",
             [
                 {"tool": "read", "input": {"node": "n1"}, "usage": {"output_tokens": 150_000}},
+                {"text": "done"},
                 {"text": "done"},
             ],
         )
@@ -577,7 +633,13 @@ class AnthropicWireTests(unittest.TestCase):
         pad = "P" * 20001
         text = "Z" * 20001
         wire = AnthropicWire(
-            [{"tool": "search", "input": {"queries": [pad]}}, {"text": text, "redacted": "opaque-signature-1"}],
+            [
+                {"tool": "search", "input": {"queries": [pad]}},
+                {"text": text, "redacted": "opaque-signature-1"},
+                {"tool": "read", "input": {"view": "map"}, "usage": {"output_tokens": 150_000}},
+                {"text": "done"},
+                {"text": "done"},
+            ],
             fail_first=1,
         )
         self.addCleanup(wire.close)
@@ -708,9 +770,11 @@ class ErrorLoopAndContinuationTests(unittest.TestCase):
         self.assertLess(len(run.requests), 20)
 
     def test_a_recovered_error_resets_the_streak_and_continuation_work_counts_normally(self):
-        steps = [{"error": "blip", "usage": {"input": 10, "output": 1}}, {"text": "first answer"}] + [
-            {"text": "more"}
-        ] * 8
+        steps = (
+            [{"error": "blip", "usage": {"input": 10, "output": 1}}, {"text": "first answer"}]
+            + [{"text": "more"}] * 8
+            + [cheap_tool("read", {"view": "map"}, output=SPEND_90_PCT), {"text": "more"}, {"text": "more"}]
+        )
         run = self.fake(steps, env={"ARENA_BACKOFF_MS": "10"})
         controls = [e for e in run.jsonl("cost-ledger.jsonl") if e["kind"] == "control"]
         self.assertNotEqual(controls[-1]["stop"], "error_loop")
@@ -727,6 +791,9 @@ class ErrorLoopAndContinuationTests(unittest.TestCase):
                 cheap_tool("read", {"node": "n1"}, output=50_000),
                 {"text": "finished"},
                 {"text": "more"},
+                cheap_tool("read", {"view": "map"}, output=SPEND_90_PCT),
+                {"text": "last"},
+                {"text": "last"},
             ],
             env={"ARENA_BACKOFF_MS": "10", "ARENA_AUTOCONTINUE": "1"},
         )
@@ -787,6 +854,9 @@ class ErrorLoopAndContinuationTests(unittest.TestCase):
                 cheap_tool("compile", {"drafts": [FIXTURE.read_text()], "check": "lean"}),
                 {"text": "done"},
                 {"text": "still done"},
+                cheap_tool("read", {"view": "map"}, output=SPEND_90_PCT),
+                {"text": "done"},
+                {"text": "done"},
             ],
             env={"ARENA_AUTOCONTINUE": "1"},
         )
@@ -795,7 +865,10 @@ class ErrorLoopAndContinuationTests(unittest.TestCase):
         submission = run.json("submission.json")
         self.assertEqual((submission["tokens"], submission["heartbeats"]), FIXTURE_SCORE[:2])
         points = [_points_left(m, o) for m, o in zip(FIXTURE_SCORE[:2], reference(NAME), strict=True)]
-        for message, spent in self.continuations(run):
+        # Only continuations sent before spend reached the final tenth; those after it are checked elsewhere.
+        before_tenth = [(m, s) for m, s in self.continuations(run) if 1 - s / cap > pct / 100]
+        self.assertGreaterEqual(len(before_tenth), 2)
+        for message, spent in before_tenth:
             with self.subTest(message=message):
                 self.assertGreater(1 - spent / cap, pct / 100)
                 self.assertNotRegex(message, STOP_TEXT)
@@ -849,24 +922,26 @@ class ErrorLoopAndContinuationTests(unittest.TestCase):
         for index in range(3):
             drafts = [statement + f" := by\n  {'skip; ' * (index * 2 + k)}sorry" for k in range(2)]
             turns += [cheap_tool("compile", {"drafts": drafts}), {"text": f"final {index}"}]
+        turns += [cheap_tool("read", {"node": "n1"}, output=SPEND_90_PCT), {"text": "final 3"}, {"text": "final 4"}]
         run = self.fake(turns, env={"ARENA_AUTOCONTINUE": "1"})
         controls = [row for row in run.jsonl("cost-ledger.jsonl") if row.get("kind") == "control"]
         self.assertTrue(controls, run.stdout)
         self.assertTrue(all(row["proof_attempt"] for row in controls[:3]), controls)
         self.assertFalse(any(row.get("stop") == "no_work_fallback" for row in controls[:3]), controls)
 
-    def test_an_identical_read_is_stubbed_and_cannot_extend_the_run(self):
-        # Before the final tenth a turn without work moves the focus instead of ending the run; the run
-        # ends only after MAX_NO_WORK_TURNS (control.ts) such turns in a row.
-        no_work_limit = 6
+    def test_an_identical_read_is_stubbed_and_no_work_ends_the_run_only_in_the_final_tenth(self):
+        # D42: before the final tenth a turn without work moves the focus and never ends the run;
+        # inside the final tenth two such turns in a row do.
+        early = 3
         read = cheap_tool("read", {"node": "n1"})
         script: list = [read, {"text": "first final"}]
-        for index in range(no_work_limit):
+        for index in range(early):
             script += [read, {"text": f"final {index}"}]
+        script += [cheap_tool("read", {"node": "n1"}, output=SPEND_90_PCT), {"text": "late final"}]
         script.append({"text": "must not be requested"})
         run = self.fake(script, env={"ARENA_AUTOCONTINUE": "1"})
         first, *repeats = tool_texts(run.requests[-1], "read")
-        self.assertEqual(len(repeats), no_work_limit)
+        self.assertEqual(len(repeats), early + 1)
         longest = max(first.splitlines(), key=len)
         for repeat in repeats:
             self.assertNotIn(longest, repeat)
@@ -874,9 +949,11 @@ class ErrorLoopAndContinuationTests(unittest.TestCase):
         # The first read is new context; every stubbed repeat is a turn without work.
         controls = [row for row in run.jsonl("cost-ledger.jsonl") if row.get("kind") == "control"]
         self.assertEqual(controls[-1]["stop"], "no_work_fallback")
-        self.assertEqual(controls[-1]["no_work_turns"], no_work_limit)
-        self.assertFalse(any(row.get("stop") == "no_work_fallback" for row in controls[:-1]))
-        self.assertEqual(len(run.requests), 2 * (no_work_limit + 1))
+        self.assertFalse(any(row.get("stop") for row in controls[:-1]))
+        cap = float(run.json("run-config.json")["limit_usd"])
+        settled = [row["spent_usd"] for row in run.jsonl("cost-ledger.jsonl") if row.get("kind") == "settle"]
+        self.assertGreaterEqual(settled[-1] / cap, 0.9)
+        self.assertEqual(len(run.requests), 2 * (early + 2))
 
 
 @slow
@@ -911,7 +988,10 @@ class OutageTests(unittest.TestCase):
 
     def test_recovered_transport_errors_do_not_end_the_run(self):
         run = self.run_fake(
-            [{"error": "brief outage"}] * 5 + [{"text": "recovered"}] + [{"text": "more"}] * 8,
+            [{"error": "brief outage"}] * 5
+            + [{"text": "recovered"}]
+            + [{"text": "more"}] * 8
+            + [cheap_tool("read", {"view": "map"}, output=SPEND_90_PCT), {"text": "more"}, {"text": "more"}],
             {
                 "ARENA_BACKOFF_MS": "10",
                 "ARENA_RETRY_BASE_MS": "10",
@@ -954,6 +1034,9 @@ class TruncationTests(unittest.TestCase):
             [
                 {"text": "reasoning before the cut", "stop_reason": "length", "usage": {"output": ceiling}},
                 {"text": "done"},
+                cheap_tool("read", {"node": "n1"}, output=SPEND_90_PCT),
+                {"text": "done"},
+                {"text": "done"},
             ],
             timeout=900,
         )
@@ -977,6 +1060,9 @@ class TruncationTests(unittest.TestCase):
                     "stop_reason": "length",
                     "usage": {"output": ceiling},
                 },
+                {"text": "done"},
+                cheap_tool("read", {"view": "map"}, output=SPEND_90_PCT),
+                {"text": "done"},
                 {"text": "done"},
             ],
             timeout=900,
@@ -1043,7 +1129,10 @@ class CompactionPolicyTests(unittest.TestCase):
     def script(self):
         usage = {"input": 14000, "output": 50, "cacheRead": 0, "cacheWrite": 0}
         steps = [{"tool_calls": [{"name": "read", "arguments": arguments}], "usage": usage} for arguments in self.READS]
-        return steps + [{"text": "done", "usage": {"input": 100, "output": 20}}] * 6
+        # The last read also carries the run into its final tenth (the reads spent ~13%; 133K output adds 80%),
+        # where two text turns end it (D42).
+        steps[-1] = {**steps[-1], "usage": {**usage, "output": 133_000}}
+        return steps + [{"text": "done", "usage": {"input": 100, "output": 20}}] * 2
 
     def fake(self, *extra) -> FakeRun:
         run = FakeRun(self.script())
@@ -1094,10 +1183,18 @@ class CompactionPolicyTests(unittest.TestCase):
             {"tool_calls": [{"name": "read", "arguments": arguments}], "usage": {"input": 3000, "output": 50}}
             for arguments in self.READS[:2]
         ]
-        steps += [
+        spend = {
+            "tool_calls": [{"name": "read", "arguments": {"node": "n1"}}],
+            "usage": {"input": 3000, "output": SPEND_90_PCT},
+        }
+        steps = [
+            *steps,
             {"text": "cut off", "stop_reason": "length", "usage": {"input": 3000, "output": ceiling}},
             {"text": "done", "usage": {"input": 100, "output": 20}},
-        ] + [{"text": "done"}] * 3
+            spend,
+            {"text": "done"},
+            {"text": "done"},
+        ]
         run = FakeRun(steps)
         self.runs.append(run)
         run.run("--compact-keep-tokens", "300")
