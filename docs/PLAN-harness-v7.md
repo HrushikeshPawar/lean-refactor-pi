@@ -655,6 +655,19 @@ four tools. Empty compactions are cancelled through Pi's `session_before_compact
 across two fixtures, real over-limit packet, literal lint with `# log` markers. Review fixes beyond the ticket:
 compile price rows name nodes by graph id (`n2 from n1`), not stored labels; `submission.json` keeps the stored label.
 
+**Built (ticket 17, 2026-10-14):** per-run blob store (system, skill, tools, packet by sha256 on each `request`
+row), `turn` and `request_id` on every journal and cost row, tool call id / request id / turn passed to the Python
+child through `AsyncLocalStorage` and stamped on ledger and event-log rows, `footer` and `delivered_text` on
+`tool_result` rows, and `arena replay <run> [--turn N | --node nX] [--raw] [--json] [--render v7]` (v6 runs
+included; v5 runs refuse). `--render v7` shows the packet, a node table, the map rebuilt from the ledger cut at that
+turn (live it is sent only when it changed), and the tool list gated by D42. The full v7 reply is not re-rendered:
+it re-reads the live ledger and its error lines run Lean; the reply the model got is shown verbatim in the next
+turn's messages. Review fixes: the splitter reads only the OpenAI-chat body that `openai-completions` sends (Luna
+had widened it for a shape only the test fake produced); the fake provider now sends that body; `tool_result.text`
+keeps the footer again (the trace judge compares it with the Langfuse span); the reference node shows as
+`unevaluated` with published numbers; `--json` index. Later: a price-rows section once the compile price row is
+a function.
+
 ## 5. Candidate graph v7: the agent writes, the harness keeps the books and steers (D7)
 
 ### 5a. What v6 shows
