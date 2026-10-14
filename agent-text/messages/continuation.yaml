@@ -1,3 +1,5 @@
-request_failed: "The request failed{cause_clause}. {facts}"
-turn_ended_with_text: "The turn ended with text and no tool call. {facts}"
+request_failed: "The request failed{cause_clause}.\n{facts}"
+turn_ended_with_text: "The turn ended with text and no tool call.\n{facts}"
 cause_clause: ": {cause}"
+points_left: "Points left per axis: tokens {tokens}, heartbeats {heartbeats}."
+finish_available: "The finish tool is available."

@@ -389,7 +389,7 @@ def structure_diagnostics(
         "goals": goals[:12],
         "error_headlines": [
             agent_text.render(
-                "replies/evaluate.diagnostic_headline",
+                "replies/check.diagnostic",
                 file_line=i["file_line"],
                 proof_line=i["proof_line"],
                 message=i["message"].splitlines()[0] if i["message"] else "",
@@ -806,7 +806,7 @@ def evaluate(name: str, proof: str, mode: str = "fast", known: dict | None = Non
         "measured_on": measured_on[0],
         "local_proxy": proxy,
         "score": None,
-        "calibration": text.render("replies/evaluate.calibration_pending"),
+        "calibration": "pending official Arena worker comparison",  # log: internal record # not-model-facing
     }
     if probe:
         result["scored"] = False

@@ -385,7 +385,7 @@ class StallCampaignTests(FakeRunCase):
         graph = Graph.from_history(campaign.events(self.directory), campaign._proof_reader(self.directory))
         with (
             patch.dict("os.environ", {"ARENA_STALL_M": "zero"}),
-            self.assertRaisesRegex(ValueError, "Stall threshold must be a positive integer"),
+            self.assertRaisesRegex(ValueError, "stall threshold must be a positive integer"),
         ):
             campaign._check_stall(self.directory, graph, set())
 
@@ -458,7 +458,7 @@ class StallCampaignTests(FakeRunCase):
             campaign.state("logic")["updates"][-1],
             {
                 "seq": next(index for index, event in enumerate(history) if event == focus),
-                "text": "Focus set to #2 (archive B, 5, 1 nodes in its region).",
+                "text": "Focus set to n2: archive cell B, score 5, 1 nodes in the cell.",
             },
         )
 
@@ -691,7 +691,7 @@ class StallCampaignTests(FakeRunCase):
         self.assertEqual(merge_event["operation"]["take"], [{"from": donor_id, "step": "s2"}])
 
     def test_bad_node_and_step_references_name_the_input(self):
-        with self.assertRaisesRegex(ValueError, "unknown node nope; use nK, #N, pN or a hash prefix"):
+        with self.assertRaisesRegex(ValueError, "nope is not a node id"):
             campaign.resolve_node_ref(campaign.events(self.directory), "nope")
         with (
             patch.object(campaign, "normalize_draft", side_effect=lambda _name, proof: proof),

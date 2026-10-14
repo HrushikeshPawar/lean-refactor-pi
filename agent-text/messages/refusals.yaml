@@ -1,2 +1,0 @@
-allowance: "${spent} of ${cap} spent, ${remaining} ({left}%) left. Stop condition: finish {finish_state}."
-axes: "Current best, saving vs the original and score points not yet earned per axis: tokens {tokens_saved} saved, {tokens_left} pts left; heartbeats {heartbeats_saved} saved, {heartbeats_left} pts left."

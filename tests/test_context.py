@@ -248,15 +248,10 @@ class ParseTests(unittest.TestCase):
 
     def test_manifest_reports_required_sections_and_certification_fails_closed(self):
         inventory = {"source": [], "dependency": [], "complete": True}
-        rendered = context.packet_manifest(
-            [("Pinned environment and candidate", ["Lean x"]), ("Source-named declarations", [])], inventory
-        )
-        self.assertEqual(rendered["sections"]["Pinned environment and candidate"], {"expected": True, "present": True})
-        self.assertFalse(
-            context.certify_manifest(rendered, ["Pinned environment and candidate", "Elaborated proof dependencies"])[
-                "certified"
-            ]
-        )
+        pinned = context.REQUIRED_SECTIONS[0]
+        rendered = context.packet_manifest([(pinned, ["Lean x"]), ("Source-named declarations", [])], inventory)
+        self.assertEqual(rendered["sections"][pinned], {"expected": True, "present": True})
+        self.assertFalse(context.certify_manifest(rendered, [pinned, "Source-named declarations"])["certified"])
 
     def test_incomplete_output_is_not_trusted(self):
         self.assertFalse(
@@ -406,26 +401,30 @@ class LibrarySectionTests(unittest.TestCase):
         parsed = context.parse_context(output, 0, 1)
         self.assertEqual([r["name"] for r in parsed["library"]], ["L.best", "L.next"])
         lines = context._library_section(parsed)
-        self.assertTrue(lines[1].startswith("1. decl:L.best · Mathlib.X · L.best :"))
-        self.assertNotIn("mentions", lines[1])
-        self.assertTrue(lines[2].startswith("2. decl:L.next"))
+        self.assertTrue(lines[0].startswith("1. decl:L.best · Mathlib.X · L.best :"))
+        self.assertNotIn("mentions", lines[0])
+        self.assertTrue(lines[1].startswith("2. decl:L.next"))
 
-    def test_ranked_library_keeps_names_already_used_by_the_reference(self):
+    def test_names_the_reference_already_uses_are_skipped_and_empty_is_safe(self):
         parsed = {
             "library": [self.record("L.used", 9), self.record("L.new", 8)],
             "source": [{"name": "L.used"}],
             "dependency": [],
         }
         lines = context._library_section(parsed)
-        self.assertIn("1. decl:L.used", lines[1])
-        self.assertIn("2. decl:L.new", lines[2])
+        self.assertFalse(any("L.used" in line for line in lines))
+        self.assertIn("1. decl:L.new", lines[0])
         self.assertEqual(context._library_section({}), [])
+        self.assertEqual(
+            context._library_section({"library": [self.record("L.used", 9)], "source": [{"name": "L.used"}]}), []
+        )
 
-    def test_section_keeps_top_sixty_and_is_shed_before_the_goals(self):
+    def test_section_respects_line_and_character_budgets_and_is_shed_before_the_goals(self):
         parsed = {"library": [self.record(f"L.n{i}", 9 - i / 100, sig="L.n : " + "t " * 400) for i in range(60)]}
         lines = context._library_section(parsed)
-        self.assertEqual(len(lines) - 1, context.LIMITS["library"])
-        self.assertTrue(all(len(line) < context.LIMITS["library_chars"] + 120 for line in lines[1:]))
+        self.assertLessEqual(len(lines), context.LIMITS["library"])
+        self.assertLessEqual(sum(len(line) + 1 for line in lines), context.LIMITS["library_budget"])
+        self.assertTrue(all(len(line) < context.LIMITS["library_chars"] + 120 for line in lines))
         parts = [
             ("Head", ["keep"]),
             (context.template("packet/sections.titles.goals").strip(), ["goal"]),

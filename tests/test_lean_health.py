@@ -228,7 +228,7 @@ class CampaignRecordingTests(unittest.TestCase):
                 campaign._append(directory, {"kind": "probe", "proof_id": "p", "result": check("timeout")["result"]})
             campaign._check_breaker(directory)
             self.assertIsNotNone(lh.tripped(directory))
-            with self.assertRaisesRegex(ValueError, "stopped this run"):
+            with self.assertRaisesRegex(ValueError, "run has stopped"):
                 campaign._refuse_if_tripped(directory)
             with mock.patch.object(campaign, "events", return_value=[]):
                 self.assertEqual(campaign.autocheck.__name__, "autocheck")  # smoke: importable with the breaker

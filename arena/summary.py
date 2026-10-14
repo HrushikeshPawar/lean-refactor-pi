@@ -313,7 +313,7 @@ def _edit_classes(ledger: list[dict], directory: Path) -> dict:
         "local": counts["local"],
         "structural": counts["structural"],
         "unclassified": counts["unclassified"],
-        "rule": f"local = at most {LOCAL_EDIT_MAX_LINES} changed lines against the first parent",
+        "rule": f"local = at most {LOCAL_EDIT_MAX_LINES} changed lines against the first parent",  # log: operator run summary
     }
 
 
@@ -572,7 +572,7 @@ def lean_text(lean: dict | None) -> str:
     gate = lean.get("gate")
     return (
         "lean: "
-        + f"{lean['checks']} model-lane checks, p50 {sec(lean['p50_seconds'])} p95 {sec(lean['p95_seconds'])}, "
+        + f"{lean['checks']} model-lane checks, p50 {sec(lean['p50_seconds'])} p95 {sec(lean['p95_seconds'])}, "  # log: operator run summary
         f"timeout rate {round(100 * lean['timeout_rate'])}% ({lean['timeouts']}), warm-kept {lean['warm_kept']}, "
         f"cold path {lean['cold_path']}"
         + (f"; gate {gate['verdict']} limit {gate['timeout']}s" if gate else "")
@@ -583,10 +583,11 @@ def lean_text(lean: dict | None) -> str:
 def route_depth_text(depth: dict | None) -> str:
     if not depth:
         return "route depth: no route events"
-    head = f"route depth: {depth['credited_routes']} credited routes, {depth['explored_routes']} explored"
+    head = f"route depth: {depth['credited_routes']} credited routes, {depth['explored_routes']} explored"  # log: operator run summary
     if depth.get("new_state_share") is None:
         return head + "; no attempts on a route yet"
-    return head + f"; {round(100 * depth['new_state_share'])}% of attempts produced a goal state new to their route"
+    share = round(100 * depth["new_state_share"])
+    return head + f"; {share}% of attempts produced a goal state new to their route"  # log: operator run summary
 
 
 def render_text(summary: dict) -> str:
@@ -599,37 +600,37 @@ def render_text(summary: dict) -> str:
     kinds = ", ".join(f"{k} {v['requests']}×${v['usd']:.4f}" for k, v in sorted(cost["by_turn_type"].items()))
     verified = summary["progress"].get("best_verified_candidate")
     verified_line = (
-        f"best verified candidate: {verified['candidate']} proxy {verified['proxy']} "
+        f"best verified candidate: {verified['candidate']} proxy {verified['proxy']} "  # log: operator run summary
         f"({verified['tokens']} tok, {verified['heartbeats']} HB)"
         if verified
-        else "best verified candidate: none (original proof baseline stands)"
+        else "best verified candidate: none (original proof baseline stands)"  # log: operator run summary
     )
     return (
         "\n".join(
             [
                 f"{summary['run_id']}: {summary['theorem']} · {summary['model']} · thinking {summary['thinking']} · stop {summary['stop_reason']}",
                 (
-                    f"cost ${cost['spent_usd']:.4f} of ${cost['limit_usd']} limit "
+                    f"cost ${cost['spent_usd']:.4f} of ${cost['limit_usd']} limit "  # log: operator run summary
                     f"(remaining ${cost['remaining_usd']:.4f}; overshoot ${cost['overshoot_usd']:.4f}) over "
                     f"{cost['requests']} requests / {summary['tools']['results']} tool results "
                     f"({cost['retries']} retries); {kinds}; bookkeeping+rejected {cost['bookkeeping_and_rejected_pct']}%"
                 ),
                 *(
                     [
-                        f"SPEND GAP: ledger settled ${cost['reconciliation']['ledger_settled_usd']:.4f}, Pi session "
+                        f"SPEND GAP: ledger settled ${cost['reconciliation']['ledger_settled_usd']:.4f}, Pi session "  # log: operator run summary
                         f"${cost['reconciliation']['session_usd'] or 0:.4f}, gap ${cost['reconciliation']['gap_usd']:.4f}"
                     ]
                     if cost["reconciliation"]["gap_usd"]
                     else []
                 ),
                 lean_text(summary.get("lean")),
-                f"cache hit rate {cache['reuse_pct']}% (recent {cache['reuse_pct_recent_10']}%), cost savings {cache['savings_pct']}%, alarms {cache['alarms']}",
+                f"cache hit rate {cache['reuse_pct']}% (recent {cache['reuse_pct_recent_10']}%), cost savings {cache['savings_pct']}%, alarms {cache['alarms']}",  # log: operator run summary
                 verified_line,
-                f"per-axis highs: tokens {pick('tokens')}, heartbeats {pick('heartbeats')}, proxy {pick('proxy')}, "
+                f"per-axis highs: tokens {pick('tokens')}, heartbeats {pick('heartbeats')}, proxy {pick('proxy')}, "  # log: operator run summary
                 f"estimated proxy {pick('estimated_proxy')}",
-                f"evaluations {summary['evaluations']}, probes {summary['probes']}, edits "
+                f"evaluations {summary['evaluations']}, probes {summary['probes']}, edits "  # log: operator run summary
                 f"structural {summary['edits']['structural']} / local {summary['edits']['local']}",
-                f"post-best spend ${cost['spent_after_best_usd']:.4f} over {cost['requests_after_best']} requests; "
+                f"post-best spend ${cost['spent_after_best_usd']:.4f} over {cost['requests_after_best']} requests; "  # log: operator run summary
                 "routes tried: " + routes_detail_text(summary.get("routes") or []),
                 route_depth_text(summary.get("route_progress")),
                 "harness merge check: " + merge_text(summary.get("merge_report") or []),

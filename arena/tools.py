@@ -750,9 +750,18 @@ def search_tool(theorem: str, run_id: str, request: dict) -> dict:
                 "dropped": row.get("dropped"),
             }
         )
-    campaign._append(
-        campaign.run_dir(run_id), {"kind": "search", "hits": [hit for item in items for hit in item.get("hits", [])]}
-    )
+    # The ledger keeps what the compaction memory needs from each hit, not the ranking details.
+    hits = [
+        {
+            "name": hit.get("name", ""),
+            "handle": hit.get("handle") or f"decl:{hit.get('name', '')}",
+            "module": hit.get("module", ""),
+            "signature": hit.get("signature", ""),
+        }
+        for item in items
+        for hit in item.get("hits", [])
+    ]
+    campaign._append(campaign.run_dir(run_id), {"kind": "search", "hits": hits})
     return reply.attach_context(run_id, reply.reply(items=items, handles=handles), include_map=False)
 
 

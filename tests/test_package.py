@@ -163,13 +163,13 @@ class SelectionTests(Fixture):
             self.run_dir("p-" + word[:4], proof=STATEMENTS["A.one"] + f" := by\n  {word}\n")
         got = self.reasons("p-sorr", "p-admi", "p-axio", "p-nati")
         self.assertEqual(len(got), 4)
-        self.assertTrue(all("FORBIDDEN" in r[0] for r in got.values()), got)
+        self.assertTrue(all("Forbidden construct" in r[0] for r in got.values()), got)
 
 
 class ManifestAndHashTests(Fixture):
     def test_statement_mismatch_and_unknown_name(self):
         self.run_dir("changed", proof="theorem one : 1 = 2 := by\n  rfl\n")
-        self.assertIn("STATEMENT_MODIFIED", self.reasons("changed")["changed"][0])
+        self.assertIn("statement differs", self.reasons("changed")["changed"][0])
         self.run_dir("other", theorem="A.one")
         manifest = package.load_manifest(self.manifest)
         del manifest["A.one"]

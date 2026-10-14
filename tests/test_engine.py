@@ -42,14 +42,14 @@ class EvaluatorBoundaryTests(unittest.TestCase):
         self.assertEqual(path.name, "strata-v4.29.1")
 
     def test_forbidden_and_statement_changes_fail_before_compile(self):
-        with self.assertRaisesRegex(ValueError, "FORBIDDEN: sorry"):
+        with self.assertRaisesRegex(ValueError, "Forbidden construct: sorry"):
             validate_proof(self.row, self.row["statement"] + " := by sorry")
-        with self.assertRaisesRegex(ValueError, "STATEMENT_MODIFIED"):
+        with self.assertRaisesRegex(ValueError, "statement differs"):
             validate_proof(self.row, "theorem Wrong := by trivial")
         drifted = self.row["statement"].replace("ks' vs' σ₁", "ks vs σ₁", 1) + " := by trivial"
-        with self.assertRaisesRegex(ValueError, r"first difference on statement line \d+: expected"):
+        with self.assertRaisesRegex(ValueError, r"at statement line \d+: expected"):
             validate_proof(self.row, drifted)
-        with self.assertRaisesRegex(ValueError, "EXTRA_COMMAND"):
+        with self.assertRaisesRegex(ValueError, "second top-level command"):
             validate_proof(self.row, self.row["src"] + "\ntheorem Extra : True := by trivial")
 
     def test_fast_checks_one_version_and_full_checks_all(self):
@@ -190,7 +190,7 @@ class DiagnosticMappingTests(unittest.TestCase):
     def test_probe_is_the_only_mode_that_accepts_sorry(self):
         row = problem(NAME)
         draft = row["statement"] + " := by\n  sorry"
-        with self.assertRaisesRegex(ValueError, "FORBIDDEN: sorry"):
+        with self.assertRaisesRegex(ValueError, "Forbidden construct: sorry"):
             validate_proof(row, draft)
         self.assertGreater(validate_proof(row, draft, allow_sorry=True), 0)
 
@@ -224,7 +224,7 @@ class LocateSourceTests(unittest.TestCase):
             "theorem t :  True := trivial\ntheorem t : True  := trivial\n",  # two loose
             "theorem u : True := trivial\n",
         ):  # none
-            with self.assertRaisesRegex(ValueError, "FILE_MODIFIED: pinned theorem is absent or ambiguous on v9"):
+            with self.assertRaisesRegex(ValueError, "pinned theorem is absent or ambiguous on v9"):
                 locate_source(source, original, "v9")
 
 

@@ -1,2 +1,0 @@
-diagnostic_headline: "line {file_line} (proof line {proof_line}): {message}"
-calibration_pending: "pending official Arena worker comparison"

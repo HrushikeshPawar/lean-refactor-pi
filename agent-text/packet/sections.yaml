@@ -1,5 +1,5 @@
 titles:
-  pinned: "Pinned environment and candidate"
+  pinned: "Pinned environment"
   types: "Definitions of project types and predicates in the statement"
   scope: "Scope at the theorem (namespace, open, variable, universe in effect before the statement)"
   reference: "Original proof and step prices ({count} tokens)"
@@ -10,7 +10,7 @@ titles:
   library: "Imported declarations (ranked)"
   earlier: "Earlier declarations from this file (ranked)"
 required:
-  environment: "Pinned environment and candidate"
+  environment: "Pinned environment"
   source: "Source-named declarations"
   dependencies: "Elaborated proof dependencies"
   reference: "Original proof and step prices"
@@ -20,6 +20,7 @@ fixed:
   pins: "Lean toolchain and source revisions: {pins}"
   pin: "Lean {version} / source revision {commit}"
   imports: "Available imports: {imports}"
+  none: "none"
   goal: "before {step}: {text}"
   goal_unavailable: "(unavailable)"
   type_construct: "decl:{name} [{kind}] {signature}\n{body}"

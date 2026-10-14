@@ -45,3 +45,8 @@ export function objectToolArguments(messages: readonly unknown[] | undefined): n
   }
   return fixed;
 }
+
+/** True when a compaction would summarize nothing: its summary request is skipped. */
+export function nothingToSummarize(preparation: { messagesToSummarize?: readonly unknown[]; turnPrefixMessages?: readonly unknown[] }): boolean {
+  return !preparation.messagesToSummarize?.length && !preparation.turnPrefixMessages?.length;
+}

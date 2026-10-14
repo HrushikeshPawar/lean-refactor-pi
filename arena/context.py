@@ -25,10 +25,10 @@ from arena.engine import (
     run_lean,
     versions,
 )
-from arena.prices import fmt_hb, snippet_tokens, step_table
 from arena.prices import rates as price_rates
+from arena.prices import snippet_tokens, step_table
 from arena.profile import MAX_DEPTH, heartbeat_floor, profile
-from arena.scoring import exchange_rates
+from arena.scoring import REFERENCE_SCORE, exchange_rates
 from arena.scoring import reference as scoring_reference
 from arena.steps import split_steps
 from arena.text import numbers, template
@@ -59,10 +59,11 @@ LIMITS = {
         "local_type_chars",
     )
 }
+DEPENDENCIES_TITLE = template("packet/sections.required.dependencies").strip()
 REQUIRED_SECTIONS = (
     template("packet/sections.required.environment").strip(),
     template("packet/sections.required.source").strip(),
-    template("packet/sections.required.dependencies").strip(),
+    DEPENDENCIES_TITLE,
     template("packet/sections.required.reference").strip(),
 )
 
@@ -453,6 +454,8 @@ def _used_section(context: dict) -> list[str]:
 
 def _dependency_section(context: dict) -> list[str]:
     helpers, counts, named = _extra_dependencies(context)
+    if not helpers:
+        return []
     lines = [template("packet/sections.fixed.dependency_intro").strip()]
     lines.extend(render_text("packet/sections.fixed.dependency_name", name=i["name"]) for i in helpers)
     lines += [
@@ -517,8 +520,14 @@ def _imports(row: dict) -> list[str]:
 
 def packet_manifest(parts: list[tuple[str, list[str]]], inventory: dict) -> dict:
     present = {title for title, body in parts if body}
+    # The dependencies section exists only when the proof uses helpers beyond the source-named declarations.
+    helpers = bool(_extra_dependencies(inventory)[0])
     sections = {
-        title: {"expected": True, "present": any(p.startswith(title) for p in present)} for title in REQUIRED_SECTIONS
+        title: {
+            "expected": helpers or title != DEPENDENCIES_TITLE,
+            "present": any(p.startswith(title) for p in present),
+        }
+        for title in REQUIRED_SECTIONS
     }
     return {
         "schema": "arena-kickoff-manifest/v1",
@@ -532,7 +541,12 @@ def packet_manifest(parts: list[tuple[str, list[str]]], inventory: dict) -> dict
 
 def certify_manifest(manifest: dict, expected: list[str] | None = None) -> dict:
     required = expected or list(REQUIRED_SECTIONS)
-    missing = [name for name in required if not manifest.get("sections", {}).get(name, {}).get("present")]
+    sections = manifest.get("sections", {})
+    missing = [
+        name
+        for name in required
+        if sections.get(name, {}).get("expected", True) and not sections.get(name, {}).get("present")
+    ]
     reasons = ["context extraction incomplete"] if not manifest.get("complete") else []
     if missing:
         reasons.append("required sections absent: " + ", ".join(missing))
@@ -684,11 +698,14 @@ LIBRARY_TITLE = template("packet/sections.titles.library").strip()
 
 
 def _library_section(context: dict) -> list[str]:
-    """The wrapper's ranked imported declarations, with signatures."""
-    records = [item for item in context.get("library", []) if item.get("sig")]
-    if not records:
-        return []
-    lines = [template("packet/library").strip()]
+    """Imported theorems ranked by the wrapper (rare constants shared with the statement, the goals and the
+    declarations the source names), minus those the reference proof already uses; fixed line and character budget."""
+    known = {item["name"] for item in context.get("source", [])} | {
+        item["name"] for item in context.get("dependency", [])
+    }
+    records = [item for item in context.get("library", []) if item["name"] not in known and item.get("sig")]
+    lines: list[str] = []
+    used = 0
     for rank, item in enumerate(records[: LIMITS["library"]], 1):
         line = render_text(
             "packet/sections.fixed.library_line",
@@ -697,8 +714,11 @@ def _library_section(context: dict) -> list[str]:
             module=item["module"],
             signature=_clip(_readable(_one_line(item["sig"])), LIMITS["library_chars"]),
         )
+        if used + len(line) + 1 > LIMITS["library_budget"]:
+            break
         lines.append(line)
-    return lines if len(lines) > 1 else []
+        used += len(line) + 1
+    return lines
 
 
 def _join_sections(sections: list[tuple[str, list[str]]]) -> str:
@@ -730,41 +750,10 @@ def _fit(parts: list[tuple[str, list[str]]], limit: int) -> str:
 
 
 def _reference_price_table(table: dict) -> list[str]:
-    total = table["total"]
-    lines = [template("packet/price-table.original_heading").strip(), template("packet/price-table.legend").strip()]
-    lines.extend(
-        render_text(
-            "packet/price-table.original_row",
-            step=row["id"],
-            lines=f"{row['first_line']}-{row['last_line']}",
-            tokens=row["tokens"],
-            self_hb=fmt_hb(row["self_hb"]),
-            incl_hb=fmt_hb(row["incl_hb"]),
-            versions=total["versions"],
-            pts_if_gone=f"{row['pts_if_gone']:+.2f}",
-            text=row["text"],
-        )
-        for row in table["rows"]
-    )
-    lines.append(
-        render_text(
-            "packet/price-table.total",
-            tokens=total["tokens"],
-            heartbeats=fmt_hb(total["heartbeats"]),
-            versions=total["versions"],
-            proxy=f"{total['proxy']:.2f}",
-        )
-    )
-    rates = table["rates"]
-    lines.append(
-        render_text(
-            "packet/price-table.rates",
-            pts_token=f"{rates['points_per_token']:.3f}",
-            pts_hb=f"{rates['points_per_1k_hb']:.3f}",
-            pts_version=f"{rates['points_per_version']:.2f}",
-        )
-    )
-    return lines
+    """The step table (one renderer with the read view's prices) and its column legend; the rates are in Scoring."""
+    from arena.campaign import render_price_table
+
+    return [*render_price_table(table).splitlines(), *template("packet/price-table.legend").strip().splitlines()]
 
 
 def packet_sections(name: str, *, cache_only: bool = False) -> list[tuple[str, str]]:
@@ -804,7 +793,7 @@ def packet_sections(name: str, *, cache_only: bool = False) -> list[tuple[str, s
         prof.get("measured_total"),
         f"{len(targets)}/{len(targets)}",
     )
-    table["total"]["proxy"] = round(100 / 3, 2)
+    table["total"]["proxy"] = REFERENCE_SCORE
     price_lines = _reference_price_table(table)
     note = (
         ""
@@ -834,7 +823,10 @@ def packet_sections(name: str, *, cache_only: bool = False) -> list[tuple[str, s
             [
                 source_line,
                 render_text("packet/sections.fixed.pins", pins=pins),
-                render_text("packet/sections.fixed.imports", imports=", ".join(_imports(row)) or "(none reported)"),
+                render_text(
+                    "packet/sections.fixed.imports",
+                    imports=", ".join(_imports(row)) or template("packet/sections.fixed.none").strip(),
+                ),
             ],
         ),
         (titles["scope"], _scope_section(row)),

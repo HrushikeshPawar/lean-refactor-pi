@@ -1,4 +1,5 @@
-import { numbers, render } from "./text.ts";
+import { finishAllowed, spendFooter } from "./spend.ts";
+import { render } from "./text.ts";
 
 type Metrics = { tokens?: number | null; heartbeats?: number | null } | null | undefined;
 
@@ -6,34 +7,27 @@ export function continuationKey(failed: boolean): "request_failed" | "turn_ended
   return failed ? "request_failed" : "turn_ended_with_text";
 }
 
-function saved(reference: number | null | undefined, value: number | null | undefined): number | null {
-  return typeof reference === "number" && reference > 0 && typeof value === "number"
-    ? Math.round(100 * (1 - value / reference)) : null;
+// Points not yet earned on one axis: a third of the percentage still missing against the reference.
+function pointsLeft(reference: number | null | undefined, value: number | null | undefined): string {
+  if (typeof reference !== "number" || reference <= 0 || typeof value !== "number") return "unknown";
+  return ((100 * value / reference) / 3).toFixed(1);
 }
 
-async function allowanceFacts(usedPct: number, remainingUsd: number, capUsd: number, baseline: Metrics, best: Metrics) {
-  const left = (value: number | null) => value === null ? "unknown" : `${((100 - value) / 3).toFixed(1)}`;
-  const tokensSaved = saved(baseline?.tokens, best?.tokens);
-  const heartbeatsSaved = saved(baseline?.heartbeats, best?.heartbeats);
-  const remainingPct = capUsd > 0 ? Math.min(100, Math.max(0, 100 * remainingUsd / capUsd)) : 0;
-  const finishFraction = (await numbers()).finish_remaining_pct / 100;
-  const spend = await render("messages/refusals.allowance", {
-    spent: (capUsd * Math.min(100, Math.max(0, usedPct)) / 100).toFixed(2), cap: capUsd,
-    remaining: remainingUsd.toFixed(2), left: remainingPct.toFixed(1),
-    finish_state: remainingUsd <= capUsd * finishFraction ? "available" : "unavailable",
-  });
-  const axes = await render("messages/refusals.axes", {
-    tokens_saved: tokensSaved === null ? "unknown" : `${tokensSaved}%`, tokens_left: left(tokensSaved),
-    heartbeats_saved: heartbeatsSaved === null ? "unknown" : `${heartbeatsSaved}%`, heartbeats_left: left(heartbeatsSaved),
-  });
-  return `${spend} ${axes}`;
+// Spend and points left per axis. Finish availability is stated only once finish is offered, by the same
+// predicate that puts the finish tool in the tool list.
+async function continuationFacts(spentUsd: number, limitUsd: number, baseline: Metrics, best: Metrics) {
+  const facts = [await spendFooter(spentUsd, limitUsd), await render("messages/continuation.points_left", {
+    tokens: pointsLeft(baseline?.tokens, best?.tokens ?? baseline?.tokens),
+    heartbeats: pointsLeft(baseline?.heartbeats, best?.heartbeats ?? baseline?.heartbeats),
+  })];
+  if (finishAllowed(spentUsd, limitUsd).allowed) facts.push(await render("messages/continuation.finish_available"));
+  return facts.join("\n");
 }
 
 export async function continuationPush(args: {
-  failed: boolean; cause?: string; usedPct: number; remainingUsd: number; capUsd: number;
-  baseline: Metrics; best: Metrics;
+  failed: boolean; cause?: string; spentUsd: number; limitUsd: number; baseline: Metrics; best: Metrics;
 }): Promise<string> {
-  const facts = await allowanceFacts(args.usedPct, args.remainingUsd, args.capUsd, args.baseline, args.best);
+  const facts = await continuationFacts(args.spentUsd, args.limitUsd, args.baseline, args.best);
   const values = { facts,
     ...(args.failed ? { cause_clause: args.cause ? await render("messages/continuation.cause_clause", { cause: args.cause }) : "" } : {}) };
   return render(`messages/continuation.${continuationKey(args.failed)}`, values);

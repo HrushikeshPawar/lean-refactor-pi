@@ -1,1 +1,1 @@
-stall_focus: "Focus set to {label} (archive {letter}, {score}, {visits} nodes in its region)."
+stall_focus: "Focus set to {label}: archive cell {letter}, score {score}, {visits} nodes in the cell."

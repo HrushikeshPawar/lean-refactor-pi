@@ -83,17 +83,11 @@ def memory(run_id: str, spent_usd: float | None = None, cap_usd: float | None = 
     best = None
     if best_node:
         theorem = history[0]["theorem"]
-        table = campaign.price_table(theorem, run_id, best_node.id)["total"]
+        # The best node's step rows and totals, from the same renderer as the packet and the read view.
         best = {
             "id": best_node.id,
             "proof": best_node.proof_text,
-            "price": render(
-                "messages/compaction-memory.price",
-                tokens=table["tokens"],
-                heartbeats=table["heartbeats"],
-                versions=table["versions"],
-                score=f"{best_node.score:.2f}",
-            ),
+            "price": campaign.price_table(theorem, run_id, best_node.id)["text"],
         }
     library: dict[str, dict] = {}
     if history:
@@ -130,7 +124,8 @@ def memory(run_id: str, spent_usd: float | None = None, cap_usd: float | None = 
                     }
     state = {
         "best": best,
-        "map": reply._map_lines(graph_map),
+        # Open holes are listed once, in their own section with their goals, not again in the map.
+        "map": reply._map_lines({**graph_map, "open": []}),
         "library": list(library.values()),
         "reads": history,
         "holes": graph_map.get("open", []),

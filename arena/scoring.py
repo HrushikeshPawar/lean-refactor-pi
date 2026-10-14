@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from arena import vendor
 
+# The score of the reference proof itself: no reduction on either axis and full compatibility.
+REFERENCE_SCORE = round(100 / 3, 2)
+
 
 def reference(name: str) -> tuple[int, int]:
     """Published denominators (proof tokens, heartbeats) for one benchmark row."""
@@ -94,7 +97,7 @@ def metrics(
         },
     }
     value = round((token_pct + heartbeat_pct + compat_pct) / 3, 2)
-    reference_proxy = round(100 / 3, 2)
+    reference_proxy = REFERENCE_SCORE
     if full:
         block["proxy"] = local_proxy(name, tokens, heartbeats, compat)
         block["deltas"] = {

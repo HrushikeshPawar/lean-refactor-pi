@@ -6,6 +6,11 @@ license: MIT
 
 # Arena task
 
-Replace the supplied proof with one that earns more points while compiling on the listed toolchains. Scoring is mechanical; the packet gives its rule and measured rates. The harness records the graph and measurements. The available tools are `compile`, `goal`, `search`, `read`, and `finish`; their descriptions define their inputs and replies.
-
-Nodes have identifiers nN; top-level steps have identifiers sK; an open hole is nN.hK. A closed node compiles, a sketch has open holes, and a broken node has failed compilation.
+Replace the proof of one theorem with a proof that scores more points and compiles on every listed Lean version.
+The packet states the scoring rule and this theorem's rates.
+The tools are `compile`, `goal`, `search` and `read`; each description states its inputs and replies.
+The harness files every compiled proof as a node of a graph.
+Ids: node nN, top-level step sK, open hole nN.hK.
+Status closed: the node compiles with no open hole.
+Status sketch: the node compiles with open holes.
+Status broken: the node does not compile.

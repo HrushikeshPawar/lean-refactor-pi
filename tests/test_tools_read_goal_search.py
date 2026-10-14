@@ -122,6 +122,33 @@ class ReadGoalSearchTests(CascadeToolCase):
         self.assertTrue(result["items"][1]["ok"])
         self.assertNotIn("tokens", result["items"][1])
 
+    def test_search_event_keeps_only_name_handle_module_and_signature_per_hit(self):
+        hit = {
+            "name": "Nat.add_comm",
+            "handle": "decl:Nat.add_comm",
+            "signature": "Nat.add_comm : ∀ (n m : ℕ), n + m = m + n",
+            "module": "Init.Data.Nat.Basic",
+            "line": 7,
+            "why": "exact",
+            "score": 0.9,
+            "tokens": 3,
+        }
+        miss = {"query": "Nat.zz", "hits": [], "suggestions": ["Nat.zero"]}
+        with patch(
+            "arena.tools.search.search",
+            return_value={"queries": [{"query": "Nat.add", "hits": [hit, {**hit, "name": "Nat.mul_comm"}]}, miss]},
+        ):
+            tools.search_tool("T", "logic", {"queries": ["Nat.add", "Nat.zz"]})
+        events = [event for event in campaign.events(self.directory) if event.get("kind") == "search"]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(
+            events[0]["hits"],
+            [
+                {key: hit[key] for key in ("name", "handle", "module", "signature")},
+                {**{key: hit[key] for key in ("handle", "module", "signature")}, "name": "Nat.mul_comm"},
+            ],
+        )
+
     def test_search_miss_renders_suggestions(self):
         with patch(
             "arena.tools.search.search",

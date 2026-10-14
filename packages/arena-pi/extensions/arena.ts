@@ -9,7 +9,7 @@ import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { nearestToolName, normalizeToolArguments, requireToolArguments } from "./toolnames.ts";
 import { DeltaChain } from "./journal.ts";
-import { objectToolArguments, ResultTrimmer } from "./trim.ts";
+import { nothingToSummarize, objectToolArguments, ResultTrimmer } from "./trim.ts";
 import { continuationPush } from "./rules.ts";
 import { cacheAlarm, cacheHitPct, callCost, finishAllowed, limitReached, limitUsd, spendFooter, toolsForSpend } from "./spend.ts";
 import { numbers as textNumbers, render as renderText } from "./text.ts";
@@ -86,7 +86,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
   // Every tool uses its schema keys for malformed-argument errors and cleaned arguments.
   const registerTool = async (tool: any) => {
     const validKeys = Object.keys(tool.parameters.properties ?? {});
-    const missingError = await renderText("messages/errors.arguments_missing", { valid: validKeys.join(", ") || "none" });
+    const missingError = await renderText("messages/errors.empty_arguments", { valid: validKeys.join(", ") || "none" });
     // Normalized before Pi's schema validation, so an empty optional enum ("view": "") or a stringified list passes.
     return pi.registerTool({ ...tool,
     prepareArguments: (args: unknown) => normalizeToolArguments(requireToolArguments(args, missingError), tool.parameters),
@@ -377,19 +377,28 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     trimmer.forget();
     void injectMemory();
   });
-  pi.on("session_compact_failed", () => {
+  pi.on("session_compact_failed", event => {
     pendingRequest = undefined;
+    // A cancelled compaction (the empty-history skip in session_before_compact, or an abort) is not a failure.
+    if (event.aborted) return;
     if (costJournal) appendCost({ kind: "compaction_failed" });
     console.error("[arena-compaction-alarm] Compaction failed; context was not replaced."); // log: operator alarm. // not-model-facing
   });
   pi.on("session_before_compact", event => {
+    // Nothing to summarize: no summary request is sent, and the skip is logged with an alarm line.
+    if (nothingToSummarize(event.preparation)) {
+      if (costJournal) appendCost({ kind: "compaction_skipped", reason: "empty_history" });
+      console.error("[arena-compaction-alarm] Compaction skipped: no messages to summarize."); // log: operator alarm. // not-model-facing
+      return { cancel: true };
+    }
     const fixed = objectToolArguments(event.preparation.messagesToSummarize) + objectToolArguments(event.preparation.turnPrefixMessages);
     if (fixed) appendTrace({ kind: "compaction_repair", null_tool_arguments: fixed });
   });
 
-  // After a compaction the harness restates its own record of the run (best verified candidate, routes,
-  // latest failures, allowance) as one hidden message. Built from the ledger, never by the model,
-  // and sent only here, so it is not repeated every turn. Pi queues it behind the turn's tool results.
+  // After a compaction the harness restates its own record of the run (best node with its price, the map,
+  // declarations the best node uses, what was read, open holes) as one hidden message. Built from the ledger,
+  // never by the model, and sent only here, so it is not repeated every turn. Pi queues it behind the turn's
+  // tool results.
   async function injectMemory() {
     if (!active || !runId) return;
     try {
@@ -729,11 +738,9 @@ export default async function arenaExtension(pi: ExtensionAPI) {
         error_streak: errorStreak, progress, ...activity, stop: null,
         outage_started_at: null, outage_attempt: 0 });
     }
-    const room = finishAllowed(spentUsd, limit);
     const checks = await campaign("state");
     const cause = failed ? String((event as any).errorMessage ?? lastAssistant?.errorMessage ?? "") : undefined;
-    const content = await continuationPush({ failed, cause, usedPct: 100 * spentUsd / limit,
-      remainingUsd: room.remainingUsd, capUsd: limit, baseline: checks?.baseline,
+    const content = await continuationPush({ failed, cause, spentUsd, limitUsd: limit, baseline: checks?.baseline,
       best: checks?.best ?? state.best });
     const cutLine = cutTokens === undefined ? undefined
       : buildTurnCutLine(cutTokens, await renderText("messages/errors.turn_cut", { tokens: "{tokens}" }));

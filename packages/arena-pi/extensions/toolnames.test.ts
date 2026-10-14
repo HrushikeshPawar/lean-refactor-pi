@@ -22,10 +22,8 @@ test("normalizes stringified arrays and the proof and draft aliases for compile"
 
 test("null and empty argument calls render the empty or malformed error with valid keys", async () => {
   const valid = "drafts, splice, fill, merge, base, from, note, check";
-  const missing = await render("messages/errors.arguments_missing", { valid });
-  const empty = await render("messages/errors.empty_arguments", { valid });
+  const missing = await render("messages/errors.empty_arguments", { valid });
   assert.match(missing, /arrived empty or malformed/);
-  assert.match(empty, /arrived empty or malformed/);
   assert.match(missing, /drafts, splice, fill, merge, base, from, note, check/);
   assert.throws(() => requireToolArguments(null, missing), new RegExp(missing));
   assert.deepEqual(normalizeToolArguments({}, { properties: {} }), {});

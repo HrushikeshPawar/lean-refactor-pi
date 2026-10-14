@@ -1,6 +1,4 @@
 finish_remaining_pct: 10
-percent_scale: 100
-rate_heartbeat_units: 100
 original_candidate: 1
 max_failures: 3
 max_drafts: 4

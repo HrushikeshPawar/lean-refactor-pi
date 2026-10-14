@@ -1,1 +1,1 @@
-salvaged: "{sketch} salvaged from {source}: compiles with {holes} ({lines})."
+salvaged: "{sketch} salvaged from {source}: {holes} at {lines}."

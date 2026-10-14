@@ -1,8 +1,6 @@
 same_goal: "same goal as {ref}"
 same_diagnostic: "{first} same as {ref}"
 errors_incomplete: "The error list may be incomplete."
-filed_focus: "{node} filed under focus {focus}."
-filed_root: "{node} filed as a new root."
 filing_focus: "{node} <- focus {focus}"
 filing_root: "{node} filed as new root"
 filing_fill: "{node} <- {parent} fill {hole}"

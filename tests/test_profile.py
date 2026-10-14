@@ -172,7 +172,7 @@ class DegradationTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(ValueError, "does not compile.*unsolved goals"):
                 profiler.profile("T", "theorem t : True := by\n  skip")
-            with self.assertRaisesRegex(ValueError, "without sorry"):
+            with self.assertRaisesRegex(ValueError, "no open hole"):
                 profiler.profile("T", "theorem t : True := by\n  sorry")
 
 

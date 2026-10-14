@@ -2,7 +2,6 @@
 
 import itertools
 import json
-import math
 import re
 import shutil
 import tempfile
@@ -11,13 +10,16 @@ from datetime import UTC
 from pathlib import Path
 
 from arena import models
-from arena.engine import ROOT
+from arena.engine import ROOT, problem, versions
 from arena.index import index_path
-from arena.skill import SKILL_DIR, skill_hash
+from arena.scoring import exchange_rates
+from arena.skill import SKILL_DIR, skill_hash, skill_prompt
 from tests.pi_support import LIVE_LANGFUSE, NAME, PI_AVAILABLE, AnthropicWire, FakeRun, message_text
 from tests.slow import slow
 
 STOP = [{"text": "done"}]
+# Words that name ending the run; none may reach the model before the final tenth of the spend (plan D42).
+STOP_TEXT = re.compile(r"\b(?:finish\w*|stop\w*|threshold\w*|tenth|end(?:s|ing)? the run)\b", re.I)
 
 
 @slow
@@ -35,7 +37,9 @@ class SkillAndThinkingTests(unittest.TestCase):
     def test_skill_and_thinking_options_are_recorded_and_reach_the_provider(self):
         default = self.start()
         first = default.requests[0]["messages"][0]
-        self.assertIn("Scoring is mechanical", message_text(first))
+        # The skill body is appended to the system prompt; its last line marks that the whole body arrived.
+        skill_line = skill_prompt().strip().splitlines()[-1]
+        self.assertIn(skill_line, message_text(first))
         self.assertIn("compile", offered_tools(default.requests[0]))
         config = default.json("run-config.json")
         self.assertEqual(config["skill"], {"name": "arena-lean", "sha256": skill_hash()})
@@ -45,7 +49,7 @@ class SkillAndThinkingTests(unittest.TestCase):
         self.assertEqual(low.json("run-config.json")["thinking"], "low")
         self.assertEqual({r["thinking"] for r in low.requests}, {"low"})
         self.assertIsNone(low.json("run-config.json")["skill"])
-        self.assertNotIn("Scoring is mechanical", message_text(low.requests[0]["messages"][0]))
+        self.assertNotIn(skill_line, message_text(low.requests[0]["messages"][0]))
 
     def test_skill_content_is_general(self):
         text = (SKILL_DIR / "SKILL.md").read_text()
@@ -158,6 +162,16 @@ def offered_tools(request: dict) -> list[str]:
     return tools
 
 
+def _points_left(measured: int, original: int) -> str:
+    """Points not yet earned on one axis: a third of the percentage of the original still left."""
+    return f"{100 * measured / original / 3:.1f}"
+
+
+def _spend_numbers(spent: float, cap: float) -> list[str]:
+    """The spend facts as digits: spent and limit in dollars, whole percent of the limit left."""
+    return [f"{spent:.2f}", f"{cap:.2f}", str(round(100 * (1 - spent / cap)))]
+
+
 def cheap_tool(name: str, arguments: dict, **usage) -> dict:
     return {
         "tool_calls": [{"name": name, "arguments": arguments}],
@@ -211,7 +225,10 @@ class CacheDisciplineTests(unittest.TestCase):
         first = "\n".join(message_text(m) for m in requests[0]["messages"])
         for dynamic in ("remaining_usd", "Remaining ledger", "spent_usd", "usage cap", "$0.0"):
             self.assertNotIn(dynamic, first)
-        self.assertIn("1 token = 0.149 pt", first)
+        # The packet's rates are this row's own, computed from its pinned denominators.
+        rates = exchange_rates(NAME, len(versions(problem(NAME))))
+        for field in ("points_per_token", "points_per_100_heartbeats", "points_per_lost_version"):
+            self.assertRegex(first, rf"(?<![\d.]){re.escape(str(rates[field]))}(?![\d])", field)
         summary = run.json("summary.json")
         self.assertEqual(len(summary["cache"]["per_request"]), summary["cost"]["requests"])
         kinds = summary["cost"]["by_turn_type"]
@@ -251,14 +268,23 @@ def tool_results(request: dict, name: str) -> list[dict]:
     return [m for m in request["messages"] if m["role"] == "toolResult" and m.get("toolName") == name]
 
 
-def compiled_node(reply: dict) -> tuple[str, str, float]:
-    """The one node a single-draft compile reply filed: its id, its candidate label and the map's score for it."""
+def compiled_node(run: FakeRun, reply: dict) -> tuple[str, str, float]:
+    """The one node a single-draft compile reply filed: its id, its stored candidate label and the map's score for it.
+
+    Replies name nodes by graph id (nK); submission.json keeps the stored label (#k), so map one to the other
+    through the run's history."""
+    from arena import campaign
+
     [item] = reply["items"]
-    label = item["price"].split()[0]
+    history = campaign.events(run.directory)
+    filed = dict.fromkeys(
+        str(e.get("candidate_id") or e["proof_id"]) for e in history if e.get("kind") in ("candidate", "probe")
+    )
+    [proof_id] = [current for current in filed if campaign._graph_node_id(history, current) == item["node"]]
     scores = {
         match[1]: float(match[2]) for line in reply["map"] if (match := re.match(r"best (\S+) score ([\d.]+)", line))
     }
-    return item["node"], label, scores[item["node"]]
+    return item["node"], campaign.node_label(history, proof_id), scores[item["node"]]
 
 
 def schema_keys(request: dict, tool: str) -> list[str]:
@@ -296,10 +322,11 @@ class AutomaticChecksTests(unittest.TestCase):
         requests = run.requests
         self.assertGreaterEqual(len(requests), 3, run.stdout)
         [compiled] = tool_results(requests[1], "compile")
-        node, label, score = compiled_node(compiled["details"])
+        node, label, score = compiled_node(run, compiled["details"])
         self.assertEqual(score, FIXTURE_SCORE[2])
+        # The cross-version fact names the filed node by its graph id and carries its score.
         self.assertTrue(
-            any(label in fact and str(score) in fact for fact in compiled["details"]["facts"]),
+            any(re.search(rf"\b{node}\b", fact) and str(score) in fact for fact in compiled["details"]["facts"]),
             compiled["details"]["facts"],
         )
         self.assertIn(node, compiled["details"]["handles"])
@@ -362,8 +389,11 @@ class AutomaticChecksTests(unittest.TestCase):
         )
         [compiled] = tool_results(run.requests[-1], "compile")
         [item] = compiled["details"]["items"]
-        label = item["price"].split()[0]
-        self.assertFalse(any(label in fact for fact in compiled["details"]["facts"]), "the check did not stay queued")
+        _, label, _ = compiled_node(run, compiled["details"])
+        node = re.compile(rf"\b{item['node']}\b")
+        self.assertFalse(
+            any(node.search(fact) for fact in compiled["details"]["facts"]), "the check did not stay queued"
+        )
         submission = run.json("submission.json")
         self.assertEqual(submission["candidate"], label, run.stdout)
         self.assertEqual((submission["tokens"], submission["heartbeats"], submission["proxy"]), FIXTURE_SCORE)
@@ -371,11 +401,10 @@ class AutomaticChecksTests(unittest.TestCase):
 
 
 class SkillToolNamesTests(unittest.TestCase):
-    def test_skill_mentions_only_the_five_tools(self):
-        import re
-
+    def test_skill_mentions_the_four_offered_tools_and_never_finish(self):
         text = "\n".join(path.read_text() for path in sorted(SKILL_DIR.rglob("*.md")))
-        self.assertEqual(set(re.findall(r"\b(?:compile|goal|search|read|finish)\b", text)), ARENA_TOOLS)
+        self.assertEqual(set(re.findall(r"\b(?:compile|goal|search|read|finish)\b", text)), START_TOOLS)
+        self.assertNotRegex(text, STOP_TEXT)
         self.assertNotRegex(text, r"\barena_[a-z_]+\b")
 
 
@@ -672,40 +701,71 @@ class ErrorLoopAndContinuationTests(unittest.TestCase):
         submission = run.json("submission.json")
         self.assertEqual((submission["tokens"], submission["heartbeats"]), FIXTURE_SCORE[:2])
 
-        def points_left(measured: int, original: int) -> str:
-            return f"{(100 - math.floor(100 * (1 - measured / original) + 0.5)) / 3:.1f}"
-
-        points = [points_left(m, o) for m, o in zip(FIXTURE_SCORE[:2], reference(NAME), strict=True)]
+        points = [_points_left(m, o) for m, o in zip(FIXTURE_SCORE[:2], reference(NAME), strict=True)]
         cap = float(run.json("run-config.json")["limit_usd"])
         for message, spent in zip([failed, *completed], spent_at, strict=True):
             with self.subTest(message=message[:40]):
                 numbers = re.findall(r"\d+(?:\.\d+)?", message)
-                spend = [f"{spent:.2f}", f"{cap - spent:.2f}", f"{100 * (cap - spent) / cap:.1f}"]
-                self.assertEqual([n for n in spend + points if n not in numbers], [], message)
+                self.assertEqual(
+                    [n for n in _spend_numbers(spent, cap) + points if n not in numbers], [], (message, rows)
+                )
 
-    def test_continuation_contains_budget_and_best_node_facts(self):
+    def continuations(self, run: FakeRun) -> list[tuple[str, float]]:
+        """Each continuation the model read, with the settled spend when it was sent (from the ledger)."""
+        messages = [message_text(m) for m in run.requests[-1]["messages"][2:] if m["role"] == "user"]
+        rows = run.jsonl("cost-ledger.jsonl")
+        spent_at = [
+            next(r["spent_usd"] for r in reversed(rows[:index]) if r["kind"] == "settle")
+            for index, row in enumerate(rows)
+            if row["kind"] == "control" and not row.get("stop")
+        ]
+        self.assertTrue(messages)
+        self.assertEqual(len(messages), len(spent_at), rows)
+        return list(zip(messages, spent_at, strict=True))
+
+    def test_continuation_before_the_final_tenth_states_only_spend_and_points_left(self):
+        from arena import text
+        from arena.scoring import reference
+
         run = self.fake(
             [
-                cheap_tool("compile", {"drafts": [FIXTURE.read_text()], "check": "tokens"}),
+                cheap_tool("compile", {"drafts": [FIXTURE.read_text()], "check": "lean"}),
                 {"text": "done"},
                 {"text": "still done"},
-            ]
+            ],
+            env={"ARENA_AUTOCONTINUE": "1"},
         )
-        later = "\n".join(message_text(m) for m in run.requests[-1]["messages"])
-        self.assertIn("turn ended with text", later)
-        self.assertIn("finish is available", later)
-        self.assertIn("Best node:", later)
-        self.assertNotIn("idea", later.lower())
-        self.assertNotIn("route", later.lower())
+        pct = text.numbers()["finish_remaining_pct"]
+        cap = float(run.json("run-config.json")["limit_usd"])
+        submission = run.json("submission.json")
+        self.assertEqual((submission["tokens"], submission["heartbeats"]), FIXTURE_SCORE[:2])
+        points = [_points_left(m, o) for m, o in zip(FIXTURE_SCORE[:2], reference(NAME), strict=True)]
+        for message, spent in self.continuations(run):
+            with self.subTest(message=message):
+                self.assertGreater(1 - spent / cap, pct / 100)
+                self.assertNotRegex(message, STOP_TEXT)
+                self.assertNotRegex(message, rf"(?<![\d.]){pct}(?!\d|\.\d)")
+                # Spend and points left per axis are the only facts: no node id, no other number.
+                numbers = re.findall(r"\d+(?:\.\d+)?", message)
+                self.assertEqual(sorted(numbers), sorted(_spend_numbers(spent, cap) + points))
 
-    def test_continuation_inside_the_final_ten_percent_is_the_plain_prompt(self):
+    def test_continuation_inside_the_final_tenth_states_finish_available_once(self):
+        from arena import text
+
         run = self.fake(
             [cheap_tool("read", {"node": "n1"}, output=SPEND_90_PCT), {"text": "done"}, {"text": "still done"}],
             env={"ARENA_AUTOCONTINUE": "1"},
         )
-        later = "\n".join(message_text(m) for m in run.requests[-1]["messages"])
-        self.assertIn("turn ended with text", later)
-        self.assertNotIn("Do not stop", later)
+        pct = text.numbers()["finish_remaining_pct"]
+        cap = float(run.json("run-config.json")["limit_usd"])
+        available = text.render("messages/continuation.finish_available")
+        for message, spent in self.continuations(run):
+            with self.subTest(message=message):
+                self.assertLessEqual(1 - spent / cap, pct / 100)
+                lines = message.splitlines()
+                self.assertEqual(lines.count(available), 1)
+                self.assertEqual([line for line in lines if STOP_TEXT.search(line)], [available])
+                self.assertIn(_spend_numbers(spent, cap)[0], message)
 
     def test_one_finish_call_stops_provider_continuations(self):
         run = self.fake(
@@ -892,7 +952,7 @@ class FinishReplayTests(unittest.TestCase):
         self.assertEqual(run.result.returncode, 0, run.stdout + run.result.stderr[-1000:])
         self.assertEqual(len(run.requests), 2, run.stdout)
         [compiled] = tool_results(run.requests[1], "compile")
-        _, label, _ = compiled_node(compiled["details"])
+        _, label, _ = compiled_node(run, compiled["details"])
         summary = run.json("summary.json")
         self.assertEqual(summary["stop_reason"], "finished")
         submission = run.json("submission.json")

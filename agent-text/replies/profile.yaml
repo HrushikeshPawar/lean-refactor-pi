@@ -1,4 +1,0 @@
-degraded: "Profile degraded to the outermost tactics: {detail}"
-hotspot_label: "top-ten score-equivalent cost (not predicted savings)"
-unit: "heartbeats (the scoring unit, raw / 1000); hb is inclusive of nested tactics"
-floor_method: "statement elaborated with a sorry proof"

@@ -225,7 +225,7 @@ def check_candidate(info: dict, manifest: dict[str, dict]) -> list[str]:
     try:
         validate_proof({"statement": row["statement"]}, proof)
     except ValueError as error:
-        why.append(str(error).split(":")[0] + ": " + str(error)[:160])
+        why.append(str(error)[:160])
     # sorry/admit/axiom etc. are already part of validate_proof's FORBIDDEN list.
     candidate_id = info["answer"]["candidate_id"]
     if sha256_text(info["theorem"] + "\0" + proof) != candidate_id:

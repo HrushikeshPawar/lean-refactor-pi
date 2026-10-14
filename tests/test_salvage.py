@@ -242,7 +242,7 @@ class FillAndMapTests(FakeRunCase):
         hole_id = f"{projection.nodes[-1].id}.h1"
         with self.assertRaisesRegex(ValueError, "n999.h1.*line"):
             campaign.compile_operation("T", "logic", {"type": "fill", "hole": "n999.h1", "text": "exact h"})
-        with self.assertRaisesRegex(ValueError, "valid sketch holes"):
+        with self.assertRaisesRegex(ValueError, "is not an open hole"):
             campaign.compile_operation(
                 "T", "logic", {"type": "fill", "hole": f"{projection.nodes[0].id}.h1", "text": "exact h"}
             )
@@ -406,7 +406,7 @@ class FillAndMapTests(FakeRunCase):
                 notice = next(
                     item["text"] for item in campaign.state("logic")["updates"] if "assembled from" in item["text"]
                 )
-                self.assertIn("alternatives", notice)
+                self.assertIn("Other fills", notice)
                 campaign.autocheck("T", "logic")
                 self.assertEqual(
                     len([item for item in campaign.events(self.directory) if item.get("kind") == "assembly"]), 1

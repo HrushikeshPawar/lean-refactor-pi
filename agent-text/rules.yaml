@@ -1,15 +1,15 @@
 score:
   template: "packet/scoring"
-  numbers: "percent_scale"
-  marker: "Score: the mean"
+  numbers: "none"
+  marker: "Score: the mean of three percentages"
 exchange_rates:
   template: "packet/scoring"
-  numbers: "rate_heartbeat_units"
-  marker: "Exchange rates:"
+  numbers: "computed per theorem"
+  marker: "Rates: 1 token ="
 token_counting:
   template: "packet/scoring"
-  numbers: "none"
-  marker: "The counter measures"
+  numbers: "computed per theorem"
+  marker: "Token count: proof text after"
 statement_immutability:
   template: "skill/lean-facts"
   numbers: "none"
@@ -29,16 +29,16 @@ finish_availability:
 graph_operations:
   template: "tools/compile.description"
   numbers: "compile_max_drafts"
-  marker: "graph edit: splice"
+  marker: "graph edit: splice, fill or merge"
 graph_identifiers:
   template: "skill/SKILL"
   numbers: "none"
-  marker: "Nodes have identifiers"
+  marker: "Ids: node nN"
 node_status:
   template: "skill/SKILL"
   numbers: "none"
-  marker: "A closed node"
+  marker: "Status closed:"
 price_columns:
   template: "packet/price-table.legend"
   numbers: "computed per step"
-  marker: "self_hb is"
+  marker: "self_hb: heartbeats"

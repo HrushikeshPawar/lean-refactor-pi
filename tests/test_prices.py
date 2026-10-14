@@ -185,7 +185,7 @@ class CampaignPriceTests(FakeRunCase):
         result = self.evaluate("theorem t := by\n  exact True.intro")
         self.assertTrue(result["ok"])
         self.assertIn("price_row", result)
-        self.assertIn("← #1", result["price_row"])
+        self.assertIn("n2 from n1", result["price_row"])
         self.assertIn("versions 1 of 2 checked", result["price_row"])
 
     def test_price_row_filing_parent_and_named_parent_metrics_keep_distinct_deltas(self):
@@ -229,10 +229,10 @@ class CampaignPriceTests(FakeRunCase):
             full = self.evaluate("theorem t := by\n  two\n  three", mode="full", parents=["#1"])
 
         self.assertEqual(third["candidate"], "#3")
-        self.assertIn("#3 ← #2", third["price_row"])
-        self.assertIn("tokens 95 (+5 vs #2)", third["price_row"])
-        self.assertIn("hb 850 (−50)", third["price_row"])
-        self.assertIn("Δscore -2.0 vs best", third["price_row"])
+        self.assertIn("n3 from n2", third["price_row"])
+        self.assertIn("tokens 95 (+5 vs n2)", third["price_row"])
+        self.assertIn("heartbeats 850 (−50)", third["price_row"])
+        self.assertIn("score -2.0 vs best", third["price_row"])
         self.assertIn("versions 1 of 2 checked", third["price_row"])
         self.assertEqual(third["metrics"]["axes"]["tokens"]["value"], third["tokens"])
         self.assertEqual(third["metrics"]["axes"]["heartbeats"]["value"], third["heartbeat"])
@@ -261,7 +261,7 @@ class CampaignPriceTests(FakeRunCase):
         ):
             table = campaign.price_table("T", "logic")
         self.assertFalse(table["profiled"])
-        self.assertIn("rates:", table["text"])
+        self.assertIn("total", table["text"])
         self.assertTrue(all(row["incl_hb"] is None for row in table["rows"]))
         before = len(campaign.events(campaign.run_dir("logic")))
         response = prices.quote_tokens("T", ["trivial"], statement="theorem t : True")

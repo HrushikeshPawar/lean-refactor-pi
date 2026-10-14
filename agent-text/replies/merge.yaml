@@ -1,5 +1,5 @@
 none_checked: "none checked"
-summary: "{count} combined proof(s) compiled, {verified} verified above both parents"
+summary: "combined proofs compiled: {count}; verified above both parents: {verified}"
 not_submitted: " (report only, never submitted: submissions are model-written)"
 entry: "{candidate} = {parents} proxy {proxy}"
 hypothesis: "Deterministic combination of disjoint edits"

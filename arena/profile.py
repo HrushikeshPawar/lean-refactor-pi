@@ -358,8 +358,8 @@ def summarize(
         "line_tokens_total": token_total if token_ok else None,
         "token_attribution_available": bool(token_ok),
         "hotspots": hotspots,
-        "hotspot_label": agent_text.render("replies/profile.hotspot_label"),
-        "unit": agent_text.render("replies/profile.unit"),
+        "hotspot_label": "top-ten score-equivalent cost (not predicted savings)",  # log: internal record # not-model-facing
+        "unit": "heartbeats; hb includes nested tactics",  # log: internal record # not-model-facing
     }
 
 
@@ -433,8 +433,14 @@ def profile(name: str, proof: str, measured: int | None = None, lane: str = "mod
         "granularity": granularity,
         "version": version,
         **summary,
-        "note": agent_text.render("replies/profile.degraded", detail=failures[0]) if failures else None,
+        "note": _degraded_note(failures),
     }
+
+
+def _degraded_note(failures: list) -> str | None:
+    if not failures:
+        return None
+    return f"Profile degraded to the outermost tactics: {failures[0]}"  # log: internal record # not-model-facing
 
 
 def heartbeat_floor(name: str) -> dict:
@@ -450,7 +456,7 @@ def heartbeat_floor(name: str) -> dict:
         known[key] = {
             "heartbeats": outcome.get("heartbeats"),
             "version": version,
-            "method": agent_text.render("replies/profile.floor_method"),
+            "method": "statement elaborated with a sorry proof",  # log: internal record # not-model-facing
         }
         cache.parent.mkdir(parents=True, exist_ok=True)
         cache.write_text(json.dumps(known, indent=1))

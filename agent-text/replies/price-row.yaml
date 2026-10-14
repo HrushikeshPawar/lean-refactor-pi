@@ -1,4 +1,4 @@
-row_root: "{label} (new root)   tokens {tokens}   hb {hb}   versions {versions}"
+row_root: "{label} new root · tokens {tokens} · heartbeats {hb} · versions {versions}"
 changed: "changed steps: {changes}"
 versions_full: "{passed}/{total}"
 versions_pending: "{checked} of {total} checked"

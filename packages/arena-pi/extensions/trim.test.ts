@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { objectToolArguments, ResultTrimmer } from "./trim.ts";
+import { nothingToSummarize, objectToolArguments, ResultTrimmer } from "./trim.ts";
 
 const context = "# Pinned source\n".repeat(40);
 
@@ -29,4 +29,11 @@ test("tool calls with unparsed arguments get an object before compaction", () =>
   assert.equal(objectToolArguments(messages), 1);
   assert.deepEqual((messages[1].content as Array<{ arguments?: unknown }>).map(block => block.arguments), [{}, undefined, { node: "n1" }]);
   assert.equal(objectToolArguments(undefined), 0);
+});
+
+test("a compaction with no history to summarize is skipped", () => {
+  assert.equal(nothingToSummarize({ messagesToSummarize: [], turnPrefixMessages: [] }), true);
+  assert.equal(nothingToSummarize({ messagesToSummarize: [{ role: "user" }], turnPrefixMessages: [] }), false);
+  assert.equal(nothingToSummarize({ messagesToSummarize: [], turnPrefixMessages: [{ role: "assistant" }] }), false);
+  assert.equal(nothingToSummarize({}), true);
 });

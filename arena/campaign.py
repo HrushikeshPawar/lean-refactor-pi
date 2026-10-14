@@ -743,7 +743,7 @@ def init(name: str, run_id: str, extra: str = "") -> dict:
             "kind": "candidate",
             "candidate_id": reference_id,
             "parents": [],
-            "hypothesis": agent_text.render("replies/candidate.original_reference"),
+            "hypothesis": "Pinned original reference proof",  # log: internal record # not-model-facing
             "origin": "reference",
             "source_versions": versions(row),
             "evaluator_sha256": hashlib.sha256(Path(__file__).with_name("engine.py").read_bytes()).hexdigest(),
@@ -802,6 +802,14 @@ def node_label(history: list[dict], proof_id: str) -> str:
     return candidate or _probe_numbers(history).get(proof_id, f"p{proof_id[:8]}")
 
 
+def _update_id(history: list[dict], proof_id: str) -> str:
+    """The graph id (nK) that model-facing updates use, falling back to the stored label."""
+    try:
+        return _graph_node_id(history, proof_id)
+    except KeyError:
+        return node_label(history, proof_id)
+
+
 def _graph_node_id(history: list[dict], proof_id: str) -> str:
     """Resolve the projection's nK id without rebuilding route signatures."""
     seen: set[str] = set()
@@ -833,7 +841,7 @@ def resolve_candidate_ref(history: list[dict], reference: str) -> str:
         matches = [candidate for candidate in candidates if candidate.startswith(reference)]
         if len(matches) == 1:
             return matches[0]
-    raise ValueError(text.render("messages/errors.unknown_candidate", reference=reference, count=len(candidates)))
+    raise ValueError(text.render("messages/errors.node_reference_invalid", reference=reference))
 
 
 def _current(history: list[dict]) -> str | None:
@@ -858,9 +866,7 @@ def resolve_probe_ref(history: list[dict], reference: str) -> str:
     for proof_id, label in _probe_numbers(history).items():
         if reference in (label, proof_id):
             return proof_id
-    raise ValueError(
-        text.render("messages/errors.unknown_probe", reference=reference, count=len(_probe_numbers(history)))
-    )
+    raise ValueError(text.render("messages/errors.node_reference_invalid", reference=reference))
 
 
 def resolve_parent_ref(history: list[dict], reference: str) -> str:
@@ -877,7 +883,7 @@ def resolve_parent_ref(history: list[dict], reference: str) -> str:
         )
         if parent:
             return parent
-        raise ValueError(text.render("messages/errors.probe_parent_missing", reference=reference.strip()))
+        raise ValueError(text.render("messages/errors.node_reference_invalid", reference=reference.strip()))
     return resolve_candidate_ref(history, reference)
 
 
@@ -1231,15 +1237,9 @@ def _advisory(rows: list[dict], window: int = 4) -> str | None:
     base = by_id[root]["score"]
     if any(r["score"] is not None and (base is None or r["score"] > base) for r in recent):
         return None
+    first, last, origin = recent[0]["n"], recent[-1]["n"], by_id[root]["n"]
     score_suffix = f" of {base}." if base is not None else "."
-    return text.render(
-        "replies/state.advisory",
-        window=window,
-        first=recent[0]["n"],
-        last=recent[-1]["n"],
-        root=by_id[root]["n"],
-        score_suffix=score_suffix,
-    )
+    return f"The last {window} candidates (#{first}-#{last}) all descend from #{origin} and none improved on its score{score_suffix}"  # log: operator state # not-model-facing
 
 
 def _model_view(result: dict) -> dict:
@@ -1529,6 +1529,9 @@ def record_evaluation(
                 else len(node.proof_text.splitlines()),
                 changes,
             )
+            # The model sees graph ids (nK) everywhere else; stored labels (#k, pK) stay internal.
+            row["label"] = _update_id(history, node.proof_id)
+            row["parent_label"] = _update_id(history, parent_node.proof_id) if parent_node else None
             total_versions = len(versions(problem(name)))
             row["versions"] = _versions_text(node.versions, total_versions)
             reply["price_row"] = render_price_row(row, parent_node is None, parent_node is best_node)
@@ -1538,41 +1541,14 @@ def record_evaluation(
 def evaluate_request(
     name: str,
     run_id: str,
-    proof: str | None = None,
+    proof: str,
     mode: str = "fast",
     parents: list[str] | None = None,
     hypothesis: str = "",
-    candidate_ref: str | None = None,
-    from_probe: str | None = None,
 ) -> dict:
-    """Entry for the model: evaluate a proof, an existing `#N`, or a probe by ID."""
-    if proof is not None and not proof.strip():
-        proof = None
-    candidate_ref = candidate_ref or None
-    from_probe = from_probe or None
-    if sum(value is not None for value in (proof, candidate_ref, from_probe)) != 1:
-        raise ValueError(text.render("messages/errors.evaluation_reference"))
-    directory = run_dir(run_id)
-    history = events(directory)
-    if candidate_ref:
-        candidate_id = resolve_candidate_ref(history, candidate_ref)
-        proof = (directory / "proofs" / f"{candidate_id}.lean").read_text()
-    elif from_probe:
-        proof_id = resolve_probe_ref(history, from_probe)
-        source = next(
-            item for item in reversed(history) if item.get("kind") == "probe" and item["proof_id"] == proof_id
-        )
-        proof = (directory / "proofs" / f"{proof_id}.lean").read_text()
-        parents = parents or ([source["parent"]] if source.get("parent") else None)
-    if not proof:
-        raise ValueError(text.render("messages/errors.evaluation_proof_missing"))
-    try:
-        result = record_evaluation(name, run_id, proof, mode, parents, hypothesis)
-    except ValueError as error:
-        if str(error) in ("FORBIDDEN: sorry", "FORBIDDEN: admit"):
-            raise ValueError(text.render("messages/errors.probe_forbidden", error=error)) from None
-        raise
-    return _model_view({**result, "full_check": _full_check_status(events(directory), result["candidate_id"])})
+    """Evaluate one complete proof and return its scored view."""
+    result = record_evaluation(name, run_id, proof, mode, parents, hypothesis)
+    return _model_view({**result, "full_check": _full_check_status(events(run_dir(run_id)), result["candidate_id"])})
 
 
 def _full_check_status(history: list[dict], candidate_id: str) -> str | None:
@@ -1584,7 +1560,7 @@ def _full_check_status(history: list[dict], candidate_id: str) -> str | None:
     total = len(history[0].get("versions") or [1])
     done = next((e for e in reversed(row["evaluations"]) if e["mode"] == "full"), None)
     if done:
-        return _check_text(row["n"], done["result"], total)
+        return _check_text(_update_id(history, candidate_id), done["result"], total)
     return text.render("replies/check.queued", count=total - 1)
 
 
@@ -1716,7 +1692,7 @@ def probe(
                 {**recorded, "full_check": _full_check_status(events(directory), recorded["candidate_id"])}
             )
             view.setdefault("notes", []).append(
-                text.render("replies/probe.complete_candidate", candidate=recorded["candidate"])
+                f"complete draft compiled, recorded as candidate {recorded['candidate']}"  # log: internal record # not-model-facing
             )
             return view
         result = {**result, "mode": "probe", "scored": False}
@@ -1810,8 +1786,7 @@ def probe_batch(
 ) -> dict:
     """Probe one to four drafts in order, keeping their parent fixed across promotions."""
     if not isinstance(drafts, list) or not 1 <= len(drafts) <= MAX_DRAFTS:
-        word = {1: "one", 2: "two", 3: "three", 4: "four"}.get(MAX_DRAFTS, str(MAX_DRAFTS))
-        raise ValueError(text.render("messages/errors.draft_limit", max_drafts_word=word))
+        raise ValueError(text.render("messages/errors.draft_limit"))
     history = events(run_dir(run_id))
     fixed_parent = resolve_parent_ref(history, parent) if parent else _current(history)
     starting_focus = next((item["proof_id"] for item in reversed(history) if item.get("kind") == "focus"), None)
@@ -2028,7 +2003,7 @@ def render_price_row(row: dict, root: bool = False, parent_is_best: bool = False
 
 
 def render_price_table(table: dict) -> str:
-    rows = [text.render("packet/price-table")]
+    rows = [text.render("packet/price-table").strip()]
     rows.extend(
         [
             text.render(
@@ -2051,16 +2026,7 @@ def render_price_table(table: dict) -> str:
             tokens=total["tokens"],
             heartbeats=fmt_hb(total["heartbeats"]),
             versions=total["versions"] or "n/a",
-            proxy="n/a" if total["proxy"] is None else f"{total['proxy']:.2f}",
-        )
-    )
-    rates_value = table["rates"]
-    rows.append(
-        text.render(
-            "packet/price-table.rates",
-            pts_token=f"{rates_value['points_per_token']:.3f}",
-            pts_hb=f"{rates_value['points_per_1k_hb']:.3f}",
-            pts_version=f"{rates_value['points_per_version']:.2f}",
+            score="n/a" if total["proxy"] is None else f"{total['proxy']:.2f}",
         )
     )
     return "\n".join(rows)
@@ -2416,31 +2382,35 @@ def merge_batch(run_id: str, max_checks: int = 64) -> dict:
     return {"checks": checks, "last": last}
 
 
+def _hole_errors() -> tuple[str, ...]:
+    return tuple(text.render("messages/errors.forbidden_construct", label=label) for label in ("sorry", "admit"))
+
+
 def _has_hole(row: dict, proof: str) -> bool:
     try:
         validate_proof(row, proof)
     except ValueError as error:
-        if str(error) in ("FORBIDDEN: sorry", "FORBIDDEN: admit"):
+        if str(error) in _hole_errors():
             return True
         raise
     return False
 
 
-def _check_text(number: int, result: dict, total: int) -> str:
+def _check_text(node: str, result: dict, total: int) -> str:
     compat = result.get("compat") or {}
     if result.get("ok") is False or not compat:
         return text.render(
-            "replies/check.could_not_run", number=number, error=str(result.get("error") or "unknown error")[:160]
+            "replies/check.could_not_run", node=node, error=str(result.get("error") or "unknown error")[:160]
         )
     failing = [version for version, info in compat.items() if not info.get("passed")]
     if not failing and len(compat) == total:
-        proxy = (result.get("metrics") or {}).get("proxy", result.get("local_proxy"))
-        return text.render("replies/check.passed", number=number, total=total, proxy=proxy)
+        score = (result.get("metrics") or {}).get("proxy", result.get("local_proxy"))
+        return text.render("replies/check.passed", node=node, total=total, score=score)
     first = compat[failing[0]]
     reason = (first.get("error_headlines") or [first.get("error") or "compile failed"])[0]
     return text.render(
         "replies/check.failed",
-        number=number,
+        node=node,
         failing=", ".join(failing),
         passed=len(compat) - len(failing),
         total=total,
@@ -2824,7 +2794,7 @@ def state(run_id: str) -> dict:
         unverified if unverified and (not verified or (unverified["score"] or 0) > (verified["score"] or 0)) else None
     )
     updates = [
-        {"seq": seq, "text": _check_text(numbers[item["candidate_id"]], item["result"], total)}
+        {"seq": seq, "text": _check_text(_update_id(history, item["candidate_id"]), item["result"], total)}
         for seq, item in enumerate(history)
         if item.get("kind") == "evaluation"
         and item.get("trigger") == "auto"
@@ -2856,8 +2826,8 @@ def state(run_id: str) -> dict:
                     "seq": seq,
                     "text": text.render(
                         "messages/salvage.salvaged",
-                        sketch=node_label(history, sketch_id),
-                        source=node_label(history, item["proof_id"]),
+                        sketch=_update_id(history, sketch_id),
+                        source=_update_id(history, item["proof_id"]),
                         holes=f"{count} hole" if count == 1 else f"{count} holes",
                         lines=lines_text,
                     ),
@@ -2880,22 +2850,22 @@ def state(run_id: str) -> dict:
             alternatives = []
             for hole_id, fill_id in (item.get("fills") or {}).items():
                 hole = holes_by_id.get(hole_id, {})
-                label = node_label(history, fill_id)
+                label = _update_id(history, fill_id)
                 used.append(f"line {hole.get('line', '?')}: {label}")  # not-model-facing
                 for alternate in (item.get("alternatives") or {}).get(hole_id, []):
                     operation = (fill_events.get(alternate) or {}).get("operation") or {}
                     cost = fill_cost(operation.get("text", ""))
                     alternatives.append(
-                        f"line {hole.get('line', '?')}: {node_label(history, alternate)} ({cost} tokens)"  # not-model-facing
+                        f"line {hole.get('line', '?')}: {_update_id(history, alternate)} ({cost} tokens)"  # not-model-facing
                     )
             if item["status"] == "broken":
-                notice = text.render("messages/assembly.assembly_failed", sketch=node_label(history, sketch_id))
+                notice = text.render("messages/assembly.assembly_failed", sketch=_update_id(history, sketch_id))
             else:
                 row = next((row for row in rows if row["id"] == item.get("node")), {})
                 notice = text.render(
                     "messages/assembly.assembled",
-                    node=node_label(history, item["node"]),
-                    sketch=node_label(history, sketch_id),
+                    node=_update_id(history, item["node"]),
+                    sketch=_update_id(history, sketch_id),
                     tokens=row.get("tokens") or 0,
                     score=row.get("score") or 0,
                     used=", ".join(used) or "none",
@@ -2922,7 +2892,7 @@ def state(run_id: str) -> dict:
                 "seq": seq,
                 "text": text.render(
                     "messages/phase.stall_focus",
-                    label=node_label(history, proof_id),
+                    label=_update_id(history, proof_id),
                     letter=item["cell"],
                     score=score,
                     visits=item["visits"],
@@ -2933,7 +2903,7 @@ def state(run_id: str) -> dict:
     reference_row = next((r for r in rows if r["origin"] == "reference"), None)
     baseline = None
     if reference_row:
-        from arena.scoring import reference
+        from arena.scoring import REFERENCE_SCORE, reference
 
         try:
             tokens, heartbeats = reference(history[0]["theorem"])
@@ -2945,7 +2915,7 @@ def state(run_id: str) -> dict:
                 "candidate": "#1",
                 "tokens": tokens,
                 "heartbeats": heartbeats,
-                "proxy": round(100 / 3, 2),
+                "proxy": REFERENCE_SCORE,
                 "status": "pinned original baseline",
             }
     return {
@@ -3088,10 +3058,12 @@ def submission(run_id: str) -> dict:
         answer = {
             "ok": True,
             "candidate": None,
-            "reason": text.render("replies/state.no_candidate_passed"),
+            "reason": "no model candidate passed every version; the original proof stands",  # log: internal record # not-model-facing
         }
         if rejected:
-            answer["reason"] = text.render("replies/state.no_candidate_cold_passed")
+            answer["reason"] = (
+                "no candidate that passed in the Lean session also passed a clean cold compile"  # log: internal record # not-model-facing
+            )
     else:
         proof = (directory / "proofs" / f"{best['id']}.lean").read_text()
         (directory / "submission.lean").write_text(proof)
@@ -3105,7 +3077,7 @@ def submission(run_id: str) -> dict:
             "proof_file": "submission.lean",
             "verified_by": "cold compile"
             if cold and cold["confirmed"]
-            else text.render("replies/state.cold_compile_without_session"),
+            else "cold compile (no session used)",  # log: internal record # not-model-facing
         }
         if cold and cold["confirmed"]:
             # The clean compile is the certified measurement; the session figure is kept for audit.
