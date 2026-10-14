@@ -4,7 +4,7 @@
 
 **Blocked by:** 15c: Old tools out: protocol actions, ideas, v6-shape tests (all lower tickets, 04 to 15b, are also committed below your branch).
 
-**Status:** ready-for-agent
+**Status:** needs-review
 
 **Branch:** `v7/16-text` (stacked on `v7/15c-old-tools-out`)
 
