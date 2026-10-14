@@ -4,7 +4,7 @@
 
 **Blocked by:** 17: Replay blob store and `arena replay` (committed below your branch; ticket 04 is below it too).
 
-**Status:** ready-for-agent
+**Status:** needs-review
 
 **Branch:** `v7/18-viewer` (stacked on `v7/17-replay`)
 
