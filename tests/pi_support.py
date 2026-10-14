@@ -40,7 +40,10 @@ class FakeRun:
         langfuse: bool = False,
         session: bool = False,
         theorem: str = NAME,
+        allow_internal_error: bool = False,
     ):
+        # Only a test that injects an internal error on purpose may opt out of the health guard (see health_problems).
+        self.allow_internal_error = allow_internal_error
         self.run_id = run_id or f"test-{uuid.uuid4().hex[:10]}"
         self.directory = run_dir(self.run_id)
         self.work = Path(tempfile.mkdtemp())
@@ -76,11 +79,35 @@ class FakeRun:
         self.timeout = timeout
         self.result: subprocess.CompletedProcess | None = None
 
-    def run(self, *extra: str) -> FakeRun:
+    def run(self, *extra: str, guard: bool = True) -> FakeRun:
+        """Run to completion. The health guard fails the test at once on an internal tool error;
+        `guard=False` leaves the check to the caller (call `health_problems` yourself)."""
         self.result = subprocess.run(
             [*self.command, *extra], cwd=ROOT, env=self.env, text=True, capture_output=True, timeout=self.timeout
         )
+        if guard:
+            self._assert_healthy()
         return self
+
+    def health_problems(self) -> list[str]:
+        """What no fake session may leave behind: an `internal_error` in any tool result, or a tool-errors.log."""
+        if self.allow_internal_error or not self.directory.exists():
+            return []
+        problems = []
+        log = self.directory / "tool-errors.log"
+        if log.exists():
+            problems.append(f"tool-errors.log exists:\n{log.read_text()[-2000:]}")
+        for row in self.jsonl("trace-journal.jsonl"):
+            if row.get("kind") == "tool_result" and "internal_error" in json.dumps(row, ensure_ascii=False):
+                text = row.get("delivered_text") or row.get("text") or ""
+                problems.append(f"{row.get('name')} tool_result has internal_error: {str(text)[:600]}")
+        return problems
+
+    def _assert_healthy(self) -> None:
+        problems = self.health_problems()
+        if problems:
+            self.cleanup()  # the test fails here; leave no run directory or Lean service behind
+            raise AssertionError("fake session health guard:\n" + "\n".join(problems))
 
     def start(self, *extra: str, own_group: bool = False) -> subprocess.Popen:
         """Launch without waiting, for tests that signal the runner.
@@ -110,10 +137,15 @@ class FakeRun:
         return False
 
     def cleanup(self) -> None:
+        # A run launched with start() never passed run()'s guard: check it now, raise only after cleaning up.
+        problems = self.health_problems() if self.result is None and hasattr(self, "process") else []
+        self.allow_internal_error = True  # checked once; a repeated cleanup only cleans
         if self.service is not None and self.service.exists():
             lean_session.stop_service(self.service)
         shutil.rmtree(self.directory, ignore_errors=True)
         shutil.rmtree(self.work, ignore_errors=True)
+        if problems:
+            raise AssertionError("fake session health guard:\n" + "\n".join(problems))
 
     @property
     def requests(self) -> list[dict]:
