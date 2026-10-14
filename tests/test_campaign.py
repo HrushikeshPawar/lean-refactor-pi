@@ -1,14 +1,22 @@
 """Offline tests for the campaign driver and comparison report: no Pi, Lean or network."""
 
 import contextlib
+import functools
 import importlib
 import io
 import json
+import os
+import signal
+import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
+
+from rich.console import Console
 
 rc = importlib.import_module("arena.cli.campaigns")
 
@@ -290,6 +298,241 @@ class ExecuteAndReportTests(unittest.TestCase):
             self.assertEqual(
                 rc.helper_discovery(plain, "#2"), {"candidates_with_helpers": 0, "best_uses_helper": False}
             )
+
+
+# Plain (non-TTY) output captured before the live campaign view existed; it must stay byte-identical.
+PLAIN_DRY_RUN = (
+    "6 runs (2 rows x 1 models x 3 replicates, 1 at a time); limit $0.1 each; planned spend $0.60\n"
+    "  arena run --model deepseek-v4.1-flash --theorem A.b --run-id p-A.b-deepseek-v4.1-flash-r1 --limit-usd 0.1 --thinking high\n"
+    "  arena run --model deepseek-v4.1-flash --theorem A.b --run-id p-A.b-deepseek-v4.1-flash-r2 --limit-usd 0.1 --thinking high\n"
+    "  arena run --model deepseek-v4.1-flash --theorem A.b --run-id p-A.b-deepseek-v4.1-flash-r3 --limit-usd 0.1 --thinking high\n"
+    "  arena run --model deepseek-v4.1-flash --theorem C.d --run-id p-C.d-deepseek-v4.1-flash-r1 --limit-usd 0.1 --thinking high\n"
+    "  arena run --model deepseek-v4.1-flash --theorem C.d --run-id p-C.d-deepseek-v4.1-flash-r2 --limit-usd 0.1 --thinking high\n"
+    "  arena run --model deepseek-v4.1-flash --theorem C.d --run-id p-C.d-deepseek-v4.1-flash-r3 --limit-usd 0.1 --thinking high\n"
+)
+PLAIN_FAKE_RUN = (
+    "packet 1/2 A: building (Lean context; cached rows are quick, new rows take minutes)\n"
+    "packet 1/2 A: certified in 0s (1,234 chars)\n"
+    "packet 2/2 B: building (Lean context; cached rows are quick, new rows take minutes)\n"
+    "packet 2/2 B: certified in 0s (1,234 chars)\n"
+    "preflight: skipped\n"
+    "12:00:00 start  fake-A-deepseek-v4.1-flash-r1\n"
+    "12:00:00 cleanup fake-A-deepseek-v4.1-flash-r1: reaped 0, MemAvailable 16.4 GB\n"
+    "12:00:00 done   fake-A-deepseek-v4.1-flash-r1 (exit 0)\n"
+    "12:00:00 start  fake-B-deepseek-v4.1-flash-r1\n"
+    "12:00:00 cleanup fake-B-deepseek-v4.1-flash-r1: reaped 0, MemAvailable 16.4 GB\n"
+    "12:00:00 done   fake-B-deepseek-v4.1-flash-r1 (exit 75)\n"
+    "12:00:00 skipped fake-B-deepseek-v4.1-flash-r1: Lean unhealthy, no model spend; continuing with the next row\n"
+    "                      Campaign fake                      \n"
+    "┏━━━━━┳━━━━━━━━━━━━━━━━━━━━━┳━━━━━━┳━━━━━━━━━━┳━━━━━━━━━┓\n"
+    "┃ Row ┃ Model               ┃ Runs ┃ Verified ┃ Spend   ┃\n"
+    "┡━━━━━╇━━━━━━━━━━━━━━━━━━━━━╇━━━━━━╇━━━━━━━━━━╇━━━━━━━━━┩\n"
+    "│ A   │ deepseek-v4.1-flash │ 1    │ 0        │ $0.0500 │\n"
+    "│ B   │ deepseek-v4.1-flash │ 1    │ 0        │ $0.0500 │\n"
+    "└─────┴─────────────────────┴──────┴──────────┴─────────┘\n"
+)
+
+SLEEPER = """
+import pathlib, signal, sys, time
+summary, ready = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+
+def graceful(signum, frame):
+    summary.parent.mkdir(parents=True, exist_ok=True)
+    summary.write_text('{"stop_reason": "interrupted"}')  # what `arena run` writes on its first SIGINT
+    time.sleep(0.2)
+    sys.exit(130)
+
+signal.signal(signal.SIGINT, graceful)
+ready.write_text("ready")
+time.sleep(20)
+sys.exit(0)
+"""
+
+
+class FakeSampler:
+    def start(self):
+        pass
+
+    def run_started(self):
+        pass
+
+    def run_finished(self):
+        pass
+
+    def stop(self):
+        return {"samples": 1}
+
+
+def campaign_args(prefix: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        prefix=prefix,
+        replicates=1,
+        jobs=1,
+        limit_usd=0.1,
+        thinking="high",
+        min_free_gb=8.0,
+        cleanup_wait=1.0,
+        prewarm_minutes=0,
+        skip_preflight=True,
+        json=False,
+        plain=False,
+    )
+
+
+@contextlib.contextmanager
+def offline_campaign(root: Path, packets=None):
+    """Everything `_run_campaign` touches besides the runs themselves, faked: no Lean, Pi or provider."""
+    housekeeping = functools.partial(
+        rc.Housekeeping, mem_fn=lambda: 16.4, service_gb_fn=lambda: 0.0, sweep_fn=lambda *a: 0
+    )
+    with (
+        mock.patch.object(rc, "RUNS", root),
+        mock.patch.object(rc, "check_indexes"),
+        mock.patch("arena.campaign.packet", side_effect=packets or (lambda row: "x" * 1234)),
+        mock.patch.object(rc, "Housekeeping", housekeeping),
+        mock.patch.object(rc.scheduler, "ResourceSampler", FakeSampler),
+        mock.patch.object(rc.scheduler, "mem_total_default", return_value=16.0),
+        mock.patch.object(
+            rc.engine, "problem", side_effect=lambda name: {"name": name, "source": name, "version_info": []}
+        ),
+        mock.patch.object(rc.scheduler, "row_projects", return_value=[]),
+        mock.patch.object(rc.lean_session, "ensure_service", return_value="/fake/socket"),
+        mock.patch.object(rc.lean_session, "request", return_value={"ok": True}),
+        mock.patch("arena.summary.build_summary", return_value={"cost": {"spent_usd": 0.05}}),
+        mock.patch.dict(os.environ),
+    ):
+        yield
+
+
+LOCK = {"pid": 42, "prefix": "fake", "started": "2026-10-13T00:00:00+00:00", "argv": []}
+
+
+class PlainOutputTests(unittest.TestCase):
+    def test_dry_run_plain_output_is_byte_identical(self):
+        out = io.StringIO()
+        with (
+            mock.patch.object(
+                rc.engine, "problem", side_effect=lambda name: {"name": name, "source": name, "version_info": []}
+            ),
+            contextlib.redirect_stdout(out),
+        ):
+            code = rc.cli_execute(
+                rc.CampaignOptions(
+                    prefix="p", rows="A.b,C.d", models="deepseek-v4.1-flash", limit_usd=0.1, dry_run=True
+                )
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(out.getvalue(), PLAIN_DRY_RUN)
+
+    def test_fake_run_plain_output_is_byte_identical(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            specs = rc.plan("fake", ["A", "B"], [rc.MODELS[0]], 1)
+            codes = {specs[0]["run_id"]: 0, specs[1]["run_id"]: 75}
+
+            def fake_run(cmd, **_kw):
+                run_id = cmd[cmd.index("--run-id") + 1]
+                (root / run_id).mkdir()
+                (root / run_id / "run-config.json").write_text(json.dumps({"packet_sha256": "hash"}))
+                return SimpleNamespace(returncode=codes[run_id])
+
+            out = io.StringIO()
+            with (
+                offline_campaign(root),
+                mock.patch("time.strftime", return_value="12:00:00"),
+                contextlib.redirect_stdout(out),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                code = rc._run_campaign(
+                    campaign_args("fake"), ["A", "B"], [rc.MODELS[0]], specs, [], LOCK, run_fn=fake_run
+                )
+        self.assertEqual(code, 1)  # the fake packets do not match the runs' recorded hash
+        self.assertEqual(out.getvalue(), PLAIN_FAKE_RUN)
+
+
+class OperatorStopTests(unittest.TestCase):
+    def test_first_ctrl_c_stops_launching_and_lets_the_running_run_finish_cleanly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            specs = rc.plan("fake", ["A", "B"], [rc.MODELS[0]], 1)
+            ready = root / "ready"
+            launched, controls = [], []
+
+            def sleeper(cmd, stop=None, **kw):
+                run_id = cmd[cmd.index("--run-id") + 1]
+                launched.append(run_id)
+                controls.append(stop)
+                summary = root / run_id / "summary.json"
+                return rc.run_child([sys.executable, "-c", SLEEPER, str(summary), str(ready)], stop=stop, **kw)
+
+            def operator():  # Ctrl+C once the child is up and handling SIGINT
+                deadline = time.monotonic() + 10
+                while not ready.exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                os.kill(os.getpid(), signal.SIGINT)
+
+            output = io.StringIO()
+            console = Console(file=output, width=140, color_system=None)
+            raw = io.StringIO()
+            thread = threading.Thread(target=operator)
+            started = time.monotonic()
+            with offline_campaign(root), contextlib.redirect_stdout(raw):
+                thread.start()
+                code = rc._run_campaign(
+                    campaign_args("fake"), ["A", "B"], [rc.MODELS[0]], specs, [], LOCK, run_fn=sleeper, console=console
+                )
+            thread.join()
+            self.assertLess(time.monotonic() - started, 5)
+            self.assertEqual(code, 130)
+            self.assertEqual(launched, [specs[0]["run_id"]])  # nothing launched after the stop
+            self.assertTrue((root / specs[0]["run_id"] / "summary.json").exists())  # the child stopped gracefully
+            self.assertFalse(controls[0].running())
+            report = json.loads((root / "fake-campaign" / "campaign.json").read_text())
+            self.assertEqual([run["exit_code"] for run in report["runs"]], [130])
+            text = output.getvalue()
+            self.assertIn("stop requested", text)
+            self.assertIn("stopped by operator: 1 run(s) stopped, 1 never launched", text)
+            board = text[text.rindex("campaign fake: 2/2 finished") :]
+            self.assertIn("stopped", board)
+            self.assertIn("skipped", board)
+            self.assertNotIn("failed", board)
+            self.assertIn("summary.json", board)
+            self.assertNotIn("Traceback", raw.getvalue() + text)
+            self.assertIs(signal.getsignal(signal.SIGINT), signal.default_int_handler)
+
+    def test_second_ctrl_c_forces_and_third_kills_the_run_process_group(self):
+        sent, killed = [], []
+        child = mock.Mock(pid=4242)
+        child.poll.return_value = None
+        child.send_signal.side_effect = sent.append
+        stop = rc.StopControl(rc.Progress(), kill_fn=lambda pgid, number: killed.append((pgid, number)))
+        stop.track(child)
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            stop.handle()
+            self.assertTrue(stop.requested)
+            stop.handle()
+            stop.handle()
+        self.assertEqual(sent, [signal.SIGINT, signal.SIGINT])  # `arena run`: first = clean stop, second = kill Pi
+        self.assertEqual(killed, [(4242, signal.SIGKILL)])
+        self.assertIn("Ctrl+C again to force", out.getvalue())
+
+    def test_ctrl_c_during_the_checks_exits_130_before_any_run(self):
+        def interrupted(_row):
+            raise KeyboardInterrupt
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            specs = rc.plan("fake", ["A"], [rc.MODELS[0]], 1)
+            errors = io.StringIO()
+            with (
+                offline_campaign(root, packets=interrupted),
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(errors),
+            ):
+                code = rc._run_campaign(campaign_args("fake"), ["A"], [rc.MODELS[0]], specs, [], LOCK)
+            self.assertEqual(code, 130)
+            self.assertFalse((root / "fake-campaign").exists())
+            self.assertIn("interrupted before any paid run", errors.getvalue())
 
 
 if __name__ == "__main__":

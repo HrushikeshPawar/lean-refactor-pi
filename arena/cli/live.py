@@ -25,6 +25,7 @@ from rich.console import Console, Group, RenderableType
 from rich.live import Live
 from rich.panel import Panel
 from rich.progress_bar import ProgressBar
+from rich.spinner import Spinner
 from rich.style import Style
 from rich.table import Table
 from rich.text import Text
@@ -578,6 +579,76 @@ def start_run(
 
 # ---- campaign view -----------------------------------------------------------------------------------------------
 
+PLAN_COMMANDS = 6  # planned `arena run` lines the live plan shows before "... N more"
+FINISHED = ("done", "failed", "stopped", "skipped")
+WAITING = ("queued", "building", "preflight")
+STATUS_STYLES = {
+    "queued": "dim",
+    "building": "cyan",
+    "preflight": "magenta",
+    "running": "bold yellow",
+    "stopped": "bold yellow",
+    "done": "green",
+    "failed": "bold red",
+    "skipped": "yellow",
+}
+
+
+@dataclass
+class CampaignPlan:
+    """What `arena campaign` is about to do; the same figures as its plain plan lines."""
+
+    runs: int
+    rows: int
+    models: int
+    replicates: int
+    jobs: int
+    limit_usd: float
+    planned_usd: float
+    commands: list[str] = field(default_factory=list)
+
+
+def plan_panel(prefix: str, plan: CampaignPlan, commands: int | None = PLAN_COMMANDS) -> Panel:
+    """The plan: run counts, limit and planned spend, then the `arena run` commands dimmed (`commands` of them, or
+    all for None)."""
+    parts: list[RenderableType] = [
+        Text.assemble(
+            (f"{plan.runs} runs", "bold"),
+            f" ({plan.rows} rows x {plan.models} models x {plan.replicates} replicates, {plan.jobs} at a time)",
+            ("  limit ", "dim"),
+            (f"${plan.limit_usd:g}", "bold"),
+            (" each", "dim"),
+            ("  planned spend ", "dim"),
+            (f"${plan.planned_usd:.2f}", "bold green"),
+        )
+    ]
+    shown = plan.commands if commands is None else plan.commands[:commands]
+    # Live: one dimmed line each, cut at the edge; a dry run (all of them) wraps so every command reads in full.
+    parts += [Text(line, style="dim", no_wrap=commands is not None, overflow="ellipsis") for line in shown]
+    if commands and len(plan.commands) > len(shown):
+        parts.append(Text(f"... {len(plan.commands) - len(shown)} more", style="dim"))
+    return Panel(Group(*parts), title=f"campaign {prefix}: plan", title_align="left", border_style="blue")
+
+
+def _duration(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    return f"{seconds}s" if seconds < 60 else f"{seconds // 60}m{seconds % 60:02d}s"
+
+
+@dataclass
+class Step:
+    """One pre-spend check (a row's packet, a model's preflight); while running, its runs show `status`."""
+
+    label: str
+    detail: str = ""
+    state: str = "running"  # running, ok or failed
+    started: float = 0.0
+    ended: float | None = None
+    status: str | None = None
+    row: str | None = None
+    model: str | None = None
+    spinner: Spinner = field(default_factory=lambda: Spinner("dots", style="cyan"))
+
 
 @dataclass
 class CampaignRun:
@@ -588,29 +659,117 @@ class CampaignRun:
     exit_code: int | None = None
     figures: RunFigures = field(default_factory=RunFigures)
     poller: RunDirPoller | None = None
+    summary: Path | None = None
+
+
+def _shown_path(path: Path) -> str:
+    with contextlib.suppress(ValueError):
+        return str(path.relative_to(Path.cwd()))
+    return str(path)
 
 
 class CampaignView:
-    """Rows x models x replicates of one campaign, each run's figures polled from its directory."""
+    """Plan, pre-spend checks and the rows x models x replicates board of one campaign; each run's figures are
+    polled from its directory."""
 
-    def __init__(self, prefix: str, specs: list[dict], runs_root: Path, limit_usd: float, clock=time.monotonic):
-        self.prefix, self.limit_usd, self.clock = prefix, limit_usd, clock
+    def __init__(
+        self,
+        prefix: str,
+        specs: list[dict],
+        runs_root: Path,
+        limit_usd: float,
+        clock=time.monotonic,
+        plan: CampaignPlan | None = None,
+    ):
+        self.prefix, self.limit_usd, self.clock, self.plan = prefix, limit_usd, clock, plan
+        self.runs_root = Path(runs_root)
         self.started = clock()
-        self.runs = [CampaignRun(spec, poller=RunDirPoller(Path(runs_root) / spec["run_id"])) for spec in specs]
+        self.runs = [CampaignRun(spec, poller=RunDirPoller(self.runs_root / spec["run_id"])) for spec in specs]
         self.by_id = {run.spec["run_id"]: run for run in self.runs}
+        self.steps: dict[str, Step] = {}
+        self.notice: Text | None = None
         self.lock = threading.Lock()
+
+    # -- pre-spend checks
+
+    def _phase_statuses(self) -> None:
+        for run in self.runs:
+            if run.status not in WAITING:
+                continue
+            run.status = next(
+                (
+                    step.status
+                    for step in self.steps.values()
+                    if step.state == "running"
+                    and step.status
+                    and step.row in (None, run.spec["row"])
+                    and step.model in (None, run.spec["model"])
+                ),
+                "queued",
+            )
+
+    def step_begin(
+        self,
+        key: str,
+        label: str,
+        detail: str = "",
+        status: str | None = None,
+        row: str | None = None,
+        model: str | None = None,
+    ) -> None:
+        with self.lock:
+            self.steps[key] = Step(label, detail, started=self.clock(), status=status, row=row, model=model)
+            self._phase_statuses()
+
+    def step_end(self, key: str, ok: bool, detail: str = "") -> None:
+        with self.lock:
+            step = self.steps.get(key)
+            if step is None or step.state != "running":
+                return
+            step.state, step.ended = ("ok" if ok else "failed"), self.clock()
+            step.detail = detail or step.detail
+            self._phase_statuses()
+
+    def steps_interrupted(self) -> None:
+        for key, step in list(self.steps.items()):
+            if step.state == "running":
+                self.step_end(key, False, "interrupted")
+
+    # -- runs
 
     def run_started(self, spec: dict) -> None:
         with self.lock:
             run = self.by_id[spec["run_id"]]
             run.status, run.started = "running", self.clock()
 
-    def run_finished(self, spec: dict, exit_code: int | None) -> None:
+    def run_finished(self, spec: dict, exit_code: int | None, stopped: bool = False) -> None:
+        """`stopped`: the operator asked the campaign to stop, so a run that did not finish cleanly was stopped."""
+        from arena.lean_health import EXIT_CODE
+
         run = self.by_id[spec["run_id"]]
         self._poll_one(run)
+        summary = self.runs_root / spec["run_id"] / "summary.json"
         with self.lock:
-            run.status = "done" if exit_code == 0 else "failed"
+            if exit_code == 0:
+                run.status = "done"
+            elif stopped:
+                run.status = "stopped"
+            elif exit_code == EXIT_CODE:
+                run.status = "skipped"  # Lean unhealthy: no model spend
+            else:
+                run.status = "failed"
             run.exit_code, run.ended = exit_code, self.clock()
+            run.summary = summary if summary.is_file() else None
+
+    def run_skipped(self, spec: dict) -> None:
+        """Never launched (the campaign was stopped first)."""
+        with self.lock:
+            run = self.by_id[spec["run_id"]]
+            run.status, run.started = "skipped", None
+
+    def set_notice(self, text: str, style: str = "bold yellow") -> None:
+        with self.lock:
+            self.notice = Text(text, style=style)
 
     def _poll_one(self, run: CampaignRun) -> None:
         if run.poller is None:
@@ -624,80 +783,146 @@ class CampaignView:
             if run.status == "running":
                 self._poll_one(run)
 
+    # -- rendering
+
     def _elapsed(self, run: CampaignRun) -> str:
         if run.started is None:
             return "-"
         return _clock((run.ended if run.ended is not None else self.clock()) - run.started)
 
+    @staticmethod
+    def _status(run: CampaignRun) -> Text:
+        label = run.status
+        if run.status == "failed" and run.exit_code is not None:
+            label = f"failed (exit {run.exit_code})"
+        return Text(label, style=STATUS_STYLES.get(run.status, ""))
+
+    def _steps(self) -> RenderableType:
+        grid = Table.grid(padding=(0, 1), expand=True)
+        grid.add_column(no_wrap=True, width=1)
+        grid.add_column(no_wrap=True, overflow="ellipsis", ratio=2)
+        grid.add_column(overflow="ellipsis", ratio=3)
+        grid.add_column(no_wrap=True, justify="right")
+        now = self.clock()
+        for step in self.steps.values():
+            icon: RenderableType = {
+                "running": step.spinner,
+                "ok": Text("✓", style="bold green"),
+                "failed": Text("✗", style="bold red"),
+            }[step.state]
+            style = {"running": "", "ok": "", "failed": "red"}[step.state]
+            grid.add_row(
+                icon,
+                Text(step.label, style="bold" if step.state == "running" else ""),
+                Text(step.detail, style=style or "dim"),
+                Text(_duration((step.ended if step.ended is not None else now) - step.started), style="dim"),
+            )
+        return Panel(grid, title="checks before any spend", title_align="left", border_style="cyan")
+
+    def _board(self) -> RenderableType:
+        table = Table(expand=True, box=None, pad_edge=False, show_edge=False)
+        for name, justify in (
+            ("theorem", "left"),
+            ("model", "left"),
+            ("r", "right"),
+            ("status", "left"),
+            ("spend", "right"),
+            ("best", "right"),
+            ("nodes", "right"),
+            ("elapsed", "right"),
+        ):
+            table.add_column(name, justify=justify, no_wrap=name != "theorem", overflow="ellipsis")
+        for run in self.runs:
+            best = run.figures.best
+            table.add_row(
+                run.spec["row"],
+                run.spec["model"],
+                str(run.spec.get("replicate", "")),
+                self._status(run),
+                "-" if run.started is None else f"${run.figures.spent_usd:.4f}",
+                "-" if best is None else f"{best.id} {_score(best.score)}",
+                str(len(run.figures.nodes)) if run.started is not None else "-",
+                self._elapsed(run),
+            )
+        done = sum(run.status in FINISHED for run in self.runs)
+        spent = sum(run.figures.spent_usd for run in self.runs)
+        planned = self.limit_usd * len(self.runs)
+        title = (
+            f"campaign {self.prefix}: {done}/{len(self.runs)} finished, "
+            f"${spent:.4f} of ${planned:.2f} planned, {_clock(self.clock() - self.started)}"
+        )
+        return Panel(table, title=title, title_align="left", border_style="blue")
+
+    def _run_line(self, run: CampaignRun, marker: str, style: str) -> RenderableType:
+        best = run.figures.best
+        limit = run.figures.limit_usd or self.limit_usd
+        line = Text.assemble(
+            (marker + " ", style),
+            (run.spec["run_id"], "bold"),
+            f"  ${run.figures.spent_usd:.4f}/${limit:.2f}",
+            f"  {len(run.figures.nodes)} nodes",
+            f"  best {best.id} {_score(best.score)}" if best else "  no scored node yet",
+            f"  {self._elapsed(run)}",
+            no_wrap=True,
+            overflow="ellipsis",
+        )
+        if run.summary is None:
+            return line
+        return Group(line, Text(f"  summary {_shown_path(run.summary)}", style="dim", overflow="fold"))
+
     def render(self, width: int = 120) -> RenderableType:
         with self.lock:
-            table = Table(expand=True, box=None, pad_edge=False, show_edge=False)
-            for name, justify in (
-                ("theorem", "left"),
-                ("model", "left"),
-                ("r", "right"),
-                ("status", "left"),
-                ("spend", "right"),
-                ("best", "right"),
-                ("nodes", "right"),
-                ("elapsed", "right"),
-            ):
-                table.add_column(name, justify=justify, no_wrap=name != "theorem", overflow="ellipsis")
-            styles = {"queued": "dim", "running": "bold yellow", "done": "green", "failed": "bold red"}
-            for run in self.runs:
-                best = run.figures.best
-                status = run.status if run.exit_code in (None, 0) else f"{run.status} ({run.exit_code})"
-                table.add_row(
-                    run.spec["row"],
-                    run.spec["model"],
-                    str(run.spec.get("replicate", "")),
-                    Text(status, style=styles.get(run.status, "")),
-                    "-" if run.started is None else f"${run.figures.spent_usd:.4f}",
-                    "-" if best is None else f"{best.id} {_score(best.score)}",
-                    str(len(run.figures.nodes)) if run.started is not None else "-",
-                    self._elapsed(run),
-                )
-            done = sum(run.status in ("done", "failed") for run in self.runs)
-            spent = sum(run.figures.spent_usd for run in self.runs)
-            planned = self.limit_usd * len(self.runs)
-            title = (
-                f"campaign {self.prefix}: {done}/{len(self.runs)} finished, "
-                f"${spent:.4f} of ${planned:.2f} planned, {_clock(self.clock() - self.started)}"
-            )
-            active = []
-            for run in self.runs:
-                if run.status != "running":
-                    continue
-                best = run.figures.best
-                limit = run.figures.limit_usd or self.limit_usd
-                active.append(
-                    Text.assemble(
-                        ("> ", "bold yellow"),
-                        (run.spec["run_id"], "bold"),
-                        f"  ${run.figures.spent_usd:.4f}/${limit:.2f}",
-                        f"  {len(run.figures.nodes)} nodes",
-                        f"  best {best.id} {_score(best.score)}" if best else "  no scored node yet",
-                        f"  {self._elapsed(run)}",
-                        no_wrap=True,
-                        overflow="ellipsis",
-                    )
-                )
-            parts: list[RenderableType] = [Panel(table, title=title, title_align="left", border_style="blue")]
+            parts: list[RenderableType] = []
+            launched = any(run.started is not None for run in self.runs)
+            if self.plan is not None:
+                parts.append(plan_panel(self.prefix, self.plan, 0 if launched else PLAN_COMMANDS))
+            if self.steps:
+                parts.append(self._steps())
+            parts.append(self._board())
+            active = [self._run_line(run, ">", "bold yellow") for run in self.runs if run.status == "running"]
             if active:
                 parts.append(Panel(Group(*active), title="active", title_align="left", border_style="yellow"))
+            stopped = [self._run_line(run, "■", "bold yellow") for run in self.runs if run.status == "stopped"]
+            if stopped:
+                parts.append(
+                    Panel(Group(*stopped), title="stopped by operator", title_align="left", border_style="yellow")
+                )
+            if self.notice is not None:
+                parts.append(self.notice)
             return Group(*parts)
 
 
 class CampaignDisplay(LiveDisplay):
+    """The live campaign view. Event lines print above it through its console (never raw stdout while it is up)."""
+
     def __init__(self, view: CampaignView, console: Console | None = None, **kwargs):
         super().__init__(view.render, view.poll, console, **kwargs)
         self.view = view
 
+    def log(self, message: str, stamp: bool = True) -> bool:
+        line = Text.assemble((time.strftime("%H:%M:%S") + " ", "dim") if stamp else "", message)
+        return self.guard(lambda: self.console.print(line, highlight=False))
+
+    def step_begin(self, key: str, label: str, detail: str = "", **match) -> bool:
+        return self.guard(lambda: self.view.step_begin(key, label, detail, **match))
+
+    def step_end(self, key: str, ok: bool, detail: str = "") -> bool:
+        return self.guard(lambda: self.view.step_end(key, ok, detail))
+
+    def steps_interrupted(self) -> bool:
+        return self.guard(self.view.steps_interrupted)
+
+    def set_notice(self, text: str, style: str = "bold yellow") -> bool:
+        return self.guard(lambda: self.view.set_notice(text, style))
+
     def run_started(self, spec: dict) -> None:
         self.guard(lambda: self.view.run_started(spec))
 
-    def run_finished(self, spec: dict, exit_code: int | None) -> None:
-        self.guard(lambda: self.view.run_finished(spec, exit_code))
+    def run_finished(self, spec: dict, exit_code: int | None, stopped: bool = False) -> None:
+        self.guard(lambda: self.view.run_finished(spec, exit_code, stopped))
+
+    def run_skipped(self, spec: dict) -> None:
+        self.guard(lambda: self.view.run_skipped(spec))
 
 
 def start_campaign(
@@ -706,14 +931,15 @@ def start_campaign(
     runs_root: Path,
     limit_usd: float,
     *,
+    plan: CampaignPlan | None = None,
     plain: bool = False,
     console: Console | None = None,
 ) -> CampaignDisplay | None:
-    """A started campaign board, or None when output must stay plain."""
+    """A started campaign view, or None when output must stay plain."""
     if console is None and not enabled(plain):
         return None
     try:
-        display = CampaignDisplay(CampaignView(prefix, specs, runs_root, limit_usd), console)
+        display = CampaignDisplay(CampaignView(prefix, specs, runs_root, limit_usd, plan=plan), console)
     except Exception:
         return None
     return display.start()

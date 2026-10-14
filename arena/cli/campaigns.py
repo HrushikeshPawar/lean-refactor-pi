@@ -27,11 +27,13 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 from rich.console import Console
 from rich.table import Table
@@ -57,6 +59,141 @@ LEAN_UNHEALTHY_EXIT = 75  # keep equal to arena.lean_health.EXIT_CODE
 
 class CampaignAbort(Exception):
     """A pre-spend gate failed; nothing was run."""
+
+
+class NotLaunched(Exception):
+    """The operator stopped the campaign before this run was launched."""
+
+
+def stamped(message: str) -> str:
+    return f"{time.strftime('%H:%M:%S')} {message}"
+
+
+class Progress:
+    """Where campaign progress goes: the live view when one is up, else the plain lines (unchanged for pipes, tests
+    and `--plain`). Each method falls back to its plain line when the view is off or has just failed."""
+
+    def __init__(self, board: live.CampaignDisplay | None = None):
+        self.board = board
+
+    def event(self, message: str) -> None:
+        """A timestamped event line (start, cleanup, done)."""
+        if not (self.board and self.board.log(message)):
+            print(stamped(message), flush=True)
+
+    def note(self, message: str) -> None:
+        if not (self.board and self.board.log(message, stamp=False)):
+            print(message, flush=True)
+
+    def step_begin(self, key: str, label: str, detail: str, plain: str | None, **match) -> None:
+        if not (self.board and self.board.step_begin(key, label, detail, **match)) and plain is not None:
+            print(plain, flush=True)
+
+    def step_end(self, key: str, ok: bool, detail: str, plain: str | None) -> None:
+        if not (self.board and self.board.step_end(key, ok, detail)) and plain is not None:
+            print(plain, flush=True)
+
+    @property
+    def showing(self) -> bool:
+        return self.board is not None and self.board.active
+
+    def plain(self, message: str) -> None:
+        """A line only the plain output has (the live view shows the same thing as a step or on the board)."""
+        if not self.showing:
+            print(message, flush=True)
+
+    def close(self) -> None:
+        """Stop the live view (last frame drawn, cursor back); later output is plain."""
+        board, self.board = self.board, None
+        if board is not None:
+            board.stop()
+
+
+class StopControl:
+    """Operator stop while runs are in flight (Ctrl+C, SIGTERM or SIGHUP). The first launches nothing more and sends
+    each running `arena run` one SIGINT, which it treats as a clean stop: Pi is asked to stop, cost.json and
+    summary.json are written. The second sends another, on which each run kills its Pi's process group at once and
+    still writes its summary. Any further one kills each run's own process group (its exact PGID: runs are started
+    in their own session, so the terminal's Ctrl+C reaches only the campaign)."""
+
+    SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+
+    def __init__(self, progress: Progress | None = None, kill_fn=os.killpg):
+        self.progress = progress or Progress()
+        self.kill_fn = kill_fn
+        self.requests = 0
+        self.event = threading.Event()
+        self.children: dict[int, subprocess.Popen] = {}
+        self.lock = threading.Lock()
+        self.previous: dict[int, object] = {}
+
+    @property
+    def requested(self) -> bool:
+        return self.event.is_set()
+
+    def install(self) -> None:
+        for number in self.SIGNALS:
+            with suppress(ValueError):  # not the main thread: nothing to install
+                self.previous[number] = signal.signal(number, self.handle)
+
+    def restore(self) -> None:
+        for number, handler in self.previous.items():
+            with suppress(ValueError, TypeError):
+                signal.signal(number, handler)  # ty: ignore[invalid-argument-type]
+        self.previous.clear()
+
+    def track(self, process: subprocess.Popen) -> None:
+        with self.lock:
+            self.children[process.pid] = process
+        if self.requested:  # the stop came while it was being launched
+            with suppress(OSError):
+                process.send_signal(signal.SIGINT)
+
+    def untrack(self, process: subprocess.Popen) -> None:
+        with self.lock:
+            self.children.pop(process.pid, None)
+
+    def running(self) -> list[subprocess.Popen]:
+        with self.lock:
+            children = list(self.children.values())
+        return [process for process in children if process.poll() is None]
+
+    def handle(self, _signum=None, _frame=None) -> None:
+        self.requests += 1
+        self.event.set()
+        running = self.running()
+        if self.requests == 1:
+            message = (
+                f"stop requested: no new runs; asking {len(running)} running run(s) to stop cleanly and write their "
+                "summaries (Ctrl+C again to force)"
+            )
+        elif self.requests == 2:
+            message = f"forcing: {len(running)} run(s) kill their Pi now (Ctrl+C again kills the runs themselves)"
+        else:
+            message = f"killing {len(running)} run(s) by process group"
+        if self.progress.board is not None:
+            self.progress.board.set_notice(message)
+        self.progress.event(message)
+        for process in running:
+            with suppress(OSError):
+                if self.requests <= 2:
+                    process.send_signal(signal.SIGINT)
+                elif process.poll() is None:
+                    self.kill_fn(process.pid, signal.SIGKILL)
+
+
+def run_child(command: list[str], stop: StopControl | None = None, **kwargs) -> subprocess.CompletedProcess:
+    """`subprocess.run` for one `arena run`, in its own session so only the campaign sees the terminal's Ctrl+C and
+    decides what each run gets (see StopControl)."""
+    with subprocess.Popen(command, stdin=subprocess.DEVNULL, start_new_session=True, **kwargs) as process:
+        if stop is not None:
+            stop.track(process)
+        try:
+            code = process.wait()
+        finally:
+            if stop is not None:
+                stop.untrack(process)
+    return subprocess.CompletedProcess(command, code)
 
 
 def slug(text: str, limit: int = 40) -> str:
@@ -109,27 +246,35 @@ def command(spec: dict, limit: float, thinking: str, passthrough: list[str]) -> 
     ]
 
 
-def check_packets(rows: list[str], packet_fn=None) -> dict[str, str]:
+def check_packets(rows: list[str], packet_fn=None, progress: Progress | None = None) -> dict[str, str]:
     """Row -> sha256 of its certified packet. Any uncertifiable row aborts the campaign."""
     if packet_fn is None:
         from arena.campaign import packet as packet_fn
+    progress = progress or Progress()
     hashes, failures = {}, []
     for index, row in enumerate(rows, 1):
-        print(
-            f"packet {index}/{len(rows)} {row}: building (Lean context; cached rows are quick, new rows take minutes)",
-            flush=True,
+        name, key = f"packet {index}/{len(rows)} {row}", f"packet:{row}"
+        progress.step_begin(
+            key,
+            name,
+            "building (Lean context; cached rows are quick, new rows take minutes)",
+            f"{name}: building (Lean context; cached rows are quick, new rows take minutes)",
+            status="building",
+            row=row,
         )
         started = time.monotonic()
         try:
             text = packet_fn(row)
         except Exception as error:
             failures.append(f"{row}: {error}")
-            print(f"packet {index}/{len(rows)} {row}: FAILED after {time.monotonic() - started:.0f}s", flush=True)
+            progress.step_end(key, False, str(error), f"{name}: FAILED after {time.monotonic() - started:.0f}s")
             continue
         hashes[row] = hashlib.sha256(text.encode()).hexdigest()
-        print(
-            f"packet {index}/{len(rows)} {row}: certified in {time.monotonic() - started:.0f}s ({len(text):,} chars)",
-            flush=True,
+        progress.step_end(
+            key,
+            True,
+            f"certified ({len(text):,} chars)",
+            f"{name}: certified in {time.monotonic() - started:.0f}s ({len(text):,} chars)",
         )
     if failures:
         raise CampaignAbort("packet certification failed: " + "; ".join(failures))
@@ -156,8 +301,32 @@ def check_preflight(
     run_fn=None,
     max_age_hours: float = RECEIPT_MAX_AGE_HOURS,
     now_fn=time.time,
+    progress: Progress | None = None,
 ) -> str:
-    """Return how the gate was satisfied: 'skipped', 'fresh receipt' or 'ran preflight'."""
+    """Return how the gate was satisfied: 'skipped', 'fresh receipt' or 'ran preflight'. With a live view each
+    model is a check step and the preflight's own output is captured into the view's log."""
+    progress = progress or Progress()
+    for model in models:
+        progress.step_begin(
+            f"preflight:{model}",
+            f"preflight {model}",
+            "receipt or one cheap traced request",
+            None,
+            status="preflight",
+            model=model,
+        )
+    try:
+        how = _preflight_gate(models, skip, block_fn, receipt_fn, run_fn, max_age_hours, now_fn, progress)
+    except CampaignAbort as error:
+        for model in models:
+            progress.step_end(f"preflight:{model}", False, str(error), None)
+        raise
+    for model in models:
+        progress.step_end(f"preflight:{model}", True, how, None)
+    return how
+
+
+def _preflight_gate(models, skip, block_fn, receipt_fn, run_fn, max_age_hours, now_fn, progress: Progress) -> str:
     if skip:
         return "skipped"
     if block_fn is None or receipt_fn is None:
@@ -174,9 +343,22 @@ def check_preflight(
     if run_fn is None:
 
         def run_fn(models: list[str]) -> int:
-            return subprocess.run(
-                [sys.executable, "-m", "arena.cli", "preflight", "--models", ",".join(models)], cwd=ROOT
-            ).returncode
+            preflight = [sys.executable, "-m", "arena.cli", "preflight", "--models", ",".join(models)]
+            if not progress.showing:
+                return subprocess.run(preflight, cwd=ROOT).returncode
+            # A child writing to the terminal would tear the live view: its lines go through the view instead.
+            with subprocess.Popen(
+                preflight,
+                cwd=ROOT,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            ) as process:
+                assert process.stdout is not None
+                for line in process.stdout:
+                    progress.note(line.rstrip("\n"))
+                return process.wait()
 
     code = run_fn(models)
     reason = block_fn(models)
@@ -505,6 +687,7 @@ class Housekeeping:
         self.lock = threading.Lock()
         self.in_flight = 0
         self.finished: list[Path] = []
+        self.cancel: threading.Event | None = None  # set: stop waiting (the operator stopped the campaign)
 
     def say(self, message: str) -> None:
         self.log(f"{time.strftime('%H:%M:%S')} {message}", flush=True) if self.log is print else self.log(message)
@@ -523,7 +706,7 @@ class Housekeeping:
             service = self.service_gb_fn()
             low = alone and free is not None and free + service < self.min_free_gb
             shown = "?" if free is None else f"{free:.1f}"
-            if not stray and not low:
+            if (not stray and not low) or (self.cancel is not None and self.cancel.is_set()):
                 break
             if self.now_fn() >= deadline:
                 self.say(
@@ -542,6 +725,11 @@ class Housekeeping:
             self.sleep_fn(5)
         with self.lock:
             self.in_flight += 1
+
+    def release(self) -> None:
+        """A run that `before_run` admitted but was never launched."""
+        with self.lock:
+            self.in_flight -= 1
 
     def after_run(self, run_id: str, directory: Path) -> None:
         reaped = self.reap_fn(directory)
@@ -565,28 +753,41 @@ def execute(
     passthrough: list[str],
     logs: Path,
     expected: str,
-    run_fn=subprocess.run,
+    run_fn: Callable[..., Any] = subprocess.run,
     summary_fn=None,
     housekeeping: Housekeeping | None = None,
     prewarm: scheduler.Prewarm | None = None,
     sampler: scheduler.ResourceSampler | None = None,
     on_finished=None,
+    progress: Progress | None = None,
+    stop: StopControl | None = None,
 ) -> dict:
+    """One run; NotLaunched when the operator stopped the campaign before it started."""
     if summary_fn is None:
         from arena.summary import build_summary as summary_fn
+    progress = progress or Progress()
     directory = RUNS / spec["run_id"]
     if housekeeping:
         housekeeping.before_run(spec["run_id"])
+    if stop is not None and stop.requested:
+        if housekeeping:
+            housekeeping.release()
+        raise NotLaunched(spec["run_id"])
     started = time.monotonic()
     if prewarm:
         prewarm.started(spec)
     if sampler:
         sampler.run_started()
-    print(f"{time.strftime('%H:%M:%S')} start  {spec['run_id']}", flush=True)
+    progress.event(f"start  {spec['run_id']}")
     try:
         with (logs / f"{spec['run_id']}.log").open("w") as log:
             proc = run_fn(
-                command(spec, limit, thinking, passthrough), cwd=ROOT, stdout=log, stderr=subprocess.STDOUT, text=True
+                command(spec, limit, thinking, passthrough),
+                cwd=ROOT,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                text=True,
+                **({} if stop is None else {"stop": stop}),
             )
     finally:
         elapsed = time.monotonic() - started
@@ -598,13 +799,10 @@ def execute(
             on_finished(spec)
         if housekeeping:
             housekeeping.after_run(spec["run_id"], directory)
-    print(f"{time.strftime('%H:%M:%S')} done   {spec['run_id']} (exit {proc.returncode})", flush=True)
+    verb = "stopped" if stop is not None and stop.requested and proc.returncode != 0 else "done  "
+    progress.event(f"{verb} {spec['run_id']} (exit {proc.returncode})")
     if proc.returncode == LEAN_UNHEALTHY_EXIT:
-        print(
-            f"{time.strftime('%H:%M:%S')} skipped {spec['run_id']}: Lean unhealthy, no model spend; "
-            f"continuing with the next row",
-            flush=True,
-        )
+        progress.event(f"skipped {spec['run_id']}: Lean unhealthy, no model spend; continuing with the next row")
     config_path = directory / "run-config.json"
     packet_sha = json.loads(config_path.read_text()).get("packet_sha256") if config_path.exists() else None
     summary = summary_fn(directory) if directory.exists() else None
@@ -669,13 +867,18 @@ def cli_execute(options: CampaignOptions, passthrough: tuple[str, ...] = ()) -> 
     except ValueError as error:
         print(error, file=sys.stderr)
         return 2
-    print(
-        f"{len(specs)} runs ({len(rows)} rows x {len(models)} models x {args.replicates} replicates, {args.jobs} at a time); "
-        f"limit ${args.limit_usd:g} each; planned spend ${worst_case_usd(specs, args.limit_usd):.2f}"
-    )
-    for spec in specs:
-        planned = command(spec, args.limit_usd, args.thinking, passthrough_tokens)
-        print("  arena run " + shlex.join(planned[4:]))
+    overview = campaign_plan(args, rows, models, specs, passthrough_tokens)
+    if live.enabled(args.plain):
+        # The live view shows the plan itself; a dry run shows it once, with every command.
+        if args.dry_run:
+            Console().print(live.plan_panel(args.prefix, overview, commands=None))
+    else:
+        print(
+            f"{len(specs)} runs ({len(rows)} rows x {len(models)} models x {args.replicates} replicates, {args.jobs} at a time); "
+            f"limit ${args.limit_usd:g} each; planned spend ${worst_case_usd(specs, args.limit_usd):.2f}"
+        )
+        for line in overview.commands:
+            print("  " + line)
     if args.dry_run:
         return 0
     clashes = [spec["run_id"] for spec in specs if (RUNS / spec["run_id"]).exists()]
@@ -694,7 +897,50 @@ def cli_execute(options: CampaignOptions, passthrough: tuple[str, ...] = ()) -> 
         lock.release()
 
 
-def _run_campaign(args, rows, models, specs, passthrough_tokens, lock_info, run_fn=subprocess.run) -> int:
+def campaign_plan(
+    args, rows: list[str], models: list[str], specs: list[dict], passthrough: list[str]
+) -> live.CampaignPlan:
+    return live.CampaignPlan(
+        runs=len(specs),
+        rows=len(rows),
+        models=len(models),
+        replicates=args.replicates,
+        jobs=args.jobs,
+        limit_usd=args.limit_usd,
+        planned_usd=worst_case_usd(specs, args.limit_usd),
+        commands=[
+            "arena run " + shlex.join(command(spec, args.limit_usd, args.thinking, passthrough)[4:]) for spec in specs
+        ],
+    )
+
+
+def _run_campaign(
+    args, rows, models, specs, passthrough_tokens, lock_info, run_fn=run_child, console: Console | None = None
+) -> int:
+    """Pre-spend checks, then the runs, then the report. With a terminal (or `console`) everything shows in one
+    live view: plan, check steps, run board; event lines print above it."""
+    board = live.start_campaign(
+        args.prefix,
+        specs,
+        RUNS,
+        args.limit_usd,
+        plan=campaign_plan(args, rows, models, specs, passthrough_tokens),
+        plain=getattr(args, "plain", False),
+        console=console,
+    )
+    progress = Progress(board)
+    stop = StopControl(progress)
+    try:
+        return _campaign_body(args, rows, models, specs, passthrough_tokens, lock_info, run_fn, progress, stop)
+    finally:
+        stop.restore()
+        progress.close()
+
+
+def _campaign_body(
+    args, rows, models, specs, passthrough_tokens, lock_info, run_fn, progress: Progress, stop: StopControl
+) -> int:
+    board = progress.board
     out = RUNS / f"{args.prefix}-campaign"
     settings = {
         "prefix": args.prefix,
@@ -715,16 +961,27 @@ def _run_campaign(args, rows, models, specs, passthrough_tokens, lock_info, run_
     }
     try:
         check_indexes(rows)
-        expected = check_packets(rows)
-        print("preflight:", check_preflight(models, args.skip_preflight))
+        expected = check_packets(rows, progress=progress)
+        progress.plain(f"preflight: {check_preflight(models, args.skip_preflight, progress=progress)}")
     except CampaignAbort as error:
+        progress.close()
         print(f"aborted before any paid run: {error}", file=sys.stderr)
         return 1
+    except KeyboardInterrupt:
+        if board is not None:
+            board.steps_interrupted()
+        progress.close()
+        print("interrupted before any paid run; nothing was launched", file=sys.stderr)
+        return 130
     out.mkdir(parents=True)
     campaign_path = out / "campaign.json"
     campaign_path.write_text(json.dumps({"settings": settings}, indent=2) + "\n")
     row_order = list(dict.fromkeys(spec["row"] for spec in specs))
     housekeeping = Housekeeping(args.min_free_gb, args.cleanup_wait)
+    housekeeping.log = progress.event
+    housekeeping.cancel = stop.event
+    # From here on Ctrl+C is an operator stop (StopControl), never a KeyboardInterrupt.
+    stop.install()
     sampler = scheduler.ResourceSampler()
     sampler.start()
     prewarm = (
@@ -754,7 +1011,7 @@ def _run_campaign(args, rows, models, specs, passthrough_tokens, lock_info, run_
             )
             hold.start(row_info)
         except Exception as error:
-            print(f"Lean service hold unavailable ({error}); continuing with cold fallback", flush=True)
+            progress.note(f"Lean service hold unavailable ({error}); continuing with cold fallback")
         if prewarm:
 
             def poll_prewarm():
@@ -764,7 +1021,7 @@ def _run_campaign(args, rows, models, specs, passthrough_tokens, lock_info, run_
                         try:
                             prewarm.warm_fn(next_row)
                         except Exception as error:
-                            print(f"pre-warm {next_row} failed: {error}", flush=True)
+                            progress.note(f"pre-warm {next_row} failed: {error}")
 
             helper_thread = threading.Thread(target=poll_prewarm, daemon=True)
             helper_thread.start()
@@ -777,9 +1034,13 @@ def _run_campaign(args, rows, models, specs, passthrough_tokens, lock_info, run_
                 hold.row_finished(spec["row"])
 
         def tracked(spec):
+            if stop.requested:
+                if board:
+                    board.run_skipped(spec)
+                return None
             if board:
                 board.run_started(spec)
-            exit_code = None
+            exit_code, launched = None, True
             try:
                 row = execute(
                     spec,
@@ -793,21 +1054,25 @@ def _run_campaign(args, rows, models, specs, passthrough_tokens, lock_info, run_
                     sampler=sampler,
                     on_finished=finished,
                     run_fn=run_fn,
+                    progress=progress,
+                    stop=stop,
                 )
+            except NotLaunched:
+                launched = False
+                return None
+            else:
                 exit_code = row["exit_code"]
                 return row
             finally:
-                if board:
-                    board.run_finished(spec, exit_code)
+                if board and launched:
+                    board.run_finished(spec, exit_code, stopped=stop.requested)
+                elif board:
+                    board.run_skipped(spec)
 
         # The board polls each run directory; the runs' own stdout goes to their log files as before.
-        board = live.start_campaign(args.prefix, specs, RUNS, args.limit_usd, plain=getattr(args, "plain", False))
-        try:
-            with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-                runs = list(pool.map(tracked, specs))
-        finally:
-            if board:
-                board.stop()
+        with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+            results = list(pool.map(tracked, specs))
+        runs = [row for row in results if row is not None]
     finally:
         stop_helpers.set()
         if helper_thread:
@@ -815,6 +1080,17 @@ def _run_campaign(args, rows, models, specs, passthrough_tokens, lock_info, run_
         if hold:
             hold.close()
         observed = sampler.stop()
+    if stop.requested:
+        stopped = [row for row in runs if row["exit_code"] != 0]
+        summaries = [str(RUNS / row["run_id"] / "summary.json") for row in stopped]
+        message = (
+            f"stopped by operator: {len(stopped)} run(s) stopped, {len(specs) - len(runs)} never launched, "
+            f"${sum(row['spent_usd'] or 0 for row in runs):.4f} spent"
+        )
+        # The live view's last frame lists each stopped run with its summary path.
+        if not (board is not None and board.set_notice(message)):
+            print(message + (f"; summaries: {', '.join(summaries)}" if summaries else ""), flush=True)
+    progress.close()
     report: dict = {
         "limit_usd": args.limit_usd,
         "prefix": args.prefix,
@@ -844,6 +1120,8 @@ def _run_campaign(args, rows, models, specs, passthrough_tokens, lock_info, run_
                 f"${group['spent_usd']['total']:.4f}",
             )
         Console().print(table)
+    if stop.requested:
+        return 130
     if not report["identical_packets"]:
         print("Packets differ between runs; the comparison is not valid.", file=sys.stderr)
         return 1

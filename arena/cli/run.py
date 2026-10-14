@@ -360,6 +360,10 @@ class RunOptions:
 def execute(options: RunOptions) -> int:
     try:
         return run(options)
+    except KeyboardInterrupt:
+        # Ctrl+C before Pi started (packet, Lean gate): from Pi's start on, `interrupt` handles it and never raises.
+        print("interrupted before Pi started; no model spend", file=sys.stderr, flush=True)
+        return 130
     finally:
         _BACKGROUND["stop"].set()
         stop_lean_session()

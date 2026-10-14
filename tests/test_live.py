@@ -188,6 +188,133 @@ class CampaignViewTests(unittest.TestCase):
             self.assertEqual((view.by_id["run"].status, view.by_id["run"].exit_code), ("failed", 1))
 
 
+SPECS = [
+    {"row": "Fixture.thm", "model": "m", "replicate": 1, "run_id": "run"},
+    {"row": "Fixture.thm", "model": "m", "replicate": 2, "run_id": "run2"},
+    {"row": "Other.thm", "model": "m", "replicate": 1, "run_id": "other"},
+]
+PLAN = live.CampaignPlan(
+    runs=3,
+    rows=2,
+    models=1,
+    replicates=2,
+    jobs=1,
+    limit_usd=0.5,
+    planned_usd=1.5,
+    commands=[f"arena run --model m --run-id {spec['run_id']} --limit-usd 0.5" for spec in SPECS],
+)
+
+
+def frame(view, width: int) -> str:
+    console = Console(record=True, width=width, color_system=None, file=io.StringIO())
+    console.print(view.render(width))
+    return console.export_text()
+
+
+class CampaignPhaseTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.now = [0.0]
+        self.view = live.CampaignView("pfx", SPECS, self.root, 0.5, clock=lambda: self.now[0], plan=PLAN)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_plan_and_check_steps_render_at_narrow_and_wide_widths(self):
+        view = self.view
+        view.step_begin(
+            "packet:Fixture.thm", "packet 1/2 Fixture.thm", "building", status="building", row="Fixture.thm"
+        )
+        self.now[0] = 7
+        statuses = {run.spec["run_id"]: run.status for run in view.runs}
+        self.assertEqual(statuses, {"run": "building", "run2": "building", "other": "queued"})
+        for width in (80, 160):
+            with self.subTest(width=width, phase="building"):
+                text = frame(view, width)
+                for figure in ("3 runs", "2 rows x 1 models x 2 replicates", "$0.5", "$1.50", "--run-id run2", "7s"):
+                    self.assertIn(figure, text)
+                self.assertIn("building", text)
+                self.assertTrue(all(len(line) <= width for line in text.splitlines()))
+        view.step_end("packet:Fixture.thm", True, "certified (18,229 chars)")
+        view.step_begin("preflight:m", "preflight m", "", status="preflight", model="m")
+        self.now[0] = 19
+        view.step_end("preflight:m", False, "preflight failed: no receipt")
+        self.assertEqual({run.status for run in view.runs}, {"queued"})
+        for width in (80, 160):
+            with self.subTest(width=width, phase="checked"):
+                text = frame(view, width)
+                self.assertIn("✓", text)
+                self.assertIn("✗", text)
+                self.assertIn("18,229", text)
+                self.assertIn("12s", text)  # the preflight step took 7s -> 19s
+                self.assertTrue(all(len(line) <= width for line in text.splitlines()))
+
+    def test_plan_commands_fold_away_once_a_run_starts(self):
+        self.assertIn("--run-id other", frame(self.view, 160))
+        self.view.run_started(SPECS[0])
+        self.assertNotIn("--run-id other", frame(self.view, 160))
+        self.assertIn("3 runs", frame(self.view, 160))
+
+    def test_status_vocabulary(self):
+        view = self.view
+        write_run(self.root / "run")
+        (self.root / "run" / "summary.json").write_text("{}")
+        for spec in SPECS:
+            view.run_started(spec)
+        view.run_finished(SPECS[0], 130, stopped=True)  # operator Ctrl+C: the run exits 130 after its summary
+        view.run_finished(SPECS[1], 130)  # the same exit without an operator stop is a failure
+        view.run_skipped(SPECS[2])
+        self.assertEqual([run.status for run in view.runs], ["stopped", "failed", "skipped"])
+        text = frame(view, 160)
+        self.assertIn("stopped", text)
+        self.assertIn("failed (exit 130)", text)
+        self.assertIn("3/3 finished", text)
+        self.assertIn("$0.1250", text)
+        self.assertIn("n2 42.50", text)
+        self.assertIn(str(self.root / "run" / "summary.json"), text.replace("\n", ""))
+        view.run_finished(SPECS[1], 75)
+        self.assertEqual(view.by_id["run2"].status, "skipped")  # Lean unhealthy, no model spend
+        view.run_finished(SPECS[1], 0, stopped=True)
+        self.assertEqual(view.by_id["run2"].status, "done")
+
+
+class CampaignDisplayTests(unittest.TestCase):
+    def test_event_lines_print_through_the_live_console_not_raw_stdout(self):
+        from arena.cli import campaigns
+
+        output, raw = io.StringIO(), io.StringIO()
+        console = Console(file=output, force_terminal=True, width=100, color_system=None)
+        with redirect_stdout(raw):
+            display = live.start_campaign("pfx", SPECS, Path("/nonexistent"), 0.5, plan=PLAN, console=console)
+            assert display is not None
+            progress = campaigns.Progress(display)
+            progress.event("start  run")
+            progress.note("deepseek session=preflight-x exit=0")
+            progress.step_begin("k", "packet 1/2 Fixture.thm", "building", "PLAIN LINE", status="building")
+            progress.step_end("k", True, "certified", "PLAIN LINE")
+            print("stray print")  # anything else printed while live goes through the view too
+            progress.close()
+        self.assertEqual(raw.getvalue(), "")
+        text = output.getvalue()
+        for line in ("start  run", "preflight-x exit=0", "stray print", "certified", "3 runs"):
+            self.assertIn(line, text)
+        self.assertNotIn("PLAIN LINE", text)
+        self.assertIn("\x1b[?25h", text)  # cursor shown again
+
+    def test_without_a_view_progress_prints_the_plain_lines(self):
+        from arena.cli import campaigns
+
+        raw = io.StringIO()
+        with redirect_stdout(raw), mock.patch("time.strftime", return_value="12:00:00"):
+            progress = campaigns.Progress()
+            progress.event("start  run")
+            progress.step_begin("k", "label", "detail", "packet 1/1 A: building")
+            progress.step_end("k", True, "detail", None)
+            progress.plain("preflight: skipped")
+        self.assertEqual(raw.getvalue(), "12:00:00 start  run\npacket 1/1 A: building\npreflight: skipped\n")
+
+
 class PlainPathTests(unittest.TestCase):
     def test_enabled_needs_a_tty_and_no_opt_out(self):
         tty = SimpleNamespace(isatty=lambda: True)
@@ -260,6 +387,19 @@ class PlainPathTests(unittest.TestCase):
             self.assertFalse(display.line("after"))
             display.stop()
         self.assertIn("bad ledger", errors.getvalue())
+
+    def test_ctrl_c_before_pi_starts_exits_130_without_a_traceback(self):
+        errors = io.StringIO()
+        with (
+            mock.patch.object(run_module, "run", side_effect=KeyboardInterrupt),
+            mock.patch.object(run_module, "stop_lean_session") as release,
+            redirect_stderr(errors),
+        ):
+            code = run_module.execute(run_module.RunOptions(model="m", theorem="t", run_id="r"))
+        self.assertEqual(code, 130)
+        release.assert_called_once()
+        self.assertIn("interrupted before Pi started", errors.getvalue())
+        self.assertNotIn("Traceback", errors.getvalue())
 
 
 if __name__ == "__main__":
