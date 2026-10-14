@@ -37,6 +37,7 @@ from rich.console import Console
 from rich.table import Table
 
 from arena import engine, lean_session, scheduler
+from arena.cli import live
 from arena.cli.run import CONFIG, MODELS
 from arena.engine import ROOT
 
@@ -626,6 +627,7 @@ class CampaignOptions:
     skip_preflight: bool = False
     dry_run: bool = False
     json: bool = False
+    plain: bool = False
 
 
 def cli_execute(options: CampaignOptions, passthrough: tuple[str, ...] = ()) -> int:
@@ -774,25 +776,38 @@ def _run_campaign(args, rows, models, specs, passthrough_tokens, lock_info, run_
             if last and hold:
                 hold.row_finished(spec["row"])
 
-        with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-            runs = list(
-                pool.map(
-                    lambda spec: execute(
-                        spec,
-                        args.limit_usd,
-                        args.thinking,
-                        passthrough_tokens,
-                        out,
-                        expected[spec["row"]],
-                        housekeeping=housekeeping,
-                        prewarm=prewarm,
-                        sampler=sampler,
-                        on_finished=finished,
-                        run_fn=run_fn,
-                    ),
-                    specs,
+        def tracked(spec):
+            if board:
+                board.run_started(spec)
+            exit_code = None
+            try:
+                row = execute(
+                    spec,
+                    args.limit_usd,
+                    args.thinking,
+                    passthrough_tokens,
+                    out,
+                    expected[spec["row"]],
+                    housekeeping=housekeeping,
+                    prewarm=prewarm,
+                    sampler=sampler,
+                    on_finished=finished,
+                    run_fn=run_fn,
                 )
-            )
+                exit_code = row["exit_code"]
+                return row
+            finally:
+                if board:
+                    board.run_finished(spec, exit_code)
+
+        # The board polls each run directory; the runs' own stdout goes to their log files as before.
+        board = live.start_campaign(args.prefix, specs, RUNS, args.limit_usd, plain=getattr(args, "plain", False))
+        try:
+            with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+                runs = list(pool.map(tracked, specs))
+        finally:
+            if board:
+                board.stop()
     finally:
         stop_helpers.set()
         if helper_thread:

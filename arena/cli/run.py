@@ -23,6 +23,7 @@ from typing import TypedDict
 from arena import lean_health, lean_session, text
 from arena import models as model_config
 from arena.campaign import autocheck, init, packet, run_dir, submission, write_state
+from arena.cli import live
 from arena.engine import ROOT
 from arena.provenance import code_version
 from arena.skill import skill_hash, skill_prompt
@@ -47,6 +48,8 @@ _tool_started: dict[str, float] = {}
 _request_count = 0
 _tool_result_count = 0
 _retry_count = 0
+# The live terminal view while Pi runs; None means plain lines (not a TTY, --plain or ARENA_PLAIN=1).
+_LIVE: live.RunDisplay | None = None
 
 
 def pi_settings(args, config: dict) -> dict:
@@ -152,8 +155,40 @@ def log_event(event: dict) -> None:
         note = f"provider retry {event.get('attempt')}/{event.get('maxAttempts')}: {event.get('errorMessage', '')}"
     elif kind == "agent_settled":
         note = "Pi agent settled"
+    if _LIVE is not None:
+        _LIVE.event(event)
     if note:
-        print(f"[{datetime.now().astimezone().strftime('%H:%M:%S')}] {note}", flush=True)
+        line = f"[{datetime.now().astimezone().strftime('%H:%M:%S')}] {note}"
+        if _LIVE is None or not _LIVE.line(line):
+            print(line, flush=True)
+
+
+@contextlib.contextmanager
+def live_view(args, directory: Path, health: dict | None, worker: subprocess.Popen | None):
+    """Show the live view while Pi runs; always gives the terminal back before the summary is printed."""
+    global _LIVE
+    if _LEAN["socket"] is None:
+        lean = "no session (cold compiles)"
+    elif health is None:
+        lean = "session leased; no gate"
+    else:
+        lean = f"session leased; gate {health['verdict']}, timeout {os.environ.get(lean_health.TIMEOUT_ENV, '?')}"
+    _LIVE = live.start_run(
+        args.run_id,
+        directory,
+        plain=args.plain,
+        theorem=args.theorem,
+        model=args.model,
+        limit_usd=args.limit_usd,
+        lean=lean,
+        merge_worker=worker,
+    )
+    try:
+        yield
+    finally:
+        display, _LIVE = _LIVE, None
+        if display is not None:
+            display.stop()
 
 
 _LEAN: dict = {"socket": None, "run_id": None, "directory": None}
@@ -319,6 +354,7 @@ class RunOptions:
     test_extension: list[Path] = field(default_factory=list)
     resume_run: bool = False
     dry_run: bool = False
+    plain: bool = False
 
 
 def execute(options: RunOptions) -> int:
@@ -594,7 +630,7 @@ def run(options: RunOptions) -> int:
 
     for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(number, interrupt)
-    with event_log.open("a") as output:
+    with event_log.open("a") as output, live_view(args, directory, health, worker):
         process = subprocess.Popen(
             command,
             cwd=shadow,
