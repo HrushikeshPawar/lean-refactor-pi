@@ -535,7 +535,16 @@ def replay(
     if raw and render is not None:
         print("replay --raw is the exact payload and --render v7 is a re-render; pass only one", file=sys.stderr)
         return 2
-    from arena.replay import ReplayError, format_index, load_run, node_turn, raw_payload, render_turn, rerender_v7
+    from arena.replay import (
+        ReplayError,
+        format_index,
+        index_rows,
+        load_run,
+        node_turn,
+        raw_payload,
+        render_turn,
+        rerender_v7,
+    )
     from arena.traces import JournalError
 
     try:
@@ -545,7 +554,7 @@ def replay(
         elif turn is not None:
             number = turn
         else:
-            print(format_index(loaded))
+            print(json.dumps({"turns": index_rows(loaded)}) if json_output else format_index(loaded))
             return 0
         if raw:
             data = raw_payload(loaded, number)

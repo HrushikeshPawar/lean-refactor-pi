@@ -2094,7 +2094,11 @@ def price_table(name: str, run_id: str, reference: str | None = None) -> dict:
 def map_view(run_id: str) -> dict:
     """Return the hidden JSON map without rendering it into model-facing prose."""
     directory = run_dir(run_id)
-    history = events(directory)
+    return map_view_from(events(directory), directory)
+
+
+def map_view_from(history: list[dict], directory: Path) -> dict:
+    """The map for `history`, reading stored proofs from `directory`. Cached data only, never Lean."""
     graph = Graph.from_history(history, _proof_reader(directory))
     from arena.scoring import reference as scoring_reference
 

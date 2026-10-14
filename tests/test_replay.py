@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from arena.campaign import _append
 from arena.replay import (
+    V7_SECTIONS,
     ReplayError,
     created_nodes,
     load_run,
@@ -77,52 +78,6 @@ class ReplayTests(unittest.TestCase):
         self.assertEqual([blank[key] for key in ("system", "skill", "tools", "packet")], ["", "", "", ""])
         self.assertEqual(split_request({"messages": [{"role": "user", "content": "only"}]})["packet"], "only")
 
-    def test_split_request_reads_pi_input_sections_and_tools_added(self):
-        payload = json.loads((FIXTURES / "input-payload.json").read_text())
-        expected = json.loads((FIXTURES / "input-split.json").read_text())
-        parts = split_request(payload)
-        for key in ("system", "skill", "tools", "packet"):
-            self.assertEqual(parts[key], expected[key])
-            self.assertEqual(_sha(parts[key]), expected["sha256"][key])
-        self.assertEqual(parts["messages"], expected["messages"])
-        self.assertNotIn("<cwd>", parts["system"])
-        self.assertNotIn("<cwd>", parts["skill"])
-        tagged = split_request(
-            {
-                "input": [
-                    {
-                        "role": "system",
-                        "content": "From content.\n\n<addendum>\nSkill.\n</addendum>",
-                        "sections": {
-                            "preamble": "IGNORED",
-                            "addendum": "<addendum>NO</addendum>",
-                            "cwd": "<cwd>x</cwd>",
-                        },
-                        "toolsAdded": "not-a-list",
-                    },
-                    {"role": "user", "content": "packet"},
-                ]
-            }
-        )
-        self.assertEqual(tagged["system"], "From content.\n\n")
-        self.assertEqual(tagged["skill"], "\nSkill.\n")
-        self.assertEqual(tagged["tools"], "")
-        preferred = split_request(
-            {
-                "tools": [{"type": "function", "function": {"name": "compile"}}],
-                "input": [{"role": "system", "content": "", "toolsAdded": [{"name": "other"}]}],
-            }
-        )
-        self.assertEqual(preferred["tools"], '[{"type":"function","function":{"name":"compile"}}]')
-        both = split_request(
-            {
-                "messages": [{"role": "user", "content": "from-messages"}],
-                "input": [{"role": "user", "content": "from-input"}],
-            }
-        )
-        self.assertEqual(both["packet"], "from-messages")
-        self.assertEqual(both["messages"], [{"role": "user", "content": "from-messages"}])
-
     def test_v6_journal_is_numbered_and_split_from_the_payload(self):
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
@@ -140,16 +95,6 @@ class ReplayTests(unittest.TestCase):
             self.assertEqual(rendered["Tools"], "compile: Compile a draft.")
             self.assertIn("<cwd>", rendered["Messages"])
             self.assertNotIn("<cwd>", rendered["System prompt"])
-
-    def test_pi_input_messages_show_the_cwd_section(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp)
-            payload = json.loads((FIXTURES / "input-payload.json").read_text())
-            _write(directory, [_request("r1", 1500, payload)])
-            rendered = dict(render_turn(load_run(str(directory)), 1))
-            self.assertIn("<cwd>\n/tmp\n</cwd>", rendered["Messages"])
-            self.assertNotIn("<cwd>", rendered["System prompt"])
-            self.assertNotIn("<cwd>", rendered["Skill"])
 
     def test_blob_parts_are_read_and_a_missing_blob_names_the_hash(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -247,6 +192,19 @@ class ReplayTests(unittest.TestCase):
             self.assertNotRegex(early["Nodes"], STOP_TEXT)
             self.assertIn("finish:", late["Tools"])
             self.assertRegex(late["Tools"], STOP_TEXT)
+
+    def test_v7_map_shows_the_best_node_and_only_nodes_created_before_the_turn(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            self._write_sample(directory)
+            loaded = load_run(str(directory))
+            title = [name for name, _ in rerender_v7(loaded, 2)][list(V7_SECTIONS).index("map")]
+            early = dict(rerender_v7(loaded, 2))[title]
+            late = dict(rerender_v7(loaded, 3))[title]
+            best = early.splitlines()[0]
+            self.assertRegex(best, r"\bn2\b.*\b2\.5\b.*\b11\b.*\b4\b")
+            self.assertNotRegex(early, r"\bn4\b")
+            self.assertRegex(late, r"\bn4\b")
 
     def test_encoded_raw_payload_hashes_to_the_stored_sha256(self):
         first = b'{"n":1}'
@@ -354,6 +312,7 @@ class ReplayTests(unittest.TestCase):
         ]
         passed = {"compat": {"v1": {"passed": True}}, "tokens": 11, "heartbeat": 4, "metrics": {"proxy": 2.5}}
         ledger = [
+            {"kind": "init", "theorem": "Not.A.Real.Theorem", "ts": 0.5},
             {"kind": "candidate", "candidate_id": A, "origin": "reference", "parents": [], "ts": 1.0},
             {"kind": "candidate", "candidate_id": B, "origin": "model", "parents": [A], "ts": 2.5},
             {"kind": "candidate", "candidate_id": C, "origin": "model", "parents": [A], "ts": 2.6},
@@ -364,7 +323,7 @@ class ReplayTests(unittest.TestCase):
                 "origin": "model",
                 "parents": [B],
                 "tool_call_id": "t9",
-                "ts": 6.5,
+                "ts": 8.5,
             },
         ]
         cost = [

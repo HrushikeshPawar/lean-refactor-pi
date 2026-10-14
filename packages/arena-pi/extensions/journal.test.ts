@@ -43,42 +43,6 @@ test("splitRequest matches the shared request fixture", () => {
   }
 });
 
-test("splitRequest reads a Pi input payload from sections and toolsAdded", () => {
-  const payload = JSON.parse(readFileSync(resolve(fixtureDir, "input-payload.json"), "utf8"));
-  const expected = JSON.parse(readFileSync(resolve(fixtureDir, "input-split.json"), "utf8"));
-  const parts = splitRequest(payload);
-  assert.equal(parts.system, expected.system);
-  assert.equal(parts.skill, expected.skill);
-  assert.equal(parts.tools, expected.tools);
-  assert.equal(parts.packet, expected.packet);
-  assert.deepEqual(parts.messages, expected.messages);
-  for (const key of ["system", "skill", "tools", "packet"] as const) {
-    assert.equal(createHash("sha256").update(parts[key]).digest("hex"), expected.sha256[key]);
-  }
-  const tagged = splitRequest({
-    input: [{
-      role: "system",
-      content: "From content.\n\n<addendum>\nSkill.\n</addendum>",
-      sections: { preamble: "IGNORED", addendum: "<addendum>NO</addendum>", cwd: "<cwd>x</cwd>" },
-      toolsAdded: "not-a-list",
-    }, { role: "user", content: "packet" }],
-  });
-  assert.equal(tagged.system, "From content.\n\n");
-  assert.equal(tagged.skill, "\nSkill.\n");
-  assert.equal(tagged.tools, "");
-  const preferred = splitRequest({
-    tools: [{ type: "function", function: { name: "compile" } }],
-    input: [{ role: "system", content: "", toolsAdded: [{ name: "other" }] }],
-  });
-  assert.equal(preferred.tools, '[{"type":"function","function":{"name":"compile"}}]');
-  const both = splitRequest({
-    messages: [{ role: "user", content: "from-messages" }],
-    input: [{ role: "user", content: "from-input" }],
-  });
-  assert.equal(both.packet, "from-messages");
-  assert.deepEqual(both.messages, [{ role: "user", content: "from-messages" }]);
-});
-
 test("splitRequest returns empty parts when the payload is not an OpenAI chat body", () => {
   assert.deepEqual(splitRequest(null), { system: "", skill: "", tools: "", packet: "", messages: [] });
   assert.deepEqual(splitRequest({ messages: [{ role: "user", content: "only" }] }), {

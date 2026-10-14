@@ -7,7 +7,9 @@ import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import TypedDict
 
 from arena.traces import expand_journal, post_hook_bytes
 
@@ -40,42 +42,29 @@ class Run:
 
 
 def split_request(payload: object) -> dict:
-    """Split a post-hook payload into the four stored texts.
+    """Split an OpenAI chat post-hook payload into the four stored texts.
 
-    v6 rows are OpenAI chat (`messages`, `tools`). Current Pi rows are `input` messages whose system
-    item carries `sections.preamble`, `sections.addendum` and `toolsAdded`. A payload that matches
-    neither returns empty strings. `messages` is whichever list the payload has, unchanged.
+    `system` is the text of `messages[0]` before `<addendum>`, `skill` the text between the addendum
+    markers, `packet` the first user message, `tools` the canonical JSON of `tools`. A payload that
+    does not match returns the missing parts as empty strings. `messages` is returned unchanged.
     """
     if not isinstance(payload, dict):
         return {"system": "", "skill": "", "tools": "", "packet": "", "messages": []}
     messages = payload.get("messages")
     if not isinstance(messages, list):
-        incoming = payload.get("input")
-        messages = incoming if isinstance(incoming, list) else []
+        messages = []
     system, skill = "", ""
-    first = messages[0] if messages and isinstance(messages[0], dict) and messages[0].get("role") == "system" else None
-    if isinstance(first, dict):
-        system, skill = _split_tags(_block_text(first.get("content")))
-        sections = first.get("sections") if not system and not skill else None
-        if isinstance(sections, dict):
-            if isinstance(sections.get("preamble"), str):
-                system = sections["preamble"]
-            if isinstance(sections.get("addendum"), str):
-                skill = _split_tags(sections["addendum"])[1]
+    if messages and isinstance(messages[0], dict) and messages[0].get("role") == "system":
+        system, skill = _split_tags(_block_text(messages[0].get("content")))
     packet = ""
     for message in messages:
         if isinstance(message, dict) and message.get("role") == "user":
             packet = _block_text(message.get("content"))
             break
     tools = ""
-    listed: object | None = None
     if "tools" in payload:
-        listed = payload["tools"]
-    elif isinstance(first, dict) and isinstance(first.get("toolsAdded"), list):
-        listed = first["toolsAdded"]
-    if "tools" in payload or listed is not None:
         try:
-            tools = json.dumps(listed, separators=(",", ":"), ensure_ascii=False)
+            tools = json.dumps(payload["tools"], separators=(",", ":"), ensure_ascii=False)
         except (TypeError, ValueError):
             tools = ""
     return {"system": system, "skill": skill, "tools": tools, "packet": packet, "messages": messages}
@@ -222,17 +211,37 @@ def rerender_v7(run: Run, turn: int) -> list[tuple[str, str]]:
     return [render(run, turn) for render in V7_SECTIONS.values()]
 
 
-def format_index(run: Run) -> str:
-    """One line per turn: number, request time in seconds, tools called, settled cost."""
-    lines = []
+class IndexRow(TypedDict):
+    turn: int
+    ts: float | None
+    tools: list[str]
+    settled_usd: float | None
+
+
+def index_rows(run: Run) -> list[IndexRow]:
+    """One row per turn: number, request time (epoch seconds), tools called, settled cost."""
+    rows: list[IndexRow] = []
     for item in run.turns:
-        seconds = _request_seconds(item)
-        clock = "-" if seconds is None else f"{seconds:.3f}"
-        names = [str(row.get("name") or "") for row in item.rows if row.get("kind") == "tool_call"]
         response = _response(item)
-        cost = None if response is None else response.get("settled_usd")
-        price = "-" if cost is None else str(cost)
-        lines.append(f"{item.number} {clock} {','.join(names) or '-'} {price}")
+        rows.append(
+            {
+                "turn": item.number,
+                "ts": _request_seconds(item),
+                "tools": [str(row.get("name") or "") for row in item.rows if row.get("kind") == "tool_call"],
+                "settled_usd": None if response is None else response.get("settled_usd"),
+            }
+        )
+    return rows
+
+
+def format_index(run: Run) -> str:
+    """One line per turn: number, request time (ISO 8601 UTC), tools called, settled cost."""
+    lines = []
+    for row in index_rows(run):
+        seconds = row["ts"]
+        clock = "-" if seconds is None else datetime.fromtimestamp(seconds, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        price = "-" if row["settled_usd"] is None else str(row["settled_usd"])
+        lines.append(f"{row['turn']} {clock} {','.join(row['tools']) or '-'} {price}")
     return "\n".join(lines)
 
 
@@ -253,15 +262,53 @@ def _nodes_body(run: Run, turn: int) -> str:
     history = _history_before(run, item)
     graph = Graph.from_history(history, _proof_reader(run.directory))
     ids = {node.proof_id: node.id for node in graph.nodes}
+    evaluated = {event.get("candidate_id") for event in history if event.get("kind") == "evaluation"}
     lines = []
     for node in graph.nodes:
+        status, tokens, heartbeats, score = node.status, node.tokens, node.heartbeats, node.score
         passed = sum(1 for value in node.versions.values() if value)
+        compat = f"{passed}/{len(node.versions)}"
+        if node.origin == "reference" and node.proof_id not in evaluated:
+            # The ledger never evaluates the pinned original, so the graph's `broken` only means "no
+            # result". Show that, with the published denominators the score is measured against.
+            status, compat = "unevaluated", "-"
+            published = _published_reference(run.config.get("theorem") or _theorem(history))
+            if published is not None:
+                from arena.scoring import REFERENCE_SCORE
+
+                (tokens, heartbeats), score = published, REFERENCE_SCORE
         parents = ",".join(ids.get(parent, parent) for parent in _parents(history, node.proof_id, node.edge))
         lines.append(
-            f"{node.id} {node.status} tokens={_shown(node.tokens)} heartbeats={_shown(node.heartbeats)} "
-            f"compat={passed}/{len(node.versions)} score={_shown(node.score)} parent={parents or '-'}"
+            f"{node.id} {status} tokens={_shown(tokens)} heartbeats={_shown(heartbeats)} "
+            f"compat={compat} score={_shown(score)} parent={parents or '-'}"
         )
     return "\n".join(lines)
+
+
+def _map_body(run: Run, turn: int) -> str:
+    from arena.campaign import map_view_from
+    from arena.reply import _map_lines
+
+    history = _history_before(run, _turn(run, turn))
+    if not history:
+        return ""
+    return "\n".join(_map_lines(map_view_from(history, run.directory)))
+
+
+def _theorem(history: list[dict]) -> str:
+    return str(history[0].get("theorem") or "") if history else ""
+
+
+def _published_reference(theorem: object) -> tuple[int, int] | None:
+    if not isinstance(theorem, str) or not theorem:
+        return None
+    from arena.scoring import reference
+
+    try:
+        return reference(theorem)
+    except Exception:
+        # Unknown rows (fixtures, imported runs) have no published denominators; the row still shows.
+        return None
 
 
 def _tools_body(run: Run, turn: int) -> str:
@@ -283,11 +330,13 @@ def _safe(title: str, build: Callable[[Run, int], str]) -> Callable[[Run, int], 
     return render
 
 
-# Ticket 16 exposes no turn-level map or reply renderer. `tools` is the D42 list: finish is absent
-# until the final tenth of the spend limit, so a v6 tool list is not shown here.
+# `map` is re-rendered for every turn; live, the map is only delivered when its hash changed.
+# `tools` is the D42 list: finish is absent until the final tenth of the spend limit, so a v6 tool
+# list is not shown here.
 V7_SECTIONS: dict[str, Callable[[Run, int], tuple[str, str]]] = {
     "packet": _safe("Packet", _packet_body),
     "nodes": _safe("Nodes", _nodes_body),
+    "map": _safe("Map (re-rendered at this turn; live, sent only when its hash changed)", _map_body),
     "tools": _safe("Tools", _tools_body),
 }
 
@@ -579,21 +628,9 @@ def _tool_lines(tools: str) -> str:
     return "\n".join(lines)
 
 
-def _visible_text(message: dict) -> str:
-    """Text the model saw. v6 stores it in `content`. Current Pi leaves `content` empty and
-    puts preamble, addendum and cwd in `sections`."""
-    text = _block_text(message.get("content"))
-    if text:
-        return text
-    sections = message.get("sections")
-    if not isinstance(sections, dict):
-        return ""
-    return "".join(value for value in sections.values() if isinstance(value, str))
-
-
 def _format_message(message: dict) -> str:
     lines = [str(message.get("role") or "")]
-    text = _visible_text(message)
+    text = _block_text(message.get("content"))
     if text:
         lines.append(text)
     reasoning = message.get("reasoning_content")

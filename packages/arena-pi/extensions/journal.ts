@@ -69,27 +69,20 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 }
 
-/** Split a post-hook payload into the four stored texts. A payload that does not match returns empty parts.
- *  v6 rows are OpenAI chat (`messages`, `tools`). Current Pi rows are `input` messages whose system item
- *  carries `sections.preamble`, `sections.addendum` and `toolsAdded`. */
+/** Split an OpenAI chat post-hook payload (`messages`, `tools`) into the four stored texts. `system` is the
+ *  text of `messages[0]` before `<addendum>`, `skill` the text between the addendum markers, `packet` the first
+ *  user message, `tools` the JSON of `tools`. A payload that does not match returns empty parts; never throws. */
 export function splitRequest(payload: unknown): RequestParts {
   const body = asRecord(payload);
   if (!body) return { ...EMPTY_PARTS };
-  const messages = Array.isArray(body.messages) ? body.messages : Array.isArray(body.input) ? body.input : [];
+  const messages = Array.isArray(body.messages) ? body.messages : [];
   const first = asRecord(messages[0]);
-  let { system, skill } = first?.role === "system" ? splitTags(blockText(first.content)) : { system: "", skill: "" };
-  const sections = asRecord(first?.sections);
-  if (!system && !skill && sections) {
-    if (typeof sections.preamble === "string") system = sections.preamble;
-    if (typeof sections.addendum === "string") skill = splitTags(sections.addendum).skill;
-  }
+  const { system, skill } = first?.role === "system" ? splitTags(blockText(first.content)) : { system: "", skill: "" };
   const user = messages.find(message => asRecord(message)?.role === "user");
   const packet = user ? blockText(asRecord(user)?.content) : "";
   let tools = "";
-  const listed = "tools" in body && body.tools !== undefined ? body.tools
-    : Array.isArray(first?.toolsAdded) ? first.toolsAdded : undefined;
-  if (listed !== undefined) {
-    try { tools = JSON.stringify(listed); } catch { tools = ""; }
+  if ("tools" in body && body.tools !== undefined) {
+    try { tools = JSON.stringify(body.tools); } catch { tools = ""; }
   }
   return { system, skill, tools, packet, messages };
 }

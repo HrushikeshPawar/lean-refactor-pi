@@ -11,7 +11,8 @@
  * is what the server validates.
  */
 import { appendFileSync, readFileSync } from "node:fs";
-import { createAssistantMessageEventStream } from "@earendil-works/pi-ai/compat";
+import { collapseSystemMessages, contentText, createAssistantMessageEventStream, getCurrentTools, getSystemMessageText }
+  from "@earendil-works/pi-ai/compat";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
@@ -37,6 +38,35 @@ const catalogModel = (id: string) => {
   const { price, contextWindow, maxTokens } = configured.models[id];
   return { cost: price, contextWindow, maxTokens };
 };
+
+/** The OpenAI chat body Pi's `openai-completions` client builds for a configured model (models.yaml compat:
+ *  system role, `max_tokens`), so `before_provider_request` sees the real payload shape. Minimal: text only. */
+function chatBody(modelId: string, messages: any[], maxTokens: number) {
+  const chat: Array<Record<string, unknown>> = [];
+  for (const message of collapseSystemMessages({ messages } as never).messages as any[]) {
+    if (message.role === "system") {
+      const text = getSystemMessageText(message);
+      if (text.length > 0) chat.push({ role: "system", content: text });
+    } else if (message.role === "user") {
+      chat.push({ role: "user", content: typeof message.content === "string" ? message.content
+        : message.content.filter((part: any) => part.type === "text" && part.text.length > 0)
+          .map((part: any) => ({ type: "text", text: part.text })) });
+    } else if (message.role === "assistant") {
+      const text = message.content.filter((part: any) => part.type === "text" && part.text.trim().length > 0)
+        .map((part: any) => part.text).join("");
+      const calls = message.content.filter((part: any) => part.type === "toolCall").map((call: any) => (
+        { id: call.id, type: "function", function: { name: call.name, arguments: JSON.stringify(call.arguments) } }));
+      if (!text && !calls.length) continue;
+      chat.push({ role: "assistant", content: text || null, ...(calls.length ? { tool_calls: calls } : {}) });
+    } else if (message.role === "toolResult") {
+      chat.push({ role: "tool", content: contentText(message.content) || "(no tool output)",
+        tool_call_id: message.toolCallId });
+    }
+  }
+  const tools = getCurrentTools(messages).map(tool => (
+    { type: "function", function: { name: tool.name, description: tool.description, parameters: tool.parameters } }));
+  return { model: modelId, messages: chat, stream: true, max_tokens: maxTokens, ...(tools.length ? { tools } : {}) };
+}
 
 export default function fakeOpenCode(pi: ExtensionAPI) {
   let request = 0;
@@ -83,9 +113,9 @@ export default function fakeOpenCode(pi: ExtensionAPI) {
           const padInput = Number(process.env.ARENA_FAKE_PAD_INPUT ?? "0");
           if (padInput > 0) input.push({ role: "user", content: "x".repeat(padInput) } as never);
           // Pi's compaction summaries do not go through extension hooks, so only agent requests are held to the ceiling.
-          const raw = { model: model.id, input, max_output_tokens: options?.maxTokens ?? 128_000 };
+          const raw = chatBody(model.id, input, options?.maxTokens ?? 128_000);
           const payload = (await options?.onPayload?.(raw)) ?? (summarizing ? raw : undefined);
-          if (!payload || (!summarizing && Number((payload as { max_output_tokens?: number }).max_output_tokens) > 64_000)) {
+          if (!payload || (!summarizing && Number((payload as { max_tokens?: number }).max_tokens) > 64_000)) {
             throw new Error("Arena did not enforce the fake provider output ceiling");
           }
           if (process.env.ARENA_FAKE_LOG) {

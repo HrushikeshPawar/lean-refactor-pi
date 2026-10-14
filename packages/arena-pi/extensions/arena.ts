@@ -554,16 +554,18 @@ export default async function arenaExtension(pi: ExtensionAPI) {
       discoveries.add(signature);
       appendCost({ kind: "discovery", signature, tool: event.toolName });
     }
-    if (!openAttempt) return;
-    const deliveredText = textOf(result?.content);
+    // Taken before the early return so a result outside an open attempt does not leave its footer behind.
     const footer = footers.get(event.toolCallId);
     footers.delete(event.toolCallId);
+    if (!openAttempt) return;
+    const deliveredText = textOf(result?.content);
     // `tool_result` runs before this event, so the trace takes the untrimmed text and footer it stashed.
     const full = untrimmed.get(event.toolCallId);
     untrimmed.delete(event.toolCallId);
     const withoutFooter = stripFooter(deliveredText, footer);
+    // `text` keeps its v6 meaning: the untrimmed text when trimmed, else the delivered text with its footer.
     appendTrace({ kind: "tool_result", id: openAttempt, tool_call_id: event.toolCallId,
-      name: event.toolName, result: event.result, text: full ?? withoutFooter, delivered_text: withoutFooter,
+      name: event.toolName, result: event.result, text: full ?? deliveredText, delivered_text: withoutFooter,
       ...(footer ? { footer } : {}), ...(full !== undefined ? { trimmed: true } : {}),
       is_error: event.isError });
   });

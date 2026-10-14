@@ -180,6 +180,16 @@ class JudgeTests(unittest.TestCase):
         observations[1]["metadata"] = {"tool_id": "other"}
         self.assertTrue(any("no Langfuse tool span for call c1" in item for item in judge(journal, observations)))
 
+    def test_a_tool_result_text_keeps_its_footer_for_the_span_join(self):
+        footer = "[spent $0.02]"
+        journal, observations = _joined()
+        observations[1]["output"] = json.dumps(f"SKILL.md\n{footer}")
+        row = {"text": f"SKILL.md\n{footer}", "delivered_text": "SKILL.md", "footer": footer}
+        journal[4].update(row)
+        self.assertEqual(judge(journal, observations), [])
+        journal[4]["text"] = "SKILL.md"
+        self.assertIn("tool output does not match journal for read", judge(journal, observations))
+
     def test_langfuse_cost_must_equal_the_settled_ledger_cost(self):
         journal, observations = _joined()
         observations[2]["totalCost"] = 0.005
