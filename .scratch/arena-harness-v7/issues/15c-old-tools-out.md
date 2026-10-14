@@ -19,6 +19,24 @@
 - `agent-text/` (tickets 05a/05b): templates whose only supplier was the Python code deleted here (idea, probe, evaluate, candidate, find, declarations replies and messages). `tests/test_agent_text.py` fails on a template no code supplies.
 - Ticket 14 left `arena/campaign.py` `find`, `declarations` and `source_range` untouched for this ticket; `arena/index.py` and `arena/search.py` replace the first two.
 
+## Reviewer clarification (2026-10-14, answers the first stop)
+- **Delete actions, keep the engine.** The rule is reachability, not the Context list. A function stays when
+  any kept entry point still reaches it: the five handlers in `arena/tools.py` (directly or transitively) or the kept
+  actions. Today `compile` reaches `probe_batch`, `compile_operation` → `probe` → `evaluate_request`, and through
+  them `resolve_candidate_ref`, `resolve_probe_ref`, `resolve_parent_ref`, `_model_view`, `_advisory` and `_region`
+  where still called. Keep all of these. Delete only what no kept entry point reaches (expected: `record_idea`,
+  `set_decision`, `profile_request`, `candidate`, the old `find`/`declarations`/`declaration` family). List kept and
+  deleted names in the hand-back.
+- **Ideas leave the engine too (checkbox 3).** Drop the `idea_id` parameters and idea bookkeeping from the kept
+  functions (`probe`, `probe_batch`, `compile_operation`, `evaluate_request`, ...) and their callers in
+  `arena/tools.py`, with behaviour otherwise unchanged. Old ledgers with `idea` events must still load (checkbox 4).
+- **`operation`, `prices`, `quote`, `map` actions go.** The Acceptance action list is authoritative: remove these four
+  actions and their argparse options. Keep their functions when `arena/tools.py` uses them (`compile_operation`,
+  `price_table`, `map_view`). `campaign.quote` is used only by the action and `tests/test_prices.py:269`: delete it
+  and move that test onto `prices.quote_tokens` (the price engine itself is untouched).
+- Test paths: `tests/test_source.py` does not exist yet; create it as checkbox 5 says. If no
+  `tests/test_agent_text.py` exists, use the current agent-text consistency test file and name it in the hand-back.
+
 ## What to build
 - [ ] 1. **Delete the old protocol actions and handlers.** Remove from `arena protocol`: `evaluate probe idea candidate decision source declarations find profile` and their argparse options. Delete from `arena/campaign.py` every function reachable only from them (the list under Context is the expected set; for each, `grep -rn "<name>" arena tools tests packages` must show no remaining user before you delete it) and the module-level constants they alone use (`IDEA_STATUSES`, `MAX_SCAN_FILES`, `MAX_DECLARATION_PAGE_CHARS`, `PROBE_*` if unused). Keep `source_range` and what it needs (ticket 15a's `read` uses it). List each deleted function in the hand-back.
 - [ ] 2. **Delete the old model-facing templates and old tool names.** Delete from `agent-text/` every template key whose only supplier was code deleted by checkbox 1 or checkbox 3 (the consistency test of ticket 05a finds them). Remove the old tool names (`arena_probe`, `arena_evaluate`, `arena_candidate`, `arena_state`, `arena_idea`, `arena_profile`, `arena_skill_read`, `arena_find`, `arena_declarations`, `arena_source`, `arena_finish`) from `COMPILE_TOOLS` and `BOOKKEEPING_TOOLS` in `arena/summary.py`, keeping only the five new names, and update the summary tests accordingly. Reading old traces that contain the old names must still work (unknown tool names count as other calls).
