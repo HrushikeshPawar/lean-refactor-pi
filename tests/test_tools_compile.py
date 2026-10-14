@@ -1,7 +1,13 @@
+import contextlib
 import hashlib
+import io
+import json
+from pathlib import Path
+from typing import ClassVar
 from unittest.mock import patch
 
 from arena import campaign, tools
+from arena.cli.protocol import ProtocolOptions, execute
 from tests.graph_support import FakeRunCase
 
 ROW = {
@@ -131,6 +137,48 @@ class CompileToolTests(CascadeCase):
         self.assertEqual(merge_edge["type"], "merged_from")
         self.assertEqual(merge_edge["operation"]["take"][0]["step"], "s1")
         self.assertEqual(donor.id, base)
+
+
+class SessionPathProtocolTests(CascadeCase):
+    """Real Lean results carry `compat[v]["lean"]`; the model view turns it into a string."""
+
+    lean_info: ClassVar[dict | None] = {"path": "session", "seconds": 0.1, "engine": "lsp"}
+
+    def call(self, request: dict) -> dict:
+        request_file = Path(self.temporary.name) / "request.json"
+        request_file.write_text(json.dumps(request))
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            execute(ProtocolOptions(action="compile", theorem="T", run_id="logic", request_file=request_file))
+        return json.loads(output.getvalue().strip().splitlines()[-1])
+
+    def test_every_form_after_a_model_node_files_a_node(self):
+        base = self.call({"drafts": ["by\n  trivial"]})["items"][0]["node"]
+        sketch = self.call({"drafts": ["by\n  sorry"]})["items"][0]["node"]
+        requests = {
+            "drafts on base": {"base": base, "drafts": ["by\n  bad"]},
+            "drafts": {"drafts": ["by\n  bad\n  trivial"]},
+            "splice": {"splice": {"base": base, "steps": "s1", "text": "bad"}},
+            "fill": {"fill": {"hole": f"{sketch}.h1", "text": "bad\n  bad"}},
+            "merge": {"merge": {"base": sketch, "take": [{"from": base, "step": "s1"}]}},
+        }
+        for form, request in requests.items():
+            with self.subTest(form=form):
+                result = self.call(request)
+                self.assertTrue(result["ok"], result)
+                item = result["items"][0]
+                self.assertIsNone(item["error"], item)
+                self.assertTrue(item["node"].startswith("n"))
+        self.assertFalse((campaign.run_dir("logic") / "tool-errors.log").exists())
+
+    def test_internal_error_traceback_goes_to_the_run_directory_only(self):
+        with patch.object(tools, "compile_tool", side_effect=AttributeError("boom")):
+            result = self.call({"drafts": ["by\n  trivial"]})
+        self.assertEqual(result["error"]["code"], "internal_error")
+        self.assertNotIn("Traceback", json.dumps(result))
+        log = (campaign.run_dir("logic") / "tool-errors.log").read_text()
+        self.assertIn("Traceback", log)
+        self.assertIn("AttributeError: boom", log)
 
 
 class MissingGoalTests(NoGoalCase):

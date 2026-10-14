@@ -14,6 +14,8 @@ from arena.engine import instrument_sorries
 class FakeRunCase(unittest.TestCase):
     cascade_errors: ClassVar[bool] = False
     no_goal_marker: ClassVar[str | None] = None
+    # Per-version Lean path info as engine.run_lean records it; None leaves it out.
+    lean_info: ClassVar[dict | None] = None
 
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -51,13 +53,18 @@ class FakeRunCase(unittest.TestCase):
         ]
         instrumented = instrument_sorries(proof)
         sorry_lines = [int(match.group(1)) for match in re.finditer(r"ARENA_SORRY (\d+)", instrumented)]
-        compat = {"v1": (known or {}).get("v1") or {"passed": not bad_lines, "diagnostics": diagnostics}}
+        compat: dict[str, dict] = {
+            "v1": (known or {}).get("v1") or {"passed": not bad_lines, "diagnostics": diagnostics}
+        }
         if mode == "full":
             compat["v2"] = {
                 "passed": not bad_lines and "old" not in proof,
                 "diagnostics": diagnostics,
                 "error_headlines": [] if "old" not in proof else ["line 3 (proof line 2): unknown tactic"],
             }
+        if cls.lean_info is not None:
+            for info in compat.values():
+                info.setdefault("lean", dict(cls.lean_info))
         score = round(100 - tokens, 2)
         metrics = {"tokens": tokens, "heartbeats": 10, "compiled": not bad_lines}
         if metrics["compiled"]:

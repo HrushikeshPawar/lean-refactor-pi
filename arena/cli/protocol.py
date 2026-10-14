@@ -5,7 +5,10 @@ Every failure is one line of JSON: `{"ok": false, "error": "..."}`.
 """
 
 import json
+import os
 import subprocess
+import time
+import traceback
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -81,6 +84,21 @@ def publish_state(run_id: str) -> None:
         pass
 
 
+def log_tool_error(run_id: str, action: str) -> None:
+    """Append the current exception's traceback to the run's tool-errors.log for the operator; never raises."""
+    try:
+        header = {
+            "ts": time.time(),
+            "action": action,
+            "tool_call_id": os.environ.get("ARENA_TOOL_CALL_ID"),
+            "turn": os.environ.get("ARENA_TURN"),
+        }
+        with (run_dir(run_id) / "tool-errors.log").open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(header) + "\n" + traceback.format_exc() + "\n")
+    except Exception:
+        pass
+
+
 @dataclass(frozen=True)
 class ProtocolOptions:
     action: str
@@ -104,6 +122,7 @@ def execute(options: ProtocolOptions) -> int:
     except (OSError, ValueError, RuntimeError, KeyError, subprocess.SubprocessError) as error:
         message = " ".join(str(error).split()) or type(error).__name__
         if args.action in ("compile", "goal", "search", "read", "finish", "reset_delivered"):
+            log_tool_error(args.run_id, args.action)
             forms = v7_tools.TOOL_FORMS.get(args.action, [])
             print(json.dumps(tool_reply.error_reply("internal_error", message[:400], [], forms), ensure_ascii=False))
             return 2
@@ -112,6 +131,7 @@ def execute(options: ProtocolOptions) -> int:
     except Exception as error:
         message = " ".join(str(error).split()) or type(error).__name__
         if args.action in ("compile", "goal", "search", "read", "finish", "reset_delivered"):
+            log_tool_error(args.run_id, args.action)
             forms = v7_tools.TOOL_FORMS.get(args.action, [])
             print(json.dumps(tool_reply.error_reply("internal_error", message[:400], [], forms), ensure_ascii=False))
             return 2

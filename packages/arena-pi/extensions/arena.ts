@@ -654,7 +654,10 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     name: "compile", label: "compile",
     description: await renderText("tools/compile.description"), parameters: compileParams,
     async execute(_id: string, params: Record<string, unknown>) {
-      return invokeTool("compile", params, Object.keys(compileParams.properties));
+      const result = await invokeTool("compile", params, Object.keys(compileParams.properties));
+      // Every compile may file a node that still needs its full check on the other toolchains.
+      kickAutocheck();
+      return result;
     },
   });
 

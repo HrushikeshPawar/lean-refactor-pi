@@ -399,6 +399,61 @@ class AutomaticChecksTests(unittest.TestCase):
         self.assertEqual((submission["tokens"], submission["heartbeats"], submission["proxy"]), FIXTURE_SCORE)
         self.assertIn(f"Submission: {label} proxy {FIXTURE_SCORE[2]}", run.stdout)
 
+    def test_a_second_compile_on_the_first_compiles_node_succeeds_through_the_lean_session(self):
+        # Session-checked results carry the Lean path, which once crashed every compile reply.
+        fixture = FIXTURE.read_text()
+        variant = fixture.replace("intros Hup Hinit", "intro Hup Hinit")
+        self.assertNotEqual(variant, fixture)
+        run = self.fake(
+            [
+                cheap_tool("compile", {"drafts": [fixture], "check": "lean"}),
+                cheap_tool("compile", {"base": "n2", "drafts": [variant], "check": "lean"}),
+                {"text": "done"},
+            ],
+            session=True,
+            timeout=900,
+        )
+        results = tool_results(run.requests[-1], "compile")
+        self.assertEqual(len(results), 2, run.stdout[-1500:])
+        for result in results:
+            with self.subTest(call=result["toolCallId"]):
+                self.assertFalse(result["isError"], message_text(result))
+                [item] = result["details"]["items"]
+                self.assertIsNone(item["error"], message_text(result))
+        first, second = (result["details"]["items"][0]["node"] for result in results)
+        self.assertEqual(first, "n2")
+        self.assertNotEqual(second, first)
+        self.assertFalse((run.directory / "tool-errors.log").exists())
+
+    def test_a_compile_starts_the_full_check_without_another_tool_call(self):
+        # No in-call wait: only the background checker the compile kicks can run the full check
+        # while the model is still thinking (the delayed final reply), before the run's closing drain.
+        texts = Path(self.enterContext(tempfile.TemporaryDirectory())) / "agent-text"
+        shutil.copytree(AGENT_TEXT, texts)
+        numbers = texts / "numbers.yaml"
+        numbers.write_text(
+            re.sub(r"(?m)^cross_version_wait_seconds: .*$", "cross_version_wait_seconds: 0", numbers.read_text())
+        )
+        run = self.fake(
+            [
+                cheap_tool("compile", {"drafts": [FIXTURE.read_text()], "check": "lean"}),
+                {"text": "done", "delay_ms": 150_000},
+            ],
+            env={"ARENA_TEXT_DIR": str(texts)},
+            timeout=600,
+        )
+        [compiled] = tool_results(run.requests[-1], "compile")
+        self.assertFalse(compiled["isError"], message_text(compiled))
+        full = [
+            row
+            for row in run.jsonl("ledger.jsonl")
+            if row.get("kind") == "evaluation" and (row.get("result") or {}).get("mode") == "full"
+        ]
+        self.assertTrue(full, run.stdout[-1500:])
+        responses = [row["ts"] for row in run.jsonl("trace-journal.jsonl") if row.get("kind") == "response"]
+        self.assertLess(full[0]["ts"], responses[-1] / 1000, "the full check waited for the closing drain")
+        self.assertNotIn("Background checks after Pi exited", run.stdout)
+
 
 class SkillToolNamesTests(unittest.TestCase):
     def test_skill_mentions_the_four_offered_tools_and_never_finish(self):

@@ -201,7 +201,8 @@ def _compile_item(name: str, run_id: str, node_ref: str, result: dict, filing: s
             "error": reply.request_error("internal_error", node_ref, [], TOOL_FORMS["compile"]),
         }
     primary = _primary(result)
-    timeout = bool(result.get("timeout") or primary.get("timeout") or primary.get("lean", {}).get("timeout"))
+    # `compat[v]["lean"]` is the model view's Lean-path string ("session" or a fallback note), not a dict.
+    timeout = bool(result.get("timeout") or primary.get("timeout"))
     errors, incomplete = all_errors(name, run_id, node, result)
     if errors:
         errors = reply.deduplicate_diagnostics(run_id, node.id, errors)
