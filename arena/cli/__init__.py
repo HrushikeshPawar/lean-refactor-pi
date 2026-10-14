@@ -111,16 +111,85 @@ def merge(run_id: str, parent_pid: int | None = None, once: bool = False) -> int
 
 
 @app.command()
-def package(
-    *run_ids: str,
+def submit(
+    *,
     name: str,
-    commit: str = "HEAD",
-    template: Path | None = None,
+    runs: Annotated[list[str], Parameter(name="runs", consume_multiple=True)],
+    previous: str | None = None,
+    max_cold: int = 5,
+    ceiling_usd: float = 3.0,
     discover: bool = False,
+    archive: bool = False,
+    overwrite: bool = False,
+    json_output: Annotated[bool, Parameter(name="json")] = False,
 ) -> int:
-    from arena.cli.package import execute
+    """Prepare a competition submission under runs/submission/<name>/.
 
-    return execute(list(run_ids), name, commit, template, discover)
+    Prepares files only. The owner uploads. Nothing in this command contacts a network service.
+
+    Upload sequence, from the submission checklist:
+    1. Check that proofs.jsonl and provenance.json agree and that per-problem spend stays within
+       the chosen track's limit. The closed-track maximum is $3.00 per problem, summed over every
+       contributing run and reported when a row exceeds it.
+    2. The owner uploads proofs.jsonl under Submit → Proofs and chooses the track. A first
+       successful submission claims the username and shows a key once; later submissions replace
+       the current leaderboard entry.
+    3. Compare the official worker's theorem-by-theorem result with the local proxy. A subset
+       upload is allowed, but unsubmitted benchmark rows score zero in the overall average.
+    4. Upload the code archive when Submit → Code opens on November 1, 2026, and submit the
+       technical report to OpenReview by November 8, 2026.
+    """
+    from rich.console import Console
+
+    from arena.submit import SubmitError, build_submission
+
+    console = Console(stderr=True)
+
+    def on_progress(event: dict) -> None:
+        if event.get("phase") == "cold":
+            console.print(f"{event.get('row')}: cold-checking {event.get('candidate')}")
+        elif event.get("phase") == "fail":
+            console.print(
+                f"[red]{event.get('row')} {event.get('candidate')}: {'; '.join(event.get('reasons') or [])}[/red]"
+            )
+
+    try:
+        result = build_submission(
+            name,
+            runs,
+            previous=previous,
+            max_cold=max_cold,
+            ceiling_usd=ceiling_usd,
+            discover=discover,
+            archive=archive,
+            overwrite=overwrite,
+            progress=on_progress,
+        )
+    except SubmitError as error:
+        print(f"submit: {error}", file=sys.stderr)
+        return 2
+    if json_output:
+        print(
+            json.dumps(
+                {
+                    "code": result.code,
+                    "directory": str(result.directory),
+                    "worse": result.worse,
+                    "missing": result.missing,
+                    "blocked": result.blocked,
+                },
+                ensure_ascii=False,
+            )
+        )
+    elif result.code == 0:
+        print(result.directory)
+        if previous is not None:
+            for row in result.worse:
+                console.print(f"[red]{row} got worse[/red]")
+            print(f"{len(result.worse)} row(s) got worse")
+    else:
+        print(f"blocked: {result.directory / 'blocked.json'}", file=sys.stderr)
+    return result.code
 
 
 @app.command()

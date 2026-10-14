@@ -41,7 +41,7 @@ class CommandTreeTests(unittest.TestCase):
                 "check",
                 "eval",
                 "merge",
-                "package",
+                "submit",
                 "preflight",
                 "serve",
                 "provision",
