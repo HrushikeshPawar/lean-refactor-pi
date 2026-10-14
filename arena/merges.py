@@ -76,5 +76,8 @@ def merge_text(rows: list[dict]) -> str:
             if useful
             else ""
         )
-        + text.render("replies/merge.not_submitted")
+        + "".join(
+            text.render("replies/merge.submitted", candidate=row["candidate"]) for row in rows if row["submitted"]
+        )
+        + ("" if any(row["submitted"] for row in rows) else text.render("replies/merge.not_submitted"))
     )

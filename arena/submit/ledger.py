@@ -31,7 +31,8 @@ def _settled_usd(spent: dict) -> float:
     return round(sum(float(row.get("usd") or 0) for row in spent.get("settles") or []), 6)
 
 
-def _calls(run_ids: list[str], runs_root: Path, selected: str | None) -> tuple[list[dict], float]:
+def _calls(run_ids: list[str], runs_root: Path, selected: str | None, donors: set[str]) -> tuple[list[dict], float]:
+    """One entry per run. A run that gave a step to the final hybrid is a donor, not discarded."""
     rows, total = [], 0.0
     for run_id in run_ids:
         directory = runs_root / run_id
@@ -39,18 +40,20 @@ def _calls(run_ids: list[str], runs_root: Path, selected: str | None) -> tuple[l
         settled = _settled_usd(spent)
         total += settled
         config = _json(directory / "run-config.json")
-        rows.append(
-            {
-                "run_id": run_id,
-                "model": config.get("model"),
-                "selected_run": run_id == selected,
-                "discarded": run_id != selected,
-                "settled_usd": settled,
-                "total_usd": round(float(spent["total_usd"]), 6),
-                "retries": spent["retries"],
-                "attempts": spent["settles"],
-            }
-        )
+        donor = run_id != selected and run_id in donors
+        call = {
+            "run_id": run_id,
+            "model": config.get("model"),
+            "selected_run": run_id == selected,
+            "discarded": run_id != selected and not donor,
+            "settled_usd": settled,
+            "total_usd": round(float(spent["total_usd"]), 6),
+            "retries": spent["retries"],
+            "attempts": spent["settles"],
+        }
+        if donor:
+            call["donor"] = True
+        rows.append(call)
     return rows, round(total, 6)
 
 
@@ -104,7 +107,8 @@ def build(
         contributors = [run_id for run_id in contributors if run_id not in recorded_ids]
         others = unlisted_runs(row["name"], named | set(earlier) | set(recorded_ids), runs_root)
         spend_ids = contributors + (list(others) if discover else [])
-        calls, spend = _calls(spend_ids, runs_root, row.get("run_id"))
+        donors = {item.get("run") for item in row.get("merged_from") or [] if isinstance(item, dict)}
+        calls, spend = _calls(spend_ids, runs_root, row.get("run_id"), donors)
         spend = round(spend + (recorded or 0.0), 6)
         entry = {
             "source": row["source"],

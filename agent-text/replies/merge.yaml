@@ -1,5 +1,6 @@
 none_checked: "none checked"
 summary: "combined proofs compiled: {count}; verified above both parents: {verified}"
-not_submitted: " (submission status follows the run's selected best verified candidate)"
+not_submitted: " (not submitted)"
+submitted: " (submitted: {candidate})"
 entry: "{candidate} = {parents} proxy {proxy}"
 hypothesis: "Deterministic combination of disjoint edits"

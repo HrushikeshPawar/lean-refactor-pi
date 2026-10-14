@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from arena.cli import app
 from arena.package import load_manifest
+from arena.steps import split_steps
 from arena.submit import SubmitError, build_submission
 from arena.submit.gates import cold_check, gate
 from arena.submit.select import load_runs, resolve_runs
@@ -475,6 +476,202 @@ class SubmitTests(unittest.TestCase):
         self.assertTrue(any(attempt["accepted"] for attempt in attempts), attempts)
         self.assertEqual(len(compiled), 2)
         self.assertEqual(compiled[0], base)
+
+    def attempts(self, result):
+        return json.loads((result.directory / "manifest.json").read_text())["rows"][0]["hybrid_attempts"]
+
+    def test_a_cheaper_step_with_only_one_matching_goal_is_never_swapped(self):
+        base = STATEMENTS["A.one"] + " := by\n  simp_all [Nat.add_comm]\n  rfl\n"
+        donor = STATEMENTS["A.one"] + " := by\n  rfl\n"
+        self.add_run(
+            "base",
+            proof=base,
+            proxy=70,
+            step_goals=[{"id": "s1", "before": "goal A", "after": "goal B"}, {"id": "s2", "before": "goal B"}],
+        )
+        cases = {
+            "before-differs": ("other", "goal B", []),
+            "after-differs": ("goal A", "other", []),
+            "both-match": ("goal A", "goal B", [True]),
+        }
+        for run_id, (before, after, accepted) in cases.items():
+            self.add_run(run_id, proof=donor, proxy=60, step_goals=[{"id": "s1", "before": before, "after": after}])
+            result = self.build("base", run_id, name=run_id)
+            self.assertEqual([attempt["accepted"] for attempt in self.attempts(result)], accepted, run_id)
+
+    def test_goals_on_one_side_only_never_align(self):
+        base = STATEMENTS["A.one"] + " := by\n  simp_all [Nat.add_comm]\n  rfl\n"
+        donor = STATEMENTS["A.one"] + " := by\n  rfl\n  rfl\n"
+        goals = [{"id": "s1", "before": "goal A", "after": "goal B"}, {"id": "s2", "before": "goal B"}]
+        self.add_run("goal-base", proof=base, proxy=70, step_goals=goals)
+        self.add_run("v6-donor", proof=donor, proxy=60)
+        self.assertEqual(self.attempts(self.build("goal-base", "v6-donor", name="donor-v6")), [])
+        self.add_run("v6-base", proof=base, proxy=70)
+        self.add_run("goal-donor", proof=donor, proxy=60, step_goals=goals)
+        self.assertEqual(self.attempts(self.build("v6-base", "goal-donor", name="base-v6")), [])
+
+    def test_a_donor_step_is_spliced_at_the_base_indentation(self):
+        base = (
+            STATEMENTS["A.one"] + " := by\n  skip\n  simp_all only [Nat.add_comm, Nat.mul_comm, Nat.add_assoc]\n  rfl\n"
+        )
+        donor = STATEMENTS["A.one"] + " := by\n    skip\n    first\n      | rfl\n      | rfl\n    rfl\n"
+        expected = STATEMENTS["A.one"] + " := by\n  skip\n  first\n    | rfl\n    | rfl\n  rfl\n"
+        self.add_run("base", proof=base, proxy=70)
+        self.add_run("donor", proof=donor, proxy=60)
+        self.plan[expected] = {"proxy": 90}
+        row = self.build("base", "donor").rows[0]
+        self.assertEqual(row["proof"], expected)
+        self.assertEqual([step["text"] for step in row["steps"]], [step.text for step in split_steps(expected)])
+
+    def test_a_one_line_proof_is_not_recombined(self):
+        one_line = STATEMENTS["A.one"] + " := by simp_all [Nat.add_comm]\n"
+        self.add_run("one-line", proof=one_line, proxy=70)
+        self.add_run("short", proof=STATEMENTS["A.one"] + " := by\n  rfl\n", proxy=60)
+        result = self.build("one-line", "short", name="one-line-base")
+        self.assertEqual(result.rows[0]["proof"], one_line)
+        self.assertEqual(self.attempts(result), [])
+
+        base = STATEMENTS["A.one"] + " := by\n  simp_all [Nat.add_comm]\n  rfl\n"
+        self.add_run("base", proof=base, proxy=70, step_goals=[{"id": "s1", "before": "goal A", "after": "goal B"}])
+        self.add_run(
+            "one-line-donor",
+            proof=STATEMENTS["A.one"] + " := by rfl\n",
+            proxy=60,
+            step_goals=[{"id": "s1", "before": "goal A", "after": "goal B"}],
+        )
+        self.assertEqual(self.attempts(self.build("base", "one-line-donor", name="one-line-donor")), [])
+
+    def test_a_hybrid_built_twice_is_compiled_once(self):
+        base = STATEMENTS["A.one"] + " := by\n  simp_all [Nat.add_comm]\n  rfl\n"
+        donor = STATEMENTS["A.one"] + " := by\n  rfl\n  rfl\n"
+        self.add_run("base", proof=base, proxy=70)
+        self.add_run("first", proof=donor, proxy=60)
+        self.add_run("second", proof=donor, proxy=60)
+        compiled = []
+
+        def recording(name, proof):
+            compiled.append(proof)
+            return self.cold(name, proof)
+
+        result = build_submission(
+            "twice",
+            ["base", "first", "second"],
+            cold_check=recording,
+            runs_root=self.runs,
+            output_root=self.out,
+            manifest_path=self.manifest,
+        )
+        self.assertEqual(compiled, [base, donor])
+        self.assertEqual(len(self.attempts(result)), 1)
+
+    def test_greedy_rounds_stack_swaps_and_donors_are_not_discarded(self):
+        base = STATEMENTS["A.one"] + " := by\n  simp_all [Nat.add_comm]\n  simp_all [Nat.mul_comm]\n  rfl\n"
+        first = STATEMENTS["A.one"] + " := by\n  rfl\n  simp_all [Nat.mul_comm]\n  rfl\n"
+        second = STATEMENTS["A.one"] + " := by\n  simp_all [Nat.add_comm]\n  exact rfl\n  rfl\n"
+        both = STATEMENTS["A.one"] + " := by\n  rfl\n  exact rfl\n  rfl\n"
+        self.add_run("base", proof=base, proxy=70, spend=(0.2,))
+        self.add_run("first", proof=first, proxy=60, spend=(0.3,))
+        self.add_run("second", proof=second, proxy=60, spend=(0.4,))
+        self.add_run("idle", proof=STATEMENTS["A.one"] + " := by\n  decide\n", proxy=50, spend=(0.1,))
+        self.plan[first] = {"proxy": 85}
+        self.plan[both] = {"proxy": 90}
+        result = self.build("base", "first", "second", "idle")
+        row = result.rows[0]
+        self.assertEqual(row["proof"], both)
+        self.assertEqual([item["run"] for item in row["merged_from"]], ["first", "second", "base"])
+        accepted = [attempt for attempt in self.attempts(result) if attempt["accepted"]]
+        self.assertEqual([attempt["donor_run"] for attempt in accepted], ["first", "second"])
+        self.assertEqual(accepted[1]["base_node"], "A.one-1")
+        self.assertEqual((result.directory / "hybrids" / "A.one-2.lean").read_text(), both)
+        calls = {
+            call["run_id"]: call
+            for call in json.loads((result.directory / "provenance.json").read_text())["problems"]["A.one"]["calls"]
+        }
+        self.assertTrue(calls["base"]["selected_run"])
+        for run_id in ("first", "second"):
+            self.assertTrue(calls[run_id]["donor"], run_id)
+            self.assertFalse(calls[run_id]["discarded"], run_id)
+        self.assertTrue(calls["idle"]["discarded"])
+        self.assertNotIn("donor", calls["idle"])
+
+    def test_no_hybrids_writes_what_the_build_wrote_before_recombination(self):
+        self.add_run("base", proof=STATEMENTS["A.one"] + " := by\n  simp_all [Nat.add_comm]\n  rfl\n", proxy=70)
+        self.add_run("donor", proof=STATEMENTS["A.one"] + " := by\n  rfl\n  rfl\n", proxy=60)
+        self.plan[STATEMENTS["A.one"] + " := by\n  rfl\n  rfl\n"] = {"proxy": 90}
+        self.add_run("other", theorem="B.two", proxy=75)
+
+        def tree(root):
+            files = {}
+            for path in sorted(root.rglob("*")):
+                if not path.is_file():
+                    continue
+                body = path.read_bytes()
+                if path.suffix == ".json":
+                    document = json.loads(body)
+                    if isinstance(document, dict):
+                        document.pop("generated", None)
+                    body = json.dumps(document, sort_keys=True).encode()
+                files[path.relative_to(root).as_posix()] = body
+            return files
+
+        def build(output_root, **kwargs):
+            return build_submission(
+                "same",
+                ["base", "donor", "other"],
+                cold_check=self.cold,
+                runs_root=self.runs,
+                output_root=output_root,
+                manifest_path=self.manifest,
+                **kwargs,
+            )
+
+        plain = build(self.root / "plain", hybrids=False)
+        with patch("arena.submit.recombine", lambda rows, *_args: (rows, None)):
+            before = build(self.root / "before")
+        self.assertEqual(tree(plain.directory), tree(before.directory))
+        hybrid = build(self.root / "hybrid")
+        self.assertEqual(hybrid.rows[0]["origin"], "submit_merge")
+
+    def test_recombination_leaves_every_source_run_file_untouched(self):
+        self.add_run("base", proof=STATEMENTS["A.one"] + " := by\n  simp_all [Nat.add_comm]\n  rfl\n", proxy=70)
+        self.add_run("donor", proof=STATEMENTS["A.one"] + " := by\n  rfl\n  rfl\n", proxy=60)
+        self.plan[STATEMENTS["A.one"] + " := by\n  rfl\n  rfl\n"] = {"proxy": 90}
+
+        def snapshot():
+            return {
+                path.relative_to(self.runs).as_posix(): (path.read_bytes(), path.stat().st_mtime_ns)
+                for path in sorted(self.runs.rglob("*"))
+                if path.is_file()
+            }
+
+        before = snapshot()
+        result = self.build("base", "donor")
+        self.assertEqual(result.rows[0]["origin"], "submit_merge")
+        self.assertEqual(snapshot(), before)
+
+    def test_a_raising_cold_check_fails_the_hybrid_gate(self):
+        base = STATEMENTS["A.one"] + " := by\n  simp_all [Nat.add_comm]\n"
+        self.add_run("base", proof=base, proxy=70)
+        self.add_run("donor", proof=STATEMENTS["A.one"] + " := by\n  rfl\n", proxy=60)
+
+        def raising(name, proof):
+            if proof != base:
+                raise RuntimeError("lean crashed")
+            return self.cold(name, proof)
+
+        result = build_submission(
+            "raising",
+            ["base", "donor"],
+            cold_check=raising,
+            runs_root=self.runs,
+            output_root=self.out,
+            manifest_path=self.manifest,
+        )
+        self.assertEqual(result.code, 0)
+        self.assertEqual(result.rows[0]["proof"], base)
+        attempt = self.attempts(result)[0]
+        self.assertFalse(attempt["accepted"])
+        self.assertEqual(attempt["reason"], "gate failed")
 
     def test_a_blocked_rebuild_keeps_the_last_good_submission(self):
         good = STATEMENTS["A.one"] + " := by\n  rfl\n"

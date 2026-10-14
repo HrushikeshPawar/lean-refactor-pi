@@ -1,4 +1,4 @@
-"""A harness-combined proof is reported, never submitted: submissions stay model-written."""
+"""A harness-combined proof is reported, and submitted when it is the run's best verified candidate."""
 
 import tempfile
 import unittest
@@ -65,13 +65,17 @@ class MergeReportTests(unittest.TestCase):
 
     def test_the_best_combination_is_submitted(self):
         directory = self.run_merge()
+        unselected = merge_report(campaign.events(directory), directory)
+        self.assertFalse(unselected[0]["submitted"])
+        self.assertNotIn("(submitted:", merge_text(unselected))
         answer = campaign.submission("m")
         rows = merge_report(campaign.events(directory), directory)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["proxy"], 80.0)
         self.assertTrue(rows[0]["beats_parents"])
         self.assertTrue(rows[0]["submitted"])
-        self.assertIn("selected best verified candidate", merge_text(rows))
+        self.assertIn(f"(submitted: {rows[0]['candidate']})", merge_text(rows))
+        self.assertNotIn("not submitted", merge_text(rows))
         self.assertEqual(answer["proxy"], 80.0)
         self.assertEqual((directory / "submission.lean").read_text(), MERGED)
 
