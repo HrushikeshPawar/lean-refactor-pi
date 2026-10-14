@@ -33,6 +33,7 @@ from arena.engine import (
 )
 from arena.graph import (
     FILING_MIN_SIMILARITY,
+    Cell,
     Graph,
     Node,
     archive,
@@ -1141,24 +1142,94 @@ def _check_stall(directory: Path, graph: Graph, newly_filed: set[str]) -> None:
         current_focus = target.node.proof_id
 
 
-def no_work_focus(run_id: str) -> dict:
-    """Move focus to the best cell of a different route, else the original, after a turn with no work."""
+def _best_first(cells: list[Cell]) -> list[Cell]:
+    return sorted(cells, key=lambda cell: (-(quality(cell.node) or 0.0), cell.letter))
+
+
+def _no_work_candidates(graph: Graph, current_route: str | None) -> list[Node]:
+    """Starting points in order: best cells of other routes, the original, then other closed nodes by quality."""
+    others = [cell.node for cell in _best_first(archive(graph)) if current_route is None or cell.route != current_route]
+    original = [node for node in graph.nodes if node.origin == "reference"]
+    closed = sorted(
+        (node for node in graph.nodes if node.status == "closed"), key=lambda node: (-(quality(node) or 0.0), node.id)
+    )
+    unique: dict[str, Node] = {}
+    for node in [*others, *original, *closed]:
+        unique.setdefault(node.proof_id, node)
+    return list(unique.values())
+
+
+def _start_material(theorem: str, run_id: str, node: Node) -> dict:
+    """The node's proof and its three costliest steps by tokens, from the same price rows as the read view."""
+    table = price_table(theorem, run_id, node.id)
+    rows = sorted(table["rows"], key=lambda row: (-row["tokens"], row["first_line"]))[:3]
+    return {"proof": node.proof_text, "prices": render_price_table({**table, "rows": rows})}
+
+
+def no_work_focus(run_id: str, theorem: str) -> dict:
+    """Move focus after a turn with no work: never to the current focus, never to a starting point already offered."""
     directory = run_dir(run_id)
     history = events(directory)
     graph = Graph.from_history(history, _proof_reader(directory))
-    by_id = {node.proof_id: node for node in graph.nodes}
-    current = by_id.get(graph.focus) if graph.focus else None
-    others = [cell for cell in archive(graph) if current is None or cell.route != current.route]
-    if others:
-        target = min(others, key=lambda cell: (-(quality(cell.node) or 0.0), cell.letter))
-        target_id = target.node.proof_id
-    else:
-        original = next((node for node in graph.nodes if node.origin == "reference"), None)
-        target_id = original.proof_id if original else None
-    if target_id is None or target_id == graph.focus:
+    current = next((node for node in graph.nodes if node.proof_id == graph.focus), None)
+    offered = {item["proof_id"] for item in history if item.get("kind") == "focus" and item.get("reason") == "no_work"}
+    candidates = [
+        node for node in _no_work_candidates(graph, current.route if current else None) if node.proof_id != graph.focus
+    ]
+    fresh = [node for node in candidates if node.proof_id not in offered]
+    # Once every candidate was offered, the cycle starts again; the current focus stays excluded.
+    pool = fresh or candidates
+    if not pool:
         return {"moved": False}
-    _append(directory, {"kind": "focus", "proof_id": target_id, "reason": "no_work"})
-    return {"moved": True, "label": _update_id(history, target_id)}
+    target = pool[0]
+    _append(directory, {"kind": "focus", "proof_id": target.proof_id, "reason": "no_work"})
+    history = events(directory)
+    return {"moved": True, "label": _update_id(history, target.proof_id), **_start_material(theorem, run_id, target)}
+
+
+def _restart_order(graph: Graph) -> list[Node]:
+    """Restart starting points in rotation: best node, original reference, then the best cell of each other route."""
+    scored = [node for node in graph.nodes if node.score is not None]
+    best = max(scored, key=lambda node: node.score) if scored else None
+    reference = next((node for node in graph.nodes if node.origin == "reference"), None)
+    excluded = {node.route for node in (best, reference) if node is not None}
+    per_route: dict[str | None, Node] = {}
+    for cell in _best_first(archive(graph)):
+        if cell.route not in excluded:
+            per_route.setdefault(cell.route, cell.node)
+    order = [node for node in (best, reference, *per_route.values()) if node is not None]
+    if not order:
+        raise ValueError(text.render("messages/errors.node_reference_invalid", reference="restart start"))
+    return order
+
+
+def restart_packet(name: str, run_id: str) -> dict:
+    """Restart the conversation at the next starting point: the kickoff packet, the start node and the map."""
+    from arena import reply
+
+    directory = run_dir(run_id)
+    history = events(directory)
+    graph = Graph.from_history(history, _proof_reader(directory))
+    order = _restart_order(graph)
+    restarts = sum(1 for item in history if item.get("kind") == "restart")
+    start = order[restarts % len(order)]
+    _append(directory, {"kind": "restart", "proof_id": start.proof_id})
+    _append(directory, {"kind": "focus", "proof_id": start.proof_id, "reason": "restart"})
+    history = events(directory)
+    material = _start_material(name, run_id, start)
+    graph_map = map_view_from(history, directory)
+    map_lines = reply._map_lines({**graph_map, "open": []})
+    label = _update_id(history, start.proof_id)
+    lines = [
+        packet(name).rstrip("\n"),
+        text.render("packet/restart.start", label=label),
+        f"```lean\n{start.proof_text}\n```",
+        text.render("packet/restart.prices_heading"),
+        material["prices"].rstrip("\n"),
+        text.render("messages/compaction-memory.map_heading"),
+        *map_lines,
+    ]
+    return {"ok": True, "text": "\n".join(lines) + "\n", "label": label, "restart": restarts + 1}
 
 
 def _metric_score(metrics: dict | None) -> float | None:

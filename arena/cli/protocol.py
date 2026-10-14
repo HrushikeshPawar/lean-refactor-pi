@@ -20,6 +20,7 @@ from arena.campaign import (
     frontier,
     init,
     no_work_focus,
+    restart_packet,
     run_dir,
     state,
     submission,
@@ -38,9 +39,11 @@ ACTIONS = (
     "goal",
     "search",
     "read",
+    "scratch",
     "finish",
     "reset_delivered",
     "no_work_focus",
+    "restart_packet",
 )
 
 
@@ -49,7 +52,7 @@ def run(args: SimpleNamespace) -> dict:
         # Compaction calls this with no request: it only forgets what was delivered.
         tool_reply.reset_delivered(args.run_id)
         return tool_reply.reply()
-    if args.action in ("compile", "goal", "search", "read", "finish"):
+    if args.action in ("compile", "goal", "search", "read", "scratch", "finish"):
         if args.request_file is None:
             raise ValueError("request-file is required")
         request = json.loads(args.request_file.read_text())
@@ -60,13 +63,16 @@ def run(args: SimpleNamespace) -> dict:
             "goal": v7_tools.goal_tool,
             "search": v7_tools.search_tool,
             "read": v7_tools.read_tool,
+            "scratch": v7_tools.scratch_tool,
             "finish": v7_tools.finish_tool,
         }[args.action]
         return tool_reply.attach_context(args.run_id, handler(args.theorem, args.run_id, request))
     if args.action == "init":
         return init(args.theorem, args.run_id)
     if args.action == "no_work_focus":
-        return no_work_focus(args.run_id)
+        return no_work_focus(args.run_id, args.theorem)
+    if args.action == "restart_packet":
+        return restart_packet(args.theorem, args.run_id)
     if args.action == "frontier":
         return frontier(args.run_id)
     if args.action == "autocheck":
@@ -126,7 +132,7 @@ def execute(options: ProtocolOptions) -> int:
         return 0
     except (OSError, ValueError, RuntimeError, KeyError, subprocess.SubprocessError) as error:
         message = " ".join(str(error).split()) or type(error).__name__
-        if args.action in ("compile", "goal", "search", "read", "finish", "reset_delivered"):
+        if args.action in ("compile", "goal", "search", "read", "scratch", "finish", "reset_delivered"):
             log_tool_error(args.run_id, args.action)
             forms = v7_tools.TOOL_FORMS.get(args.action, [])
             print(json.dumps(tool_reply.error_reply("internal_error", message[:400], [], forms), ensure_ascii=False))
@@ -135,7 +141,7 @@ def execute(options: ProtocolOptions) -> int:
         return 2
     except Exception as error:
         message = " ".join(str(error).split()) or type(error).__name__
-        if args.action in ("compile", "goal", "search", "read", "finish", "reset_delivered"):
+        if args.action in ("compile", "goal", "search", "read", "scratch", "finish", "reset_delivered"):
             log_tool_error(args.run_id, args.action)
             forms = v7_tools.TOOL_FORMS.get(args.action, [])
             print(json.dumps(tool_reply.error_reply("internal_error", message[:400], [], forms), ensure_ascii=False))

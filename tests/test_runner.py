@@ -148,7 +148,7 @@ class LifecycleTests(unittest.TestCase):
 
 
 FINISH = "finish"
-ARENA_TOOLS = {"compile", "goal", "search", "read", FINISH}
+ARENA_TOOLS = {"compile", "goal", "search", "read", "scratch", FINISH}
 # Offered from the first request; finish joins them only in the final 10% of the limit.
 START_TOOLS = ARENA_TOOLS - {FINISH}
 
@@ -487,9 +487,9 @@ class AutomaticChecksTests(unittest.TestCase):
 
 
 class SkillToolNamesTests(unittest.TestCase):
-    def test_skill_mentions_the_four_offered_tools_and_never_finish(self):
+    def test_skill_mentions_the_offered_tools_and_never_finish(self):
         text = "\n".join(path.read_text() for path in sorted(SKILL_DIR.rglob("*.md")))
-        self.assertEqual(set(re.findall(r"\b(?:compile|goal|search|read|finish)\b", text)), START_TOOLS)
+        self.assertEqual(set(re.findall(r"\b(?:compile|goal|search|read|scratch|finish)\b", text)), START_TOOLS)
         self.assertNotRegex(text, STOP_TEXT)
         self.assertNotRegex(text, r"\barena_[a-z_]+\b")
 

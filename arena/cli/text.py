@@ -77,7 +77,7 @@ def render_template(
             from arena.skill import skill_prompt
 
             parts = [("system prompt", SYSTEM_PROMPT), ("skill", skill_prompt())]
-            for name in ("compile", "goal", "search", "read", "finish"):
+            for name in ("compile", "goal", "search", "read", "finish", "scratch"):
                 prefix = f"tools/{name}.params."
                 descriptions = [text.render(f"tools/{name}.description")]
                 descriptions.extend(

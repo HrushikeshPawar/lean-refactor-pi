@@ -12,7 +12,7 @@ import { nearestToolName, normalizeToolArguments, requireToolArguments } from ".
 import { BlobStore, DeltaChain, splitRequest, stampRecord } from "./journal.ts";
 import { nothingToSummarize, objectToolArguments, ResultTrimmer } from "./trim.ts";
 import { stopDecision } from "./control.ts";
-import { continuationPush } from "./rules.ts";
+import { continuationFacts, continuationPush } from "./rules.ts";
 import { cacheAlarm, cacheHitPct, callCost, finishAllowed, limitReached, limitUsd, spendFooter, toolsForSpend } from "./spend.ts";
 import { numbers as textNumbers, render as renderText } from "./text.ts";
 import { classifyFailure, nextWait } from "./outage.ts";
@@ -24,7 +24,7 @@ const root = resolve(import.meta.dirname, "../../..");
 const workspaces = resolve(root, "workspaces");
 const MAX_ERROR_STREAK = 3;
 const FINISH_TOOL = "finish";
-const ARENA_TOOLS = new Set(["compile", "goal", "search", "read", "finish"]);
+const ARENA_TOOLS = new Set(["compile", "goal", "search", "read", "scratch", "finish"]);
 
 function validObjectJson(raw: string | undefined): boolean {
   if (raw === undefined) return false;
@@ -547,6 +547,10 @@ export default async function arenaExtension(pi: ExtensionAPI) {
         payload?.ok !== false && (payload?.items ?? []).some((item: any) => item?.node && item?.repeat !== true),
       );
     }
+    // A scratch run that is not a repeat is work: it tests an idea without filing a node.
+    if (event.toolName === "scratch") {
+      turnHadNovelContext ||= Boolean(payload?.ok !== false && (payload?.items ?? []).some((item: any) => item?.repeat === false));
+    }
     // The trimmer only shortens the model-facing text; `details` keep the full payload, so a repeated identical
     // result yields signatures already in `discoveries` and does not count as novel context.
     const keys = discoveryKeys(event.toolName, payload);
@@ -707,6 +711,16 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     },
   });
 
+  const scratchParams = Type.Object({
+    code: Type.String({ description: await renderText("tools/scratch.params.code") }),
+  });
+  await registerTool({ name: "scratch", label: "Scratch Lean commands",
+    description: await renderText("tools/scratch.description"), parameters: scratchParams,
+    async execute(_id: string, params: Record<string, unknown>) {
+      return invokeTool("scratch", params, Object.keys(scratchParams.properties));
+    },
+  });
+
   const finishParams = Type.Object({});
   await registerTool({ name: FINISH_TOOL, label: "Finish the run",
     description: await renderText("tools/finish.description"), parameters: finishParams,
@@ -754,7 +768,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
       else noWorkTurns += 1;
     }
     const noWorkThisTurn = !failed && !(turnHadProofAttempt || turnHadNovelContext || turnHadVerifiedImprovement);
-    const { stop, moveFocus } = stopDecision({ limitHit, finishConfirmed, noWorkThisTurn,
+    const { stop, moveFocus, restart } = stopDecision({ limitHit, finishConfirmed, noWorkThisTurn,
       providerUnreachable: failure === "transport" && outageStartedAt !== undefined && nextWait(outageAttempt, Number(process.env.ARENA_BACKOFF_MS ?? 2000), outageStartedAt, Date.now(), Number(process.env.ARENA_OUTAGE_LIMIT_MS ?? 600000)).stop,
       errorLoop: failure === "model" && errorStreak >= MAX_ERROR_STREAK,
       continuations, noWorkTurns, plateau, finishAllowed: finishAllowed(spentUsd, limit).allowed });
@@ -799,10 +813,30 @@ export default async function arenaExtension(pi: ExtensionAPI) {
       best: checks?.best ?? state.best });
     const cutLine = cutTokens === undefined ? undefined
       : buildTurnCutLine(cutTokens, await renderText("messages/errors.turn_cut", { tokens: "{tokens}" }));
-    // No work before the final tenth: focus moves to a different starting point, stated as one fact line.
+    // Second no-work turn in a row, before the final tenth: the run restarts from a packet at the next starting
+    // point. The compaction draft keeps nothing before it, so the old reasoning leaves the model's context.
+    if (restart) {
+      const restarted = await campaign("restart_packet");
+      if (restarted.ok === true && typeof restarted.text === "string") {
+        await campaign("reset_delivered");
+        trimmer.forget();
+        noWorkTurns = 0;
+        appendCost({ kind: "restart", continuations, restart: restarted.restart, label: restarted.label, chars: restarted.text.length });
+        const facts = await continuationFacts(spentUsd, limit, checks?.baseline, checks?.best ?? state.best);
+        return { entries: [...event.entries,
+          { type: "compaction" as const, summary: restarted.text, firstKeptEntryId: null },
+          { type: "custom_message" as const, customType: "arena-continuation",
+            content: await renderText("messages/continuation.restart", { facts }), display: false }], continue: true };
+      }
+      console.error(`[arena-restart] not restarted: ${restarted.error ?? "no packet"}`); // log: operator diagnostic. // not-model-facing
+    }
+    // No work before the final tenth: focus moves to a different starting point, stated as one fact line and the
+    // starting point's proof and costliest steps.
     const moved = moveFocus ? await campaign("no_work_focus") : undefined;
     const focusLine = moved?.moved ? await renderText("messages/continuation.focus_moved", { label: moved.label }) : undefined;
-    const nextText = [content, focusLine, cutLine].filter(line => line !== undefined).join("\n");
+    const focusMaterial = moved?.moved ? await renderText("messages/continuation.focus_material",
+      { label: moved.label, proof: moved.proof, prices: moved.prices }) : undefined;
+    const nextText = [content, focusLine, focusMaterial, cutLine].filter(line => line !== undefined).join("\n");
     return { entries: [...event.entries, { type: "custom_message" as const, customType: "arena-continuation",
       content: nextText, display: false }], continue: true };
   });

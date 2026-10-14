@@ -1686,3 +1686,11 @@ Fresh runs with only the theorem and reference proof, $0.50 each, before the pha
   hides `arenaGenerated`/`arenaNumbered`/`arena_index`/`arena_moduleRanges`.
 - **Still open:** a draft identical to the reference is filed as a new root; hole goals can print "n/a"; the model
   never uses splice, fill or merge in DeepSeek runs; stall focus moves are ignored by the model.
+- **Keep-trying fixes (2026-10-14, after ski4 DeepSeek stalled at turn 31 with 75% left):**
+  - `scratch` tool: any Lean commands in the theorem's environment; returns Lean messages (info included) and tokens
+    per line; no node, no score. A non-repeated scratch run counts as work.
+  - First text-only turn: the focus moves to a node not offered before, and the continuation carries its proof and
+    three costliest steps. Second in a row: the conversation restarts from a fresh packet (a compaction entry that
+    keeps nothing) at a rotating start node (best, original, best cell of each other route). Work, graph and spend
+    carry over; the old reasoning does not.
+  - `goal` returns every open goal with its case tag; ask at the splitting line to see all cases.

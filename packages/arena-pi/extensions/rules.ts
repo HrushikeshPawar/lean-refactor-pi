@@ -15,7 +15,7 @@ function pointsLeft(reference: number | null | undefined, value: number | null |
 
 // Spend and points left per axis. Finish availability is stated only once finish is offered, by the same
 // predicate that puts the finish tool in the tool list.
-async function continuationFacts(spentUsd: number, limitUsd: number, baseline: Metrics, best: Metrics) {
+export async function continuationFacts(spentUsd: number, limitUsd: number, baseline: Metrics, best: Metrics) {
   const facts = [await spendFooter(spentUsd, limitUsd), await render("messages/continuation.points_left", {
     tokens: pointsLeft(baseline?.tokens, best?.tokens ?? baseline?.tokens),
     heartbeats: pointsLeft(baseline?.heartbeats, best?.heartbeats ?? baseline?.heartbeats),

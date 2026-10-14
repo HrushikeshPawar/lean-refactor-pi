@@ -7,6 +7,7 @@ import hashlib
 import re
 
 from arena import campaign, engine, graph, reply, salvage, search, text
+from arena.forbidden import official_filter
 from arena.prices import snippet_tokens
 from arena.steps import parse, split_steps, step_range
 
@@ -16,6 +17,7 @@ TOOL_FORMS = {
     "search": ["queries:[strings]", "kind:name|type|text", "after:prefix"],
     "read": ["handle:decl:<name>", "node:nN", "hole:nN.hK", "view:source|prices|diff|outline|map"],
     "finish": ["{}"],
+    "scratch": ["code:<lean commands>"],
 }
 
 
@@ -49,6 +51,7 @@ def _empty_error(tool: str) -> dict:
         "search": ["queries", "kind", "after"],
         "read": ["handle", "node", "hole", "view", "against"],
         "finish": [],
+        "scratch": ["code"],
     }[tool]
     return reply.error_reply("empty_arguments", "{}", valid, TOOL_FORMS[tool])
 
@@ -64,6 +67,7 @@ def _is_empty(request: object, tool: str) -> bool:
         "search": ("queries", "kind", "after"),
         "read": ("handle", "node", "hole", "view", "against"),
         "finish": (),
+        "scratch": ("code",),
     }[tool]
     return not any(key in request and request[key] not in (None, "", [], {}) for key in keys)
 
@@ -543,6 +547,17 @@ def compile_tool(theorem: str, run_id: str, request: dict) -> dict:
     return reply.attach_context(run_id, result, include_map=True)
 
 
+def _goal_cases(goals: list[str], cap: int) -> str:
+    """Every goal as its own block, headed by its case tag (Lean's `case foo` line); goals past `cap` are not shown."""
+    blocks = []
+    for index, goal in enumerate(goals[:cap], 1):
+        if goal.splitlines()[0].startswith("case "):
+            blocks.append(goal)
+        else:
+            blocks.append(_render("goal_untagged", index=index, count=len(goals)) + "\n" + goal)
+    return "\n\n".join(blocks)
+
+
 def goal_tool(theorem: str, run_id: str, request: dict) -> dict:
     if _is_empty(request, "goal"):
         return _empty_error("goal")
@@ -626,15 +641,21 @@ def goal_tool(theorem: str, run_id: str, request: dict) -> dict:
                     )
                 ]
             )
-        goals = (answer or {}).get("goals") or []
+        goals = [str(goal).strip() for goal in (answer or {}).get("goals") or [] if str(goal).strip()]
         rendered = (answer or {}).get("rendered") or "\n".join(goals)
+        extra = []
+        if len(goals) > 1:
+            cap = int(text.numbers().get("goal_cases_max", 12))
+            rendered = _goal_cases(goals, cap)
+            if len(goals) > cap:
+                extra.append(_render("goal_cases_omitted", count=len(goals) - cap, cap=cap))
         if not rendered:
             rendered = _render("no_goal", line=proof_line)
         items = [
             {
                 "ref": "goal",
                 "ok": True,
-                "lines": [_render("goal_item", node=node.id, line=proof_line, goal=rendered)],
+                "lines": [_render("goal_item", node=node.id, line=proof_line, goal=rendered), *extra],
                 "error": None,
                 "goal": rendered,
             }
@@ -994,6 +1015,75 @@ def read_tool(theorem: str, run_id: str, request: dict) -> dict:
         reply.reply(items=[{"ref": node.id, "ok": True, "lines": lines, "error": None, **data}]),
         include_map=False,
     )
+
+
+def _scratch_messages(output: str) -> list[dict]:
+    """Every Lean message in order. Info text prints without a position (`trace_state`, `#check`), so an unpositioned
+    run is an info message of its own with line None; only an indented line continues the message before it."""
+    found: list[dict] = []
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        match = engine._HEADER.match(line)
+        if match:
+            found.append({"severity": match["severity"], "line": int(match["line"]), "message": [match["rest"]]})
+        elif found and (line[:1].isspace() or found[-1]["line"] is None):
+            found[-1]["message"].append(line)
+        else:
+            found.append({"severity": "info", "line": None, "message": [line]})
+    return [{**item, "message": "\n".join(item["message"]).strip()} for item in found]
+
+
+def scratch_tool(theorem: str, run_id: str, request: dict) -> dict:
+    """Lean commands run in the target's environment in place of its declaration. Never a node, never scored."""
+    if _is_empty(request, "scratch"):
+        return _empty_error("scratch")
+    valid = ["code"]
+    unknown = sorted(set(request) - set(valid))
+    if unknown:
+        return _invalid("unknown_argument", unknown[0], valid, TOOL_FORMS["scratch"])
+    limit = int(text.numbers().get("scratch_max_chars", 4000))
+    code = request.get("code")
+    if not isinstance(code, str) or not code.strip():
+        return _invalid("bad_code", "empty", [f"1..{limit} characters"], TOOL_FORMS["scratch"])
+    if len(code) > limit:
+        return _invalid("bad_code", f"{len(code)} characters", [f"1..{limit} characters"], TOOL_FORMS["scratch"])
+    if re.search(r"(?m)^\s*import\b", code):
+        return _invalid("bad_code", "import", ["no import lines"], TOOL_FORMS["scratch"])
+    label = official_filter()(code)
+    if label:
+        return _invalid("forbidden", label, ["no forbidden constructs"], TOOL_FORMS["scratch"])
+    row = campaign.problem(theorem)
+    version, commit = engine.versions(row)[0]
+    # The snippet takes the target declaration's place in the same file the compile tool checks.
+    built = engine.candidate_file(row, code, version, commit)
+    digest = hashlib.sha256(code.encode()).hexdigest()
+    earlier = sum(
+        1 for event in _history(run_id) if event.get("kind") == "scratch" and event.get("code_sha256") == digest
+    )
+    campaign._append(campaign.run_dir(run_id), {"kind": "scratch", "code_sha256": digest})
+    facts = [_render("scratch_repeat", count=earlier + 1)] if earlier else []
+    output = engine.run_lean(row, built["path"], built["text"], prefix_end=built["head"])
+    lines = []
+    if output is None:
+        lines.append(_render("scratch_timeout"))
+    else:
+        lines.extend(
+            _render(
+                "scratch_message",
+                line=message["line"] - built["start_line"] + 1 if message["line"] else "?",
+                severity=message["severity"],
+                message=message["message"][: engine._MESSAGE_LIMIT],
+            )
+            for message in _scratch_messages(output[1])
+        )
+    for number, line in enumerate(code.splitlines(), 1):
+        count = snippet_tokens(line) if line.strip() else 0
+        if count:
+            lines.append(_render("scratch_line_tokens", line=number, tokens=count))
+    lines.append(_render("scratch_tokens", tokens=snippet_tokens(code)))
+    item = {"ref": "scratch", "ok": True, "lines": lines, "error": None, "repeat": bool(earlier)}
+    return reply.reply(facts=facts, items=[item])
 
 
 def finish_tool(theorem: str, run_id: str, request: dict | None = None) -> dict:

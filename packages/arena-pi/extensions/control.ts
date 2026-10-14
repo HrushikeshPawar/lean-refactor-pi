@@ -10,7 +10,8 @@ export type StopInput = {
   noWorkThisTurn: boolean; finishAllowed: boolean;
 };
 
-export function stopDecision(input: StopInput): { stop: string | null; moveFocus: boolean } {
+// A first turn without work moves the focus; a second one in a row restarts the conversation from a packet.
+export function stopDecision(input: StopInput): { stop: string | null; moveFocus: boolean; restart: boolean } {
   const stop = input.limitHit ? "limit_reached"
     : input.finishConfirmed ? "finished"
     : input.providerUnreachable ? "provider_unreachable"
@@ -18,5 +19,6 @@ export function stopDecision(input: StopInput): { stop: string | null; moveFocus
     : input.finishAllowed && input.continuations >= MAX_CONTINUATIONS ? "continuation_limit"
     : input.finishAllowed && input.noWorkTurns >= 2 ? "no_work_fallback"
     : input.continuations >= 4 && input.plateau >= 4 && input.finishAllowed ? "plateau" : null;
-  return { stop, moveFocus: stop === null && input.noWorkThisTurn && !input.finishAllowed };
+  const active = stop === null && input.noWorkThisTurn && !input.finishAllowed;
+  return { stop, moveFocus: active && input.noWorkTurns < 2, restart: active && input.noWorkTurns >= 2 };
 }

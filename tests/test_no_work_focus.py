@@ -32,15 +32,16 @@ class NoWorkFocusTests(unittest.TestCase):
                 patch.object(campaign, "run_dir", return_value=directory),
                 patch.object(campaign, "events", side_effect=lambda _: history + appended),
                 patch.object(campaign, "_append", side_effect=lambda _d, event: appended.append(event)),
+                patch.object(campaign, "_start_material", return_value={"proof": "", "prices": ""}),
             ):
-                result = campaign.no_work_focus("run")
+                result = campaign.no_work_focus("run", "t")
                 self.assertTrue(result["moved"])
                 self.assertEqual(appended[-1], {"kind": "focus", "proof_id": "b", "reason": "no_work"})
-                self.assertEqual(campaign.no_work_focus("run")["moved"], True)
+                self.assertEqual(campaign.no_work_focus("run", "t")["moved"], True)
                 self.assertEqual(appended[-1]["proof_id"], "a")
                 history[:] = [*history[:1], {"kind": "focus", "proof_id": "ref", "reason": "start"}]
                 appended.clear()
-                self.assertEqual(campaign.no_work_focus("run"), {"moved": False})
+                self.assertEqual(campaign.no_work_focus("run", "t"), {"moved": False})
         json.dumps(result)
 
 

@@ -6,6 +6,8 @@ compile_max_drafts: 4
 error_passes_max: 3
 cross_version_wait_seconds: 10
 goal_try_max: 6
+goal_cases_max: 12
+scratch_max_chars: 4000
 read_source_lines: 400
 finish_points_lines: 4
 source_lines_per_call: 400
