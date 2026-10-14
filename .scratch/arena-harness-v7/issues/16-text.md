@@ -19,6 +19,20 @@
 - Tests today: `tests/test_context.py` (packet tests), `tests/test_memory.py`, `tests/test_agent_text.py` (tickets 05a and 05b: renderer, verbatim-packet and literal-lint tests; read it first).
 - `docs/PLAN-harness-v7.md` §1d lists the defects to remove: the 10% rule stated 4 times, token rules in two places (about 250 wasted tokens per run), a theorem-specific number in the generic skill ("original scores only 33"), a hard-coded token example, "90% down on heartbeats", strategy words in the references.
 
+## Reviewer clarification (2026-10-14, answers the first stop)
+- **Add the theorem render mode first, as checkbox 0, in its own commit before any text edit.** `arena text render
+  --theorem ROW [--json]` prints the complete model-facing text for one row, part by part: system prompt (the run
+  launcher's prompt templates), skill, the five tool descriptions with their parameter descriptions, then each packet
+  section by title. With `--json` it prints `{"theorem": ROW, "parts": [{"part", "chars", "words", "text"}]}`
+  (words counted as `arena text budget` counts them). It is **cache-only**: it builds the packet from
+  `cached_context` and the cached reference profile and exits non-zero with a clear message when either is missing;
+  it never starts Lean (add a `cache_only` path to `render_packet` or a shared helper; do not duplicate the packet
+  code). One fast test with a fixture context covers part order, counts and the missing-cache refusal. This mode adds
+  no model-facing text, so take the checkbox 1 baseline right after it, on the unchanged text.
+- **Slow file in the sandbox.** The `lsp_unavailable` and loopback socket failures are sandbox permissions, not code:
+  run the slow file with loopback permission (as in 15c). If any failure remains with loopback allowed, report it
+  against this baseline; do not change its assertions or setup.
+
 ## What to build
 - [ ] 1. **Baseline and inventory.** Before editing, run `uv run arena text budget` (counts words) and save the table; run `uv run arena text render --theorem <row>` (ticket 05a) for `Core.InitsUpdatesComm`, `putnam_1964_b2` and `Cslib.SKI.parallelReduction_diamond` and record the character and word counts per part (system prompt, skill, tool descriptions, packet sections). Read the organizers' prompts named under "Read first" and write at most 8 bullets of observations (structure, what they state about scoring, what they leave out) into your hand-back. Nothing from them is copied into `agent-text/`.
 - [ ] 2. **Rule table.** Create `agent-text/rules.yaml`: a list of every rule the model is told, each with an id, the one template key that states it, and the numbers it uses. It must contain at least: the score definition and per-axis rates; the token-counting rules; statement immutability; forbidden constructs; the budget and stop (`numbers.yaml` finish fraction, the spend limit); the operations (`splice`, `fill`, `merge`, `base`) and node, step and hole ids; what a status (`closed`, `sketch`, `broken`) means; what the price row columns mean. No rule appears twice. The consistency test of checkbox 17 reads this file.
