@@ -24,6 +24,7 @@ packet_earlier_chars: 240
 packet_earlier_filler: 5
 packet_types: 8
 packet_type_chars: 700
+packet_profile_lines: 12
 packet_scope: 25
 packet_scope_chars: 600
 packet_library: 60

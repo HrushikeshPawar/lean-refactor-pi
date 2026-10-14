@@ -1,2 +1,5 @@
-salvaged: "{sketch} salvaged from {source}: {holes} at {lines}."
-salvaged_unseen: "{sketch} salvaged from an earlier broken node: {holes} at {lines}."
+salvaged: "{sketch}: sketch from {sources}; {fill}."
+salvaged_unseen: "{sketch}: sketch from earlier broken nodes; {fill}."
+fill_one: "line {lines} is a hole to fill (`fill` hole {ids})"
+fill_many: "lines {lines} are holes to fill (`fill` holes {ids})"
+fill_none: "no hole left to fill"

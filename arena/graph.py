@@ -424,6 +424,11 @@ def stall_target(graph: Graph, fired: dict, mode: str) -> Cell | None:
     ]
     if not candidates:
         return None
+    # A different route is a different starting point: prefer it whenever one exists.
+    root = by_id.get(fired["root"])
+    other_routes = [cell for cell in candidates if root is None or cell.route != root.route]
+    if other_routes:
+        candidates = other_routes
 
     def cell_quality(cell: Cell) -> float:
         value = quality(cell.node)

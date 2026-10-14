@@ -57,7 +57,9 @@ class ReadGoalSearchTests(CascadeToolCase):
         self.assertEqual(len(result["items"]), 3)
         self.assertTrue(result["items"][1]["ok"])
         self.assertFalse(result["items"][2]["ok"])
-        self.assertEqual(result["items"][2]["error"]["code"], "snippet_failed")
+        # The failure is in the snippet's own verdict line, not repeated as a second error line.
+        self.assertIsNone(result["items"][2]["error"])
+        self.assertRegex(result["items"][2]["lines"][0], r"^t2 error")
         self.assertEqual(result["items"][1].get("status", "closed"), "closed")
 
     def test_goal_at_error_line_is_blocked_until_error_is_replaced(self):
@@ -68,8 +70,52 @@ class ReadGoalSearchTests(CascadeToolCase):
                 "compat": {"v1": {"diagnostics": [{"severity": "error", "proof_line": 2, "message": "bad"}]}}
             },
         ):
-            result = tools.goal_tool("T", "logic", {"node": node, "line": 2})
+            result = tools.goal_tool("T", "logic", {"node": node, "line": 3})
         self.assertEqual(result["items"][0]["error"]["code"], "goal_blocked")
+
+    def test_goal_try_at_the_failing_line_runs_in_place_of_that_line(self):
+        node = tools.compile_tool("T", "logic", {"drafts": ["by\n  bad\n  bad"]})["items"][0]["node"]
+        failing = {"compat": {"v1": {"diagnostics": [{"severity": "error", "proof_line": 2, "message": "bad"}]}}}
+        with (
+            patch("arena.tools._node_result", return_value=failing),
+            patch(
+                "arena.tools.engine.candidate_file",
+                return_value={
+                    "path": "T.lean",
+                    "text": "theorem t : True := by\n  bad\n  bad",
+                    "head": 0,
+                    "start_line": 1,
+                },
+            ),
+            patch("arena.tools.engine.lean_goals", return_value={"goals": ["⊢ True"], "rendered": "⊢ True"}),
+            patch(
+                "arena.tools.engine.lean_try", return_value={"results": [{"returncode": 0, "goals_after": None}]}
+            ) as lean_try,
+        ):
+            result = tools.goal_tool("T", "logic", {"node": node, "line": 2, "try": ["trivial"]})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["items"][1]["ref"], "t1")
+        self.assertEqual(lean_try.call_args.args[4]["line"], 1)
+        with patch("arena.tools._node_result", return_value=failing):
+            blocked = tools.goal_tool("T", "logic", {"node": node, "line": 3})
+        error = blocked["items"][0]["error"]
+        self.assertEqual(error["code"], "goal_blocked")
+        self.assertIn("error at line 2", error["input"])
+        self.assertEqual(error["valid"], ["a line up to 2"])
+
+    def test_search_hit_without_a_line_omits_the_line_part(self):
+        hits = [
+            {"handle": "decl:A.f", "signature": "A.f : Nat", "module": "(this file)", "line": None, "why": "name"},
+            {"handle": "decl:A.g", "signature": "A.g : Nat", "module": "Init", "line": 7, "why": "name"},
+        ]
+        with patch(
+            "arena.tools.search.search", return_value={"kind": "name", "queries": [{"query": "A", "hits": hits}]}
+        ):
+            result = tools.search_tool("T", "logic", {"queries": ["A"]})
+        shown = "\n".join(line for item in result["items"] for line in item["lines"])
+        self.assertIn("A.f : Nat (this file) name", shown)
+        self.assertIn("A.g : Nat Init:7 name", shown)
+        self.assertNotIn("None", shown)
 
     def test_goal_try_at_line_targets_the_enclosing_step(self):
         node = self.sketch()

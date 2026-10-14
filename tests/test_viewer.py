@@ -1012,6 +1012,34 @@ class GraphViewerUpgradeTests(unittest.TestCase):
         self.assertIn("<b class=go>proof-sib</b>", html)
         self.assertIn("<td>n2.h1</td>", html)
 
+    def test_a_node_with_only_a_fast_check_is_labelled_not_checked_below_best(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not installed")
+        # `stat` and the status labels live inside app.js's IIFE, past its first `location` access: lift them out.
+        script = (
+            "const fs = require('fs'), source = fs.readFileSync(process.argv[1], 'utf8');"
+            "const pick = re => source.match(re)[0];"
+            "const code = [pick(/const STATUSES = .*/), pick(/const isProbe = .*/),"
+            " pick(/function stat\\(it\\) \\{[\\s\\S]*?\\n  \\}/)].join('\\n');"
+            "const nodes = JSON.parse(process.argv[2]);"
+            "const run = new Function('nodes', code + '; return [nodes.map(stat), STATUSES];');"
+            "console.log(JSON.stringify(run(nodes)));"
+        )
+        nodes = [
+            {"status": "primary", "proof": "exact h", "evaluations": [{"mode": "fast"}]},
+            {"status": "primary", "proof": "exact h", "evaluations": [{"mode": "fast"}, {"mode": "full"}]},
+            {"status": "primary", "proof": "sorry", "evaluations": [{"mode": "fast"}]},
+            {"status": "full", "proof": "exact h", "evaluations": [{"mode": "full"}]},
+        ]
+        result = subprocess.run(
+            [node, "-e", script, str(self.ASSETS / "app.js"), json.dumps(nodes)], capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        statuses, labels = json.loads(result.stdout)
+        self.assertEqual(statuses, ["unchecked", "compiled", "compiled", "verified"])
+        self.assertIn(["unchecked", "Not checked: below best"], labels)
+
     def test_viewer_scripts_parse(self):
         node = shutil.which("node")
         if not node:

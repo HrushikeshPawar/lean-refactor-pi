@@ -11,6 +11,7 @@ import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-wor
 import { nearestToolName, normalizeToolArguments, requireToolArguments } from "./toolnames.ts";
 import { BlobStore, DeltaChain, splitRequest, stampRecord } from "./journal.ts";
 import { nothingToSummarize, objectToolArguments, ResultTrimmer } from "./trim.ts";
+import { stopDecision } from "./control.ts";
 import { continuationPush } from "./rules.ts";
 import { cacheAlarm, cacheHitPct, callCost, finishAllowed, limitReached, limitUsd, spendFooter, toolsForSpend } from "./spend.ts";
 import { numbers as textNumbers, render as renderText } from "./text.ts";
@@ -750,14 +751,11 @@ export default async function arenaExtension(pi: ExtensionAPI) {
       if (turnHadProofAttempt || turnHadNovelContext || turnHadVerifiedImprovement) noWorkTurns = 0;
       else noWorkTurns += 1;
     }
-    const stop = limitHit ? "limit_reached"
-      : finishConfirmed ? "finished"
-      : failure === "transport" && outageStartedAt !== undefined && nextWait(outageAttempt, Number(process.env.ARENA_BACKOFF_MS ?? 2000), outageStartedAt, Date.now(), Number(process.env.ARENA_OUTAGE_LIMIT_MS ?? 600000)).stop ? "provider_unreachable"
-      : failure === "model" && errorStreak >= MAX_ERROR_STREAK ? "error_loop"
-      : continuations >= 12 ? "continuation_limit"
-      : noWorkTurns >= 2 ? "no_work_fallback"
-      // A plateau only ends the run inside the final 10%; earlier the model must try a new route.
-      : continuations >= 4 && plateau >= 4 && finishAllowed(spentUsd, limit).allowed ? "plateau" : null;
+    const noWorkThisTurn = !failed && !(turnHadProofAttempt || turnHadNovelContext || turnHadVerifiedImprovement);
+    const { stop, moveFocus } = stopDecision({ limitHit, finishConfirmed, noWorkThisTurn,
+      providerUnreachable: failure === "transport" && outageStartedAt !== undefined && nextWait(outageAttempt, Number(process.env.ARENA_BACKOFF_MS ?? 2000), outageStartedAt, Date.now(), Number(process.env.ARENA_OUTAGE_LIMIT_MS ?? 600000)).stop,
+      errorLoop: failure === "model" && errorStreak >= MAX_ERROR_STREAK,
+      continuations, noWorkTurns, plateau, finishAllowed: finishAllowed(spentUsd, limit).allowed });
     turnHadProofAttempt = false;
     turnHadNovelContext = false;
     turnHadVerifiedImprovement = false;
@@ -799,7 +797,10 @@ export default async function arenaExtension(pi: ExtensionAPI) {
       best: checks?.best ?? state.best });
     const cutLine = cutTokens === undefined ? undefined
       : buildTurnCutLine(cutTokens, await renderText("messages/errors.turn_cut", { tokens: "{tokens}" }));
-    const nextText = cutLine === undefined ? content : `${content}\n${cutLine}`;
+    // No work before the final tenth: focus moves to a different starting point, stated as one fact line.
+    const moved = moveFocus ? await campaign("no_work_focus") : undefined;
+    const focusLine = moved?.moved ? await renderText("messages/continuation.focus_moved", { label: moved.label }) : undefined;
+    const nextText = [content, focusLine, cutLine].filter(line => line !== undefined).join("\n");
     return { entries: [...event.entries, { type: "custom_message" as const, customType: "arena-continuation",
       content: nextText, display: false }], continue: true };
   });

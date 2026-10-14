@@ -43,6 +43,7 @@ from arena.graph import (
     measured_parent,
     merge_steps,
     merge_text,
+    quality,
     ranked_frontier,
     similarity,
     splice_text,
@@ -806,6 +807,23 @@ def node_label(history: list[dict], proof_id: str) -> str:
     return candidate or _probe_numbers(history).get(proof_id, f"p{proof_id[:8]}")
 
 
+def _compact_ids(ids: list[str]) -> str:
+    """`n2, n3, n4, n5, n9` as `n2–n5, n9`; ids that are not plain nK stay as they are."""
+    parts: list[tuple[int, int] | str] = []
+    for ref in ids:
+        number = int(ref[1:]) if re.fullmatch(r"n[0-9]+", ref) else None
+        if number is None:
+            parts.append(ref)
+        elif parts and isinstance(parts[-1], tuple) and parts[-1][1] == number - 1:
+            parts[-1] = (parts[-1][0], number)
+        else:
+            parts.append((number, number))
+    return ", ".join(
+        part if isinstance(part, str) else f"n{part[0]}" if part[0] == part[1] else f"n{part[0]}–n{part[1]}"
+        for part in parts
+    )
+
+
 def _update_id(history: list[dict], proof_id: str) -> str:
     """The graph id (nK) that model-facing updates use, falling back to the stored label."""
     try:
@@ -1121,6 +1139,26 @@ def _check_stall(directory: Path, graph: Graph, newly_filed: set[str]) -> None:
             },
         )
         current_focus = target.node.proof_id
+
+
+def no_work_focus(run_id: str) -> dict:
+    """Move focus to the best cell of a different route, else the original, after a turn with no work."""
+    directory = run_dir(run_id)
+    history = events(directory)
+    graph = Graph.from_history(history, _proof_reader(directory))
+    by_id = {node.proof_id: node for node in graph.nodes}
+    current = by_id.get(graph.focus) if graph.focus else None
+    others = [cell for cell in archive(graph) if current is None or cell.route != current.route]
+    if others:
+        target = min(others, key=lambda cell: (-(quality(cell.node) or 0.0), cell.letter))
+        target_id = target.node.proof_id
+    else:
+        original = next((node for node in graph.nodes if node.origin == "reference"), None)
+        target_id = original.proof_id if original else None
+    if target_id is None or target_id == graph.focus:
+        return {"moved": False}
+    _append(directory, {"kind": "focus", "proof_id": target_id, "reason": "no_work"})
+    return {"moved": True, "label": _update_id(history, target_id)}
 
 
 def _metric_score(metrics: dict | None) -> float | None:
@@ -2801,7 +2839,7 @@ def state(run_id: str) -> dict:
     leading = (
         unverified if unverified and (not verified or (unverified["score"] or 0) > (verified["score"] or 0)) else None
     )
-    updates = [
+    updates: list[dict] = [
         {"seq": seq, "text": _check_text(_update_id(history, item["candidate_id"]), item["result"], total)}
         for seq, item in enumerate(history)
         if item.get("kind") == "evaluation"
@@ -2817,32 +2855,41 @@ def state(run_id: str) -> dict:
         graph_ids[f"n{len(graph_ids) + 1}"] = proof_id
     probes = {item["proof_id"]: item for item in history if item.get("kind") == "probe"}
     directory = run_dir(run_id)
+    salvage_events: dict[str, list[tuple[int, dict]]] = {}
+    for seq, item in enumerate(history):
+        if item.get("kind") == "salvage" and item.get("status") == "salvaged" and item.get("sketch_id"):
+            salvage_events.setdefault(item["sketch_id"], []).append((seq, item))
     for seq, item in enumerate(history):
         if item.get("kind") == "salvage" and item.get("status") == "salvaged" and item.get("sketch_id"):
             sketch_id = item["sketch_id"]
+            if salvage_events[sketch_id][-1][0] != seq:
+                continue  # one line per sketch, written when its last source draft arrives
             sketch_path = directory / "proofs" / f"{sketch_id}.lean"
             sketch_text = sketch_path.read_text() if sketch_path.is_file() else ""
             compile_result = (probes.get(sketch_id) or {}).get("result", {})
             hole_rows = find_holes(sketch_text, compile_result.get("goals") or [])
-            line_numbers = [hole["line"] for hole in hole_rows]
-            lines_text = (
-                f"line {line_numbers[0]}" if len(line_numbers) == 1 else "lines " + ", ".join(map(str, line_numbers))
-            )
-            count = len(hole_rows)
-            holes_text = f"{count} hole" if count == 1 else f"{count} holes"
-            source = _update_id(history, item["proof_id"])
             sketch = _update_id(history, sketch_id)
-            # `source` lets the delivery name the broken node only when the model has seen its id.
+            fill = (
+                text.render(
+                    "messages/salvage.fill_many" if len(hole_rows) > 1 else "messages/salvage.fill_one",
+                    lines=", ".join(str(hole["line"]) for hole in hole_rows),
+                    ids=", ".join(f"{sketch}.h{hole['index']}" for hole in hole_rows),
+                )
+                if hole_rows
+                else text.render("messages/salvage.fill_none")
+            )
+            sources = list(
+                dict.fromkeys(_update_id(history, entry["proof_id"]) for _, entry in salvage_events[sketch_id])
+            )
+            # `source` lets the delivery name the broken nodes only when the model has seen every id.
             updates.append(
                 {
                     "seq": seq,
                     "text": text.render(
-                        "messages/salvage.salvaged", sketch=sketch, source=source, holes=holes_text, lines=lines_text
+                        "messages/salvage.salvaged", sketch=sketch, sources=_compact_ids(sources), fill=fill
                     ),
-                    "source": source,
-                    "unseen_text": text.render(
-                        "messages/salvage.salvaged_unseen", sketch=sketch, holes=holes_text, lines=lines_text
-                    ),
+                    "source": sources,
+                    "unseen_text": text.render("messages/salvage.salvaged_unseen", sketch=sketch, fill=fill),
                 }
             )
         elif item.get("kind") == "assembly" and item.get("status") in ("closed", "broken"):

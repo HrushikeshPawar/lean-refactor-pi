@@ -19,6 +19,7 @@ from arena.campaign import (
     autocheck,
     frontier,
     init,
+    no_work_focus,
     run_dir,
     state,
     submission,
@@ -39,6 +40,7 @@ ACTIONS = (
     "read",
     "finish",
     "reset_delivered",
+    "no_work_focus",
 )
 
 
@@ -63,6 +65,8 @@ def run(args: SimpleNamespace) -> dict:
         return tool_reply.attach_context(args.run_id, handler(args.theorem, args.run_id, request))
     if args.action == "init":
         return init(args.theorem, args.run_id)
+    if args.action == "no_work_focus":
+        return no_work_focus(args.run_id)
     if args.action == "frontier":
         return frontier(args.run_id)
     if args.action == "autocheck":

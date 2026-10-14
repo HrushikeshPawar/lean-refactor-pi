@@ -103,8 +103,8 @@ class ReplyTests(unittest.TestCase):
         self.assertIsNone(second["map"])
 
     def test_an_update_names_its_source_node_only_once_the_model_has_seen_it(self):
-        update = {"seq": 1, "text": "n11 salvaged from n7: 1 hole at line 3.", "source": "n7"}
-        update["unseen_text"] = "n11 salvaged from an earlier broken node: 1 hole at line 3."
+        update = {"seq": 1, "text": "n11: sketch from n7; line 3 is a hole to fill.", "source": ["n7"]}
+        update["unseen_text"] = "n11: sketch from earlier broken nodes; line 3 is a hole to fill."
         with patch.object(campaign, "state", return_value={"updates": [update]}):
             unseen = reply.attach_context(self.run_id, reply.reply())
         self.assertEqual(unseen["facts"], [update["unseen_text"]])

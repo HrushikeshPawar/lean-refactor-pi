@@ -41,3 +41,9 @@ test("an error input never doubles the template's period and an empty valid list
     input: "X is not a declaration of the pinned project.", valid: [], forms: ["node:nN"] } }, "");
   assert.equal(result.content[0]?.text, "unknown_handle: X is not a declaration of the pinned project. Forms: node:nN.");
 });
+
+test("a failed item with its own lines still shows its error code and forms", async () => {
+  const result = await renderReply({ ok: true, facts: [], items: [{ ok: false, lines: ["error line 3: `grind` failed"],
+    error: { code: "goal_blocked", input: "line 5 follows an error at line 3", valid: ["a line up to 3"], forms: ["node+line"] } }] }, "");
+  assert.equal(result.content[0]?.text, "error line 3: `grind` failed\ngoal_blocked: line 5 follows an error at line 3. Valid values: a line up to 3. Forms: node+line.");
+});

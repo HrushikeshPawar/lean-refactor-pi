@@ -209,7 +209,10 @@ def _node_ids(result: dict) -> set[str]:
 
 
 def _update_text(update: dict, seen: set[str]) -> str:
-    if update.get("source") and update["source"] not in seen and isinstance(update.get("unseen_text"), str):
+    sources = update.get("source") or []
+    if isinstance(sources, str):
+        sources = [sources]
+    if sources and not set(sources) <= seen and isinstance(update.get("unseen_text"), str):
         return update["unseen_text"]
     return update["text"]
 

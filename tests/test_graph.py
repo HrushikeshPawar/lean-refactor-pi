@@ -157,6 +157,24 @@ class ArchiveTests(unittest.TestCase):
         only_lineage, _ = self.project([("root", "r1", 100, "closed", None), ("child", "r1", 90, "closed", "root")])
         self.assertIsNone(graph_module.stall_target(only_lineage, fired, "best_other_cell"))
 
+    def test_stall_target_prefers_another_route_over_a_better_same_route_cell(self):
+        graph, _ = self.project(
+            [
+                ("root", "r1", 100, "closed", None),
+                ("same", "r1", 90, "sketch", None),
+                ("other", "r2", 10, "closed", None),
+            ]
+        )
+        fired = {"root": "root", "count": 12}
+        for mode in ("best_other_cell", "least_visited"):
+            target = graph_module.stall_target(graph, fired, mode)
+            assert target is not None
+            self.assertEqual(target.node.proof_id, "other")
+        same_only, _ = self.project([("root", "r1", 100, "closed", None), ("same", "r1", 90, "sketch", None)])
+        target = graph_module.stall_target(same_only, fired, "best_other_cell")
+        assert target is not None
+        self.assertEqual(target.node.proof_id, "same")
+
     def test_stall_fires_depend_only_on_nodes_and_reset_on_each_crossing(self):
         specs = [("root", "r1", 100, "closed", None)]
         specs += [(f"n{i}", "r1", 100 - i, "closed", specs[-1][0]) for i in range(1, 13)]

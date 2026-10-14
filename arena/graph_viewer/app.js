@@ -15,7 +15,7 @@ const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;',
       bestPath = {nodes: new Set(), edges: new Set()}, tokenRange = [0, 1], routeById = new Map();
   const graph = $('graph'), wrap = $('graph-wrap'), minimap = $('minimap'), tip = $('node-tip');
   const STEP_X = 90, STEP_Y = 100;
-  const STATUSES = [['verified','Verified 3/3'],['compiled','Compiled'],['skeleton','Skeleton (sorry)'],['failed','Failed'],['unevaluated','Unevaluated']];
+  const STATUSES = [['verified','Verified 3/3'],['compiled','Compiled'],['unchecked','Not checked: below best'],['skeleton','Skeleton (sorry)'],['failed','Failed'],['unevaluated','Unevaluated']];
   const KINDS = [['candidate','Candidates'],['merge','Merges ⊕'],['probe','Probes']];
 
   function status(node) { return node.status || 'fail'; }
@@ -28,6 +28,8 @@ const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;',
   const kidsOf = id => [...(byId.get(id)?.children || []), ...(probeKids.get(id) || [])];
   function stat(it) {
     if (isProbe(it)) return it.status === 'skeleton' ? 'skeleton' : it.status === 'pass' ? 'compiled' : 'failed';
+    // A fast (primary-toolchain) check only, no full check ever ran: the harness skips the full check below the verified best.
+    if (it.status === 'primary' && !/\bsorry\b/.test(it.proof || '') && !it.evaluations?.some(e => e.mode === 'full')) return 'unchecked';
     return {full:'verified', primary:'compiled', fail:'failed'}[it.status] || 'unevaluated';
   }
   const kindOf = it => isProbe(it) ? 'probe' : it.origin === 'auto_merge' ? 'merge' : 'candidate';
@@ -142,7 +144,7 @@ const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;',
   // ---- colour, grouping and filters -------------------------------------------------------------
   const GREY = '#6f7f93';
   const routeColor = id => { const n = Number(String(id ?? '').replace(/\D/g, '')); return !id ? GREY : n <= 1 ? '#7a869a' : `hsl(${Math.round((n * 137.508) % 360)} 62% 52%)`; };
-  const STATUS_FILL = {verified:'#1d644b', compiled:'#796029', skeleton:'#4b3a78', failed:'#783a49', unevaluated:'#24465f'};
+  const STATUS_FILL = {verified:'#1d644b', compiled:'#796029', unchecked:'#4d4630', skeleton:'#4b3a78', failed:'#783a49', unevaluated:'#24465f'};
   const fillOf = it => colorBy === 'route' ? routeColor(it.route) : STATUS_FILL[stat(it)];
   const clip = (text, n) => { text = String(text ?? '').replace(/\s+/g, ' ').trim(); return text.length > n ? text.slice(0, n - 1) + '…' : text; };
   const groupKey = (group, it) => group === 'route' ? (it.route || 'none') : group === 'kind' ? kindOf(it) : stat(it);

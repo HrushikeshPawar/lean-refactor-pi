@@ -50,6 +50,7 @@ LIMITS = {
         "earlier_chars",
         "earlier_filler",
         "types",
+        "profile_lines",
         "type_chars",
         "scope",
         "scope_chars",
@@ -355,6 +356,41 @@ def _types_section(context: dict) -> list[str]:
                 )
             )
     return lines
+
+
+def _profile_section(prof: dict, src: str, name: str) -> list[str]:
+    """Per-line self heartbeats of the reference proof, the unattributed remainder, and own-name references."""
+    lines = prof.get("line_profile") or []
+    measured, attributed, remainder = prof.get("measured_total"), prof.get("profiled_total"), prof.get("unattributed")
+    if not lines or measured is None or attributed is None or remainder is None:
+        return []
+    top = sorted((x for x in lines if x["self_hb"] > 0), key=lambda x: -x["self_hb"])[: LIMITS["profile_lines"]]
+    body = [
+        render_text(
+            "packet/sections.fixed.profile_line",
+            line=x["proof_line"],
+            self_hb=x["self_hb"],
+            tokens=x["tokens"],
+            text=_clip(x["text"].strip(), 70),
+        )
+        for x in sorted(top, key=lambda x: x["proof_line"])
+    ]
+    body.append(
+        render_text(
+            "packet/sections.fixed.profile_total",
+            measured=measured,
+            attributed=attributed,
+            shown=len(top),
+            remainder=remainder,
+            share=round(100 * remainder / measured, 1) if measured else 0,
+        )
+    )
+    short = re.escape(name.rsplit(".", 1)[-1])
+    own = re.compile(rf"(?<![\w.'])(?:{re.escape(name)}|{short})(?![\w'])")
+    refs = [str(number) for number, text in enumerate(src.splitlines(), 1) if number > 1 and own.search(text)]
+    if refs and remainder > 0:
+        body.append(render_text("packet/sections.fixed.profile_selfref", lines=", ".join(refs), remainder=remainder))
+    return body
 
 
 def _goal_section(context: dict, proof: str) -> list[str]:
@@ -834,6 +870,7 @@ def packet_sections(name: str, *, cache_only: bool = False) -> list[tuple[str, s
             render_text("packet/sections.titles.reference", count=row["proof_length"]),
             [f"```lean\n{row['src']}\n```", *price_lines],
         ),
+        (template("packet/sections.titles.profile").strip(), _profile_section(prof, row["src"], name)),
         (titles["goals"], _goal_section(context, row["src"])),
         (LIBRARY_TITLE, _library_section(context)),
         (titles["types"], _types_section(context)),

@@ -35,7 +35,8 @@ export async function renderReply(reply: Reply, footer: string, validKeys: strin
   for (const item of reply.items ?? []) {
     const itemLines = Array.isArray(item.lines) ? item.lines.filter((line): line is string => typeof line === "string" && Boolean(line)) : [];
     if (itemLines.length) lines.push(...itemLines);
-    else {
+    // A failed item keeps its error (code, valid values, forms) after its own lines.
+    if (!itemLines.length || item.ok === false) {
       const line = await errorLine(item.error, validKeys);
       if (line) lines.push(line);
     }

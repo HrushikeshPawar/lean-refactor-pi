@@ -131,6 +131,10 @@ class HoleTests(unittest.TestCase):
 
 
 class SalvageCampaignTests(FakeRunCase):
+    def test_source_drafts_are_listed_compactly_in_one_line(self):
+        self.assertEqual(campaign._compact_ids(["n2", "n3", "n4", "n5", "n9", "n11", "n12"]), "n2–n5, n9, n11–n12")
+        self.assertEqual(campaign._compact_ids(["n7"]), "n7")
+
     def test_failed_probe_is_salvaged_once_and_published_as_an_update(self):
         with (
             patch.object(campaign.lean_health, "tripped", return_value=False),
@@ -150,10 +154,8 @@ class SalvageCampaignTests(FakeRunCase):
             edge = next(item for item in history if item.get("kind") == "edge" and item.get("proof_id") == sketch_id)
             self.assertEqual((edge["type"], edge["from"], edge["exact"]), ("salvaged_from", [proof_id], True))
             self.assertTrue(any(item.get("kind") == "route" and item.get("proof_id") == sketch_id for item in history))
-            notice = next(
-                item["text"] for item in campaign.state("logic")["updates"] if "salvaged from" in item["text"]
-            )
-            self.assertIn("1 hole", notice)
+            notice = next(item["text"] for item in campaign.state("logic")["updates"] if "sketch from" in item["text"])
+            self.assertRegex(notice, r"^n\d+: sketch from n\d+; line \d+ is a hole to fill \(`fill` hole n\d+\.h1\)\.$")
             self.assertEqual(campaign.autocheck("T", "logic")["checked"], [])
             self.assertTrue(first["ok"])
 
@@ -212,7 +214,7 @@ class SalvageCampaignTests(FakeRunCase):
                 campaign.autocheck("T", "logic")
             events = [item for item in campaign.events(self.directory) if item.get("kind") == "salvage"]
             self.assertEqual((len(events), events[0]["status"], events[0]["compiles"]), (1, "unavailable", 1))
-            self.assertFalse(any("salvaged from" in item["text"] for item in campaign.state("logic")["updates"]))
+            self.assertFalse(any("sketch from" in item["text"] for item in campaign.state("logic")["updates"]))
             campaign.autocheck("T", "logic")
             self.assertEqual(
                 len([item for item in campaign.events(self.directory) if item.get("kind") == "salvage"]), 1

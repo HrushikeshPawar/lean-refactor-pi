@@ -800,8 +800,13 @@ class ErrorLoopAndContinuationTests(unittest.TestCase):
                 self.assertGreater(1 - spent / cap, pct / 100)
                 self.assertNotRegex(message, STOP_TEXT)
                 self.assertNotRegex(message, rf"(?<![\d.]){pct}(?!\d|\.\d)")
-                # Spend and points left per axis are the only facts: no node id, no other number.
-                numbers = re.findall(r"\d+(?:\.\d+)?", message)
+                # Spend and points left per axis are the only facts, plus at most one focus move to a
+                # node id (a text-only turn moves the focus before the final tenth); no other number.
+                focus = text.render("messages/continuation.focus_moved", label="n0").replace("n0", r"(n\d+)")
+                moves = [line for line in message.splitlines() if re.fullmatch(focus, line)]
+                self.assertLessEqual(len(moves), 1)
+                rest = "\n".join(line for line in message.splitlines() if line not in moves)
+                numbers = re.findall(r"\d+(?:\.\d+)?", rest)
                 self.assertEqual(sorted(numbers), sorted(_spend_numbers(spent, cap) + points))
 
     def test_continuation_inside_the_final_tenth_states_finish_available_once(self):
@@ -851,31 +856,27 @@ class ErrorLoopAndContinuationTests(unittest.TestCase):
         self.assertFalse(any(row.get("stop") == "no_work_fallback" for row in controls[:3]), controls)
 
     def test_an_identical_read_is_stubbed_and_cannot_extend_the_run(self):
+        # Before the final tenth a turn without work moves the focus instead of ending the run; the run
+        # ends only after MAX_NO_WORK_TURNS (control.ts) such turns in a row.
+        no_work_limit = 6
         read = cheap_tool("read", {"node": "n1"})
-        run = self.fake(
-            [
-                read,
-                {"text": "first final"},
-                read,
-                {"text": "second final"},
-                read,
-                {"text": "third final"},
-                {"text": "must not be requested"},
-            ],
-            env={"ARENA_AUTOCONTINUE": "1"},
-        )
+        script: list = [read, {"text": "first final"}]
+        for index in range(no_work_limit):
+            script += [read, {"text": f"final {index}"}]
+        script.append({"text": "must not be requested"})
+        run = self.fake(script, env={"ARENA_AUTOCONTINUE": "1"})
         first, *repeats = tool_texts(run.requests[-1], "read")
-        self.assertEqual(len(repeats), 2)
+        self.assertEqual(len(repeats), no_work_limit)
         longest = max(first.splitlines(), key=len)
         for repeat in repeats:
             self.assertNotIn(longest, repeat)
             self.assertLess(len(repeat), len(first) / 2)
-        # The first read is new context; the two stubbed repeats are turns without work.
+        # The first read is new context; every stubbed repeat is a turn without work.
         controls = [row for row in run.jsonl("cost-ledger.jsonl") if row.get("kind") == "control"]
         self.assertEqual(controls[-1]["stop"], "no_work_fallback")
-        self.assertEqual(controls[-1]["no_work_turns"], 2)
+        self.assertEqual(controls[-1]["no_work_turns"], no_work_limit)
         self.assertFalse(any(row.get("stop") == "no_work_fallback" for row in controls[:-1]))
-        self.assertEqual(len(run.requests), 6)
+        self.assertEqual(len(run.requests), 2 * (no_work_limit + 1))
 
 
 @slow

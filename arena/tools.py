@@ -128,6 +128,28 @@ def _filing_line(node, projection, result: dict) -> str:
     return _render("filing_root", node=node.id)
 
 
+def message_goal(message: str) -> str | None:
+    """The goal Lean prints under the first line of a diagnostic (case tag, hypotheses, `⊢`), without the tactic's own report."""
+    body: list[str] = []
+    for line in message.split("\n")[1:]:
+        if line.startswith("["):
+            break
+        body.append(line)
+    goal = "\n".join(body).strip()
+    return goal if "⊢" in goal else None
+
+
+def _branch_groups(errors: list[dict]) -> list[tuple[dict, int]]:
+    """Failures of one tactic after `<;>` arrive as one diagnostic per branch at the same position; keep the first of each."""
+    groups: dict[tuple, list[dict]] = {}
+    for item in errors:
+        headline = item.get("message", "").split("\n")[0]
+        fan_out = "<;>" in (item.get("source_line_text") or "")
+        key = (item.get("line"), item.get("column"), headline) if fan_out else (id(item),)
+        groups.setdefault(key, []).append(item)
+    return [(items[0], len(items) if len(items) > 1 else 0) for items in groups.values()]
+
+
 def all_errors(name: str, run_id: str, node, result: dict) -> tuple[list[dict], bool]:
     """Reveal diagnostics one step at a time without filing replacement texts."""
     primary = _primary(result)
@@ -171,7 +193,7 @@ def all_errors(name: str, run_id: str, node, result: dict) -> tuple[list[dict], 
         fresh = [item for item in next_errors if (item.get("proof_line"), item.get("message")) not in known]
         for item in fresh:
             row_item = dict(item)
-            row_item["goal"] = goal_by_line.get(item.get("proof_line"))
+            row_item["goal"] = message_goal(item.get("message", "")) or goal_by_line.get(item.get("proof_line"))
             revealed.append(row_item)
         if checked_primary.get("timeout") or checked.get("timeout"):
             incomplete = True
@@ -183,8 +205,9 @@ def all_errors(name: str, run_id: str, node, result: dict) -> tuple[list[dict], 
         incomplete = True
     ordered = sorted(revealed, key=lambda item: (item.get("proof_line") or 0, item.get("column") or 0))
     for index, item in enumerate(ordered, 1):
-        if not item.get("goal"):
-            item["goal"] = goal_by_line.get(item.get("proof_line"))
+        item["goal"] = (
+            message_goal(item.get("message", "")) or item.get("goal") or goal_by_line.get(item.get("proof_line"))
+        )
         item["id"] = f"{node.id}.e{index}"
         item["line"] = item.get("proof_line")
     return ordered, incomplete
@@ -211,7 +234,7 @@ def _compile_item(name: str, run_id: str, node_ref: str, result: dict, filing: s
     lines = [_render("compile_item", node=node.id, filing=filing, status=status)]
     if timeout:
         lines.append(_render("timeout"))
-    for item in errors:
+    for item, branches in _branch_groups(errors):
         lines.append(
             _render(
                 "error_item",
@@ -220,6 +243,8 @@ def _compile_item(name: str, run_id: str, node_ref: str, result: dict, filing: s
                 message=item.get("message", "").splitlines()[0],
             )
         )
+        if branches:
+            lines.append(_render("error_branches", count=branches))
         if item.get("goal"):
             lines.append(_render("error_goal", goal=item["goal"]))
     lines.extend(
@@ -547,7 +572,7 @@ def goal_tool(theorem: str, run_id: str, request: dict) -> dict:
         earlier = [
             item
             for item in (_primary(_node_result(run_id, node.proof_id)).get("diagnostics") or [])
-            if item.get("severity") == "error" and (item.get("proof_line") or 0) <= proof_line
+            if item.get("severity") == "error" and (item.get("proof_line") or 0) < proof_line
         ]
         if earlier:
             err = min(earlier, key=lambda item: item.get("proof_line", 0))
@@ -556,8 +581,8 @@ def goal_tool(theorem: str, run_id: str, request: dict) -> dict:
                     _item_error(
                         "goal",
                         "goal_blocked",
-                        err.get("proof_line"),
-                        ["a reachable line"],
+                        text.render("messages/errors.goal_blocked", line=proof_line, error_line=err.get("proof_line")),
+                        [f"a line up to {err.get('proof_line')}"],
                         TOOL_FORMS["goal"],
                         [
                             _render(
@@ -655,14 +680,8 @@ def goal_tool(theorem: str, run_id: str, request: dict) -> dict:
                         "ref": f"t{index}",
                         "ok": not item.get("timeout") and item.get("returncode") == 0,
                         "lines": lines,
-                        "error": None
-                        if not item.get("timeout") and item.get("returncode") == 0
-                        else reply.request_error(
-                            "timeout" if item.get("timeout") else "snippet_failed",
-                            snippet,
-                            ["compiling snippet"],
-                            TOOL_FORMS["goal"],
-                        ),
+                        # The verdict line already says how the snippet failed; a second error line would repeat it.
+                        "error": None,
                         "tokens": snippet_tokens(snippet),
                         "delta": snippet_tokens(snippet) - snippet_tokens("sorry"),
                         "goals": item.get("goals_after"),
@@ -748,12 +767,12 @@ def search_tool(theorem: str, run_id: str, request: dict) -> dict:
             handles.append(handle)
             lines.append(
                 _render(
-                    "search_hit",
+                    "search_hit_unplaced" if hit.get("line") is None else "search_hit",
                     handle=handle,
                     signature=hit.get("signature", ""),
                     module=hit.get("module", ""),
-                    line=hit.get("line", "?"),
                     why=hit.get("why", ""),
+                    **({} if hit.get("line") is None else {"line": hit["line"]}),
                 )
             )
         suggestions = row.get("suggestions") or []

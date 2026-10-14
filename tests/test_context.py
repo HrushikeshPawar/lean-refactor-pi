@@ -1,6 +1,7 @@
 import json
 import unittest
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import patch
 
 from arena import campaign, context
@@ -710,3 +711,48 @@ class RouteRuleAgreementTests(unittest.TestCase):
             with self.subTest(label):
                 self.assertNotIn("Routes are fingerprinted from complete proofs", text)
                 self.assertNotIn("routes are fingerprinted from complete proofs", text)
+
+
+class ProfileSectionTests(unittest.TestCase):
+    SRC = "theorem foo : P := by\n  intro h\n  have := foo h\n  exact bar"
+    PROF: ClassVar[dict] = {
+        "line_profile": [
+            {"proof_line": 2, "self_hb": 5, "tokens": 2, "text": "intro h"},
+            {"proof_line": 3, "self_hb": 80, "tokens": 5, "text": "have := foo h"},
+            {"proof_line": 4, "self_hb": 0, "tokens": 2, "text": "exact bar"},
+        ],
+        "measured_total": 300,
+        "profiled_total": 85,
+        "unattributed": 215,
+    }
+
+    def test_lines_total_and_remainder_are_reported_with_own_name_references(self):
+        body = context._profile_section(self.PROF, self.SRC, "A.foo")
+        text = "\n".join(body)
+        self.assertIn("line 3 · 80 self hb · 5 tokens", text)
+        self.assertNotIn("line 4 ·", text)  # zero-cost lines are not listed
+        self.assertIn("Measured 300", text)
+        self.assertIn("85 are attributed", text)
+        self.assertIn("215 (71.7%)", text)
+        self.assertIn("proof lines 3", text)  # the header line mentioning the name is not a reference
+
+    def test_no_own_name_reference_means_no_reference_line(self):
+        body = context._profile_section(self.PROF, "theorem foo : P := by\n  exact bar", "A.foo")
+        self.assertEqual(len(body), 3)
+        self.assertNotIn("refers to its own", "\n".join(body))
+
+    def test_missing_profile_gives_no_section(self):
+        self.assertEqual(context._profile_section({}, self.SRC, "A.foo"), [])
+
+    def test_ski_packet_has_definitions_and_the_unattributed_remainder(self):
+        ski = "Cslib.SKI.parallelReduction_diamond"
+        try:
+            packet = context.render_packet(ski, cache_only=True)
+        except ValueError:
+            self.skipTest("SKI packet cache is not provisioned")
+        self.assertIn("Cslib.SKI.ParallelReduction.red_S", packet)
+        self.assertIn("Relation.Diamond", packet)
+        self.assertIn("1384 heartbeats; 984 are attributed", packet)
+        self.assertIn("400 (28.9%) are not tied to any line", packet)
+        self.assertIn("proof lines 11, 12", packet)
+        self.assertLessEqual(len(packet), context.MAX_PACKET_CHARS)

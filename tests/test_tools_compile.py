@@ -188,6 +188,51 @@ class MissingGoalTests(NoGoalCase):
         self.assertIsNone(result["items"][0]["errors"][0]["goal"])
 
 
+RECORDED_LINE = "  induction h₁ generalizing a₂ <;> cases h₂ <;> grind"
+RECORDED_MESSAGE = (
+    "`grind` failed\ncase grind\na a₁ a_1 : SKI\nh : ¬Join ParallelReduction a_1 a_1\n⊢ False\n"
+    "[grind] Goal diagnostics\n  [facts] Asserted facts\n    [prop] ¬Join ParallelReduction a_1 a_1"
+)
+
+
+class BranchErrorTests(CascadeCase):
+    """A diagnostic recorded from v7solo-ski2: `grind` failing in several branches after `<;>`."""
+
+    def recorded_errors(self, count):
+        return [
+            {
+                "id": f"n2.e{index}",
+                "line": 3,
+                "column": 48,
+                "message": RECORDED_MESSAGE.replace("a_1 a_1", f"a_{index} a_{index}"),
+                "source_line_text": RECORDED_LINE,
+                "goal": "⊢ Join ParallelReduction a₁ a₂",
+            }
+            for index in range(1, count + 1)
+        ]
+
+    def test_goal_is_the_one_lean_reports_at_the_failing_branch(self):
+        self.assertEqual(
+            tools.message_goal(RECORDED_MESSAGE),
+            "case grind\na a₁ a_1 : SKI\nh : ¬Join ParallelReduction a_1 a_1\n⊢ False",
+        )
+        self.assertIsNone(tools.message_goal("unknown identifier 'x'"))
+
+    def test_compile_item_shows_branch_count_and_first_branch_goal(self):
+        tools.compile_tool("T", "logic", {"drafts": ["by\n  trivial"]})
+        node = tools._nodes("logic")[1].nodes[-1]
+        errors = self.recorded_errors(3)
+        for item in errors:
+            item["goal"] = tools.message_goal(item["message"])
+        with patch.object(tools, "all_errors", return_value=(errors, False)):
+            shown = tools._compile_item("T", "logic", node.id, {"compat": {}}, "filed")["item"]["lines"]
+        text = "\n".join(shown)
+        self.assertIn("3 branches failed", text)
+        self.assertIn("case grind", text)
+        self.assertNotIn("⊢ Join ParallelReduction a₁ a₂", text)
+        self.assertEqual(text.count("`grind` failed"), 1)
+
+
 class CompileWaitTests(FakeRunCase):
     cascade_errors = True
 
