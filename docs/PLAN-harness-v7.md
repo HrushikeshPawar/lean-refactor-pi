@@ -1694,3 +1694,7 @@ Fresh runs with only the theorem and reference proof, $0.50 each, before the pha
     keeps nothing) at a rotating start node (best, original, best cell of each other route). Work, graph and spend
     carry over; the old reasoning does not.
   - `goal` returns every open goal with its case tag; ask at the splitting line to see all cases.
+- **v7solo-ski5 (2026-10-15):** DeepSeek 69.38 (270 tok, 353 hb; v6 70.34), MiMo 67.47 (276/412; overspent to $0.64
+  on one 393K uncached call, a primalabs cache miss with an append-only prefix). The no-work restart fired once, live,
+  at turn 53 (context 520K to 12K tokens, $0.010) but too late to gain. Fix: a stalled run (best unchanged for 8 model
+  turns, counted once a best exists) restarts at its next pause (`STALL_RESTART` in `control.ts`).

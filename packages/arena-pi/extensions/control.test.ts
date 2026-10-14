@@ -3,7 +3,7 @@ import test from "node:test";
 import { stopDecision, type StopInput } from "./control.ts";
 
 const base: StopInput = { limitHit: false, finishConfirmed: false, providerUnreachable: false, errorLoop: false,
-  continuations: 0, noWorkTurns: 0, plateau: 0, noWorkThisTurn: false, finishAllowed: false };
+  continuations: 0, noWorkTurns: 0, plateau: 0, bestPlateau: 0, noWorkThisTurn: false, finishAllowed: false };
 
 test("no work before the final tenth moves focus and does not stop", () => {
   assert.deepEqual(stopDecision({ ...base, continuations: 2, noWorkTurns: 1, noWorkThisTurn: true }), { stop: null, moveFocus: true, restart: false });
@@ -20,8 +20,10 @@ test("inside the final tenth the old stops apply and no focus move is requested"
   assert.equal(stopDecision({ ...late, continuations: 12 }).stop, "continuation_limit");
 });
 
-test("plateau stops only inside the final tenth", () => {
+test("plateau stops only inside the final tenth and restarts before it", () => {
   assert.equal(stopDecision({ ...base, continuations: 6, plateau: 5 }).stop, null);
+  assert.deepEqual(stopDecision({ ...base, continuations: 8, plateau: 6, bestPlateau: 8 }), { stop: null, moveFocus: false, restart: true });
+  assert.equal(stopDecision({ ...base, continuations: 8, plateau: 6, bestPlateau: 0 }).restart, false);
   assert.equal(stopDecision({ ...base, continuations: 6, plateau: 5, finishAllowed: true }).stop, "plateau");
 });
 

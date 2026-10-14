@@ -129,6 +129,8 @@ export default async function arenaExtension(pi: ExtensionAPI) {
   let previousProgress = "";
   let finishConfirmed = false;
   let noWorkTurns = 0;
+  // Model turn at which the best last changed; the stall restart counts model turns from here.
+  let bestChangedTurn = 0;
   let turnHadProofAttempt = false;
   let turnHadNovelContext = false;
   let turnHadVerifiedImprovement = false;
@@ -758,7 +760,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
       verified_improvement: turnHadVerifiedImprovement };
     if (!failed) {
       if (progress === previousProgress) plateau += 1;
-      else plateau = 0;
+      else { plateau = 0; bestChangedTurn = turn; }
       previousProgress = progress;
       turnHadVerifiedImprovement ||= verifiedImproved(state.best, previousVerified);
       activity = { proof_attempt: turnHadProofAttempt, novel_context: turnHadNovelContext,
@@ -771,7 +773,8 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     const { stop, moveFocus, restart } = stopDecision({ limitHit, finishConfirmed, noWorkThisTurn,
       providerUnreachable: failure === "transport" && outageStartedAt !== undefined && nextWait(outageAttempt, Number(process.env.ARENA_BACKOFF_MS ?? 2000), outageStartedAt, Date.now(), Number(process.env.ARENA_OUTAGE_LIMIT_MS ?? 600000)).stop,
       errorLoop: failure === "model" && errorStreak >= MAX_ERROR_STREAK,
-      continuations, noWorkTurns, plateau, finishAllowed: finishAllowed(spentUsd, limit).allowed });
+      continuations, noWorkTurns, plateau, bestPlateau: state.best ? turn - bestChangedTurn : 0,
+      finishAllowed: finishAllowed(spentUsd, limit).allowed });
     turnHadProofAttempt = false;
     turnHadNovelContext = false;
     turnHadVerifiedImprovement = false;
@@ -821,6 +824,8 @@ export default async function arenaExtension(pi: ExtensionAPI) {
         await campaign("reset_delivered");
         trimmer.forget();
         noWorkTurns = 0;
+        plateau = 0;
+        bestChangedTurn = turn;
         appendCost({ kind: "restart", continuations, restart: restarted.restart, label: restarted.label, chars: restarted.text.length });
         const facts = await continuationFacts(spentUsd, limit, checks?.baseline, checks?.best ?? state.best);
         return { entries: [...event.entries,
