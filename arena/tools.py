@@ -1018,8 +1018,9 @@ def read_tool(theorem: str, run_id: str, request: dict) -> dict:
 
 
 def _scratch_messages(output: str) -> list[dict]:
-    """Every Lean message in order. Info text prints without a position (`trace_state`, `#check`), so an unpositioned
-    run is an info message of its own with line None; only an indented line continues the message before it."""
+    """Every Lean message in order. Info text prints without a position (`trace_state`, `#check`); unpositioned text
+    before any positioned message is an info message with line None, later unpositioned text continues the message
+    before it."""
     found: list[dict] = []
     for line in output.splitlines():
         if not line.strip():
@@ -1027,7 +1028,9 @@ def _scratch_messages(output: str) -> list[dict]:
         match = engine._HEADER.match(line)
         if match:
             found.append({"severity": match["severity"], "line": int(match["line"]), "message": [match["rest"]]})
-        elif found and (line[:1].isspace() or found[-1]["line"] is None):
+        elif found:
+            # Lean prints both an error's continuation and info text (`trace_state`) without a position, so any
+            # unpositioned line stays with the message before it rather than being labelled as a separate info.
             found[-1]["message"].append(line)
         else:
             found.append({"severity": "info", "line": None, "message": [line]})
