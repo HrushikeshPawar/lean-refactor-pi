@@ -677,6 +677,20 @@ first, was 0.7 s. Fields are capped at 200 KB with the replay marker. Review fix
 the cache, probe siblings, a half-written last line skipped, a real escaping test under node. Known difference:
 for a v6 node enclosed by two calls the viewer names the earliest call and `arena replay` the narrowest window.
 
+**Built (ticket 19a, 2026-10-14):** `arena submit --name N --runs R...` (package `arena/submit/`) replaces the v6
+`arena package`. Per row it ranks verified candidates by recorded proxy and takes the first that passes the gates,
+cheapest first: exact statement, the official filter loaded from `vendor/arena-space/app.py` with `ast` (no
+gradio), no `sorry`, then a cold compile on every listed toolchain (one at a time, memory wait with a timeout), then
+the $3.00 settle-sum ceiling over every contributing run. Outputs: `proofs.jsonl` (`{name, proof}`), `manifest.json`
+/ `MANIFEST.md` (graph id and stored label), `provenance.json` (turn, call ids when recorded, spend), and a diff
+against `--previous` with worse rows first; a failing build writes only `blocked.json` and never deletes the last
+good submission. Rows the named runs leave without a verified candidate carry the previous proof (re-gated, with its
+runs and spend); rows with candidates that all fail block. Runs whose graph cannot be built (older Inits runs with
+string diagnostics) are rejected with a reason. A carried row whose spend is unknown blocks. Filter parity: all 23
+patterns equal FORBIDDEN in label, regex, flags and order; the only difference is the official 256 KB length cap,
+which `arena submit` applies and the in-run `validate_proof` does not (largest recorded proof 78.8 KB; backlog).
+Owner-machine smoke on the v6c2 InitsUpdatesComm run: n8 / #4, proxy 83.88 on all three toolchains, 7 s.
+
 ## 5. Candidate graph v7: the agent writes, the harness keeps the books and steers (D7)
 
 ### 5a. What v6 shows
