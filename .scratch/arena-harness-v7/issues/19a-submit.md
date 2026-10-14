@@ -4,7 +4,7 @@
 
 **Blocked by:** 10a: Graph core: steps, edges, focus, operations; 13: Price engine and instant token quotes (both committed below your branch).
 
-**Status:** ready-for-agent
+**Status:** needs-review
 
 **Branch:** `v7/19a-submit` (stacked on `v7/18-viewer`)
 
