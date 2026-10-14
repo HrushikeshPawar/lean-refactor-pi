@@ -226,40 +226,7 @@ def _():
     return _resolve("this file", scanned=([], []))
 
 
-def _():
-    def not_found(*args):
-        raise ValueError("not found")
-
-    with (
-        patch.object(campaign, "_source_hint", lambda name, symbol: (symbol, None, None)),
-        patch.object(campaign, "_resolve_declaration_source", not_found),
-        patch.object(campaign, "_indexed_entry", lambda name, symbol: None),
-    ):
-        return campaign._source_declaration("nm", "foo")["hint"]
-
-
-def _():
-    built = {"text": "text", "head": 0, "path": Path("."), "start_line": 1}
-    with (
-        patch.object(campaign, "problem", lambda name: ROW),
-        patch.object(campaign, "measure_version", lambda row: ("v1", "c1")),
-        patch.object(engine, "candidate_file", lambda *args, **kwargs: built),
-        patch.object(engine, "run_lean", lambda *args, **kwargs: None),
-    ):
-        return raised(campaign._declaration_in_lean, "nm", "foo")
-
-
-def _():
-    built = {"text": "text", "head": 0, "path": Path("."), "start_line": 1}
-    with (
-        patch.object(campaign, "problem", lambda name: ROW),
-        patch.object(campaign, "measure_version", lambda row: ("v1", "c1")),
-        patch.object(engine, "candidate_file", lambda *args, **kwargs: built),
-        patch.object(engine, "run_lean", lambda *args, **kwargs: (0, "")),
-    ):
-        return campaign._declaration_in_lean("nm", "foo")["hint"]
-
-
+@case("errors.stopped_run", "campaign._refuse_if_tripped after the Lean breaker tripped")
 def _():
     with patch.object(campaign.lean_health, "tripped", lambda directory: True):
         return raised(campaign._refuse_if_tripped, Path("."))

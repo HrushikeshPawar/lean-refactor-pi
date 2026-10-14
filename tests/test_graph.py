@@ -641,6 +641,17 @@ class StallCampaignTests(FakeRunCase):
         self.assertEqual(event["from"], [first_id])
         self.assertEqual(first["candidate"], "#2")
 
+    def test_dissimilar_free_text_is_filed_once_as_a_root(self):
+        proof = "theorem t := by\n  entirely different approach\n  another distinct line\n  third separate tactic\n  fourth unrelated statement"
+        proof_id = "f" * 64
+        campaign._snapshot(self.directory, proof_id, proof)
+        edge, created = campaign._file_node(self.directory, campaign.events(self.directory), proof_id, proof)
+        self.assertTrue(created)
+        self.assertEqual((edge["type"], edge["from"], edge["exact"]), ("root", [], False))
+        duplicate, created = campaign._file_node(self.directory, campaign.events(self.directory), proof_id, proof)
+        self.assertFalse(created)
+        self.assertEqual(duplicate["proof_id"], edge["proof_id"])
+
     def test_splice_and_merge_operations_record_exact_lineage(self):
         with patch.object(campaign, "normalize_draft", side_effect=lambda _name, proof: proof):
             base = self.evaluate("theorem t := by\n  intro h\n  exact h")

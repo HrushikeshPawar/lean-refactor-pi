@@ -74,7 +74,7 @@ class AmbiguousDeclaration(ValueError):
         self.candidates = candidates
 
 
-_SESSION: ContextVar[_Session | None] = ContextVar("arena_source_session", default=None)
+_SESSION: ContextVar[_Session | None] = ContextVar("source_session", default=None)
 _NAMED_PARENT_UNSET = object()
 _BATCH_FOCUS: ContextVar[tuple[bool, str | None]] = ContextVar("arena_batch_focus", default=(False, None))
 _BATCH_NEWLY_FILED: ContextVar[set[str] | None] = ContextVar("arena_batch_newly_filed", default=None)

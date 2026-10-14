@@ -238,7 +238,7 @@ def candidate_file(row: dict, proof: str, version: str, commit: str, truncate: b
 
     With `truncate`, everything after the target declaration is dropped so
     compile time never depends on later declarations. The returned text is the
-    single file every compile and every `lean_goal` lookup uses. Standalone rows
+    single file every compile and every goal lookup uses. Standalone rows
     (no file in the repository) are rebuilt as their header followed by the proof.
     """
     path = workspace(row, version, commit)
@@ -344,7 +344,7 @@ def structure_diagnostics(
     `text` is the candidate file the diagnostics are about. `report_start_line`
     is where the target starts in the file the model can inspect (the primary
     version's); `file_line` is always expressed in that file, so a diagnostic
-    from another toolchain still points at the right line for `lean_goal`.
+    from another toolchain still points at the right line for goal lookups.
     """
     lines = text.splitlines()
     shift = (report_start_line or start_line) - start_line
@@ -770,7 +770,7 @@ def evaluate(name: str, proof: str, mode: str = "fast", known: dict | None = Non
     checked = targets if mode == "full" else targets[:1]
     if mode == "fast" and measured_on != targets[0]:
         checked = [targets[0], measured_on]
-    # Only the primary version's file is materialized for `lean_goal`; every
+    # Only the primary version's file is materialized for goal lookups; every
     # version's diagnostics are reported in that file's line numbers.
     primary_start = candidate_file(row, proof, *targets[0])["start_line"] if len(checked) > 1 else None
     compat = {}

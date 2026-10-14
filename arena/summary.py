@@ -42,7 +42,6 @@ def stop_reason_of(directory: Path, controls: list[dict]) -> str:
 
 
 COMPILE_TOOLS = {"compile"}
-BOOKKEEPING_TOOLS = {"read", "goal", "finish"}
 LOCAL_EDIT_MAX_LINES = 2
 WARMUP_REQUESTS = 2
 
@@ -204,9 +203,7 @@ def _turns(events: list[dict], settles: list[dict]) -> list[dict]:
             kind = "rejected"
         elif any(name in COMPILE_TOOLS for name in names):
             kind = "compile"
-        elif any(name in (BOOKKEEPING_TOOLS - {"read", "goal", "finish"}) for name in names) or (
-            names and all(_new_bookkeeping_call(call) for call in calls)
-        ):
+        elif names and all(_new_bookkeeping_call(call) for call in calls):
             kind = "bookkeeping"
         elif names:
             kind = "context"

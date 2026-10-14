@@ -77,7 +77,6 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `messages/errors.module_missing` | 16 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.no_candidate_cold_passed` | 14 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.no_candidate_passed` | 10 | Agent messages and notices | when the matching event occurs |
-| `messages/errors.no_source_declaration` | 7 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.node_reference_invalid` | 11 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.operation_type_invalid` | 9 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.parent_ignored` | 4 | Agent messages and notices | when the matching event occurs |

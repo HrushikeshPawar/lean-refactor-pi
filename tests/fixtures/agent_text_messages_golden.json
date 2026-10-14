@@ -90,6 +90,12 @@
     "expected": "Declaration not found in pinned project: foo"
   },
   {
+    "id": "errors.stopped_run",
+    "source": "arena/campaign.py:1041",
+    "call": "campaign._refuse_if_tripped after the Lean breaker tripped",
+    "expected": "The harness has stopped this run"
+  },
+  {
     "id": "errors.run_exists",
     "source": "arena/campaign.py:1338",
     "call": "campaign.init on a run directory that already holds a ledger",

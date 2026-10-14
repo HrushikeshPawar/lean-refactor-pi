@@ -242,7 +242,6 @@ class DataTests(unittest.TestCase):
             [(t["name"], t["is_error"], t["duration_s"]) for t in board["tools"]],
             [("compile", False, 1.5), ("compile", True, 0.2)],
         )
-        self.assertNotIn("ideas", board)
         kinds = [c["kind"] for c in board["controls"]]
         self.assertEqual(kinds, ["limit", "finish", "control"])
         self.assertEqual(board["lean"]["paths"]["session"]["runs"], 2)
@@ -250,10 +249,18 @@ class DataTests(unittest.TestCase):
         self.assertTrue(board["lean"]["cold_verification"]["confirmed"])
         self.assertEqual(board["packet"], "kickoff packet text")
 
-    def test_dashboard_ignores_legacy_idea_events(self):
+    def test_dashboard_builds_from_a_legacy_ledger_with_ideas_and_old_tool_names(self):
         directory = make_run(self.root, "legacy-run")
+        old_tool = "arena_" + "probe"
+        with (directory / "trace-journal.jsonl").open("a") as handle:
+            for event in (
+                {"ts": ms(9), "kind": "tool_call", "tool_call_id": "old", "name": old_tool, "args": {}},
+                {"ts": ms(9.1), "kind": "tool_result", "tool_call_id": "old", "name": old_tool, "result": {}},
+            ):
+                handle.write(json.dumps(event) + "\n")
         board = run_dashboard("legacy-run", directory)
         self.assertNotIn("ideas", board)
+        self.assertIn(old_tool, [tool["name"] for tool in board["tools"]])
         json.dumps(board)
 
     def test_tool_text_is_clipped(self):

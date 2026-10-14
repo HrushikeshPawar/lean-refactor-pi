@@ -14,7 +14,6 @@ source_path_missing: "{path} does not exist in the pinned project or its depende
 invalid_declaration: "Invalid declaration name"
 module_missing: "{symbol} is defined in {module}, which is not in the pinned project or its dependency roots"
 declaration_missing: "Declaration not found in pinned project: {symbol}"
-no_source_declaration: "No pinned source declaration matched this name."
 stopped_run: "The harness has stopped this run"
 run_exists: "Run ID already exists: {directory}"
 unknown_candidate: "Unknown candidate {reference}; candidates are #1-#{count}"
