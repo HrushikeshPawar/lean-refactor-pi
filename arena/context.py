@@ -784,7 +784,7 @@ def _profile_section(prof: dict) -> list[str]:
     )
     measured = prof.get("measured_total")
     profiled = prof.get("profiled_total")
-    coverage = round(100 * profiled / measured, 1) if measured else None
+    coverage = round(100 * float(profiled) / float(measured), 1) if measured and profiled is not None else None
     return (
         render_text(
             "packet/profile",
@@ -804,19 +804,20 @@ def _profile_section(prof: dict) -> list[str]:
     )
 
 
-def _fit(parts: list[tuple[str, list[str]]], limit: int) -> str:
-    """Join sections; if over budget drop entries from the end of the lowest-priority sections."""
-    sections = [(title, list(body)) for title, body in parts]
+def _join_sections(sections: list[tuple[str, list[str]]]) -> str:
+    return "\n\n".join((f"{title}\n" if title else "") + "\n".join(body) for title, body in sections if body)
 
-    def render() -> str:
-        return "\n\n".join((f"{title}\n" if title else "") + "\n".join(body) for title, body in sections if body)
+
+def _fit_sections(parts: list[tuple[str, list[str]]], limit: int) -> list[tuple[str, list[str]]]:
+    """Shed entries from the end of the lowest-priority sections."""
+    sections = [(title, list(body)) for title, body in parts]
 
     # Shed order: earlier-lemma lines, then goals beyond the first few (later goals mostly repeat the same
     # hypotheses), then library lines, then local-variable lines past a floor (every hypothesis already
     # appears in the goals), then the remaining goals down to one.
     goals = template("packet/sections.titles.goals").strip()
     stages = [(EARLIER_TITLE, 0), (goals, GOALS_FLOOR), (LIBRARY_TITLE, 0), (LOCAL_TITLE, LOCAL_FLOOR), (goals, 1)]
-    while len(render()) > limit:
+    while len(_join_sections(sections)) > limit:
         for title, floor in stages:
             target = next((body for t, body in sections if t.startswith(title)), None)
             if target and len(target) > floor:
@@ -824,17 +825,25 @@ def _fit(parts: list[tuple[str, list[str]]], limit: int) -> str:
                 break
         else:
             break
-    if len(render()) > limit:
+    if len(_join_sections(sections)) > limit:
         raise ValueError(render_text("packet/sections.fixed.budget_certification_failed"))
-    return render()
+    return [(title, body) for title, body in sections if body]
 
 
-def render_packet(name: str) -> str:
+def _fit(parts: list[tuple[str, list[str]]], limit: int) -> str:
+    return _join_sections(_fit_sections(parts, limit))
+
+
+def packet_sections(name: str, *, cache_only: bool = False) -> list[tuple[str, str]]:
     row = problem(name)
     targets = versions(row)
-    context = lean_context(name)
+    context = cached_context(name) if cache_only else lean_context(name)
+    if cache_only and not context:
+        raise ValueError(f"Cached context is unavailable for {name}")
     context["root"] = "" if is_standalone(row) else row["file_path"].split("/")[0]
-    prof = reference_profile(name)
+    prof = reference_profile(name, cache_only=cache_only)
+    if cache_only and not prof:
+        raise ValueError(f"Cached reference profile is unavailable for {name}")
     pins = "; ".join(
         render_text("packet/sections.fixed.pin", version=version, commit=commit) for version, commit in targets
     )
@@ -915,4 +924,9 @@ def render_packet(name: str) -> str:
             .splitlines(),
         )
     )
-    return _fit(parts, MAX_PACKET_CHARS) + "\n"
+    fitted = _fit_sections(parts, MAX_PACKET_CHARS)
+    return [(title, (f"{title}\n" if title else "") + "\n".join(body)) for title, body in fitted]
+
+
+def render_packet(name: str, *, cache_only: bool = False) -> str:
+    return "\n\n".join(content for _title, content in packet_sections(name, cache_only=cache_only)) + "\n"

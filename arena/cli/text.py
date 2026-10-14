@@ -66,8 +66,40 @@ def render_template(
     json_output: Annotated[bool, Parameter(name="json")] = False,
     list_keys: Annotated[bool, Parameter(name="list")] = False,
     skill: bool = False,
+    theorem: str | None = None,
 ) -> int:
     try:
+        if theorem is not None:
+            if key is not None or list_keys or skill or var:
+                raise text.TextError("--theorem cannot be combined with KEY, --list, --skill, or --var")
+            from arena.cli.run import SYSTEM_PROMPT
+            from arena.context import packet_sections
+            from arena.skill import skill_prompt
+
+            parts = [("system prompt", SYSTEM_PROMPT), ("skill", skill_prompt())]
+            for name in ("compile", "goal", "search", "read", "finish"):
+                prefix = f"tools/{name}.params."
+                descriptions = [text.render(f"tools/{name}.description")]
+                descriptions.extend(
+                    f"{part.removeprefix(prefix)}: {text.render(part)}"
+                    for part in text.keys()  # noqa: SIM118
+                    if part.startswith(prefix)
+                )
+                parts.append((f"tools/{name}", "\n".join(descriptions)))
+            parts.extend((title or "Task", content) for title, content in packet_sections(theorem, cache_only=True))
+            result = {
+                "theorem": theorem,
+                "parts": [
+                    {"part": part, "chars": len(content), "words": len(content.split()), "text": content}
+                    for part, content in parts
+                ],
+            }
+            if json_output:
+                print(json.dumps(result, ensure_ascii=False))
+            else:
+                for item in result["parts"]:
+                    print(f"## {item['part']} ({item['chars']} chars, {item['words']} words)\n{item['text']}\n")
+            return 0
         if list_keys:
             result: object = text.keys()
             if json_output:
@@ -106,7 +138,7 @@ def render_template(
         else:
             print(rendered, end="")
         return 0
-    except text.TextError as error:
+    except (text.TextError, ValueError) as error:
         print(str(error), file=sys.stderr)
         return 2
 

@@ -1,15 +1,53 @@
+import io
 import json
 import os
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
 from arena import text
-from arena.cli.text import _budget_markdown, _budget_rows, _shown_for
+from arena.cli.text import _budget_markdown, _budget_rows, _shown_for, render_template
 
 
 class TextRendererTests(unittest.TestCase):
+    def test_theorem_render_uses_cached_fixture_and_reports_parts(self):
+        fixtures = Path(__file__).parent / "fixtures/agent_text"
+        context = json.loads((fixtures / "core-context.json").read_text())
+        profile = json.loads((fixtures / "core-profile.json").read_text())
+        output = io.StringIO()
+        with (
+            patch("arena.context.cached_context", return_value=context),
+            patch("arena.context.reference_profile", return_value=profile),
+            patch("arena.context.lean_context", side_effect=AssertionError("Lean started")),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(render_template(theorem="Core.InitsUpdatesComm", json_output=True), 0)
+        result = json.loads(output.getvalue())
+        parts = result["parts"]
+        self.assertEqual(result["theorem"], "Core.InitsUpdatesComm")
+        self.assertEqual([part["part"] for part in parts[:3]], ["system prompt", "skill", "tools/compile"])
+        self.assertEqual(
+            [part["part"] for part in parts[3:7]], ["tools/goal", "tools/search", "tools/read", "tools/finish"]
+        )
+        self.assertTrue(any(part["part"].startswith("Pinned environment") for part in parts))
+        for part in parts:
+            self.assertEqual(part["chars"], len(part["text"]))
+            self.assertEqual(part["words"], len(part["text"].split()))
+        error = io.StringIO()
+        with patch("arena.context.cached_context", return_value={}), redirect_stderr(error):
+            self.assertNotEqual(render_template(theorem="Core.InitsUpdatesComm", json_output=True), 0)
+        self.assertIn("cached context", error.getvalue().lower())
+        error = io.StringIO()
+        with (
+            patch("arena.context.cached_context", return_value=context),
+            patch("arena.context.reference_profile", return_value={}),
+            redirect_stderr(error),
+        ):
+            self.assertNotEqual(render_template(theorem="Core.InitsUpdatesComm", json_output=True), 0)
+        self.assertIn("cached reference profile", error.getvalue().lower())
+
     def test_every_template_has_budget_metadata(self):
         root = Path(__file__).parents[1] / "agent-text"
         files = {
