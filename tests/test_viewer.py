@@ -393,6 +393,254 @@ class LangfuseTests(unittest.TestCase):
         self.assertIsNone(shaped["session_url"])
 
 
+def _request(request_id: str, ts_ms: int) -> dict:
+    return {"kind": "request", "id": request_id, "ts": ts_ms, "post_hook": {"messages": []}}
+
+
+def _call(request_id: str, tool_call_id: str, start_ms: int, end_ms: int, **result) -> list[dict]:
+    delivered = result.get("delivered", "delivered body")
+    footer = result.get("footer", "footer line")
+    untrimmed = result.get("untrimmed", f"{delivered}\n{footer}")
+    return [
+        {
+            "kind": "tool_call",
+            "id": request_id,
+            "ts": start_ms,
+            "tool_call_id": tool_call_id,
+            "name": result.get("name", "compile"),
+            "args": result.get("args", {"steps": "s1"}),
+        },
+        {
+            "kind": "tool_result",
+            "id": request_id,
+            "ts": end_ms,
+            "tool_call_id": tool_call_id,
+            "name": result.get("name", "compile"),
+            "trimmed": result.get("trimmed", False),
+            "text": untrimmed,
+            "delivered_text": delivered,
+            "footer": footer,
+            "is_error": result.get("is_error", False),
+            "result": {
+                "isError": result.get("is_error", False),
+                "content": [
+                    {"type": "text", "text": delivered},
+                    {"type": "text", "text": footer},
+                ],
+            },
+        },
+    ]
+
+
+def _response(request_id: str, ts_ms: int) -> dict:
+    return {
+        "kind": "response",
+        "id": request_id,
+        "ts": ts_ms,
+        "content": [
+            {"type": "thinking", "thinking": "because the step is shorter"},
+            {"type": "text", "text": "filed the splice"},
+        ],
+    }
+
+
+def _candidate(ts: float, ident: str, origin: str, **extra) -> dict:
+    return {"kind": "candidate", "ts": ts, "candidate_id": ident, "origin": origin, "parents": [], **extra}
+
+
+class NodeCallTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.directory = Path(self.temp.name)
+
+    def _write(self, journal: list[dict], ledger: list[dict]) -> None:
+        write(self.directory / "trace-journal.jsonl", journal)
+        write(self.directory / "ledger.jsonl", ledger)
+
+    def test_v7_node_returns_its_call_reasoning_and_siblings_in_time_order(self):
+        self._write(
+            [
+                _request("r1", 1000),
+                *_call("r1", "t1", 2000, 4000, delivered="delivered body", untrimmed="delivered body\nfooter line"),
+                _response("r1", 4500),
+            ],
+            [
+                _candidate(1.0, "ref", "reference"),
+                _candidate(2.5, "c2", "model", parents=["ref"], tool_call_id="t1"),
+                _candidate(2.6, "c3", "model", parents=["ref"], tool_call_id="t1"),
+            ],
+        )
+        found = viewer_data.node_calls(self.directory, "n2")
+        self.assertEqual(found["node"], "n2")
+        self.assertEqual(found["turn"], 1)
+        self.assertEqual(
+            found["call"],
+            {
+                "tool_call_id": "t1",
+                "name": "compile",
+                "args": {"steps": "s1"},
+                "delivered": "delivered body",
+                "untrimmed": "delivered body\nfooter line",
+                "trimmed": False,
+                "footer": "footer line",
+                "is_error": False,
+            },
+        )
+        self.assertEqual(
+            found["reasoning"],
+            [
+                {"type": "thinking", "text": "because the step is shorter"},
+                {"type": "text", "text": "filed the splice"},
+            ],
+        )
+        self.assertEqual(found["siblings"], ["c3"])
+        self.assertNotIn("reason", found)
+
+    def test_v6_time_window_joins_the_enclosing_call_and_lists_the_batch(self):
+        self._write(
+            [
+                _request("r1", 1000),
+                *_call("r1", "t1", 2000, 4000, name="arena_probe", args={"draft": "a"}),
+                _response("r1", 4500),
+                _request("r2", 6000),
+                *_call("r2", "t2", 7000, 9000, name="compile", args={}),
+                _response("r2", 9500),
+            ],
+            [
+                _candidate(1.0, "ref", "reference"),
+                _candidate(2.5, "c2", "model", parents=["ref"]),
+                _candidate(2.7, "c3", "model", parents=["ref"]),
+                _candidate(8.0, "c4", "model", parents=["c2"]),
+            ],
+        )
+        found = viewer_data.node_calls(self.directory, "n2")
+        self.assertEqual(found["call"]["tool_call_id"], "t1")
+        self.assertEqual(found["call"]["name"], "arena_probe")
+        self.assertEqual(found["siblings"], ["c3"])
+        self.assertNotIn("origin_line", found)
+        self.assertNotIn("holes", found)
+        later = viewer_data.node_calls(self.directory, "n4")
+        self.assertEqual(later["call"]["tool_call_id"], "t2")
+        self.assertEqual(later["siblings"], [])
+
+    def test_trimmed_result_keeps_delivered_and_untrimmed_apart(self):
+        self._write(
+            [
+                _request("r1", 1000),
+                *_call(
+                    "r1",
+                    "t1",
+                    2000,
+                    4000,
+                    trimmed=True,
+                    delivered="alpha",
+                    untrimmed="alpha\nbeta",
+                    footer="budget line",
+                ),
+                _response("r1", 4500),
+            ],
+            [
+                _candidate(1.0, "ref", "reference"),
+                _candidate(2.5, "c2", "model", tool_call_id="t1"),
+            ],
+        )
+        call = viewer_data.node_calls(self.directory, "n2")["call"]
+        self.assertTrue(call["trimmed"])
+        self.assertEqual(call["delivered"], "alpha")
+        self.assertEqual(call["untrimmed"], "alpha\nbeta")
+        self.assertEqual(call["footer"], "budget line")
+
+    def test_a_run_without_a_journal_does_not_raise(self):
+        write(self.directory / "ledger.jsonl", [_candidate(1.0, "ref", "reference")])
+        found = viewer_data.node_calls(self.directory, "n1")
+        self.assertEqual(
+            found,
+            {"node": "n1", "turn": None, "call": None, "reasoning": [], "siblings": [], "reason": "no journal"},
+        )
+
+    def test_reference_and_unknown_nodes_have_no_call(self):
+        self._write(
+            [_request("r1", 1000), *_call("r1", "t1", 2000, 4000), _response("r1", 4500)],
+            [
+                _candidate(1.0, "ref", "reference"),
+                _candidate(2.5, "c2", "model", tool_call_id="t1"),
+                _candidate(9.0, "merged", "auto_merge"),
+            ],
+        )
+        reference = viewer_data.node_calls(self.directory, "n1")
+        self.assertEqual(reference["reason"], "harness-made")
+        self.assertIsNone(reference["call"])
+        self.assertEqual(viewer_data.node_calls(self.directory, "n3")["reason"], "harness-made")
+        missing = viewer_data.node_calls(self.directory, "n9")
+        self.assertEqual(missing["reason"], "no call matched")
+        self.assertIsNone(missing["call"])
+
+    def test_two_enclosing_calls_return_the_earliest_and_say_ambiguous(self):
+        self._write(
+            [
+                _request("r1", 1000),
+                *_call("r1", "early", 2000, 5000, name="compile", delivered="early"),
+                *_call("r1", "late", 3000, 4000, name="goal", delivered="late"),
+                _response("r1", 5500),
+            ],
+            [
+                _candidate(1.0, "ref", "reference"),
+                _candidate(3.5, "c2", "model"),
+            ],
+        )
+        found = viewer_data.node_calls(self.directory, "n2")
+        self.assertEqual(found["reason"], "ambiguous")
+        self.assertEqual(found["call"]["tool_call_id"], "early")
+        self.assertEqual(found["call"]["name"], "compile")
+
+    def test_v7_edge_rebuilds_the_filing_line_and_holes(self):
+        proof = "theorem t : True := by\n  have h : True := sorry\n"
+        (self.directory / "proofs").mkdir()
+        (self.directory / "proofs" / "c2.lean").write_text(proof)
+        self._write(
+            [_request("r1", 1000), *_call("r1", "t1", 2000, 4000), _response("r1", 4500)],
+            [
+                _candidate(1.0, "ref", "reference"),
+                _candidate(2.5, "c2", "model", parents=["ref"], tool_call_id="t1"),
+                {
+                    "kind": "edge",
+                    "proof_id": "c2",
+                    "type": "edited_from",
+                    "from": ["ref"],
+                    "exact": True,
+                    "operation": {"type": "edited_from", "from": ["ref"], "steps": "s1"},
+                },
+                {
+                    "kind": "evaluation",
+                    "candidate_id": "c2",
+                    "mode": "primary",
+                    "ts": 2.8,
+                    "result": {"compat": {"v1": {"passed": True}}},
+                },
+            ],
+        )
+        found = viewer_data.node_calls(self.directory, "n2")
+        self.assertEqual(found["origin_line"], "n2 <- n1 splice s1")
+        self.assertEqual(found["holes"], [{"id": "n2.h1", "goal": "True", "status": "open", "fills": []}])
+
+    def test_oversized_call_text_is_cut_with_the_replay_marker(self):
+        extra = 10_000
+        huge = "u" * (200 * 1024 + extra)
+        self._write(
+            [
+                _request("r1", 1000),
+                *_call("r1", "t1", 2000, 4000, delivered="short", untrimmed=huge, footer="foot"),
+                _response("r1", 4500),
+            ],
+            [_candidate(1.0, "ref", "reference"), _candidate(2.5, "c2", "model", tool_call_id="t1")],
+        )
+        call = viewer_data.node_calls(self.directory, "n2")["call"]
+        self.assertEqual(call["delivered"], "short")
+        self.assertTrue(call["untrimmed"].endswith(f"[truncated: {extra} more characters; use arena replay]"))
+        self.assertLess(len(call["untrimmed"]), len(huge))
+
+
 class ServerTests(unittest.TestCase):
     def test_endpoints_and_assets(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -438,6 +686,50 @@ class ServerTests(unittest.TestCase):
                     self.assertTrue(get("/" + page))
                 with self.assertRaises(urllib.error.HTTPError):
                     get("/run/nope/dashboard.json")
+
+    def test_node_endpoint_serves_a_call_and_rejects_a_bad_id(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            viewer_data._CACHE.clear()
+            directory = make_run(root, "v6x-Core.T-m1-r1")
+            # A second candidate sits inside the only tool call, so the endpoint has a real call to return.
+            write(
+                directory / "trace-journal.jsonl",
+                [
+                    _request("r1", ms(1)),
+                    *_call("r1", "t1", ms(1.5), ms(4), delivered="ok", untrimmed="ok\nfoot", footer="foot"),
+                    _response("r1", ms(5)),
+                ],
+            )
+            with patch.object(campaign, "ROOT", root):
+                httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.handler_for(server.Runs([], "v6x*")))
+                thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+                thread.start()
+                self.addCleanup(httpd.server_close)
+                self.addCleanup(httpd.shutdown)
+                base = f"http://127.0.0.1:{httpd.server_port}"
+
+                def get(path):
+                    with urllib.request.urlopen(base + path) as response:
+                        return response.status, response.headers["Content-Type"], response.read().decode()
+
+                status, content_type, body = get("/run/v6x-Core.T-m1-r1/node/n2.json")
+                self.assertEqual(status, 200)
+                self.assertEqual(content_type, "application/json; charset=utf-8")
+                payload = json.loads(body)
+                self.assertEqual(payload["call"]["name"], "compile")
+                self.assertEqual(payload["node"], "n2")
+                missing_status, _, missing_body = get("/run/v6x-Core.T-m1-r1/node/n9.json")
+                self.assertEqual(missing_status, 200)
+                self.assertEqual(json.loads(missing_body)["reason"], "no call matched")
+                for path in (
+                    "/run/v6x-Core.T-m1-r1/node/a/b.json",
+                    "/run/v6x-Core.T-m1-r1/node/n..2.json",
+                    "/run/v6x-Core.T-m1-r1/node/%232.json",
+                ):
+                    with self.assertRaises(urllib.error.HTTPError) as caught:
+                        get(path)
+                    self.assertEqual(caught.exception.code, 404)
 
 
 class AssetTests(unittest.TestCase):
@@ -535,6 +827,21 @@ class GraphViewerUpgradeTests(unittest.TestCase):
         self.assertIn("dataset.sig", hub)
         self.assertIn("document.activeElement !== select", hub)
         self.assertIn("document.activeElement", (self.ASSETS / "dashboard.js").read_text())
+
+    def test_calls_tab_escapes_fetched_text(self):
+        source = (self.ASSETS / "app.js").read_text()
+        start = source.index("function callsHtml")
+        chunk = source[start : source.index("function renderDetailTab")]
+        self.assertIn("esc(call.delivered)", chunk)
+        self.assertIn("esc(call.untrimmed)", chunk)
+        self.assertIn("esc(block.text)", chunk)
+        self.assertIn("goBtn(id)", chunk)
+        for line in chunk.splitlines():
+            if "innerHTML" not in line:
+                continue
+            self.assertNotIn("payload", line)
+            if "${" in line:
+                self.assertIn("esc(", line)
 
     def test_viewer_scripts_parse(self):
         node = shutil.which("node")

@@ -77,6 +77,10 @@ button:disabled{opacity:.45;cursor:default}button:disabled:hover{border-color:va
 .sw{display:inline-block;flex:none}
 .route-badge{display:inline-flex;gap:6px;align-items:center;flex-wrap:wrap}.route-badge .sw{width:11px;height:11px;border-radius:50%}
 .route-line{cursor:pointer;align-items:center}.route-line:hover{background:var(--panel2)}.route-line .sw{width:11px;height:11px;border-radius:50%}
+.origin-line{margin:0 0 8px;color:var(--blue)}
+.calls-footer{color:var(--muted)}
+.holes{width:100%;border-collapse:collapse;margin:8px 0}
+.holes th,.holes td{border:1px solid var(--line);padding:4px 6px;text-align:left;vertical-align:top}
 
 /* Hover card */
 .node-tip{position:fixed;z-index:50;pointer-events:none;min-width:250px;max-width:360px;padding:9px 11px;border:1px solid #6683a0;border-radius:8px;background:#0f1924f5;box-shadow:0 10px 30px #000a;font-size:12px}

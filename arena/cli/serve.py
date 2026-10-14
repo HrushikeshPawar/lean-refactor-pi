@@ -24,7 +24,7 @@ from typing import Any
 
 from arena.campaign import graph_state, run_dir
 from arena.summary import configured_cap
-from arena.viewer_data import Langfuse, campaign_of, hub_row, read_jsonl, run_dashboard
+from arena.viewer_data import Langfuse, campaign_of, hub_row, node_calls, read_jsonl, run_dashboard
 
 ASSETS = Path(__file__).resolve().parents[1] / "graph_viewer"
 
@@ -279,6 +279,7 @@ def handler_for(runs: Runs | str, langfuse: Langfuse | None = None):
             self.wfile.write(body)
 
         def viewer(self, run_id: str, rest: str) -> None:
+            node_match = re.fullmatch(r"node/([A-Za-z0-9._-]+)\.json", rest)
             if rest == "graph.json":
                 self.send(
                     json.dumps(graph_payload(run_id), ensure_ascii=False).encode(), "application/json; charset=utf-8"
@@ -299,6 +300,13 @@ def handler_for(runs: Runs | str, langfuse: Langfuse | None = None):
             elif rest in VIEWER_FILES:
                 filename, content_type = VIEWER_FILES[rest]
                 self.send((ASSETS / filename).read_bytes(), content_type)
+            elif node_match:
+                node_id = node_match.group(1)
+                if ".." in node_id:
+                    self.send_error(404)
+                else:
+                    body = node_calls(run_dir(run_id), node_id)
+                    self.send(json.dumps(body, ensure_ascii=False).encode(), "application/json; charset=utf-8")
             else:
                 self.send_error(404)
 

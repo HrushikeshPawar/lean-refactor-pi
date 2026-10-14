@@ -405,14 +405,14 @@
                  ['Route',node.route?routeBadge(node.route):'<span class="muted">none</span>'],['Parent',parents.length?parents.map(goBtn).join(' '):'<span class="muted">root</span>'],
                  ['Children',node.children.length?node.children.map(goBtn).join(' '):'<span class="muted">none</span>'],...((probeKids.get(node.id)||[]).length?[['Probes',(probeKids.get(node.id)).map(goBtn).join(' ')]]:[])])}
         <div class="actions"><button type="button" data-open="overview" class="primary">Details ↗</button><button type="button" data-open="diff">Diff ↗</button><button type="button" data-open="proof">Proof ↗</button><button type="button" data-open="lineage">Lineage ↗</button></div></div>
-      ${node.hypothesis||node.origin==='auto_merge'?`<div class="card hypcard"><h3>Reasoning</h3><p class="hyp">${esc(node.hypothesis||'Deterministic combination of disjoint edits')}</p></div>`:''}
+      ${node.hypothesis||node.origin==='auto_merge'?`<div class="card hypcard"><h3>Stated hypothesis</h3><p class="hyp">${esc(node.hypothesis||'Deterministic combination of disjoint edits')}</p></div>`:''}
       <div class="card"><h3>Evaluations (${node.evaluations.length})</h3><div class="evals">${evals||'<p class="muted">None yet.</p>'}</div></div>
       <div class="card ancard"><h3>Ancestry (${chain.length})</h3><div class="evals">${chain.map(n=>`<div class="eval-line"><button data-go="${esc(n.id)}" class="${n.id===node.id?'primary':''}">#${esc(n.index)}</button><span class="tag ${n.status==='full'?'good':n.status==='fail'?'bad':''}">${esc(status(n))}</span><span>${esc(n.tokens ?? '?')} tok · ${esc(n.heartbeat ?? '?')} hb · ${esc(n.local_proxy?.toFixed?.(2) ?? '—')}</span></div>`).join('')}</div></div></div>`;
     $('detail').querySelectorAll('[data-go]').forEach(el=>el.onclick=()=>select(el.dataset.go));
     paintSwatches($('detail'));
     $('detail').querySelectorAll('[data-open]').forEach(el=>el.onclick=()=>openDetail(el.dataset.open));
   }
-  const DETAIL_TABS=[['overview','Reasoning and relations'],['diff','Diff and merge provenance'],['proof','Full proof'],['lineage','Lineage diffs'],['evals','Evaluations and Lean feedback']];
+  const DETAIL_TABS=[['overview','Reasoning and relations'],['diff','Diff and merge provenance'],['proof','Full proof'],['lineage','Lineage diffs'],['evals','Evaluations and Lean feedback'],['calls','Reasoning & calls']];
   function openDetail(tab='overview') {
     const node=byId.get(selected);if(!node)return;
     const dialog=$('code-dialog');
@@ -423,12 +423,54 @@
     renderDetailTab(node,tab);
     if(!dialog.open){if(document.body.classList.contains('embed'))parent.postMessage({type:'arena-focus'},location.origin);dialog.showModal();}
   }
+  let callsToken = 0;
+  function callsHtml(payload) {
+    const lines = [];
+    if (payload.reason) lines.push(`<p class="muted">${esc(payload.reason)}</p>`);
+    if (payload.origin_line) lines.push(`<p class="origin-line">${esc(payload.origin_line)}</p>`);
+    if (payload.turn != null) lines.push(`<p>Turn ${esc(payload.turn)}</p>`);
+    for (const block of payload.reasoning || []) {
+      lines.push(`<h3>${block.type === 'thinking' ? 'Thinking' : 'Reply'}</h3><pre>${esc(block.text)}</pre>`);
+    }
+    const call = payload.call;
+    if (call) {
+      lines.push(`<h3>${esc(call.name)}</h3><pre>${esc(JSON.stringify(call.args, null, 2))}</pre>`);
+      lines.push(`<h3>Delivered</h3><pre>${esc(call.delivered)}</pre>`);
+      if (call.trimmed) lines.push(`<details><summary>Untrimmed result</summary><pre>${esc(call.untrimmed)}</pre></details>`);
+      if (call.footer) lines.push(`<pre class="calls-footer">${esc(call.footer)}</pre>`);
+    }
+    if (payload.holes) {
+      const rows = payload.holes.map(hole => `<tr><td>${esc(hole.id)}</td><td>${esc(hole.goal)}</td><td>${esc(hole.status)}</td><td>${esc((hole.fills || []).join(' '))}</td></tr>`).join('');
+      lines.push(`<table class="holes"><thead><tr><th>Hole</th><th>Goal</th><th>Status</th><th>Fills</th></tr></thead><tbody>${rows}</tbody></table>`);
+    }
+    const siblingButtons = (payload.siblings || []).map(id => goBtn(id)).join(' ');
+    if (siblingButtons) lines.push(`<p class="row">${siblingButtons}</p>`);
+    return lines.join('');
+  }
+  function renderCalls(node) {
+    const token = ++callsToken;
+    const box = $('dtab');
+    box.innerHTML = '<p class="muted">Loading...</p>';
+    fetch(`node/${encodeURIComponent(node.id)}.json`).then(response => {
+      if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+      return response.json();
+    }).then(payload => {
+      if (token !== callsToken) return;
+      const html = callsHtml(payload);
+      box.innerHTML = html;
+      box.querySelectorAll('[data-go]').forEach(el => el.onclick = () => { select(el.dataset.go); openDetail('calls'); });
+    }).catch(error => {
+      if (token !== callsToken) return;
+      box.innerHTML = `<p class="muted">${esc(error && error.message ? error.message : String(error))}</p><button type="button" data-retry>Retry</button>`;
+      box.querySelector('[data-retry]').onclick = () => renderCalls(node);
+    });
+  }
   function renderDetailTab(node,tab) {
     const {derived,ancestry,reference,root}=context(node),box=$('dtab');
     const bind=()=>box.querySelectorAll('[data-go]').forEach(el=>el.onclick=()=>{select(el.dataset.go);openDetail(tab)});
     if(tab==='overview'){
       const relations=derived.map((d,i)=>`<div>${i?'Alternate derivation':'Recorded parents'}: ${d.parents.length?d.parents.map(goBtn).join(' '):'root'}${d.merge?.base?` · base ${goBtn(d.merge.base)}`:''}</div>`).join('');
-      box.innerHTML=`<code>${esc(node.id)}</code><h3>Reasoning</h3><p class="hyp">${esc(node.hypothesis||(node.origin==='auto_merge'?'Deterministic combination of disjoint edits':'No hypothesis recorded'))}</p>
+      box.innerHTML=`<code>${esc(node.id)}</code><h3>Stated hypothesis</h3><p class="hyp">${esc(node.hypothesis||(node.origin==='auto_merge'?'Deterministic combination of disjoint edits':'No hypothesis recorded'))}</p>
         <h3>Relationships</h3><div class="row">${relations}</div>
         <p class="muted">Children: ${node.children.length?node.children.map(goBtn).join(' '):'none'} · Decision: ${esc(node.decision)}</p><button id="collapse" type="button">${collapsed.has(node.id)?'Expand descendants':'Collapse descendants'}</button>`;
       $('collapse').onclick=()=>{collapsed.has(node.id)?collapsed.delete(node.id):collapsed.add(node.id);view=null;layout();renderGraph();detail();openDetail(tab)};
@@ -439,6 +481,8 @@
       const selector=$('diff-parent');if(selector){const update=()=>{$('diff').innerHTML=diff(byId.get(selector.value)?.proof ?? '',node.proof,$('diff-all').checked)};selector.onchange=update;$('diff-all').onchange=update;update();}
     } else if(tab==='proof'){
       box.innerHTML=`<pre class="full-code lean">${window.LeanHL?window.LeanHL.block(node.proof):esc(node.proof)}</pre>`;
+    } else if(tab==='calls'){
+      renderCalls(node);
     } else if(tab==='lineage'){
       const cumulative=root&&root.id!==node.id?`<h3>${esc(nodeLabel(root))} → ${esc(nodeLabel(node))} · cumulative</h3><div class="diff">${diff(root.proof,node.proof)}</div>`:'<p class="muted">This is the earliest recorded proof.</p>';
       const steps=ancestry.edges.map(({parent,child})=>{const from=byId.get(parent),to=byId.get(child);

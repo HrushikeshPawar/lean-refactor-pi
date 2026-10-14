@@ -688,3 +688,278 @@ def shape_langfuse(run_id: str, rows: list[dict], base: str, project: str | None
             "max_generation_latency_s": max(latencies) if latencies else None,
         },
     }
+
+
+# A call field above this is cut. 200 KB, so one node panel cannot ship a whole journal.
+_FIELD_LIMIT = 200 * 1024
+_HARNESS_ORIGINS = {"reference", "auto_merge", "assembly"}
+_CALL_KEYS = ("tool_call_id", "name", "args", "delivered", "untrimmed", "trimmed", "footer", "is_error")
+
+
+def node_calls(directory: Path, node: str) -> dict:
+    """The journal turn that created `node`: its call, as delivered and untrimmed, and its reasoning.
+
+    v7 nodes join on `tool_call_id`. Older nodes join when one tool-call window encloses the
+    ledger timestamp. A missing journal is an empty panel, not an error.
+    """
+    if not (directory / "trace-journal.jsonl").is_file():
+        return _no_call(node, "no journal")
+    from arena.replay import ReplayError, load_run, node_turn
+
+    run = load_run(str(directory))
+    proof_id = _proof_of(run.ledger, node)
+    if proof_id is None:
+        return _no_call(node, "no call matched")
+    event = _creator(run.ledger, proof_id)
+    if event is None:
+        return _no_call(node, "no call matched")
+    if event.get("origin") in _HARNESS_ORIGINS:
+        return _no_call(node, "harness-made")
+    calls = _calls(run)
+    tool_call = event.get("tool_call_id")
+    reason = None
+    if tool_call:
+        try:
+            turn = node_turn(run, node)
+        except ReplayError:
+            return _no_call(node, "no call matched")
+        chosen = next((call for call in calls if call["tool_call_id"] == tool_call and call["turn"] == turn), None)
+        if chosen is None:
+            chosen = next((call for call in calls if call["tool_call_id"] == tool_call), None)
+        if chosen is None:
+            return _no_call(node, "no call matched")
+    else:
+        stamp = event.get("ts")
+        if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
+            return _no_call(node, "no call matched")
+        enclosing = [call for call in calls if _encloses(call, float(stamp))]
+        if not enclosing:
+            return _no_call(node, "no call matched")
+        enclosing.sort(key=lambda call: (call["start"], call["turn"], str(call["tool_call_id"])))
+        chosen = enclosing[0]
+        if len(enclosing) > 1:
+            reason = "ambiguous"
+        else:
+            try:
+                node_turn(run, node)
+            except ReplayError:
+                return _no_call(node, "no call matched")
+    found = {
+        "node": node,
+        "turn": chosen["turn"],
+        "call": {key: chosen[key] for key in _CALL_KEYS},
+        "reasoning": _reasoning(run, chosen["turn"]),
+        "siblings": _siblings(run.ledger, chosen, proof_id),
+    }
+    if reason:
+        found["reason"] = reason
+    found.update(_step_origin(directory, run.ledger, proof_id))
+    return found
+
+
+def _no_call(node: str, reason: str) -> dict:
+    return {"node": node, "turn": None, "call": None, "reasoning": [], "siblings": [], "reason": reason}
+
+
+def _proof_of(history: list[dict], node: str) -> str | None:
+    from arena.campaign import resolve_node_ref
+
+    try:
+        return resolve_node_ref(history, node)
+    except ValueError:
+        return None
+
+
+def _creator(history: list[dict], proof_id: str) -> dict | None:
+    for event in _creators(history):
+        if _event_proof(event) == proof_id:
+            return event
+    return None
+
+
+def _creators(history: list[dict]) -> list[dict]:
+    seen: set[str] = set()
+    found = []
+    for event in history:
+        proof_id = _event_proof(event)
+        if not proof_id or proof_id in seen:
+            continue
+        seen.add(proof_id)
+        found.append(event)
+    return found
+
+
+def _event_proof(event: dict) -> str:
+    if event.get("kind") == "probe":
+        return str(event.get("proof_id") or "")
+    if event.get("kind") == "candidate":
+        return str(event.get("candidate_id") or "")
+    return ""
+
+
+def _journal_seconds(ts) -> float | None:
+    """Journal stamps are milliseconds. Ledger stamps are already seconds."""
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)):
+        return None
+    return float(ts) / 1000
+
+
+def _text_blocks(result) -> str:
+    if not isinstance(result, dict):
+        return ""
+    content = result.get("content")
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts = []
+    for block in content:
+        if isinstance(block, str):
+            parts.append(block)
+        elif isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
+            parts.append(block["text"])
+    return "\n".join(parts)
+
+
+def _delivered(row: dict) -> str:
+    if isinstance(row.get("delivered_text"), str):
+        return row["delivered_text"]
+    return _text_blocks(row.get("result"))
+
+
+def _untrimmed(row: dict) -> str:
+    if isinstance(row.get("text"), str):
+        return row["text"]
+    return _text_blocks(row.get("result"))
+
+
+def _is_error(row: dict) -> bool:
+    if isinstance(row.get("is_error"), bool):
+        return row["is_error"]
+    result = row.get("result")
+    return bool(isinstance(result, dict) and result.get("isError"))
+
+
+def _cap(text: str) -> str:
+    if len(text) <= _FIELD_LIMIT:
+        return text
+    omitted = len(text) - _FIELD_LIMIT
+    return f"{text[:_FIELD_LIMIT]}\n[truncated: {omitted} more characters; use arena replay]"
+
+
+def _calls(run) -> list[dict]:
+    calls = []
+    for item in run.turns:
+        pending: dict = {}
+        order: list = []
+        for row in item.rows:
+            kind = row.get("kind")
+            if kind == "tool_call":
+                ident = row.get("tool_call_id")
+                start = _journal_seconds(row.get("ts"))
+                pending[ident] = {
+                    "tool_call_id": ident,
+                    "name": str(row.get("name") or ""),
+                    "args": {} if row.get("args") is None else row.get("args"),
+                    "delivered": "",
+                    "untrimmed": "",
+                    "trimmed": False,
+                    "footer": "",
+                    "is_error": False,
+                    "turn": item.number,
+                    "start": start,
+                    "end": start,
+                }
+                order.append(ident)
+            elif kind == "tool_result" and row.get("tool_call_id") in pending:
+                call = pending[row.get("tool_call_id")]
+                call["delivered"] = _cap(_delivered(row))
+                call["untrimmed"] = _cap(_untrimmed(row))
+                call["trimmed"] = bool(row.get("trimmed"))
+                call["footer"] = row.get("footer") if isinstance(row.get("footer"), str) else ""
+                call["is_error"] = _is_error(row)
+                end = _journal_seconds(row.get("ts"))
+                if end is not None:
+                    call["end"] = end
+        calls.extend(pending[ident] for ident in order)
+    return calls
+
+
+def _encloses(call: dict, stamp: float) -> bool:
+    start, end = call["start"], call["end"]
+    return start is not None and end is not None and start <= stamp <= end
+
+
+def _reasoning(run, turn: int) -> list[dict]:
+    item = next((candidate for candidate in run.turns if candidate.number == turn), None)
+    if item is None:
+        return []
+    response = next((row for row in item.rows if row.get("kind") == "response"), None)
+    if not isinstance(response, dict):
+        return []
+    blocks = []
+    for block in response.get("content") or []:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "thinking" and isinstance(block.get("thinking"), str):
+            blocks.append({"type": "thinking", "text": block["thinking"]})
+        elif block.get("type") == "text" and isinstance(block.get("text"), str):
+            blocks.append({"type": "text", "text": block["text"]})
+    return blocks
+
+
+def _siblings(history: list[dict], chosen: dict, proof_id: str) -> list[str]:
+    """Proof ids, the same ids the graph viewer selects. Ordered by ledger time."""
+    matched = []
+    for event in _creators(history):
+        ident = _event_proof(event)
+        if not ident or ident == proof_id or event.get("origin") in _HARNESS_ORIGINS:
+            continue
+        if not _same_call(event, chosen):
+            continue
+        matched.append(event)
+    matched.sort(key=lambda event: (event.get("ts") or 0, _event_proof(event)))
+    return [_event_proof(event) for event in matched]
+
+
+def _same_call(event: dict, chosen: dict) -> bool:
+    ident = event.get("tool_call_id")
+    if ident and chosen.get("tool_call_id"):
+        return ident == chosen["tool_call_id"]
+    stamp = event.get("ts")
+    if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
+        return False
+    return _encloses(chosen, float(stamp))
+
+
+def _step_origin(directory: Path, history: list[dict], proof_id: str) -> dict:
+    """Filing line and holes from the v7 graph. A ledger with no edge for this node has neither."""
+    edge = next((event for event in history if event.get("kind") == "edge" and event.get("proof_id") == proof_id), None)
+    if edge is None:
+        return {}
+    from arena.graph import Graph
+    from arena.tools import _filing_line
+
+    def read(ident: str) -> str | None:
+        path = directory / "proofs" / f"{ident}.lean"
+        return path.read_text(encoding="utf-8") if path.is_file() else None
+
+    projection = Graph.from_history(history, read)
+    node = next((item for item in projection.nodes if item.proof_id == proof_id), None)
+    if node is None:
+        return {}
+    fields: dict = {"origin_line": _filing_line(node, projection, {})}
+    holes = []
+    for hole in node.holes:
+        index = hole.get("index")
+        holes.append(
+            {
+                "id": hole.get("id") or (f"{node.id}.h{index}" if index else ""),
+                "goal": hole.get("goal"),
+                "status": hole.get("status") or "open",
+                "fills": list(hole.get("fills") or []),
+            }
+        )
+    if holes:
+        fields["holes"] = holes
+    return fields
