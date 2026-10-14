@@ -63,17 +63,17 @@ class MergeReportTests(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def test_combination_is_reported_and_not_submitted(self):
+    def test_the_best_combination_is_submitted(self):
         directory = self.run_merge()
-        rows = merge_report(campaign.events(directory))
+        answer = campaign.submission("m")
+        rows = merge_report(campaign.events(directory), directory)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["proxy"], 80.0)
         self.assertTrue(rows[0]["beats_parents"])
-        self.assertFalse(rows[0]["submitted"])
-        self.assertIn("never submitted", merge_text(rows))
-        answer = campaign.submission("m")
-        self.assertEqual(answer["candidate"], "#2", "the best model-written candidate, not the 80.0 combination")
-        self.assertEqual((directory / "submission.lean").read_text(), LEFT)
+        self.assertTrue(rows[0]["submitted"])
+        self.assertIn("selected best verified candidate", merge_text(rows))
+        self.assertEqual(answer["proxy"], 80.0)
+        self.assertEqual((directory / "submission.lean").read_text(), MERGED)
 
 
 if __name__ == "__main__":

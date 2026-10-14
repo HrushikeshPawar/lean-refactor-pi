@@ -76,6 +76,7 @@ class SubmitTests(unittest.TestCase):
         tool_call_id=None,
         journal=False,
         config=True,
+        step_goals=None,
     ):
         statement = STATEMENTS[theorem]
         proof = statement + " := by\n  rfl\n" if proof is None else proof
@@ -122,6 +123,8 @@ class SubmitTests(unittest.TestCase):
                 },
             },
         ]
+        if step_goals is not None:
+            ledger.append({"kind": "step_goals", "proof_id": candidate_id, "goals": step_goals})
         (directory / "ledger.jsonl").write_text("\n".join(json.dumps(row) for row in ledger) + "\n")
         proofs = directory / "proofs"
         proofs.mkdir()
@@ -322,6 +325,156 @@ class SubmitTests(unittest.TestCase):
         rejected = json.loads((result.directory / "manifest.json").read_text())["rejected"]
         self.assertEqual([item["row"] for item in rejected], ["A.one"])
         self.assertTrue(any("native_decide" in reason for reason in rejected[0]["reasons"]))
+
+    def test_recombination_aligns_recorded_goals_and_keeps_full_lineage(self):
+        base = STATEMENTS["A.one"] + " := by\n  simp_all [Nat.add_comm]\n  rfl\n"
+        donor = STATEMENTS["A.one"] + " := by\n  rfl\n"
+        self.add_run(
+            "base",
+            proof=base,
+            proxy=70,
+            step_goals=[
+                {"id": "s1", "before": "⊢ 1 = 1", "after": "⊢ 1 = 1"},
+                {"id": "s2", "before": "⊢ 1 = 1", "after": "⊢ True"},
+            ],
+        )
+        self.add_run(
+            "donor",
+            proof=donor,
+            proxy=60,
+            step_goals=[{"id": "s1", "before": "⊢ 1 = 1", "after": "⊢ 1 = 1"}],
+        )
+        result = self.build("base", "donor", name="goal-hybrid")
+        self.assertEqual(result.code, 0)
+        hybrid = result.rows[0]
+        self.assertEqual(hybrid["origin"], "submit_merge")
+        self.assertEqual(hybrid["merged_from"][0]["run"], "donor")
+        self.assertEqual(hybrid["merged_from"][0]["step"], "s1")
+        self.assertEqual(hybrid["contributing_run_ids"], ["base", "donor"])
+        manifest = json.loads((result.directory / "manifest.json").read_text())
+        attempts = manifest["rows"][0]["hybrid_attempts"]
+        self.assertEqual(len(attempts), 1)
+        self.assertTrue(attempts[0]["accepted"])
+        markdown = (result.directory / "MANIFEST.md").read_text()
+        self.assertIn("merged from:", markdown)
+        self.assertIn("hybrid attempt 1:", markdown)
+        self.assertTrue((result.directory / "proofs-no-hybrids.jsonl").exists())
+        self.assertTrue((result.directory / "hybrids" / "A.one-1.lean").exists())
+        self.assertEqual((self.runs / "base" / "proofs" / "cand-base.lean").read_text(), base)
+        self.assertEqual((self.runs / "donor" / "proofs" / "cand-donor.lean").read_text(), donor)
+
+    def test_goal_mismatch_is_rejected_and_v6_uses_position_and_hash(self):
+        base = STATEMENTS["A.one"] + " := by\n  simp_all [Nat.add_comm]\n  rfl\n"
+        donor = STATEMENTS["A.one"] + " := by\n  rfl\n"
+        self.add_run(
+            "base",
+            proof=base,
+            proxy=70,
+            step_goals=[
+                {"id": "s1", "before": "goal A", "after": "goal B"},
+                {"id": "s2", "before": "goal C", "after": "goal D"},
+            ],
+        )
+        self.add_run(
+            "wrong",
+            proof=donor,
+            proxy=60,
+            step_goals=[{"id": "s1", "before": "different", "after": "goal D"}],
+        )
+        no_match = self.build("base", "wrong", name="no-goal-match")
+        no_match_manifest = json.loads((no_match.directory / "manifest.json").read_text())
+        self.assertEqual(no_match_manifest["rows"][0]["hybrid_attempts"], [])
+
+        partial_base = STATEMENTS["A.one"] + " := by\n  simp_all [Nat.add_comm]\n  rfl\n"
+        partial_donor = STATEMENTS["A.one"] + " := by\n  rfl\n  exact rfl\n"
+        self.add_run(
+            "partial-base",
+            proof=partial_base,
+            proxy=70,
+            step_goals=[{"id": "s2", "before": "base goal", "after": None}],
+        )
+        self.add_run(
+            "partial-donor",
+            proof=partial_donor,
+            proxy=60,
+            step_goals=[{"id": "s2", "before": "donor goal", "after": None}],
+        )
+        partial = self.build("partial-base", "partial-donor", name="partial-goals")
+        partial_manifest = json.loads((partial.directory / "manifest.json").read_text())
+        self.assertEqual(partial_manifest["rows"][0]["hybrid_attempts"], [])
+
+        v6_donor = STATEMENTS["A.one"] + " := by\n  rfl\n  exact rfl\n"
+        self.add_run("v6-base", proof=base, proxy=70)
+        self.add_run("v6-short", proof=donor, proxy=60)
+        wrong_count = self.build("v6-base", "v6-short", name="v6-wrong-count")
+        self.assertEqual(wrong_count.rows[0].get("origin"), None)
+        self.add_run("v6-donor", proof=v6_donor, proxy=60)
+        fallback = self.build("v6-base", "v6-donor", name="v6-match")
+        self.assertEqual(fallback.rows[0]["origin"], "submit_merge")
+        self.assertEqual(fallback.rows[0]["merged_from"][0]["run"], "v6-donor")
+
+    def test_hybrid_cold_failure_and_non_improving_proxy_are_logged(self):
+        base = STATEMENTS["A.one"] + " := by\n  simp_all [Nat.add_comm]\n"
+        donor = STATEMENTS["A.one"] + " := by\n  rfl\n"
+        hybrid_proof = base.replace("simp_all [Nat.add_comm]", "rfl")
+        self.add_run("base", proof=base, proxy=70)
+        self.add_run("donor", proof=donor, proxy=60)
+        self.plan[hybrid_proof] = {"proxy": 65, "error": "cold failed"}
+        rejected = self.build("base", "donor", name="cold-rejected")
+        self.assertEqual(rejected.rows[0].get("origin"), None)
+        attempt = json.loads((rejected.directory / "manifest.json").read_text())["rows"][0]["hybrid_attempts"][0]
+        self.assertFalse(attempt["accepted"])
+        self.assertEqual(attempt["reason"], "gate failed")
+
+        self.plan[hybrid_proof] = {"proxy": 70}
+        flat = self.build("base", "donor", name="proxy-rejected")
+        attempt = json.loads((flat.directory / "manifest.json").read_text())["rows"][0]["hybrid_attempts"][0]
+        self.assertFalse(attempt["accepted"])
+        self.assertEqual(attempt["reason"], "settled proxy did not improve")
+
+    def test_no_hybrids_keeps_single_run_output_and_ceiling_counts_donor_calls(self):
+        base = STATEMENTS["A.one"] + " := by\n  simp_all [Nat.add_comm]\n"
+        donor = STATEMENTS["A.one"] + " := by\n  rfl\n"
+        self.add_run("base", proof=base, proxy=70, spend=(0.4,))
+        self.add_run("donor", proof=donor, proxy=60, spend=(0.4,))
+        plain = self.build("base", "donor", name="plain", hybrids=False)
+        self.assertEqual(plain.rows[0]["proof"], base)
+        self.assertFalse((plain.directory / "proofs-no-hybrids.jsonl").exists())
+        self.assertNotIn("hybrid_attempts", json.loads((plain.directory / "manifest.json").read_text())["rows"][0])
+
+        over = self.build("base", "donor", name="over-ceiling", ceiling_usd=0.7)
+        self.assertEqual(over.code, 1)
+        self.assertIn("$0.8000", over.blocked[0]["reasons"][0])
+
+    def test_static_hybrid_failure_does_not_use_the_cold_check_limit(self):
+        base = STATEMENTS["A.one"] + " := by\n  simp_all only [Nat.add_comm, Nat.add_assoc, Nat.mul_comm]\n"
+        forbidden = STATEMENTS["A.one"] + " := by\n  sorry\n"
+        valid = STATEMENTS["A.one"] + " := by\n  exact rfl\n"
+        self.add_run("base", proof=base, proxy=70)
+        self.add_run("forbidden", proof=forbidden, proxy=60)
+        self.add_run("valid", proof=valid, proxy=50)
+        self.plan[valid] = {"proxy": 80}
+        compiled = []
+
+        def recording(name, proof):
+            compiled.append(proof)
+            return self.cold(name, proof)
+
+        result = build_submission(
+            "static-hybrid",
+            ["base", "forbidden", "valid"],
+            max_hybrids=1,
+            cold_check=recording,
+            runs_root=self.runs,
+            output_root=self.out,
+            manifest_path=self.manifest,
+        )
+        self.assertEqual(result.code, 0)
+        attempts = json.loads((result.directory / "manifest.json").read_text())["rows"][0]["hybrid_attempts"]
+        self.assertIn("static gate failed", [attempt["reason"] for attempt in attempts])
+        self.assertTrue(any(attempt["accepted"] for attempt in attempts), attempts)
+        self.assertEqual(len(compiled), 2)
+        self.assertEqual(compiled[0], base)
 
     def test_a_blocked_rebuild_keeps_the_last_good_submission(self):
         good = STATEMENTS["A.one"] + " := by\n  rfl\n"
@@ -591,6 +744,9 @@ class SubmitTests(unittest.TestCase):
         self.assertIn("November 1, 2026", text)
         self.assertIn("November 8, 2026", text)
         self.assertIn("Submit", text)
+        self.assertIn("--hybrids", text)
+        self.assertIn("--no-hybrids", text)
+        self.assertIn("--max-hybrids", text)
         with patch("sys.stderr", io.StringIO()):
             code = app(["submit", "--name", "bad name", "--runs", "x"])
         self.assertEqual(code, 2)

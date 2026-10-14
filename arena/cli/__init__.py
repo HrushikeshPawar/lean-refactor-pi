@@ -117,6 +117,8 @@ def submit(
     runs: Annotated[list[str], Parameter(name="runs", consume_multiple=True, negative=())],
     previous: str | None = None,
     max_cold: int = 5,
+    hybrids: bool = True,
+    max_hybrids: int = 20,
     ceiling_usd: float = 3.0,
     discover: bool = False,
     archive: bool = False,
@@ -138,6 +140,9 @@ def submit(
        upload is allowed, but unsubmitted benchmark rows score zero in the overall average.
     4. Upload the code archive when Submit → Code opens on November 1, 2026, and submit the
        technical report to OpenReview by November 8, 2026.
+
+    Cross-run step hybrids are enabled by default. Use --no-hybrids for single-run selection,
+    or --max-hybrids to limit cold-checked hybrids per row (default 20).
     """
     from rich.console import Console
 
@@ -159,6 +164,8 @@ def submit(
             runs,
             previous=previous,
             max_cold=max_cold,
+            hybrids=hybrids,
+            max_hybrids=max_hybrids,
             ceiling_usd=ceiling_usd,
             discover=discover,
             archive=archive,

@@ -1,22 +1,25 @@
-"""Merge report: verified model candidates whose edits the harness could combine, as analysis only.
-
-The submission must be a proof the model wrote. A harness-composed combination of two model proofs is
-therefore never submitted, whatever it scores; `submission` skips `auto_merge` candidates. This module only
-reports what the harness's own merge checks found, so a reviewer can see what a combination would have
-been worth and decide what to do with it.
-"""
+"""Report verified harness combinations and whether the run selected one for submission."""
 
 from __future__ import annotations
+
+import json
+from pathlib import Path
 
 from arena import text
 
 
-def merge_report(history: list[dict]) -> list[dict]:
-    """One row per merge check whose combined proof compiled, from the ledger alone (no Lean).
+def merge_report(history: list[dict], directory: Path | None = None) -> list[dict]:
+    """One row per merge check whose combined proof compiled, with submission status when available.
 
     Each row: the two parent candidates (as #n), their best proxies, the combined candidate and its
-    verified proxy, and whether the combination beats both parents. Always `submitted: False`.
+    verified proxy, whether the combination beats both parents, and whether it is the run's
+    selected submission candidate.
     """
+    try:
+        submission = json.loads((directory / "submission.json").read_text(encoding="utf-8")) if directory else {}
+    except (OSError, ValueError):
+        submission = {}
+    submitted_id = submission.get("candidate_id") if isinstance(submission, dict) else None
     labels: dict[str, str] = {}
     best: dict[str, float] = {}
     verified: dict[str, bool] = {}
@@ -46,7 +49,7 @@ def merge_report(history: list[dict]) -> list[dict]:
                 "verified": bool(event.get("full_passed")),
                 "proxy": combined,
                 "beats_parents": combined is not None and bool(parent_best) and combined > max(parent_best),
-                "submitted": False,
+                "submitted": merged == submitted_id,
             }
         )
     return rows

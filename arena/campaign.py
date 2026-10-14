@@ -3031,15 +3031,12 @@ def submission(run_id: str) -> dict:
     directory = run_dir(run_id)
     history = events(directory)
     rows = _summaries(history)
-    # Harness-combined proofs (auto_merge) are reported by arena.merges but never submitted: the answer is model-written.
+    # A harness-combined candidate is eligible when it is the best verified candidate.
     pool = sorted(
         (
             r
             for r in rows
-            if r["verified"]
-            and r["score"] is not None
-            and r["status"] == "full"
-            and r["origin"] not in ("reference", "auto_merge")
+            if r["verified"] and r["score"] is not None and r["status"] == "full" and r["origin"] != "reference"
         ),
         key=lambda r: (r["score"], -r["n"]),
         reverse=True,

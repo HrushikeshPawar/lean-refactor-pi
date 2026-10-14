@@ -502,7 +502,7 @@ def build_summary(directory: Path) -> dict:
         },
         "routes": route_rows,
         "route_progress": route_progress(route_rows),
-        "merge_report": merge_report(ledger),
+        "merge_report": merge_report(ledger, directory),
         "submission": submission_result,
     }
 

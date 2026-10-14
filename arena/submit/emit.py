@@ -25,7 +25,9 @@ def manifest_document(
     rejected: list[dict],
     missing: list[str],
     rejected_runs: list[dict] | None = None,
+    hybrid_attempts: list[dict] | None = None,
 ) -> dict:
+    attempts_by_name = {item["name"]: item["attempts"] for item in hybrid_attempts or []}
     described = []
     for row in rows:
         problem = problems[row["name"]]
@@ -47,6 +49,12 @@ def manifest_document(
         }
         if "code" in problem:
             entry["code"] = problem["code"]
+        if row.get("origin") == "submit_merge":
+            entry["origin"] = "submit_merge"
+            entry["hybrid_id"] = row.get("hybrid_id")
+            entry["merged_from"] = row.get("merged_from") or []
+        if hybrid_attempts is not None:
+            entry["hybrid_attempts"] = attempts_by_name.get(row["name"], [])
         described.append(entry)
     return {
         "name": name,
@@ -76,9 +84,28 @@ def _markdown(document: dict) -> str:
                 f"- cold: {cold or 'unrecorded'}",
                 f"- spend: ${row.get('spend_usd')} across {', '.join(row.get('contributing_runs') or []) or 'no runs'}",
                 f"- code: {code}",
-                "",
             ]
         )
+        if row.get("origin") == "submit_merge":
+            lines.append(f"- hybrid: `{row.get('hybrid_id')}`")
+            lines.extend(
+                f"- merged from: `{item.get('run')}` / `{item.get('node')}` / `{item.get('step')}`"
+                for item in row.get("merged_from") or []
+            )
+        if "hybrid_attempts" in row:
+            attempts = row.get("hybrid_attempts") or []
+            if not attempts:
+                lines.append("- hybrid attempts: none")
+            for index, attempt in enumerate(attempts, 1):
+                reasons = "; ".join((attempt.get("gate_result") or {}).get("reasons") or []) or "passed"
+                lines.append(
+                    f"- hybrid attempt {index}: base `{attempt.get('base_node')}`, donor run "
+                    f"`{attempt.get('donor_run')}` node `{attempt.get('donor_node')}` step "
+                    f"{attempt.get('step_index')}, saving {attempt.get('token_saving')} tokens; "
+                    f"gate {reasons}; proxy {attempt.get('settled_proxy')}; "
+                    f"{attempt.get('reason')}"
+                )
+        lines.append("")
     lines.extend(["## Rejected candidates", ""])
     if document["rejected"]:
         lines.extend(
@@ -107,6 +134,7 @@ def write(
     manifest: dict,
     provenance: dict,
     diff: dict,
+    no_hybrids: list[dict] | None = None,
 ) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     proofs = [
@@ -114,6 +142,23 @@ def write(
         for row in sorted(rows, key=lambda row: row["name"])
     ]
     (directory / "proofs.jsonl").write_text(("\n".join(proofs) + "\n") if proofs else "", encoding="utf-8")
+    if no_hybrids is not None:
+        baseline = [
+            json.dumps({"name": row["name"], "proof": row["proof"]}, ensure_ascii=False)
+            for row in sorted(no_hybrids, key=lambda row: row["name"])
+        ]
+        (directory / "proofs-no-hybrids.jsonl").write_text(
+            ("\n".join(baseline) + "\n") if baseline else "", encoding="utf-8"
+        )
+    for row in rows:
+        if row.get("origin") == "submit_merge":
+            hybrids = directory / "hybrids"
+            hybrids.mkdir(exist_ok=True)
+            accepted = row.get("accepted_hybrids") or [
+                {"hybrid_id": row.get("hybrid_id") or row["name"], "proof": row["proof"]}
+            ]
+            for hybrid in accepted:
+                (hybrids / f"{hybrid['hybrid_id']}.lean").write_text(hybrid["proof"], encoding="utf-8")
     for line in (directory / "proofs.jsonl").read_text(encoding="utf-8").splitlines():
         row = json.loads(line)
         provenance["problems"][row["name"]]["proof_sha256"] = sha256_text(row["proof"])

@@ -24,16 +24,12 @@ from arena.submit import ledger
 from arena.submit.diff import diff_submissions
 from arena.submit.emit import blocked, manifest_document, write
 from arena.submit.gates import cold_check as default_cold_check
+from arena.submit.recombine import recombine
 from arena.submit.select import SubmitError, load_previous, load_runs, resolve_runs, select_rows
 
-__all__ = ["SubmissionResult", "SubmitError", "build_submission", "post_select"]
+__all__ = ["SubmissionResult", "SubmitError", "build_submission"]
 
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
-
-
-def post_select(rows: list[dict]) -> list[dict]:
-    """Identity hook. Ticket 19b replaces it with cross-run recombination."""
-    return rows
 
 
 @dataclass
@@ -59,6 +55,8 @@ def build_submission(
     runs: list[str],
     previous: str | None = None,
     max_cold: int = 5,
+    hybrids: bool = True,
+    max_hybrids: int = 20,
     ceiling_usd: float = CEILING_USD,
     discover: bool = False,
     archive: bool = False,
@@ -81,6 +79,8 @@ def build_submission(
         raise SubmitError("invalid submission name")
     if max_cold < 1:
         raise SubmitError("max_cold must be at least 1")
+    if max_hybrids < 0:
+        raise SubmitError("max_hybrids cannot be negative")
     destination_root = output_root or (ROOT / "runs" / "submission")
     destination = destination_root / name
     if destination.exists() and not overwrite:
@@ -97,8 +97,11 @@ def build_submission(
     checker = cold_check or (lambda theorem, proof: default_cold_check(theorem, proof, memory_reader=memory_reader))
     loaded, rejected_runs = load_runs(run_ids, runs_root)
     selection = select_rows(manifest, loaded, checker, max_cold, previous_rows, progress)
-    # Looked up on the module so a later ticket can replace the hook.
-    chosen = post_select(selection.rows)
+    hybrid_attempts = None
+    if hybrids:
+        chosen, hybrid_attempts = recombine(selection.rows, manifest, loaded, max_hybrids, checker)
+    else:
+        chosen = selection.rows
     named = set(run_ids)
     problems, spend_blocks = ledger.build(chosen, runs_root, ceiling_usd, discover, named)
     blocked_rows = list(selection.blocked) + spend_blocks
@@ -127,10 +130,13 @@ def build_submission(
         "rejected": selection.rejected,
         "rejected_runs": rejected_runs,
     }
-    document = manifest_document(name, run_ids, chosen, problems, selection.rejected, selection.missing, rejected_runs)
+    document = manifest_document(
+        name, run_ids, chosen, problems, selection.rejected, selection.missing, rejected_runs, hybrid_attempts
+    )
     diff = diff_submissions(chosen, previous_dir)
     _replace(destination, overwrite)
-    write(destination, chosen, document, provenance, diff)
+    baseline_rows = selection.rows if any(row.get("origin") == "submit_merge" for row in chosen) else None
+    write(destination, chosen, document, provenance, diff, baseline_rows)
     if archive:
         commit = _git(repo, "rev-parse", "HEAD").strip()
         toolchains = [
