@@ -668,6 +668,15 @@ keeps the footer again (the trace judge compares it with the Langfuse span); the
 `unevaluated` with published numbers; `--json` index. Later: a price-rows section once the compile price row is
 a function.
 
+**Built (ticket 18, 2026-10-14):** the viewer's "Reasoning & calls" tab (Details dialog, and probes) fetches
+`node/<id>.json` lazily: the creating tool call (delivered text, untrimmed text when trimmed, footer), that turn's
+reasoning, batch siblings by proof id in time order, and for v7 nodes the filing line and holes with each `nK` id
+turned into a go-to button through an `ids` map. The reference node is "harness-made"; runs without a journal say
+so. The journal is indexed once per run (cached on file stamps, payloads never expanded): 0.3 ms per node after the
+first, was 0.7 s. Fields are capped at 200 KB with the replay marker. Review fixes: tab-switch race, `nK` links,
+the cache, probe siblings, a half-written last line skipped, a real escaping test under node. Known difference:
+for a v6 node enclosed by two calls the viewer names the earliest call and `arena replay` the narrowest window.
+
 ## 5. Candidate graph v7: the agent writes, the harness keeps the books and steers (D7)
 
 ### 5a. What v6 shows
