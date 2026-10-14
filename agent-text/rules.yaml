@@ -1,0 +1,44 @@
+score:
+  template: "packet/scoring"
+  numbers: "percent_scale"
+  marker: "Score: the mean"
+exchange_rates:
+  template: "packet/scoring"
+  numbers: "rate_heartbeat_units"
+  marker: "Exchange rates:"
+token_counting:
+  template: "packet/scoring"
+  numbers: "none"
+  marker: "The counter measures"
+statement_immutability:
+  template: "skill/lean-facts"
+  numbers: "none"
+  marker: "The theorem statement"
+forbidden_constructs:
+  template: "skill/lean-facts"
+  numbers: "none"
+  marker: "A submitted proof may contain"
+spend_limit:
+  template: "messages/footer"
+  numbers: "run limit and settled spend"
+  marker: "budget:"
+finish_availability:
+  template: "tools/finish.description"
+  numbers: "finish_remaining_pct"
+  marker: "Offered when"
+graph_operations:
+  template: "tools/compile.description"
+  numbers: "compile_max_drafts"
+  marker: "graph edit: splice"
+graph_identifiers:
+  template: "skill/SKILL"
+  numbers: "none"
+  marker: "Nodes have identifiers"
+node_status:
+  template: "skill/SKILL"
+  numbers: "none"
+  marker: "A closed node"
+price_columns:
+  template: "packet/price-table.legend"
+  numbers: "computed per step"
+  marker: "self_hb is"

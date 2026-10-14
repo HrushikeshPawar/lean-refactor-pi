@@ -1,1 +1,1 @@
-description: "Request to stop the run. Available only when {finish_remaining_pct}% or less of the spend allowance remains."
+description: "End the run and return the archive and remaining points by axis. Offered when at most {finish_remaining_pct}% of the spend limit remains."

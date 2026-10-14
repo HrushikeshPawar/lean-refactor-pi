@@ -1,6 +1,8 @@
+import ast
 import io
 import json
 import os
+import re
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -12,6 +14,115 @@ from arena.cli.text import _budget_markdown, _budget_rows, _shown_for, render_te
 
 
 class TextRendererTests(unittest.TestCase):
+    def test_model_text_builders_have_no_long_literals(self):
+        root = Path(__file__).parents[1]
+        python_files = (
+            "arena/context.py",
+            "arena/memory.py",
+            "arena/reply.py",
+            "arena/tools.py",
+            "arena/campaign.py",
+            "arena/summary.py",
+        )
+        for name in python_files:
+            source = (root / name).read_text()
+            tree = ast.parse(source)
+            docstrings = {
+                id(node.body[0].value)
+                for node in ast.walk(tree)
+                if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.body
+                and isinstance(node.body[0], ast.Expr)
+                and isinstance(node.body[0].value, ast.Constant)
+                and isinstance(node.body[0].value.value, str)
+            }
+            parents = {id(child): parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+                    continue
+                if id(node) in docstrings or len(node.value) < 30 or " " not in node.value:
+                    continue
+                line = source.splitlines()[node.lineno - 1]
+                if "# log" in line:
+                    continue
+                ancestors = []
+                parent = parents.get(id(node))
+                while parent and not isinstance(parent, (ast.FunctionDef, ast.Module)):
+                    ancestors.append(parent)
+                    parent = parents.get(id(parent))
+                if any(isinstance(item, ast.Raise) for item in ancestors):
+                    continue
+                if any(
+                    isinstance(item, ast.Call)
+                    and isinstance(item.func, ast.Name)
+                    and item.func.id in {"print", "logging"}
+                    for item in ancestors
+                ):
+                    continue
+                # Summary artifact descriptions are operator output, not model text.
+                if name == "arena/summary.py":
+                    continue
+                self.fail(f"{name}:{node.lineno}: long model-facing literal")
+
+        quoted = re.compile(r""""(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`""")
+        for name in ("arena.ts", "rules.ts", "trim.ts", "reply.ts", "spend.ts"):
+            source = (root / "packages/arena-pi/extensions" / name).read_text()
+            for number, line in enumerate(source.splitlines(), 1):
+                if (
+                    line.lstrip().startswith(("//", "*"))
+                    or "// log" in line
+                    or "console." in line
+                    or "throw new Error" in line
+                ):
+                    continue
+                for match in quoted.finditer(line):
+                    literal = re.sub(r"\$\{.*\}", "", match.group()[1:-1])
+                    if len(literal) >= 30 and " " in literal:
+                        self.fail(f"packages/arena-pi/extensions/{name}:{number}: long model-facing literal")
+
+    def test_rule_owners_and_numbers_are_registered_once(self):
+        root = Path(__file__).parents[1] / "agent-text"
+        rules = text._parse_yaml((root / "rules.yaml").read_text(), "rules")
+        templates = {key: text.template(key) for key in text.keys()}  # noqa: SIM118
+        for rule_id, rule in rules.items():
+            with self.subTest(rule=rule_id):
+                owner = rule["template"]
+                marker = rule["marker"]
+                self.assertIn(owner, templates)
+                self.assertIn(marker, templates[owner])
+                self.assertEqual([key for key, body in templates.items() if marker in body], [owner])
+                for number in rule["numbers"].split(","):
+                    if number in text.numbers():
+                        self.assertIn("{" + number, templates[owner])
+
+    def test_rendered_templates_avoid_proof_direction_terms(self):
+        terms = (Path(__file__).parent / "fixtures/neutrality_terms.txt").read_text().splitlines()
+        required = {
+            "induction",
+            "inductive",
+            "recursion",
+            "recursive",
+            "lemma",
+            "strategy",
+            "route",
+            "idea",
+            "simp",
+            "rw",
+            "rewrite",
+            "grind",
+        }
+        self.assertTrue(required <= set(terms))
+        denied = re.compile(r"\b(?:" + "|".join(map(re.escape, terms)) + r")\b", re.I)
+        for key in text.keys():  # noqa: SIM118
+            with self.subTest(key=key):
+                values = {
+                    name: 1 if fmt else "X"
+                    for name, fmt in text._check(key, text.template(key))
+                    if name not in text.numbers()
+                }
+                rendered = text.render(key, **values)
+                self.assertNotRegex(rendered, denied)
+
     def test_theorem_render_uses_cached_fixture_and_reports_parts(self):
         fixtures = Path(__file__).parent / "fixtures/agent_text"
         context = json.loads((fixtures / "core-context.json").read_text())
@@ -55,7 +166,7 @@ class TextRendererTests(unittest.TestCase):
             for path in root.rglob("*")
             if path.is_file()
             and path.suffix in {".yaml", ".md"}
-            and path.name not in {"README.md", "numbers.yaml", "shown.yaml"}
+            and path.name not in {"README.md", "numbers.yaml", "shown.yaml", "rules.yaml"}
         }
         for key in files:
             shown = _shown_for(key)
@@ -72,6 +183,34 @@ class TextRendererTests(unittest.TestCase):
         start, end = "<!-- budget:start -->", "<!-- budget:end -->"
         actual = readme.split(start, 1)[1].split(end, 1)[0].strip()
         self.assertEqual(actual, _budget_markdown(_budget_rows()))
+
+    def test_word_budget_limits(self):
+        from arena.cli.run import SYSTEM_PROMPT
+        from arena.skill import skill_prompt
+
+        numbers = text.numbers()
+        tools = []
+        for name in ("compile", "goal", "search", "read", "finish"):
+            prefix = f"tools/{name}."
+            tools.extend(text.render(key) for key in text.keys() if key.startswith(prefix))  # noqa: SIM118
+        static_words = (
+            len(SYSTEM_PROMPT.split()) + len(skill_prompt().split()) + sum(len(item.split()) for item in tools)
+        )
+        self.assertLessEqual(static_words, numbers["budget.static_words"])
+        packet_keys = (
+            "packet/task",
+            "packet/scoring",
+            "packet/library",
+            "packet/price-table.legend",
+            "packet/price-table.original_heading",
+            "packet/sections.titles.goals",
+            "packet/sections.titles.library",
+        )
+        packet_words = sum(len(text.template(key).split()) for key in packet_keys)
+        self.assertLessEqual(packet_words, numbers["budget.packet_words"])
+        for key in text.keys():  # noqa: SIM118
+            if key.startswith(("replies/", "messages/")):
+                self.assertLessEqual(len(text.template(key).split()), numbers["budget.reply_words"], key)
 
     def test_shared_renderer_cases(self):
         cases = json.loads((Path(__file__).parent / "fixtures" / "text-cases.json").read_text())

@@ -206,14 +206,14 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     if (!costJournal) throw new Error("Arena cost journal is unavailable"); // not-model-facing: internal cost ledger invariant.
     mkdirSync(dirname(costJournal), { recursive: true });
     const fd = openSync(costJournal, "a", 0o600);
-    try { appendFileSync(fd, `${JSON.stringify({ ts: Date.now(), ...event })}\n`); fsyncSync(fd); }
+    try { appendFileSync(fd, `${JSON.stringify({ ts: Date.now(), ...event })}\n`); fsyncSync(fd); } // log: durable cost journal row.
     finally { closeSync(fd); }
   }
   function appendTrace(event: Record<string, unknown>) {
     if (!traceJournal) throw new Error("Arena trace journal is unavailable"); // not-model-facing: internal trace ledger invariant.
     mkdirSync(dirname(traceJournal), { recursive: true });
     const fd = openSync(traceJournal, "a", 0o600);
-    try { appendFileSync(fd, `${JSON.stringify({ ts: Date.now(), ...event })}\n`); fsyncSync(fd); }
+    try { appendFileSync(fd, `${JSON.stringify({ ts: Date.now(), ...event })}\n`); fsyncSync(fd); } // log: durable trace journal row.
     finally { closeSync(fd); }
     chmodSync(traceJournal, 0o600);
   }
@@ -298,7 +298,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     if (process.env.ARENA_BUDGET_REQUIRED !== "1") return;
     if (!active || limitHit || ctx.model?.id !== (process.env.ARENA_PI_MODEL_ID ?? process.env.ARENA_MODEL)) {
       ctx.abort();
-      if (ctx.hasUI) ctx.ui.notify(limitHit ? "The spend limit is already reached." : "Select /arena and the run's model before prompting.", "error"); // not-model-facing: operator UI notification.
+      if (ctx.hasUI) ctx.ui.notify(limitHit ? "The spend limit is already reached." : "Select /arena and the run's model before prompting.", "error"); // log: operator UI notification. // not-model-facing
     }
   });
 
@@ -377,7 +377,11 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     trimmer.forget();
     void injectMemory();
   });
-  pi.on("session_compact_failed", () => { pendingRequest = undefined; });
+  pi.on("session_compact_failed", () => {
+    pendingRequest = undefined;
+    if (costJournal) appendCost({ kind: "compaction_failed" });
+    console.error("[arena-compaction-alarm] Compaction failed; context was not replaced."); // log: operator alarm. // not-model-facing
+  });
   pi.on("session_before_compact", event => {
     const fixed = objectToolArguments(event.preparation.messagesToSummarize) + objectToolArguments(event.preparation.turnPrefixMessages);
     if (fixed) appendTrace({ kind: "compaction_repair", null_tool_arguments: fixed });
@@ -423,7 +427,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("arena", {
-    description: "Select a benchmark theorem: /arena Core.InitsUpdatesComm", // not-model-facing: slash-command help shown in the UI.
+    description: "Select a benchmark theorem: /arena Core.InitsUpdatesComm", // log: slash-command help shown only in the operator UI. // not-model-facing
     handler: async (name, ctx) => {
       const wanted = name.trim();
       const rows = (await readFile(resolve(root, "benchmark/original/warmup.jsonl"), "utf8"))
@@ -730,7 +734,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     const cause = failed ? String((event as any).errorMessage ?? lastAssistant?.errorMessage ?? "") : undefined;
     const content = await continuationPush({ failed, cause, usedPct: 100 * spentUsd / limit,
       remainingUsd: room.remainingUsd, capUsd: limit, baseline: checks?.baseline,
-      best: checks?.best ?? state.best, bestNode: String(state.best?.node ?? state.best?.candidate ?? "none") });
+      best: checks?.best ?? state.best });
     const cutLine = cutTokens === undefined ? undefined
       : buildTurnCutLine(cutTokens, await renderText("messages/errors.turn_cut", { tokens: "{tokens}" }));
     const nextText = cutLine === undefined ? content : `${content}\n${cutLine}`;

@@ -1,5 +1,7 @@
 import json
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 from arena import campaign, context
 from arena.engine import ROOT
@@ -26,6 +28,22 @@ DENYLIST = (
 
 
 class ParseTests(unittest.TestCase):
+    def test_cached_packet_prices_steps_and_keeps_library_ahead_of_locals(self):
+        fixtures = Path(__file__).parent / "fixtures/agent_text"
+        inventory = json.loads((fixtures / "core-context.json").read_text())
+        measured = json.loads((fixtures / "core-profile.json").read_text())
+        with (
+            patch.object(context, "cached_context", return_value=inventory),
+            patch.object(context, "reference_profile", return_value=measured),
+        ):
+            packet = context.render_packet(NAME, cache_only=True)
+        self.assertLess(packet.index("Original proof"), packet.index("step  lines"))
+        self.assertLess(packet.index("step  lines"), packet.index("before s1"))
+        self.assertLess(packet.index("before s1"), packet.index("Imported declarations"))
+        self.assertIn("s1", packet)
+        self.assertNotIn("Heartbeat profile of the reference proof", packet)
+        self.assertNotIn("Kickoff inventory manifest", packet)
+
     def test_kickoff_declaration_names_are_source_handles(self):
         inventory = {
             "source": [
@@ -307,12 +325,12 @@ class RankingTests(unittest.TestCase):
         by_name = {e["item"]["name"]: e for e in context.score_earlier(self.inventory())}
         self.assertEqual(by_name["N.noise0"]["relevance"], 0)  # N.Ctx is in most statements: no signal
 
-    def test_reasons_name_the_shared_constants_equations_and_goal_heads(self):
+    def test_reasons_name_shared_constants_equations_and_goal_heads(self):
         by_name = {e["item"]["name"]: e for e in context.score_earlier(self.inventory())}
-        self.assertIn("rw-ready", by_name["N.far_rw"]["reason"])
+        self.assertIn("equation overlap", by_name["N.far_rw"]["reason"])
         self.assertIn("mentions step", by_name["N.far_rw"]["reason"])
         self.assertIn("concludes Reach", by_name["N.far_mention"]["reason"])
-        self.assertIn("used by related lemmas", by_name["N.helper"]["reason"])
+        self.assertIn("used by nearby declarations", by_name["N.helper"]["reason"])
 
     def test_section_orders_by_score_keeps_handles_and_fits_the_character_budget(self):
         lines = context._earlier_section(self.inventory())
@@ -332,13 +350,10 @@ class RankingTests(unittest.TestCase):
 
     def test_zero_relevance_filler_is_capped_and_empty_context_is_safe(self):
         lines = context._earlier_section(self.inventory())
-        self.assertLessEqual(
-            sum(
-                "mentions" not in line and "concludes" not in line and "rw-ready" not in line and "related" not in line
-                for line in lines
-            ),
-            5,
-        )
+        zero_relevance = {
+            entry["item"]["name"] for entry in context.score_earlier(self.inventory()) if entry["relevance"] == 0
+        }
+        self.assertLessEqual(sum(any(f"decl:{name} " in line for name in zero_relevance) for line in lines), 5)
         self.assertEqual(context._earlier_section({}), [])
 
     def test_parse_context_keeps_target_and_relevance_fields(self):
@@ -378,7 +393,7 @@ class LibrarySectionTests(unittest.TestCase):
             "sig": sig or f"{name} : A.foo x -> B.bar x",
         }
 
-    def test_records_are_parsed_in_order_and_rendered_with_handles_and_shared_constants(self):
+    def test_records_are_parsed_in_order_and_rendered_with_handles_and_signatures(self):
         output = "\n".join(
             [
                 "ARENA_CTX " + json.dumps(self.record("L.best", 9)),
@@ -391,48 +406,35 @@ class LibrarySectionTests(unittest.TestCase):
         parsed = context.parse_context(output, 0, 1)
         self.assertEqual([r["name"] for r in parsed["library"]], ["L.best", "L.next"])
         lines = context._library_section(parsed)
-        self.assertTrue(lines[1].startswith("1. [decl:L.best · Mathlib.X · mentions foo, bar]"))
-        self.assertTrue(lines[2].startswith("2. [decl:L.next"))
+        self.assertTrue(lines[1].startswith("1. decl:L.best · Mathlib.X · L.best :"))
+        self.assertNotIn("mentions", lines[1])
+        self.assertTrue(lines[2].startswith("2. decl:L.next"))
 
-    def test_lemmas_the_reference_already_uses_are_skipped_and_empty_is_safe(self):
+    def test_ranked_library_keeps_names_already_used_by_the_reference(self):
         parsed = {
             "library": [self.record("L.used", 9), self.record("L.new", 8)],
             "source": [{"name": "L.used"}],
             "dependency": [],
         }
         lines = context._library_section(parsed)
-        self.assertFalse(any("L.used" in line for line in lines))
-        self.assertIn("1. [decl:L.new", lines[1])
+        self.assertIn("1. decl:L.used", lines[1])
+        self.assertIn("2. decl:L.new", lines[2])
         self.assertEqual(context._library_section({}), [])
-        self.assertEqual(
-            context._library_section({"library": [self.record("L.used", 9)], "source": [{"name": "L.used"}]}), []
-        )
 
-    def test_section_respects_line_and_character_budgets_and_is_shed_before_the_goals(self):
+    def test_section_keeps_top_sixty_and_is_shed_before_the_goals(self):
         parsed = {"library": [self.record(f"L.n{i}", 9 - i / 100, sig="L.n : " + "t " * 400) for i in range(60)]}
         lines = context._library_section(parsed)
-        self.assertLessEqual(len(lines) - 1, context.LIMITS["library"])
-        self.assertLessEqual(sum(len(line) + 1 for line in lines[1:]), context.LIMITS["library_budget"])
+        self.assertEqual(len(lines) - 1, context.LIMITS["library"])
         self.assertTrue(all(len(line) < context.LIMITS["library_chars"] + 120 for line in lines[1:]))
         parts = [
             ("Head", ["keep"]),
-            ("Goal before each top-level tactic of the reference proof", ["goal"]),
+            (context.template("packet/sections.titles.goals").strip(), ["goal"]),
             (context.LIBRARY_TITLE, lines),
             (context.EARLIER_TITLE, ["e " * 100] * 10),
         ]
         text = context._fit(parts, 3000)
         self.assertLessEqual(len(text), 3000)
         self.assertIn("goal", text)
-
-    def test_scoring_facts_state_the_formula_and_the_counter_without_row_specific_rates(self):
-        facts = context.SCORING_FACTS
-        for phrase in (
-            "(token_reduction% + heartbeat_reduction% + compatibility%) / 3",
-            "`_` can replace",
-            "tab counts",
-        ):
-            self.assertIn(phrase, facts)
-        self.assertNotIn("heartbeats per token", facts)
 
     def test_counter_facts_match_the_pinned_counter(self):
         from arena.engine import ROOT as root
@@ -449,7 +451,7 @@ class LibrarySectionTests(unittest.TestCase):
 
 
 class LocalSheddingTests(unittest.TestCase):
-    GOALS = "Goal before each top-level tactic of the reference proof"
+    GOALS = context.template("packet/sections.titles.goals").strip()
 
     def parts(self, locals_=76, goals=12, library=30):
         return [
@@ -473,29 +475,24 @@ class LocalSheddingTests(unittest.TestCase):
         self.assertEqual(self.count(text, "lib"), 30)
         self.assertEqual(self.count(text, "goal "), 12)
 
-    def test_locals_shed_to_floor_after_library_and_before_goals(self):
-        # Budget that fits the goals floor and the floor of locals but nothing more (goals above
-        # GOALS_FLOOR are shed before library lines, so start at the floor).
+    def test_all_locals_are_shed_before_any_library_line(self):
         parts = self.parts(goals=context.GOALS_FLOOR)
-        keep = [p for p in parts if p[0] not in (context.LOCAL_TITLE, context.LIBRARY_TITLE)]
-        floor_locals = (context.LOCAL_TITLE, parts[6][1][: context.LOCAL_FLOOR])
-        limit = len(context._fit([*keep, floor_locals], 10**7))
+        keep = [p for p in parts if p[0] != context.LOCAL_TITLE]
+        limit = len(context._fit(keep, 10**7))
         text = context._fit(parts, limit)
-        self.assertEqual(self.count(text, "lib"), 0)  # library shed first
-        self.assertEqual(1 + self.count(text, "loc"), context.LOCAL_FLOOR)  # header + 19 variable lines
-        self.assertEqual(self.count(text, "goal "), context.GOALS_FLOOR)  # goals untouched
+        self.assertEqual(self.count(text, "loc"), 0)
+        self.assertEqual(self.count(text, "lib"), 30)
+        self.assertEqual(self.count(text, "goal "), context.GOALS_FLOOR)
         for required in ("keep head", "ref ", "used ", "dep ", "env "):
             self.assertIn(required, text)
 
-    def test_goals_shed_only_after_locals_reach_the_floor(self):
+    def test_remaining_goals_shed_after_locals_and_library(self):
         parts = self.parts(goals=context.GOALS_FLOOR)
-        keep = [p for p in parts if p[0] != context.LIBRARY_TITLE]
-        keep[-1] = (context.LOCAL_TITLE, parts[6][1][: context.LOCAL_FLOOR])
-        # Tighter than the floors allow: goals must shrink, locals stay at the floor.
+        keep = [p for p in parts if p[0] not in (context.LIBRARY_TITLE, context.LOCAL_TITLE)]
         text = context._fit(parts, len(context._fit(keep, 10**7)) - 600)
         self.assertEqual(self.count(text, "lib"), 0)
-        self.assertEqual(1 + self.count(text, "loc"), context.LOCAL_FLOOR)
-        self.assertLess(self.count(text, "goal "), 12)
+        self.assertEqual(self.count(text, "loc"), 0)
+        self.assertLess(self.count(text, "goal "), context.GOALS_FLOOR)
         self.assertGreaterEqual(self.count(text, "goal "), 1)
 
     def test_required_sections_are_never_shed(self):
@@ -526,7 +523,7 @@ class TruncationTests(unittest.TestCase):
         big = [f"entry {i} " + "x" * 200 for i in range(40)]
         parts = [
             ("Head", ["keep me"]),
-            ("Goal before each top-level tactic of the reference proof", big[:10]),
+            (context.template("packet/sections.titles.goals").strip(), big[:10]),
             ("Signatures of constants the reference proof mentions", big[:20]),
             (context.EARLIER_TITLE, big),
         ]
@@ -591,16 +588,17 @@ class FixturePacketTests(unittest.TestCase):
         items = [item for item in context.lean_context(NAME)["source"] if item["name"] == "Core.updatedStates"]
         self.assertEqual({item["origin"] for item in items}, {"statement", "proof"})
 
-    def test_goal_trace_profile_and_exchange_rates_are_present(self):
-        self.assertIn("-- before proof line 11", self.text)
+    def test_goal_steps_prices_and_exchange_rates_are_present(self):
+        from arena.engine import problem, versions
+        from arena.scoring import exchange_rates
+
+        rates = exchange_rates(NAME, len(versions(problem(NAME))))
+        self.assertIn("before s1", self.text)
         self.assertIn("⊢ ∃ σ₁", self.text)
-        self.assertIn("Heartbeat profile of the reference proof", self.text)
-        self.assertIn("Top self costs", self.text)
-        self.assertIn("Top-ten starting lines by score-equivalent baseline cost", self.text)
-        self.assertIn("tactic spans: proof", self.text)
-        self.assertIn("1 token = 0.149 pt", self.text)
-        self.assertIn("100 heartbeats = 0.784 pt", self.text)
-        self.assertIn("one lost toolchain version = 11.11 pt", self.text)
+        self.assertIn("step  lines  tokens", self.text)
+        self.assertIn(str(rates["points_per_token"]), self.text)
+        self.assertIn(str(rates["points_per_100_heartbeats"]), self.text)
+        self.assertIn(str(rates["points_per_lost_version"]), self.text)
 
     def test_packet_is_deterministic_bounded_and_strategy_free(self):
         self.assertEqual(self.text, context.render_packet(NAME))
@@ -658,8 +656,8 @@ class PhyslibInventoryTests(unittest.TestCase):
         self.assertLess(len(helpers), len({item["name"] for item in self.context["dependency"]}) / 2)
         self.assertIn(f"{len(helpers)} helpers shown", self.packet)
         self.assertLessEqual(len(self.packet), context.MAX_PACKET_CHARS + 1)
-        self.assertIn("Source names:", self.packet)
-        self.assertIn("Extra direct theorem/lemma dependencies:", self.packet)
+        self.assertIn(context.template("packet/sections.titles.source").strip(), self.packet)
+        self.assertIn(context.template("packet/sections.titles.dependencies").strip(), self.packet)
 
     def test_the_library_lemma_that_decides_the_row_is_ranked_in_the_packet(self):
         winner = "Continuous.integral_pos_of_hasCompactSupport_nonneg_nonzero"

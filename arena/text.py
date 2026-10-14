@@ -95,7 +95,7 @@ def _load() -> tuple[dict[str, str], dict[str, int | float]]:
     }
     numbers_path = directory / "numbers.yaml"
     for path in directory.rglob("*.yaml"):
-        if path == numbers_path or path.name == "shown.yaml":
+        if path == numbers_path or path.name in {"shown.yaml", "rules.yaml"}:
             continue
         prefix = path.relative_to(directory).with_suffix("").as_posix()
         templates.update(

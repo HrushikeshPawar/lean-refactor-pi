@@ -1,7 +1,7 @@
-description: "Read pinned source, node prices, a diff, an outline or the graph map."
+description: "Return pinned source or a node's prices, diff, outline, or graph map."
 params:
-  handle: "Declaration handle returned by search."
-  node: "Existing node handle."
-  hole: "Existing hole handle."
-  view: "View source, prices, diff, outline or map."
-  against: "Node to compare when reading a diff."
+  handle: "Declaration identifier, optionally with a source line range."
+  node: "Node identifier for node views."
+  hole: "Hole identifier for its goal view."
+  view: "Choose source, prices, diff, outline, or map."
+  against: "Comparison node for the diff view."

@@ -1,8 +1,0 @@
-best_proxy: "best proxy {proxy} ({candidate})"
-no_scored_proof: "no scored proof"
-original_tag: " (original's route)"
-credited_tag: " (credited)"
-not_credited_tag: " (not credited)"
-state_count: " · {depth} goal state{plural}"
-row: "{route}{tag} · {attempts} attempt{plural}{states} · {best}"
-none: "none"

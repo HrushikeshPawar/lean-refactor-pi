@@ -1,5 +1,5 @@
-description: "Search the pinned declaration index by name, type or text."
+description: "Search declarations visible from this theorem's imports. Return handles, signatures, and locations."
 params:
-  queries: "One or more search strings."
-  kind: "Search by name, type or text."
-  after: "Prefix used for name completion."
+  queries: "Search strings, returned as separate result items."
+  kind: "Match declaration names, types, or source text."
+  after: "Name prefix for completion results."

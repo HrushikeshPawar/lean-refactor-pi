@@ -1,3 +1,6 @@
+original_heading: "step  lines  tokens  self_hb  incl_hb  versions  pts_if_gone  text"
+legend: "self_hb is this step's elaboration cost; incl_hb includes nested work; versions are passing/listed; pts_if_gone is an upper bound on points from removing this step."
+original_row: "{step}  {lines}  {tokens}  {self_hb}  {incl_hb}  {versions}  {pts_if_gone}  {text}"
 row: "{step}  {lines}  {tokens}  {self_hb}  {incl_hb}  {pts_if_gone}  {text}"
 total: "total  {tokens}  {heartbeats}  {versions}  proxy {proxy}"
 rates: "rates: 1 token = {pts_token} pts · 1K hb = {pts_hb} pts · 1 version = {pts_version} pts"

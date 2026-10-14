@@ -32,10 +32,7 @@ from arena.traces import langfuse_environment, langfuse_extension, plugin_proble
 DEFAULT_LIMIT_USD = 0.5
 MAX_LIMIT_USD = 2.0  # keep equal to MAX_LIMIT_USD in packages/arena-pi/extensions/spend.ts
 
-SYSTEM_PROMPT = (
-    "You are optimizing one Lean 4 proof for the Lean Refactor Arena. Only the listed tools are "
-    "available. Keep replies short; spend effort on proofs, not prose."
-)
+SYSTEM_PROMPT = text.render("messages/run.system_prompt")
 
 
 # Every per-model fact (prices, windows, output limits, compaction, timeout, thinking levels) lives in models.yaml.

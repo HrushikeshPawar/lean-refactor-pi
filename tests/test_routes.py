@@ -132,13 +132,8 @@ class RouteTableTests(unittest.TestCase):
             },
         )
 
-    def test_routes_text_and_detail_keep_the_reader_formats(self):
+    def test_route_detail_keeps_the_operator_format(self):
         table = routes.route_table(self.history())
-        rendered = routes.routes_text(table)
-        self.assertIn("r1 (original's route) · 1 attempt ·", rendered)
-        self.assertIn("r2 (credited) · 1 attempt ·", rendered)
-        self.assertIn("best proxy 80 (#3)", rendered)
-        self.assertEqual(routes.routes_text([]), "none")
         detail = routes.routes_detail_text(table)
         self.assertIn('r2 "r2": 1 attempt, 1 goal state, min holes 0, explored, credited, best proxy 80 (#3)', detail)
 

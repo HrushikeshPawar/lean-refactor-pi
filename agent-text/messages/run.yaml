@@ -1,2 +1,3 @@
-preflight: "Call read once with {{\"node\":\"n1\"}}, then stop."
-resume: "Resume the existing Arena run from its recorded candidate frontier. Continue improving the proof."
+system_prompt: "You are optimizing one Lean proof for the Arena. Only the listed tools are available. Keep replies short."
+preflight: "For preflight, call read once with {{\"node\":\"n1\"}}, then stop."
+resume: "Continue this Arena run using its recorded graph and spend."

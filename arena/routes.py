@@ -11,8 +11,6 @@ import hashlib
 import re
 from difflib import SequenceMatcher
 
-from arena import text as agent_text
-
 ROUTE_DEPTH = 3  # distinct goal states that make a route explored
 STALE_STREAK = 5  # consecutive attempts leaving an already seen goal state
 MAX_SKELETON = 24
@@ -264,46 +262,6 @@ def progress(table: list[dict]) -> dict:
         "new_state_attempts": new,
         "new_state_share": round(new / attempts, 3) if attempts else None,
     }
-
-
-def routes_text(table: list[dict]) -> str:
-    """One line for the model: neutral facts per route (id, original or credited, attempts, goal states, best proxy).
-    The label is for humans and never appears here, so no route is named or framed."""
-    parts = []
-    for row in table:
-        if not row["attempts"] and not row["original"]:
-            continue
-        best = (
-            agent_text.render("replies/routes.best_proxy", proxy=row["best_proxy"], candidate=row["best_candidate"])
-            if row["best_proxy"] is not None
-            else agent_text.render("replies/routes.no_scored_proof")
-        )
-        tag = (
-            agent_text.render("replies/routes.original_tag")
-            if row["original"]
-            else agent_text.render("replies/routes.credited_tag")
-            if row.get("credited")
-            else agent_text.render("replies/routes.not_credited_tag")
-            if "credited" in row or "depth" in row
-            else ""
-        )
-        states = (
-            agent_text.render("replies/routes.state_count", depth=row["depth"], plural="" if row["depth"] == 1 else "s")
-            if row.get("depth") is not None
-            else ""
-        )
-        parts.append(
-            agent_text.render(
-                "replies/routes.row",
-                route=row["route"],
-                tag=tag,
-                attempts=row["attempts"],
-                plural="" if row["attempts"] == 1 else "s",
-                states=states,
-                best=best,
-            )
-        )
-    return "; ".join(parts) if parts else agent_text.render("replies/routes.none")
 
 
 def routes_detail_text(table: list[dict]) -> str:

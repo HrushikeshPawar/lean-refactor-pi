@@ -1,4 +1,6 @@
 finish_remaining_pct: 10
+percent_scale: 100
+rate_heartbeat_units: 100
 original_candidate: 1
 max_failures: 3
 max_drafts: 4
@@ -12,3 +14,27 @@ source_lines_per_call: 400
 find_files_per_query: 30
 search_hits_default: 10
 search_hits_max: 30
+packet_max_chars: 40000
+packet_goals: 40
+packet_goal_chars: 700
+packet_goal_floor: 8
+packet_used: 5
+packet_used_chars: 320
+packet_earlier: 60
+packet_earlier_budget: 12000
+packet_earlier_chars: 240
+packet_earlier_filler: 5
+packet_types: 8
+packet_type_chars: 700
+packet_scope: 25
+packet_scope_chars: 600
+packet_library: 60
+packet_library_budget: 7000
+packet_library_chars: 340
+packet_local_type_chars: 320
+memory_library_lines: 15
+memory_read_entries: 30
+budget:
+  static_words: 599
+  packet_words: 214
+  reply_words: 40

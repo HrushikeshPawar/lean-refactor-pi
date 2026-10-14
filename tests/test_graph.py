@@ -132,8 +132,11 @@ class ArchiveTests(unittest.TestCase):
             ]
         )
         fired = {"root": "root", "count": 12}
-        self.assertEqual(graph_module.stall_target(graph, fired, "best_other_cell").node.proof_id, "x")
-        self.assertEqual(graph_module.stall_target(graph, fired, "least_visited").node.proof_id, "z")
+        best = graph_module.stall_target(graph, fired, "best_other_cell")
+        least = graph_module.stall_target(graph, fired, "least_visited")
+        assert best is not None and least is not None
+        self.assertEqual(best.node.proof_id, "x")
+        self.assertEqual(least.node.proof_id, "z")
         self.assertIsNone(graph_module.stall_target(graph, fired, "map_only"))
         with self.assertRaises(ValueError):
             graph_module.stall_target(graph, fired, "unknown")
@@ -145,8 +148,11 @@ class ArchiveTests(unittest.TestCase):
                 ("y", "r3", 30, "closed", None),
             ]
         )
-        self.assertEqual(graph_module.stall_target(tied, fired, "best_other_cell").letter, "B")
-        self.assertEqual(graph_module.stall_target(tied, fired, "least_visited").letter, "B")
+        tied_best = graph_module.stall_target(tied, fired, "best_other_cell")
+        tied_least = graph_module.stall_target(tied, fired, "least_visited")
+        assert tied_best is not None and tied_least is not None
+        self.assertEqual(tied_best.letter, "B")
+        self.assertEqual(tied_least.letter, "B")
 
         only_lineage, _ = self.project([("root", "r1", 100, "closed", None), ("child", "r1", 90, "closed", "root")])
         self.assertIsNone(graph_module.stall_target(only_lineage, fired, "best_other_cell"))
@@ -812,8 +818,10 @@ class WorkerTests(unittest.TestCase):
             a = campaign.record_evaluation("T", "test", left, "full", [root], materialize_live=False)["candidate_id"]
             b = campaign.record_evaluation("T", "test", right, "full", [root], materialize_live=False)["candidate_id"]
             first = campaign.merge_once("test")
+            assert first is not None
             self.assertEqual(first["reason"], "no_independent_edits")
             outcome = campaign.merge_once("test")
+            assert outcome is not None
             self.assertEqual(outcome["parents"], sorted([a, b]))
             self.assertTrue(outcome["full_passed"])
             child = next(n for n in campaign.graph_state("test")["nodes"] if n["id"] == outcome["candidate_id"])
@@ -870,7 +878,8 @@ class PacketTests(unittest.TestCase):
     def test_packet_has_statement_and_protocol_but_no_strategy(self):
         text = campaign.packet("Core.InitsUpdatesComm")
         self.assertIn("theorem InitsUpdatesComm", text)
-        self.assertIn("Survey the supplied references", text)
+        self.assertIn("Original proof: node n1", text)
+        self.assertIn("step  lines  tokens", text)
         self.assertNotIn("at least three", text)
         self.assertNotIn("witness before versus after induction", text)
         self.assertNotIn("arena-candidate-126", text)
@@ -939,9 +948,11 @@ class ViewerTests(unittest.TestCase):
             "nodes": [{"id": "ref", "origin": "reference"}, {"id": "a", "origin": "model"}],
         }
         point = baseline_point(payload)
+        assert point is not None
         self.assertEqual(
             (point["number"], point["candidate_id"], point["tokens"], point["local_proxy"]), (0, "ref", 224, 33.33)
         )
+        assert isinstance(point["heartbeat"], (int, float))
         self.assertGreater(point["heartbeat"], 0)
         self.assertIsNone(baseline_point({"theorem": "Core.InitsUpdatesComm", "nodes": []}))
 
@@ -966,6 +977,7 @@ class ViewerTests(unittest.TestCase):
         give_reference_its_numbers(payload)
         ref, other = payload["nodes"]
         self.assertEqual((ref["status"], ref["tokens"], ref["local_proxy"]), ("full", 224, 33.33))
+        assert isinstance(ref["heartbeat"], (int, float))
         self.assertGreater(ref["heartbeat"], 0)
         self.assertIsNone(other["tokens"])
 

@@ -16,32 +16,48 @@ import math
 import re
 from pathlib import Path
 
-from arena.engine import ROOT, candidate_file, is_standalone, measure_version, problem, run_lean, versions
+from arena.engine import (
+    ROOT,
+    candidate_file,
+    is_standalone,
+    measure_version,
+    problem,
+    run_lean,
+    versions,
+)
+from arena.prices import fmt_hb, snippet_tokens, step_table
+from arena.prices import rates as price_rates
 from arena.profile import MAX_DEPTH, heartbeat_floor, profile
 from arena.scoring import exchange_rates
+from arena.scoring import reference as scoring_reference
+from arena.steps import split_steps
+from arena.text import numbers, template
 from arena.text import render as render_text
-from arena.text import template
 
 LEAN_FILE = Path(__file__).with_name("lean") / "context.lean"
 _RECORD = re.compile(r"^ARENA_CTX (\{.*\})$", re.M)
-MAX_PACKET_CHARS = 40_000
+MAX_PACKET_CHARS = int(numbers()["packet_max_chars"])
 CONTEXT_TIMEOUT = 360  # seconds; the library scan adds about 20-40 s to the largest environments
 LIMITS = {
-    "goals": 40,
-    "goal_chars": 700,
-    "used": 5,
-    "used_chars": 320,
-    "earlier": 60,
-    "earlier_budget": 12_000,
-    "earlier_chars": 240,
-    "types": 8,
-    "type_chars": 700,
-    "profile_entries": 24,
-    "scope": 25,
-    "scope_chars": 600,
-    "library": 20,
-    "library_budget": 7_000,
-    "library_chars": 340,
+    name: int(numbers()[f"packet_{name}"])
+    for name in (
+        "goals",
+        "goal_chars",
+        "used",
+        "used_chars",
+        "earlier",
+        "earlier_budget",
+        "earlier_chars",
+        "earlier_filler",
+        "types",
+        "type_chars",
+        "scope",
+        "scope_chars",
+        "library",
+        "library_budget",
+        "library_chars",
+        "local_type_chars",
+    )
 }
 REQUIRED_SECTIONS = (
     template("packet/sections.required.environment").strip(),
@@ -246,28 +262,6 @@ def _one_line(text: str) -> str:
     return " ".join(text.split())
 
 
-SCORING_FACTS = template("packet/scoring").strip()
-
-
-def _rates(name: str, total_versions: int) -> str:
-    rates = exchange_rates(name, total_versions)
-    return render_text(
-        "packet/rates",
-        **{
-            key: rates[key]
-            for key in (
-                "points_per_token",
-                "heartbeats_per_token",
-                "points_per_100_heartbeats",
-                "points_per_lost_version",
-                "tokens_per_lost_version",
-                "reference_tokens",
-                "reference_heartbeats",
-            )
-        },
-    ).strip()
-
-
 _SCOPE = re.compile(
     r"^(?:@\[[^\]]*\]\s*)?(?:public\s+|private\s+)?(?:noncomputable\s+)?"
     r"(namespace|section|end|open|variable|universe|include|omit)\b(.*)$"
@@ -362,16 +356,19 @@ def _types_section(context: dict) -> list[str]:
     return lines
 
 
-def _goal_section(context: dict) -> list[str]:
+def _goal_section(context: dict, proof: str) -> list[str]:
     lines = []
-    for item in context.get("goal", [])[: LIMITS["goals"]]:
-        span = (
-            str(item["proof_line"])
-            if item["proof_line"] == item["end_proof_line"]
-            else f"{item['proof_line']}-{item['end_proof_line']}"
-        )
+    goals = {item["proof_line"]: item for item in context.get("goal", [])}
+    for step in split_steps(proof)[: LIMITS["goals"]]:
+        item = goals.get(step.first_line)
         lines.append(
-            render_text("packet/sections.fixed.goal", span=span, text=_clip(item["text"], LIMITS["goal_chars"]))
+            render_text(
+                "packet/sections.fixed.goal",
+                step=step.id,
+                text=_clip(item["text"], LIMITS["goal_chars"])
+                if item
+                else template("packet/sections.fixed.goal_unavailable").strip(),
+            )
         )
     return lines
 
@@ -500,19 +497,13 @@ def _local_section(context: dict) -> list[str]:
         render_text(
             "packet/sections.fixed.local_line",
             name=name,
-            type=_clip(_one_line(ty), 320),
+            type=_clip(_one_line(ty), LIMITS["local_type_chars"]),
             scope=scope,
             lines=",".join(map(str, sorted(locations))),
         )
         for (name, ty, scope), locations in sorted(scopes.items())
     )
     return lines
-
-
-def _signature_counts(items: list[dict], root: str) -> tuple[int, int]:
-    """(previewed signatures shown, signatures unavailable) over distinct names, as the sections report."""
-    unique = list({item["name"]: item for item in items}.values())
-    return sum(bool(i.get("sig")) for i in _preview(unique, root)), sum(not bool(i.get("sig")) for i in unique)
 
 
 def _imports(row: dict) -> list[str]:
@@ -669,7 +660,7 @@ def _earlier_section(context: dict) -> list[str]:
         item = entry["item"]
         if not entry["relevance"]:
             filler += 1
-            if filler > 5:
+            if filler > LIMITS["earlier_filler"]:
                 continue
         tag = render_text("packet/sections.fixed.earlier_reason", text=entry["reason"]) if entry["reason"] else ""
         line = render_text(
@@ -688,120 +679,26 @@ def _earlier_section(context: dict) -> list[str]:
 
 
 LOCAL_TITLE = template("packet/sections.titles.locals").strip()
-LOCAL_FLOOR = 20  # local-variable lines kept (header included) before the rest of the packet is shed
-GOALS_FLOOR = 8  # goals kept before library lines are shed when the packet is over budget
+GOALS_FLOOR = int(numbers()["packet_goal_floor"])
 LIBRARY_TITLE = template("packet/sections.titles.library").strip()
 
 
 def _library_section(context: dict) -> list[str]:
-    """Imported theorems ranked by the wrapper (rare constants shared with the statement, the goals and the
-    lemmas the source names), minus those the reference proof already uses; fixed line and character budget."""
-    known = {item["name"] for item in context.get("source", [])} | {
-        item["name"] for item in context.get("dependency", [])
-    }
-    records = [item for item in context.get("library", []) if item["name"] not in known and item.get("sig")]
+    """The wrapper's ranked imported declarations, with signatures."""
+    records = [item for item in context.get("library", []) if item.get("sig")]
     if not records:
         return []
     lines = [template("packet/library").strip()]
-    used = 0
     for rank, item in enumerate(records[: LIMITS["library"]], 1):
-        shared = ", ".join(_short(name) for name in item.get("shared", [])[:3])
         line = render_text(
             "packet/sections.fixed.library_line",
             rank=rank,
             name=item["name"],
             module=item["module"],
-            mentions=" · mentions " + shared if shared else "",
             signature=_clip(_readable(_one_line(item["sig"])), LIMITS["library_chars"]),
         )
-        if used + len(line) + 1 > LIMITS["library_budget"]:
-            break
         lines.append(line)
-        used += len(line) + 1
     return lines if len(lines) > 1 else []
-
-
-def _profile_section(prof: dict) -> list[str]:
-    if prof.get("error"):
-        return [render_text("packet/sections.fixed.profile_missing", error=_clip(prof["error"], 160))]
-    rows = []
-    kept = [e for e in prof["entries"] if e["share_pct"] >= 1.5 or e["depth"] == 0]
-    for entry in kept[: LIMITS["profile_entries"]]:
-        file_span = (
-            str(entry["file_line"])
-            if entry["end_file_line"] == entry["file_line"]
-            else f"{entry['file_line']}-{entry['end_file_line']}"
-        )
-        rows.append(
-            render_text(
-                "packet/sections.fixed.profile_row",
-                lines=entry["lines"],
-                file_span=file_span,
-                heartbeats=entry["hb"],
-                self_heartbeats=entry["self_hb"],
-                share=entry["share_pct"],
-                indent="  " * entry["depth"],
-                text=_clip(entry["text"], 60),
-            )
-        )
-    if not prof.get("token_attribution_available"):
-        hotspots = [template("packet/sections.fixed.profile_unavailable").strip()]
-    else:
-        hotspots = []
-        for item in prof["hotspots"]:
-            spans = ", ".join(
-                render_text(
-                    "packet/sections.fixed.profile_span",
-                    proof_start=span["proof_line"],
-                    proof_end=span["end_proof_line"],
-                    file_start=span["file_line"],
-                    file_end=span["end_file_line"],
-                    depth=span["depth"],
-                )
-                for span in item["tactic_spans"]
-            )
-            hotspots.append(
-                render_text(
-                    "packet/sections.fixed.profile_hotspot",
-                    proof_start=item["proof_line"],
-                    proof_end=item["end_proof_line"],
-                    file_start=item["file_line"],
-                    file_end=item["end_file_line"],
-                    spans=_clip(spans, 180),
-                    heartbeats=item["self_hb"],
-                    tokens=item["tokens"],
-                    points=item["baseline_cost_points"],
-                )
-            )
-    top = ", ".join(
-        render_text(
-            "packet/sections.fixed.profile_cost",
-            lines=t["lines"],
-            heartbeats=t["self_hb"],
-            share=t["cumulative_share_pct"],
-        )
-        for t in prof["top_self_cost"]
-    )
-    measured = prof.get("measured_total")
-    profiled = prof.get("profiled_total")
-    coverage = round(100 * float(profiled) / float(measured), 1) if measured and profiled is not None else None
-    return (
-        render_text(
-            "packet/profile",
-            granularity=prof["granularity"],
-            entries="\n".join(rows),
-            hotspots="\n".join([render_text("packet/sections.fixed.profile_top"), *hotspots]),
-            costs=top,
-            measured=measured,
-            profiled=profiled,
-            coverage=coverage,
-            floor=prof.get("statement_floor_hb"),
-            remainder=prof.get("unattributed"),
-            note=("\n" + _clip(prof["note"], 180)) if prof.get("note") else "",
-        )
-        .strip()
-        .splitlines()
-    )
 
 
 def _join_sections(sections: list[tuple[str, list[str]]]) -> str:
@@ -812,11 +709,9 @@ def _fit_sections(parts: list[tuple[str, list[str]]], limit: int) -> list[tuple[
     """Shed entries from the end of the lowest-priority sections."""
     sections = [(title, list(body)) for title, body in parts]
 
-    # Shed order: earlier-lemma lines, then goals beyond the first few (later goals mostly repeat the same
-    # hypotheses), then library lines, then local-variable lines past a floor (every hypothesis already
-    # appears in the goals), then the remaining goals down to one.
+    # Earlier declarations, excess goals, all locals, library entries, then remaining goals.
     goals = template("packet/sections.titles.goals").strip()
-    stages = [(EARLIER_TITLE, 0), (goals, GOALS_FLOOR), (LIBRARY_TITLE, 0), (LOCAL_TITLE, LOCAL_FLOOR), (goals, 1)]
+    stages = [(EARLIER_TITLE, 0), (goals, GOALS_FLOOR), (LOCAL_TITLE, 0), (LIBRARY_TITLE, 0), (goals, 1)]
     while len(_join_sections(sections)) > limit:
         for title, floor in stages:
             target = next((body for t, body in sections if t.startswith(title)), None)
@@ -834,24 +729,83 @@ def _fit(parts: list[tuple[str, list[str]]], limit: int) -> str:
     return _join_sections(_fit_sections(parts, limit))
 
 
+def _reference_price_table(table: dict) -> list[str]:
+    total = table["total"]
+    lines = [template("packet/price-table.original_heading").strip(), template("packet/price-table.legend").strip()]
+    lines.extend(
+        render_text(
+            "packet/price-table.original_row",
+            step=row["id"],
+            lines=f"{row['first_line']}-{row['last_line']}",
+            tokens=row["tokens"],
+            self_hb=fmt_hb(row["self_hb"]),
+            incl_hb=fmt_hb(row["incl_hb"]),
+            versions=total["versions"],
+            pts_if_gone=f"{row['pts_if_gone']:+.2f}",
+            text=row["text"],
+        )
+        for row in table["rows"]
+    )
+    lines.append(
+        render_text(
+            "packet/price-table.total",
+            tokens=total["tokens"],
+            heartbeats=fmt_hb(total["heartbeats"]),
+            versions=total["versions"],
+            proxy=f"{total['proxy']:.2f}",
+        )
+    )
+    rates = table["rates"]
+    lines.append(
+        render_text(
+            "packet/price-table.rates",
+            pts_token=f"{rates['points_per_token']:.3f}",
+            pts_hb=f"{rates['points_per_1k_hb']:.3f}",
+            pts_version=f"{rates['points_per_version']:.2f}",
+        )
+    )
+    return lines
+
+
 def packet_sections(name: str, *, cache_only: bool = False) -> list[tuple[str, str]]:
     row = problem(name)
     targets = versions(row)
     context = cached_context(name) if cache_only else lean_context(name)
     if cache_only and not context:
-        raise ValueError(f"Cached context is unavailable for {name}")
+        raise ValueError(f"Cached context is unavailable for {name}")  # not-model-facing: CLI cache refusal.
     context["root"] = "" if is_standalone(row) else row["file_path"].split("/")[0]
     prof = reference_profile(name, cache_only=cache_only)
     if cache_only and not prof:
-        raise ValueError(f"Cached reference profile is unavailable for {name}")
+        raise ValueError(f"Cached reference profile is unavailable for {name}")  # not-model-facing: CLI cache refusal.
     pins = "; ".join(
         render_text("packet/sections.fixed.pin", version=version, commit=commit) for version, commit in targets
     )
-    task = (
-        render_text("packet/task", name=name, rates=_rates(name, len(targets)), scoring=SCORING_FACTS)
+    rates = exchange_rates(name, len(targets))
+    task = render_text("packet/task", name=name, statement=row["statement"]).strip().splitlines()
+    scoring = (
+        render_text(
+            "packet/scoring",
+            points_per_token=rates["points_per_token"],
+            points_per_100_heartbeats=rates["points_per_100_heartbeats"],
+            points_per_lost_version=rates["points_per_lost_version"],
+            reference_tokens=rates["reference_tokens"],
+            reference_heartbeats=rates["reference_heartbeats"],
+            example_short=snippet_tokens("exact foo"),
+            example_pair=snippet_tokens("⟨a, b⟩"),
+        )
         .strip()
-        .split("\n\n")
+        .splitlines()
     )
+    table = step_table(
+        row["src"],
+        prof,
+        price_rates(*scoring_reference(name), len(targets)),
+        row["proof_length"],
+        prof.get("measured_total"),
+        f"{len(targets)}/{len(targets)}",
+    )
+    table["total"]["proxy"] = round(100 / 3, 2)
+    price_lines = _reference_price_table(table)
     note = (
         ""
         if not context.get("error")
@@ -859,7 +813,7 @@ def packet_sections(name: str, *, cache_only: bool = False) -> list[tuple[str, s
     )
     titles = {
         key: template(f"packet/sections.titles.{key}").strip()
-        for key in ("pinned", "types", "scope", "profile", "goals", "source", "dependencies", "inventory")
+        for key in ("pinned", "types", "scope", "goals", "source", "dependencies")
     }
     source_line = (
         render_text("packet/sections.fixed.standalone_source", source=row["source"])
@@ -874,24 +828,26 @@ def packet_sections(name: str, *, cache_only: bool = False) -> list[tuple[str, s
     )
     parts: list[tuple[str, list[str]]] = [
         ("", task),
+        ("", scoring),
         (
             titles["pinned"],
             [
                 source_line,
                 render_text("packet/sections.fixed.pins", pins=pins),
-                render_text("packet/sections.fixed.original"),
                 render_text("packet/sections.fixed.imports", imports=", ".join(_imports(row)) or "(none reported)"),
             ],
         ),
-        (titles["types"], _types_section(context)),
         (titles["scope"], _scope_section(row)),
-        (render_text("packet/sections.titles.reference", count=row["proof_length"]), [f"```lean\n{row['src']}\n```"]),
-        (titles["profile"], _profile_section(prof)),
-        (titles["goals"], _goal_section(context)),
+        (
+            render_text("packet/sections.titles.reference", count=row["proof_length"]),
+            [f"```lean\n{row['src']}\n```", *price_lines],
+        ),
+        (titles["goals"], _goal_section(context, row["src"])),
+        (LIBRARY_TITLE, _library_section(context)),
+        (titles["types"], _types_section(context)),
         (titles["source"], _used_section(context)),
         (titles["dependencies"], _dependency_section(context)),
         (LOCAL_TITLE, _local_section(context)),
-        (LIBRARY_TITLE, _library_section(context)),
         (EARLIER_TITLE, _earlier_section(context)),
     ]
     if note:
@@ -902,30 +858,14 @@ def packet_sections(name: str, *, cache_only: bool = False) -> list[tuple[str, s
         raise ValueError(
             render_text("packet/sections.fixed.packet_not_certifiable", reasons="; ".join(result["reasons"]))
         )
-    root = context.get("root", "")
-    helpers, tags, named = _extra_dependencies(context)
-    parts.append(
-        (
-            titles["inventory"],
-            render_text(
-                "packet/inventory",
-                occurrences=len(context.get("source", [])),
-                distinct=len(_source_names(context)),
-                source_shown=_signature_counts(list(_source_names(context).values()), root)[0],
-                source_unavailable=_signature_counts(list(_source_names(context).values()), root)[1],
-                helpers=len(helpers),
-                counts=", ".join(f"{tag} {n}" for tag, n in tags.items()),
-                named=named,
-                helper_shown=_signature_counts(helpers, root)[0],
-                helper_unavailable=_signature_counts(helpers, root)[1],
-                sections=", ".join(name for name, state in manifest["sections"].items() if state["present"]),
-            )
-            .strip()
-            .splitlines(),
-        )
-    )
     fitted = _fit_sections(parts, MAX_PACKET_CHARS)
-    return [(title, (f"{title}\n" if title else "") + "\n".join(body)) for title, body in fitted]
+    return [
+        (
+            title or ("Task" if index == 0 else "Scoring" if index == 1 else "Notice"),
+            (f"{title}\n" if title else "") + "\n".join(body),
+        )
+        for index, (title, body) in enumerate(fitted)
+    ]
 
 
 def render_packet(name: str, *, cache_only: bool = False) -> str:

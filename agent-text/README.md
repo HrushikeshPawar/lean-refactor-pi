@@ -31,21 +31,21 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `messages/arena-line.only_spend` | 2 | Agent messages and notices | when the matching event occurs |
 | `messages/assembly.assembled` | 13 | Agent messages and notices | when the matching event occurs |
 | `messages/assembly.assembly_failed` | 6 | Agent messages and notices | when the matching event occurs |
-| `messages/compaction-memory.allowance` | 7 | Agent messages and notices | when the matching event occurs |
-| `messages/compaction-memory.best_verified` | 4 | Agent messages and notices | when the matching event occurs |
-| `messages/compaction-memory.blocker` | 2 | Agent messages and notices | when the matching event occurs |
-| `messages/compaction-memory.failure` | 2 | Agent messages and notices | when the matching event occurs |
-| `messages/compaction-memory.failures` | 3 | Agent messages and notices | when the matching event occurs |
-| `messages/compaction-memory.header` | 24 | Agent messages and notices | when the matching event occurs |
-| `messages/compaction-memory.leading_unverified` | 4 | Agent messages and notices | when the matching event occurs |
-| `messages/compaction-memory.metrics_estimated` | 8 | Agent messages and notices | when the matching event occurs |
-| `messages/compaction-memory.metrics_none` | 2 | Agent messages and notices | when the matching event occurs |
-| `messages/compaction-memory.metrics_verified` | 8 | Agent messages and notices | when the matching event occurs |
-| `messages/compaction-memory.none_verified` | 6 | Agent messages and notices | when the matching event occurs |
-| `messages/compaction-memory.work` | 7 | Agent messages and notices | when the matching event occurs |
+| `messages/compaction-memory.best` | 7 | Agent messages and notices | when the matching event occurs |
+| `messages/compaction-memory.compaction_header` | 7 | Agent messages and notices | when the matching event occurs |
+| `messages/compaction-memory.hole` | 2 | Agent messages and notices | when the matching event occurs |
+| `messages/compaction-memory.holes_heading` | 2 | Agent messages and notices | when the matching event occurs |
+| `messages/compaction-memory.library` | 5 | Agent messages and notices | when the matching event occurs |
+| `messages/compaction-memory.library_heading` | 5 | Agent messages and notices | when the matching event occurs |
+| `messages/compaction-memory.map_heading` | 1 | Agent messages and notices | when the matching event occurs |
+| `messages/compaction-memory.no_best` | 4 | Agent messages and notices | when the matching event occurs |
+| `messages/compaction-memory.price` | 8 | Agent messages and notices | when the matching event occurs |
+| `messages/compaction-memory.read` | 3 | Agent messages and notices | when the matching event occurs |
+| `messages/compaction-memory.read_heading` | 3 | Agent messages and notices | when the matching event occurs |
+| `messages/compaction-memory.seed_header` | 6 | Agent messages and notices | when the matching event occurs |
 | `messages/continuation.cause_clause` | 2 | Agent messages and notices | when the matching event occurs |
-| `messages/continuation.request_failed` | 7 | Agent messages and notices | when the matching event occurs |
-| `messages/continuation.turn_ended_with_text` | 13 | Agent messages and notices | when the matching event occurs |
+| `messages/continuation.request_failed` | 4 | Agent messages and notices | when the matching event occurs |
+| `messages/continuation.turn_ended_with_text` | 10 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.ambiguous_symbol` | 4 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.arguments_missing` | 9 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.cold_session_unavailable` | 4 | Agent messages and notices | when the matching event occurs |
@@ -119,51 +119,45 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `messages/notices.closest_tool` | 4 | Agent messages and notices | when the matching event occurs |
 | `messages/notices.profile_degraded` | 7 | Agent messages and notices | when the matching event occurs |
 | `messages/phase.stall_focus` | 12 | Agent messages and notices | when the matching event occurs |
-| `messages/refusals.allowance` | 21 | Agent messages and notices | when the matching event occurs |
+| `messages/refusals.allowance` | 11 | Agent messages and notices | when the matching event occurs |
 | `messages/refusals.axes` | 26 | Agent messages and notices | when the matching event occurs |
-| `messages/run.preflight` | 7 | Agent messages and notices | when the matching event occurs |
-| `messages/run.resume` | 14 | Agent messages and notices | when the matching event occurs |
+| `messages/run.preflight` | 9 | Agent messages and notices | when the matching event occurs |
+| `messages/run.resume` | 10 | Agent messages and notices | when the matching event occurs |
+| `messages/run.system_prompt` | 18 | Agent messages and notices | when the matching event occurs |
 | `messages/salvage.salvaged` | 8 | Agent messages and notices | when the matching event occurs |
 | `messages/trim.repeated` | 7 | Agent messages and notices | when a repeat is shortened |
 | `messages/trim.result_stub` | 14 | Agent messages and notices | when a repeat is shortened |
-| `packet/inventory` | 34 | Initial theorem packet | once per run |
-| `packet/library` | 35 | Initial theorem packet | once per run |
+| `packet/library` | 7 | Initial theorem packet | once per run |
 | `packet/price-table` | 7 | Prices action replies | when the table is requested |
+| `packet/price-table.legend` | 24 | Prices action replies | when the table is requested |
+| `packet/price-table.original_heading` | 8 | Prices action replies | when the table is requested |
+| `packet/price-table.original_row` | 8 | Prices action replies | when the table is requested |
 | `packet/price-table.rates` | 18 | Prices action replies | when the table is requested |
 | `packet/price-table.row` | 7 | Prices action replies | when the table is requested |
 | `packet/price-table.total` | 6 | Prices action replies | when the table is requested |
-| `packet/profile` | 40 | Initial theorem packet | once per run |
-| `packet/rates` | 35 | Initial theorem packet | once per run |
-| `packet/scoring` | 160 | Initial theorem packet | once per run |
+| `packet/scoring` | 143 | Initial theorem packet | once per run |
 | `packet/sections.fixed.budget_certification_failed` | 8 | Initial theorem packet | once per run |
 | `packet/sections.fixed.context_missing` | 4 | Initial theorem packet | once per run |
-| `packet/sections.fixed.dependency_intro` | 14 | Initial theorem packet | once per run |
+| `packet/sections.fixed.dependency_intro` | 13 | Initial theorem packet | once per run |
 | `packet/sections.fixed.dependency_name` | 1 | Initial theorem packet | once per run |
 | `packet/sections.fixed.dependency_preview` | 9 | Initial theorem packet | once per run |
-| `packet/sections.fixed.dependency_summary` | 16 | Initial theorem packet | once per run |
+| `packet/sections.fixed.dependency_summary` | 6 | Initial theorem packet | once per run |
 | `packet/sections.fixed.earlier_conclusion` | 2 | Initial theorem packet | once per run |
 | `packet/sections.fixed.earlier_line` | 6 | Initial theorem packet | once per run |
 | `packet/sections.fixed.earlier_mention` | 2 | Initial theorem packet | once per run |
 | `packet/sections.fixed.earlier_reason` | 2 | Initial theorem packet | once per run |
-| `packet/sections.fixed.earlier_rewrite` | 1 | Initial theorem packet | once per run |
+| `packet/sections.fixed.earlier_rewrite` | 2 | Initial theorem packet | once per run |
 | `packet/sections.fixed.earlier_usage` | 4 | Initial theorem packet | once per run |
-| `packet/sections.fixed.goal` | 6 | Initial theorem packet | once per run |
+| `packet/sections.fixed.goal` | 3 | Initial theorem packet | once per run |
+| `packet/sections.fixed.goal_unavailable` | 1 | Initial theorem packet | once per run |
 | `packet/sections.fixed.imports` | 3 | Initial theorem packet | once per run |
-| `packet/sections.fixed.library_line` | 5 | Initial theorem packet | once per run |
+| `packet/sections.fixed.library_line` | 6 | Initial theorem packet | once per run |
 | `packet/sections.fixed.local_intro` | 15 | Initial theorem packet | once per run |
 | `packet/sections.fixed.local_line` | 7 | Initial theorem packet | once per run |
 | `packet/sections.fixed.namespace` | 2 | Initial theorem packet | once per run |
-| `packet/sections.fixed.original` | 4 | Initial theorem packet | once per run |
 | `packet/sections.fixed.packet_not_certifiable` | 6 | Initial theorem packet | once per run |
 | `packet/sections.fixed.pin` | 6 | Initial theorem packet | once per run |
 | `packet/sections.fixed.pins` | 6 | Initial theorem packet | once per run |
-| `packet/sections.fixed.profile_cost` | 5 | Initial theorem packet | once per run |
-| `packet/sections.fixed.profile_hotspot` | 16 | Initial theorem packet | once per run |
-| `packet/sections.fixed.profile_missing` | 3 | Initial theorem packet | once per run |
-| `packet/sections.fixed.profile_row` | 11 | Initial theorem packet | once per run |
-| `packet/sections.fixed.profile_span` | 7 | Initial theorem packet | once per run |
-| `packet/sections.fixed.profile_top` | 10 | Initial theorem packet | once per run |
-| `packet/sections.fixed.profile_unavailable` | 10 | Initial theorem packet | once per run |
 | `packet/sections.fixed.root_namespace` | 2 | Initial theorem packet | once per run |
 | `packet/sections.fixed.signature` | 6 | Initial theorem packet | once per run |
 | `packet/sections.fixed.source` | 2 | Initial theorem packet | once per run |
@@ -175,21 +169,19 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `packet/sections.fixed.used_preview` | 11 | Initial theorem packet | once per run |
 | `packet/sections.required.dependencies` | 3 | Initial theorem packet | once per run |
 | `packet/sections.required.environment` | 4 | Initial theorem packet | once per run |
-| `packet/sections.required.reference` | 2 | Initial theorem packet | once per run |
+| `packet/sections.required.reference` | 5 | Initial theorem packet | once per run |
 | `packet/sections.required.source` | 2 | Initial theorem packet | once per run |
 | `packet/sections.titles.dependencies` | 3 | Initial theorem packet | once per run |
 | `packet/sections.titles.earlier` | 6 | Initial theorem packet | once per run |
-| `packet/sections.titles.goals` | 9 | Initial theorem packet | once per run |
-| `packet/sections.titles.inventory` | 3 | Initial theorem packet | once per run |
-| `packet/sections.titles.library` | 9 | Initial theorem packet | once per run |
+| `packet/sections.titles.goals` | 4 | Initial theorem packet | once per run |
+| `packet/sections.titles.library` | 3 | Initial theorem packet | once per run |
 | `packet/sections.titles.locals` | 2 | Initial theorem packet | once per run |
 | `packet/sections.titles.pinned` | 4 | Initial theorem packet | once per run |
-| `packet/sections.titles.profile` | 6 | Initial theorem packet | once per run |
-| `packet/sections.titles.reference` | 4 | Initial theorem packet | once per run |
+| `packet/sections.titles.reference` | 7 | Initial theorem packet | once per run |
 | `packet/sections.titles.scope` | 13 | Initial theorem packet | once per run |
 | `packet/sections.titles.source` | 2 | Initial theorem packet | once per run |
 | `packet/sections.titles.types` | 9 | Initial theorem packet | once per run |
-| `packet/task` | 110 | Initial theorem packet | once per run |
+| `packet/task` | 10 | Initial theorem packet | once per run |
 | `replies/candidate.original_reference` | 4 | Tool replies | when the matching tool result occurs |
 | `replies/check.could_not_run` | 7 | Tool replies | when the matching tool result occurs |
 | `replies/check.failed` | 6 | Tool replies | when the matching tool result occurs |
@@ -212,14 +204,6 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/profile.floor_method` | 6 | Tool replies | when the matching tool result occurs |
 | `replies/profile.hotspot_label` | 6 | Tool replies | when the matching tool result occurs |
 | `replies/profile.unit` | 13 | Tool replies | when the matching tool result occurs |
-| `replies/routes.best_proxy` | 4 | Tool replies | when the matching tool result occurs |
-| `replies/routes.credited_tag` | 1 | Tool replies | when the matching tool result occurs |
-| `replies/routes.no_scored_proof` | 3 | Tool replies | when the matching tool result occurs |
-| `replies/routes.none` | 1 | Tool replies | when the matching tool result occurs |
-| `replies/routes.not_credited_tag` | 2 | Tool replies | when the matching tool result occurs |
-| `replies/routes.original_tag` | 2 | Tool replies | when the matching tool result occurs |
-| `replies/routes.row` | 6 | Tool replies | when the matching tool result occurs |
-| `replies/routes.state_count` | 4 | Tool replies | when the matching tool result occurs |
 | `replies/state.advisory` | 15 | Tool replies | when the matching tool result occurs |
 | `replies/state.cold_compile_without_session` | 5 | Tool replies | when the matching tool result occurs |
 | `replies/state.no_candidate_cold_passed` | 14 | Tool replies | when the matching tool result occurs |
@@ -262,39 +246,40 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/tools.search_miss` | 4 | Tool replies | when the matching tool result occurs |
 | `replies/tools.timeout` | 8 | Tool replies | when the matching tool result occurs |
 | `replies/tools.try_item` | 8 | Tool replies | when the matching tool result occurs |
-| `skill/SKILL` | 739 | Agent skill instructions | once per run |
-| `tools/compile.description` | 13 | Model tool definitions | every request |
-| `tools/compile.params.base` | 5 | Model tool definitions | every request |
-| `tools/compile.params.check` | 8 | Model tool definitions | every request |
+| `skill/SKILL` | 97 | Agent skill instructions | once per run |
+| `skill/lean-facts` | 35 | Agent skill instructions | once per run |
+| `tools/compile.description` | 23 | Model tool definitions | every request |
+| `tools/compile.params.base` | 6 | Model tool definitions | every request |
+| `tools/compile.params.check` | 9 | Model tool definitions | every request |
 | `tools/compile.params.drafts` | 9 | Model tool definitions | every request |
 | `tools/compile.params.fill` | 7 | Model tool definitions | every request |
 | `tools/compile.params.fill_hole` | 6 | Model tool definitions | every request |
-| `tools/compile.params.fill_text` | 6 | Model tool definitions | every request |
-| `tools/compile.params.from` | 7 | Model tool definitions | every request |
-| `tools/compile.params.merge` | 6 | Model tool definitions | every request |
-| `tools/compile.params.merge_base` | 9 | Model tool definitions | every request |
-| `tools/compile.params.merge_from` | 5 | Model tool definitions | every request |
-| `tools/compile.params.merge_step` | 4 | Model tool definitions | every request |
-| `tools/compile.params.merge_take` | 6 | Model tool definitions | every request |
-| `tools/compile.params.note` | 3 | Model tool definitions | every request |
-| `tools/compile.params.splice` | 10 | Model tool definitions | every request |
+| `tools/compile.params.fill_text` | 5 | Model tool definitions | every request |
+| `tools/compile.params.from` | 5 | Model tool definitions | every request |
+| `tools/compile.params.merge` | 7 | Model tool definitions | every request |
+| `tools/compile.params.merge_base` | 7 | Model tool definitions | every request |
+| `tools/compile.params.merge_from` | 4 | Model tool definitions | every request |
+| `tools/compile.params.merge_step` | 5 | Model tool definitions | every request |
+| `tools/compile.params.merge_take` | 7 | Model tool definitions | every request |
+| `tools/compile.params.note` | 6 | Model tool definitions | every request |
+| `tools/compile.params.splice` | 9 | Model tool definitions | every request |
 | `tools/compile.params.splice_base` | 9 | Model tool definitions | every request |
-| `tools/compile.params.splice_steps` | 7 | Model tool definitions | every request |
+| `tools/compile.params.splice_steps` | 6 | Model tool definitions | every request |
 | `tools/compile.params.splice_text` | 6 | Model tool definitions | every request |
-| `tools/finish.description` | 16 | Model tool definitions | every request |
-| `tools/goal.description` | 13 | Model tool definitions | every request |
+| `tools/finish.description` | 22 | Model tool definitions | every request |
+| `tools/goal.description` | 17 | Model tool definitions | every request |
 | `tools/goal.params.hole` | 6 | Model tool definitions | every request |
-| `tools/goal.params.line` | 6 | Model tool definitions | every request |
-| `tools/goal.params.node` | 3 | Model tool definitions | every request |
-| `tools/goal.params.try` | 7 | Model tool definitions | every request |
-| `tools/read.description` | 13 | Model tool definitions | every request |
-| `tools/read.params.against` | 7 | Model tool definitions | every request |
-| `tools/read.params.handle` | 5 | Model tool definitions | every request |
-| `tools/read.params.hole` | 3 | Model tool definitions | every request |
-| `tools/read.params.node` | 3 | Model tool definitions | every request |
+| `tools/goal.params.line` | 7 | Model tool definitions | every request |
+| `tools/goal.params.node` | 5 | Model tool definitions | every request |
+| `tools/goal.params.try` | 8 | Model tool definitions | every request |
+| `tools/read.description` | 12 | Model tool definitions | every request |
+| `tools/read.params.against` | 6 | Model tool definitions | every request |
+| `tools/read.params.handle` | 8 | Model tool definitions | every request |
+| `tools/read.params.hole` | 6 | Model tool definitions | every request |
+| `tools/read.params.node` | 5 | Model tool definitions | every request |
 | `tools/read.params.view` | 7 | Model tool definitions | every request |
-| `tools/search.description` | 10 | Model tool definitions | every request |
+| `tools/search.description` | 12 | Model tool definitions | every request |
 | `tools/search.params.after` | 5 | Model tool definitions | every request |
-| `tools/search.params.kind` | 6 | Model tool definitions | every request |
-| `tools/search.params.queries` | 5 | Model tool definitions | every request |
+| `tools/search.params.kind` | 7 | Model tool definitions | every request |
+| `tools/search.params.queries` | 7 | Model tool definitions | every request |
 <!-- budget:end -->

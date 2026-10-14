@@ -20,7 +20,7 @@ async function allowanceFacts(usedPct: number, remainingUsd: number, capUsd: num
   const spend = await render("messages/refusals.allowance", {
     spent: (capUsd * Math.min(100, Math.max(0, usedPct)) / 100).toFixed(2), cap: capUsd,
     remaining: remainingUsd.toFixed(2), left: remainingPct.toFixed(1),
-    finish_amount: (capUsd * finishFraction).toFixed(2),
+    finish_state: remainingUsd <= capUsd * finishFraction ? "available" : "unavailable",
   });
   const axes = await render("messages/refusals.axes", {
     tokens_saved: tokensSaved === null ? "unknown" : `${tokensSaved}%`, tokens_left: left(tokensSaved),
@@ -31,10 +31,10 @@ async function allowanceFacts(usedPct: number, remainingUsd: number, capUsd: num
 
 export async function continuationPush(args: {
   failed: boolean; cause?: string; usedPct: number; remainingUsd: number; capUsd: number;
-  baseline: Metrics; best: Metrics; bestNode: string;
+  baseline: Metrics; best: Metrics;
 }): Promise<string> {
   const facts = await allowanceFacts(args.usedPct, args.remainingUsd, args.capUsd, args.baseline, args.best);
-  const values = { facts, best_node: args.bestNode || "none",
+  const values = { facts,
     ...(args.failed ? { cause_clause: args.cause ? await render("messages/continuation.cause_clause", { cause: args.cause }) : "" } : {}) };
   return render(`messages/continuation.${continuationKey(args.failed)}`, values);
 }

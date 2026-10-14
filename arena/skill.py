@@ -21,4 +21,4 @@ def skill_prompt() -> str:
     Arena disables built-in tools, so the body goes into the stable system prompt instead."""
     rendered = render("skill/SKILL")
     body = rendered.split("---", 2)[2] if rendered.startswith("---") else rendered
-    return body.strip()
+    return body.strip() + "\n\n" + render("skill/lean-facts").strip()
