@@ -7,6 +7,7 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -1012,3 +1013,37 @@ class SessionLogTests(unittest.TestCase):
         self.assertTrue(lean_session.memory_pressure())
         self.assertFalse(lean_session.memory_pressure(within=0))
         self.assertIn(lean_session.WAITING_NAME, lean_session.SESSION_FILES)
+
+
+class OrphanExitTests(unittest.TestCase):
+    """A service whose socket or directory is deleted exits at once (no Lean: the service has no projects)."""
+
+    def serve(self) -> tuple[Path, threading.Thread]:
+        directory = Path(tempfile.mkdtemp(prefix="arena-orphan-"))
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        lines: list[str] = []
+        for patcher in (patch.object(lean_session.signal, "signal"), patch.object(lean_session, "_log", lines.append)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        thread = threading.Thread(target=lean_session.serve, args=(directory,), daemon=True)
+        thread.start()
+        deadline = time.monotonic() + 5
+        while not (directory / lean_session.SOCKET_NAME).exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertTrue((directory / lean_session.SOCKET_NAME).exists())
+        return directory, thread
+
+    def test_the_service_exits_when_its_directory_is_deleted(self):
+        directory, thread = self.serve()
+        shutil.rmtree(directory)
+        thread.join(5)
+        self.assertFalse(thread.is_alive())
+
+    def test_the_service_exits_when_its_socket_is_replaced(self):
+        directory, thread = self.serve()
+        newer = directory / "newer"
+        newer.write_text("a newer service's socket")  # created while the old one exists: a distinct inode
+        os.replace(newer, directory / lean_session.SOCKET_NAME)
+        thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertTrue((directory / lean_session.SOCKET_NAME).exists())  # never removes another service's socket

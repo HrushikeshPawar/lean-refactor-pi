@@ -1828,8 +1828,20 @@ def serve(directory: Path) -> int:
     for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(number, stop)
 
+    def socket_gone() -> bool:
+        """True once this service's socket (or its directory) is deleted or replaced: no client can reach it again,
+        and the linger exit below could never take the start lock in a deleted directory."""
+        try:
+            return path.stat().st_ino != own_socket
+        except OSError:
+            return True
+
     def watch() -> None:
         while not session.closing:
+            if socket_gone():
+                _log(f"service socket {path} is gone; exiting")
+                stop()
+                return
             session.reap_idle()
             session.log_pss()
             with suppress(OSError):

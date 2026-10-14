@@ -12,6 +12,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from arena import lean_session
 from arena.campaign import run_dir
 from arena.engine import ROOT
 
@@ -66,6 +67,12 @@ class FakeRun:
             *extra,
         ]
         self.env = {**os.environ, "ARENA_FAKE_SCRIPT": str(self.script), "ARENA_FAKE_LOG": str(self.log), **(env or {})}
+        # A session run gets a Lean service of its own, stopped by cleanup(): the shared one would linger after
+        # the test, and stopping that one could kill a live run's Lean.
+        self.service: Path | None = None
+        if session and lean_session.SERVICE_DIR_ENV not in (env or {}):
+            self.service = self.work / "lean"
+            self.env[lean_session.SERVICE_DIR_ENV] = str(self.service)
         self.timeout = timeout
         self.result: subprocess.CompletedProcess | None = None
 
@@ -103,6 +110,8 @@ class FakeRun:
         return False
 
     def cleanup(self) -> None:
+        if self.service is not None and self.service.exists():
+            lean_session.stop_service(self.service)
         shutil.rmtree(self.directory, ignore_errors=True)
         shutil.rmtree(self.work, ignore_errors=True)
 
