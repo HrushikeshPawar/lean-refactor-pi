@@ -1,2 +1,3 @@
 request_failed: "The request failed{cause_clause}. {facts} Best node: {best_node}."
 turn_ended_with_text: "The turn ended with text and no tool call. {facts} Best node: {best_node}."
+cause_clause: ": {cause}"

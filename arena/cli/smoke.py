@@ -30,7 +30,7 @@ def execute(rows: list[str]) -> int:
             ("goal", {"node": "n1", "line": 1}),
             ("search", {"queries": [name], "kind": "name"}),
             ("read", {"node": "n1"}),
-            ("read", {"view": "prices"}),
+            ("read", {"node": "n1", "view": "prices"}),
             ("finish", {}),
         ]
         steps = [tool(n, args, 150_000 if n == "read" and args.get("view") == "prices" else 40) for n, args in calls]

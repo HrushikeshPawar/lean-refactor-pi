@@ -1,0 +1,2 @@
+preflight: "Call read once with {{\"node\":\"n1\"}}, then stop."
+resume: "Resume the existing Arena run from its recorded candidate frontier. Continue improving the proof."

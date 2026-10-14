@@ -1,4 +1,2 @@
-skill_stub: "This skill file was already loaded earlier in this run; unchanged. Use the earlier text."
 result_stub: "This result was already loaded earlier in this run; unchanged. Use the earlier text."
 repeated: "same message as the {severity} at {where}"
-warning_cut: "{message} ... [{omitted} more characters of this {severity} omitted]"

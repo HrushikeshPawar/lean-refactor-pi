@@ -10,19 +10,20 @@ type Reply = {
   stop?: boolean;
 };
 
-function errorText(error: Reply["error"]): string | undefined {
-  if (typeof error === "string") return error;
-  if (!error) return undefined;
-  return String(error.line ?? error.message ?? error.code ?? "");
+function listText(value: unknown): string {
+  const items = Array.isArray(value) ? value.map(String).filter(Boolean) : [];
+  return items.length ? items.join(", ") : "none";
 }
 
-async function itemError(error: unknown, validKeys: string[]): Promise<string | undefined> {
+/** Every Python error has the shape {code, input, valid, forms}; a bare string comes from a failed command. */
+async function errorLine(error: unknown, validKeys: string[]): Promise<string | undefined> {
   if (!error || typeof error !== "object") return typeof error === "string" ? error : undefined;
   const value = error as Record<string, unknown>;
   if (value.code === "empty_arguments") {
     return render("messages/errors.empty_arguments", { valid: validKeys.join(", ") || "none" });
   }
-  return errorText(value as Reply["error"]);
+  return render("messages/errors.request", { code: String(value.code ?? "error"), input: String(value.input ?? "") || "none",
+    valid: listText(value.valid), forms: listText(value.forms) });
 }
 
 export async function renderReply(reply: Reply, footer: string, validKeys: string[] = []) {
@@ -31,14 +32,14 @@ export async function renderReply(reply: Reply, footer: string, validKeys: strin
     const itemLines = Array.isArray(item.lines) ? item.lines.filter((line): line is string => typeof line === "string" && Boolean(line)) : [];
     if (itemLines.length) lines.push(...itemLines);
     else {
-      const line = await itemError(item.error, validKeys);
+      const line = await errorLine(item.error, validKeys);
       if (line) lines.push(line);
     }
   }
   if (Array.isArray(reply.map)) lines.push(...reply.map.filter((line): line is string => typeof line === "string"));
-  if (reply.handles?.length) lines.push(`handles: ${reply.handles.join(", ")}`);
+  if (reply.handles?.length) lines.push(await render("replies/tools.handles", { handles: reply.handles.join(", ") }));
   if (reply.error) {
-    const line = await itemError(reply.error, validKeys);
+    const line = await errorLine(reply.error, validKeys);
     if (line) lines.push(line);
   }
   if (footer) lines.push(footer);

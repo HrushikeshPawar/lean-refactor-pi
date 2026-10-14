@@ -2,11 +2,17 @@
 
 import itertools
 import json
+import math
+import re
+import shutil
+import tempfile
 import unittest
 from datetime import UTC
 from pathlib import Path
 
 from arena import models
+from arena.engine import ROOT
+from arena.index import index_path
 from arena.skill import SKILL_DIR, skill_hash
 from tests.pi_support import LIVE_LANGFUSE, NAME, PI_AVAILABLE, AnthropicWire, FakeRun, message_text
 from tests.slow import slow
@@ -114,9 +120,8 @@ class LifecycleTests(unittest.TestCase):
         ).run()
         offered = [offered_tools(request) for request in run.requests]
         self.assertGreaterEqual(len(offered), 4, run.stdout[-1500:])
-        self.assertTrue({"compile", "goal", "search", "read"} <= set(offered[0]))
-        self.assertEqual([FINISH in tools for tools in offered[:2]], [False, False])
-        self.assertEqual([FINISH in tools for tools in offered[2:]], [True] * (len(offered) - 2))
+        self.assertEqual([set(tools) for tools in offered[:2]], [START_TOOLS] * 2)
+        self.assertEqual([set(tools) for tools in offered[2:]], [ARENA_TOOLS] * (len(offered) - 2))
 
     def test_sigterm_mid_request_still_leaves_cost_json_and_summary(self):
         import signal
@@ -135,6 +140,9 @@ class LifecycleTests(unittest.TestCase):
 
 
 FINISH = "finish"
+ARENA_TOOLS = {"compile", "goal", "search", "read", FINISH}
+# Offered from the first request; finish joins them only in the final 10% of the limit.
+START_TOOLS = ARENA_TOOLS - {FINISH}
 
 
 def offered_tools(request: dict) -> list[str]:
@@ -159,7 +167,6 @@ def cheap_tool(name: str, arguments: dict, **usage) -> dict:
 
 # One scripted response whose 150K output tokens ($0.60/M) spend 90% of the $0.1 test cap.
 SPEND_90_PCT = 150_000
-SOURCE = {"handle": "Strata/Languages/Core/StatementSemanticsProps.lean", "first": 950, "last": 960}
 
 
 @slow
@@ -227,6 +234,9 @@ class CacheDisciplineTests(unittest.TestCase):
 
 
 FIXTURE = Path(__file__).resolve().parents[1] / "runs/baseline/Core_InitsUpdatesComm/arena-candidate-126.txt"
+# What the fixture measures on every listed version: (tokens, heartbeats, proxy).
+FIXTURE_SCORE = (126, 578, 76.72)
+AGENT_TEXT = ROOT / "agent-text"
 
 
 def tool_texts(request: dict, name: str | None = None) -> list[str]:
@@ -235,6 +245,25 @@ def tool_texts(request: dict, name: str | None = None) -> list[str]:
         for m in request["messages"]
         if m["role"] == "toolResult" and (name is None or m.get("toolName") == name)
     ]
+
+
+def tool_results(request: dict, name: str) -> list[dict]:
+    return [m for m in request["messages"] if m["role"] == "toolResult" and m.get("toolName") == name]
+
+
+def compiled_node(reply: dict) -> tuple[str, str, float]:
+    """The one node a single-draft compile reply filed: its id, its candidate label and the map's score for it."""
+    [item] = reply["items"]
+    label = item["price"].split()[0]
+    scores = {
+        match[1]: float(match[2]) for line in reply["map"] if (match := re.match(r"best (\S+) score ([\d.]+)", line))
+    }
+    return item["node"], label, scores[item["node"]]
+
+
+def schema_keys(request: dict, tool: str) -> list[str]:
+    [definition] = [d for d in request["tool_definitions"] if d["name"] == tool]
+    return list(definition["parameters"]["properties"])
 
 
 @slow
@@ -249,63 +278,96 @@ class AutomaticChecksTests(unittest.TestCase):
         for run in self.runs:
             run.cleanup()
 
-    def fake(self, steps):
-        run = FakeRun(steps)
+    def fake(self, steps, **kwargs):
+        run = FakeRun(steps, **kwargs)
         self.runs.append(run)
         return run.run()
 
-    def test_background_result_arrives_on_a_later_tool_result_without_rewriting_history(self):
+    def test_cross_version_result_arrives_in_the_compile_reply_without_rewriting_history(self):
+        # No provider delay: the compile call itself waits for the cross-version check
+        # (cross_version_wait_seconds), so the result is in its own reply, not on a later tool result.
         run = self.fake(
             [
                 cheap_tool("compile", {"drafts": [FIXTURE.read_text()], "check": "lean"}),
-                {**cheap_tool("read", {"node": "n1"}), "delay_ms": 25000},
                 cheap_tool("read", {"node": "n1"}),
                 {"text": "done"},
             ]
         )
         requests = run.requests
-        self.assertGreaterEqual(len(requests), 4, run.stdout)
-        compiled = tool_texts(requests[1], "compile")[0]
-        self.assertIn("passes all 3 versions", compiled.lower())
-        self.assertIn("n2 filed as new root", compiled.lower())
-        later = tool_texts(requests[2], "read")[0]
-        self.assertNotIn("[arena]", compiled + later)
+        self.assertGreaterEqual(len(requests), 3, run.stdout)
+        [compiled] = tool_results(requests[1], "compile")
+        node, label, score = compiled_node(compiled["details"])
+        self.assertEqual(score, FIXTURE_SCORE[2])
+        self.assertTrue(
+            any(label in fact and str(score) in fact for fact in compiled["details"]["facts"]),
+            compiled["details"]["facts"],
+        )
+        self.assertIn(node, compiled["details"]["handles"])
         for earlier, after in itertools.pairwise(requests):
             before = earlier["messages"]
             self.assertEqual(json.dumps(after["messages"][: len(before)]), json.dumps(before))
-        self.assertIsNotNone(run.json("submission.json").get("candidate"))
+        submission = run.json("submission.json")
+        self.assertEqual(submission["candidate"], label, run.stdout)
+        self.assertEqual((submission["tokens"], submission["heartbeats"], submission["proxy"]), FIXTURE_SCORE)
 
-    def test_each_registered_tool_accepts_its_public_argument_shape(self):
+    def test_every_arena_tool_succeeds_with_the_arguments_models_actually_send(self):
+        fixture = FIXTURE.read_text()
         calls = [
-            ("compile", {"drafts": [FIXTURE.read_text()], "check": "tokens"}),
-            ("goal", {"node": "n1", "line": 1}),
-            ("search", {"queries": ["InitsUpdatesComm"], "kind": "name"}),
-            ("read", {"node": "n1"}),
+            # `draft` for `drafts`, a bare string for a list, and empty optional fields.
+            ("compile", {"draft": fixture, "check": "tokens", "note": "", "base": ""}),
+            # A list sent as JSON text.
+            ("compile", {"drafts": json.dumps([fixture + "\n"]), "check": "tokens", "from": ""}),
+            ("goal", {"node": "n1", "line": 12, "hole": "", "try": [""]}),
+            ("search", {"queries": '["InitsUpdatesComm", "UpdateStates"]', "kind": "name", "after": ""}),
+            ("search", {"queries": "['InitStatesUpdated']", "kind": ""}),
+            ("read", {"node": "n1", "view": "", "against": "", "hole": ""}),
         ]
         steps = [cheap_tool(name, args) for name, args in calls]
-        steps += [cheap_tool("read", {"node": "n1"}, output=SPEND_90_PCT), cheap_tool("finish", {})]
-        run = self.fake(steps)
+        steps += [cheap_tool("read", {"view": "map"}, output=SPEND_90_PCT), cheap_tool("finish", {})]
+        run = self.fake(steps, session=True, timeout=900)  # goal needs the Lean session's LSP lane
         summary = run.json("summary.json")
         self.assertEqual(summary["tools"]["errors"], {}, run.stdout[-1500:])
-        self.assertTrue({name for name, _ in [*calls, ("finish", {})]} <= set(summary["tools"]["calls"]))
+        self.assertEqual(set(summary["tools"]["calls"]), ARENA_TOOLS)
+        self.assertEqual(summary["tools"]["calls"]["compile"], 2)
         self.assertEqual(summary["stop_reason"], "finished")
         self.assertEqual(len(run.requests), len(steps))
+        # Item errors too: only a missing search index (a machine cache, built by `arena index build`) is allowed.
+        allowed = {"no_index"} if index_path(NAME) is None else set()
+        results = [m for m in run.requests[-1]["messages"] if m["role"] == "toolResult"]
+        # The finish result ends the run, so no request carries it; stop_reason "finished" above is its success.
+        self.assertEqual([m["toolName"] for m in results], [name for name, _ in calls] + ["read"])
+        for result in results:
+            with self.subTest(tool=result["toolName"], call=result["toolCallId"]):
+                self.assertFalse(result["isError"], message_text(result))
+                codes = {item["error"]["code"] for item in result["details"].get("items", []) if item.get("error")}
+                self.assertEqual(codes - allowed, set(), message_text(result))
+        # Each shape reached the handler intact: one draft per compile, every query of a stringified list.
+        compiled = [result["details"]["items"] for result in tool_results(run.requests[-1], "compile")]
+        self.assertEqual([len(items) for items in compiled], [1, 1])
+        searched = [[item["ref"] for item in r["details"]["items"]] for r in tool_results(run.requests[-1], "search")]
+        self.assertEqual(searched, [["InitsUpdatesComm", "UpdateStates"], ["InitStatesUpdated"]])
 
     def test_checks_queued_when_the_model_stops_are_finished_before_submitting(self):
-        run = self.fake([cheap_tool("compile", {"drafts": [FIXTURE.read_text()], "check": "lean"}), {"text": "done"}])
-        self.assertIsNotNone(run.json("submission.json").get("candidate"), run.stdout)
-        self.assertIn("Submission:", run.stdout)
-
-
-ARENA_TOOLS = {"compile", "goal", "search", "read", "finish"}
-START_TOOLS = ARENA_TOOLS - {FINISH}
-
-
-def declared_tools(request: dict) -> set[str]:
-    import re
-
-    names = set(re.findall(r'"name": "([a-z_]+)"', json.dumps(request["messages"][0])))
-    return names | set(request.get("tools", []))
+        # With no in-call wait the cross-version check is still queued when the model stops;
+        # the runner must finish it before it chooses the submission.
+        texts = Path(self.enterContext(tempfile.TemporaryDirectory())) / "agent-text"
+        shutil.copytree(AGENT_TEXT, texts)
+        numbers = texts / "numbers.yaml"
+        numbers.write_text(
+            re.sub(r"(?m)^cross_version_wait_seconds: .*$", "cross_version_wait_seconds: 0", numbers.read_text())
+        )
+        run = self.fake(
+            [cheap_tool("compile", {"drafts": [FIXTURE.read_text()], "check": "lean"}), {"text": "done"}],
+            env={"ARENA_TEXT_DIR": str(texts)},
+        )
+        [compiled] = tool_results(run.requests[-1], "compile")
+        [item] = compiled["details"]["items"]
+        label = item["price"].split()[0]
+        self.assertFalse(any(label in fact for fact in compiled["details"]["facts"]), "the check did not stay queued")
+        submission = run.json("submission.json")
+        self.assertEqual(submission["candidate"], label, run.stdout)
+        self.assertEqual((submission["tokens"], submission["heartbeats"], submission["proxy"]), FIXTURE_SCORE)
+        self.assertIn(f"Submission: {label} proxy {FIXTURE_SCORE[2]}", run.stdout)
 
 
 class SkillToolNamesTests(unittest.TestCase):
@@ -320,23 +382,56 @@ class SkillToolNamesTests(unittest.TestCase):
 @slow
 @unittest.skipUnless(PI_AVAILABLE and FIXTURE.exists(), "pi and the Strata fixture are required")
 class ToolArgumentUxTests(unittest.TestCase):
-    def test_empty_and_null_arguments_report_valid_keys(self):
-        run = FakeRun(
-            [cheap_tool("compile", {}), {"tool_calls": [{"name": "compile", "arguments": None}]}, {"text": "done"}]
-        )
+    def fake(self, steps) -> FakeRun:
+        run = FakeRun(steps)
         self.addCleanup(run.cleanup)
         run.run()
         assert run.result is not None
         self.assertEqual(run.result.returncode, 0, run.stdout[-1000:])
-        results = [
-            m for m in run.requests[-1]["messages"] if m.get("role") == "toolResult" and m.get("toolName") == "compile"
-        ]
-        self.assertEqual(len(results), 2)
+        return run
+
+    def assert_rejected_before_running(self, run: FakeRun, results: list[dict]) -> None:
+        """Each result is an error that lists every compile key, and no Lean ran."""
+        valid = schema_keys(run.requests[-1], "compile")
+        self.assertIn("drafts", valid)
         for result in results:
-            self.assertTrue(result["isError"])
-            self.assertIn("arrived empty or malformed", message_text(result))
-            self.assertIn("drafts", message_text(result))
-            self.assertNotIn("validation", message_text(result).lower())
+            text = message_text(result)
+            self.assertTrue(result["isError"], text)
+            self.assertEqual([key for key in valid if not re.search(rf"\b{key}\b", text)], [], text)
+            self.assertNotIn("validation", text.lower())
+        summary = run.json("summary.json")
+        self.assertEqual(summary["evaluations"], 0)
+        self.assertEqual(summary["progress"]["best_verified_candidate"], None)
+        self.assertNotEqual(summary["stop_reason"], "error_loop")
+
+    def test_empty_and_null_arguments_report_valid_keys(self):
+        run = self.fake(
+            [cheap_tool("compile", {}), {"tool_calls": [{"name": "compile", "arguments": None}]}, {"text": "done"}]
+        )
+        results = tool_results(run.requests[-1], "compile")
+        self.assertEqual(len(results), 2)
+        self.assert_rejected_before_running(run, results)
+
+    def test_malformed_json_arguments_are_rejected_instead_of_running(self):
+        # The provider streams text that is not a JSON object; Pi would parse it as {} and run the tool.
+        draft = FIXTURE.read_text()
+        run = self.fake(
+            [
+                {"tool_calls": [{"name": "compile", "arguments": {}, "raw_arguments": '{"drafts": ["' + draft[:40]}]},
+                {"text": "done"},
+            ]
+        )
+        results = tool_results(run.requests[-1], "compile")
+        self.assertEqual(len(results), 1)
+        self.assert_rejected_before_running(run, results)
+
+    def test_a_misnamed_tool_gets_the_nearest_registered_name(self):
+        run = self.fake([cheap_tool("compil", {"drafts": [FIXTURE.read_text()]}), {"text": "done"}])
+        [result] = tool_results(run.requests[-1], "compil")
+        self.assertTrue(result["isError"])
+        named = set(re.findall(r"\b(?:compile|goal|search|read|finish)\b", message_text(result)))
+        self.assertEqual(named, {"compile"}, message_text(result))
+        self.assertEqual(run.json("summary.json")["evaluations"], 0)
 
 
 @slow
@@ -377,16 +472,16 @@ class AnthropicWireTests(unittest.TestCase):
             ],
         )
         self.assertEqual(wire.rejections, [], run.stdout[-800:])
-        tools = {
-            tool["name"]: tool["input_schema"] for tool in wire.payloads[1]["tools"] if tool["name"] in ARENA_TOOLS
-        }
+        self.assertEqual({tool["name"] for tool in wire.payloads[0]["tools"]}, START_TOOLS)
+        tools = {tool["name"]: tool["input_schema"] for tool in wire.payloads[1]["tools"]}
         self.assertEqual(set(tools), ARENA_TOOLS)
         for name, schema in tools.items():
             with self.subTest(tool=name):
                 self.assertEqual(schema["type"], "object")
                 self.assertFalse({"anyOf", "oneOf", "allOf"} & set(schema))
         self.assertEqual(set(tools["search"]["properties"]), {"queries", "kind", "after"})
-        self.assertEqual(tools["search"]["required"], ["queries"])
+        # No key is schema-required: an empty call reaches the handler, which names the valid keys.
+        self.assertEqual({name: schema.get("required") for name, schema in tools.items() if schema.get("required")}, {})
         self.assertEqual(tools["finish"]["properties"], {})
 
     def test_wire_bytes_retries_and_langfuse_keep_the_post_hook_request(self):
@@ -538,16 +633,55 @@ class ErrorLoopAndContinuationTests(unittest.TestCase):
         self.assertTrue(any(e["continuations"] >= 1 for e in controls))
 
     def test_failed_request_continuation_names_failure_without_calling_it_text(self):
+        from arena import text
+        from arena.scoring import reference
+
         run = self.fake(
-            [{"error": "brief outage"}, cheap_tool("read", {"node": "n1"}), {"text": "finished"}, {"text": "more"}],
+            [
+                cheap_tool("compile", {"drafts": [FIXTURE.read_text()], "check": "lean"}, output=50_000),
+                {"error": "brief outage"},
+                cheap_tool("read", {"node": "n1"}, output=50_000),
+                {"text": "finished"},
+                {"text": "more"},
+            ],
             env={"ARENA_BACKOFF_MS": "10", "ARENA_AUTOCONTINUE": "1"},
         )
-        failed = "\n".join(message_text(m) for m in run.requests[1]["messages"])
-        self.assertIn("request failed", failed.lower())
+        # Every user message after the packet is a continuation: the first after the failure, then after text turns.
+        failed, *completed = [message_text(m) for m in run.requests[-1]["messages"][2:] if m["role"] == "user"]
+        self.assertTrue(completed)
+        # Which template rendered: each key's fixed opening, read from agent-text rather than copied here.
+        opening = {
+            key: text.template(f"messages/continuation.{key}").split("{")[0].strip()
+            for key in ("request_failed", "turn_ended_with_text")
+        }
+        self.assertTrue(failed.startswith(opening["request_failed"]), failed)
+        self.assertNotIn(opening["turn_ended_with_text"], failed)
         self.assertIn("brief outage", failed)
-        self.assertNotIn("turn ended with text", failed)
-        completed = "\n".join(message_text(m) for m in run.requests[3]["messages"])
-        self.assertIn("turn ended with text", completed)
+        for later in completed:
+            self.assertTrue(later.startswith(opening["turn_ended_with_text"]), later)
+            self.assertNotIn("brief outage", later)
+
+        # The numbers are the run's own: spend at each continuation from the ledger, points left from the best.
+        rows = run.jsonl("cost-ledger.jsonl")
+        spent_at = []
+        for index, row in enumerate(rows):
+            if row["kind"] == "control" and not row.get("stop"):
+                spent_at.append(next(r["spent_usd"] for r in reversed(rows[:index]) if r["kind"] == "settle"))
+        self.assertEqual(len(spent_at), 1 + len(completed), rows)
+        self.assertGreater(spent_at[1], spent_at[0] + 0.02)
+        submission = run.json("submission.json")
+        self.assertEqual((submission["tokens"], submission["heartbeats"]), FIXTURE_SCORE[:2])
+
+        def points_left(measured: int, original: int) -> str:
+            return f"{(100 - math.floor(100 * (1 - measured / original) + 0.5)) / 3:.1f}"
+
+        points = [points_left(m, o) for m, o in zip(FIXTURE_SCORE[:2], reference(NAME), strict=True)]
+        cap = float(run.json("run-config.json")["limit_usd"])
+        for message, spent in zip([failed, *completed], spent_at, strict=True):
+            with self.subTest(message=message[:40]):
+                numbers = re.findall(r"\d+(?:\.\d+)?", message)
+                spend = [f"{spent:.2f}", f"{cap - spent:.2f}", f"{100 * (cap - spent) / cap:.1f}"]
+                self.assertEqual([n for n in spend + points if n not in numbers], [], message)
 
     def test_continuation_contains_budget_and_best_node_facts(self):
         run = self.fake(
@@ -594,12 +728,39 @@ class ErrorLoopAndContinuationTests(unittest.TestCase):
         turns = []
         for index in range(3):
             drafts = [statement + f" := by\n  {'skip; ' * (index * 2 + k)}sorry" for k in range(2)]
-            turns += [cheap_tool("compile", {"drafts": drafts, "check": "lean"}), {"text": f"final {index}"}]
+            turns += [cheap_tool("compile", {"drafts": drafts}), {"text": f"final {index}"}]
         run = self.fake(turns, env={"ARENA_AUTOCONTINUE": "1"})
         controls = [row for row in run.jsonl("cost-ledger.jsonl") if row.get("kind") == "control"]
         self.assertTrue(controls, run.stdout)
         self.assertTrue(all(row["proof_attempt"] for row in controls[:3]), controls)
         self.assertFalse(any(row.get("stop") == "no_work_fallback" for row in controls[:3]), controls)
+
+    def test_an_identical_read_is_stubbed_and_cannot_extend_the_run(self):
+        read = cheap_tool("read", {"node": "n1"})
+        run = self.fake(
+            [
+                read,
+                {"text": "first final"},
+                read,
+                {"text": "second final"},
+                read,
+                {"text": "third final"},
+                {"text": "must not be requested"},
+            ],
+            env={"ARENA_AUTOCONTINUE": "1"},
+        )
+        first, *repeats = tool_texts(run.requests[-1], "read")
+        self.assertEqual(len(repeats), 2)
+        longest = max(first.splitlines(), key=len)
+        for repeat in repeats:
+            self.assertNotIn(longest, repeat)
+            self.assertLess(len(repeat), len(first) / 2)
+        # The first read is new context; the two stubbed repeats are turns without work.
+        controls = [row for row in run.jsonl("cost-ledger.jsonl") if row.get("kind") == "control"]
+        self.assertEqual(controls[-1]["stop"], "no_work_fallback")
+        self.assertEqual(controls[-1]["no_work_turns"], 2)
+        self.assertFalse(any(row.get("stop") == "no_work_fallback" for row in controls[:-1]))
+        self.assertEqual(len(run.requests), 6)
 
 
 @slow
@@ -713,26 +874,48 @@ class TruncationTests(unittest.TestCase):
 
 
 @slow
-@unittest.skipUnless(PI_AVAILABLE, "pi and the Strata fixture are required")
+@unittest.skipUnless(PI_AVAILABLE and FIXTURE.exists(), "pi and the Strata fixture are required")
 class FinishReplayTests(unittest.TestCase):
-    def test_complete_compile_can_be_submitted_when_the_run_finishes(self):
-        fixture = Path(__file__).resolve().parents[1] / "runs/baseline/Core_InitsUpdatesComm/arena-candidate-126.txt"
+    def test_one_finish_call_submits_the_candidate_verified_before_it(self):
+        # The run ends on the finish call itself; the submission is the node the earlier compile verified.
         run = FakeRun(
-            [cheap_tool("compile", {"drafts": [fixture.read_text()], "check": "lean"}), {"text": "done"}], timeout=1200
+            [
+                cheap_tool("compile", {"drafts": [FIXTURE.read_text()], "check": "lean"}, output=SPEND_90_PCT),
+                cheap_tool("finish", {}),
+                {"text": "must not be requested"},
+            ],
+            timeout=1200,
         )
         self.addCleanup(run.cleanup)
         run.run()
         assert run.result is not None
         self.assertEqual(run.result.returncode, 0, run.stdout + run.result.stderr[-1000:])
-        self.assertIsNotNone(run.json("submission.json").get("candidate"), run.stdout)
+        self.assertEqual(len(run.requests), 2, run.stdout)
+        [compiled] = tool_results(run.requests[1], "compile")
+        _, label, _ = compiled_node(compiled["details"])
+        summary = run.json("summary.json")
+        self.assertEqual(summary["stop_reason"], "finished")
+        submission = run.json("submission.json")
+        self.assertEqual(submission["candidate"], label, run.stdout)
+        self.assertEqual((submission["tokens"], submission["heartbeats"], submission["proxy"]), FIXTURE_SCORE)
+        self.assertEqual(
+            summary["progress"]["best_verified_candidate"],
+            dict(zip(("candidate", "tokens", "heartbeats", "proxy"), (label, *FIXTURE_SCORE), strict=True)),
+        )
 
 
 @slow
 @unittest.skipUnless(PI_AVAILABLE, "pi and the Strata fixture are required")
 class CompactionPolicyTests(unittest.TestCase):
-    # Distinct views avoid the repeated-read stub; the fake provider usage drives compaction.
-    READS = [("n1", 0)] * 6
-    READ_VIEWS = ("source", "prices", "map", "outline", "diff", "source")
+    # Six distinct reads, so none is stubbed as a repeat; the fake provider usage drives compaction.
+    READS = (
+        {"node": "n1", "view": "source"},
+        {"node": "n1", "view": "prices"},
+        {"node": "n1", "view": "outline"},
+        {"node": "n1", "view": "map"},
+        {"view": "map"},
+        {"node": "n1", "view": "diff", "against": "n1"},
+    )
 
     def setUp(self):
         self.runs = []
@@ -743,22 +926,7 @@ class CompactionPolicyTests(unittest.TestCase):
 
     def script(self):
         usage = {"input": 14000, "output": 50, "cacheRead": 0, "cacheWrite": 0}
-        steps: list[dict] = [
-            {
-                "tool_calls": [
-                    {
-                        "name": "read",
-                        "arguments": {
-                            "node": path,
-                            "view": self.READ_VIEWS[offset],
-                            **({"against": path} if self.READ_VIEWS[offset] == "diff" else {}),
-                        },
-                    }
-                ],
-                "usage": usage,
-            }
-            for path, offset in self.READS
-        ]
+        steps = [{"tool_calls": [{"name": "read", "arguments": arguments}], "usage": usage} for arguments in self.READS]
         return steps + [{"text": "done", "usage": {"input": 100, "output": 20}}] * 6
 
     def fake(self, *extra) -> FakeRun:
@@ -771,6 +939,7 @@ class CompactionPolicyTests(unittest.TestCase):
         requests = run.requests
         summaries = [r for r in requests if not r["messages"][0].get("sections")]
         self.assertTrue(summaries, "compaction never ran")
+        self.assertEqual(run.json("summary.json")["tools"]["errors"], {}, "every distinct read must be a valid view")
         agent = [r for r in requests if r["messages"][0].get("sections")]
 
         def stable(message):  # Pi regenerates an internal timestamp that no provider receives
@@ -802,29 +971,17 @@ class CompactionPolicyTests(unittest.TestCase):
         self.assertAlmostEqual(run.json("cost.json")["spent_usd"], sum(e["usd"] for e in settles), places=9)
 
     def test_a_length_stop_does_not_compact_after_the_output_ceiling(self):
-        steps: list[dict[str, object]] = [
-            {
-                "tool_calls": [
-                    {
-                        "name": "read",
-                        "arguments": {
-                            "node": path,
-                            "view": self.READ_VIEWS[offset],
-                            **({"against": path} if self.READ_VIEWS[offset] == "diff" else {}),
-                        },
-                    }
-                ],
-                "usage": {"input": 3000, "output": 50},
-            }
-            for path, offset in self.READS[:2]
+        # Pi compacts after a length stop below the model's output ceiling (it reads that as context
+        # pressure); a turn cut at the ceiling itself must stay in history.
+        ceiling = models.load()["models"]["deepseek-v4.1-flash"]["request_output_tokens"]
+        steps: list[dict] = [
+            {"tool_calls": [{"name": "read", "arguments": arguments}], "usage": {"input": 3000, "output": 50}}
+            for arguments in self.READS[:2]
         ]
-        steps.extend(
-            [
-                {"text": "cut off", "stop_reason": "length", "usage": {"input": 3000, "output": 16000}},
-                {"text": "done", "usage": {"input": 100, "output": 20}},
-            ]
-            + [{"text": "done"}] * 3
-        )
+        steps += [
+            {"text": "cut off", "stop_reason": "length", "usage": {"input": 3000, "output": ceiling}},
+            {"text": "done", "usage": {"input": 100, "output": 20}},
+        ] + [{"text": "done"}] * 3
         run = FakeRun(steps)
         self.runs.append(run)
         run.run("--compact-keep-tokens", "300")

@@ -20,12 +20,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import TypedDict
 
-from arena import lean_health, lean_session
+from arena import lean_health, lean_session, text
 from arena import models as model_config
 from arena.campaign import autocheck, init, packet, run_dir, submission, write_state
 from arena.engine import ROOT
 from arena.provenance import code_version
-from arena.skill import SKILL_DIR, skill_hash, skill_prompt
+from arena.skill import skill_hash, skill_prompt
 from arena.summary import configured_cap, cost_report_from_ledger, render_text, write_summary
 from arena.traces import langfuse_environment, langfuse_extension, plugin_problems
 
@@ -46,7 +46,7 @@ DRAIN_S = 300
 # How long Pi gets to finish an in-flight evaluation and write cost.json after a stop request.
 STOP_GRACE_S = 45
 THINKING_LEVELS = tuple(CONFIG["thinking"]["levels"])
-_tool_started: dict[str, tuple[float, dict]] = {}
+_tool_started: dict[str, float] = {}
 _request_count = 0
 _tool_result_count = 0
 _retry_count = 0
@@ -122,14 +122,14 @@ def log_event(event: dict) -> None:
         name = event.get("toolName", "tool")
         if name == "compile":
             args = event.get("args") or {}
-            _tool_started[event.get("toolCallId", "")] = (time.monotonic(), args)
+            _tool_started[event.get("toolCallId", "")] = time.monotonic()
             parent = args.get("base") or args.get("from") or "?"
             note = f"{name} started drafts={len(args.get('drafts') or [])} base={str(parent)[:12]}"
     elif kind == "tool_execution_end":
         _tool_result_count += 1
         name = event.get("toolName", "tool")
         started = _tool_started.pop(event.get("toolCallId", ""), None)
-        elapsed = f" in {time.monotonic() - started[0]:.1f}s" if started else ""
+        elapsed = f" in {time.monotonic() - started:.1f}s" if started is not None else ""
         if name == "compile":
             content = event.get("result", {}).get("content") or []
             detail = content[0].get("text", "") if content else ""
@@ -389,10 +389,10 @@ def run(options: RunOptions) -> int:
         ):
             print("error: resume thinking level or skill differs from the original run", file=sys.stderr)
             return 2
-        prompt = "Resume the existing Arena run from its recorded candidate frontier. Continue improving the proof."
+        prompt = text.render("messages/run.resume")
     else:
         prompt = (
-            'Call read once with {"node":"n1"}, then stop.'
+            text.render("messages/run.preflight")
             if args.preflight
             else packet(args.theorem) + ("\nAdditional instructions:\n" + extra + "\n" if extra else "")
         )
@@ -486,7 +486,6 @@ def run(options: RunOptions) -> int:
     env["ARENA_LIMIT_USD"] = str(args.limit_usd)
     env["ARENA_REQUEST_OUTPUT_TOKENS"] = str(CONFIG["models"][args.model]["request_output_tokens"])
     env.setdefault("ARENA_OUTAGE_LIMIT_MS", str(CONFIG["outage_limit_ms"]))
-    env["ARENA_SKILL_DIR"] = "" if args.no_skill else str(SKILL_DIR)
     env["ARENA_BUDGET_REPORT_PATH"] = str(directory / "cost.json")
     if plugin is not None:
         try:

@@ -49,12 +49,14 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `messages/compaction-memory.metrics_verified` | 8 | Agent messages and notices | when the matching event occurs |
 | `messages/compaction-memory.none_verified` | 6 | Agent messages and notices | when the matching event occurs |
 | `messages/compaction-memory.work` | 7 | Agent messages and notices | when the matching event occurs |
+| `messages/continuation.cause_clause` | 2 | Agent messages and notices | when the matching event occurs |
 | `messages/continuation.request_failed` | 7 | Agent messages and notices | when the matching event occurs |
 | `messages/continuation.turn_ended_with_text` | 13 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.ambiguous_symbol` | 4 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.arguments_missing` | 9 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.cold_session_unavailable` | 4 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.cold_verification_paused` | 5 | Agent messages and notices | when the matching event occurs |
+| `messages/errors.command_failed` | 3 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.command_no_result` | 6 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.decision_invalid` | 9 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.declaration_items` | 11 | Agent messages and notices | when the matching event occurs |
@@ -109,15 +111,12 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `messages/errors.profile_timeout` | 5 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.project_file_missing` | 10 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.proof_utility_parse` | 8 | Agent messages and notices | when the matching event occurs |
+| `messages/errors.request` | 7 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.resolve_name_timeout` | 7 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.run_exists` | 5 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.run_theorem_mismatch` | 6 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.run_uninitialized` | 3 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.run_uninitialized_theorem` | 6 | Agent messages and notices | when the matching event occurs |
-| `messages/errors.select_target` | 6 | Agent messages and notices | when the matching event occurs |
-| `messages/errors.skill_directory` | 4 | Agent messages and notices | when the matching event occurs |
-| `messages/errors.skill_missing` | 8 | Agent messages and notices | when the matching event occurs |
-| `messages/errors.skill_path` | 15 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.source_commit_mismatch` | 10 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.source_line_range` | 9 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.source_path_missing` | 12 | Agent messages and notices | when the matching event occurs |
@@ -140,26 +139,15 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `messages/notices.block_shell` | 16 | Agent messages and notices | when the matching event occurs |
 | `messages/notices.block_workspace` | 6 | Agent messages and notices | when the matching event occurs |
 | `messages/notices.closest_tool` | 4 | Agent messages and notices | when the matching event occurs |
-| `messages/notices.evaluate_parent` | 13 | Agent messages and notices | when the matching event occurs |
-| `messages/notices.evaluate_parents` | 14 | Agent messages and notices | when the matching event occurs |
-| `messages/notices.evaluate_usage` | 12 | Agent messages and notices | when the matching event occurs |
-| `messages/notices.idea_missing` | 4 | Agent messages and notices | when the matching event occurs |
-| `messages/notices.lean_path` | 26 | Agent messages and notices | when the matching event occurs |
-| `messages/notices.probe_combined` | 9 | Agent messages and notices | when the matching event occurs |
-| `messages/notices.probe_limit` | 9 | Agent messages and notices | when the matching event occurs |
-| `messages/notices.probe_missing` | 4 | Agent messages and notices | when the matching event occurs |
-| `messages/notices.probe_placeholder` | 8 | Agent messages and notices | when the matching event occurs |
 | `messages/notices.profile_degraded` | 7 | Agent messages and notices | when the matching event occurs |
-| `messages/notices.profile_trimmed` | 25 | Agent messages and notices | when the matching event occurs |
-| `messages/notices.stale_route` | 14 | Agent messages and notices | when the matching event occurs |
 | `messages/phase.stall_focus` | 12 | Agent messages and notices | when the matching event occurs |
 | `messages/refusals.allowance` | 21 | Agent messages and notices | when the matching event occurs |
 | `messages/refusals.axes` | 26 | Agent messages and notices | when the matching event occurs |
+| `messages/run.preflight` | 7 | Agent messages and notices | when the matching event occurs |
+| `messages/run.resume` | 14 | Agent messages and notices | when the matching event occurs |
 | `messages/salvage.salvaged` | 8 | Agent messages and notices | when the matching event occurs |
 | `messages/trim.repeated` | 7 | Agent messages and notices | when a repeat is shortened |
 | `messages/trim.result_stub` | 14 | Agent messages and notices | when a repeat is shortened |
-| `messages/trim.skill_stub` | 15 | Agent messages and notices | when a repeat is shortened |
-| `messages/trim.warning_cut` | 9 | Agent messages and notices | when a repeat is shortened |
 | `packet/inventory` | 34 | Initial theorem packet | once per run |
 | `packet/library` | 35 | Initial theorem packet | once per run |
 | `packet/price-table` | 7 | Prices action replies | when the table is requested |
@@ -274,6 +262,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/tools.finish_archive` | 2 | Tool replies | when the matching tool result occurs |
 | `replies/tools.finish_points` | 8 | Tool replies | when the matching tool result occurs |
 | `replies/tools.goal_item` | 4 | Tool replies | when the matching tool result occurs |
+| `replies/tools.handles` | 2 | Tool replies | when the matching tool result occurs |
 | `replies/tools.hole_item` | 4 | Tool replies | when the matching tool result occurs |
 | `replies/tools.map_archive` | 7 | Tool replies | when the matching tool result occurs |
 | `replies/tools.map_best` | 8 | Tool replies | when the matching tool result occurs |

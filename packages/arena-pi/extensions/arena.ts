@@ -87,7 +87,9 @@ export default async function arenaExtension(pi: ExtensionAPI) {
   const registerTool = async (tool: any) => {
     const validKeys = Object.keys(tool.parameters.properties ?? {});
     const missingError = await renderText("messages/errors.arguments_missing", { valid: validKeys.join(", ") || "none" });
-    return pi.registerTool({ ...tool, prepareArguments: (args: unknown) => requireToolArguments(args, missingError),
+    // Normalized before Pi's schema validation, so an empty optional enum ("view": "") or a stringified list passes.
+    return pi.registerTool({ ...tool,
+    prepareArguments: (args: unknown) => normalizeToolArguments(requireToolArguments(args, missingError), tool.parameters),
     execute: (id: string, params: any, ...rest: any[]) =>
       tool.execute(id, normalizeToolArguments(params, tool.parameters), ...rest) });
   };
@@ -129,6 +131,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
 
   async function campaign(action: string, args: string[] = []): Promise<Record<string, any>> {
     if (!active || !runId) throw new Error("Arena run is not selected"); // not-model-facing: internal extension state invariant.
+    const commandFailed = await renderText("messages/errors.command_failed");
     const command = ["run", "--no-sync", "arena", "protocol", action,
       "--theorem", active, "--run-id", runId, ...args];
     const output = await new Promise<string>((accept, reject) => {
@@ -140,7 +143,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
       child.on("error", reject);
       child.on("close", code => code === 0 || chunks.length
         ? accept(Buffer.concat(chunks).toString("utf8"))
-        : accept(JSON.stringify({ ok: false, error: (Buffer.concat(errors).toString("utf8").trim().split("\n").at(-1) ?? "Arena command failed").replace(/^\w*(Error|Exception): /, "") })));
+        : accept(JSON.stringify({ ok: false, error: (Buffer.concat(errors).toString("utf8").trim().split("\n").at(-1) || commandFailed).replace(/^\w*(Error|Exception): /, "") })));
     });
     try { return JSON.parse(output.trim().split("\n").at(-1) ?? ""); }
     catch { return { ok: false, error: await renderText("messages/errors.command_no_result", { output: output.trim().slice(0, 200) }) }; }
@@ -459,7 +462,11 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     }
   });
 
+  // Pi's tool_execution_end event carries no arguments, so each compile's check is kept from its start.
+  const compileChecks = new Map<string, string>();
   pi.on("tool_execution_start", event => {
+    // A missing check means a Lean check, as in arena/tools.py.
+    if (event.toolName === "compile") compileChecks.set(event.toolCallId, String(event.args?.check ?? "lean"));
     if (!openAttempt) return;
     appendTrace({ kind: "tool_call", id: openAttempt, tool_call_id: event.toolCallId,
       name: event.toolName, args: event.args });
@@ -471,11 +478,15 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     if (event.toolName === FINISH_TOOL && finishConfirmed) ctx.abort();
     const result = event.result as { content?: Array<{ type?: string; text?: string }> } | undefined;
     const payload = payloadFromToolResult(result);
-    if (event.toolName === "compile" && (event.input as any)?.check === "lean") {
+    const check = compileChecks.get(event.toolCallId);
+    compileChecks.delete(event.toolCallId);
+    // Every draft the harness filed as a node (with holes or errors too) carries `node`; a rejected one does not.
+    if (event.toolName === "compile" && check === "lean") {
       turnHadProofAttempt ||= Boolean(payload?.ok !== false && (payload?.items ?? []).some((item: any) => item?.node));
     }
-    // A repeated identical result reaches here as the trimmer's `unchanged` stub: nothing new was read.
-    const keys = payload?.unchanged === true ? [] : discoveryKeys(event.toolName, payload);
+    // The trimmer only shortens the model-facing text; `details` keep the full payload, so a repeated identical
+    // result yields signatures already in `discoveries` and does not count as novel context.
+    const keys = discoveryKeys(event.toolName, payload);
     for (const key of keys) {
       const signature = createHash("sha256").update(key).digest("hex");
       if (discoveries.has(signature)) continue;
@@ -597,7 +608,8 @@ export default async function arenaExtension(pi: ExtensionAPI) {
   });
 
   const searchParams = Type.Object({
-    queries: Type.Array(Type.String(), { minItems: 1, description: await renderText("tools/search.params.queries") }),
+    queries: Type.Optional(Type.Array(Type.String(), { minItems: 1,
+      description: await renderText("tools/search.params.queries") })),
     kind: Type.Optional(Type.Union([Type.Literal("name"), Type.Literal("type"), Type.Literal("text")],
       { description: await renderText("tools/search.params.kind") })),
     after: Type.Optional(Type.String({ description: await renderText("tools/search.params.after") })),
@@ -633,7 +645,8 @@ export default async function arenaExtension(pi: ExtensionAPI) {
         finishConfirmed = true;
         const stop = limitHit ? "limit_reached" : "finished";
         appendCost({ kind: "control", continuations, plateau, no_work_turns: noWorkTurns,
-          error_streak: errorStreak, progress: previousProgress, stop });
+          error_streak: errorStreak, progress: previousProgress, stop,
+          outage_started_at: outageStartedAt ?? null, outage_attempt: outageAttempt });
       }
       return result;
     },

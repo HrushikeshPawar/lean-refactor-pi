@@ -802,6 +802,9 @@ def read_tool(theorem: str, run_id: str, request: dict) -> dict:
     if request.get("against") and view != "diff":
         return _invalid("bad_argument", "against", ["against with view diff"], TOOL_FORMS["read"])
     targets = [key for key in ("handle", "node", "hole") if request.get(key)]
+    if view == "map" and not targets:
+        # The map covers the whole graph, so it needs no target.
+        return reply.attach_context(run_id, reply.reply(), include_map=True, force_map=True)
     if len(targets) != 1:
         return _invalid("bad_target", ",".join(targets) or "none", ["one of handle, node, hole"], TOOL_FORMS["read"])
     if targets[0] == "handle":

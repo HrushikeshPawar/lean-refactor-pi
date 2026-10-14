@@ -147,6 +147,18 @@ class ReadGoalSearchTests(CascadeToolCase):
         self.assertFalse(invalid["ok"])
         self.assertEqual(invalid["error"]["valid"], ["source"])
 
+    def test_read_map_needs_no_target(self):
+        node = self.sketch()
+        with patch.object(campaign, "map_view", return_value={"recent": [{"node": node, "status": "open"}]}):
+            result = tools.read_tool("T", "logic", {"view": "map"})
+            again = tools.read_tool("T", "logic", {"view": "map"})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["items"], [])
+        self.assertTrue(any(node in line for line in result["map"]))
+        self.assertEqual(again["map"], result["map"])
+        missing = tools.read_tool("T", "logic", {"view": "source"})
+        self.assertEqual(missing["error"]["code"], "bad_target")
+
     def test_finish_returns_archive_and_stops(self):
         with (
             patch.object(

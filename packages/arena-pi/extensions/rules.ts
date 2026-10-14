@@ -35,6 +35,6 @@ export async function continuationPush(args: {
 }): Promise<string> {
   const facts = await allowanceFacts(args.usedPct, args.remainingUsd, args.capUsd, args.baseline, args.best);
   const values = { facts, best_node: args.bestNode || "none",
-    ...(args.failed ? { cause_clause: args.cause ? `: ${args.cause}` : "" } : {}) };
+    ...(args.failed ? { cause_clause: args.cause ? await render("messages/continuation.cause_clause", { cause: args.cause }) : "" } : {}) };
   return render(`messages/continuation.${continuationKey(args.failed)}`, values);
 }
