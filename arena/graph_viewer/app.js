@@ -1,8 +1,8 @@
 /* Static Arena graph viewer. The loopback server supplies graph.json; snapshots set GRAPH_SNAPSHOT. */
+const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 (() => {
   if (/[?&]embed=1/.test(location.search)) document.body.classList.add('embed');
   const $ = id => document.getElementById(id);
-  const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   // localStorage can throw (private windows, blocked site data): every access is wrapped.
   const store = {get(k){try{return localStorage.getItem(k)}catch{return null}}, set(k,v){try{localStorage.setItem(k,v)}catch{}}};
   let data, byId = new Map(), pById = new Map(), probeItems = [], probeKids = new Map(), coords = new Map(),
@@ -385,11 +385,13 @@
     $('detail').innerHTML=`<div class="side"><div class="card sumcard"><h2>Probe ${esc(p.id.slice(0,8))} ${stTag(st)}</h2>
       ${facts([['Tokens',esc(p.tokens??'?')],['Heartbeats',esc(p.heartbeat??'—')],['Open goals',p.status==='skeleton'?`${esc(p.goals)} (sorry skeleton)`:p.status==='fail'?`${esc(p.errors??'?')} error(s)`:'none'],
         ['Route',p.route?routeBadge(p.route):'<span class="muted">none</span>'],['Parent',p.parent?goBtn(p.parent):'<span class="muted">none</span>']])}
-      <div class="muted small">A probe is a quick compile of a proof sketch; it is not an evaluated candidate and has no score.</div></div>
+      <div class="muted small">A probe is a quick compile of a proof sketch; it is not an evaluated candidate and has no score.</div>
+      <div class="actions"><button type="button" data-open="calls">Reasoning & calls ↗</button></div></div>
       ${p.headlines?.length?`<div class="card hypcard"><h3>Lean errors</h3>${p.headlines.map(h=>`<p class="hyp">${esc(h)}</p>`).join('')}</div>`:''}
       ${p.first_goal?`<div class="card hypcard"><h3>First open goal</h3><pre class="hyp mono">${esc(p.first_goal)}</pre></div>`:''}</div>`;
     paintSwatches($('detail'));
     $('detail').querySelectorAll('[data-go]').forEach(el=>el.onclick=()=>select(el.dataset.go));
+    $('detail').querySelectorAll('[data-open]').forEach(el=>el.onclick=()=>openDetail(el.dataset.open));
   }
   function detail() {
     if (pById.has(selected)) { probeDetail(pById.get(selected)); return; }
@@ -414,39 +416,17 @@
   }
   const DETAIL_TABS=[['overview','Reasoning and relations'],['diff','Diff and merge provenance'],['proof','Full proof'],['lineage','Lineage diffs'],['evals','Evaluations and Lean feedback'],['calls','Reasoning & calls']];
   function openDetail(tab='overview') {
-    const node=byId.get(selected);if(!node)return;
+    const probe=pById.get(selected),node=byId.get(selected)||probe;if(!node)return;
+    if(probe)tab='calls'; // a probe has only its creating call; the other tabs need candidate fields
     const dialog=$('code-dialog');
-    $('code-dialog-body').innerHTML=`<div class="modal-head"><h2>${esc(nodeLabel(node))} ${node.origin==='auto_merge'?'⊕ automatic merge':''}<span class="muted dsub"> · ${esc(status(node))} · ${esc(node.tokens ?? '?')} tokens · ${esc(node.heartbeat ?? '?')} heartbeats</span></h2><button id="close-code" type="button" aria-label="Close details">✕</button></div>
-      <nav class="dtabs">${DETAIL_TABS.map(([id,label])=>`<button type="button" data-dtab="${id}" aria-selected="${id===tab}">${label}</button>`).join('')}</nav><div id="dtab"></div>`;
+    $('code-dialog-body').innerHTML=`<div class="modal-head"><h2>${probe?`Probe ${esc(probe.id.slice(0,8))}`:`${esc(nodeLabel(node))} ${node.origin==='auto_merge'?'⊕ automatic merge':''}`}<span class="muted dsub"> · ${esc(probe?stat(probe):status(node))} · ${esc(node.tokens ?? '?')} tokens · ${esc(node.heartbeat ?? '?')} heartbeats</span></h2><button id="close-code" type="button" aria-label="Close details">✕</button></div>
+      <nav class="dtabs">${(probe?DETAIL_TABS.filter(([id])=>id==='calls'):DETAIL_TABS).map(([id,label])=>`<button type="button" data-dtab="${id}" aria-selected="${id===tab}">${label}</button>`).join('')}</nav><div id="dtab"></div>`;
     $('close-code').onclick=()=>dialog.close();
     $('code-dialog-body').querySelectorAll('[data-dtab]').forEach(b=>b.onclick=()=>openDetail(b.dataset.dtab));
     renderDetailTab(node,tab);
     if(!dialog.open){if(document.body.classList.contains('embed'))parent.postMessage({type:'arena-focus'},location.origin);dialog.showModal();}
   }
   let callsToken = 0;
-  function callsHtml(payload) {
-    const lines = [];
-    if (payload.reason) lines.push(`<p class="muted">${esc(payload.reason)}</p>`);
-    if (payload.origin_line) lines.push(`<p class="origin-line">${esc(payload.origin_line)}</p>`);
-    if (payload.turn != null) lines.push(`<p>Turn ${esc(payload.turn)}</p>`);
-    for (const block of payload.reasoning || []) {
-      lines.push(`<h3>${block.type === 'thinking' ? 'Thinking' : 'Reply'}</h3><pre>${esc(block.text)}</pre>`);
-    }
-    const call = payload.call;
-    if (call) {
-      lines.push(`<h3>${esc(call.name)}</h3><pre>${esc(JSON.stringify(call.args, null, 2))}</pre>`);
-      lines.push(`<h3>Delivered</h3><pre>${esc(call.delivered)}</pre>`);
-      if (call.trimmed) lines.push(`<details><summary>Untrimmed result</summary><pre>${esc(call.untrimmed)}</pre></details>`);
-      if (call.footer) lines.push(`<pre class="calls-footer">${esc(call.footer)}</pre>`);
-    }
-    if (payload.holes) {
-      const rows = payload.holes.map(hole => `<tr><td>${esc(hole.id)}</td><td>${esc(hole.goal)}</td><td>${esc(hole.status)}</td><td>${esc((hole.fills || []).join(' '))}</td></tr>`).join('');
-      lines.push(`<table class="holes"><thead><tr><th>Hole</th><th>Goal</th><th>Status</th><th>Fills</th></tr></thead><tbody>${rows}</tbody></table>`);
-    }
-    const siblingButtons = (payload.siblings || []).map(id => goBtn(id)).join(' ');
-    if (siblingButtons) lines.push(`<p class="row">${siblingButtons}</p>`);
-    return lines.join('');
-  }
   function renderCalls(node) {
     const token = ++callsToken;
     const box = $('dtab');
@@ -456,8 +436,7 @@
       return response.json();
     }).then(payload => {
       if (token !== callsToken) return;
-      const html = callsHtml(payload);
-      box.innerHTML = html;
+      box.innerHTML = callsHtml(payload, id => itemOf(id) ? goBtn(id) : '');
       box.querySelectorAll('[data-go]').forEach(el => el.onclick = () => { select(el.dataset.go); openDetail('calls'); });
     }).catch(error => {
       if (token !== callsToken) return;
@@ -466,6 +445,8 @@
     });
   }
   function renderDetailTab(node,tab) {
+    callsToken++; // a late node/<id>.json answer must not overwrite this tab
+    if(tab==='calls'){renderCalls(node);return;}
     const {derived,ancestry,reference,root}=context(node),box=$('dtab');
     const bind=()=>box.querySelectorAll('[data-go]').forEach(el=>el.onclick=()=>{select(el.dataset.go);openDetail(tab)});
     if(tab==='overview'){
@@ -481,8 +462,6 @@
       const selector=$('diff-parent');if(selector){const update=()=>{$('diff').innerHTML=diff(byId.get(selector.value)?.proof ?? '',node.proof,$('diff-all').checked)};selector.onchange=update;$('diff-all').onchange=update;update();}
     } else if(tab==='proof'){
       box.innerHTML=`<pre class="full-code lean">${window.LeanHL?window.LeanHL.block(node.proof):esc(node.proof)}</pre>`;
-    } else if(tab==='calls'){
-      renderCalls(node);
     } else if(tab==='lineage'){
       const cumulative=root&&root.id!==node.id?`<h3>${esc(nodeLabel(root))} → ${esc(nodeLabel(node))} · cumulative</h3><div class="diff">${diff(root.proof,node.proof)}</div>`:'<p class="muted">This is the earliest recorded proof.</p>';
       const steps=ancestry.edges.map(({parent,child})=>{const from=byId.get(parent),to=byId.get(child);
@@ -740,6 +719,31 @@
   }
   refresh(); if(!window.GRAPH_SNAPSHOT)setInterval(refresh,2500);
 })();
+
+// The "Reasoning & calls" tab. `go(id)` is a select button for an id in the graph, or '' when it is not there.
+// Graph ids (`n3`) in the filing line and hole fills become buttons through `payload.ids`; everything else is escaped.
+function callsHtml(payload, go) {
+  const ids = payload.ids || {}, lines = [];
+  const named = text => String(text ?? '').split(/\b(n[1-9][0-9]*)\b/).map((part, i) => i % 2 && ids[part] && go(ids[part]) || esc(part)).join('');
+  if (payload.reason) lines.push(`<p class="muted">${esc(payload.reason)}</p>`);
+  if (payload.origin_line) lines.push(`<p class="origin-line">${named(payload.origin_line)}</p>`);
+  if (payload.turn != null) lines.push(`<p>Turn ${esc(payload.turn)}</p>`);
+  for (const block of payload.reasoning || []) lines.push(`<h3>${block.type === 'thinking' ? 'Thinking' : 'Reply'}</h3><pre>${esc(block.text)}</pre>`);
+  const call = payload.call;
+  if (call) {
+    lines.push(`<h3>${esc(call.name)}</h3><pre>${esc(typeof call.args === 'string' ? call.args : JSON.stringify(call.args, null, 2))}</pre>`);
+    lines.push(`<h3>Delivered</h3><pre>${esc(call.delivered)}</pre>`);
+    if (call.trimmed) lines.push(`<details><summary>Untrimmed result</summary><pre>${esc(call.untrimmed)}</pre></details>`);
+    if (call.footer) lines.push(`<pre class="calls-footer">${esc(call.footer)}</pre>`);
+  }
+  if (payload.holes) {
+    const rows = payload.holes.map(hole => `<tr><td>${esc(hole.id)}</td><td>${esc(hole.goal)}</td><td>${esc(hole.status)}</td><td>${(hole.fills || []).map(named).join(' ')}</td></tr>`).join('');
+    lines.push(`<table class="holes"><thead><tr><th>Hole</th><th>Goal</th><th>Status</th><th>Fills</th></tr></thead><tbody>${rows}</tbody></table>`);
+  }
+  const siblings = (payload.siblings || []).map(id => go(id) || esc(String(id).slice(0, 8))).join(' ');
+  if (siblings) lines.push(`<p class="row">${siblings}</p>`);
+  return lines.join('');
+}
 
 function diagnosticText(result) {
   if (typeof result.diagnostics === 'string') return result.diagnostics;

@@ -704,9 +704,10 @@ def node_calls(directory: Path, node: str) -> dict:
     """
     if not (directory / "trace-journal.jsonl").is_file():
         return _no_call(node, "no journal")
-    from arena.replay import ReplayError, load_run, node_turn
+    from arena.replay import ReplayError, node_turn
 
-    run = load_run(str(directory))
+    index = _journal_index(directory)
+    run, calls = index["run"], index["calls"]
     proof_id = _proof_of(run.ledger, node)
     if proof_id is None:
         return _no_call(node, "no call matched")
@@ -715,7 +716,6 @@ def node_calls(directory: Path, node: str) -> dict:
         return _no_call(node, "no call matched")
     if event.get("origin") in _HARNESS_ORIGINS:
         return _no_call(node, "harness-made")
-    calls = _calls(run)
     tool_call = event.get("tool_call_id")
     reason = None
     if tool_call:
@@ -739,22 +739,62 @@ def node_calls(directory: Path, node: str) -> dict:
         chosen = enclosing[0]
         if len(enclosing) > 1:
             reason = "ambiguous"
-        else:
-            try:
-                node_turn(run, node)
-            except ReplayError:
-                return _no_call(node, "no call matched")
     found = {
         "node": node,
         "turn": chosen["turn"],
         "call": {key: chosen[key] for key in _CALL_KEYS},
-        "reasoning": _reasoning(run, chosen["turn"]),
+        "reasoning": index["reasoning"].get(chosen["turn"], []),
         "siblings": _siblings(run.ledger, chosen, proof_id),
     }
     if reason:
         found["reason"] = reason
     found.update(_step_origin(directory, run.ledger, proof_id))
     return found
+
+
+def _journal_index(directory: Path) -> dict:
+    """The calls, per-turn reasoning and slim turns `node_calls` joins on, rebuilt only when the
+    journal or the ledger changes. Request payloads are never expanded or held; a line that does
+    not decode (the half-written tail of a live run) is skipped, as `read_jsonl` does."""
+    from arena.replay import Run, _group
+
+    journal, ledger = directory / "trace-journal.jsonl", directory / "ledger.jsonl"
+    key, stamp = ("calls", str(directory)), (_stamp(journal), _stamp(ledger))
+    hit = _CACHE.get(key)
+    if hit and hit[0] == stamp:
+        return hit[1]
+    rows: list[dict] = []
+    try:
+        lines = journal.read_text(errors="replace").splitlines()
+    except OSError:
+        lines = []
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        if row.get("kind") == "request":
+            rows.append({field: row[field] for field in ("kind", "id", "turn", "ts") if field in row})
+        elif row.get("kind") in ("tool_call", "tool_result", "response"):
+            rows.append(row)
+    run = Run(directory, {}, rows, read_jsonl(ledger), [], [], {})
+    _group(run)
+    index = {"run": run, "calls": _calls(run), "reasoning": {item.number: _reasoning(item) for item in run.turns}}
+    # node_turn needs only each tool row's kind, id and time; drop the texts once the calls hold them.
+    run.journal = []
+    for item in run.turns:
+        item.request = {}
+        item.rows = [
+            {field: row.get(field) for field in ("kind", "tool_call_id", "ts")}
+            for row in item.rows
+            if row.get("kind") in ("tool_call", "tool_result")
+        ]
+    for old in [k for k in _CACHE if k[0] == "calls" and k != key][:-3]:  # a few runs at most
+        _CACHE.pop(old, None)
+    _CACHE[key] = (stamp, index)
+    return index
 
 
 def _no_call(node: str, reason: str) -> dict:
@@ -847,6 +887,14 @@ def _cap(text: str) -> str:
     return f"{text[:_FIELD_LIMIT]}\n[truncated: {omitted} more characters; use arena replay]"
 
 
+def _cap_args(args):
+    """Arguments as sent; serialized and cut when the JSON is over the field limit."""
+    if args is None:
+        return {}
+    serialized = json.dumps(args, ensure_ascii=False, default=str)
+    return args if len(serialized) <= _FIELD_LIMIT else _cap(serialized)
+
+
 def _calls(run) -> list[dict]:
     calls = []
     for item in run.turns:
@@ -860,7 +908,7 @@ def _calls(run) -> list[dict]:
                 pending[ident] = {
                     "tool_call_id": ident,
                     "name": str(row.get("name") or ""),
-                    "args": {} if row.get("args") is None else row.get("args"),
+                    "args": _cap_args(row.get("args")),
                     "delivered": "",
                     "untrimmed": "",
                     "trimmed": False,
@@ -890,10 +938,7 @@ def _encloses(call: dict, stamp: float) -> bool:
     return start is not None and end is not None and start <= stamp <= end
 
 
-def _reasoning(run, turn: int) -> list[dict]:
-    item = next((candidate for candidate in run.turns if candidate.number == turn), None)
-    if item is None:
-        return []
+def _reasoning(item) -> list[dict]:
     response = next((row for row in item.rows if row.get("kind") == "response"), None)
     if not isinstance(response, dict):
         return []
@@ -902,9 +947,9 @@ def _reasoning(run, turn: int) -> list[dict]:
         if not isinstance(block, dict):
             continue
         if block.get("type") == "thinking" and isinstance(block.get("thinking"), str):
-            blocks.append({"type": "thinking", "text": block["thinking"]})
+            blocks.append({"type": "thinking", "text": _cap(block["thinking"])})
         elif block.get("type") == "text" and isinstance(block.get("text"), str):
-            blocks.append({"type": "text", "text": block["text"]})
+            blocks.append({"type": "text", "text": _cap(block["text"])})
     return blocks
 
 
@@ -962,4 +1007,11 @@ def _step_origin(directory: Path, history: list[dict], proof_id: str) -> dict:
         )
     if holes:
         fields["holes"] = holes
+    # The text names nodes by graph id (`n3`); the viewer keys them on proof ids.
+    proofs = {item.id: item.proof_id for item in projection.nodes}
+    named = re.findall(r"\bn[1-9][0-9]*\b", fields["origin_line"])
+    named += [str(fill) for hole in node.holes for fill in hole.get("fills") or []]
+    ids = {name: proofs[name] for name in named if name in proofs}
+    if ids:
+        fields["ids"] = ids
     return fields

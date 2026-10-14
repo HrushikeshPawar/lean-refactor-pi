@@ -622,6 +622,7 @@ class NodeCallTests(unittest.TestCase):
         )
         found = viewer_data.node_calls(self.directory, "n2")
         self.assertEqual(found["origin_line"], "n2 <- n1 splice s1")
+        self.assertEqual(found["ids"], {"n2": "c2", "n1": "ref"})
         self.assertEqual(found["holes"], [{"id": "n2.h1", "goal": "True", "status": "open", "fills": []}])
 
     def test_oversized_call_text_is_cut_with_the_replay_marker(self):
@@ -639,6 +640,114 @@ class NodeCallTests(unittest.TestCase):
         self.assertEqual(call["delivered"], "short")
         self.assertTrue(call["untrimmed"].endswith(f"[truncated: {extra} more characters; use arena replay]"))
         self.assertLess(len(call["untrimmed"]), len(huge))
+
+    def test_tool_call_id_finds_a_node_filed_outside_every_call_window(self):
+        self._write(
+            [
+                _request("r1", 1000),
+                *_call("r1", "t1", 2000, 4000, name="compile"),
+                _response("r1", 4500),
+                _request("r2", 6000),
+                *_call("r2", "t2", 7000, 9000, name="goal"),
+                _response("r2", 9500),
+            ],
+            # Filed long after both calls returned: no time window encloses it.
+            [_candidate(1.0, "ref", "reference"), _candidate(100.0, "c2", "model", tool_call_id="t2")],
+        )
+        found = viewer_data.node_calls(self.directory, "n2")
+        self.assertEqual((found["turn"], found["call"]["tool_call_id"], found["call"]["name"]), (2, "t2", "goal"))
+        self.assertNotIn("reason", found)
+
+    def test_a_node_is_found_by_its_proof_id_and_a_unique_prefix(self):
+        reference, child = "a" * 64, "0f" * 32
+        self._write(
+            [_request("r1", 1000), *_call("r1", "t1", 2000, 4000), _response("r1", 4500)],
+            [_candidate(1.0, reference, "reference"), _candidate(2.5, child, "model", tool_call_id="t1")],
+        )
+        for ref in (child, child[:8]):
+            found = viewer_data.node_calls(self.directory, ref)
+            self.assertEqual((found["node"], found["call"]["tool_call_id"]), (ref, "t1"))
+        self.assertEqual(viewer_data.node_calls(self.directory, reference)["reason"], "harness-made")
+
+    def test_siblings_follow_ledger_time_not_filing_order(self):
+        self._write(
+            [_request("r1", 1000), *_call("r1", "t1", 2000, 4000), _response("r1", 4500)],
+            [
+                _candidate(1.0, "ref", "reference"),
+                _candidate(2.5, "c2", "model", tool_call_id="t1"),
+                _candidate(2.9, "late", "model", tool_call_id="t1"),
+                _candidate(2.7, "early", "model", tool_call_id="t1"),
+            ],
+        )
+        self.assertEqual(viewer_data.node_calls(self.directory, "n2")["siblings"], ["early", "late"])
+        self.assertEqual(viewer_data.node_calls(self.directory, "n3")["siblings"], ["c2", "early"])
+
+    def test_oversized_delivered_args_and_reasoning_are_cut_with_the_replay_marker(self):
+        extra = 777
+        huge = "d" * (200 * 1024 + extra)
+        response = _response("r1", 4500)
+        response["content"] = [{"type": "thinking", "thinking": huge}, {"type": "text", "text": "short reply"}]
+        self._write(
+            [
+                _request("r1", 1000),
+                *_call("r1", "t1", 2000, 4000, delivered=huge, untrimmed="short", args={"steps": huge}),
+                response,
+            ],
+            [_candidate(1.0, "ref", "reference"), _candidate(2.5, "c2", "model", tool_call_id="t1")],
+        )
+        found = viewer_data.node_calls(self.directory, "n2")
+        marker = f"[truncated: {extra} more characters; use arena replay]"
+        self.assertTrue(found["call"]["delivered"].endswith(marker))
+        self.assertEqual(found["call"]["untrimmed"], "short")
+        self.assertTrue(found["reasoning"][0]["text"].endswith(marker))
+        self.assertEqual(found["reasoning"][1]["text"], "short reply")
+        args = found["call"]["args"]
+        self.assertIsInstance(args, str)
+        serialized = json.dumps({"steps": huge})
+        self.assertTrue(args.endswith(f"[truncated: {len(serialized) - 200 * 1024} more characters; use arena replay]"))
+        self.assertTrue(serialized.startswith(args.split("\n[truncated")[0]))
+
+    def test_a_half_written_last_journal_line_is_skipped(self):
+        self._write(
+            [_request("r1", 1000), *_call("r1", "t1", 2000, 4000), _response("r1", 4500)],
+            [_candidate(1.0, "ref", "reference"), _candidate(2.5, "c2", "model", tool_call_id="t1")],
+        )
+        with (self.directory / "trace-journal.jsonl").open("a") as journal:
+            journal.write('{"kind": "tool_call", "id": "r2", "ts": 50')
+        self.assertEqual(viewer_data.node_calls(self.directory, "n2")["call"]["tool_call_id"], "t1")
+
+    def test_journal_is_read_once_until_it_changes(self):
+        journal = self.directory / "trace-journal.jsonl"
+        self._write(
+            [_request("r1", 1000), *_call("r1", "t1", 2000, 4000), _response("r1", 4500)],
+            [
+                _candidate(1.0, "ref", "reference"),
+                _candidate(2.5, "c2", "model", tool_call_id="t1"),
+                _candidate(20.0, "c3", "model", tool_call_id="t2"),
+            ],
+        )
+        original = Path.read_text
+        reads = []
+
+        def counting(path, *args, **kwargs):
+            if path == journal:
+                reads.append(path)
+            return original(path, *args, **kwargs)
+
+        with patch.object(Path, "read_text", autospec=True, side_effect=counting):
+            self.assertEqual(viewer_data.node_calls(self.directory, "n2")["call"]["tool_call_id"], "t1")
+            self.assertEqual(viewer_data.node_calls(self.directory, "n3")["reason"], "no call matched")
+            self.assertEqual(len(reads), 1)
+            with journal.open("a") as handle:
+                handle.write(
+                    "".join(
+                        json.dumps(row) + "\n"
+                        for row in [_request("r2", 10_000), *_call("r2", "t2", 11_000, 12_000, name="goal")]
+                    )
+                )
+            later = viewer_data.node_calls(self.directory, "n3")
+        self.assertEqual(len(reads), 2)
+        self.assertEqual((later["turn"], later["call"]["name"]), (2, "goal"))
 
 
 class ServerTests(unittest.TestCase):
@@ -730,6 +839,24 @@ class ServerTests(unittest.TestCase):
                     with self.assertRaises(urllib.error.HTTPError) as caught:
                         get(path)
                     self.assertEqual(caught.exception.code, 404)
+
+    def test_single_run_server_serves_node_calls_at_the_root(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = make_run(root, "v6x-Core.T-m1-r1")
+            write(
+                directory / "trace-journal.jsonl",
+                [_request("r1", ms(1)), *_call("r1", "t1", ms(1.5), ms(4), name="goal"), _response("r1", ms(5))],
+            )
+            with patch.object(campaign, "ROOT", root):
+                httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.handler_for(server.Runs(["v6x-Core.T-m1-r1"])))
+                thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+                thread.start()
+                self.addCleanup(httpd.server_close)
+                self.addCleanup(httpd.shutdown)
+                with urllib.request.urlopen(f"http://127.0.0.1:{httpd.server_port}/node/n2.json") as response:
+                    payload = json.loads(response.read().decode())
+        self.assertEqual((payload["node"], payload["call"]["name"]), ("n2", "goal"))
 
 
 class AssetTests(unittest.TestCase):
@@ -828,20 +955,62 @@ class GraphViewerUpgradeTests(unittest.TestCase):
         self.assertIn("document.activeElement !== select", hub)
         self.assertIn("document.activeElement", (self.ASSETS / "dashboard.js").read_text())
 
-    def test_calls_tab_escapes_fetched_text(self):
-        source = (self.ASSETS / "app.js").read_text()
-        start = source.index("function callsHtml")
-        chunk = source[start : source.index("function renderDetailTab")]
-        self.assertIn("esc(call.delivered)", chunk)
-        self.assertIn("esc(call.untrimmed)", chunk)
-        self.assertIn("esc(block.text)", chunk)
-        self.assertIn("goBtn(id)", chunk)
-        for line in chunk.splitlines():
-            if "innerHTML" not in line:
-                continue
-            self.assertNotIn("payload", line)
-            if "${" in line:
-                self.assertIn("esc(", line)
+    # app.js's IIFE needs a DOM and stops at its first `location` access; the top-level helpers are declared before.
+    CALLS = (
+        "const vm = require('vm'), fs = require('fs'), ctx = vm.createContext({});"
+        "try { vm.runInContext(fs.readFileSync(process.argv[1], 'utf8'), ctx); } catch {}"
+        "ctx.payload = JSON.parse(process.argv[2]);"
+        "ctx.go = process.argv[3] === 'link' ? id => `<b class=go>${id}</b>` : () => '';"
+        "console.log(vm.runInContext('callsHtml(payload, go)', ctx));"
+    )
+
+    def calls_html(self, payload: dict, link: bool = False) -> str:
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not installed")
+        argv = [node, "-e", self.CALLS, str(self.ASSETS / "app.js"), json.dumps(payload), "link" if link else ""]
+        result = subprocess.run(argv, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
+    def test_calls_tab_escapes_every_fetched_field(self):
+        bad = "<img src=x onerror=1>"
+        payload = {
+            "node": bad,
+            "turn": bad,
+            "reason": bad,
+            "origin_line": f"n2 <- n1 {bad}",
+            "ids": {"n1": bad},
+            "reasoning": [{"type": "thinking", "text": bad}],
+            "call": {
+                "name": bad,
+                "args": {"steps": bad},
+                "delivered": bad,
+                "untrimmed": bad,
+                "trimmed": True,
+                "footer": bad,
+            },
+            "holes": [{"id": bad, "goal": bad, "status": bad, "fills": [bad]}],
+            "siblings": [bad],
+        }
+        html = self.calls_html(payload)
+        self.assertNotIn("<img", html)
+        # turn, reason, origin line, thinking, name, args, delivered, untrimmed, footer, 4 hole cells, sibling
+        self.assertEqual(html.count("&lt;img"), 14)
+
+    def test_calls_tab_links_graph_ids_it_can_resolve(self):
+        payload = {
+            "turn": 1,
+            "origin_line": "n2 <- n1, n7 splice s1",
+            "ids": {"n1": "proof-one", "n7": "proof-seven"},
+            "holes": [{"id": "n2.h1", "goal": "True", "status": "filled", "fills": ["n7", "n9"]}],
+            "siblings": ["proof-sib"],
+        }
+        html = self.calls_html(payload, link=True)
+        self.assertIn("n2 &lt;- <b class=go>proof-one</b>, <b class=go>proof-seven</b> splice s1", html)
+        self.assertIn("<td><b class=go>proof-seven</b> n9</td>", html)
+        self.assertIn("<b class=go>proof-sib</b>", html)
+        self.assertIn("<td>n2.h1</td>", html)
 
     def test_viewer_scripts_parse(self):
         node = shutil.which("node")
