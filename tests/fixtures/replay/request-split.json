@@ -1,0 +1,42 @@
+{
+  "system": "Be exact.\n\n",
+  "skill": "\nThe skill body.\n",
+  "tools": "[{\"type\":\"function\",\"function\":{\"name\":\"compile\",\"description\":\"Compile a draft. Keep going.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"note\":{\"type\":\"string\"}}}}}]",
+  "packet": "Packet line.\nSecond line.",
+  "messages": [
+    {
+      "role": "system",
+      "content": "Be exact.\n\n<addendum>\nThe skill body.\n</addendum>\n\n<cwd>\n/tmp\n</cwd>"
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Packet line.\nSecond line."
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": null,
+      "reasoning_content": "Think once.",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "type": "function",
+          "function": {
+            "name": "compile",
+            "arguments": "{}"
+          }
+        }
+      ]
+    }
+  ],
+  "sha256": {
+    "system": "d274a2385cf95ec705921d3b0ad703b2a37552b76a0529257f2e007ded392860",
+    "skill": "197b8754b8c4e1153a54aaab6e47770a528a0a1379f7824b34a8194749c61dd9",
+    "tools": "7dcc6c1595fc795d39c5c68d927f831b8d0e7ca5c585f049c9b0b3a27c4f373a",
+    "packet": "f77ec6823bb867b625518cb48941efea0b0a686cbfa90daef82e518d6293a589"
+  }
+}

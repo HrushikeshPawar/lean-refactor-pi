@@ -56,6 +56,7 @@ from arena.profile import profile
 from arena.salvage import fill_cost, fill_text
 from arena.salvage import holes as find_holes
 from arena.salvage import salvage as salvage_proof
+from arena.traces import call_context
 
 
 def run_dir(run_id: str) -> Path:
@@ -606,10 +607,13 @@ def packet(name: str) -> str:
 
 def _append(directory: Path, event: dict) -> None:
     directory.mkdir(parents=True, exist_ok=True)
+    # The event's own keys win. A tool call id already on the row is not replaced by the environment.
+    context = {key: value for key, value in call_context().items() if key not in event}
     fd = os.open(directory / "ledger.jsonl", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
-        data = (json.dumps({"ts": time.time(), **event}, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
+        row = {"ts": time.time(), **context, **event}
+        data = (json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
         os.write(fd, data)
         os.fsync(fd)
     finally:

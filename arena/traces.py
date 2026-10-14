@@ -237,6 +237,25 @@ class JournalError(ValueError):
     """A delta row that cannot be restored: its base is missing or the restored bytes fail their hash."""
 
 
+def call_context() -> dict:
+    """Identity of the Pi tool call that spawned this process, taken from the environment.
+
+    The extension sets `ARENA_TOOL_CALL_ID`, `ARENA_REQUEST_ID` and `ARENA_TURN` only around a tool
+    execution. An unset or empty variable is left out. `turn` is an int.
+    """
+    found = {}
+    tool_call = os.environ.get("ARENA_TOOL_CALL_ID")
+    request = os.environ.get("ARENA_REQUEST_ID")
+    turn = os.environ.get("ARENA_TURN")
+    if tool_call:
+        found["tool_call_id"] = tool_call
+    if request:
+        found["request_id"] = request
+    if turn and turn.isdecimal():
+        found["turn"] = int(turn)
+    return found
+
+
 def _restore(base: bytes | None, row: dict, middle: str, prefix_key: str, suffix_key: str) -> bytes:
     if base is None:
         raise JournalError(f"{row.get('kind')} {row.get('id')} is a delta with no earlier row to apply it to")
@@ -279,6 +298,34 @@ def expand_journal(rows: list[dict]) -> list[dict]:
             }
         out.append(row)
     return out
+
+
+def post_hook_bytes(stored_rows: list[dict]) -> dict[str, bytes]:
+    """Original post-hook payload bytes keyed by request id.
+
+    Walks unexpanded rows the same way `expand_journal` restores a request. The bytes are the payload
+    that was hashed, with no extra newline. `expand_journal` itself still returns the parsed object.
+    """
+    found: dict[str, bytes] = {}
+    hook = None
+    for row in stored_rows:
+        if (
+            row.get("kind") != "request"
+            or not row.get("post_hook_encoding")
+            or not isinstance(row.get("post_hook"), str)
+        ):
+            continue
+        data = (
+            _restore(hook, row, row["post_hook"], "post_hook_prefix", "post_hook_suffix")
+            if row["post_hook_encoding"] == "delta"
+            else row["post_hook"].encode()
+        )
+        if hashlib.sha256(data).hexdigest() != row.get("post_hook_sha256"):
+            raise JournalError(f"post-hook payload of {row.get('id')} does not match its sha256")
+        hook = data
+        if isinstance(row.get("id"), str):
+            found[row["id"]] = data
+    return found
 
 
 def read_journal(path: Path) -> list[dict]:
@@ -378,9 +425,12 @@ def judge(journal: list[dict], observations: list[dict]) -> list[str]:
         if seen != expected_usage:
             problems.append(f"usage does not join attempt {request.get('id')}")
         total = generation.get("totalCost")
-        if settled is not None and response.get("price_tier") != "high":
-            if total is None or abs(float(total) - float(settled)) > 1e-6:
-                problems.append(f"Langfuse cost {total} does not equal settled ${settled} for {request.get('id')}")
+        if (
+            settled is not None
+            and response.get("price_tier") != "high"
+            and (total is None or abs(float(total) - float(settled)) > 1e-6)
+        ):
+            problems.append(f"Langfuse cost {total} does not equal settled ${settled} for {request.get('id')}")
 
     calls = {row.get("tool_call_id"): row for row in journal if row.get("kind") == "tool_call"}
     tools = [row for row in journal if row.get("kind") == "tool_result"]

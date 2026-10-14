@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { appendFileSync, chmodSync, closeSync, fsyncSync, mkdirSync, openSync, readFileSync } from "node:fs";
@@ -8,7 +9,7 @@ import { Type } from "typebox";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { nearestToolName, normalizeToolArguments, requireToolArguments } from "./toolnames.ts";
-import { DeltaChain } from "./journal.ts";
+import { BlobStore, DeltaChain, splitRequest, stampRecord } from "./journal.ts";
 import { nothingToSummarize, objectToolArguments, ResultTrimmer } from "./trim.ts";
 import { continuationPush } from "./rules.ts";
 import { cacheAlarm, cacheHitPct, callCost, finishAllowed, limitReached, limitUsd, spendFooter, toolsForSpend } from "./spend.ts";
@@ -83,6 +84,10 @@ function deliveredBlocks(content: unknown): Array<Record<string, unknown>> {
 
 export default async function arenaExtension(pi: ExtensionAPI) {
   const sharedNumbers = await textNumbers();
+  // One store for the tool call that is executing. campaign() reads it when it spawns the Python child.
+  const toolContext = new AsyncLocalStorage<{ toolCallId: string; requestId?: string; turn: number }>();
+  let requestId: string | undefined;
+  let turn = 0;
   // Every tool uses its schema keys for malformed-argument errors and cleaned arguments.
   const registerTool = async (tool: any) => {
     const validKeys = Object.keys(tool.parameters.properties ?? {});
@@ -90,8 +95,9 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     // Normalized before Pi's schema validation, so an empty optional enum ("view": "") or a stringified list passes.
     return pi.registerTool({ ...tool,
     prepareArguments: (args: unknown) => normalizeToolArguments(requireToolArguments(args, missingError), tool.parameters),
-    execute: (id: string, params: any, ...rest: any[]) =>
-      tool.execute(id, normalizeToolArguments(params, tool.parameters), ...rest) });
+    execute: (id: string, params: any, ...rest: any[]) => toolContext.run(
+      { toolCallId: id, requestId, turn },
+      () => tool.execute(id, normalizeToolArguments(params, tool.parameters), ...rest)) });
   };
   // Providers Pi does not ship (models.yaml `providers`) are registered here; Pi prices their calls from these models.
   const configuredModels = JSON.parse(process.env.ARENA_MODELS_JSON ?? "{}");
@@ -102,6 +108,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
   const runDirectory = runId ? resolve(root, "runs", "pi-budget", runId) : undefined;
   const costJournal = runDirectory ? resolve(runDirectory, "cost-ledger.jsonl") : undefined;
   const traceJournal = runDirectory ? resolve(runDirectory, "trace-journal.jsonl") : undefined;
+  const blobs = runDirectory ? new BlobStore(resolve(runDirectory, "blobs")) : undefined;
   // The one spend rule (spend.ts): each call's actual cost is added once, the run stops at the limit.
   const limit = limitUsd();
   const outputLimit = Number(process.env.ARENA_REQUEST_OUTPUT_TOKENS ?? 0);
@@ -135,7 +142,17 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     const command = ["run", "--no-sync", "arena", "protocol", action,
       "--theorem", active, "--run-id", runId, ...args];
     const output = await new Promise<string>((accept, reject) => {
-      const child = spawn("uv", command, { cwd: root, stdio: ["ignore", "pipe", "pipe"] });
+      const env = { ...process.env };
+      delete env.ARENA_TOOL_CALL_ID;
+      delete env.ARENA_REQUEST_ID;
+      delete env.ARENA_TURN;
+      const store = toolContext.getStore();
+      if (store) {
+        env.ARENA_TOOL_CALL_ID = store.toolCallId;
+        if (store.requestId !== undefined) env.ARENA_REQUEST_ID = store.requestId;
+        env.ARENA_TURN = String(store.turn);
+      }
+      const child = spawn("uv", command, { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] });
       const chunks: Buffer[] = [];
       const errors: Buffer[] = [];
       child.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
@@ -202,18 +219,23 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     try { return readFileSync(costJournal, "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line)); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
   }
+  function traceEvents(): Array<Record<string, unknown>> {
+    if (!traceJournal) return [];
+    try { return readFileSync(traceJournal, "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line)); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
+  }
   function appendCost(event: Record<string, unknown>) {
     if (!costJournal) throw new Error("Arena cost journal is unavailable"); // not-model-facing: internal cost ledger invariant.
     mkdirSync(dirname(costJournal), { recursive: true });
     const fd = openSync(costJournal, "a", 0o600);
-    try { appendFileSync(fd, `${JSON.stringify({ ts: Date.now(), ...event })}\n`); fsyncSync(fd); } // log: durable cost journal row.
+    try { appendFileSync(fd, `${JSON.stringify(stampRecord({ ts: Date.now(), ...event }, turn, requestId))}\n`); fsyncSync(fd); } // log: durable cost journal row.
     finally { closeSync(fd); }
   }
   function appendTrace(event: Record<string, unknown>) {
     if (!traceJournal) throw new Error("Arena trace journal is unavailable"); // not-model-facing: internal trace ledger invariant.
     mkdirSync(dirname(traceJournal), { recursive: true });
     const fd = openSync(traceJournal, "a", 0o600);
-    try { appendFileSync(fd, `${JSON.stringify({ ts: Date.now(), ...event })}\n`); fsyncSync(fd); } // log: durable trace journal row.
+    try { appendFileSync(fd, `${JSON.stringify(stampRecord({ ts: Date.now(), ...event }, turn, requestId))}\n`); fsyncSync(fd); } // log: durable trace journal row.
     finally { closeSync(fd); }
     chmodSync(traceJournal, 0o600);
   }
@@ -259,6 +281,9 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     previousVerified = undefined;
     discoveries.clear();
     trimmer.forget();
+    // A resumed session continues the turn count. Rows written before the first request stay at turn 0.
+    requestId = undefined;
+    turn = traceEvents().filter(item => item.kind === "request").length;
     for (const item of costEvents()) if (item.kind === "discovery" && typeof item.signature === "string") {
       discoveries.add(item.signature);
     }
@@ -285,8 +310,18 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     pendingRequest = id;
     openAttempt = id;
+    turn += 1;
+    requestId = id;
+    const stored: Record<string, string> = {};
+    if (blobs) {
+      const parts = splitRequest(payload);
+      for (const key of ["system", "skill", "tools", "packet"] as const) {
+        if (parts[key]) stored[key] = blobs.put(parts[key]);
+      }
+    }
     appendTrace({ kind: "request", id, run_id: runId, retry_of: previousFailed ?? null,
-      model: ctx.model?.id ?? process.env.ARENA_MODEL ?? null, ...hookFields(payload) });
+      model: ctx.model?.id ?? process.env.ARENA_MODEL ?? null,
+      ...(Object.keys(stored).length ? { blobs: stored } : {}), ...hookFields(payload) });
     return payload === event.payload ? undefined : payload;
   });
   pi.on("after_provider_response", event => {
@@ -486,6 +521,18 @@ export default async function arenaExtension(pi: ExtensionAPI) {
   });
 
   const untrimmed = new Map<string, string>();
+  const footers = new Map<string, string>();
+  function textOf(content: unknown): string {
+    if (!Array.isArray(content)) return "";
+    return content.filter(part => part && typeof part === "object" && part.type === "text" && part.text)
+      .map(part => String(part.text)).join("\n");
+  }
+  function stripFooter(delivered: string, footer: string | undefined): string {
+    if (!footer) return delivered;
+    if (delivered === footer) return "";
+    const suffix = `\n${footer}`;
+    return delivered.endsWith(suffix) ? delivered.slice(0, -suffix.length) : delivered;
+  }
   pi.on("tool_execution_end", (event, ctx) => {
     // A confirmed finish ends the run: no provider request follows the tool result.
     if (event.toolName === FINISH_TOOL && finishConfirmed) ctx.abort();
@@ -508,14 +555,16 @@ export default async function arenaExtension(pi: ExtensionAPI) {
       appendCost({ kind: "discovery", signature, tool: event.toolName });
     }
     if (!openAttempt) return;
-    const text = Array.isArray(result?.content)
-      ? result.content.filter(part => part?.type === "text" && part.text).map(part => part.text).join("\n")
-      : "";
-    // `tool_result` runs before this event, so the trace takes the untrimmed text it stashed.
+    const deliveredText = textOf(result?.content);
+    const footer = footers.get(event.toolCallId);
+    footers.delete(event.toolCallId);
+    // `tool_result` runs before this event, so the trace takes the untrimmed text and footer it stashed.
     const full = untrimmed.get(event.toolCallId);
     untrimmed.delete(event.toolCallId);
+    const withoutFooter = stripFooter(deliveredText, footer);
     appendTrace({ kind: "tool_result", id: openAttempt, tool_call_id: event.toolCallId,
-      name: event.toolName, result: event.result, text: full ?? text, ...(full !== undefined ? { trimmed: true } : {}),
+      name: event.toolName, result: event.result, text: full ?? withoutFooter, delivered_text: withoutFooter,
+      ...(footer ? { footer } : {}), ...(full !== undefined ? { trimmed: true } : {}),
       is_error: event.isError });
   });
 
@@ -532,6 +581,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
       .map(part => (part as { text: string }).text).join("\n"));
     let spend = "";
     try { spend = await spendFooter(spentUsd, limit); } catch { /* the footer is best effort */ }
+    if (spend) footers.set(event.toolCallId, spend);
     if (!spend && !changed) return;
     return { content: spend ? [...content, { type: "text" as const, text: spend }] : content,
       details: event.details, isError: event.isError };

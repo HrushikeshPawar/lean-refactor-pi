@@ -1,0 +1,35 @@
+{
+  "model": "demo",
+  "input": [
+    {
+      "role": "system",
+      "content": "",
+      "sections": {
+        "preamble": "Be exact.\n\n",
+        "addendum": "<addendum>\nThe skill body.\n</addendum>",
+        "cwd": "<cwd>\n/tmp\n</cwd>"
+      },
+      "timestamp": 1,
+      "toolsAdded": [
+        {
+          "name": "compile",
+          "description": "Compile a draft. Keep going.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Packet line.\nSecond line."
+        }
+      ],
+      "timestamp": 2
+    }
+  ],
+  "max_output_tokens": 16000
+}

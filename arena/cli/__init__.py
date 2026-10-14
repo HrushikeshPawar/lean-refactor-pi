@@ -514,6 +514,64 @@ def _print_bench_comparison(old: dict, new: dict) -> None:
     Console().print(table)
 
 
+@app.command()
+def replay(
+    run: str,
+    *,
+    turn: int | None = None,
+    node: str | None = None,
+    raw: bool = False,
+    json_output: Annotated[bool, Parameter(name="json")] = False,
+    render: str | None = None,
+) -> int:
+    """Show what one turn of a journaled run sent to the model."""
+    if render is not None and render != "v7":
+        print("replay --render accepts only: v7", file=sys.stderr)
+        return 2
+    if turn is not None and node is not None:
+        print("replay accepts --turn or --node, not both", file=sys.stderr)
+        return 2
+    # --raw is the stored payload bytes. --render v7 rebuilds later surfaces, so the two views are not combined.
+    if raw and render is not None:
+        print("replay --raw is the exact payload and --render v7 is a re-render; pass only one", file=sys.stderr)
+        return 2
+    from arena.replay import ReplayError, format_index, load_run, node_turn, raw_payload, render_turn, rerender_v7
+    from arena.traces import JournalError
+
+    try:
+        loaded = load_run(run)
+        if node is not None:
+            number = node_turn(loaded, node)
+        elif turn is not None:
+            number = turn
+        else:
+            print(format_index(loaded))
+            return 0
+        if raw:
+            data = raw_payload(loaded, number)
+            if json_output:
+                body = data.decode()
+                print(json.dumps({"turn": number, "sections": [{"title": "Payload", "text": body}]}))
+            else:
+                sys.stdout.buffer.write(data)
+            return 0
+        sections = rerender_v7(loaded, number) if render == "v7" else render_turn(loaded, number)
+        if json_output:
+            payload = {"turn": number, "sections": [{"title": title, "text": text} for title, text in sections]}
+            print(json.dumps(payload))
+            return 0
+        from rich.panel import Panel
+        from rich.text import Text
+
+        console = Console(highlight=False)
+        for title, text in sections:
+            console.print(Panel(Text(text), title=Text(title)))
+        return 0
+    except (ReplayError, JournalError) as error:
+        print(error, file=sys.stderr)
+        return 1
+
+
 def main() -> None:
     result = app()
     sys.exit(result if isinstance(result, int) else 0)
