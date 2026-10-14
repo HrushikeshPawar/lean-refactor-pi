@@ -4,7 +4,7 @@
 
 **Blocked by:** 15b: TS five-tool surface, MCP server removed (all lower tickets are committed below your branch).
 
-**Status:** needs-review
+**Status:** done
 
 **Branch:** `v7/15c-old-tools-out` (stacked on `v7/15b-tool-surface`)
 

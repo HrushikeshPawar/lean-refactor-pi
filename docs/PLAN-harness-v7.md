@@ -632,6 +632,17 @@ The null-argument re-request (#27c) is not built: Pi 1.1.0 has no supported way 
 - `prepareArguments` normalises before Pi's schema validation (empty optional enums failed validation).
 - Weakened and deleted slow tests restored; unused templates and `ARENA_SKILL_DIR` removed. Slow file 34/34.
 
+**Built (ticket 15c, 2026-10-14):** the protocol keeps only `init frontier state autocheck submission memory compile
+goal search read finish reset_delivered`. Old actions (including `operation`, `prices`, `quote`, `map`) are gone, but
+the engine they shared stays where a v7 handler reaches it (`probe`, `probe_batch`, `evaluate_request`,
+`compile_operation`, the `resolve_*_ref` helpers, the `decl:` source scanner behind `source_range`); ideas are gone
+from the engine, summary, memory and viewer. v6 ledgers with `idea` events and old tool names still summarise and
+load in the viewer; old tool calls now count as context turns, so the campaign takes cell A's bookkeeping share from
+its own `summary.json`, not from a v7 re-summary. Review fixes: restored the `errors.stopped_run` golden case and the
+graph test that free text is filed once as a root, removed dead golden cases and the orphan
+`no_source_declaration` template. Viewer renames beyond the idea panels ("Routes" card, "Frontier" heading) are noted
+for ticket 18.
+
 ## 5. Candidate graph v7: the agent writes, the harness keeps the books and steers (D7)
 
 ### 5a. What v6 shows
