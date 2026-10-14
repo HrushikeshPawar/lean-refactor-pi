@@ -56,6 +56,7 @@ scores match our cold proxies within ±0.6 on every row. The weakest axis is len
 | D39 | **Ticket 01 scope.** Deleted up front: lean4-skills and its copied references, `arena_skill.py` (its live part moved to `arena/skill.py`), `route_validation.py`, `submission/` (checklist to `docs/SUBMISSION-checklist.md`), the benchmark research notes, Luna and Qwen, `budget.test.ts`/`testmodels.ts`, 9 tautological tests. **Kept until their replacement lands**, so the harness runs between tickets: the LLM route extraction (`route_features.py`, the background route worker; goes in ticket 11) and the idea tool plus `arena_skill_read` (go with the old tools in ticket 15) | decided |
 | D40 | **The lean-lsp-mcp server is removed** (owner, 2026-10-10), not kept as a hidden backend. Ticket 15 deletes it; `compile` and `goal` run on the shared Lean service's LSP lane, so no Lean process runs outside the memory budget (spec story 30). Ticket 08a must therefore provide on that lane what the MCP tools gave: goals at a position or hole, and running a snippet at a hole (`goal try`) | decided |
 | D41 | **Ticket review (owner, 2026-10-10).** Splits: 05→05a/05b, 08a→08a/08b/08c with the REPL ticket as 08d, 10→10a/10b, 15→15a/15b/15c, 19→19a/19b (27 tickets, 04–20, one straight stack). The library token-cost column is dropped (§3e). **Health gate:** the model starts once the primary toolchain's reference proof passes; the other toolchains' reference checks continue in the background and a failure marks the run unhealthy and stops it before further spend; final verification and `arena submit` still require every listed toolchain green. **Speed gate** noise floor 0.25 s (a figure fails only above both the % tolerance and 0.25 s), run at the end of 08a–08d, 10b and 12. Truncated turns (#35): Pi `maxTokens` set to the run ceiling if Pi supports it, else owner decision. Finish is one call that stops at once. `arena submit` keeps the $3 per-problem total (summed over contributing runs) as a reported gate. Stall default `best_other_cell`; route 13+ joins the best route; filing threshold 0.50. REPL adopted only on the stated agreement and speed rule, else shipped disabled. `arena text budget` counts words. "All errors at once" (#9) is in 15a; #26 and #27 in 15b; spec stories 28 and 29 in 08b | decided |
+| D42 | **Hidden stop, one rate unit (owner, 2026-10-14, ticket 16 review).** Before spend reaches the final 10%, no model-facing text mentions `finish`, stopping, a stop condition or the threshold: in v5 and v6 a visible stop option was gamed, so the model works until the final tenth (pseudo-autoresearch). `finish` and its description appear only when offered; a turn that ends with text reports spend and points left per axis only. Ticket 16 overrides 15b checkbox 4: continuations no longer name the best node (the map and memory carry it). Heartbeat rates use one unit, 100 heartbeats, on one line | decided |
 
 Open decisions are listed in §11.
 
@@ -642,6 +643,17 @@ its own `summary.json`, not from a v7 re-summary. Review fixes: restored the `er
 graph test that free text is filed once as a root, removed dead golden cases and the orphan
 `no_source_declaration` template. Viewer renames beyond the idea panels ("Routes" card, "Frontier" heading) are noted
 for ticket 18.
+
+**Built (ticket 16, 2026-10-14):** all model-facing text rewritten from `agent-text/` with `rules.yaml` (one rule, one
+place), a cache-only `arena text render --theorem ROW`, the packet in the plan's order (task, scoring with one
+100-heartbeat rates line, environment, price table, goals by step id, library top 60 as `rank. handle · module ·
+signature` with the pre-16 ranking and budget, statement-level sections), the shed order with local lines before
+library lines, and `memory_text` (best node with its step table, map, used library lines, merged read ranges, open
+holes; compaction and seed headers). D42: no stop, `finish` or threshold text before the final tenth; the skill lists
+four tools. Empty compactions are cancelled through Pi's `session_before_compact`. Text shrank from 279 templates /
+2,968 words to 223 / 1,743 (Core packet 41.7K to 36.4K chars). Tests: hidden stop, placeholders, rule consistency
+across two fixtures, real over-limit packet, literal lint with `# log` markers. Review fixes beyond the ticket:
+compile price rows name nodes by graph id (`n2 from n1`), not stored labels; `submission.json` keeps the stored label.
 
 ## 5. Candidate graph v7: the agent writes, the harness keeps the books and steers (D7)
 
