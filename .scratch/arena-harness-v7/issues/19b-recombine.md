@@ -4,7 +4,7 @@
 
 **Blocked by:** 19a: `arena submit`: selection, gates, outputs, filter parity (committed below your branch).
 
-**Status:** needs-review
+**Status:** done
 
 **Branch:** `v7/19b-recombine` (stacked on `v7/19a-submit`)
 

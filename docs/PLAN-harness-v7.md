@@ -691,6 +691,18 @@ patterns equal FORBIDDEN in label, regex, flags and order; the only difference i
 which `arena submit` applies and the in-run `validate_proof` does not (largest recorded proof 78.8 KB; backlog).
 Owner-machine smoke on the v6c2 InitsUpdatesComm run: n8 / #4, proxy 83.88 on all three toolchains, 7 s.
 
+**Built (ticket 19b, 2026-10-14):** `arena submit` recombines across runs (`--hybrids/--no-hybrids`,
+`--max-hybrids 20`): from a row's gated best it swaps one step for a cheaper donor step at the same `goal_before`
+(and `goal_after` when both recorded) from any named run's node, re-indented to the base step; the v6 position-and-hash
+fallback runs only when neither node has goals. Hybrids are deduplicated by proof text, static-gated before Lean,
+cold-checked and kept only on a strictly higher settled proxy (a hybrid's recorded proxy is its measured one, so gate
+(e) cannot reject it); greedy, steps recomputed after each accept. Hybrids are `origin: submit_merge` with
+`merged_from`, written only under the submission; donor runs join the spend sum and are flagged `donor` in
+provenance; `proofs-no-hybrids.jsonl` appears when a hybrid is final; `--no-hybrids` output is byte-identical to
+19a. A run's own `submission()` may now pick an `auto_merge` candidate (`reference` stays excluded). Owner-machine
+smoke over the 8 v6 InitsUpdatesComm runs: 4 distinct hybrids tried, all failed cold, final row n71 (25 s). With v6
+data the position fallback mostly pairs unrelated steps; recombination pays off once v7 runs record step goals.
+
 ## 5. Candidate graph v7: the agent writes, the harness keeps the books and steers (D7)
 
 ### 5a. What v6 shows
