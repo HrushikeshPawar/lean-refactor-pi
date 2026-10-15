@@ -25,19 +25,19 @@ elab "arena_index" : command => do
   let outputPath : System.FilePath := @@INDEX_PATH@@
   let handle ← IO.FS.Handle.mk outputPath .write
   let moduleRanges ← IO.mkRef ({} : Std.HashMap Lean.Name (Std.HashMap Lean.Name Lean.DeclarationRanges))
-  let isGenerated (name : Lean.Name) : Bool :=
-    name.isInternal || name.isInternalDetail || Lean.isAuxRecursor env name || Lean.isNoConfusion env name ||
-      Lean.Meta.isMatcherCore env name || match name with
+  let isGenerated (declName : Lean.Name) : Bool :=
+    declName.isInternal || declName.isInternalDetail || Lean.isAuxRecursor env declName || Lean.isNoConfusion env declName ||
+      Lean.Meta.isMatcherCore env declName || match declName with
         | .str _ last => arenaGeneratedSuffixes.contains last || arenaNumberedAux last
         | _ => false
-  let declKind (name : Lean.Name) (info : Lean.ConstantInfo) : String :=
-    if Lean.Meta.isInstanceCore env name then "instance" else
+  let declKind (declName : Lean.Name) (info : Lean.ConstantInfo) : String :=
+    if Lean.Meta.isInstanceCore env declName then "instance" else
     match info with
     | .thmInfo _ => "theorem"
     | .axiomInfo _ => "axiom"
     | .defnInfo _ => "def"
     | .opaqueInfo _ => "opaque"
-    | .inductInfo _ => if isClass env name then "class" else if isStructure env name then "structure" else "inductive"
+    | .inductInfo _ => if isClass env declName then "class" else if isStructure env declName then "structure" else "inductive"
     | .ctorInfo _ => "constructor"
     | .recInfo _ => "recursor"
     | .quotInfo _ => "quot"
@@ -48,18 +48,18 @@ elab "arena_index" : command => do
     | _, expr => expr
   let headOf (expr : Lean.Expr) : String :=
     match (stripPi 100 expr).getAppFn with
-    | .const name _ => name.toString
+    | .const declName _ => declName.toString
     | _ => ""
   let typeText (info : Lean.ConstantInfo) : CommandElabM String := do
     try
       let formatted ← liftTermElabM (do pure (← ppExpr info.type).pretty)
       pure (if formatted.length > 600 then (String.ofList (formatted.toList.take 599)) ++ "…" else formatted)
     catch _ => pure ""
-  let rangesFor (name : Lean.Name) : CommandElabM (Option (Nat × Nat)) := do
-    match ← findDeclarationRanges? name with
+  let rangesFor (declName : Lean.Name) : CommandElabM (Option (Nat × Nat)) := do
+    match ← findDeclarationRanges? declName with
     | some range => pure (some (range.range.pos.line, range.range.endPos.line))
     | none =>
-      match env.getModuleIdxFor? name with
+      match env.getModuleIdxFor? declName with
       | none => pure none
       | some idx => do
         let moduleName := env.header.moduleNames[idx.toNat]!
@@ -71,21 +71,21 @@ elab "arena_index" : command => do
               found.foldl (fun acc item => acc.insert item.1 item.2) {}
             moduleRanges.modify (·.insert moduleName table)
             pure table
-        match ranges[name]? with
+        match ranges[declName]? with
         | some range => pure (some (range.range.pos.line, range.range.endPos.line))
         | none => pure none
   let rows := env.constants.map₁.toList ++ env.constants.map₂.toList
   let localNames := env.constants.map₂.toList.map (fun item => item.1)
-  for (name, info) in rows do
-    let privateName := isPrivateName name
-    let generated := isGenerated name
-    let moduleName := if localNames.contains name then "(this file)" else match env.getModuleIdxFor? name with
+  for (declName, info) in rows do
+    let privateName := isPrivateName declName
+    let generated := isGenerated declName
+    let moduleName := if localNames.contains declName then "(this file)" else match env.getModuleIdxFor? declName with
       | none => "(this file)"
       | some idx => (env.header.moduleNames[idx.toNat]!).toString
-    let range ← rangesFor name
+    let range ← rangesFor declName
     let mut fields : List (String × Json) := [
-      ("name", toJson name.toString),
-      ("kind", toJson (declKind name info)),
+      ("name", toJson declName.toString),
+      ("kind", toJson (declKind declName info)),
       ("module", toJson moduleName),
       ("line", match range with | some (line, _) => toJson line | none => Json.null),
       ("end_line", match range with | some (_, line) => toJson line | none => Json.null),
