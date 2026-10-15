@@ -641,6 +641,8 @@ export default async function arenaExtension(pi: ExtensionAPI) {
       steps: Type.String({ description: await renderText("tools/compile.params.splice_steps") }),
       text: Type.String({ description: await renderText("tools/compile.params.splice_text") }),
     }, { description: await renderText("tools/compile.params.splice") })),
+    steps: Type.Optional(Type.String({ description: await renderText("tools/compile.params.splice_steps") })),
+    text: Type.Optional(Type.String({ description: await renderText("tools/compile.params.splice_text") })),
     fill: Type.Optional(Type.Object({
       hole: Type.String({ description: await renderText("tools/compile.params.fill_hole") }),
       text: Type.String({ description: await renderText("tools/compile.params.fill_text") }),

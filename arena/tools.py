@@ -146,11 +146,29 @@ def _rewrite_parts(message: str) -> tuple[str, list[str]] | None:
     return pattern, rest[start:]
 
 
-def error_headline(message: str) -> str:
-    """A diagnostic's first line; a failed rewrite also names the pattern it did not find."""
+_GOAL_BLOCK_START = re.compile(r"^(?:case\s|⊢|\S[^:]*? : |\[)")
+
+
+def error_message(message: str) -> str:
+    """A diagnostic's text up to its goal block: the headline and the lines under it, joined into one line and capped
+    at `error_message_chars`. A failed rewrite names the pattern it did not find instead."""
     parts = _rewrite_parts(message)
-    first = message.split("\n")[0]
-    return f"{first} `{parts[0]}`" if parts else first
+    lines = message.split("\n")
+    if parts:
+        return f"{lines[0]} `{parts[0]}`"
+    kept = [lines[0]]
+    for line in lines[1:]:
+        if _GOAL_BLOCK_START.match(line):
+            break
+        kept.append(line)
+    compact = " ".join(line.strip() for line in kept if line.strip())
+    limit = int(text.numbers().get("error_message_chars", 400))
+    return compact if len(compact) <= limit else compact[: limit - 1] + "…"
+
+
+def _statement_by_line(proof: str) -> int | None:
+    """The proof line (1-based) that ends the statement with `:= by`."""
+    return next((number for number, line in enumerate(proof.split("\n"), 1) if re.search(r":=\s*by\s*$", line)), None)
 
 
 def message_goal(message: str) -> str | None:
@@ -335,15 +353,18 @@ def _compile_item(name: str, run_id: str, node_ref: str, result: dict, filing: s
     known = _statement_context(projection) | _binder_hypotheses(name, errors) if groups else set()
     if groups:
         lines.append(_render("lean_messages"))
+    main_line = _statement_by_line(node.proof_text)
     for item, branches in groups:
         lines.append(
             _render(
                 "error_item",
                 id=item["id"],
                 line=item.get("line") or "?",
-                message=error_headline(item.get("message", "")),
+                message=error_message(item.get("message", "")),
             )
         )
+        if item.get("message", "").startswith("unsolved goals") and item.get("line") == main_line:
+            lines.append(_render("error_main_goal_open"))
         if branches:
             lines.append(_render("error_branches", count=branches))
         if item.get("goal"):
@@ -492,8 +513,20 @@ def _token_items(name: str, run_id: str, request: dict, op: str | None) -> dict:
     return reply.reply(items=normalized + errors)
 
 
+def _flat_splice(request: object) -> object:
+    """Top-level `steps` and `text` (with an optional `base`) are a splice: the same as `{"splice": {...}}`."""
+    if not isinstance(request, dict) or "splice" in request or not ({"steps", "text"} & request.keys()):
+        return request
+    if any(key in request for key in ("drafts", "fill", "merge")):
+        return request
+    splice = {key: request[key] for key in ("base", "steps", "text") if key in request}
+    rest = {key: value for key, value in request.items() if key not in ("base", "steps", "text")}
+    return {**rest, "splice": splice}
+
+
 def compile_tool(theorem: str, run_id: str, request: dict) -> dict:
     valid = ["drafts", "splice", "fill", "merge", "base", "from", "note", "check"]
+    request = _flat_splice(request)
     if _is_empty(request, "compile"):
         return _empty_error("compile")
     if not isinstance(request, dict):
@@ -1067,7 +1100,42 @@ def search_tool(theorem: str, run_id: str, request: dict) -> dict:
     return reply.attach_context(run_id, reply.reply(items=items, handles=handles), include_map=False)
 
 
+_FILE_HANDLE = re.compile(r"([^\s:]+\.lean):([1-9][0-9]*)-([1-9][0-9]*)")
+
+
+def _file_read(theorem: str, run_id: str, handle: str) -> dict:
+    """`<path>.lean:first-last` inside the run's Lean project or its dependencies, with file line numbers."""
+    valid = ["decl:<qualified-name>[:first-last]", "<path>.lean:first-last"]
+    match = _FILE_HANDLE.fullmatch(handle)
+    if not match or handle.startswith("/") or ".." in match.group(1).split("/"):
+        return _invalid("bad_handle", handle, valid, TOOL_FORMS["read"])
+    path, first, last = match.group(1), int(match.group(2)), int(match.group(3))
+    if last < first:
+        return _invalid("bad_handle", handle, ["first <= last"], TOOL_FORMS["read"])
+    size = int(text.numbers().get("read_source_lines", 400))
+    end = min(last, first + size - 1)
+    try:
+        result = campaign.source_range(theorem, path, first, end)
+    except ValueError as error:
+        return _invalid("unknown_handle", str(error).rstrip("."), valid, TOOL_FORMS["read"])
+    campaign._append(
+        campaign.run_dir(run_id),
+        {"kind": "read", "handle": path, "first": result.get("first"), "last": result.get("last")},
+    )
+    lines = [_render("read_range", file=path, first=result.get("first", first), last=result.get("last", end))]
+    lines.extend(result.get("text", "").splitlines())
+    continuation = result.get("next_first")
+    facts = [f"{path}:{continuation}-{continuation + size - 1}"] if continuation else []
+    return reply.attach_context(
+        run_id,
+        reply.reply(facts=facts, items=[{"ref": path, "ok": True, "lines": lines, "error": None, "source": result}]),
+        include_map=False,
+    )
+
+
 def _decl_read(theorem: str, run_id: str, handle: str) -> dict:
+    if not handle.startswith("decl:"):
+        return _file_read(theorem, run_id, handle)
     match = re.fullmatch(r"(decl:[^:\s]+)(?::([1-9][0-9]*)-([1-9][0-9]*))?", handle)
     if not match:
         return _invalid("bad_handle", handle, ["decl:<qualified-name>[:first-last]"], TOOL_FORMS["read"])

@@ -265,6 +265,7 @@ def salvage(name: str, proof: str, compile: Callable[[str], dict]) -> dict:
     current = proof
     rounds = []
     last_result = None
+    s1_used = False
     for index in range(MAX_COMPILES):
         try:
             compiled = _compiled(name, current, compile)
@@ -299,8 +300,16 @@ def salvage(name: str, proof: str, compile: Callable[[str], dict]) -> dict:
         if tree is None:
             status = "broken-outside-steps"
             break
-        dropped = drop_finished(lines, tree, {line - 1 for line in compiled.get("finished_lines") or []})
+        # S1 removes steps that come after a finished proof. Once S2-S4 have inserted sorry, later "No goals" errors
+        # are their doing, so S1 may not run then; and it runs at most once per salvage.
+        s1_allowed = not s1_used and all(round_["strategies"] == ["S1"] for round_ in rounds)
+        dropped = (
+            drop_finished(lines, tree, {line - 1 for line in compiled.get("finished_lines") or []})
+            if s1_allowed
+            else None
+        )
         if dropped is not None:
+            s1_used = True
             rounds.append({"round": index + 1, "errors": len(compiled["error_lines"]), "strategies": ["S1"]})
             current = "\n".join(dropped)
             continue

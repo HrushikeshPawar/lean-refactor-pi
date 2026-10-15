@@ -4,6 +4,7 @@ max_failures: 3
 max_drafts: 4
 compile_max_drafts: 4
 error_passes_max: 3
+error_message_chars: 400
 cross_version_wait_seconds: 10
 goal_try_max: 6
 goal_cases_max: 12
