@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -3484,9 +3485,20 @@ def write_state(run_id: str) -> None:
     """Publish `state` atomically for the Pi extension, which reads it on every tool result."""
     directory = run_dir(run_id)
     target = directory / "state.json"
-    temporary = target.with_name(f"state.{os.getpid()}.tmp")
-    temporary.write_text(json.dumps(state(run_id), ensure_ascii=False))
-    temporary.replace(target)
+    snapshot = state(run_id)
+    # Tool calls and background checks publish concurrently: a slower writer holding an older snapshot must never
+    # replace a newer one (v7-check4 Binius showed its best fall from 90.26 back to 89.89, then return).
+    temporary = target.with_name(f"state.{os.getpid()}.{threading.get_ident()}.tmp")
+    with open(directory / "state.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            current = json.loads(target.read_text()).get("seq", -1)
+        except (OSError, ValueError, AttributeError):
+            current = -1
+        if isinstance(current, int) and snapshot.get("seq", 0) < current:
+            return
+        temporary.write_text(json.dumps(snapshot, ensure_ascii=False))
+        temporary.replace(target)
 
 
 COLD_TOLERANCE = 0.05  # same drift tolerance as arena certify
