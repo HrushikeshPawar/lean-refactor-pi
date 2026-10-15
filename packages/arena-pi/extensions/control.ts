@@ -11,6 +11,8 @@ export const RESTART_MIN_REMAINING_FRACTION = 0.2;
 
 export type StopInput = {
   limitHit: boolean; finishTurn: boolean; providerUnreachable: boolean; errorLoop: boolean;
+  // The provider refused for a spent subscription window; the campaign moves the row to its fallback model.
+  usageLimit?: boolean;
   continuations: number; noWorkTurns: number; plateau: number;
   // Spend since the best last changed (the run's whole spend before the first best).
   stallUsd: number; limitUsd: number;
@@ -24,6 +26,7 @@ export type StopInput = {
 // STALL_RESTART_FRACTION of the limit, restarts the conversation from a packet.
 export function stopDecision(input: StopInput): { stop: string | null; moveFocus: boolean; restart: boolean; island: boolean } {
   const stop = input.limitHit ? "limit_reached"
+    : input.usageLimit ? "usage_limit"
     : input.finishTurn ? "finished"
     : input.providerUnreachable ? "provider_unreachable"
     : input.errorLoop ? "error_loop"

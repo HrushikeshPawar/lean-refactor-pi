@@ -32,6 +32,7 @@ test("real failures and the spend limit stop at any spend", () => {
   assert.equal(stopDecision({ ...base, limitHit: true }).stop, "limit_reached");
   assert.equal(stopDecision({ ...base, errorLoop: true }).stop, "error_loop");
   assert.equal(stopDecision({ ...base, providerUnreachable: true }).stop, "provider_unreachable");
+  assert.equal(stopDecision({ ...base, usageLimit: true }).stop, "usage_limit");
 });
 
 test("a turn ending in text opens a new island before the final tenth and finishes inside it", () => {

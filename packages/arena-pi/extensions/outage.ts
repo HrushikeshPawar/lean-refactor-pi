@@ -1,9 +1,13 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 
-export type FailureKind = "transport" | "model";
+export type FailureKind = "transport" | "model" | "usage_limit";
+
+// A subscription's usage window is spent (Pi: "You have hit your ChatGPT usage limit ..."): retrying cannot help.
+const USAGE_LIMIT = /usage limit|usage_limit_reached/i;
 
 export function classifyFailure(message: AssistantMessage | undefined): FailureKind | undefined {
   if (!message || message.stopReason !== "error") return undefined;
+  if (USAGE_LIMIT.test(message.errorMessage ?? "")) return "usage_limit";
   if (message.usage?.totalTokens || message.content.length > 0) return "model";
   return "transport";
 }

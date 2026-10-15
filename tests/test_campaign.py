@@ -544,6 +544,45 @@ class RunArgsSplitTests(unittest.TestCase):
         self.assertEqual(split_run_args(["run", "--", "x"]), (["run", "--", "x"], []))
 
 
+class SubscriptionFallbackTests(unittest.TestCase):
+    spec = {"row": "Cslib.SKI.x", "model": "gpt-6.1-sol", "replicate": 1, "run_id": "v8-Cslib.SKI.x-gpt-6.1-sol-r1"}
+
+    def test_fallback_spec_names_the_fallback_model(self):
+        from arena.cli.campaigns import fallback_spec
+
+        moved = fallback_spec(self.spec, "deepseek-v4.1-flash")
+        self.assertEqual(moved["model"], "deepseek-v4.1-flash")
+        self.assertEqual(moved["run_id"], "v8-Cslib.SKI.x-deepseek-v4.1-flash-r1")
+        self.assertEqual((moved["row"], moved["replicate"]), (self.spec["row"], 1))
+
+    def test_room_needs_both_windows_below_the_cap_and_a_reading(self):
+        from arena.cli.campaigns import subscription_room
+        from arena.codex_limits import CodexLimits
+
+        def reading(five, week):
+            return lambda: CodexLimits(five, week, None, None, 0.0, "app-server")
+
+        self.assertTrue(subscription_room(90, reading(31, 5))[0])
+        self.assertFalse(subscription_room(90, reading(90, 5))[0])
+        self.assertFalse(subscription_room(90, reading(10, 95))[0])
+        self.assertEqual(subscription_room(90, lambda: None), (False, "Codex limits unavailable"))
+
+    def test_only_usage_limit_stops_move_to_the_fallback(self):
+        from arena.cli.campaigns import usage_limit_specs
+
+        other = {**self.spec, "run_id": "other"}
+        results = [{"stop_reason": "usage_limit"}, {"stop_reason": "limit_reached"}]
+        moved = usage_limit_specs([self.spec, other], results, "deepseek-v4.1-flash")
+        self.assertEqual([spec["model"] for spec in moved], ["deepseek-v4.1-flash"])
+        self.assertEqual(usage_limit_specs([self.spec], [{"stop_reason": "usage_limit"}], None), [])
+
+    def test_sol_is_on_the_subscription_and_deepseek_is_not(self):
+        from arena.cli.campaigns import on_subscription
+
+        self.assertTrue(on_subscription("gpt-6.1-sol"))
+        self.assertFalse(on_subscription("deepseek-v4.1-flash"))
+
+
 if __name__ == "__main__":
     unittest.main()
 

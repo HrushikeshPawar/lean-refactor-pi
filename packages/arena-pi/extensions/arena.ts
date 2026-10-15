@@ -736,6 +736,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     const { stop, moveFocus, restart, island } = stopDecision({ limitHit, finishTurn, doneTurn: islandTurn, noWorkThisTurn,
       providerUnreachable: failure === "transport" && outageStartedAt !== undefined && nextWait(outageAttempt, Number(process.env.ARENA_BACKOFF_MS ?? 2000), outageStartedAt, Date.now(), Number(process.env.ARENA_OUTAGE_LIMIT_MS ?? 600000)).stop,
       errorLoop: failure === "model" && errorStreak >= MAX_ERROR_STREAK,
+      usageLimit: failure === "usage_limit",
       continuations, noWorkTurns, plateau, stallUsd: spentUsd - spentAtBestChange, limitUsd: limit,
       remainingFraction: remaining.remainingFraction, finishAllowed: remaining.allowed });
     turnHadProofAttempt = false;

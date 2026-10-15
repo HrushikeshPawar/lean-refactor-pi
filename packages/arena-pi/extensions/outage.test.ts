@@ -7,6 +7,8 @@ test("classifies transport failures separately from billed model failures", () =
   assert.equal(classifyFailure({ role: "assistant", content: [], stopReason: "error", usage: { totalTokens: 1 } } as any), "model");
   assert.equal(classifyFailure({ role: "assistant", content: [{ type: "text", text: "failed" }], stopReason: "error" } as any), "model");
   assert.equal(classifyFailure({ role: "assistant", content: [], stopReason: "stop" } as any), undefined);
+  assert.equal(classifyFailure({ role: "assistant", content: [], stopReason: "error", usage: { totalTokens: 0 },
+    errorMessage: "You have hit your ChatGPT usage limit (plus plan). Try again in ~42 min." } as any), "usage_limit");
 });
 
 test("backs off exponentially and caps the wait at the outage deadline", () => {

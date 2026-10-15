@@ -38,7 +38,8 @@ from typing import Any
 from rich.console import Console
 from rich.table import Table
 
-from arena import engine, lean_session, scheduler
+from arena import codex_limits, engine, lean_session, scheduler
+from arena import models as model_config
 from arena.cli import live
 from arena.cli.run import CONFIG, MODELS
 from arena.engine import ROOT
@@ -534,6 +535,45 @@ def requeue_specs(specs: list[dict], results: list[dict | None]) -> list[dict]:
     ]
 
 
+# ---- subscription models and their fallback ------------------------------------------------------------------------
+
+# Providers billed through a usage-capped subscription (Pi's built-in openai login), not per token.
+SUBSCRIPTION_PROVIDERS = ("openai",)
+CODEX_MAX_PCT = 90.0
+
+
+def on_subscription(model: str) -> bool:
+    return model_config.provider(model) in SUBSCRIPTION_PROVIDERS
+
+
+def fallback_spec(spec: dict, fallback: str) -> dict:
+    """The same row and replicate on the fallback model, under its own run id."""
+    run_id = spec["run_id"].replace(f"-{slug(spec['model'])}-", f"-{slug(fallback)}-", 1)
+    if run_id == spec["run_id"]:
+        run_id = f"{run_id}-{slug(fallback)}"
+    return {**spec, "model": fallback, "run_id": run_id}
+
+
+def subscription_room(max_pct: float, limits_fn=codex_limits.read_limits) -> tuple[bool, str]:
+    """Whether the subscription has room for one more run: both windows below max_pct. No reading means no room."""
+    limits = limits_fn()
+    if limits is None:
+        return False, "Codex limits unavailable"
+    reading = f"Codex 5h {limits.five_hour_pct:.0f}%, weekly {limits.weekly_pct:.0f}%"
+    return limits.five_hour_pct < max_pct and limits.weekly_pct < max_pct, reading
+
+
+def usage_limit_specs(specs: list[dict], results: list[dict | None], fallback: str | None) -> list[dict]:
+    """The fallback run for each subscription run the provider stopped for a spent usage window."""
+    if not fallback:
+        return []
+    return [
+        fallback_spec(spec, fallback)
+        for spec, row in zip(specs, results, strict=True)
+        if row is not None and row.get("stop_reason") == "usage_limit" and spec["model"] != fallback
+    ]
+
+
 def lean_unhealthy_rows(runs: list[dict]) -> list[dict]:
     return [
         run for run in runs if run.get("stop_reason") == "lean_unhealthy" or run.get("exit_code") == LEAN_UNHEALTHY_EXIT
@@ -849,6 +889,8 @@ class CampaignOptions:
     min_free_gb: float = MIN_FREE_GB
     cleanup_wait: float = CLEANUP_WAIT_S
     prewarm_minutes: float = 0  # >0 opens the next row's Lean early; off: only live runs hold memory
+    fallback_model: str | None = None  # runs a subscription model's row when its usage window is (nearly) spent
+    codex_max_pct: float = CODEX_MAX_PCT
     skip_preflight: bool = False
     dry_run: bool = False
     json: bool = False
@@ -883,6 +925,9 @@ def cli_execute(options: CampaignOptions, passthrough: tuple[str, ...] = ()) -> 
         print("--prewarm-minutes must be at least 0", file=sys.stderr)
         return 2
     rows, models = [r for r in args.rows.split(",") if r], [m for m in args.models.split(",") if m]
+    if args.fallback_model is not None and args.fallback_model not in MODELS:
+        print(f"unknown --fallback-model {args.fallback_model!r}; choose from {', '.join(MODELS)}", file=sys.stderr)
+        return 2
     try:
         specs = plan(
             args.prefix,
@@ -980,6 +1025,8 @@ def _campaign_body(
         "min_free_gb": args.min_free_gb,
         "cleanup_wait_s": args.cleanup_wait,
         "prewarm_minutes": args.prewarm_minutes,
+        "fallback_model": getattr(args, "fallback_model", None),
+        "codex_max_pct": getattr(args, "codex_max_pct", CODEX_MAX_PCT),
         "order": [spec["run_id"] for spec in specs],
         "started": lock_info["started"],
         "cpu_count": os.cpu_count(),
@@ -989,7 +1036,9 @@ def _campaign_body(
     try:
         check_indexes(rows)
         expected = check_packets(rows, progress=progress)
-        progress.plain(f"preflight: {check_preflight(models, args.skip_preflight, progress=progress)}")
+        fallback = getattr(args, "fallback_model", None)
+        checked = list(dict.fromkeys([*models, *([fallback] if fallback else [])]))
+        progress.plain(f"preflight: {check_preflight(checked, args.skip_preflight, progress=progress)}")
     except CampaignAbort as error:
         progress.close()
         print(f"aborted before any paid run: {error}", file=sys.stderr)
@@ -1022,6 +1071,7 @@ def _campaign_body(
         else None
     )
     completed: dict[str, int] = dict.fromkeys(rows, 0)
+    fallback = getattr(args, "fallback_model", None)
     finished_lock = threading.Lock()
     hold = None
     stop_helpers = threading.Event()
@@ -1066,6 +1116,15 @@ def _campaign_body(
                 if board:
                     board.run_skipped(spec)
                 return None
+            if fallback and spec["model"] != fallback and on_subscription(spec["model"]):
+                room, reading = subscription_room(getattr(args, "codex_max_pct", CODEX_MAX_PCT))
+                if not room:
+                    moved = fallback_spec(spec, fallback)
+                    progress.event(f"{spec['run_id']}: {reading}; running {moved['run_id']} on {fallback} instead")
+                    if board:
+                        board.run_skipped(spec)
+                        board.add_run(moved)
+                    spec = moved
             if board:
                 board.run_started(spec)
             exit_code, launched = None, True
@@ -1108,6 +1167,13 @@ def _campaign_body(
                 if board:
                     board.add_run(spec)
             results += list(pool.map(tracked, retries))
+            # A subscription run stopped by a spent usage window: the row runs again on the fallback model.
+            moved = usage_limit_specs([*specs, *retries], results, fallback) if not stop.requested else []
+            for spec in moved:
+                progress.event(f"requeue {spec['run_id']}: the subscription's usage window ran out")
+                if board:
+                    board.add_run(spec)
+            results += list(pool.map(tracked, moved))
         runs = [row for row in results if row is not None]
     finally:
         stop_helpers.set()
