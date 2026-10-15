@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -35,6 +36,7 @@ BASELINE_PROXY = round(100 / 3, 2)
 STALL_SECONDS = 15 * 60
 TEXT_LIMIT = 4000
 _CACHE: dict = {}
+_CACHE_LOCK = threading.Lock()  # `arena serve` answers requests on threads; eviction iterates the cache
 
 
 # ---------------------------------------------------------------------------------------------
@@ -69,11 +71,12 @@ def read_jsonl(path: Path) -> list[dict]:
                     rows.append(row)
         except OSError:
             rows = []
-    jsonl_keys = [k for k in _CACHE if k[0] == "jsonl"]
-    for old in jsonl_keys[: max(0, len(jsonl_keys) - 23)]:  # keep memory bounded: oldest files go first
-        _CACHE.pop(old, None)
-    _CACHE.pop(key, None)
-    _CACHE[key] = (stamp, rows)
+    with _CACHE_LOCK:
+        jsonl_keys = [k for k in _CACHE if k[0] == "jsonl"]
+        for old in jsonl_keys[: max(0, len(jsonl_keys) - 23)]:  # keep memory bounded: oldest files go first
+            _CACHE.pop(old, None)
+        _CACHE.pop(key, None)
+        _CACHE[key] = (stamp, rows)
     return rows
 
 
@@ -791,9 +794,10 @@ def _journal_index(directory: Path) -> dict:
             for row in item.rows
             if row.get("kind") in ("tool_call", "tool_result")
         ]
-    for old in [k for k in _CACHE if k[0] == "calls" and k != key][:-3]:  # a few runs at most
-        _CACHE.pop(old, None)
-    _CACHE[key] = (stamp, index)
+    with _CACHE_LOCK:
+        for old in [k for k in _CACHE if k[0] == "calls" and k != key][:-3]:  # a few runs at most
+            _CACHE.pop(old, None)
+        _CACHE[key] = (stamp, index)
     return index
 
 
