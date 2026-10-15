@@ -176,6 +176,12 @@ class UntriedStepTests(unittest.TestCase):
         self.assertFalse(any("Barely tried" in line for line in lines))
 
 
+class CompactMessageTests(unittest.TestCase):
+    def test_a_turnstile_only_inside_a_line_leaves_the_message_unchanged(self):
+        message = "type mismatch\n  h\nhas type\n    a ⊢ b\nbut is expected to have type\n    c"
+        self.assertEqual(reply.compact_message(message), message)
+
+
 class MessageGoalTests(unittest.TestCase):
     def test_note_lines_before_the_goal_are_not_the_goal(self):
         from arena.tools import message_goal

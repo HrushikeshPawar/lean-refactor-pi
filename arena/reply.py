@@ -189,7 +189,9 @@ def compact_message(
     if "⊢" not in message:
         return message
     lines = message.split("\n")
-    first = next(index for index, line in enumerate(lines) if line.startswith("⊢"))
+    first = next((index for index, line in enumerate(lines) if line.startswith("⊢")), None)
+    if first is None:  # `⊢` only inside a line (v7-check4 SKI: 11 scratch replies became internal errors)
+        return message
     start = _goal_start(lines, first)
     return "\n".join([*lines[:start], compact_goal("\n".join(lines[start:]), known, hypothesis_chars)])
 
