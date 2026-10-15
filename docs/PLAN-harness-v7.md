@@ -1786,3 +1786,16 @@ Fresh runs with only the theorem and reference proof, $0.50 each, before the pha
   - The incomplete-errors note names its node and line and sits in that node's result.
 - **Fact:** a scratch `example` has only the hypotheses it states; try a step that needs the proof's context with `goal` at its line.
 - **Slow test** `tests/test_campaign_handoff_slow.py`: a real two-row campaign (strata, then cslib) with the scripted model on a private Lean service. It checks that both gates are healthy, that every strata toolchain closed before the first cslib server started, that cleanup reports the closed toolchains, and that no server is left after the campaign.
+
+### 12j. v7-sol-ski2 and the v8 campaign shape (2026-10-16)
+
+- Sol SKI (stopped by the owner at $1.37 of $2.5): **76.57** (134 tokens, 517 HB, cold-verified, 0 tool errors) vs DS 71.27.
+- v7/23 fixes from the Sol and check4 deep dives: ineligible (version-failing) nodes never shown as compiles/best;
+  search map resent only when the best or shapes change; same-message errors grouped; top-level splice `base`;
+  closing drain skips candidates whose (upper-bound) estimate cannot beat the verified best, cap 180 s.
+- Campaign: Codex 5h/weekly usage read from `codex app-server`; a subscription row moves to `--fallback-model`
+  (DeepSeek) when a window is at or above `--codex-max-pct` (90); a run stopped by `usage_limit` is requeued on the
+  fallback, which starts at $0 with its own `--fallback-limit-usd` (0.5).
+- `--baseline runs/analysis/submission-v3`: rows run by headroom (100 minus best known score); the campaign ends by
+  building `<campaign>/submission` (a run replaces a baseline row only when it beats it by ≥0.1).
+- Not changed: the island restart on text-only turns (it lifted EM 44→78 on DS); Core-like tails (hidden stop rule).
