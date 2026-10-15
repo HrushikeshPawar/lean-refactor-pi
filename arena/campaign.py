@@ -2391,7 +2391,49 @@ def map_view_from(history: list[dict], directory: Path) -> dict:
     price_rates = rates(reference_tokens, reference_heartbeats, total_versions)
     profiles = _cached_profiles(name, history)
     tables = {node.proof_id: _table_for_node(name, node, profiles, price_rates, total_versions) for node in graph.nodes}
-    return graph_map_view(graph, effort_table(graph, tables), (reference_tokens, reference_heartbeats))
+    view = graph_map_view(graph, effort_table(graph, tables), (reference_tokens, reference_heartbeats))
+    scored = [node for node in graph.nodes if node.score is not None]
+    if scored:
+        best = max(scored, key=lambda node: node.score)
+        view["line_costs"] = _line_costs(best.proof_text, profiles.get(best.proof_id))
+    return view
+
+
+# Rows in each of the best node's two line lists.
+LINE_COSTS_SHOWN = 5
+
+
+def _line_costs(proof: str, profile: dict | None) -> dict:
+    """The best node's costliest lines in two lists: lines whose own tactic spent heartbeats, by those heartbeats,
+    and lines that run nothing of their own (statements, terms, continued arguments), by tokens."""
+    if not profile:
+        return {}
+    lines = proof.splitlines()
+    tokens = profile.get("line_tokens") if profile.get("token_attribution_available") else None
+    tokens = tokens if isinstance(tokens, dict) else {}
+    spent: dict[int, int] = {}
+    for item in profile.get("entries") or []:
+        line = item.get("proof_line")
+        if isinstance(line, int) and item.get("self_hb") is not None:
+            spent[line] = spent.get(line, 0) + int(item["self_hb"])
+
+    def row(line: int) -> dict:
+        count = tokens.get(line, tokens.get(str(line)))
+        return {
+            "line": line,
+            "text": lines[line - 1].strip() if 0 < line <= len(lines) else "",
+            "tokens": count,
+            "heartbeats": spent.get(line),
+        }
+
+    tactic = sorted(spent, key=lambda line: -spent[line])[:LINE_COSTS_SHOWN]
+    quiet = [
+        line
+        for line in range(1, len(lines) + 1)
+        if line not in spent and isinstance(tokens.get(line, tokens.get(str(line))), int)
+    ]
+    quiet = sorted(quiet, key=lambda line: -int(tokens.get(line, tokens.get(str(line)))))[:LINE_COSTS_SHOWN]
+    return {"tactic": [row(line) for line in tactic], "quiet": [row(line) for line in quiet]}
 
 
 def graph_state(run_id: str) -> dict:

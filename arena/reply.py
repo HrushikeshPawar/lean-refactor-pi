@@ -194,6 +194,48 @@ def _effort_lines(data: dict) -> list[str]:
     return lines
 
 
+LINE_TEXT_CHARS = 90
+
+
+def _cell(value: object) -> str:
+    """Proof text inside a table cell: one line, no column separators, cut at LINE_TEXT_CHARS."""
+    flat = str(value).replace("|", "\\|").replace("`", "'")
+    return flat if len(flat) <= LINE_TEXT_CHARS else flat[: LINE_TEXT_CHARS - 1] + "…"
+
+
+def _line_cost_lines(data: dict) -> list[str]:
+    """The best node's costliest tactic lines and its longest lines that run nothing of their own."""
+    costs = data.get("line_costs") or {}
+    node = shown((data.get("best") or {}).get("node"))
+    lines: list[str] = []
+    if costs.get("tactic"):
+        lines.append(text.render("replies/tools.map_tactic_lines_head", node=node))
+        lines.extend(
+            text.render(
+                "replies/tools.map_tactic_line",
+                line=row["line"],
+                text=_cell(row["text"]),
+                heartbeats=shown(row.get("heartbeats")),
+                tokens=shown(row.get("tokens")),
+            )
+            for row in costs["tactic"]
+        )
+    if costs.get("quiet"):
+        lines.append(text.render("replies/tools.map_quiet_lines_head", node=node))
+        lines.extend(
+            text.render(
+                "replies/tools.map_quiet_line",
+                line=row["line"],
+                text=_cell(row["text"]),
+                tokens=shown(row.get("tokens")),
+            )
+            for row in costs["quiet"]
+        )
+    if lines:
+        lines.append(text.render("replies/tools.map_lines_note"))
+    return lines
+
+
 def _map_lines(data: dict) -> list[str]:
     lines: list[str] = []
     best = data.get("best")
@@ -255,6 +297,7 @@ def _map_lines(data: dict) -> list[str]:
         ]
     )
     lines.extend(_effort_lines(data))
+    lines.extend(_line_cost_lines(data))
     holes = data.get("open", [])
     if holes:
         lines.append(text.render("replies/tools.map_holes_head"))
