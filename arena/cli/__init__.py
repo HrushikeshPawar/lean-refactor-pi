@@ -200,6 +200,14 @@ def submit(
 
 
 @app.command()
+def submission(baseline: Path, out: Path, cold: bool = False) -> int:
+    """Build a submission directory: baseline rows replaced by better cold-verified runs."""
+    from arena.submission import cli_execute
+
+    return cli_execute(baseline, out, cold)
+
+
+@app.command()
 def preflight(
     theorem: str = "Core.InitsUpdatesComm",
     models: str | None = None,

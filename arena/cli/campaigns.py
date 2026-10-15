@@ -38,7 +38,7 @@ from typing import Any
 from rich.console import Console
 from rich.table import Table
 
-from arena import codex_limits, engine, lean_session, scheduler
+from arena import codex_limits, engine, lean_session, scheduler, submission
 from arena import models as model_config
 from arena.cli import live
 from arena.cli.run import CONFIG, MODELS
@@ -896,6 +896,10 @@ class CampaignOptions:
     fallback_model: str | None = None  # runs a subscription model's row when its usage window is (nearly) spent
     codex_max_pct: float = CODEX_MAX_PCT
     fallback_limit_usd: float = FALLBACK_LIMIT_USD  # the fallback run's own limit; it starts from $0
+    # With a baseline submission: rows run in order of headroom (100 minus the best known score) and the campaign
+    # ends by building the next submission into <campaign dir>/submission from the baseline and every run's best.
+    baseline: Path | None = None
+    submission_cold: bool = False  # re-compile changed rows cold before writing the submission
     skip_preflight: bool = False
     dry_run: bool = False
     json: bool = False
@@ -936,13 +940,21 @@ def cli_execute(options: CampaignOptions, passthrough: tuple[str, ...] = ()) -> 
     if args.fallback_model is not None and args.fallback_model not in MODELS:
         print(f"unknown --fallback-model {args.fallback_model!r}; choose from {', '.join(MODELS)}", file=sys.stderr)
         return 2
+    if args.baseline is not None:
+        try:
+            base = submission.load_baseline(args.baseline)
+        except (OSError, ValueError, KeyError) as error:
+            print(f"--baseline {args.baseline}: {error}", file=sys.stderr)
+            return 2
+        rows = submission.gain_order(rows, base, submission.run_results(names=set(rows)))
     try:
         specs = plan(
             args.prefix,
             rows,
             models,
             args.replicates,
-            group_of=lambda name: scheduler.row_group(engine.problem(name)),
+            # Gain order is kept as given; otherwise rows sharing toolchains run next to each other.
+            group_of=None if args.baseline is not None else lambda name: scheduler.row_group(engine.problem(name)),
         )
     except ValueError as error:
         print(error, file=sys.stderr)
@@ -1036,6 +1048,7 @@ def _campaign_body(
         "fallback_model": getattr(args, "fallback_model", None),
         "codex_max_pct": getattr(args, "codex_max_pct", CODEX_MAX_PCT),
         "fallback_limit_usd": getattr(args, "fallback_limit_usd", FALLBACK_LIMIT_USD),
+        "baseline": str(args.baseline) if getattr(args, "baseline", None) else None,
         "order": [spec["run_id"] for spec in specs],
         "started": lock_info["started"],
         "cpu_count": os.cpu_count(),
@@ -1239,6 +1252,15 @@ def _campaign_body(
         Console().print(table)
     if stop.requested:
         return 130
+    if getattr(args, "baseline", None) is not None:
+        try:
+            built = submission.build(out / "submission", args.baseline, cold=args.submission_cold)
+        except (submission.SubmissionError, OSError, ValueError, KeyError) as error:
+            print(f"submission not built: {error}", file=sys.stderr)
+            return 1
+        print(
+            f"submission: {built['out']} ({len(built['changed'])} rows changed, mean {built['mean']})", flush=True
+        )
     if not report["identical_packets"]:
         print("Packets differ between runs; the comparison is not valid.", file=sys.stderr)
         return 1
