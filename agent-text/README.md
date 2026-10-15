@@ -228,10 +228,10 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/tools.map_lines_note` | 34 | Tool replies | when the matching tool result occurs |
 | `replies/tools.map_origin_from` | 3 | Tool replies | when the matching tool result occurs |
 | `replies/tools.map_origin_root` | 2 | Tool replies | when the matching tool result occurs |
-| `replies/tools.map_quiet_line` | 7 | Tool replies | when the matching tool result occurs |
-| `replies/tools.map_quiet_lines_cols` | 8 | Tool replies | when the matching tool result occurs |
-| `replies/tools.map_quiet_lines_head` | 18 | Tool replies | when the matching tool result occurs |
-| `replies/tools.map_quiet_lines_note` | 19 | Tool replies | when the matching tool result occurs |
+| `replies/tools.map_quiet_line` | 9 | Tool replies | when the matching tool result occurs |
+| `replies/tools.map_quiet_lines_cols` | 10 | Tool replies | when the matching tool result occurs |
+| `replies/tools.map_quiet_lines_head` | 15 | Tool replies | when the matching tool result occurs |
+| `replies/tools.map_quiet_lines_note` | 27 | Tool replies | when the matching tool result occurs |
 | `replies/tools.map_recent` | 13 | Tool replies | when the matching tool result occurs |
 | `replies/tools.map_recent_head` | 38 | Tool replies | when the matching tool result occurs |
 | `replies/tools.map_reference` | 7 | Tool replies | when the matching tool result occurs |
@@ -264,6 +264,12 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/tools.read_step` | 3 | Tool replies | when the matching tool result occurs |
 | `replies/tools.read_step_after` | 2 | Tool replies | when the matching tool result occurs |
 | `replies/tools.read_step_before` | 2 | Tool replies | when the matching tool result occurs |
+| `replies/tools.read_tree_cols` | 17 | Tool replies | when the matching tool result occurs |
+| `replies/tools.read_tree_head` | 34 | Tool replies | when the matching tool result occurs |
+| `replies/tools.read_tree_more` | 5 | Tool replies | when the matching tool result occurs |
+| `replies/tools.read_tree_pending` | 15 | Tool replies | when the matching tool result occurs |
+| `replies/tools.read_tree_row` | 15 | Tool replies | when the matching tool result occurs |
+| `replies/tools.read_tree_total` | 23 | Tool replies | when the matching tool result occurs |
 | `replies/tools.refresh_tail` | 6 | Tool replies | when the matching tool result occurs |
 | `replies/tools.repeat_fact` | 16 | Tool replies | when the matching tool result occurs |
 | `replies/tools.same_diagnostic` | 4 | Tool replies | when the matching tool result occurs |
@@ -318,12 +324,12 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `tools/goal.params.line` | 7 | Model tool definitions | every request |
 | `tools/goal.params.node` | 5 | Model tool definitions | every request |
 | `tools/goal.params.try` | 10 | Model tool definitions | every request |
-| `tools/read.description` | 12 | Model tool definitions | every request |
+| `tools/read.description` | 13 | Model tool definitions | every request |
 | `tools/read.params.against` | 6 | Model tool definitions | every request |
 | `tools/read.params.handle` | 24 | Model tool definitions | every request |
 | `tools/read.params.hole` | 6 | Model tool definitions | every request |
 | `tools/read.params.node` | 5 | Model tool definitions | every request |
-| `tools/read.params.view` | 7 | Model tool definitions | every request |
+| `tools/read.params.view` | 14 | Model tool definitions | every request |
 | `tools/scratch.description` | 45 | Model tool definitions | every request |
 | `tools/scratch.params.code` | 15 | Model tool definitions | every request |
 | `tools/search.description` | 12 | Model tool definitions | every request |

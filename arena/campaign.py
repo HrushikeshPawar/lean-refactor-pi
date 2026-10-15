@@ -2337,6 +2337,73 @@ def _table_for_node(name: str, node: Node, profiles: dict[str, dict], price_rate
     return table
 
 
+def _span(lines: list[str], entry: dict) -> str:
+    """The source text a profile entry covers, from its start line and column to its end line and column."""
+    first, last = entry.get("proof_line"), entry.get("end_proof_line") or entry.get("proof_line")
+    if not isinstance(first, int) or not 0 < first <= len(lines):
+        return ""
+    start, end = int(entry.get("column") or 0), entry.get("end_column")
+    last = min(int(last), len(lines))
+    if first == last:
+        return lines[first - 1][start : end if isinstance(end, int) else None]
+    body = [
+        lines[first - 1][start:],
+        *lines[first : last - 1],
+        lines[last - 1][: end if isinstance(end, int) else None],
+    ]
+    return "\n".join(body)
+
+
+def cost_tree(name: str, run_id: str, reference: str) -> dict:
+    """A node's measured cost tree: every profiled tactic and stated term in source order with its nesting depth,
+    tokens of its source span, total and own heartbeats, and the points it would return if it cost nothing.
+    Cached data only; never Lean."""
+    directory = run_dir(run_id)
+    history = events(directory)
+    graph = Graph.from_history(history, _proof_reader(directory))
+    proof_id = resolve_node_ref(history, reference)
+    node = next(node for node in graph.nodes if node.proof_id == proof_id)
+    profile = _cached_profiles(name, history).get(proof_id)
+    if profile is None and node.origin == "reference":
+        from arena.context import reference_profile
+
+        try:
+            profile = reference_profile(name, cache_only=True) or None
+        except (ValueError, OSError):
+            profile = None
+    from arena.scoring import reference as scoring_reference
+
+    price_rates = rates(*scoring_reference(name), len(versions(problem(name))))
+    lines = node.proof_text.splitlines()
+    rows = []
+    for entry in (profile or {}).get("entries") or []:
+        span = _span(lines, entry)
+        tokens = snippet_tokens(span) if span.strip() else 0
+        heartbeats = int(entry.get("hb") or 0)
+        rows.append(
+            {
+                "line": entry.get("proof_line"),
+                "depth": int(entry.get("depth") or 0),
+                "kind": entry.get("kind", "tactic"),
+                "text": " ".join(span.split()),
+                "tokens": tokens,
+                "heartbeats": heartbeats,
+                "own_heartbeats": entry.get("self_hb"),
+                "points": round(
+                    tokens * price_rates["points_per_token"] + heartbeats / 1000 * price_rates["points_per_1k_hb"], 2
+                ),
+            }
+        )
+    return {
+        "node": _update_id(history, proof_id),
+        "profiled": profile is not None,
+        "rows": rows,
+        "measured": (profile or {}).get("measured_total"),
+        "attributed": (profile or {}).get("profiled_total"),
+        "unattributed": (profile or {}).get("unattributed"),
+    }
+
+
 def price_table(name: str, run_id: str, reference: str | None = None) -> dict:
     """Return prices from cached proof/profile data only; this action never starts Lean."""
     directory = run_dir(run_id)
@@ -2405,35 +2472,36 @@ LINE_COSTS_SHOWN = 5
 
 def _line_costs(proof: str, profile: dict | None) -> dict:
     """The best node's costliest lines in two lists: lines whose own tactic spent heartbeats, by those heartbeats,
-    and lines that run nothing of their own (statements, terms, continued arguments), by tokens."""
+    and lines that run no tactic (stated terms, continued arguments), by tokens, with the heartbeats spent
+    elaborating a stated term measured on its line."""
     if not profile:
         return {}
     lines = proof.splitlines()
     tokens = profile.get("line_tokens") if profile.get("token_attribution_available") else None
     tokens = tokens if isinstance(tokens, dict) else {}
     spent: dict[int, int] = {}
+    stated: dict[int, int] = {}
     for item in profile.get("entries") or []:
         line = item.get("proof_line")
         if isinstance(line, int) and item.get("self_hb") is not None:
-            spent[line] = spent.get(line, 0) + int(item["self_hb"])
+            book = stated if item.get("kind") == "term" else spent
+            book[line] = book.get(line, 0) + int(item["self_hb"])
 
-    def row(line: int) -> dict:
-        count = tokens.get(line, tokens.get(str(line)))
+    def count(line: int) -> int | None:
+        return tokens.get(line, tokens.get(str(line)))
+
+    def row(line: int, hb: dict[int, int]) -> dict:
         return {
             "line": line,
             "text": lines[line - 1].strip() if 0 < line <= len(lines) else "",
-            "tokens": count,
-            "heartbeats": spent.get(line),
+            "tokens": count(line),
+            "heartbeats": hb.get(line),
         }
 
     tactic = sorted(spent, key=lambda line: -spent[line])[:LINE_COSTS_SHOWN]
-    quiet = [
-        line
-        for line in range(1, len(lines) + 1)
-        if line not in spent and isinstance(tokens.get(line, tokens.get(str(line))), int)
-    ]
-    quiet = sorted(quiet, key=lambda line: -int(tokens.get(line, tokens.get(str(line)))))[:LINE_COSTS_SHOWN]
-    return {"tactic": [row(line) for line in tactic], "quiet": [row(line) for line in quiet]}
+    quiet = [line for line in range(1, len(lines) + 1) if line not in spent and isinstance(count(line), int)]
+    quiet = sorted(quiet, key=lambda line: (-int(count(line)), -stated.get(line, 0)))[:LINE_COSTS_SHOWN]
+    return {"tactic": [row(line, spent) for line in tactic], "quiet": [row(line, stated) for line in quiet]}
 
 
 def graph_state(run_id: str) -> dict:

@@ -1035,6 +1035,10 @@ def _decl_read(theorem: str, run_id: str, handle: str) -> dict:
     )
 
 
+# Rows of the cost tree view: the costliest nodes by points.
+TREE_ROWS = 30
+
+
 def read_tool(theorem: str, run_id: str, request: dict) -> dict:
     if _is_empty(request, "read"):
         return _empty_error("read")
@@ -1146,6 +1150,39 @@ def read_tool(theorem: str, run_id: str, request: dict) -> dict:
                 lines.append(_render("read_step_after", goal=step.after))
         data["steps"] = [step.__dict__ for step in steps]
         data["holes"] = holes
+    elif view == "tree":
+        tree = campaign.cost_tree(theorem, run_id, node.id)
+        if not tree["profiled"]:
+            lines = [_render("read_tree_pending", node=node.id)]
+        else:
+            # The costliest nodes by points, shown in source order so nesting stays readable.
+            keep = sorted(range(len(tree["rows"])), key=lambda index: -tree["rows"][index]["points"])[:TREE_ROWS]
+            shown_rows = [tree["rows"][index] for index in sorted(keep)]
+            lines = [_render("read_tree_head", node=node.id), text.template("replies/tools.read_tree_cols").strip()]
+            lines += [
+                _render(
+                    "read_tree_row",
+                    line=row["line"],
+                    text=("· " * row["depth"]) + reply.cell(row["text"]),
+                    kind=row["kind"],
+                    tokens=row["tokens"],
+                    heartbeats=row["heartbeats"],
+                    own=reply.shown(row["own_heartbeats"]),
+                    points=row["points"],
+                )
+                for row in shown_rows
+            ]
+            if len(tree["rows"]) > len(shown_rows):
+                lines.append(_render("read_tree_more", count=len(tree["rows"]) - len(shown_rows)))
+            lines.append(
+                _render(
+                    "read_tree_total",
+                    measured=reply.shown(tree["measured"]),
+                    attributed=reply.shown(tree["attributed"]),
+                    rest=reply.shown(tree["unattributed"]),
+                )
+            )
+        data["tree"] = tree
     elif view == "map":
         result = reply.attach_context(
             run_id,
@@ -1155,7 +1192,7 @@ def read_tool(theorem: str, run_id: str, request: dict) -> dict:
         )
         return result
     else:
-        return _invalid("bad_view", view, ["source", "prices", "diff", "outline", "map"], TOOL_FORMS["read"])
+        return _invalid("bad_view", view, ["source", "prices", "diff", "outline", "map", "tree"], TOOL_FORMS["read"])
     return reply.attach_context(
         run_id,
         reply.reply(items=[{"ref": node.id, "ok": True, "lines": lines, "error": None, **data}]),

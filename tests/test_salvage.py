@@ -154,8 +154,12 @@ class SalvageCampaignTests(FakeRunCase):
             edge = next(item for item in history if item.get("kind") == "edge" and item.get("proof_id") == sketch_id)
             self.assertEqual((edge["type"], edge["from"], edge["exact"]), ("salvaged_from", [proof_id], True))
             self.assertTrue(any(item.get("kind") == "route" and item.get("proof_id") == sketch_id for item in history))
-            notice = next(item["text"] for item in campaign.state("logic")["updates"] if "compiling part of" in item["text"])
-            self.assertRegex(notice, r"^n\d+: compiling part of n\d+; line \d+ is a hole to fill \(`fill` hole n\d+\.h1\)\.$")
+            notice = next(
+                item["text"] for item in campaign.state("logic")["updates"] if "compiling part of" in item["text"]
+            )
+            self.assertRegex(
+                notice, r"^n\d+: compiling part of n\d+; line \d+ is a hole to fill \(`fill` hole n\d+\.h1\)\.$"
+            )
             self.assertEqual(campaign.autocheck("T", "logic")["checked"], [])
             self.assertTrue(first["ok"])
 

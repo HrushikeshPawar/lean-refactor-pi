@@ -32,7 +32,7 @@ LEAN_DIR = Path(__file__).with_name("lean")
 
 MAX_DEPTH = 4
 # not-model-facing: parser for structured output printed by the Lean profiler.
-_ENTRY = re.compile(r"^ARENA_PROFILE (\d+) (\d+) (\d+) (\d+) (\d+)$", re.M)
+_ENTRY = re.compile(r"^ARENA_PROFILE (\d+) (\d+) (\d+) (\d+) (\d+) (tactic|term) (\d+)$", re.M)
 _TOTAL = re.compile(r"^ARENA_PROFILE_TOTAL (\d+)$", re.M)
 ENTRY_LIMIT = 60
 MIN_SHARE = 0.5
@@ -48,11 +48,21 @@ def parse_profile(output: str, shift: int, start_line: int) -> tuple[list[dict],
     `shift` is the number of lines the instrumentation added before the theorem, so
     reported lines map back onto the candidate file.
     """
-    merged: dict[tuple[int, int, int, int], dict] = {}
-    for line, column, depth, end, heartbeats in _ENTRY.findall(output):
-        key = (int(line) - shift, int(column), int(depth), int(end) - shift)
+    merged: dict[tuple[int, int, int, int, int, str], dict] = {}
+    for line, column, depth, end, end_column, kind, heartbeats in _ENTRY.findall(output):
+        key = (int(line) - shift, int(column), int(depth), int(end) - shift, int(end_column), kind)
         record = merged.setdefault(
-            key, {"file_line": key[0], "column": key[1], "depth": key[2], "end_file_line": key[3], "hb": 0, "calls": 0}
+            key,
+            {
+                "file_line": key[0],
+                "column": key[1],
+                "depth": key[2],
+                "end_file_line": key[3],
+                "end_column": key[4],
+                "kind": kind,
+                "hb": 0,
+                "calls": 0,
+            },
         )
         record["hb"] += int(heartbeats)
         record["calls"] += 1
@@ -64,15 +74,19 @@ def parse_profile(output: str, shift: int, start_line: int) -> tuple[list[dict],
     return records, int(total[1]) if total else None
 
 
+def _end(record: dict) -> tuple[int, int]:
+    return record["end_file_line"], record.get("end_column", 10**6)
+
+
 def attribute(records: list[dict]) -> None:
-    """Fill `self_hb`: inclusive cost minus the cost of the tactics directly inside."""
+    """Fill `self_hb`: inclusive cost minus the cost of the tactics and stated terms directly inside."""
     for parent in records:
         inner = [
             child
             for child in records
             if child["depth"] == parent["depth"] + 1
             and (parent["file_line"], parent["column"]) < (child["file_line"], child["column"])
-            and child["end_file_line"] <= parent["end_file_line"]
+            and _end(child) <= _end(parent)
         ]
         parent["self_hb"] = max(0, parent["hb"] - sum(child["hb"] for child in inner))
 
@@ -217,6 +231,9 @@ def summarize(
             "proof_line": record["proof_line"],
             "end_proof_line": record["end_proof_line"],
             "depth": record["depth"],
+            "kind": record.get("kind", "tactic"),
+            "column": record["column"],
+            "end_column": record.get("end_column"),
             "hb": record["hb"],
             "self_hb": record["self_hb"],
             "share_pct": share,

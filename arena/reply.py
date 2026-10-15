@@ -216,7 +216,7 @@ def _effort_lines(data: dict) -> list[str]:
 LINE_TEXT_CHARS = 90
 
 
-def _cell(value: object) -> str:
+def cell(value: object) -> str:
     """Proof text inside a table cell: one line, no column separators, cut at LINE_TEXT_CHARS."""
     flat = str(value).replace("|", "\\|").replace("`", "'")
     return flat if len(flat) <= LINE_TEXT_CHARS else flat[: LINE_TEXT_CHARS - 1] + "…"
@@ -233,7 +233,7 @@ def _line_cost_lines(data: dict) -> list[str]:
             text.render(
                 "replies/tools.map_tactic_line",
                 line=row["line"],
-                text=_cell(row["text"]),
+                text=cell(row["text"]),
                 heartbeats=shown(row.get("heartbeats")),
                 tokens=shown(row.get("tokens")),
             )
@@ -247,8 +247,9 @@ def _line_cost_lines(data: dict) -> list[str]:
             text.render(
                 "replies/tools.map_quiet_line",
                 line=row["line"],
-                text=_cell(row["text"]),
+                text=cell(row["text"]),
                 tokens=shown(row.get("tokens")),
+                heartbeats=shown(row.get("heartbeats")),
             )
             for row in costs["quiet"]
         )
