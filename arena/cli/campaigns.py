@@ -540,18 +540,20 @@ def requeue_specs(specs: list[dict], results: list[dict | None]) -> list[dict]:
 # Providers billed through a usage-capped subscription (Pi's built-in openai login), not per token.
 SUBSCRIPTION_PROVIDERS = ("openai",)
 CODEX_MAX_PCT = 90.0
+# A row moved to the fallback model starts at $0 with this limit, whatever the subscription model's limit was.
+FALLBACK_LIMIT_USD = 0.5
 
 
 def on_subscription(model: str) -> bool:
     return model_config.provider(model) in SUBSCRIPTION_PROVIDERS
 
 
-def fallback_spec(spec: dict, fallback: str) -> dict:
-    """The same row and replicate on the fallback model, under its own run id."""
+def fallback_spec(spec: dict, fallback: str, limit: float = FALLBACK_LIMIT_USD) -> dict:
+    """The same row and replicate on the fallback model, under its own run id and its own spend limit."""
     run_id = spec["run_id"].replace(f"-{slug(spec['model'])}-", f"-{slug(fallback)}-", 1)
     if run_id == spec["run_id"]:
         run_id = f"{run_id}-{slug(fallback)}"
-    return {**spec, "model": fallback, "run_id": run_id}
+    return {**spec, "model": fallback, "run_id": run_id, "limit_usd": limit}
 
 
 def subscription_room(max_pct: float, limits_fn=codex_limits.read_limits) -> tuple[bool, str]:
@@ -563,12 +565,14 @@ def subscription_room(max_pct: float, limits_fn=codex_limits.read_limits) -> tup
     return limits.five_hour_pct < max_pct and limits.weekly_pct < max_pct, reading
 
 
-def usage_limit_specs(specs: list[dict], results: list[dict | None], fallback: str | None) -> list[dict]:
+def usage_limit_specs(
+    specs: list[dict], results: list[dict | None], fallback: str | None, limit: float = FALLBACK_LIMIT_USD
+) -> list[dict]:
     """The fallback run for each subscription run the provider stopped for a spent usage window."""
     if not fallback:
         return []
     return [
-        fallback_spec(spec, fallback)
+        fallback_spec(spec, fallback, limit)
         for spec, row in zip(specs, results, strict=True)
         if row is not None and row.get("stop_reason") == "usage_limit" and spec["model"] != fallback
     ]
@@ -849,7 +853,7 @@ def execute(
     try:
         with (logs / f"{spec['run_id']}.log").open("w") as log:
             proc = run_fn(
-                command(spec, limit, thinking, passthrough),
+                command(spec, spec.get("limit_usd", limit), thinking, passthrough),
                 cwd=ROOT,
                 stdout=log,
                 stderr=subprocess.STDOUT,
@@ -891,6 +895,7 @@ class CampaignOptions:
     prewarm_minutes: float = 0  # >0 opens the next row's Lean early; off: only live runs hold memory
     fallback_model: str | None = None  # runs a subscription model's row when its usage window is (nearly) spent
     codex_max_pct: float = CODEX_MAX_PCT
+    fallback_limit_usd: float = FALLBACK_LIMIT_USD  # the fallback run's own limit; it starts from $0
     skip_preflight: bool = False
     dry_run: bool = False
     json: bool = False
@@ -925,6 +930,9 @@ def cli_execute(options: CampaignOptions, passthrough: tuple[str, ...] = ()) -> 
         print("--prewarm-minutes must be at least 0", file=sys.stderr)
         return 2
     rows, models = [r for r in args.rows.split(",") if r], [m for m in args.models.split(",") if m]
+    if not 0 < args.fallback_limit_usd <= MAX_LIMIT_USD:
+        print(f"--fallback-limit-usd must be above 0 and at most {MAX_LIMIT_USD:g}", file=sys.stderr)
+        return 2
     if args.fallback_model is not None and args.fallback_model not in MODELS:
         print(f"unknown --fallback-model {args.fallback_model!r}; choose from {', '.join(MODELS)}", file=sys.stderr)
         return 2
@@ -1027,6 +1035,7 @@ def _campaign_body(
         "prewarm_minutes": args.prewarm_minutes,
         "fallback_model": getattr(args, "fallback_model", None),
         "codex_max_pct": getattr(args, "codex_max_pct", CODEX_MAX_PCT),
+        "fallback_limit_usd": getattr(args, "fallback_limit_usd", FALLBACK_LIMIT_USD),
         "order": [spec["run_id"] for spec in specs],
         "started": lock_info["started"],
         "cpu_count": os.cpu_count(),
@@ -1119,7 +1128,7 @@ def _campaign_body(
             if fallback and spec["model"] != fallback and on_subscription(spec["model"]):
                 room, reading = subscription_room(getattr(args, "codex_max_pct", CODEX_MAX_PCT))
                 if not room:
-                    moved = fallback_spec(spec, fallback)
+                    moved = fallback_spec(spec, fallback, getattr(args, "fallback_limit_usd", FALLBACK_LIMIT_USD))
                     progress.event(f"{spec['run_id']}: {reading}; running {moved['run_id']} on {fallback} instead")
                     if board:
                         board.run_skipped(spec)
@@ -1168,7 +1177,13 @@ def _campaign_body(
                     board.add_run(spec)
             results += list(pool.map(tracked, retries))
             # A subscription run stopped by a spent usage window: the row runs again on the fallback model.
-            moved = usage_limit_specs([*specs, *retries], results, fallback) if not stop.requested else []
+            moved = (
+                usage_limit_specs(
+                    [*specs, *retries], results, fallback, getattr(args, "fallback_limit_usd", FALLBACK_LIMIT_USD)
+                )
+                if not stop.requested
+                else []
+            )
             for spec in moved:
                 progress.event(f"requeue {spec['run_id']}: the subscription's usage window ran out")
                 if board:

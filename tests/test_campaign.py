@@ -554,6 +554,15 @@ class SubscriptionFallbackTests(unittest.TestCase):
         self.assertEqual(moved["model"], "deepseek-v4.1-flash")
         self.assertEqual(moved["run_id"], "v8-Cslib.SKI.x-deepseek-v4.1-flash-r1")
         self.assertEqual((moved["row"], moved["replicate"]), (self.spec["row"], 1))
+        self.assertEqual(moved["limit_usd"], 0.5)
+        self.assertEqual(fallback_spec(self.spec, "deepseek-v4.1-flash", 0.3)["limit_usd"], 0.3)
+
+    def test_a_moved_run_gets_its_own_limit_on_the_command_line(self):
+        from arena.cli.campaigns import command, fallback_spec
+
+        moved = fallback_spec(self.spec, "deepseek-v4.1-flash")
+        argv = command(moved, moved.get("limit_usd", 2.5), "high", [])
+        self.assertEqual(argv[argv.index("--limit-usd") + 1], "0.5")
 
     def test_room_needs_both_windows_below_the_cap_and_a_reading(self):
         from arena.cli.campaigns import subscription_room
