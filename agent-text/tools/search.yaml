@@ -2,4 +2,4 @@ description: "Search declarations visible from this theorem's imports. Return ha
 params:
   queries: "Search strings, returned as separate result items."
   kind: "Match declaration names, types, or source text."
-  after: "Name prefix for completion results."
+  after: "Name prefix for completion results; without queries it lists every completion of the prefix."

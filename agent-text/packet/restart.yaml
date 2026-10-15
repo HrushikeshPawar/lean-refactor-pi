@@ -1,2 +1,6 @@
 start: "Starting point: {label}. The task and the sections above stand as written; the run continues from this node."
 prices_heading: "Costliest steps of the starting point:"
+tried_heading: "Already tried since the last restart (do not repeat these):"
+tried_line: "- {label}, changed {steps}: {verdict}"
+tried_failed: "failed ({reason})"
+tried_no_gain: "no gain over the best so far"

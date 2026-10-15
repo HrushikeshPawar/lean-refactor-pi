@@ -50,9 +50,8 @@ def script() -> tuple[list[tuple[str, dict, str | None]], int]:
         ("read", {"node": "n8", "view": "prices"}, None),
         ("compile", {"drafts": [tokens_only], "check": "tokens"}, None),
         ("read", {"node": "n2", "view": "outline"}, None),  # this turn's output spends 90% of the limit
-        ("finish", {}, None),
     ]
-    return turns, len(turns) - 2
+    return turns, len(turns) - 1
 
 
 @slow
@@ -65,11 +64,10 @@ class GoldenSessionTests(unittest.TestCase):
             cheap_tool(name, arguments, **({"output": SPEND_90_PCT} if index == cls.spend_turn else {}))
             for index, (name, arguments, _) in enumerate(turns)
         ]
-        # The model thinks before it calls finish, as a real one does: only a full check kicked in the background
-        # (not the closing drain) can land in that window. The fake answers faster than Lean checks.
-        steps[-1]["delay_ms"] = FINISH_THINKING_MS
+        # The model thinks before its closing text-only turn, as a real one does: only a full check kicked in the
+        # background (not the closing drain) can land in that window. The fake answers faster than Lean checks.
         cls.turns = turns
-        cls.run_ = FakeRun([*steps, {"text": "done"}], session=True, timeout=1800)
+        cls.run_ = FakeRun([*steps, {"text": "done", "delay_ms": FINISH_THINKING_MS}], session=True, timeout=1800)
         try:
             cls.run_.run(guard=False)  # every guard condition is asserted below, each on its own
             cls.requests = cls.run_.requests
@@ -102,7 +100,8 @@ class GoldenSessionTests(unittest.TestCase):
         return texts
 
     def test_every_scripted_turn_reached_the_model_and_finish_ended_the_run(self):
-        self.assertEqual(len(self.requests), len(self.turns), self.run_.stdout[-2000:])
+        # Every tool turn plus the closing text-only turn reached the model.
+        self.assertEqual(len(self.requests), len(self.turns) + 1, self.run_.stdout[-2000:])
         self.assertEqual([row.get("name") for row in self.results()], [name for name, _, _ in self.turns])
         self.assertEqual(self.summary.get("stop_reason"), "finished", self.run_.stdout[-2000:])
 
@@ -150,7 +149,7 @@ class GoldenSessionTests(unittest.TestCase):
         responses = [row["ts"] for row in self.journal if row.get("kind") == "response"]
         self.assertLess(full[0]["ts"], responses[-1] / 1000, "the full check waited for the closing drain")
 
-    def test_finish_is_unmentioned_and_unoffered_until_the_final_tenth(self):
+    def test_finish_is_unmentioned_until_the_final_tenth_and_the_tool_list_never_changes(self):
         before, after = self.requests[: self.spend_turn + 1], self.requests[self.spend_turn + 1 :]
         self.assertTrue(after, "no request was sent inside the final tenth")
         for request in before:
@@ -163,7 +162,7 @@ class GoldenSessionTests(unittest.TestCase):
                         self.assertNotRegex(message_text(message), STOP_TEXT, message["role"])
         for request in after:
             with self.subTest(request=request["index"]):
-                self.assertIn("finish", offered_tools(request))
+                self.assertEqual(set(offered_tools(request)), START_TOOLS)
 
     def test_no_tool_errors_log(self):
         self.assertFalse(self.tool_errors_log)

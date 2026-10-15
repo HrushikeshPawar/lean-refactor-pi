@@ -283,11 +283,14 @@ class ToolReplyTextTests(CascadeToolCase):
             {"hole": f"{node}.h1", "try": ["trivial", "constructor", "bogus x", "skip"]},
         )
         lines = [line for item in result["items"][1:] for line in item["lines"]]
+        verdicts = [line for line in lines if line.startswith("t")]
         self.assertEqual(
-            [line.split(", tokens")[0] for line in lines],
+            [line.split(", tokens")[0] for line in verdicts],
             ["t1 closed", "t2 open goals 2", "t3 error: unknown tactic near x", "t4 timed out"],
         )
-        self.assertTrue(all(", tokens " in line for line in lines))
+        self.assertTrue(all(", tokens " in line for line in verdicts))
+        # An open snippet shows the goals it leaves, with each case's hypothesis names.
+        self.assertIn("case b: h", "\n".join(lines))
         self.assertNotRegex("\n".join(lines), r"delta|n/a|heartbeats|None")
 
     def test_goal_try_without_line_or_hole_names_both(self):

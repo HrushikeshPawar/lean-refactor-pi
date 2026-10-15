@@ -7,7 +7,8 @@ error_passes_max: 3
 cross_version_wait_seconds: 10
 goal_try_max: 6
 goal_cases_max: 12
-scratch_max_chars: 4000
+goal_try_chars: 1500
+scratch_max_chars: 8000
 read_source_lines: 400
 finish_points_lines: 4
 source_lines_per_call: 400
@@ -36,6 +37,6 @@ packet_local_type_chars: 320
 memory_library_lines: 15
 memory_read_entries: 30
 budget:
-  static_words: 599
+  static_words: 640
   packet_words: 214
   reply_words: 40

@@ -14,3 +14,6 @@ Ids: node nN, top-level step sK, open hole nN.hK.
 Status closed: the node compiles with no open hole.
 Status sketch: the node compiles with open holes.
 Status broken: the node does not compile.
+Spend counts only your own tokens, reasoning included; Lean checks are free, so a scratch test is cheaper than long reasoning.
+`#check` a declaration before passing it positional arguments. One compile call takes up to {compile_max_drafts} drafts.
+Each turn should call a tool; recaps are not needed.

@@ -217,6 +217,73 @@ def all_errors(name: str, run_id: str, node, result: dict) -> tuple[list[dict], 
     return ordered, incomplete
 
 
+def _timed_out(primary: dict) -> bool:
+    """Lean was cut off at its time limit: the version's error is the timeout message."""
+    error = primary.get("error")
+    return bool(error) and error == text.render("messages/errors.lean_timeout", timeout=engine.lean_timeout())
+
+
+def _lineage(projection, node_ids: list[str]) -> set[str]:
+    """Node ids of the given nodes and every ancestor (the base chain they were filed from)."""
+    by_id = {node.id: node for node in projection.nodes}
+    by_proof = {node.proof_id: node for node in projection.nodes}
+    pending = [by_id[ident].proof_id for ident in node_ids if ident in by_id]
+    seen: set[str] = set()
+    while pending:
+        proof_id = pending.pop()
+        node = by_proof.get(proof_id)
+        if node is None or proof_id in seen:
+            continue
+        seen.add(proof_id)
+        pending.extend((node.edge or {}).get("from") or [])
+    return {by_proof[proof_id].id for proof_id in seen}
+
+
+def _open_holes(projection, lineage: set[str]) -> list[dict]:
+    """Open sketch holes of the lineage only, with whole-line goals."""
+    return [
+        {
+            "node": node.id,
+            "hole": f"{node.id}.h{hole['index']}",
+            "line": hole["line"],
+            "goal": reply.goal_summary(hole.get("goal")),
+        }
+        for node in projection.nodes
+        if node.id in lineage and node.status == "sketch"
+        for hole in node.holes
+        if hole["status"] == "open"
+    ]
+
+
+def _refresh_versions(item: dict, history: list[dict], projection) -> None:
+    """Rewrite a closed item's versions and score from the ledger after the in-call check,
+    so the item agrees with the state updates delivered alongside it."""
+    price = item.get("price")
+    if not isinstance(price, str) or not item.get("lines"):
+        return
+    proof_id = next((node.proof_id for node in projection.nodes if node.id == item["node"]), None)
+    rows = {row["id"]: row for row in campaign._summaries(history)}
+    row = rows.get(proof_id)
+    if row is None or not row["evaluations"]:
+        return
+    total = len((history[0].get("versions") if history else None) or [1])
+    full = [evaluation for evaluation in row["evaluations"] if evaluation["mode"] == "full"]
+    source = full[-1] if full else row["evaluations"][-1]
+    statuses = {version: bool(value.get("passed")) for version, value in (source["result"].get("compat") or {}).items()}
+    tail = text.render(
+        "replies/tools.refresh_tail",
+        versions=campaign._versions_text(statuses, total),
+        score="n/a" if row["score"] is None else f"{row['score']:.2f}",
+    )
+    first, separator, rest = price.partition("\n")
+    head, marker, _stale = first.partition(" · versions ")
+    if not marker:
+        return
+    refreshed = head + tail + separator + rest
+    item["price"] = refreshed
+    item["lines"] = [refreshed if line == price else line for line in item["lines"]]
+
+
 def _compile_item(name: str, run_id: str, node_ref: str, result: dict, filing: str) -> dict:
     _history_rows, projection = _nodes(run_id)
     node = next((item for item in projection.nodes if item.id == node_ref), None)
@@ -229,7 +296,7 @@ def _compile_item(name: str, run_id: str, node_ref: str, result: dict, filing: s
         }
     primary = _primary(result)
     # `compat[v]["lean"]` is the model view's Lean-path string ("session" or a fallback note), not a dict.
-    timeout = bool(result.get("timeout") or primary.get("timeout"))
+    timeout = bool(result.get("timeout") or primary.get("timeout") or _timed_out(primary))
     errors, incomplete = all_errors(name, run_id, node, result)
     if errors:
         errors = reply.deduplicate_diagnostics(run_id, node.id, errors)
@@ -237,7 +304,7 @@ def _compile_item(name: str, run_id: str, node_ref: str, result: dict, filing: s
     status = "timeout" if timeout else node.status
     lines = [_render("compile_item", node=node.id, filing=filing, status=status)]
     if timeout:
-        lines.append(_render("timeout"))
+        lines.append(_render("timeout", seconds=engine.lean_timeout()))
     for item, branches in _branch_groups(errors):
         lines.append(
             _render(
@@ -253,7 +320,12 @@ def _compile_item(name: str, run_id: str, node_ref: str, result: dict, filing: s
             lines.append(_render("error_goal", goal=item["goal"]))
     lines.extend(
         [
-            _render("hole_item", hole=f"{node.id}.h{hole['index']}", line=hole["line"], goal=hole.get("goal") or "n/a")
+            _render(
+                "hole_item",
+                hole=f"{node.id}.h{hole['index']}",
+                line=hole["line"],
+                goal=reply.goal_summary(hole.get("goal"), limit=None) or "n/a",
+            )
             for hole in holes
         ]
     )
@@ -543,19 +615,77 @@ def compile_tool(theorem: str, run_id: str, request: dict) -> dict:
     if closed_nodes:
         seconds = float(text.numbers().get("cross_version_wait_seconds", 10))
         campaign.autocheck(theorem, run_id, max_seconds=seconds, kinds=("full",))
+    # Everything below reads one snapshot taken after the in-call check.
+    history, projection = _nodes(run_id)
+    for item in items:
+        if item.get("status") == "closed" and item.get("node"):
+            _refresh_versions(item, history, projection)
+    for left, right, parent, steps in graph.merge_offers(projection, set(handles)):
+        if reply.first_time(run_id, f"merge:{left},{right}"):
+            facts.append(_render("merge_offer", left=left, right=right, parent=parent, steps=", ".join(steps)))
+    focus = next((node.id for node in projection.nodes if node.proof_id == projection.focus), None)
+    lineage = _lineage(projection, handles or ([focus] if focus else []))
     result = reply.reply(facts=facts, items=items, handles=handles)
-    return reply.attach_context(run_id, result, include_map=True)
+    return reply.attach_context(run_id, result, include_map=True, holes=_open_holes(projection, lineage))
+
+
+def _goal_names(goal: str) -> tuple[str, list[str]]:
+    """A goal's case tag and the names of its hypotheses (the words before ' :' on each unindented line)."""
+    lines = goal.splitlines()
+    case = lines[0].removeprefix("case ").strip() if lines and lines[0].startswith("case ") else ""
+    names = []
+    for line in lines[1:] if case else lines:
+        if line.startswith("⊢"):
+            break
+        if line[:1].strip() and " : " in line:
+            names.extend(line.split(" : ", 1)[0].split())
+    return case, names
 
 
 def _goal_cases(goals: list[str], cap: int) -> str:
-    """Every goal as its own block, headed by its case tag (Lean's `case foo` line); goals past `cap` are not shown."""
+    """A name map (one line per goal), then every goal as its own block, headed by its case tag (Lean's `case foo`
+    line); goals past `cap` are not shown."""
+    shown = goals[:cap]
+    names = []
+    for index, goal in enumerate(shown, 1):
+        case, hypotheses = _goal_names(goal)
+        listed = " ".join(hypotheses) or "none"
+        if case:
+            names.append(_render("goal_map_case", case=case, names=listed))
+        else:
+            names.append(_render("goal_map_untagged", index=index, count=len(goals), names=listed))
     blocks = []
-    for index, goal in enumerate(goals[:cap], 1):
+    for index, goal in enumerate(shown, 1):
         if goal.splitlines()[0].startswith("case "):
             blocks.append(goal)
         else:
             blocks.append(_render("goal_untagged", index=index, count=len(goals)) + "\n" + goal)
-    return "\n\n".join(blocks)
+    return "\n".join(names) + "\n\n" + "\n\n".join(blocks)
+
+
+def _try_goals(item: dict) -> str:
+    """The goals a snippet leaves: its open goals, or the unsolved goals of its error. Cut at a line boundary."""
+    goals = str(item.get("goals_after") or "").strip()
+    output = str(item.get("output") or "")
+    marker = output.find("unsolved goals")
+    if not goals and item.get("returncode") != 0 and marker >= 0:
+        rest = output[marker:].split("\n", 1)
+        kept = []
+        for line in (rest[1] if len(rest) > 1 else "").splitlines():
+            if re.match(r"\S+:\d+:\d+: ", line):
+                break
+            kept.append(line)
+        goals = "\n".join(kept).strip()
+    if not goals:
+        return ""
+    blocks = [block.strip() for block in re.split(r"\n\s*\n", goals) if block.strip()]
+    shown = _goal_cases(blocks, int(text.numbers().get("goal_cases_max", 12)))
+    limit = int(text.numbers().get("goal_try_chars", 1500))
+    if len(shown) <= limit:
+        return shown
+    kept = shown[:limit].rsplit("\n", 1)[0]
+    omitted = len(shown.splitlines()) - len(kept.splitlines())
+    return kept + "\n" + _render("try_goals_cut", count=omitted)
 
 
 def goal_tool(theorem: str, run_id: str, request: dict) -> dict:
@@ -643,7 +773,7 @@ def goal_tool(theorem: str, run_id: str, request: dict) -> dict:
             )
         goals = [str(goal).strip() for goal in (answer or {}).get("goals") or [] if str(goal).strip()]
         rendered = (answer or {}).get("rendered") or "\n".join(goals)
-        extra = []
+        extra = [_render("try_replaces")] if tries else []
         if len(goals) > 1:
             cap = int(text.numbers().get("goal_cases_max", 12))
             rendered = _goal_cases(goals, cap)
@@ -707,6 +837,9 @@ def goal_tool(theorem: str, run_id: str, request: dict) -> dict:
                 snippet = tries[index - 1]
                 # The try lane measures no heartbeats, so the line shows only what was measured: the verdict and tokens.
                 lines = [_render("try_item", index=index, verdict=_try_verdict(item), tokens=snippet_tokens(snippet))]
+                left = _try_goals(item)
+                if left:
+                    lines.append(left)
                 items.append(
                     {
                         "ref": f"t{index}",
@@ -754,16 +887,22 @@ def _try_verdict(item: dict) -> str:
 def search_tool(theorem: str, run_id: str, request: dict) -> dict:
     if _is_empty(request, "search"):
         return _empty_error("search")
-    queries = request.get("queries")
-    if not isinstance(queries, list):
-        return _invalid("bad_queries", queries, ["list of strings"], TOOL_FORMS["search"])
     valid = ["queries", "kind", "after"]
     unknown = sorted(set(request) - set(valid))
     if unknown:
         return _invalid("unknown_argument", unknown[0], valid, TOOL_FORMS["search"])
+    after = request.get("after")
+    if after is not None and not isinstance(after, str):
+        return _invalid("bad_after", after, [_render("search_form")], TOOL_FORMS["search"])
+    queries = request.get("queries")
+    if queries is None and after is not None:
+        # The after form alone lists every completion of the prefix: one empty suffix.
+        queries = [""]
+    if not isinstance(queries, list):
+        return _invalid("bad_queries", queries, [_render("search_form")], TOOL_FORMS["search"])
     kind = request.get("kind", "name")
     string_queries = [(index, query) for index, query in enumerate(queries) if isinstance(query, str)]
-    found = search.search(theorem, [query for _, query in string_queries], kind=kind, after=request.get("after"))
+    found = search.search(theorem, [query for _, query in string_queries], kind=kind, after=after)
     by_index = dict(zip((index for index, _ in string_queries), found.get("queries", []), strict=False))
     items, handles = [], []
     for index, query in enumerate(queries):
@@ -864,8 +1003,11 @@ def _decl_read(theorem: str, run_id: str, handle: str) -> dict:
     unknown_valid = ["decl:<name> from search", "node:n1"]
     if resolved is None:
         return _invalid("unknown_handle", canonical, unknown_valid, TOOL_FORMS["read"])
-    start = int(first) if first else resolved.get("line", 1)
-    end = int(last) if last else start + int(text.numbers().get("read_source_lines", 400)) - 1
+    # Ranges count from the declaration's first line (1), so the file header never comes back for `:1-40`.
+    base = int(resolved.get("line") or 1)
+    size = int(text.numbers().get("read_source_lines", 400))
+    start = base + int(first) - 1 if first else base
+    end = base + int(last) - 1 if last else start + size - 1
     try:
         result = campaign.source_range(theorem, canonical, start, end)
     except ValueError as error:
@@ -875,18 +1017,12 @@ def _decl_read(theorem: str, run_id: str, handle: str) -> dict:
         campaign.run_dir(run_id),
         {"kind": "read", "handle": canonical, "first": result.get("first"), "last": result.get("last")},
     )
-    lines = [
-        _render(
-            "read_source", source=canonical, first=result.get("first", first or 1), last=result.get("last", last or "?")
-        )
-    ]
+    shown_first = result.get("first", start) - base + 1
+    shown_last = result.get("last", end) - base + 1
+    lines = [_render("read_source", source=canonical, first=shown_first, last=shown_last)]
     lines.extend(result.get("text", "").splitlines())
     continuation = result.get("next_first")
-    facts = (
-        [f"{canonical}:{continuation}-{continuation + int(text.numbers().get('read_source_lines', 400)) - 1}"]
-        if continuation
-        else []
-    )
+    facts = [f"{canonical}:{continuation - base + 1}-{continuation - base + size}"] if continuation else []
     return reply.attach_context(
         run_id,
         reply.reply(
@@ -955,6 +1091,11 @@ def read_tool(theorem: str, run_id: str, request: dict) -> dict:
         data["source"] = node.proof_text
     elif view == "prices":
         price = campaign.price_table(theorem, run_id, node.id)
+        if node.origin == "reference":
+            # The packet's reference table counts the row's proof length (statement excluded); the node's fallback
+            # count includes the statement, so the total is taken from the row the packet uses.
+            price = {**price, "total": {**price.get("total", {}), "tokens": campaign.problem(theorem)["proof_length"]}}
+            price["text"] = campaign.render_price_table(price)
         # A value not measured yet is stored as None; the model sees "n/a", never Python's None.
         total = {key: "n/a" if value is None else value for key, value in price.get("total", {}).items()}
         lines = [
@@ -964,7 +1105,9 @@ def read_tool(theorem: str, run_id: str, request: dict) -> dict:
                 tokens=total.get("tokens", "n/a"),
                 heartbeats=total.get("heartbeats", "n/a"),
                 versions=total.get("versions", "n/a"),
-            )
+            ),
+            *str(price.get("text") or "").splitlines(),
+            *text.template("packet/price-table.legend").strip().splitlines(),
         ]
         data["prices"] = price
     elif view == "diff":
@@ -1053,7 +1196,8 @@ def scratch_tool(theorem: str, run_id: str, request: dict) -> dict:
         return _invalid("bad_code", f"{len(code)} characters", [f"1..{limit} characters"], TOOL_FORMS["scratch"])
     if re.search(r"(?m)^\s*import\b", code):
         return _invalid("bad_code", "import", ["no import lines"], TOOL_FORMS["scratch"])
-    label = official_filter()(code)
+    # sorry is allowed in scratch: it is checked as a neutral word, so every other construct is still refused.
+    label = official_filter()(re.sub(r"\bsorry\b", "trivial", code))
     if label:
         return _invalid("forbidden", label, ["no forbidden constructs"], TOOL_FORMS["scratch"])
     row = campaign.problem(theorem)
@@ -1071,15 +1215,22 @@ def scratch_tool(theorem: str, run_id: str, request: dict) -> dict:
     if output is None:
         lines.append(_render("scratch_timeout"))
     else:
-        lines.extend(
-            _render(
-                "scratch_message",
-                line=message["line"] - built["start_line"] + 1 if message["line"] else "?",
-                severity=message["severity"],
-                message=message["message"][: engine._MESSAGE_LIMIT],
+        for message in _scratch_messages(output[1]):
+            snippet_line = message["line"] - built["start_line"] + 1 if message["line"] else None
+            # Messages before the snippet come from the harness wrapper; sorry warnings are the allowed sorry itself.
+            if snippet_line is not None and snippet_line < 1:
+                continue
+            body = message["message"]
+            if message["severity"] == "warning" and "declaration uses" in body and "sorry" in body:
+                continue
+            lines.append(
+                _render(
+                    "scratch_message",
+                    line=snippet_line if snippet_line is not None else "?",
+                    severity=message["severity"],
+                    message=message["message"][: engine._MESSAGE_LIMIT],
+                )
             )
-            for message in _scratch_messages(output[1])
-        )
     for number, line in enumerate(code.splitlines(), 1):
         count = snippet_tokens(line) if line.strip() else 0
         if count:

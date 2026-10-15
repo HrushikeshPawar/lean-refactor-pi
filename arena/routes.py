@@ -82,6 +82,24 @@ def signature(proof: str) -> dict:
     return {"skeleton": _heads(proof_body(proof)), "steps": sorted(normalized)}
 
 
+_DRAFT = re.compile(r"\bsorry\b|\badmit\b|\bby\s+trivial\b")
+
+
+def is_draft(proof: str) -> bool:
+    """A harness or test sketch: a hole, or a trivial body standing in for a proof."""
+    return bool(_DRAFT.search(_strip_comments(proof)))
+
+
+def attach(members: dict[str, list[dict]], sig: dict, base_route: str | None) -> dict:
+    """Route for a draft: its base's route, else the most similar existing route. Never a new route."""
+    if base_route is None and members:
+        base_route = max(members, key=lambda route: max(similarity(sig, member) for member in members[route]))
+    if base_route is None:
+        return assign(members, sig, None, None)
+    scores = [similarity(sig, member) for member in members.get(base_route, [])]
+    return {"route": base_route, "new": False, "similarity": max(scores, default=1.0), "runner_up": None}
+
+
 def similarity(a: dict, b: dict) -> float:
     """Mix top-level tactic shape and normalized step overlap equally."""
     left, right = a["skeleton"], b["skeleton"]

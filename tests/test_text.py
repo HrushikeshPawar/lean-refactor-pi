@@ -240,7 +240,7 @@ class TextRendererTests(unittest.TestCase):
 
         numbers = text.numbers()
         tools = []
-        for name in ("compile", "goal", "search", "read", "finish"):
+        for name in ("compile", "goal", "search", "read", "scratch"):
             prefix = f"tools/{name}."
             tools.extend(text.render(key) for key in text.keys() if key.startswith(prefix))  # noqa: SIM118
         static_words = (
@@ -413,7 +413,7 @@ class PlaceholderTests(unittest.TestCase):
                 text._check("demo", body)
 
     def test_a_missing_or_unused_value_raises(self):
-        key = "messages/continuation.points_left"
+        key = "messages/continuation.focus_material"
         values = _dummies(key)
         self.assertTrue(values)
         missing = dict(values)

@@ -5,8 +5,7 @@ import { numbers, render } from "./text.ts";
 
 export const DEFAULT_LIMIT_USD = 0.5;
 export const MAX_LIMIT_USD = 2;
-// The model may finish only when at most this fraction of the limit is left. Before that the finish tool
-// is not offered at all.
+// The model may finish only when at most this fraction of the limit is left.
 const sharedNumbers = await numbers();
 export const FINISH_REMAINING_FRACTION = sharedNumbers.finish_remaining_pct / 100;
 
@@ -41,12 +40,6 @@ export async function spendFooter(spentUsd: number, limit: number): Promise<stri
   return render("messages/footer", { spent: spentUsd.toFixed(2), limit: limit.toFixed(2), left });
 }
 
-/** The tool list with `finish` offered only when the finish rule allows it. */
-export function toolsForSpend(active: readonly string[], finish: string, allowed: boolean): string[] {
-  const rest = active.filter(name => name !== finish);
-  return allowed ? [...rest, finish] : rest;
-}
-
 // Cache hit rate in the provider-standard sense: cache_read over every prompt token
 // (input + cache_read + cache_write).
 export function cacheHitPct(usage: { input?: number; cacheRead?: number; cacheWrite?: number }): number | null {
@@ -55,10 +48,15 @@ export function cacheHitPct(usage: { input?: number; cacheRead?: number; cacheWr
   return prompt ? 100 * read / prompt : null;
 }
 
-// A request that wrote more cache than it read after warm-up means the stable prefix was not reused.
+// After warm-up, a request that wrote more cache than it read, or paid more than this for uncached input,
+// means the stable prefix was not reused.
 export const CACHE_WARMUP_REQUESTS = 2;
-export function cacheAlarm(usage: { cacheRead?: number; cacheWrite?: number }, settledRequests: number):
-    { request: number; read: number; write: number } | undefined {
+export const UNCACHED_INPUT_ALARM_USD = 0.03;
+export function cacheAlarm(usage: { cacheRead?: number; cacheWrite?: number }, settledRequests: number, inputUsd: number):
+    { request: number; read: number; write: number; input_usd: number; reason: string } | undefined {
   const read = usage.cacheRead ?? 0, write = usage.cacheWrite ?? 0;
-  return settledRequests > CACHE_WARMUP_REQUESTS && write > read ? { request: settledRequests, read, write } : undefined;
+  if (settledRequests <= CACHE_WARMUP_REQUESTS) return undefined;
+  const alarm = { request: settledRequests, read, write, input_usd: inputUsd };
+  if (write > read) return { ...alarm, reason: "cache_write_over_read" };
+  return inputUsd > UNCACHED_INPUT_ALARM_USD ? { ...alarm, reason: "uncached_input" } : undefined;
 }

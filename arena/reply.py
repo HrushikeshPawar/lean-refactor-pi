@@ -81,6 +81,34 @@ def reset_delivered(run_id: str) -> None:
     _save(run_id, state)
 
 
+def first_time(run_id: str, key: str) -> bool:
+    """True the first time `key` is seen for this run; later calls return False."""
+    state = _load(run_id)
+    seen = state.setdefault("offered", [])
+    if key in seen:
+        return False
+    seen.append(key)
+    _save(run_id, state)
+    return True
+
+
+def goal_summary(goal: object, limit: int | None = 120) -> str | None:
+    """A goal as whole lines joined by " / ", stopping before a line that would pass `limit` characters."""
+    if not isinstance(goal, str) or not goal.strip():
+        return None
+    lines = [line.rstrip() for line in goal.strip().split("\n")]
+    kept: list[str] = []
+    size = 0
+    for line in lines:
+        extra = len(line) + (3 if kept else 0)
+        if kept and limit is not None and size + extra > limit:
+            break
+        kept.append(line)
+        size += extra
+    summary = " / ".join(kept)
+    return summary if len(kept) == len(lines) else summary + " / ..."
+
+
 def shown(value: object) -> object:
     """A value as the model sees it: a missing one is "-", never Python's None."""
     return "-" if value is None or value == "" else value
@@ -174,8 +202,16 @@ def _map_lines(data: dict) -> list[str]:
     return lines
 
 
-def attach_context(run_id: str, result: dict, *, include_map: bool = False, force_map: bool = False) -> dict:
-    """Attach new state updates and a changed map, persisting delivery cursors."""
+def attach_context(
+    run_id: str,
+    result: dict,
+    *,
+    include_map: bool = False,
+    force_map: bool = False,
+    holes: list[dict] | None = None,
+) -> dict:
+    """Attach new state updates and a changed map, persisting delivery cursors.
+    `holes`, when given, replaces the map's open holes (the caller's current lineage only)."""
     state = _load(run_id)
     try:
         updates = campaign.state(run_id).get("updates", [])
@@ -184,7 +220,10 @@ def attach_context(run_id: str, result: dict, *, include_map: bool = False, forc
     delivered = int(state.get("delivered_seq", -1))
     fresh = [item for item in updates if int(item.get("seq", -1)) > delivered]
     if include_map or force_map:
-        lines = _map_lines(campaign.map_view(run_id))
+        data = campaign.map_view(run_id)
+        if holes is not None:
+            data["open"] = holes
+        lines = _map_lines(data)
         digest = hashlib.sha256("\n".join(lines).encode()).hexdigest()
         if force_map or digest != state.get("map_hash"):
             result["map"] = lines

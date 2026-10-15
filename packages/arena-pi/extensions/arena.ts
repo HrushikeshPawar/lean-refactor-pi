@@ -13,18 +13,16 @@ import { BlobStore, DeltaChain, splitRequest, stampRecord } from "./journal.ts";
 import { nothingToSummarize, objectToolArguments, ResultTrimmer } from "./trim.ts";
 import { stopDecision } from "./control.ts";
 import { continuationFacts, continuationPush } from "./rules.ts";
-import { cacheAlarm, cacheHitPct, callCost, finishAllowed, limitReached, limitUsd, spendFooter, toolsForSpend } from "./spend.ts";
+import { cacheAlarm, cacheHitPct, callCost, finishAllowed, limitReached, limitUsd, spendFooter } from "./spend.ts";
 import { numbers as textNumbers, render as renderText } from "./text.ts";
 import { classifyFailure, nextWait } from "./outage.ts";
 import { applyToolTurnEffort } from "./thinking.ts";
-import { buildTurnCutLine } from "./truncation.ts";
 import { renderReply } from "./reply.ts";
 
 const root = resolve(import.meta.dirname, "../../..");
 const workspaces = resolve(root, "workspaces");
 const MAX_ERROR_STREAK = 3;
-const FINISH_TOOL = "finish";
-const ARENA_TOOLS = new Set(["compile", "goal", "search", "read", "scratch", "finish"]);
+const ARENA_TOOLS = new Set(["compile", "goal", "search", "read", "scratch"]);
 
 function validObjectJson(raw: string | undefined): boolean {
   if (raw === undefined) return false;
@@ -116,6 +114,8 @@ export default async function arenaExtension(pi: ExtensionAPI) {
   let spentUsd = 0;
   let settledCalls = 0;
   let limitHit = false;
+  // Tool calls of the message that crossed the limit still running; the run aborts when the last one ends.
+  let limitToolsLeft = 0;
   // The provider request currently open: opened in before_provider_request, closed by the call's settle row.
   let pendingRequest: string | undefined;
   let openAttempt: string | undefined;
@@ -127,10 +127,9 @@ export default async function arenaExtension(pi: ExtensionAPI) {
   let outageStartedAt: number | undefined;
   let outageAttempt = 0;
   let previousProgress = "";
-  let finishConfirmed = false;
   let noWorkTurns = 0;
-  // Model turn at which the best last changed; the stall restart counts model turns from here.
-  let bestChangedTurn = 0;
+  // Spend when the best last changed; the stall restart counts the spend since then.
+  let spentAtBestChange = 0;
   let turnHadProofAttempt = false;
   let turnHadNovelContext = false;
   let turnHadVerifiedImprovement = false;
@@ -253,13 +252,6 @@ export default async function arenaExtension(pi: ExtensionAPI) {
       ...(delta ? { post_hook_prefix: delta.prefix, post_hook_suffix: delta.suffix } : {}),
       post_hook: delta ? delta.middle : text.toString("utf8") };
   }
-  // The finish tool is offered to the model only inside the final FINISH_REMAINING_FRACTION of the limit.
-  function applyFinishGate() {
-    const offered = toolsForSpend(pi.getActiveTools(), FINISH_TOOL, finishAllowed(spentUsd, limit).allowed);
-    const current = pi.getActiveTools();
-    if (offered.length !== current.length || offered.some((name, index) => name !== current[index])) pi.setActiveTools(offered);
-  }
-
   pi.on("session_start", (_event, ctx) => {
     active = undefined;
     // The run total is the sum of the ledger's settle rows, so a resumed run continues from its spend.
@@ -267,6 +259,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     spentUsd = settled.reduce((sum, item) => sum + Number(item.usd), 0);
     settledCalls = settled.length;
     limitHit = limitReached(spentUsd, limit);
+    limitToolsLeft = 0;
     pendingRequest = undefined;
     previousFailed = undefined;
     const latest = costEvents().filter(item => item.kind === "control").at(-1);
@@ -276,8 +269,9 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     outageStartedAt = typeof latest?.outage_started_at === "number" ? latest.outage_started_at : undefined;
     outageAttempt = Number(latest?.outage_attempt ?? 0);
     previousProgress = String(latest?.progress ?? "");
-    finishConfirmed = false;
     noWorkTurns = Number(latest?.no_work_turns ?? 0);
+    // A ledger without the field (written before it existed) starts its stall count at the current spend.
+    spentAtBestChange = Number(latest?.spent_at_best_change ?? spentUsd);
     turnHadProofAttempt = false;
     turnHadNovelContext = false;
     turnHadVerifiedImprovement = false;
@@ -290,7 +284,6 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     for (const item of costEvents()) if (item.kind === "discovery" && typeof item.signature === "string") {
       discoveries.add(item.signature);
     }
-    applyFinishGate();
   });
 
   // Every provider request is journaled here. Pi runs extension hook errors to completion without failing
@@ -332,7 +325,6 @@ export default async function arenaExtension(pi: ExtensionAPI) {
   });
 
   pi.on("before_agent_start", (_event, ctx) => {
-    applyFinishGate();
     if (process.env.ARENA_BUDGET_REQUIRED !== "1") return;
     if (!active || limitHit || ctx.model?.id !== (process.env.ARENA_PI_MODEL_ID ?? process.env.ARENA_MODEL)) {
       ctx.abort();
@@ -345,7 +337,8 @@ export default async function arenaExtension(pi: ExtensionAPI) {
 
   // Add one call's actual cost to the run total and write its settle row. The one place spend changes.
   // A call with no usage (a request that failed before the provider counted tokens) settles at zero.
-  function settle(id: string, usage: AssistantMessage["usage"] | undefined, extra: Record<string, unknown>, ctx: ExtensionContext) {
+  // `toolCalls` is the number of tool calls in the message being settled; they still run when the limit is crossed.
+  function settle(id: string, usage: AssistantMessage["usage"] | undefined, extra: Record<string, unknown>, ctx: ExtensionContext, toolCalls = 0) {
     const known = Boolean(usage?.totalTokens);
     const usd = known ? callCost(usage) : 0;
     spentUsd += usd;
@@ -358,23 +351,26 @@ export default async function arenaExtension(pi: ExtensionAPI) {
       ...extra });
     if (known) settledCalls += 1;
     if (known && usage && extra.source !== "compaction") {
-      const alarm = cacheAlarm(usage, settledCalls);
+      const alarm = cacheAlarm(usage, settledCalls, cost?.input ?? 0);
       if (alarm) {
         appendCost({ kind: "cache_alarm", id, ...alarm });
-        console.error(`[arena-cache-alarm] request ${alarm.request}: wrote ${alarm.write} cache tokens but read ${alarm.read}; the stable prefix was not reused`); // not-model-facing: operator diagnostic log.
+        if (alarm.reason === "uncached_input") console.error(`[arena-cache-alarm] request ${alarm.request}: $${alarm.input_usd.toFixed(4)} of uncached input; the stable prefix was not reused`); // not-model-facing: operator diagnostic log.
+        else console.error(`[arena-cache-alarm] request ${alarm.request}: wrote ${alarm.write} cache tokens but read ${alarm.read}; the stable prefix was not reused`); // not-model-facing: operator diagnostic log.
       }
     }
     if (known) console.error(`[arena-cost] settled $${usd.toFixed(6)}; cache read ${usage?.cacheRead ?? 0}, write ${usage?.cacheWrite ?? 0}; total $${spentUsd.toFixed(6)}`); // not-model-facing: operator diagnostic log.
-    applyFinishGate();
-    // Stop the agent at once: no further provider request, no further tool batch. The turn that follows is
-    // closed in agent_before_settle with the limit as the stop reason.
+    // Stop the agent: no further provider request. A message with tool calls keeps its batch, so the run aborts
+    // when the last of those calls ends (tool_execution_end). The turn that follows is closed in agent_before_settle
+    // with the limit as the stop reason.
     if (limitReached(spentUsd, limit) && !limitHit) {
       limitHit = true;
       // Recorded here because an aborted run may never reach agent_before_settle.
       appendCost({ kind: "control", continuations, plateau, no_work_turns: noWorkTurns,
         error_streak: errorStreak, progress: previousProgress, stop: "limit_reached",
-        outage_started_at: outageStartedAt ?? null, outage_attempt: outageAttempt });
-      ctx.abort();
+        outage_started_at: outageStartedAt ?? null, outage_attempt: outageAttempt,
+        spent_at_best_change: spentAtBestChange });
+      if (toolCalls > 0) limitToolsLeft = toolCalls;
+      else ctx.abort();
     }
   }
 
@@ -398,7 +394,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
       stop_reason: message.stopReason, response_id: message.responseId ?? null,
       response_model: message.responseModel ?? message.model, error_message: message.errorMessage ?? null };
     const known = Boolean(message.usage?.totalTokens);
-    settle(id, message.usage, {}, ctx);
+    settle(id, message.usage, {}, ctx, blocks.filter(block => block.type === "toolCall").length);
     appendTrace({ ...delivered, settled_usd: known ? callCost(message.usage) : null,
       usage: { input: message.usage?.input ?? 0, output: message.usage?.output ?? 0,
         cache_read: message.usage?.cacheRead ?? 0, cache_write: message.usage?.cacheWrite ?? 0 } });
@@ -537,8 +533,8 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     return delivered.endsWith(suffix) ? delivered.slice(0, -suffix.length) : delivered;
   }
   pi.on("tool_execution_end", (event, ctx) => {
-    // A confirmed finish ends the run: no provider request follows the tool result.
-    if (event.toolName === FINISH_TOOL && finishConfirmed) ctx.abort();
+    // The batch of the message that crossed the limit ends here; after its last result no provider request follows.
+    if (limitToolsLeft > 0 && --limitToolsLeft === 0) ctx.abort();
     const result = event.result as { content?: Array<{ type?: string; text?: string }> } | undefined;
     const payload = payloadFromToolResult(result);
     const check = compileChecks.get(event.toolCallId);
@@ -723,22 +719,6 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     },
   });
 
-  const finishParams = Type.Object({});
-  await registerTool({ name: FINISH_TOOL, label: "Finish the run",
-    description: await renderText("tools/finish.description"), parameters: finishParams,
-    async execute(_id: string, params: Record<string, unknown>) {
-      const result = await invokeTool(FINISH_TOOL, params, []);
-      if (result.details?.stop === true) {
-        finishConfirmed = true;
-        const stop = limitHit ? "limit_reached" : "finished";
-        appendCost({ kind: "control", continuations, plateau, no_work_turns: noWorkTurns,
-          error_streak: errorStreak, progress: previousProgress, stop,
-          outage_started_at: outageStartedAt ?? null, outage_attempt: outageAttempt });
-      }
-      return result;
-    },
-  });
-
   pi.on("agent_before_settle", async event => {
     if (process.env.ARENA_AUTOCONTINUE !== "1" || !active || !runId) return;
     const state = await campaign("frontier");
@@ -760,7 +740,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
       verified_improvement: turnHadVerifiedImprovement };
     if (!failed) {
       if (progress === previousProgress) plateau += 1;
-      else { plateau = 0; bestChangedTurn = turn; }
+      else { plateau = 0; spentAtBestChange = spentUsd; }
       previousProgress = progress;
       turnHadVerifiedImprovement ||= verifiedImproved(state.best, previousVerified);
       activity = { proof_attempt: turnHadProofAttempt, novel_context: turnHadNovelContext,
@@ -770,11 +750,17 @@ export default async function arenaExtension(pi: ExtensionAPI) {
       else noWorkTurns += 1;
     }
     const noWorkThisTurn = !failed && !(turnHadProofAttempt || turnHadNovelContext || turnHadVerifiedImprovement);
-    const { stop, moveFocus, restart } = stopDecision({ limitHit, finishConfirmed, noWorkThisTurn,
+    // A finish: a turn that completed, stopped on its own (not cut by the length limit), wrote visible text and
+    // asked for no tool, once the finish rule allows it.
+    const remaining = finishAllowed(spentUsd, limit);
+    const finishTurn = remaining.allowed && !failed && lastAssistant?.stopReason === "stop"
+      && (lastAssistant.content ?? []).some(block => block.type === "text" && block.text.trim() !== "")
+      && !(lastAssistant.content ?? []).some(block => block.type === "toolCall");
+    const { stop, moveFocus, restart } = stopDecision({ limitHit, finishTurn, noWorkThisTurn,
       providerUnreachable: failure === "transport" && outageStartedAt !== undefined && nextWait(outageAttempt, Number(process.env.ARENA_BACKOFF_MS ?? 2000), outageStartedAt, Date.now(), Number(process.env.ARENA_OUTAGE_LIMIT_MS ?? 600000)).stop,
       errorLoop: failure === "model" && errorStreak >= MAX_ERROR_STREAK,
-      continuations, noWorkTurns, plateau, bestPlateau: state.best ? turn - bestChangedTurn : 0,
-      finishAllowed: finishAllowed(spentUsd, limit).allowed });
+      continuations, noWorkTurns, plateau, stallUsd: spentUsd - spentAtBestChange, limitUsd: limit,
+      remainingFraction: remaining.remainingFraction, finishAllowed: remaining.allowed });
     turnHadProofAttempt = false;
     turnHadNovelContext = false;
     turnHadVerifiedImprovement = false;
@@ -782,7 +768,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
       const latestControl = costEvents().filter(item => item.kind === "control").at(-1);
       if (latestControl?.stop !== stop) {
         appendCost({ kind: "control", continuations, plateau, no_work_turns: noWorkTurns,
-          error_streak: errorStreak, progress, ...activity, stop,
+          error_streak: errorStreak, progress, ...activity, stop, spent_at_best_change: spentAtBestChange,
           ...(failed ? { error_message: (lastAssistant?.errorMessage ?? "").slice(0, 300), failure } : {}),
           outage_started_at: outageStartedAt ?? null, outage_attempt: outageAttempt,
           ...(failure === "transport" ? { outage_ms: Date.now() - (outageStartedAt ?? Date.now()) } : {}) });
@@ -799,7 +785,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
         delay = wait.stop ? 0 : wait.delayMs;
       } else delay = Math.min(30_000, Number(process.env.ARENA_BACKOFF_MS ?? 2000) * 2 ** (errorStreak - 1));
       appendCost({ kind: "control", continuations, plateau, no_work_turns: noWorkTurns,
-        error_streak: errorStreak, progress, ...activity, stop: null, backoff_ms: delay,
+        error_streak: errorStreak, progress, ...activity, stop: null, backoff_ms: delay, spent_at_best_change: spentAtBestChange,
         ...(failure ? { error_message: (lastAssistant?.errorMessage ?? "").slice(0, 300), failure } : {}),
         outage_started_at: outageStartedAt ?? null, outage_attempt: outageAttempt,
         ...(failure === "transport" ? { outage_ms: Date.now() - outageStartedAt! } : {}) });
@@ -807,15 +793,13 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     } else {
       continuations += 1;
       appendCost({ kind: "control", continuations, plateau, no_work_turns: noWorkTurns,
-        error_streak: errorStreak, progress, ...activity, stop: null,
+        error_streak: errorStreak, progress, ...activity, stop: null, spent_at_best_change: spentAtBestChange,
         outage_started_at: null, outage_attempt: 0 });
     }
     const checks = await campaign("state");
     const cause = failed ? String((event as any).errorMessage ?? lastAssistant?.errorMessage ?? "") : undefined;
-    const content = await continuationPush({ failed, cause, spentUsd, limitUsd: limit, baseline: checks?.baseline,
-      best: checks?.best ?? state.best });
-    const cutLine = cutTokens === undefined ? undefined
-      : buildTurnCutLine(cutTokens, await renderText("messages/errors.turn_cut", { tokens: "{tokens}" }));
+    const content = await continuationPush({ failed, cause, cutTokens, skeleton: checks?.skeleton, spentUsd,
+      limitUsd: limit, baseline: checks?.baseline, best: checks?.best ?? state.best });
     // Second no-work turn in a row, before the final tenth: the run restarts from a packet at the next starting
     // point. The compaction draft keeps nothing before it, so the old reasoning leaves the model's context.
     if (restart) {
@@ -825,9 +809,9 @@ export default async function arenaExtension(pi: ExtensionAPI) {
         trimmer.forget();
         noWorkTurns = 0;
         plateau = 0;
-        bestChangedTurn = turn;
+        spentAtBestChange = spentUsd;
         appendCost({ kind: "restart", continuations, restart: restarted.restart, label: restarted.label, chars: restarted.text.length });
-        const facts = await continuationFacts(spentUsd, limit, checks?.baseline, checks?.best ?? state.best);
+        const facts = await continuationFacts(spentUsd, limit, checks?.baseline, checks?.best ?? state.best, checks?.skeleton);
         return { entries: [...event.entries,
           { type: "compaction" as const, summary: restarted.text, firstKeptEntryId: null },
           { type: "custom_message" as const, customType: "arena-continuation",
@@ -841,7 +825,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     const focusLine = moved?.moved ? await renderText("messages/continuation.focus_moved", { label: moved.label }) : undefined;
     const focusMaterial = moved?.moved ? await renderText("messages/continuation.focus_material",
       { label: moved.label, proof: moved.proof, prices: moved.prices }) : undefined;
-    const nextText = [content, focusLine, focusMaterial, cutLine].filter(line => line !== undefined).join("\n");
+    const nextText = [content, focusLine, focusMaterial].filter(line => line !== undefined).join("\n");
     return { entries: [...event.entries, { type: "custom_message" as const, customType: "arena-continuation",
       content: nextText, display: false }], continue: true };
   });

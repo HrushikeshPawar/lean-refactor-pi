@@ -1039,12 +1039,16 @@ def _file_node(
                 earlier.setdefault(node.route, []).append(node.signature)
         parent = sources[0] if sources else None
         parent_node = graph_nodes.get(parent)
-        assignment = routes.assign(
-            earlier,
-            routes.signature(proof),
-            parent_node.route if parent_node else None,
-            routes.line_diff(parent_node.proof_text, proof) if parent_node and parent_node.route else None,
-        )
+        if routes.is_draft(proof):
+            # Harness and test sketches never open a route; they belong to their base's route.
+            assignment = routes.attach(earlier, routes.signature(proof), parent_node.route if parent_node else None)
+        else:
+            assignment = routes.assign(
+                earlier,
+                routes.signature(proof),
+                parent_node.route if parent_node else None,
+                routes.line_diff(parent_node.proof_text, proof) if parent_node and parent_node.route else None,
+            )
         origin = next(
             (
                 item.get("origin", "model")
@@ -1148,10 +1152,15 @@ def _best_first(cells: list[Cell]) -> list[Cell]:
 
 def _no_work_candidates(graph: Graph, current_route: str | None) -> list[Node]:
     """Starting points in order: best cells of other routes, the original, then other closed nodes by quality."""
-    others = [cell.node for cell in _best_first(archive(graph)) if current_route is None or cell.route != current_route]
+    others = [
+        cell.node
+        for cell in _best_first(archive(graph))
+        if (current_route is None or cell.route != current_route) and not routes.is_draft(cell.node.proof_text)
+    ]
     original = [node for node in graph.nodes if node.origin == "reference"]
     closed = sorted(
-        (node for node in graph.nodes if node.status == "closed"), key=lambda node: (-(quality(node) or 0.0), node.id)
+        (node for node in graph.nodes if node.status == "closed" and not routes.is_draft(node.proof_text)),
+        key=lambda node: (-(quality(node) or 0.0), node.id),
     )
     unique: dict[str, Node] = {}
     for node in [*others, *original, *closed]:
@@ -1188,24 +1197,105 @@ def no_work_focus(run_id: str, theorem: str) -> dict:
 
 
 def _restart_order(graph: Graph) -> list[Node]:
-    """Restart starting points in rotation: best node, original reference, then the best cell of each other route."""
-    scored = [node for node in graph.nodes if node.score is not None]
-    best = max(scored, key=lambda node: node.score) if scored else None
+    """Restart starting points in rotation: the best clean node, the original reference, then the best cell of each
+    other route that scores no lower than that best. Sketches and test drafts never start a restart."""
     reference = next((node for node in graph.nodes if node.origin == "reference"), None)
+    scored = [node for node in graph.nodes if node.score is not None and not routes.is_draft(node.proof_text)]
+    best = max(scored, key=lambda node: node.score) if scored else reference
+    if best is None:
+        raise ValueError(text.render("messages/errors.node_reference_invalid", reference="restart start"))
     excluded = {node.route for node in (best, reference) if node is not None}
     per_route: dict[str | None, Node] = {}
     for cell in _best_first(archive(graph)):
-        if cell.route not in excluded:
-            per_route.setdefault(cell.route, cell.node)
-    order = [node for node in (best, reference, *per_route.values()) if node is not None]
-    if not order:
-        raise ValueError(text.render("messages/errors.node_reference_invalid", reference="restart start"))
-    return order
+        node = cell.node
+        if cell.route in excluded or routes.is_draft(node.proof_text) or node.score is None:
+            continue
+        if best.score is not None and node.score < best.score:
+            continue
+        per_route.setdefault(cell.route, node)
+    unique: dict[str, Node] = {}
+    for node in [best, reference, *per_route.values()]:
+        if node is not None:
+            unique.setdefault(node.proof_id, node)
+    return list(unique.values())
+
+
+def _tried_since_restart(history: list[dict], graph: Graph) -> list[str]:
+    """Distinct ideas tried since the last restart that failed or did not beat the best so far, newest last."""
+    start = max((seq for seq, item in enumerate(history) if item.get("kind") == "restart"), default=-1)
+    nodes = {node.proof_id: node for node in graph.nodes}
+    best = max(
+        (
+            score
+            for score in (
+                _metric_score((item.get("result") or {}).get("metrics"))
+                for item in history[: start + 1]
+                if item.get("kind") == "evaluation"
+            )
+            if score is not None
+        ),
+        default=None,
+    )
+    lines: list[str] = []
+    for item in history[start + 1 :]:
+        result = item.get("result") or {}
+        if item.get("kind") == "probe":
+            proof_id = item["proof_id"]
+            verdict = _failure_text(result) if _probe_failed(result) else None
+        elif item.get("kind") == "evaluation":
+            proof_id = item["candidate_id"]
+            metrics = result.get("metrics") or {}
+            score = _metric_score(metrics)
+            if not metrics.get("compiled"):
+                verdict = _failure_text(result)
+            elif score is None or (best is not None and score <= best):
+                verdict = None
+            else:
+                best = score
+                continue
+        else:
+            continue
+        node = nodes.get(proof_id)
+        parents = (node.edge or {}).get("from") or [] if node else []
+        parent = nodes.get(parents[0]) if parents else None
+        changes = changed_steps(parent.steps, node.steps) if parent and node else []
+        steps = ", ".join(step_id for change in changes for step_id in change["ids"]) or "whole proof"
+        outcome = (
+            text.render("packet/restart.tried_failed", reason=verdict)
+            if verdict
+            else text.render("packet/restart.tried_no_gain")
+        )
+        lines.append(
+            text.render(
+                "packet/restart.tried_line",
+                label=_update_id(history, proof_id),
+                steps=steps,
+                verdict=outcome,
+            )
+        )
+    distinct = [line for index, line in enumerate(lines) if line not in lines[index + 1 :]]
+    return distinct[-8:]
+
+
+def _kickoff_within(sections: list[tuple[str, str]], limit: int) -> str:
+    """The kickoff packet fitted to `limit` characters, shedding entries in the packet's own priority order."""
+    from arena import context
+
+    parts = []
+    for title, content in sections:
+        head = f"{title}\n"
+        if title and content.startswith(head):
+            parts.append((title, content[len(head) :].split("\n")))
+        else:
+            parts.append(("", content.split("\n")))
+    fitted = context._fit_sections(parts, limit)
+    return "\n\n".join((f"{title}\n" if title else "") + "\n".join(body) for title, body in fitted) + "\n"
 
 
 def restart_packet(name: str, run_id: str) -> dict:
-    """Restart the conversation at the next starting point: the kickoff packet, the start node and the map."""
-    from arena import reply
+    """Restart the conversation at the next starting point: the kickoff packet, the start node, the costliest steps,
+    the ideas already tried, and the map. The whole packet stays within the packet budget."""
+    from arena import context, reply
 
     directory = run_dir(run_id)
     history = events(directory)
@@ -1213,23 +1303,44 @@ def restart_packet(name: str, run_id: str) -> dict:
     order = _restart_order(graph)
     restarts = sum(1 for item in history if item.get("kind") == "restart")
     start = order[restarts % len(order)]
+    tried = _tried_since_restart(history, graph)
     _append(directory, {"kind": "restart", "proof_id": start.proof_id})
     _append(directory, {"kind": "focus", "proof_id": start.proof_id, "reason": "restart"})
     history = events(directory)
     material = _start_material(name, run_id, start)
     graph_map = map_view_from(history, directory)
-    map_lines = reply._map_lines({**graph_map, "open": []})
+    map_lines = list(reply._map_lines({**graph_map, "open": []}))
     label = _update_id(history, start.proof_id)
-    lines = [
-        packet(name).rstrip("\n"),
-        text.render("packet/restart.start", label=label),
-        f"```lean\n{start.proof_text}\n```",
-        text.render("packet/restart.prices_heading"),
-        material["prices"].rstrip("\n"),
-        text.render("messages/compaction-memory.map_heading"),
-        *map_lines,
-    ]
-    return {"ok": True, "text": "\n".join(lines) + "\n", "label": label, "restart": restarts + 1}
+    sections = context.packet_sections(name)
+    while True:
+        tail = "\n".join(
+            [
+                text.render("packet/restart.start", label=label),
+                f"```lean\n{start.proof_text}\n```",
+                text.render("packet/restart.prices_heading"),
+                material["prices"].rstrip("\n"),
+                *([text.render("packet/restart.tried_heading"), *tried] if tried else []),
+                text.render("messages/compaction-memory.map_heading"),
+                *map_lines,
+            ]
+        )
+        try:
+            kickoff = _kickoff_within(sections, context.MAX_PACKET_CHARS - len(tail) - 2)
+            break
+        except ValueError:
+            # The kickoff cannot shrink further: shed the map first, then the tried list.
+            if map_lines:
+                map_lines.pop()
+            elif tried:
+                tried.pop(0)
+            else:
+                raise
+    return {
+        "ok": True,
+        "text": kickoff.rstrip("\n") + "\n" + tail + "\n",
+        "label": label,
+        "restart": restarts + 1,
+    }
 
 
 def _metric_score(metrics: dict | None) -> float | None:
@@ -2147,6 +2258,15 @@ def render_price_table(table: dict) -> str:
     return "\n".join(rows)
 
 
+def _reference_tokens(name: str, node: Node) -> int:
+    """The packet's token count for the reference (proof body only); other unscored nodes count their text."""
+    if node.origin == "reference":
+        length = problem(name).get("proof_length")
+        if isinstance(length, int):
+            return length
+    return snippet_tokens(node.proof_text)
+
+
 def _table_for_node(name: str, node: Node, profiles: dict[str, dict], price_rates: dict, total_versions: int) -> dict:
     profile_result = profiles.get(node.proof_id)
     if profile_result is None and node.origin == "reference":
@@ -2160,7 +2280,7 @@ def _table_for_node(name: str, node: Node, profiles: dict[str, dict], price_rate
         node.proof_text,
         profile_result,
         price_rates,
-        node.tokens if node.tokens is not None else snippet_tokens(node.proof_text),
+        node.tokens if node.tokens is not None else _reference_tokens(name, node),
         node.heartbeats,
         _versions_total(node.versions, total_versions),
     )
@@ -2895,6 +3015,46 @@ def autocheck(
     }
 
 
+def _skeleton(history: list[dict], rows: list[dict], best: dict | None, run_id: str) -> dict:
+    """Data for the continuation view: attempts since the best candidate, how many share its route, and the costliest
+    step of the best node with its share of tokens or heartbeats, whichever is larger."""
+    best_seq = max(
+        (
+            seq
+            for seq, item in enumerate(history)
+            if item.get("kind") == "evaluation" and best and item.get("candidate_id") == best["id"]
+        ),
+        default=-1,
+    )
+    attempts = {
+        item["proof_id"] if item["kind"] == "probe" else item.get("candidate_id")
+        for seq, item in enumerate(history)
+        if seq > best_seq and item.get("kind") in ("probe", "candidate")
+    }
+    routes_by_id = {item["proof_id"]: item.get("route") for item in history if item.get("kind") == "route"}
+    best_route = routes_by_id.get(best["id"]) if best else None
+    same_route = sum(1 for attempt in attempts if best_route is not None and routes_by_id.get(attempt) == best_route)
+    try:
+        table = price_table(history[0]["theorem"], run_id)
+    except ValueError:
+        table = {"rows": [], "total": {}}
+    total_tokens = table["total"].get("tokens") or 0
+    total_hb = table["total"].get("heartbeats") or 0
+
+    def share(row: dict) -> float:
+        token_pct = 100 * row["tokens"] / total_tokens if total_tokens and row["tokens"] else 0.0
+        hb_pct = 100 * row["self_hb"] / total_hb if total_hb and row.get("self_hb") else 0.0
+        return max(token_pct, hb_pct)
+
+    top = max(table["rows"], key=share, default=None)
+    return {
+        "attempts": len(attempts),
+        "same_route": same_route,
+        "top_step": top["id"] if top else None,
+        "top_share_pct": round(share(top), 1) if top else None,
+    }
+
+
 def state(run_id: str) -> dict:
     """Everything the model should know without asking: the best verified candidate, a
     better unverified one if any, what is being checked, and the harness's check results."""
@@ -3059,6 +3219,7 @@ def state(run_id: str) -> dict:
         "leading_unverified": _brief(leading),
         "checking": [f"#{r['n']}" for r in _autocheck_jobs(rows)],
         "updates": updates[-10:],
+        "skeleton": _skeleton(history, rows, _best(rows), run_id),
     }
 
 
@@ -3131,6 +3292,7 @@ def cold_verify(run_id: str, row: dict) -> dict:
             "candidate_id": row["id"],
             "confirmed": confirmed,
             "passed": passed,
+            "compat": cold["compat"],
             "recorded_heartbeats": recorded,
             "cold_heartbeats": measured,
         }
@@ -3212,6 +3374,14 @@ def submission(run_id: str) -> dict:
             # The clean compile is the certified measurement; the session figure is kept for audit.
             answer["session_heartbeats"] = best["heartbeats"]
             answer["heartbeats"] = cold["cold_heartbeats"]
+            # The score follows the certified measurement, not the session estimate it replaces.
+            if cold.get("compat"):
+                from arena.scoring import local_proxy
+
+                answer["session_proxy"] = best["score"]
+                answer["proxy"] = local_proxy(
+                    history[0]["theorem"], best["tokens"], cold["cold_heartbeats"], cold["compat"]
+                )
     if rejected:
         answer["rejected_on_cold"] = rejected
     (directory / "submission.json").write_text(json.dumps(answer, indent=2) + "\n")

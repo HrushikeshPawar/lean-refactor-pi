@@ -55,10 +55,11 @@ def _file_for(row: sqlite3.Row, theorem: dict) -> str:
 
 def _hit(row: sqlite3.Row, theorem: dict, why: str, match: str | None = None) -> dict:
     name = row["name"]
-    raw_type = row["type"] or ""
+    # Binders span several lines in the index; one line keeps implicit {x} and explicit (x) readable.
+    raw_type = " ".join((row["type"] or "").split())
     signature = f"{name} : {raw_type}" if raw_type else name
-    if len(signature) > 300:
-        signature = signature[:299] + "…"
+    if len(signature) > 500:
+        signature = signature[:499] + "…"
     result = {
         "handle": f"decl:{name}",
         "name": name,
@@ -158,7 +159,9 @@ def _name_query(connection: sqlite3.Connection, theorem: dict, query: str, after
             if distance <= 2 or (len(folded) >= 4 and _is_subsequence(folded, row["folded_name"])):
                 fuzzy.append((distance, row))
         fuzzy.sort(key=lambda item: (item[0], len(item[1]["name"]), item[1]["name"]))
-        candidates.extend((row, "fuzzy") for _, row in fuzzy)
+        # Once a real name match exists, only one-edit fuzzy matches stay: the rest is padding.
+        real = bool(candidates)
+        candidates.extend((row, "fuzzy") for distance, row in fuzzy if distance <= 1 or not real)
 
     seen = set()
     ranked = []

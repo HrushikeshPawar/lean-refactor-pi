@@ -1698,3 +1698,59 @@ Fresh runs with only the theorem and reference proof, $0.50 each, before the pha
   on one 393K uncached call, a primalabs cache miss with an append-only prefix). The no-work restart fired once, live,
   at turn 53 (context 520K to 12K tokens, $0.010) but too late to gain. Fix: a stalled run (best unchanged for 8 model
   turns, counted once a best exists) restarts at its next pause (`STALL_RESTART` in `control.ts`).
+
+### 12h. v7-check campaign (2026-10-15) and its fixes (`v7/21-check-fixes`)
+
+**Results.** 5 rows with DeepSeek and MiMo at $0.50 each, $5.27 in total. DeepSeek scored Fsub 77.01 (v6 72.32), Wick 63.16 (v6 44.73, official 75.58), EM 61.6 (v6 rerun 78.33), Binius 88.19 (v6ark 90.51) and Core 86.25 (official 87.11). MiMo scored 70.93, 44.39, 48.13, 88.25 and 83.06; it lost four rows and tied Binius. MiMo is paused, so the next campaign is DeepSeek only.
+
+**Root causes found**, from per-row and harness audits, model-thinking traces and a Codex cross-check:
+- Offering `finish` at 10% changed the tool list. That broke the prompt cache, so the request that crossed the limit was billed fully uncached, and it caused 6 of the 7 overshoots.
+- The request that crosses the limit was aborted, which discarded its tool calls.
+- Compile replies contradicted themselves: they were rendered before the cross-version check.
+- `sorry` instrumentation was invalid in term position (the `trace` errors).
+- Timeouts were reported silently.
+- The stall rule counted turns.
+- Restarts landed on sketch nodes.
+- Nothing nudged a change of proof skeleton (EM and Wick never left `calc` / `span_induction`).
+- "Points left" read as an order to continue.
+- Models believed compiles cost money.
+- MiMo spent 18% of its budget on thinking-only turns cut at 64K tokens.
+
+**Fixed:**
+- **Control:**
+  - No `finish` tool; the tool list is fixed from turn 1.
+  - In the final tenth only, a turn that ends normally with visible text and no tool call finishes the run. Length-cut and failed turns don't count.
+  - The crossing request's tool calls run before the abort.
+  - The stall restart fires after 12% of the limit is spent without a new best. No restart or focus move under 20% left.
+  - A cache alarm fires on more than $0.03 of uncached input.
+- **Compile replies:**
+  - One snapshot after the autocheck.
+  - Timeout text.
+  - Holes from the current lineage only, cut at line boundaries.
+  - Merge offers for siblings that change disjoint steps.
+- **Tools:**
+  - `goal` try shows the goals left after the snippet, with hypothesis names per case.
+  - Full search signatures.
+  - Declaration-relative `read` ranges.
+  - Per-step `prices`.
+  - `scratch` allows `sorry`, at 8,000 characters, without the noise lines.
+  - A clear `search after` error.
+  - The reference token count matches the packet.
+- **Backend:**
+  - Term-safe `sorry` probes, rerun plain when a probe hits a harness-only error.
+  - Cold-measured score in the submission.
+  - Restarts begin at the best node with a list of ideas already tried, within `packet_max_chars`.
+  - Sketch drafts are not filed as routes.
+  - `skeleton` facts in the state.
+  - Each `calc` relation is its own step.
+- **Text:**
+  - The spend line explains that only the model's own tokens count and Lean checks are free.
+  - "Points left" removed.
+  - A neutral skeleton fact after 6 or more attempts on one skeleton.
+  - A cut-turn line.
+  - "No recaps".
+  - Measured token facts.
+  - Advice to `#check` before positional arguments.
+  - The finish-available line names the 10% rule and how to finish.
+
+**Not done:** MiMo output cap and effort (MiMo paused), the primalabs billing check, the Lean output tail on timeouts (`run_lean` returns nothing on a timeout), and a decision on the budget footer under D42.

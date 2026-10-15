@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { callCost, finishAllowed, limitReached, limitUsd, spendFooter, toolsForSpend } from "./spend.ts";
+import { callCost, finishAllowed, limitReached, limitUsd, spendFooter } from "./spend.ts";
 
 test("the limit defaults to fifty cents and anything above two dollars is refused at startup", () => {
   assert.equal(limitUsd({}), 0.5);
@@ -21,12 +21,6 @@ test("finish becomes available once ten percent or less of the limit is left", (
   assert.equal(finishAllowed(0.45, 0.5).allowed, true);
   assert.equal(finishAllowed(0.7, 0.5).remainingUsd, 0);
   assert.equal(finishAllowed(0, 2).allowed, false);
-});
-
-test("the finish tool is listed only when allowed, and never twice", () => {
-  assert.deepEqual(toolsForSpend(["a", "finish", "b"], "finish", false), ["a", "b"]);
-  assert.deepEqual(toolsForSpend(["a", "b"], "finish", true), ["a", "b", "finish"]);
-  assert.deepEqual(toolsForSpend(["a", "finish"], "finish", true), ["a", "finish"]);
 });
 
 test("a call without a usable cost adds nothing", () => {

@@ -32,13 +32,14 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `messages/compaction-memory.read_heading` | 3 | Agent messages and notices | when the matching event occurs |
 | `messages/compaction-memory.seed_header` | 8 | Agent messages and notices | when the matching event occurs |
 | `messages/continuation.cause_clause` | 2 | Agent messages and notices | when the matching event occurs |
-| `messages/continuation.finish_available` | 5 | Agent messages and notices | when the matching event occurs |
+| `messages/continuation.finish_available` | 28 | Agent messages and notices | when the matching event occurs |
 | `messages/continuation.focus_material` | 7 | Agent messages and notices | when the matching event occurs |
 | `messages/continuation.focus_moved` | 8 | Agent messages and notices | when the matching event occurs |
-| `messages/continuation.points_left` | 8 | Agent messages and notices | when the matching event occurs |
 | `messages/continuation.request_failed` | 4 | Agent messages and notices | when the matching event occurs |
 | `messages/continuation.restart` | 9 | Agent messages and notices | when the matching event occurs |
-| `messages/continuation.turn_ended_with_text` | 10 | Agent messages and notices | when the matching event occurs |
+| `messages/continuation.skeleton` | 17 | Agent messages and notices | when the matching event occurs |
+| `messages/continuation.turn_cut` | 2 | Agent messages and notices | when the matching event occurs |
+| `messages/continuation.turn_ended_with_text` | 18 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.ambiguous_symbol` | 5 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.cold_session_unavailable` | 4 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.cold_verification_paused` | 7 | Agent messages and notices | when the matching event occurs |
@@ -97,7 +98,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `messages/errors.stopped_run` | 4 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.theorem_location_missing` | 10 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.toolchains_missing` | 6 | Agent messages and notices | when the matching event occurs |
-| `messages/errors.turn_cut` | 8 | Agent messages and notices | when the matching event occurs |
+| `messages/errors.turn_cut` | 23 | Agent messages and notices | when the matching event occurs |
 | `messages/footer` | 8 | Agent messages and notices | after each tool result |
 | `messages/notices.block_shell` | 7 | Agent messages and notices | when the matching event occurs |
 | `messages/notices.block_workspace` | 4 | Agent messages and notices | when the matching event occurs |
@@ -118,6 +119,10 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `packet/price-table.total` | 11 | Prices action replies | when the table is requested |
 | `packet/restart.prices_heading` | 6 | Initial theorem packet | once per run |
 | `packet/restart.start` | 18 | Initial theorem packet | once per run |
+| `packet/restart.tried_failed` | 2 | Initial theorem packet | once per run |
+| `packet/restart.tried_heading` | 10 | Initial theorem packet | once per run |
+| `packet/restart.tried_line` | 5 | Initial theorem packet | once per run |
+| `packet/restart.tried_no_gain` | 7 | Initial theorem packet | once per run |
 | `packet/scoring` | 144 | Initial theorem packet | once per run |
 | `packet/sections.fixed.budget_certification_failed` | 8 | Initial theorem packet | once per run |
 | `packet/sections.fixed.context_missing` | 4 | Initial theorem packet | once per run |
@@ -202,6 +207,8 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/tools.finish_points` | 8 | Tool replies | when the matching tool result occurs |
 | `replies/tools.goal_cases_omitted` | 7 | Tool replies | when the matching tool result occurs |
 | `replies/tools.goal_item` | 4 | Tool replies | when the matching tool result occurs |
+| `replies/tools.goal_map_case` | 3 | Tool replies | when the matching tool result occurs |
+| `replies/tools.goal_map_untagged` | 8 | Tool replies | when the matching tool result occurs |
 | `replies/tools.goal_untagged` | 7 | Tool replies | when the matching tool result occurs |
 | `replies/tools.handles` | 2 | Tool replies | when the matching tool result occurs |
 | `replies/tools.hole_item` | 4 | Tool replies | when the matching tool result occurs |
@@ -214,6 +221,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/tools.map_recent` | 5 | Tool replies | when the matching tool result occurs |
 | `replies/tools.map_reference` | 7 | Tool replies | when the matching tool result occurs |
 | `replies/tools.map_routes` | 20 | Tool replies | when the matching tool result occurs |
+| `replies/tools.merge_offer` | 13 | Tool replies | when the matching tool result occurs |
 | `replies/tools.no_goal` | 6 | Tool replies | when the matching tool result occurs |
 | `replies/tools.own_theorem` | 12 | Tool replies | when the matching tool result occurs |
 | `replies/tools.price` | 7 | Tool replies | when the matching tool result occurs |
@@ -221,10 +229,11 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/tools.read_hole` | 5 | Tool replies | when the matching tool result occurs |
 | `replies/tools.read_node_source` | 2 | Tool replies | when the matching tool result occurs |
 | `replies/tools.read_price_row` | 7 | Tool replies | when the matching tool result occurs |
-| `replies/tools.read_source` | 3 | Tool replies | when the matching tool result occurs |
+| `replies/tools.read_source` | 9 | Tool replies | when the matching tool result occurs |
 | `replies/tools.read_step` | 3 | Tool replies | when the matching tool result occurs |
 | `replies/tools.read_step_after` | 2 | Tool replies | when the matching tool result occurs |
 | `replies/tools.read_step_before` | 2 | Tool replies | when the matching tool result occurs |
+| `replies/tools.refresh_tail` | 6 | Tool replies | when the matching tool result occurs |
 | `replies/tools.repeat_fact` | 16 | Tool replies | when the matching tool result occurs |
 | `replies/tools.same_diagnostic` | 4 | Tool replies | when the matching tool result occurs |
 | `replies/tools.same_goal` | 4 | Tool replies | when the matching tool result occurs |
@@ -233,21 +242,24 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/tools.scratch_repeat` | 12 | Tool replies | when the matching tool result occurs |
 | `replies/tools.scratch_timeout` | 9 | Tool replies | when the matching tool result occurs |
 | `replies/tools.scratch_tokens` | 3 | Tool replies | when the matching tool result occurs |
+| `replies/tools.search_form` | 17 | Tool replies | when the matching tool result occurs |
 | `replies/tools.search_hint` | 1 | Tool replies | when the matching tool result occurs |
 | `replies/tools.search_hit` | 4 | Tool replies | when the matching tool result occurs |
 | `replies/tools.search_hit_unplaced` | 4 | Tool replies | when the matching tool result occurs |
 | `replies/tools.search_miss` | 4 | Tool replies | when the matching tool result occurs |
-| `replies/tools.timeout` | 8 | Tool replies | when the matching tool result occurs |
+| `replies/tools.timeout` | 11 | Tool replies | when the matching tool result occurs |
 | `replies/tools.token_draft` | 6 | Tool replies | when the matching tool result occurs |
 | `replies/tools.token_fill` | 6 | Tool replies | when the matching tool result occurs |
 | `replies/tools.token_splice` | 10 | Tool replies | when the matching tool result occurs |
 | `replies/tools.try_closed` | 1 | Tool replies | when the matching tool result occurs |
 | `replies/tools.try_error` | 2 | Tool replies | when the matching tool result occurs |
+| `replies/tools.try_goals_cut` | 10 | Tool replies | when the matching tool result occurs |
 | `replies/tools.try_item` | 4 | Tool replies | when the matching tool result occurs |
 | `replies/tools.try_open` | 3 | Tool replies | when the matching tool result occurs |
+| `replies/tools.try_replaces` | 29 | Tool replies | when the matching tool result occurs |
 | `replies/tools.try_timeout` | 2 | Tool replies | when the matching tool result occurs |
-| `skill/SKILL` | 107 | Agent skill instructions | once per run |
-| `skill/lean-facts` | 35 | Agent skill instructions | once per run |
+| `skill/SKILL` | 154 | Agent skill instructions | once per run |
+| `skill/lean-facts` | 92 | Agent skill instructions | once per run |
 | `tools/compile.description` | 29 | Model tool definitions | every request |
 | `tools/compile.params.base` | 6 | Model tool definitions | every request |
 | `tools/compile.params.check` | 11 | Model tool definitions | every request |
@@ -267,21 +279,21 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `tools/compile.params.splice_steps` | 6 | Model tool definitions | every request |
 | `tools/compile.params.splice_text` | 6 | Model tool definitions | every request |
 | `tools/finish.description` | 22 | Model tool definitions | every request |
-| `tools/goal.description` | 30 | Model tool definitions | every request |
+| `tools/goal.description` | 41 | Model tool definitions | every request |
 | `tools/goal.params.hole` | 6 | Model tool definitions | every request |
 | `tools/goal.params.line` | 7 | Model tool definitions | every request |
 | `tools/goal.params.node` | 5 | Model tool definitions | every request |
 | `tools/goal.params.try` | 10 | Model tool definitions | every request |
 | `tools/read.description` | 12 | Model tool definitions | every request |
 | `tools/read.params.against` | 6 | Model tool definitions | every request |
-| `tools/read.params.handle` | 13 | Model tool definitions | every request |
+| `tools/read.params.handle` | 24 | Model tool definitions | every request |
 | `tools/read.params.hole` | 6 | Model tool definitions | every request |
 | `tools/read.params.node` | 5 | Model tool definitions | every request |
 | `tools/read.params.view` | 7 | Model tool definitions | every request |
 | `tools/scratch.description` | 45 | Model tool definitions | every request |
-| `tools/scratch.params.code` | 11 | Model tool definitions | every request |
+| `tools/scratch.params.code` | 15 | Model tool definitions | every request |
 | `tools/search.description` | 12 | Model tool definitions | every request |
-| `tools/search.params.after` | 5 | Model tool definitions | every request |
+| `tools/search.params.after` | 14 | Model tool definitions | every request |
 | `tools/search.params.kind` | 7 | Model tool definitions | every request |
 | `tools/search.params.queries` | 7 | Model tool definitions | every request |
 <!-- budget:end -->

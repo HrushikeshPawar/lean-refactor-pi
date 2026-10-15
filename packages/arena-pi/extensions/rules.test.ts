@@ -17,14 +17,13 @@ test("failure and completed continuations share spend and points-left facts", as
   assert.doesNotMatch(failed, /turn ended with text/i);
   assert.match(completed, /turn ended with text/i);
   assert.equal(failed.slice(failed.indexOf("$0.04")), completed.slice(completed.indexOf("$0.04")));
-  assert.match(failed, /tokens 28\.0/);
-  assert.match(failed, /heartbeats 2\.7/);
+  assert.doesNotMatch(failed, /points left/i);
 });
 
 
 test("finish is named only once the final tenth of the limit is reached, and then once", async () => {
   const metrics = { baseline: { tokens: 224, heartbeats: 4251 }, best: { tokens: 188, heartbeats: 339 } };
-  const stopText = /\b(?:finish\w*|stop\w*|threshold\w*|tenth)\b/i;
+  const stopText = /\b(?:finish\w*|stop\w*|threshold\w*|tenth|ends? the run)\b/i;
   const pct = (await numbers()).finish_remaining_pct;
   const limitUsd = 0.1;
   const edge = limitUsd * (1 - pct / 100);

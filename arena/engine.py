@@ -411,19 +411,29 @@ _SORRY_TACTIC = re.compile(
     r"(?:\||\bcase\b|\bnext\b)[^\n=]*=>[ \t]*)sorry\b(?![_'])"
 )
 _GOAL_MARKER = re.compile(r"^ARENA_SORRY (\d+)$")
+# A `sorry` directly after one of these is a term, where a bare tactic sequence is not valid.
+# not-model-facing: regex that locates Lean term positions for probe instrumentation.
+_TERM_BEFORE = re.compile(r"(?::=|[(,⟨↦]|\b(?:exact|refine|apply|use)|\bfun\b[^\n]*=>)\s*$")
+# Diagnostics that only the instrumentation can produce; the probe then compiles the plain draft.
+# not-model-facing: pattern for harness-origin errors, never shown to the model.
+_HARNESS_ERROR = re.compile(r"Unknown identifier `trace(?:_state)?`|unexpected token ';'")
 
 
 def instrument_sorries(proof: str) -> str:
     """Make each tactic-position `sorry` print its goals without moving any line.
 
     Lean's command line prints informational messages without positions, so
-    each trace is preceded by a marker naming the proof line.
+    each trace is preceded by a marker naming the proof line. In term position
+    the trace block is wrapped in `by`, which is valid there and in tactic position alike.
     """
 
     def replace(match: re.Match) -> str:
         line = proof.count("\n", 0, match.start()) + 1
         # not-model-facing: generated Lean syntax used only by the compiler.
-        return f'{match[1]}(trace "ARENA_SORRY {line}"; trace_state; sorry)'
+        block = f'trace "ARENA_SORRY {line}"; trace_state; sorry'
+        prefix = match[1]
+        term = "by" not in prefix and "<;>" not in prefix and _TERM_BEFORE.search(proof[: match.start()])
+        return f"{prefix}(by {block})" if term else f"{prefix}({block})"
 
     return _SORRY_TACTIC.sub(replace, proof)
 
@@ -715,16 +725,22 @@ def compile_version(
     lane: str = "model",
 ) -> dict:
     built = candidate_file(row, proof, version, commit)
-    text = built["text"]
-    if probe:
-        body = proof.rstrip("\n")
-        text = text[: built["offset"]] + instrument_sorries(body) + text[built["offset"] + len(body) :]
-    wrapper_start = None
-    if measure:
-        wrapper_start = text[: built["head"]].count("\n") + 1
-        text = text[: built["head"]] + HEARTBEAT_WRAPPER + text[built["head"] :]
+
+    def assemble(instrument: bool) -> str:
+        text = built["text"]
+        if probe and instrument:
+            body = proof.rstrip("\n")
+            text = text[: built["offset"]] + instrument_sorries(body) + text[built["offset"] + len(body) :]
+        if measure:
+            text = text[: built["head"]] + HEARTBEAT_WRAPPER + text[built["head"] :]
+        return text
+
+    wrapper_start = built["text"][: built["head"]].count("\n") + 1 if measure else None
     timeout = lean_timeout()
-    output = run_lean(row, built["path"], text, timeout=timeout, prefix_end=built["head"], lane=lane)
+    output = run_lean(row, built["path"], assemble(True), timeout=timeout, prefix_end=built["head"], lane=lane)
+    if output is not None and probe and output[0] != 0 and _HARNESS_ERROR.search(output[1]):
+        # Harness-origin error: the model must see only the plain draft's own result.
+        output = run_lean(row, built["path"], assemble(False), timeout=timeout, prefix_end=built["head"], lane=lane)
     lean_run = last_lean_run()
     if output is None:
         return {

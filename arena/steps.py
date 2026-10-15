@@ -67,19 +67,46 @@ def _step(text: str, ident: str, first_line: int, last_line: int, indent: int) -
     return Step(ident, first_line, last_line, text, digest, indent)
 
 
+_CALC_RELATION = re.compile(r"^\s*_\s")
+
+
+def _calc_segments(lines: list[str], start: int, end: int) -> list[tuple[int, int]]:
+    """Line ranges of a `calc` block's relations: its first line, then each `_ ...` line at the same indent.
+
+    Each range keeps its continuation lines (the `by` block or term under the relation) and drops trailing blanks.
+    """
+    relations = [i for i in range(start + 1, end) if _CALC_RELATION.match(lines[i])]
+    indent = _indent(lines[relations[0]]) if relations else 0
+    starts = [start] + [i for i in relations if _indent(lines[i]) == indent]
+    segments = []
+    for offset, first in enumerate(starts):
+        last = starts[offset + 1] if offset + 1 < len(starts) else end
+        while last > first and not lines[last - 1].strip():
+            last -= 1
+        segments.append((first, last))
+    return segments
+
+
+def _is_calc(lines: list[str], index: int) -> bool:
+    return re.match(r"calc\b", lines[index].strip()) is not None
+
+
 def split_steps(proof: str) -> list[Step]:
     lines = proof.split("\n")
     roots = parse(lines)
     if roots:
         steps = []
-        for index, node in enumerate(roots, 1):
+        for node in roots:
             end = node.end
             while end > node.start and not lines[end - 1].strip():
                 end -= 1
-            first_line = node.start + 1
-            last_line = max(node.start, end - 1) + 1
-            text = "\n".join(lines[node.start : end])
-            steps.append(_step(text, f"s{index}", first_line, last_line, _indent(lines[node.start])))
+            spans = _calc_segments(lines, node.start, end) if _is_calc(lines, node.start) else [(node.start, end)]
+            for first, last_exclusive in spans:
+                first_line = first + 1
+                last_line = max(first, last_exclusive - 1) + 1
+                text = "\n".join(lines[first:last_exclusive])
+                ident = f"s{len(steps) + 1}"
+                steps.append(_step(text, ident, first_line, last_line, _indent(lines[first])))
         return steps
 
     body = proof_body(proof)
@@ -91,6 +118,19 @@ def split_steps(proof: str) -> list[Step]:
         body_start = delimiter + 2
     first_line = proof.count("\n", 0, max(0, body_start)) + 1
     body_lines = body.split("\n") if body else [""]
+    head = next((i for i, line in enumerate(body_lines) if line.strip()), 0)
+    if _is_calc(body_lines, head):
+        spans = _calc_segments(body_lines, head, len(body_lines))
+        return [
+            _step(
+                "\n".join(body_lines[first:last]),
+                f"s{index}",
+                first_line + first,
+                first_line + max(first, last - 1),
+                _indent(body_lines[first]),
+            )
+            for index, (first, last) in enumerate(spans, 1)
+        ]
     last_line = max(first_line, first_line + len(body_lines) - 1)
     indent = min((_indent(line) for line in body_lines if line.strip()), default=0)
     return [_step(body, "s1", first_line, last_line, indent)]

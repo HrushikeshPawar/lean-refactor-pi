@@ -657,6 +657,32 @@ def merge_text(base: str, left: str, right: str) -> dict:
     return {**details, "text": text, "reason": None}
 
 
+def merge_offers(graph: Graph, ids: set[str]) -> list[tuple[str, str, str, list[str]]]:
+    """Verified sibling pairs (one of them in `ids`) that change disjoint steps of one parent:
+    (left, right, parent, changed steps)."""
+    by_proof = {node.proof_id: node for node in graph.nodes}
+    verified = [node for node in graph.nodes if node.verified and (node.edge or {}).get("from")]
+
+    def changed(parent: Node, node: Node) -> set[str]:
+        old = {step.id: step.hash for step in parent.steps}
+        return {step.id for step in node.steps if old.get(step.id) != step.hash}
+
+    offers = []
+    for index, left in enumerate(verified):
+        for right in verified[index + 1 :]:
+            if not ids & {left.id, right.id}:
+                continue
+            sources = (left.edge or {}).get("from") or []
+            if sources != (right.edge or {}).get("from") or len(sources) != 1 or sources[0] not in by_proof:
+                continue
+            parent = by_proof[sources[0]]
+            left_steps, right_steps = changed(parent, left), changed(parent, right)
+            if left_steps and right_steps and not left_steps & right_steps:
+                steps = sorted(left_steps | right_steps, key=lambda ident: (len(ident), ident))
+                offers.append((left.id, right.id, parent.id, steps))
+    return offers
+
+
 def ranked_frontier(nodes: list[dict]) -> list[dict]:
     """Rank exploration priority separately from verified proof quality."""
     eligible = [node for node in nodes if node.get("status") in ("full", "primary") and node.get("decision") != "park"]

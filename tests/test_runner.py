@@ -116,7 +116,7 @@ class LifecycleTests(unittest.TestCase):
         assert run.result is not None
         self.assertEqual(run.result.returncode, 0, run.result.stderr[-1500:])
 
-    def test_the_finish_tool_is_offered_only_in_the_final_ten_percent(self):
+    def test_the_tool_list_never_changes_inside_the_final_ten_percent(self):
         run = self.fake(
             [
                 cheap_tool("read", {"node": "n1"}),
@@ -128,8 +128,7 @@ class LifecycleTests(unittest.TestCase):
         ).run()
         offered = [offered_tools(request) for request in run.requests]
         self.assertGreaterEqual(len(offered), 4, run.stdout[-1500:])
-        self.assertEqual([set(tools) for tools in offered[:2]], [START_TOOLS] * 2)
-        self.assertEqual([set(tools) for tools in offered[2:]], [ARENA_TOOLS] * (len(offered) - 2))
+        self.assertEqual([set(tools) for tools in offered], [ARENA_TOOLS] * len(offered))
 
     def test_sigterm_mid_request_still_leaves_cost_json_and_summary(self):
         import signal
@@ -147,10 +146,9 @@ class LifecycleTests(unittest.TestCase):
         self.assertTrue((run.directory / "summary.txt").exists())
 
 
-FINISH = "finish"
-ARENA_TOOLS = {"compile", "goal", "search", "read", "scratch", FINISH}
-# Offered from the first request; finish joins them only in the final 10% of the limit.
-START_TOOLS = ARENA_TOOLS - {FINISH}
+ARENA_TOOLS = {"compile", "goal", "search", "read", "scratch"}
+# The tool list is fixed from the first request: a late tool would change the cached prompt prefix.
+START_TOOLS = ARENA_TOOLS
 
 
 def offered_tools(request: dict) -> list[str]:
@@ -369,7 +367,7 @@ class AutomaticChecksTests(unittest.TestCase):
             ("read", {"node": "n1", "view": "", "against": "", "hole": ""}),
         ]
         steps = [cheap_tool(name, args) for name, args in calls]
-        steps += [cheap_tool("read", {"view": "map"}, output=SPEND_90_PCT), cheap_tool("finish", {})]
+        steps += [cheap_tool("read", {"view": "map"}, output=SPEND_90_PCT), {"text": "done"}]
         run = self.fake(steps, session=True, timeout=900)  # goal needs the Lean session's LSP lane
         summary = run.json("summary.json")
         self.assertEqual(summary["tools"]["errors"], {}, run.stdout[-1500:])
@@ -380,7 +378,7 @@ class AutomaticChecksTests(unittest.TestCase):
         # Item errors too: only a missing search index (a machine cache, built by `arena index build`) is allowed.
         allowed = {"no_index"} if index_path(NAME) is None else set()
         results = [m for m in run.requests[-1]["messages"] if m["role"] == "toolResult"]
-        # The finish result ends the run, so no request carries it; stop_reason "finished" above is its success.
+        # The closing text-only turn ends the run; stop_reason "finished" above is its success.
         self.assertEqual([m["toolName"] for m in results], [name for name, _ in calls] + ["read"])
         for result in results:
             with self.subTest(tool=result["toolName"], call=result["toolCallId"]):
@@ -622,7 +620,6 @@ class AnthropicWireTests(unittest.TestCase):
         self.assertEqual(set(tools["search"]["properties"]), {"queries", "kind", "after"})
         # No key is schema-required: an empty call reaches the handler, which names the valid keys.
         self.assertEqual({name: schema.get("required") for name, schema in tools.items() if schema.get("required")}, {})
-        self.assertEqual(tools["finish"]["properties"], {})
 
     def test_wire_bytes_retries_and_langfuse_keep_the_post_hook_request(self):
         import hashlib
@@ -900,11 +897,11 @@ class ErrorLoopAndContinuationTests(unittest.TestCase):
                 self.assertEqual([line for line in lines if STOP_TEXT.search(line)], [available])
                 self.assertIn(_spend_numbers(spent, cap)[0], message)
 
-    def test_one_finish_call_stops_provider_continuations(self):
+    def test_one_text_only_turn_in_the_final_tenth_stops_provider_continuations(self):
         run = self.fake(
             [
                 cheap_tool("read", {"node": "n1"}, output=SPEND_90_PCT),
-                cheap_tool("finish", {}),
+                {"text": "done"},
                 {"text": "must not be requested"},
             ],
             env={"ARENA_AUTOCONTINUE": "1"},
@@ -1078,12 +1075,12 @@ class TruncationTests(unittest.TestCase):
 @slow
 @unittest.skipUnless(PI_AVAILABLE and FIXTURE.exists(), "pi and the Strata fixture are required")
 class FinishReplayTests(unittest.TestCase):
-    def test_one_finish_call_submits_the_candidate_verified_before_it(self):
-        # The run ends on the finish call itself; the submission is the node the earlier compile verified.
+    def test_one_finishing_turn_submits_the_candidate_verified_before_it(self):
+        # The run ends on a text-only turn in the final tenth; the submission is the node the earlier compile verified.
         run = FakeRun(
             [
                 cheap_tool("compile", {"drafts": [FIXTURE.read_text()], "check": "lean"}, output=SPEND_90_PCT),
-                cheap_tool("finish", {}),
+                {"text": "done"},
                 {"text": "must not be requested"},
             ],
             timeout=1200,
