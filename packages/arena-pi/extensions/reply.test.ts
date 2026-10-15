@@ -2,18 +2,18 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { renderReply } from "./reply.ts";
 
-test("renders facts, ordered item lines, map, handles and footer while retaining the payload", async () => {
+test("renders facts, ordered item lines, map and footer while retaining the payload", async () => {
   const reply = { ok: true, facts: ["fact"], items: [
     { ref: "n1", lines: ["first", "second"] },
     { ref: "n2", ok: false, lines: [], error: { code: "invalid_draft", input: "7", valid: ["nonempty string"], forms: ["drafts[1..N]"] } },
   ], map: ["best", "recent"], handles: ["decl:Core.a"] };
   const result = await renderReply(reply, "budget footer");
-  assert.deepEqual(result.content.map(part => part.text), ["fact\nfirst\nsecond\ninvalid_draft: 7. Valid values: nonempty string. Forms: drafts[1..N].\nbest\nrecent\nhandles: decl:Core.a\nbudget footer"]);
+  assert.deepEqual(result.content.map(part => part.text), ["fact\nfirst\nsecond\ninvalid_draft: 7. Valid values: nonempty string. Forms: drafts[1..N].\nbest\nrecent\nbudget footer"]);
   assert.equal(result.details, reply);
   assert.equal(result.isError, false);
 });
 
-test("omits an empty handles line and marks only a top-level failure as an error", async () => {
+test("marks only a top-level failure as an error", async () => {
   const itemFailure = await renderReply({ ok: true, facts: [], items: [{ ok: false, lines: [], error: { code: "bad" } }] }, "");
   assert.equal(itemFailure.content[0]?.text, "bad: none. Forms: none.");
   assert.equal(itemFailure.isError, false);

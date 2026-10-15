@@ -2,3 +2,6 @@ row_root: "{label} new root · tokens {tokens} · heartbeats {hb} · versions {v
 changed: "changed steps: {changes}"
 versions_full: "{passed}/{total}"
 versions_pending: "{checked} of {total} checked"
+vs_node: "{delta} vs {node}"
+vs_best: "{delta} vs best"
+parenthesis: " ({parts})"

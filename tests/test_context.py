@@ -38,8 +38,8 @@ class ParseTests(unittest.TestCase):
             patch.object(context, "reference_profile", return_value=measured),
         ):
             packet = context.render_packet(NAME, cache_only=True)
-        self.assertLess(packet.index("Original proof"), packet.index("step  lines"))
-        self.assertLess(packet.index("step  lines"), packet.index("before s1"))
+        self.assertLess(packet.index("Original proof"), packet.index("| step | lines |"))
+        self.assertLess(packet.index("| step | lines |"), packet.index("before s1"))
         self.assertLess(packet.index("before s1"), packet.index("Imported declarations"))
         self.assertIn("s1", packet)
         self.assertNotIn("Heartbeat profile of the reference proof", packet)
@@ -595,7 +595,7 @@ class FixturePacketTests(unittest.TestCase):
         rates = exchange_rates(NAME, len(versions(problem(NAME))))
         self.assertIn("before s1", self.text)
         self.assertIn("⊢ ∃ σ₁", self.text)
-        self.assertIn("step  lines  tokens", self.text)
+        self.assertIn("| step | lines | tokens |", self.text)
         self.assertIn(str(rates["points_per_token"]), self.text)
         self.assertIn(str(rates["points_per_100_heartbeats"]), self.text)
         self.assertIn(str(rates["points_per_lost_version"]), self.text)

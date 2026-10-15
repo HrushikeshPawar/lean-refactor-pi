@@ -36,18 +36,21 @@ def script() -> tuple[list[tuple[str, dict, str | None]], int]:
         ("read", {"node": "n1", "view": "source"}, None),
         ("search", {"queries": ["InitStatesUpdated", "UpdateStates"], "kind": "name"}, None),
         ("compile", {"drafts": [fixture], "check": "lean"}, "n2"),
-        ("compile", {"base": "n2", "drafts": [variant, broken], "check": "lean"}, "n3 n4"),
-        ("compile", {"splice": {"base": "n2", "steps": "s1", "text": "rintro Hup Hinit"}}, "n5"),
-        ("compile", {"drafts": [sketch]}, "n6"),
-        ("compile", {"fill": {"hole": "n6.h1", "text": FILLED}}, "n7"),
-        ("compile", {"merge": {"base": "n7", "take": [{"from": "n5", "step": "s1"}]}}, "n8"),
+        ("compile", {"base": "n2", "drafts": [variant], "check": "lean"}, "n3"),
+        ("compile", {"splice": {"base": "n2", "steps": "s1", "text": "rintro Hup Hinit"}}, "n4"),
+        ("compile", {"drafts": [sketch]}, "n5"),
+        ("compile", {"fill": {"hole": "n5.h1", "text": FILLED}}, "n6"),
+        ("compile", {"merge": {"base": "n6", "take": [{"from": "n4", "step": "s1"}]}}, "n7"),
+        # Last filing compile: the background salvage of a broken draft files its own node whenever it finishes,
+        # so a broken draft earlier would make every later node number depend on that timing.
+        ("compile", {"base": "n2", "drafts": [broken], "check": "lean"}, "n8"),
         ("goal", {"node": "n2", "line": 13}, None),
         ("goal", {"node": "n2", "line": 13, "try": [FILLED, "simp"]}, None),
-        ("read", {"hole": "n6.h1"}, None),
+        ("read", {"hole": "n5.h1"}, None),
         ("read", {"handle": "InitStatesUpdated"}, None),  # no decl: prefix: a bad handle
         ("read", {"handle": "decl:InitStatesUpdated"}, None),
         ("read", {"node": "n3", "view": "diff", "against": "n2"}, None),
-        ("read", {"node": "n8", "view": "prices"}, None),
+        ("read", {"node": "n7", "view": "prices"}, None),
         ("compile", {"drafts": [tokens_only], "check": "tokens"}, None),
         ("read", {"node": "n2", "view": "outline"}, None),  # this turn's output spends 90% of the limit
     ]

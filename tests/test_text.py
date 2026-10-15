@@ -627,7 +627,11 @@ class PacketBehaviourTests(unittest.TestCase):
                 self.assertLess(1, reference)
                 self.assertLess(reference, goals)
                 self.assertLess(goals, library)
-                rows = [line.split()[0] for line in sections[reference][1].splitlines() if re.match(r"s\d+\s", line)]
+                rows = [
+                    line.split("|")[1].strip()
+                    for line in sections[reference][1].splitlines()
+                    if re.match(r"\| s\d+ \|", line)
+                ]
                 self.assertEqual(rows, [f"s{i}" for i in range(1, len(rows) + 1)])
                 steps = [
                     line[len(goal_prefix) :].split(":")[0]

@@ -109,6 +109,107 @@ def goal_summary(goal: object, limit: int | None = 120) -> str | None:
     return summary if len(kept) == len(lines) else summary + " / ..."
 
 
+_HYPOTHESIS = re.compile(r"^[^\s:⊢][^\n]*? :(?: |$)")
+
+
+def _normal(value: str) -> str:
+    return " ".join(value.split())
+
+
+def _goal_start(lines: list[str], target: int) -> int:
+    """Index where the hypotheses of the goal whose `⊢` line is `target` begin."""
+    start = target
+    while start > 0:
+        line = lines[start - 1]
+        if line.startswith("case ") or (line and (line[0].isspace() or _HYPOTHESIS.match(line))):
+            start -= 1
+        else:
+            break
+    # Indented lines above the first hypothesis continue the message's own text, not the goal.
+    while start < target and lines[start] and lines[start][0].isspace():
+        start += 1
+    return start
+
+
+def _parse_goal(lines: list[str], start: int, target: int) -> dict:
+    """One goal: its case tag, hypotheses (each with its continuation lines) and target lines."""
+    tag = None
+    hypotheses: list[list[str]] = []
+    for line in lines[start:target]:
+        if line.startswith("case ") and not hypotheses:
+            tag = line
+        elif line and line[0].isspace() and hypotheses:
+            hypotheses[-1].append(line)
+        else:
+            hypotheses.append([line])
+    end = target + 1
+    while end < len(lines) and lines[end].strip() and lines[end][0].isspace():
+        end += 1
+    return {"tag": tag, "hypotheses": hypotheses, "target": lines[target:end], "end": end}
+
+
+def compact_goal(goal: str, known: set[str] | frozenset[str] = frozenset(), hypothesis_chars: int | None = None) -> str:
+    """A goal as its `⊢` target (whole) and only the hypotheses not in `known` (normalized hypothesis texts),
+    with a count of the omitted ones. When the hypotheses pass `hypothesis_chars`, the oldest are dropped first."""
+    lines = goal.strip("\n").split("\n")
+    targets = [index for index, line in enumerate(lines) if line.startswith("⊢")]
+    if not targets:
+        return goal.strip()
+    out: list[str] = []
+    cursor = 0
+    for target in targets:
+        if target < cursor:
+            continue
+        start = max(cursor, _goal_start(lines, target))
+        out.extend(lines[cursor:start])
+        parsed = _parse_goal(lines, start, target)
+        shown_hyps = [block for block in parsed["hypotheses"] if _normal(" ".join(block)) not in known]
+        omitted = len(parsed["hypotheses"]) - len(shown_hyps)
+        if hypothesis_chars is not None:
+            while (
+                len(shown_hyps) > 1 and sum(len(line) + 1 for block in shown_hyps for line in block) > hypothesis_chars
+            ):
+                shown_hyps.pop(0)
+                omitted += 1
+        if parsed["tag"]:
+            out.append(parsed["tag"])
+        if omitted:
+            out.append(text.render("replies/tools.goal_hyps_omitted", count=omitted))
+        out.extend(line for block in shown_hyps for line in block)
+        out.extend(parsed["target"])
+        cursor = parsed["end"]
+    out.extend(lines[cursor:])
+    return "\n".join(out)
+
+
+def compact_message(
+    message: str, known: set[str] | frozenset[str] = frozenset(), hypothesis_chars: int | None = None
+) -> str:
+    """A Lean message with its goal state compacted by `compact_goal`; the text before the goal stays."""
+    if "⊢" not in message:
+        return message
+    lines = message.split("\n")
+    first = next(index for index, line in enumerate(lines) if line.startswith("⊢"))
+    start = _goal_start(lines, first)
+    return "\n".join([*lines[:start], compact_goal("\n".join(lines[start:]), known, hypothesis_chars)])
+
+
+def hypothesis_set(goal: str | None) -> set[str]:
+    """The normalized hypothesis texts of a goal, for `compact_goal`'s `known`."""
+    if not goal or "⊢" not in goal:
+        return set()
+    lines = goal.strip("\n").split("\n")
+    found: set[str] = set()
+    cursor = 0
+    for target in (index for index, line in enumerate(lines) if line.startswith("⊢")):
+        if target < cursor:
+            continue
+        parsed = _parse_goal(lines, max(cursor, _goal_start(lines, target)), target)
+        found.update(_normal(" ".join(block)) for block in parsed["hypotheses"])
+        cursor = parsed["end"]
+    return found
+
+
 def shown(value: object) -> object:
     """A value as the model sees it: a missing one is "-", never Python's None."""
     return "-" if value is None or value == "" else value
@@ -134,12 +235,9 @@ def outcome(status: object, holes: list | None = None) -> object:
 
 def _origin(item: dict) -> str:
     parents = ", ".join(item.get("from") or [])
-    edge = str(item.get("edge") or "root")
-    if not parents or edge == "root":
+    if not parents or (item.get("edge") or "root") == "root":
         return text.render("replies/tools.map_origin_root")
-    return text.render(
-        "replies/tools.map_origin_from", edge=edge.removesuffix("_from").replace("_", " "), parents=parents
-    )
+    return text.render("replies/tools.map_origin_from", parents=parents)
 
 
 # Steps shown in full, by points at stake; the rest are one summary line.
@@ -182,7 +280,7 @@ def _signed(value: object) -> object:
 
 def _effort_lines(data: dict) -> list[str]:
     """The best node's steps ranked by points at stake, with units the model can act on."""
-    rows = sorted(data.get("effort", []), key=lambda item: -(item.get("at_stake") or 0))
+    rows = sorted(data.get("effort", []), key=lambda item: (-(item.get("at_stake") or 0), -(item.get("tokens") or 0)))
     if not rows:
         return []
     best = data.get("best") or {}
@@ -216,10 +314,10 @@ def _effort_lines(data: dict) -> list[str]:
 LINE_TEXT_CHARS = 90
 
 
-def cell(value: object) -> str:
-    """Proof text inside a table cell: one line, no column separators, cut at LINE_TEXT_CHARS."""
-    flat = str(value).replace("|", "\\|").replace("`", "'")
-    return flat if len(flat) <= LINE_TEXT_CHARS else flat[: LINE_TEXT_CHARS - 1] + "…"
+def cell(value: object, limit: int = LINE_TEXT_CHARS) -> str:
+    """Text inside a table cell: one line, no column separators, cut at `limit` characters."""
+    flat = " ".join(str(value).replace("|", "\\|").replace("`", "'").split())
+    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
 
 
 def _line_cost_lines(data: dict) -> list[str]:
@@ -331,6 +429,8 @@ def _map_lines(data: dict) -> list[str]:
             for item in data.get("recent", [])
         ]
     )
+    if any(item.get("status") == "sketch" for item in data.get("recent", [])):
+        lines.append(text.render("replies/tools.map_recent_salvage"))
     lines.extend(_effort_lines(data))
     lines.extend(_line_cost_lines(data))
     holes = data.get("open", [])

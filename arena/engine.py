@@ -291,7 +291,8 @@ _HEADER = re.compile(
 # Lean's command line prints informational messages without a position, so
 # these would otherwise read as continuation lines of the previous diagnostic.
 _UNPOSITIONED_INFO = re.compile(r"^(?:ARENA_[A-Z_]+\b|Try this:)")
-_MESSAGE_LIMIT = 800
+# A goal state sits at the end of a message; it must survive whole for the reply to show its target.
+_MESSAGE_LIMIT = 6000
 _DIAGNOSTIC_LIMIT = 8
 
 

@@ -5,18 +5,22 @@ max_drafts: 4
 compile_max_drafts: 4
 error_passes_max: 3
 cross_version_wait_seconds: 10
-# The compile tool waits this long for a closed node's per-step profile so its reply shows step heartbeats.
-profile_wait_seconds: 10
 goal_try_max: 6
 goal_cases_max: 12
 goal_try_chars: 1500
 scratch_max_chars: 8000
+scratch_message_chars: 3000
+scratch_output_chars: 300
+goal_hyp_chars: 1000
+outline_max_chars: 6000
 read_source_lines: 400
 finish_points_lines: 4
 source_lines_per_call: 400
 find_files_per_query: 30
 search_hits_default: 10
 search_hits_max: 30
+search_fuzzy_hits: 5
+search_signature_chars: 200
 packet_max_chars: 40000
 packet_goals: 40
 packet_goal_chars: 700

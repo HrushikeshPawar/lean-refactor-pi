@@ -18,7 +18,7 @@ def rates(reference_tokens: int, reference_heartbeats: int, total_versions: int)
 
 def fmt_hb(n: int | float | None) -> str:
     if n is None:
-        return "n/a"
+        return "-"
     # Exact counts: a rounded "1.2K" hides changes of a few hundred heartbeats.
     return str(int(n)) if int(n) == n else str(round(n))
 
@@ -96,7 +96,10 @@ def step_table(
         )
         self_hb = entry.get("self_hb") if entry else None
         incl_hb = _step_hb(entries, step, entry)
-        points = tokens * rates["points_per_token"] + (incl_hb or 0) / 1000 * rates["points_per_1k_hb"]
+        # Points need the step's heartbeats; an unmeasured step has no points, never points computed with 0.
+        points = (
+            None if incl_hb is None else tokens * rates["points_per_token"] + incl_hb / 1000 * rates["points_per_1k_hb"]
+        )
         first_line = step.text.splitlines()[0].strip() if step.text.splitlines() else ""
         rows.append(
             {
@@ -106,7 +109,7 @@ def step_table(
                 "tokens": tokens,
                 "self_hb": self_hb,
                 "incl_hb": incl_hb,
-                "pts_if_gone": round(points, 2),
+                "pts_if_gone": None if points is None else round(points, 2),
                 "text": first_line[:40],
             }
         )

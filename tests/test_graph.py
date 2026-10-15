@@ -909,7 +909,7 @@ class PacketTests(unittest.TestCase):
         text = campaign.packet("Core.InitsUpdatesComm")
         self.assertIn("theorem InitsUpdatesComm", text)
         self.assertIn("Original proof: node n1", text)
-        self.assertIn("step  lines  tokens", text)
+        self.assertIn("| step | lines | tokens |", text)
         self.assertNotIn("at least three", text)
         self.assertNotIn("witness before versus after induction", text)
         self.assertNotIn("arena-candidate-126", text)

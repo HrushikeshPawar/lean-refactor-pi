@@ -15,7 +15,7 @@ TOOL_FORMS = {
     "compile": ["drafts[1..N]", "splice{base,steps,text}", "fill{hole,text}", "merge{base,take}"],
     "goal": ["node+hole", "node+line", "hole:nN.hK", "try:[snippets]"],
     "search": ["queries:[strings]", "kind:name|type|text", "after:prefix"],
-    "read": ["handle:decl:<name>", "node:nN", "hole:nN.hK", "view:source|prices|diff|outline|map"],
+    "read": ["handle:decl:<name>", "node:nN", "hole:nN.hK", "view:source|prices|diff|outline|map", "step:sN"],
     "finish": ["{}"],
     "scratch": ["code:<lean commands>"],
 }
@@ -49,7 +49,7 @@ def _empty_error(tool: str) -> dict:
         "compile": ["drafts", "splice", "fill", "merge", "base", "from", "note", "check"],
         "goal": ["node", "hole", "line", "try"],
         "search": ["queries", "kind", "after"],
-        "read": ["handle", "node", "hole", "view", "against"],
+        "read": ["handle", "node", "hole", "view", "against", "step"],
         "finish": [],
         "scratch": ["code"],
     }[tool]
@@ -65,7 +65,7 @@ def _is_empty(request: object, tool: str) -> bool:
         "compile": ("drafts", "splice", "fill", "merge", "base", "from", "note", "check"),
         "goal": ("node", "hole", "line", "try"),
         "search": ("queries", "kind", "after"),
-        "read": ("handle", "node", "hole", "view", "against"),
+        "read": ("handle", "node", "hole", "view", "against", "step"),
         "finish": (),
         "scratch": ("code",),
     }[tool]
@@ -304,6 +304,7 @@ def _compile_item(name: str, run_id: str, node_ref: str, result: dict, filing: s
     if timeout:
         lines.append(_render("timeout", seconds=engine.lean_timeout()))
     groups = _branch_groups(errors)
+    known = _statement_context(projection) | _binder_hypotheses(name, errors) if groups else set()
     if groups:
         lines.append(_render("lean_messages"))
     for item, branches in groups:
@@ -318,7 +319,8 @@ def _compile_item(name: str, run_id: str, node_ref: str, result: dict, filing: s
         if branches:
             lines.append(_render("error_branches", count=branches))
         if item.get("goal"):
-            lines.append(_render("error_goal", goal=item["goal"]))
+            goal = reply.compact_goal(item["goal"], known, int(text.numbers().get("goal_hyp_chars", 1000)))
+            lines.append(_render("error_goal", goal=goal))
     if holes:
         lines.append(_render("open_holes"))
     lines.extend(
@@ -619,8 +621,7 @@ def compile_tool(theorem: str, run_id: str, request: dict) -> dict:
         seconds = float(text.numbers().get("cross_version_wait_seconds", 10))
         campaign.autocheck(theorem, run_id, max_seconds=seconds, kinds=("full",))
         # The step table describes the newest best node; without its profile every step would read "pending".
-        seconds = float(text.numbers().get("profile_wait_seconds", 10))
-        campaign.autocheck(theorem, run_id, max_seconds=seconds, kinds=("profiles",))
+        campaign.profile_in_call(theorem, run_id, [node for node in closed_nodes if node])
     # Everything below reads one snapshot taken after the in-call check.
     history, projection = _nodes(run_id)
     for item in items:
@@ -899,6 +900,40 @@ def _missing_line(row: dict, label: str) -> str | None:
     )
 
 
+def _capped_hits(hits: list[dict]) -> list[dict]:
+    """Every hit that names the query's declaration, then at most `search_fuzzy_hits` loose matches, in rank order."""
+    limit = int(text.numbers().get("search_fuzzy_hits", 5))
+    loose = 0
+    kept = []
+    for hit in hits:
+        if hit.get("why") in ("fuzzy", "substring"):
+            loose += 1
+            if loose > limit:
+                continue
+        kept.append(hit)
+    return kept
+
+
+def _search_row(hit: dict) -> str:
+    """One table row: the name once, its signature without the restated name, the place, and why it matched."""
+    name = str(hit.get("name") or str(hit.get("handle", "")).removeprefix("decl:"))
+    signature = str(hit.get("signature", ""))
+    signature = signature.removeprefix(f"{name} : ")
+    module = hit.get("module", "")
+    place = module if hit.get("line") is None else _render("search_place", module=module, line=hit["line"])
+    why = hit.get("why", "")
+    if hit.get("match"):
+        why = f"{why}: {hit['match']}"
+    chars = int(text.numbers().get("search_signature_chars", 200))
+    return _render(
+        "search_row",
+        name=reply.cell(name, 120),
+        signature=reply.cell(signature, chars),
+        place=place,
+        why=reply.cell(why, 80),
+    )
+
+
 def search_tool(theorem: str, run_id: str, request: dict) -> dict:
     if _is_empty(request, "search"):
         return _empty_error("search")
@@ -919,7 +954,7 @@ def search_tool(theorem: str, run_id: str, request: dict) -> dict:
     string_queries = [(index, query) for index, query in enumerate(queries) if isinstance(query, str)]
     found = search.search(theorem, [query for _, query in string_queries], kind=kind, after=after)
     by_index = dict(zip((index for index, _ in string_queries), found.get("queries", []), strict=False))
-    items, handles = [], []
+    items, handles, exact = [], [], 0
     for index, query in enumerate(queries):
         if index not in by_index:
             items.append(_item_error(f"q{index + 1}", "invalid_query", query, ["string"], TOOL_FORMS["search"]))
@@ -930,6 +965,7 @@ def search_tool(theorem: str, run_id: str, request: dict) -> dict:
         label = str(query) or (after or "")
         error = row.get("error")
         missing = _missing_line(row, label)
+        head = _render("search_head", query=label)
         if error:
             suggestions = error.get("suggestions") or row.get("suggestions") or []
             items.append(
@@ -940,6 +976,7 @@ def search_tool(theorem: str, run_id: str, request: dict) -> dict:
                     error.get("valid", ["nonempty query"]),
                     TOOL_FORMS["search"],
                     [
+                        head,
                         *([missing] if missing else []),
                         _render(
                             "search_miss",
@@ -951,22 +988,17 @@ def search_tool(theorem: str, run_id: str, request: dict) -> dict:
                 )
             )
             continue
-        lines = [missing] if missing else []
-        for hit in row.get("hits", []):
-            handle = hit.get("handle") or f"decl:{hit.get('name', '')}"
-            handles.append(handle)
-            lines.append(
-                _render(
-                    "search_hit_unplaced" if hit.get("line") is None else "search_hit",
-                    handle=handle,
-                    signature=hit.get("signature", ""),
-                    module=hit.get("module", ""),
-                    why=hit.get("why", ""),
-                    **({} if hit.get("line") is None else {"line": hit["line"]}),
-                )
-            )
+        lines = [head, *([missing] if missing else [])]
+        shown_hits = _capped_hits(row.get("hits", []))
+        if shown_hits:
+            lines.append(text.template("replies/tools.search_cols").strip())
+        for hit in shown_hits:
+            handles.append(hit.get("handle") or f"decl:{hit.get('name', '')}")
+            lines.append(_search_row(hit))
+        if any(hit.get("why") == "exact" for hit in shown_hits):
+            exact += 1
         suggestions = row.get("suggestions") or []
-        if not lines:
+        if not shown_hits and not missing:
             lines.append(
                 _render(
                     "search_miss",
@@ -989,6 +1021,9 @@ def search_tool(theorem: str, run_id: str, request: dict) -> dict:
                 "dropped": row.get("dropped"),
             }
         )
+    first = next((item for item in items if item.get("lines")), None)
+    if first is not None:
+        first["lines"] = [_render("search_result", queries=len(queries), exact=exact), *first["lines"]]
     # The ledger keeps what the compaction memory needs from each hit, not the ranking details.
     hits = [
         {
@@ -1022,11 +1057,13 @@ def _decl_read(theorem: str, run_id: str, handle: str) -> dict:
     unknown_valid = ["decl:<name> from search", "node:n1"]
     if resolved is None:
         return _invalid("unknown_handle", canonical, unknown_valid, TOOL_FORMS["read"])
-    # Ranges count from the declaration's first line (1), so the file header never comes back for `:1-40`.
+    # Ranges are file line numbers; without one the read covers the declaration only.
     base = int(resolved.get("line") or 1)
     size = int(text.numbers().get("read_source_lines", 400))
-    start = base + int(first) - 1 if first else base
-    end = base + int(last) - 1 if last else start + size - 1
+    start = int(first) if first else base
+    indexed_end = resolved.get("end_line")
+    end = int(last) if last else (int(indexed_end) if isinstance(indexed_end, int) and indexed_end >= start else None)
+    end = None if end is None else min(end, start + size - 1)
     try:
         result = campaign.source_range(theorem, canonical, start, end)
     except ValueError as error:
@@ -1036,12 +1073,18 @@ def _decl_read(theorem: str, run_id: str, handle: str) -> dict:
         campaign.run_dir(run_id),
         {"kind": "read", "handle": canonical, "first": result.get("first"), "last": result.get("last")},
     )
-    shown_first = result.get("first", start) - base + 1
-    shown_last = result.get("last", end) - base + 1
-    lines = [_render("read_source", source=canonical, first=shown_first, last=shown_last)]
+    lines = [
+        _render(
+            "read_source",
+            file=result.get("path", ""),
+            first=result.get("first", start),
+            last=result.get("last", start),
+            name=name,
+        )
+    ]
     lines.extend(result.get("text", "").splitlines())
     continuation = result.get("next_first")
-    facts = [f"{canonical}:{continuation - base + 1}-{continuation - base + size}"] if continuation else []
+    facts = [f"{canonical}:{continuation}-{continuation + size - 1}"] if continuation else []
     return reply.attach_context(
         run_id,
         reply.reply(
@@ -1055,16 +1098,75 @@ def _decl_read(theorem: str, run_id: str, handle: str) -> dict:
 TREE_ROWS = 30
 
 
+def _outline(theorem: str, run_id: str, node, wanted: object) -> tuple[list[str] | None, dict]:
+    """The step table of a node (step, lines, tokens, heartbeats, pts, first line); with `wanted`, that step's full
+    goal before it and the hypotheses that changed after it. Goals come from the recorded step goals."""
+    steps = node.steps  # carries the recorded step goals; split_steps(proof) would drop them
+    data = {"steps": [step.__dict__ for step in steps], "holes": node.holes}
+    if wanted is not None:
+        step = next((item for item in steps if item.id == wanted), None)
+        if step is None:
+            return None, data
+        if not step.before and not step.after:
+            campaign.step_goals_in_call(theorem, run_id, node.proof_id)
+            step = next((item for item in _node(run_id, node.id).steps if item.id == wanted), step)
+        lines = [_render("read_step", step=step.id, first=step.first_line, last=step.last_line)]
+        if step.before:
+            lines.append(_render("read_step_before", goal=step.before))
+        if step.after:
+            known = reply.hypothesis_set(step.before)
+            lines.append(_render("read_step_after", goal=reply.compact_goal(step.after, known)))
+        return _cut_outline(lines), data
+    try:
+        rows = {row["id"]: row for row in campaign.price_table(theorem, run_id, node.id)["rows"]}
+    except (ValueError, OSError, StopIteration):
+        rows = {}
+    lines = [text.template("replies/tools.read_outline_cols").strip()]
+    for step in steps:
+        row = rows.get(step.id, {})
+        first_line = next((line.strip() for line in step.text.splitlines() if line.strip()), "")
+        lines.append(
+            _render(
+                "read_outline_row",
+                step=step.id,
+                first=step.first_line,
+                last=step.last_line,
+                tokens=reply.shown(row.get("tokens")),
+                heartbeats=reply.shown(row.get("incl_hb")),
+                points=reply.shown(row.get("pts_if_gone")),
+                text=reply.cell(first_line, 60),
+            )
+        )
+    lines.append(_render("read_outline_hint"))
+    return _cut_outline(lines), data
+
+
+def _cut_outline(lines: list[str]) -> list[str]:
+    """The outline within `outline_max_chars`; lines that do not fit are counted, not shown."""
+    limit = int(text.numbers().get("outline_max_chars", 6000))
+    kept, size = [], 0
+    for line in lines:
+        if size + len(line) + 1 > limit and kept:
+            break
+        kept.append(line)
+        size += len(line) + 1
+    if len(kept) < len(lines):
+        kept.append(_render("read_outline_cut", count=len(lines) - len(kept), limit=limit))
+    return kept
+
+
 def read_tool(theorem: str, run_id: str, request: dict) -> dict:
     if _is_empty(request, "read"):
         return _empty_error("read")
-    valid = ["handle", "node", "hole", "view", "against"]
+    valid = ["handle", "node", "hole", "view", "against", "step"]
     unknown = sorted(set(request) - set(valid))
     if unknown:
         return _invalid("unknown_argument", unknown[0], valid, TOOL_FORMS["read"])
     view = request.get("view", "source")
     if request.get("handle") and view != "source":
         return _invalid("bad_view", view, ["source"], TOOL_FORMS["read"])
+    if request.get("step") and view != "outline":
+        return _invalid("bad_argument", "step", ["step with view outline"], TOOL_FORMS["read"])
     if request.get("against") and view != "diff":
         return _invalid("bad_argument", "against", ["against with view diff"], TOOL_FORMS["read"])
     targets = [key for key in ("handle", "node", "hole") if request.get(key)]
@@ -1110,7 +1212,13 @@ def read_tool(theorem: str, run_id: str, request: dict) -> dict:
     lines = []
     data = {}
     if view == "source":
-        lines = [_render("read_node_source", node=node.id), *node.proof_text.splitlines()]
+        lines = [
+            _render("read_node_source", node=node.id),
+            *(
+                _render("source_line", line=number, text=line)
+                for number, line in enumerate(node.proof_text.splitlines(), 1)
+            ),
+        ]
         data["source"] = node.proof_text
     elif view == "prices":
         price = campaign.price_table(theorem, run_id, node.id)
@@ -1154,18 +1262,9 @@ def read_tool(theorem: str, run_id: str, request: dict) -> dict:
         lines = [_render("read_diff", node=node.id, against=other.id, change=f"{len(diff)} lines"), *diff]
         data["diff"] = diff
     elif view == "outline":
-        steps = node.steps  # carries the recorded step goals; split_steps(proof) would drop them
-        holes = node.holes
-        # Goals come from the recorded step goals; a step without them shows its lines only.
-        lines = []
-        for step in steps:
-            lines.append(_render("read_step", step=step.id, first=step.first_line, last=step.last_line))
-            if step.before:
-                lines.append(_render("read_step_before", goal=step.before))
-            if step.after:
-                lines.append(_render("read_step_after", goal=step.after))
-        data["steps"] = [step.__dict__ for step in steps]
-        data["holes"] = holes
+        lines, data = _outline(theorem, run_id, node, request.get("step"))
+        if lines is None:
+            return _invalid("unknown_step", request.get("step"), [step.id for step in node.steps], TOOL_FORMS["read"])
     elif view == "tree":
         tree = campaign.cost_tree(theorem, run_id, node.id)
         if not tree["profiled"]:
@@ -1220,49 +1319,139 @@ def read_tool(theorem: str, run_id: str, request: dict) -> dict:
     )
 
 
+_MARK = re.compile(r"(?:.*:\sinfo:\s)?ARENA_MARK\s(\d+)")
+_INFO_COMMAND = re.compile(r"#(?:check_failure|check|print|eval|reduce|synth|where|help)\b")
+_STRIKE = re.compile("[\u0335\u0336]")
+
+
 def _scratch_messages(output: str) -> list[dict]:
-    """Every Lean message in order. Info text prints without a position (`trace_state`, `#check`); unpositioned text
-    before any positioned message is an info message with line None, later unpositioned text continues the message
-    before it."""
+    """Every Lean message in order. Info text prints without a position (`trace_state`, `#check`). An `ARENA_MARK n`
+    line, put in front of each info command by `scratch_tool`, starts that command's info message and names its
+    snippet line. Other unpositioned text before any positioned message is an info message with line None; later
+    it continues the message before it, except right after a goal state (its `⊢` target and the indented lines
+    under it), where it starts a new info message."""
     found: list[dict] = []
+    in_target = False
+    previous_blank = False
     for line in output.splitlines():
         if not line.strip():
+            previous_blank = True
             continue
         match = engine._HEADER.match(line)
+        mark = _MARK.fullmatch(line.strip())
         if match:
             found.append({"severity": match["severity"], "line": int(match["line"]), "message": [match["rest"]]})
+            in_target = False
+        elif mark:
+            found.append({"severity": "info", "line": None, "message": [], "mark": int(mark.group(1))})
+            in_target = False
         elif found:
-            # Lean prints both an error's continuation and info text (`trace_state`) without a position, so any
-            # unpositioned line stays with the message before it rather than being labelled as a separate info.
-            found[-1]["message"].append(line)
+            ended = in_target and not line[0].isspace() and not previous_blank
+            if ended:
+                found.append({"severity": "info", "line": None, "message": [line]})
+                in_target = line.startswith("⊢")
+            else:
+                found[-1]["message"].append(line)
+                if line.startswith("⊢"):
+                    in_target = True
+                elif in_target and not line[0].isspace():
+                    in_target = False
         else:
             found.append({"severity": "info", "line": None, "message": [line]})
-    return [{**item, "message": "\n".join(item["message"]).strip()} for item in found]
+            in_target = line.startswith("⊢")
+        previous_blank = False
+    result: list[dict] = []
+    for item in found:
+        lines = item["message"]
+        # A goal state at the end of a command's info text is `trace_state` output of the declaration after it.
+        first = next((index for index, line in enumerate(lines) if line.startswith("⊢")), None)
+        start = reply._goal_start(lines, first) if first is not None and "mark" in item else 0
+        if "mark" in item and first is not None and start > 0:
+            result.append({**item, "message": "\n".join(lines[:start]).strip()})
+            result.append({"severity": "info", "line": None, "message": "\n".join(lines[start:]).strip()})
+        else:
+            result.append({**item, "message": "\n".join(lines).strip()})
+    return result
 
 
 _UNKNOWN_NAME = re.compile(r"Unknown\s(?:constant|identifier)\s`([^`\s]+)`")
-_DECLARATION_START = re.compile(r"(?:@\[[^\]]*\]\s*)?(?:(?:private|protected|noncomputable)\s+)*(?:example|theorem|lemma)\b")
+_DECLARATION_START = re.compile(
+    r"(?:@\[[^\]]*\]\s*)?(?:(?:private|protected|noncomputable)\s+)*(?:example|theorem|lemma)\b"
+)
 # The measure definition without its bare trailing call, which would measure the snippet's first command a second time.
 # Lean prints info messages without a position, so the values are read in the order the declarations ran.
 _MEASURE_DEFINITION = engine.HEARTBEAT_WRAPPER.removesuffix("arena_measure_heartbeats\n")
 _ARENA_LINE = re.compile(r"(?:.*:\sinfo:\s)?ARENA_HEARTBEATS\s(\d+)")
+# not-model-facing: Lean code injected in front of every scratch snippet: no unused-variable lint, and a mark that
+# names the snippet line of each info command's output.
+_SNIPPET_PREFIX = (
+    "set_option linter.unusedVariables false\n"  # log: Lean source, not model text
+    "open Lean Elab Command in\n"
+    'elab "arena_mark " n:num : command => logInfo m!"ARENA_MARK {n.getNat}"\n'
+)
 
 
 def _measured_snippet(code: str) -> tuple[str, list[int]]:
-    """The snippet with the heartbeat measure in front of each top-level declaration, on the declaration's own
-    line, so no line of the snippet moves. A declaration right after a doc comment or an attribute line stays
-    unmeasured: the measure would separate it from its doc comment or attribute."""
+    """The snippet with the heartbeat measure in front of each top-level declaration and a mark in front of each
+    info command, on the command's own line, so no line of the snippet moves. A declaration right after a doc
+    comment or an attribute line stays unmeasured: the measure would separate it from its doc comment or attribute."""
     lines, starts, previous = [], [], ""
     for number, line in enumerate(code.splitlines(), 1):
         stripped = line.strip()
         if _DECLARATION_START.match(line) and not previous.endswith("-/") and not previous.startswith("@["):
             starts.append(number)
             lines.append("arena_measure_heartbeats " + line)
+        elif _INFO_COMMAND.match(line):
+            lines.append(f"arena_mark {number} " + line)
         else:
             lines.append(line)
         if stripped:
             previous = stripped
     return "\n".join(lines) + ("\n" if code.endswith("\n") else ""), starts
+
+
+def _binder_hypotheses(theorem: str, errors: list[dict]) -> set[str]:
+    """Hypotheses in these goals named only by the theorem's own binders: the statement's context, which every
+    goal repeats. A shadowed binder prints as `name✝`, so a rebound name is never matched."""
+    statement = campaign.problem(theorem).get("statement") or ""
+    head = statement.split(":=")[0]
+    names = set(re.findall(r"[({\[⦃]\s*([^:(){}\[\]⦃⦄]+?)\s*:", head))
+    binders = {name for group in names for name in group.split()}
+    found: set[str] = set()
+    for item in errors:
+        for hypothesis in reply.hypothesis_set(item.get("goal")):
+            declared = hypothesis.split(" : ", 1)[0].split()
+            if declared and set(declared) <= binders:
+                found.add(hypothesis)
+    return found
+
+
+def _statement_context(projection) -> set[str]:
+    """The hypotheses every goal of this theorem starts with: those of the first recorded step goal."""
+    for node in projection.nodes:
+        for step in node.steps:
+            if step.before and "⊢" in step.before:
+                return reply.hypothesis_set(step.before)
+    return set()
+
+
+def _body_tokens(span: str) -> int:
+    """Tokens after the declaration's first `:=`: the statement it restates is not counted."""
+    _head, separator, rest = span.partition(":=")
+    return snippet_tokens(rest if separator else span)
+
+
+def _warning_text(message: str) -> str:
+    """A warning on one line: its first line, without notes and strikethrough marks."""
+    first = next((line for line in _STRIKE.sub("", message).splitlines() if line.strip()), "")
+    return " ".join(first.split())
+
+
+def _error_text(message: str, known: set[str], limit: int) -> str:
+    """An error with its goal state reduced to the hypotheses the theorem does not already have; notes dropped."""
+    kept = [line for line in _STRIKE.sub("", message).splitlines() if not line.startswith("Note:")]
+    compact = reply.compact_message("\n".join(kept), known, int(text.numbers().get("goal_hyp_chars", 1000)))
+    return compact if len(compact) <= limit else compact[: limit - 1] + "…"
 
 
 def scratch_tool(theorem: str, run_id: str, request: dict) -> dict:
@@ -1296,17 +1485,24 @@ def scratch_tool(theorem: str, run_id: str, request: dict) -> dict:
     )
     campaign._append(campaign.run_dir(run_id), {"kind": "scratch", "code_sha256": digest})
     facts = [_render("scratch_repeat", count=earlier + 1)] if earlier else []
-    has_declaration = any(_DECLARATION_START.match(line) for line in code.splitlines())
-    lean_text, wrapper_start = built["text"], None
-    if measured_starts:
-        # The measure definition goes in front of the snippet, as compile does; its lines are mapped back below.
-        wrapper_start = built["text"][: built["head"]].count("\n") + 1
-        lean_text = built["text"][: built["head"]] + _MEASURE_DEFINITION + built["text"][built["head"] :]
+    code_lines = code.splitlines()
+    declarations = [number for number, line in enumerate(code_lines, 1) if _DECLARATION_START.match(line)]
+    # The prefix goes in front of the snippet as compile's measure does; its lines are mapped back below.
+    inserted = _SNIPPET_PREFIX + (_MEASURE_DEFINITION if measured_starts else "")
+    wrapper_start = built["text"][: built["head"]].count("\n") + 1
+    lean_text = built["text"][: built["head"]] + inserted + built["text"][built["head"] :]
     output = engine.run_lean(row, built["path"], lean_text, prefix_end=built["head"])
-    lines = []
+    lines: list[str] = []
     heartbeats: dict[int, int] = {}
+    errors = warnings = 0
+    messages: list[tuple[int | None, dict]] = []
+    known = _statement_context(_nodes(run_id)[1])
+    message_chars = int(text.numbers().get("scratch_message_chars", 3000))
+    info_rows: list[str] = []
+    warning_lines: dict[str, list[int]] = {}
+    body: list[str] = []
     if output is None:
-        lines.append(_render("scratch_timeout"))
+        body.append(_render("scratch_timeout"))
     else:
         measured_values, kept = [], []
         for raw_line in output[1].splitlines():
@@ -1317,12 +1513,11 @@ def scratch_tool(theorem: str, run_id: str, request: dict) -> dict:
                 kept.append(raw_line)
         if len(measured_values) == len(measured_starts):
             heartbeats = dict(zip(measured_starts, measured_values, strict=True))
-        messages = []
         for message in _scratch_messages("\n".join(kept)):
             candidate_line = message["line"]
-            if candidate_line is not None and wrapper_start is not None:
+            if candidate_line is not None:
                 candidate_line, in_wrapper = engine.map_measured_line(
-                    candidate_line, wrapper_start, _MEASURE_DEFINITION.count("\n")
+                    candidate_line, wrapper_start, inserted.count("\n")
                 )
                 if in_wrapper:
                     continue
@@ -1330,18 +1525,43 @@ def scratch_tool(theorem: str, run_id: str, request: dict) -> dict:
             # Messages before the snippet come from the harness wrapper; sorry warnings are the allowed sorry itself.
             if snippet_line is not None and snippet_line < 1:
                 continue
-            body = message["message"]
-            if message["severity"] == "warning" and "declaration uses" in body and "sorry" in body:
+            if (
+                message["severity"] == "warning"
+                and "declaration uses" in message["message"]
+                and "sorry" in message["message"]
+            ):
                 continue
             messages.append((snippet_line, message))
-            lines.append(
-                _render(
-                    "scratch_message",
-                    line=snippet_line if snippet_line is not None else "?",
-                    severity=message["severity"],
-                    message=message["message"][: engine._MESSAGE_LIMIT],
+            if message["severity"] == "info":
+                number = message.get("mark") or snippet_line
+                command = code_lines[number - 1].strip() if number and number <= len(code_lines) else None
+                info_rows.append(
+                    _render(
+                        "scratch_info_row",
+                        line=number if number else "-",
+                        command=reply.cell(command, 60) if command else "-",
+                        output=reply.cell(message["message"], int(text.numbers().get("scratch_output_chars", 300))),
+                    )
                 )
-            )
+            elif message["severity"] == "warning":
+                warnings += 1
+                warning_lines.setdefault(_warning_text(message["message"]), []).append(snippet_line or 0)
+            else:
+                errors += 1
+                body.append(
+                    _render(
+                        "scratch_message",
+                        line=snippet_line if snippet_line is not None else "-",
+                        severity=message["severity"],
+                        message=_error_text(message["message"], known, message_chars),
+                    )
+                )
+        for warning, at in warning_lines.items():
+            more = f" {_render('scratch_also', lines=', '.join(str(n) for n in at[1:]))}" if len(at) > 1 else ""
+            body.append(_render("scratch_message", line=at[0] or "-", severity="warning", message=warning) + more)
+        if info_rows:
+            body.append(text.template("replies/tools.scratch_info_cols").strip())
+            body.extend(info_rows)
         seen_names: list[str] = []
         for _snippet_line, message in messages:
             for name in _UNKNOWN_NAME.findall(message["message"]):
@@ -1350,31 +1570,26 @@ def scratch_tool(theorem: str, run_id: str, request: dict) -> dict:
         for name in seen_names:
             prefix, siblings = search.sibling_names(theorem, name)
             if siblings:
-                lines.append(
-                    _render("scratch_unknown_names", name=name, prefix=prefix, names=", ".join(siblings))
-                )
+                body.append(_render("scratch_unknown_names", name=name, prefix=prefix, names=", ".join(siblings)))
+    spans = [(start, campaign.declaration_end(code_lines, start)) for start in declarations]
+    body_total = sum(_body_tokens("\n".join(code_lines[start - 1 : end])) for start, end in spans)
     if measured_starts and output is not None:
-        code_lines = code.splitlines()
         from arena.scoring import reference as scoring_reference
 
         price_rates = rates(*scoring_reference(theorem), len(engine.versions(row)))
-        bounds = measured_starts[1:] + [len(code_lines) + 1]
-        for start, end in zip(measured_starts, bounds, strict=True):
+        for start, end in spans:
             hb = heartbeats.get(start)
             if hb is None:
                 continue
-            span = "\n".join(code_lines[start - 1 : end - 1])
-            tokens = snippet_tokens(span)
+            tokens = _body_tokens("\n".join(code_lines[start - 1 : end]))
             points = tokens * price_rates["points_per_token"] + hb / 1000 * price_rates["points_per_1k_hb"]
-            lines.append(
-                _render("scratch_decl_cost", line=start, tokens=tokens, heartbeats=hb, points=round(points, 1))
-            )
-    if has_declaration:
-        for number, line in enumerate(code.splitlines(), 1):
-            count = snippet_tokens(line) if line.strip() else 0
-            if count:
-                lines.append(_render("scratch_line_tokens", line=number, tokens=count))
-    lines.append(_render("scratch_tokens", tokens=snippet_tokens(code)))
+            body.append(_render("scratch_decl_cost", line=start, tokens=tokens, heartbeats=hb, points=round(points, 1)))
+    status = _render("scratch_ok" if output is not None and not errors else "scratch_failed")
+    if declarations:
+        lines.append(_render("scratch_result_body", status=status, errors=errors, warnings=warnings, tokens=body_total))
+    else:
+        lines.append(_render("scratch_result", status=status, errors=errors, warnings=warnings))
+    lines.extend(body)
     item = {"ref": "scratch", "ok": True, "lines": lines, "error": None, "repeat": bool(earlier)}
     return reply.reply(facts=facts, items=[item])
 

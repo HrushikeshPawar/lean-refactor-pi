@@ -27,27 +27,44 @@ class ToolCase(FakeRunCase):
             self.addCleanup(item.stop)
 
 
-class ScratchLineTokenTests(ToolCase):
-    def test_scratch_line_tokens_appear_only_when_the_snippet_declares(self):
+class ScratchResultTests(ToolCase):
+    def scratch(self, code, output="", measured=None):
         built = {"path": "p", "text": "", "head": 0, "start_line": 1, "end_line": 1, "offset": 0}
         with (
             patch.object(tools.engine, "versions", return_value=[("v", "c")]),
             patch("arena.scoring.reference", return_value=(1000, 10000)),
             patch.object(tools.engine, "candidate_file", return_value=built),
-            patch.object(tools.engine, "run_lean", return_value=(0, "")),
+            patch.object(tools.engine, "run_lean", return_value=(0, output)),
             patch.object(tools, "_history", return_value=[]),
             patch.object(campaign, "_append"),
             patch.object(campaign, "run_dir", return_value=self.directory),
         ):
-            check = tools.scratch_tool("T", "logic", {"code": "#check Nat.add_comm\n"})
-            proof = tools.scratch_tool("T", "logic", {"code": "example : True := trivial\n"})
+            result = tools.scratch_tool("T", "logic", {"code": code})
+        return (result.get("details") or result)["items"][0]["lines"]
 
-        def lines(result):
-            return (result.get("details") or result)["items"][0]["lines"]
+    def test_result_line_counts_messages_and_body_tokens_only_when_the_snippet_declares(self):
+        check = self.scratch("#check Nat.add_comm\n")
+        proof = self.scratch("example : 1 = 1 := trivial\n")
+        self.assertEqual(check[0], "OK: errors 0, warnings 0")
+        self.assertRegex(proof[0], r"^OK: errors 0, warnings 0, body tokens 1 ")
+        self.assertFalse([line for line in proof if line.startswith("line 1 tokens")])
 
-        self.assertFalse([line for line in lines(check) if line.startswith("line 1 tokens")])
-        self.assertTrue(any(line.startswith("snippet tokens") for line in lines(check)))
-        self.assertTrue([line for line in lines(proof) if line.startswith("line 1 tokens")])
+    def test_info_outputs_are_a_table_with_their_source_lines_and_warnings_are_deduplicated(self):
+        # Lean prints each info command's text after an ARENA_MARK line naming the snippet line.
+        shift = tools._SNIPPET_PREFIX.count("\n") + tools._MEASURE_DEFINITION.count("\n")
+        output = (
+            "ARENA_MARK 2\nNat.add_comm (n m : ℕ) : n + m = m + n\n"
+            f"f.lean:{shift + 1}:0: warning: `X` has been deprecated\u0335: use Y\nNote: a long note\n"
+            f"f.lean:{shift + 3}:0: warning: `X` has been deprecated\u0335: use Y\n"
+        )
+        lines = self.scratch("example : True := trivial\n#check Nat.add_comm\nexample : True := trivial\n", output)
+        self.assertIn("| 2 | `#check Nat.add_comm` | Nat.add_comm (n m : ℕ) : n + m = m + n |", lines)
+        warnings = [line for line in lines if "warning:" in line]
+        self.assertEqual(len(warnings), 1)
+        self.assertNotIn("Note", "\n".join(lines))
+        self.assertNotIn("\u0335", "\n".join(lines))
+        self.assertTrue(warnings[0].endswith("(also lines 3)"))
+        self.assertFalse([line for line in lines if "line ?" in line])
 
 
 class CascadeToolCase(ToolCase):
@@ -139,8 +156,8 @@ class ReadGoalSearchTests(CascadeToolCase):
         ):
             result = tools.search_tool("T", "logic", {"queries": ["A"]})
         shown = "\n".join(line for item in result["items"] for line in item["lines"])
-        self.assertIn("A.f : Nat (this file) name", shown)
-        self.assertIn("A.g : Nat Init:7 name", shown)
+        self.assertIn("| A.f | Nat | (this file) | name |", shown)
+        self.assertIn("| A.g | Nat | Init:7 | name |", shown)
         self.assertNotIn("None", shown)
 
     def test_goal_try_at_line_targets_the_enclosing_step(self):
@@ -227,7 +244,7 @@ class ReadGoalSearchTests(CascadeToolCase):
             return_value={"queries": [{"query": "Nat.ad", "hits": [], "suggestions": ["Nat.add", "Nat.sub"]}]},
         ):
             result = tools.search_tool("T", "logic", {"queries": ["Nat.ad"]})
-        self.assertIn("Nat.add, Nat.sub", result["items"][0]["lines"][1])  # [0] is the result section header
+        self.assertIn("Nat.add, Nat.sub", result["items"][0]["lines"][-1])
 
     def test_decl_read_appends_event_and_invalid_hole_view_lists_source(self):
         with (
@@ -352,14 +369,30 @@ class ToolReplyTextTests(CascadeToolCase):
         self.assertEqual(result["error"]["input"], "X.y is not a declaration of the pinned project")
         self.assertTrue(result["error"]["valid"])
 
-    def test_outline_shows_recorded_step_goals_and_no_placeholder(self):
+    def test_outline_is_a_step_table_and_a_requested_step_shows_its_goals(self):
         node = tools.compile_tool("T", "logic", {"drafts": ["by\n  skip\n  trivial"]})["items"][0]["node"]
         bare = tools.read_tool("T", "logic", {"node": node, "view": "outline"})["items"][0]["lines"]
-        self.assertEqual(bare, [RESULT, "s1 lines 2-2", "s2 lines 3-3"])
+        self.assertEqual(bare[0], RESULT)
+        self.assertTrue(bare[1].startswith("| step |"))
+        self.assertRegex(bare[2], r"^\| s1 \| 2-2 \| \S+ \| - \| - \| `skip` \|$")  # unmeasured: no heartbeats, no pts
         proof_id = campaign.resolve_node_ref(campaign.events(self.directory), node)
-        goals = [{"id": "s1", "before": "⊢ True", "after": "⊢ True"}, {"id": "s2", "before": "⊢ True", "after": None}]
+        hypotheses = "a : ℕ\nb : ℕ\n"
+        goals = [
+            {"id": "s1", "before": hypotheses + "⊢ True", "after": hypotheses + "c : ℕ\n⊢ True"},
+            {"id": "s2", "before": "⊢ True", "after": None},
+        ]
         campaign._append(self.directory, {"kind": "step_goals", "proof_id": proof_id, "goals": goals})
-        shown = tools.read_tool("T", "logic", {"node": node, "view": "outline"})["items"][0]["lines"]
+        again = tools.read_tool("T", "logic", {"node": node, "view": "outline"})["items"][0]["lines"]
+        self.assertNotIn("⊢ True", "\n".join(again))  # goals only for a requested step
+        shown = tools.read_tool("T", "logic", {"node": node, "view": "outline", "step": "s1"})["items"][0]["lines"]
         self.assertEqual(
-            shown, [RESULT, "s1 lines 2-2", "before: ⊢ True", "after: ⊢ True", "s2 lines 3-3", "before: ⊢ True"]
+            shown,
+            [
+                RESULT,
+                "s1 lines 2-2",
+                "before: a : ℕ\nb : ℕ\n⊢ True",
+                "after: (2 unchanged hypotheses omitted)\nc : ℕ\n⊢ True",
+            ],
         )
+        missing = tools.read_tool("T", "logic", {"node": node, "view": "outline", "step": "s9"})
+        self.assertEqual(missing["error"]["code"], "unknown_step")

@@ -1,3 +1,3 @@
 legend: "self_hb: heartbeats of the step alone.\nincl_hb: heartbeats of the step with its nested steps.\npts_if_gone: upper bound on the points gained by removing the step.\nversions: listed versions on which the proof compiles."
-row: "{step}  {lines}  {tokens}  {self_hb}  {incl_hb}  {pts_if_gone}  {text}"
-total: "total  -  {tokens}  -  {heartbeats}  -  versions {versions} · score {score}"
+row: "| {step} | {lines} | {tokens} | {self_hb} | {incl_hb} | {pts_if_gone} | `{text}` |"
+total: "| total | - | {tokens} | - | {heartbeats} | - | versions {versions} · score {score} |"

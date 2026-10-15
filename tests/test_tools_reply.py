@@ -112,7 +112,7 @@ class ReplyTests(unittest.TestCase):
                 text.render("replies/tools.map_shapes"),
                 "| n9 | compiles with open holes | - | - | - | 1 |",
                 text.render("replies/tools.map_recent_head"),
-                "| n4 | edited from n2 | does not compile | - | - | - |",
+                "| n4 | made from n2 | does not compile | - | - | - |",
                 "| n5 | new root | does not compile | - | - | - |",
                 text.render("replies/tools.map_steps_head", node="n2"),
                 text.render("replies/tools.map_steps_legend"),

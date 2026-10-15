@@ -42,7 +42,6 @@ export async function renderReply(reply: Reply, footer: string, validKeys: strin
     }
   }
   if (Array.isArray(reply.map)) lines.push(...reply.map.filter((line): line is string => typeof line === "string"));
-  if (reply.handles?.length) lines.push(await render("replies/tools.handles", { handles: reply.handles.join(", ") }));
   if (reply.error) {
     const line = await errorLine(reply.error, validKeys);
     if (line) lines.push(line);

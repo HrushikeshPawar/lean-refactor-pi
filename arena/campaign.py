@@ -180,6 +180,7 @@ def source_range(name: str, path: str, first: int | None = None, last: int | Non
     """Read pinned source; `next_first` continues a range cut at the limit.
 
     Without `first`, a `decl:` handle starts at its declaration and a path at the top of the file.
+    Without `last`, a `decl:` handle stops where its declaration ends (see `declaration_end`).
     """
     # Lines are 1-based; some models send 0 to mean "not given".
     first, last = (first or None), (last or None)
@@ -187,10 +188,33 @@ def source_range(name: str, path: str, first: int | None = None, last: int | Non
         return _source_range(name, path, first, last)
 
 
+# A column-0 line starting with one of these ends the declaration before it.
+_TOP_LEVEL = re.compile(
+    r"(?:/--|/-!|/-|@\[|--|#|end\b|namespace\b|section\b|open\b|variable\b|universe\b|set_option\b|"
+    r"(?:(?:private|protected|noncomputable|unsafe|partial|nonrec)\s+)*"
+    r"(?:theorem|lemma|def|abbrev|instance|structure|class|inductive|axiom|opaque|example|macro|syntax|"
+    r"notation|infix|infixl|infixr|prefix|postfix|elab|local|scoped|attribute|deriving|export|mutual)\b)"
+)
+
+
+def declaration_end(lines: list[str], first: int) -> int:
+    """The last line (1-based) of the declaration starting at `first`: the line before the next top-level
+    command, without the blank lines that separate them."""
+    end = first
+    for number in range(first + 1, len(lines) + 1):
+        line = lines[number - 1]
+        if line and not line[0].isspace() and _TOP_LEVEL.match(line):
+            break
+        if line.strip():
+            end = number
+    return end
+
+
 def _source_range(name: str, path: str, first: int | None, last: int | None) -> dict:
     row = problem(name)
     version, commit = measure_version(row)
     project = workspace(row, version, commit)
+    to_declaration_end = path.startswith("decl:") and last is None
     if path.startswith("decl:"):
         source_symbol, module, span = _source_hint(name, path[5:])
         try:
@@ -217,6 +241,8 @@ def _source_range(name: str, path: str, first: int | None, last: int | None) -> 
     if first < 1 or first > len(lines):
         raise ValueError(text.render("messages/errors.source_line_range", path=path, count=len(lines), first=first))
     wanted = last if last is not None else first + 199
+    if to_declaration_end:
+        wanted = declaration_end(lines, first)
     end = min(wanted, len(lines), first + MAX_SOURCE_LINES - 1)
     if end < first:
         raise ValueError(text.render("messages/errors.source_range_order"))
@@ -2238,6 +2264,18 @@ def _price_change_text(changes: list[dict]) -> str:
     return "; ".join(values)
 
 
+def _comparison(vs_parent, vs_best, parent_label: str, parent_is_best: bool, with_names: bool = False) -> str:
+    """The parenthesis after a value: its change against the parent and against the best node, only the known
+    ones; nothing at all when neither is known."""
+    parts = []
+    if vs_parent is not None:
+        delta = fmt_signed(vs_parent)
+        parts.append(text.render("replies/price-row.vs_node", delta=delta, node=parent_label) if with_names else delta)
+    if not parent_is_best and vs_best is not None:
+        parts.append(text.render("replies/price-row.vs_best", delta=fmt_signed(vs_best)))
+    return text.render("replies/price-row.parenthesis", parts=", ".join(parts)) if parts else ""
+
+
 def render_price_row(row: dict, root: bool = False, parent_is_best: bool = False) -> str:
     if root:
         return text.render(
@@ -2247,16 +2285,10 @@ def render_price_row(row: dict, root: bool = False, parent_is_best: bool = False
             hb=fmt_hb(row["hb"]),
             versions=row["versions"],
         )
-    tokens_part = (
-        "n/a" if row["tokens_vs_parent"] is None else f"{fmt_signed(row['tokens_vs_parent'])} vs {row['parent_label']}"
+    tokens_part = _comparison(
+        row["tokens_vs_parent"], row["tokens_vs_best"], row["parent_label"], parent_is_best, with_names=True
     )
-    if not parent_is_best:
-        best = "n/a" if row["tokens_vs_best"] is None else f"{fmt_signed(row['tokens_vs_best'])} vs best"
-        tokens_part += f", {best}"
-    hb_part = "n/a" if row["hb_vs_parent"] is None else fmt_signed(row["hb_vs_parent"])
-    if not parent_is_best:
-        best = "n/a" if row["hb_vs_best"] is None else fmt_signed(row["hb_vs_best"])
-        hb_part += f", {best}"
+    hb_part = _comparison(row["hb_vs_parent"], row["hb_vs_best"], row["parent_label"], parent_is_best)
     score_part = "n/a" if row["score_vs_best"] is None else f"{row['score_vs_best']:+.1f} vs best"
     rendered = [
         text.render(
@@ -2288,7 +2320,7 @@ def render_price_table(table: dict) -> str:
                 tokens=row["tokens"],
                 self_hb=fmt_hb(row["self_hb"]),
                 incl_hb=fmt_hb(row["incl_hb"]),
-                pts_if_gone=f"{row['pts_if_gone']:+.2f}",
+                pts_if_gone="-" if row["pts_if_gone"] is None else f"{row['pts_if_gone']:+.2f}",
                 text=row["text"],
             )
             for row in table["rows"]
@@ -2300,8 +2332,8 @@ def render_price_table(table: dict) -> str:
             "packet/price-table.total",
             tokens=total["tokens"],
             heartbeats=fmt_hb(total["heartbeats"]),
-            versions=total["versions"] or "n/a",
-            score="n/a" if total["proxy"] is None else f"{total['proxy']:.2f}",
+            versions=total["versions"] or "-",
+            score="-" if total["proxy"] is None else f"{total['proxy']:.2f}",
         )
     )
     return "\n".join(rows)
@@ -2897,6 +2929,30 @@ def _profile_jobs(history: list[dict], graph: Graph) -> list[Node]:
     ]
 
 
+def profile_in_call(name: str, run_id: str, node_refs: list[str]) -> None:
+    """Profile closed nodes inside the model's own tool call, on the model lane: the background lane and the
+    autocheck lock can be held for tens of seconds by other jobs, and the reply must not read "pending"."""
+    directory = run_dir(run_id)
+    history = events(directory)
+    graph = Graph.from_history(history, _proof_reader(directory))
+    attempted = {event.get("proof_id") for event in history if event.get("kind") in {"profile", "profile_error"}}
+    for ref in node_refs:
+        try:
+            proof_id = resolve_node_ref(history, ref)
+        except (ValueError, KeyError):
+            continue
+        node = next((item for item in graph.nodes if item.proof_id == proof_id), None)
+        if node is None or node.status != "closed" or proof_id in attempted:
+            continue
+        started = time.monotonic()
+        try:
+            result = profile(name, node.proof_text, node.heartbeats, lane="model")
+            event = {"kind": "profile", "proof_id": proof_id, "result": result}
+        except Exception as error:  # the background job does not retry a node that failed here
+            event = {"kind": "profile_error", "proof_id": proof_id, "error": str(error)[:300]}
+        _append(directory, {**event, "seconds": round(time.monotonic() - started, 2), "trigger": "in_call"})
+
+
 def _run_profile_job(name: str, run_id: str, node: Node) -> None:
     directory = run_dir(run_id)
     started = time.monotonic()
@@ -2929,7 +2985,12 @@ def _salvage_jobs(history: list[dict], directory: Path, graph: Graph | None = No
     """Broken, filed graph nodes with no terminal salvage event yet."""
     done = {item.get("proof_id") for item in history if item.get("kind") == "salvage"}
     graph = graph or Graph.from_history(history, _proof_reader(directory))
-    return [node for node in graph.nodes if node.status == "broken" and node.edge and node.proof_id not in done]
+    # The pinned reference compiles by definition; it reads as broken only because it is never evaluated.
+    return [
+        node
+        for node in graph.nodes
+        if node.status == "broken" and node.edge and node.origin != "reference" and node.proof_id not in done
+    ]
 
 
 def _assembly_jobs(history: list[dict], directory: Path, graph: Graph | None = None) -> list[Node]:
@@ -3098,6 +3159,28 @@ def _run_full_check(name: str, run_id: str, job: dict) -> str:
         )
     write_state(run_id)
     return f"#{job['n']}"
+
+
+def step_goals_in_call(name: str, run_id: str, proof_id: str) -> None:
+    """Record one node's step goals inside the model's own read, on the model lane, when the background job has
+    not reached it yet."""
+    directory = run_dir(run_id)
+    if any(
+        event.get("kind") == "step_goals"
+        and event.get("proof_id") == proof_id
+        and ("goals" in event or "error" in event)
+        for event in events(directory)
+    ):
+        return
+    started = time.monotonic()
+    try:
+        from arena import step_goals
+
+        goals = step_goals.step_goals(name, (directory / "proofs" / f"{proof_id}.lean").read_text(), lane="model")
+        event = {"kind": "step_goals", "proof_id": proof_id, "goals": goals}
+    except Exception as error:  # recorded so neither path retries it
+        event = {"kind": "step_goals", "proof_id": proof_id, "error": str(error)[:300]}
+    _append(directory, {**event, "seconds": round(time.monotonic() - started, 2), "trigger": "in_call"})
 
 
 def _run_step_goals(name: str, run_id: str, proof_id: str) -> None:
@@ -3672,32 +3755,97 @@ def repeated_text(proof: str, points_per_token: float) -> list[dict]:
         before = {words[p - 1] if p > 0 else None for p in positions}
         if len(before) == 1 and None not in before:
             continue  # every occurrence extends to the left as well; the longer span is listed instead
-        kept: list[int] = []
-        for p in positions:
-            if not kept or p >= kept[-1] + length:
-                kept.append(p)
-        if len(kept) < 2:
+        trimmed = _balanced_span(body, found, words, positions, length)
+        if trimmed is None:
             continue
-        span = " ".join(body[found[kept[0]].start() : found[kept[0] + length - 1].end()].split())
+        offset, length = trimmed
+        occurrences = _non_overlapping([p + offset for p in positions], length)
+        if len(occurrences) < 2:
+            continue
+        span = " ".join(body[found[occurrences[0]].start() : found[occurrences[0] + length - 1].end()].split())
+        if span in items:
+            continue
         tokens = snippet_tokens(span)
-        saved = (len(kept) - 1) * tokens - (tokens + 4)
-        if tokens < REPEAT_MIN_TOKENS or saved <= 0 or span in items:
+        if tokens < REPEAT_MIN_TOKENS or _repeat_saved(len(occurrences), tokens) <= 0:
             continue
         items[span] = {
             "text": span,
-            "count": len(kept),
             "tokens": tokens,
-            "saved_tokens": saved,
-            "points": round(saved * points_per_token, 2),
+            "ranges": [(found[p].start(), found[p + length - 1].end()) for p in occurrences],
         }
+    # Greedy by savings; a span never overlaps one already chosen, in any occurrence (overlapping occurrences drop).
     chosen: list[dict] = []
-    for item in sorted(items.values(), key=lambda row: -row["saved_tokens"]):
-        if any(f" {item['text']} " in f" {kept['text']} " for kept in chosen):
-            continue
-        chosen = [kept for kept in chosen if f" {kept['text']} " not in f" {item['text']} "] + [item]
-        if len(chosen) == REPEAT_SHOWN:
+    taken: list[tuple[int, int]] = []
+    pool = list(items.values())
+    while pool and len(chosen) < REPEAT_SHOWN:
+        scored = []
+        for item in pool:
+            ranges = [r for r in item["ranges"] if not any(r[0] < end and start < r[1] for start, end in taken)]
+            saved = _repeat_saved(len(ranges), item["tokens"]) if len(ranges) >= 2 else 0
+            if saved > 0:
+                scored.append((saved, item, ranges))
+        if not scored:
             break
+        saved, item, ranges = max(scored, key=lambda entry: (entry[0], -len(entry[1]["text"])))
+        taken.extend(ranges)
+        pool.remove(item)
+        chosen.append(
+            {
+                "text": item["text"],
+                "count": len(ranges),
+                "tokens": item["tokens"],
+                "saved_tokens": saved,
+                "points": round(saved * points_per_token, 2),
+            }
+        )
     return sorted(chosen, key=lambda row: -row["saved_tokens"])
+
+
+def _repeat_saved(count: int, tokens: int) -> int:
+    """Tokens saved by sharing a span of `tokens` that occurs `count` times: one `have` costs tokens + 4."""
+    return (count - 1) * tokens - (tokens + 4)
+
+
+def _non_overlapping(positions: list[int], length: int) -> list[int]:
+    kept: list[int] = []
+    for p in positions:
+        if not kept or p >= kept[-1] + length:
+            kept.append(p)
+    return kept
+
+
+_OPENERS = {"(": ")", "[": "]", "{": "}", "⟨": "⟩"}
+_CLOSERS = set(_OPENERS.values())
+
+
+def _balanced_span(
+    body: str, found: list, words: list[str], positions: list[int], length: int
+) -> tuple[int, int] | None:
+    """The longest part (offset, length in words) of a repeated word span that is bracket-balanced and starts and ends
+    at a term boundary (whitespace or a bracket) in every occurrence."""
+
+    def boundary(position: int, length_: int) -> bool:
+        first, last = found[position].start(), found[position + length_ - 1].end()
+        left = body[first - 1] if first > 0 else " "
+        right = body[last] if last < len(body) else " "
+        return (left.isspace() or left in _OPENERS) and (
+            right.isspace() or right in _OPENERS or right in _CLOSERS or right in ",;"
+        )
+
+    def balanced(start: int, size: int) -> bool:
+        stack: list[str] = []
+        for word in words[positions[0] + start : positions[0] + start + size]:
+            if word in _OPENERS:
+                stack.append(_OPENERS[word])
+            elif word in _CLOSERS and (not stack or stack.pop() != word):
+                return False
+        return not stack
+
+    for size in range(length, 0, -1):
+        for start in range(length - size + 1):
+            if balanced(start, size) and all(boundary(p + start, size) for p in positions):
+                return start, size
+    return None
 
 
 def _group_starts(words: list[str], length: int) -> dict[tuple[str, ...], list[int]]:

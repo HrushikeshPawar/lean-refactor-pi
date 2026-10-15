@@ -59,7 +59,8 @@ class PriceUnitTests(unittest.TestCase):
             None,
         )
         self.assertEqual(fallback["rows"][0]["tokens"], prices.snippet_tokens("first\n  nested"))
-        self.assertEqual(fallback["rows"][0]["pts_if_gone"], round(fallback["rows"][0]["tokens"] * 100 / 30, 2))
+        self.assertIsNone(fallback["rows"][0]["pts_if_gone"])  # unmeasured heartbeats: no points, never points at 0 HB
+        self.assertIsNone(missing["rows"][0]["pts_if_gone"])
 
     def test_changed_lines_counts_replacements_and_insertions(self):
         self.assertEqual(changed_lines("a\nb\nc\n", "a\nx\nc\ny\n"), 2)

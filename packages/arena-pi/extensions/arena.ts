@@ -529,7 +529,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
   function stripFooter(delivered: string, footer: string | undefined): string {
     if (!footer) return delivered;
     if (delivered === footer) return "";
-    const suffix = `\n${footer}`;
+    const suffix = `\n\n${footer}`;
     return delivered.endsWith(suffix) ? delivered.slice(0, -suffix.length) : delivered;
   }
   pi.on("tool_execution_end", (event, ctx) => {
@@ -590,8 +590,11 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     try { spend = await spendFooter(spentUsd, limit); } catch { /* the footer is best effort */ }
     if (spend) footers.set(event.toolCallId, spend);
     if (!spend && !changed) return;
-    return { content: spend ? [...content, { type: "text" as const, text: spend }] : content,
-      details: event.details, isError: event.isError };
+    // The footer joins the last text part after a blank line: Pi concatenates parts without a separator.
+    const lastText = spend ? content.map(part => part.type === "text" && Boolean(part.text)).lastIndexOf(true) : -1;
+    const withSpend = !spend ? content : lastText < 0 ? [...content, { type: "text" as const, text: spend }]
+      : content.map((part, index) => index === lastText ? { ...part, text: `${(part as { text: string }).text}\n\n${spend}` } : part);
+    return { content: withSpend, details: event.details, isError: event.isError };
   });
 
   pi.on("context", async event => {
@@ -699,8 +702,9 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     node: Type.Optional(Type.String({ description: await renderText("tools/read.params.node") })),
     hole: Type.Optional(Type.String({ description: await renderText("tools/read.params.hole") })),
     view: Type.Optional(Type.Union([Type.Literal("source"), Type.Literal("prices"), Type.Literal("diff"),
-      Type.Literal("outline"), Type.Literal("map")], { description: await renderText("tools/read.params.view") })),
+      Type.Literal("outline"), Type.Literal("tree"), Type.Literal("map")], { description: await renderText("tools/read.params.view") })),
     against: Type.Optional(Type.String({ description: await renderText("tools/read.params.against") })),
+    step: Type.Optional(Type.String({ description: await renderText("tools/read.params.step") })),
   });
   await registerTool({ name: "read", label: "Read pinned context",
     description: await renderText("tools/read.description"), parameters: readParams,

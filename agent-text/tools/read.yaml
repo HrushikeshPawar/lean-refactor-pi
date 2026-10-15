@@ -1,7 +1,8 @@
 description: "Return pinned source or a node's prices, diff, outline, tree, or graph map."
 params:
-  handle: "Declaration handle from search, e.g. decl:Nat.add_comm; append :first-last for lines counted from the declaration's first line (line 1 is its first line), e.g. decl:Nat.add_comm:1-30."
+  handle: "Declaration handle from search, e.g. decl:Nat.add_comm; append :first-last for file lines, e.g. :120-150."
   node: "Node identifier for node views."
   hole: "Hole identifier for its goal view."
   view: "Choose source, prices, diff, outline, tree (cost per tactic and stated term), or map."
   against: "Comparison node for the diff view."
+  step: "Step id; outline view gives its goals."
