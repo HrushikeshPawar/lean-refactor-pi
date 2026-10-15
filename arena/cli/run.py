@@ -55,32 +55,61 @@ PI_STDERR_SHOWN = ("alarm]", "[arena-restart]", "[arena-memory]")
 
 
 class _Echo:
-    """Passes writes through to a stream and keeps each complete line, so the setup lines printed before the
-    live view starts can be shown again inside it."""
+    """Keeps each complete line written to a stream; with `passthrough` the text also reaches the stream."""
 
-    def __init__(self, stream, lines: list[str]):
-        self.stream, self.lines, self.partial = stream, lines, ""
+    def __init__(self, stream, lines: list[str], passthrough: bool):
+        self.stream, self.lines, self.partial, self.passthrough = stream, lines, "", passthrough
 
     def write(self, data: str) -> int:
         self.partial += data
         *done, self.partial = self.partial.split("\n")
         self.lines.extend(line for line in done if line.strip())
-        return self.stream.write(data)
+        return self.stream.write(data) if self.passthrough else len(data)
+
+    def flush(self) -> None:
+        if self.passthrough:
+            self.stream.flush()
 
     def __getattr__(self, name):
         return getattr(self.stream, name)
 
 
 class _Setup:
-    """Echoes stdout and stderr from the start of the run until the live view takes the terminal."""
+    """The setup phase (Lean session, health gate, warm-up) in a small live panel of its own; its lines are shown
+    again inside the run view once Pi starts. Plain output when the panel cannot start."""
 
-    def __init__(self):
+    def __init__(self, run_id: str):
+        from rich.console import Console
+        from rich.live import Live
+        from rich.panel import Panel
+        from rich.text import Text
+
         self.lines: list[str] = []
         self.saved = (sys.stdout, sys.stderr)
-        sys.stdout, sys.stderr = _Echo(sys.stdout, self.lines), _Echo(sys.stderr, self.lines)
+        self.started = time.monotonic()
+        console = Console(file=sys.stdout)
+
+        def render():
+            seconds = int(time.monotonic() - self.started)
+            body = Text("\n".join(self.lines[-12:]) or "starting", overflow="ellipsis", no_wrap=True)
+            title = f"arena run {run_id} · starting · {seconds}s"
+            return Panel(body, title=title, title_align="left", border_style="cyan")
+
+        self.live: Live | None = None
+        try:
+            self.live = Live(get_renderable=render, console=console, refresh_per_second=4, transient=True)
+            self.live.start()
+        except Exception:  # the panel is cosmetic: fall back to plain lines
+            self.live = None
+        passthrough = self.live is None
+        sys.stdout = _Echo(sys.stdout, self.lines, passthrough)
+        sys.stderr = _Echo(sys.stderr, self.lines, passthrough)
 
     def restore(self) -> list[str]:
         sys.stdout, sys.stderr = self.saved
+        if self.live is not None:
+            with contextlib.suppress(Exception):
+                self.live.stop()
         return self.lines
 
 
@@ -412,14 +441,26 @@ class RunOptions:
     plain: bool = False
 
 
+def _release_setup() -> None:
+    """Give the terminal back from the setup panel when the run ends before the live view takes over (an
+    unhealthy gate, a refused option, Ctrl+C), printing the lines the panel held."""
+    global _SETUP
+    setup, _SETUP = _SETUP, None
+    if setup is not None:
+        for line in setup.restore():
+            print(line, flush=True)
+
+
 def execute(options: RunOptions) -> int:
     try:
         return run(options)
     except KeyboardInterrupt:
+        _release_setup()
         # Ctrl+C before Pi started (packet, Lean gate): from Pi's start on, `interrupt` handles it and never raises.
         print("interrupted before Pi started; no model spend", file=sys.stderr, flush=True)
         return 130
     finally:
+        _release_setup()
         _BACKGROUND["stop"].set()
         stop_lean_session()
 
@@ -467,7 +508,7 @@ def run(options: RunOptions) -> int:
         return 2
     global _SETUP
     if not args.dry_run and live.enabled(args.plain):
-        _SETUP = _Setup()
+        _SETUP = _Setup(args.run_id)
     if not args.dry_run and not args.no_lean_session:
         start_lean_session(directory, row, args.run_id)
     if args.resume_run:
