@@ -308,7 +308,8 @@ def _effort_lines(data: dict) -> list[str]:
         lines.append(
             text.render("replies/tools.map_steps_more", count=len(rest), at_stake=shown(rest[0].get("at_stake")))
         )
-    untried = _untried_steps(rest)
+    # On a first node every step has 0 tries, so "barely tried" would name arbitrary steps.
+    untried = _untried_steps(rest) if any(int(item.get("variants") or 0) for item in rows) else None
     if untried:
         lines.append(untried)
     return lines

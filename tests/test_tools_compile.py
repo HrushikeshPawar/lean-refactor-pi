@@ -117,7 +117,13 @@ class CompileToolTests(CascadeCase):
     def test_more_errors_than_pass_limit_are_reported_as_incomplete(self):
         result = tools.compile_tool("T", "logic", {"drafts": ["by\n" + "\n".join(["  bad"] * 5)]})
         self.assertEqual(len(result["items"][0]["errors"]), 4)
-        self.assertTrue(any("incomplete" in fact.lower() for fact in result["facts"]))
+        node = result["items"][0]["node"]
+        # A note about a node this call filed sits in that node's result, not under Updates.
+        lines = result["items"][0]["lines"]
+        self.assertTrue(
+            any(line.startswith(f"{node}: Lean may report more errors after line") for line in lines), lines
+        )
+        self.assertEqual(result["facts"], [])
 
     def test_splice_fill_and_merge_record_exact_graph_edges(self):
         base = tools.compile_tool("T", "logic", {"drafts": ["by\n  trivial"]})["items"][0]["node"]

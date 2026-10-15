@@ -170,3 +170,20 @@ class UntriedStepTests(unittest.TestCase):
         self.assertNotIn("s12", line)
         self.assertIsNone(_untried_steps(hidden[1:]))
 
+    def test_first_node_without_any_tries_names_nothing(self):
+        rows = [{"step": f"s{i}", "variants": 0, "at_stake": 5.0 - i * 0.1, "tokens": 9} for i in range(1, 12)]
+        lines = reply._effort_lines({"effort": rows, "best": {"id": "n2"}})
+        self.assertFalse(any("Barely tried" in line for line in lines))
+
+
+class MessageGoalTests(unittest.TestCase):
+    def test_note_lines_before_the_goal_are_not_the_goal(self):
+        from arena.tools import message_goal
+
+        message = (
+            "Case tag `app` not found.\n\nNote: There are no cases to select.\n\n"
+            "der this : Typing [] t τ\n⊢ t.Value ∨ ∃ t', t ⭢βᵛ t'"
+        )
+        goal = message_goal(message)
+        self.assertTrue(goal.startswith("der this"), goal)
+        self.assertNotIn("Note:", goal)

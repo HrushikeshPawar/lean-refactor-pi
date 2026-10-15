@@ -180,6 +180,8 @@ def message_goal(message: str) -> str | None:
     for line in parts[1] if parts else message.split("\n")[1:]:
         if line.startswith("["):
             break
+        if not body and (not line.strip() or line.startswith(("Note:", "Hint:"))):
+            continue  # Lean's advice lines before the goal are part of the report, not the goal
         body.append(line)
     goal = "\n".join(body).strip()
     return goal if "⊢" in goal else None
@@ -397,7 +399,8 @@ def _compile_item(name: str, run_id: str, node_ref: str, result: dict, filing: s
                     versions=price.get("versions", "n/a"),
                 )
             )
-    facts = [_render("errors_incomplete")] if incomplete else []
+    last_line = max((item.get("line") or 0 for item in errors), default=0)
+    facts = [_render("errors_incomplete", node=node.id, line=last_line)] if incomplete else []
     # Every attempt on this proof text leaves one ledger row, this one included.
     attempts = sum(
         1

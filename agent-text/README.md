@@ -204,7 +204,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/tools.error_goal` | 2 | Tool replies | when the matching tool result occurs |
 | `replies/tools.error_item` | 4 | Tool replies | when the matching tool result occurs |
 | `replies/tools.error_main_goal_open` | 11 | Tool replies | when the matching tool result occurs |
-| `replies/tools.errors_incomplete` | 6 | Tool replies | when the matching tool result occurs |
+| `replies/tools.errors_incomplete` | 13 | Tool replies | when the matching tool result occurs |
 | `replies/tools.filing_draft` | 7 | Tool replies | when the matching tool result occurs |
 | `replies/tools.filing_fill` | 7 | Tool replies | when the matching tool result occurs |
 | `replies/tools.filing_focus` | 4 | Tool replies | when the matching tool result occurs |
@@ -326,7 +326,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/tools.try_replaces` | 29 | Tool replies | when the matching tool result occurs |
 | `replies/tools.try_timeout` | 2 | Tool replies | when the matching tool result occurs |
 | `skill/SKILL` | 155 | Agent skill instructions | once per run |
-| `skill/lean-facts` | 115 | Agent skill instructions | once per run |
+| `skill/lean-facts` | 137 | Agent skill instructions | once per run |
 | `tools/compile.description` | 29 | Model tool definitions | every request |
 | `tools/compile.params.base` | 6 | Model tool definitions | every request |
 | `tools/compile.params.check` | 11 | Model tool definitions | every request |
