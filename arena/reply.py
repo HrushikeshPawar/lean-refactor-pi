@@ -221,6 +221,8 @@ def outcome(status: object, holes: list | None = None) -> object:
     """A node's internal status as the model reads it: its compile outcome phrase."""
     if status == "closed":
         return text.render("replies/tools.outcome_closed")
+    if status == "ineligible":
+        return text.render("replies/tools.outcome_ineligible")
     if status == "sketch":
         count = len(holes or [])
         if count == 1:
@@ -477,6 +479,12 @@ def _map_lines(data: dict) -> list[str]:
     return lines
 
 
+def _map_key(data: dict) -> list:
+    """What makes a map worth showing in full again: the best node and the set of shapes (route letter, node)."""
+    best = (data.get("best") or {}).get("node")
+    return [best, sorted([str(item.get("letter")), str(item.get("node"))] for item in data.get("archive", []))]
+
+
 def attach_context(
     run_id: str,
     result: dict,
@@ -500,9 +508,14 @@ def attach_context(
             data["open"] = holes
         lines = _map_lines(data)
         digest = hashlib.sha256("\n".join(lines).encode()).hexdigest()
-        if force_map or digest != state.get("map_hash"):
+        # The full map only when it matters: first one after a (re)start, a new best, or a new shape/route.
+        key = _map_key(data)
+        matters = force_map or "map_hash" not in state or key != state.get("map_key")
+        if matters and (force_map or digest != state.get("map_hash") or key != state.get("map_key")):
             result["map"] = [text.render("replies/tools.section_map"), *lines] if lines else lines
-            state["map_hash"] = digest
+        elif digest != state.get("map_hash"):
+            result["map"] = [text.render("replies/tools.map_unchanged")]
+        state["map_hash"], state["map_key"] = digest, key
     # Node ids the model has been shown; an update never names a node outside them.
     seen = set(state.get("seen_nodes", [])) | _node_ids(result)
     facts = [_update_text(item, seen) for item in fresh if isinstance(item.get("text"), str)] + result.get("facts", [])

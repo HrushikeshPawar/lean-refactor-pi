@@ -227,11 +227,11 @@ class Graph:
                     proof_id,
                     status,
                     entries[proof_id].get("origin", "model"),
-                    _score(result) if best else None,
+                    None if best and version_failed(_versions(result)) else _score(result) if best else None,
                     verified,
                     result.get("tokens"),
                     result.get("heartbeat"),
-                    {version: bool(value.get("passed")) for version, value in (result.get("compat") or {}).items()},
+                    _versions(result),
                     edge,
                     steps,
                     depth,
@@ -276,6 +276,19 @@ class Graph:
                     fills=[fill.id for fill in ordered],
                 )
         return cls(nodes, focus, [node.id for node in nodes], stall_events)
+
+
+def _versions(result: dict) -> dict[str, bool]:
+    return {version: bool(value.get("passed")) for version, value in (result.get("compat") or {}).items()}
+
+
+def version_failed(versions: dict[str, bool]) -> bool:
+    return any(not passed for passed in versions.values())
+
+
+def shown_status(node: "Node") -> str:
+    """A node's status as the map and replies show it: a proof failing a required version is never "closed"."""
+    return "ineligible" if node.status == "closed" and version_failed(node.versions) else node.status
 
 
 def _score(result: dict) -> float | None:
@@ -467,7 +480,7 @@ def map_view(graph: Graph, effort: list[dict] | None = None, reference: tuple[in
             "letter": cell.letter,
             "route": cell.route,
             "depth_bucket": cell.depth_bucket,
-            "status": cell.status,
+            "status": shown_status(cell.node) if cell.node.status == cell.status else cell.status,
             "node": cell.node.id,
             "label": cell.node.label,
             "score": cell.node.score,
@@ -485,7 +498,7 @@ def map_view(graph: Graph, effort: list[dict] | None = None, reference: tuple[in
             "label": node.label,
             "edge": (node.edge or {}).get("type"),
             "from": [node_ids.get(parent, parent) for parent in (node.edge or {}).get("from") or []],
-            "status": node.status,
+            "status": shown_status(node),
             "score": node.score,
             "tokens": node.tokens,
             "heartbeats": node.heartbeats,

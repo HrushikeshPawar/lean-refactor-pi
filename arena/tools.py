@@ -149,9 +149,33 @@ def _rewrite_parts(message: str) -> tuple[str, list[str]] | None:
 _GOAL_BLOCK_START = re.compile(r"^(?:case\s|⊢|\S[^:]*? : |\[)")
 
 
+_COMBINING = re.compile("[\u0332\u0335]")
+_HYP_NAME = re.compile(r"\w+✝[⁰¹²³⁴⁵⁶⁷⁸⁹]*")
+
+
+def _same_message_key(message: str) -> str:
+    """A message with line numbers, other digits and inaccessible hypothesis names blurred, so near-identical ones match."""
+    return re.sub(r"\d+", "#", _HYP_NAME.sub("_", error_message(message)))
+
+
+def _same_message_groups(groups: list[tuple[dict, int]]) -> list[tuple[dict, int, list[str]]]:
+    """Groups whose messages match merge into the first; the ids of the later ones come back with it."""
+    merged: dict[str, tuple[dict, int, list[str]]] = {}
+    for item, branches in groups:
+        message = item.get("message", "")
+        # An open goal is its own fact; only the same complaint about different goals merges.
+        key = f"{id(item)}" if message.startswith("unsolved goals") else _same_message_key(message)
+        if key in merged:
+            merged[key][2].append(str(item["id"]))
+        else:
+            merged[key] = (item, branches, [])
+    return list(merged.values())
+
+
 def error_message(message: str) -> str:
     """A diagnostic's text up to its goal block: the headline and the lines under it, joined into one line and capped
     at `error_message_chars`. A failed rewrite names the pattern it did not find instead."""
+    message = _COMBINING.sub("", message)
     parts = _rewrite_parts(message)
     lines = message.split("\n")
     if parts:
@@ -330,6 +354,15 @@ def _refresh_versions(item: dict, history: list[dict], projection) -> None:
     item["lines"] = [refreshed if line == price else line for line in item["lines"]]
 
 
+def _mark_ineligible(item: dict, projection) -> None:
+    """A node that fails a required version is never reported as compiling."""
+    node = next((node for node in projection.nodes if node.id == item.get("node")), None)
+    if node is not None and graph.shown_status(node) == "ineligible" and item.get("lines"):
+        closed, failed = reply.outcome("closed"), reply.outcome("ineligible")
+        item["lines"][0] = item["lines"][0].replace(f" {closed} ", f" {failed} ", 1)
+        item["status"] = "ineligible"
+
+
 def _compile_item(name: str, run_id: str, node_ref: str, result: dict, filing: str) -> dict:
     _history_rows, projection = _nodes(run_id)
     node = next((item for item in projection.nodes if item.id == node_ref), None)
@@ -351,12 +384,12 @@ def _compile_item(name: str, run_id: str, node_ref: str, result: dict, filing: s
     lines = [_render("compile_filed", node=node.id, outcome=reply.outcome(status, holes), filing=filing)]
     if timeout:
         lines.append(_render("timeout", seconds=engine.lean_timeout()))
-    groups = _branch_groups(errors)
+    groups = _same_message_groups(_branch_groups(errors))
     known = _statement_context(projection) | _binder_hypotheses(name, errors) if groups else set()
     if groups:
         lines.append(_render("lean_messages"))
     main_line = _statement_by_line(node.proof_text)
-    for item, branches in groups:
+    for item, branches, same in groups:
         lines.append(
             _render(
                 "error_item",
@@ -372,6 +405,8 @@ def _compile_item(name: str, run_id: str, node_ref: str, result: dict, filing: s
         if item.get("goal"):
             goal = reply.compact_goal(item["goal"], known, int(text.numbers().get("goal_hyp_chars", 1000)))
             lines.append(_render("error_goal", goal=goal))
+        if same:
+            lines.append(_render("error_same", count=len(same), ids=", ".join(same)))
     if holes:
         lines.append(_render("open_holes"))
     lines.extend(
@@ -538,6 +573,13 @@ def compile_tool(theorem: str, run_id: str, request: dict) -> dict:
     if unknown:
         return _invalid("unknown_argument", unknown[0], valid, TOOL_FORMS["compile"])
     operations = [key for key in ("drafts", "splice", "fill", "merge") if key in request]
+    if len(operations) == 1 and operations[0] in ("splice", "merge") and request.get("base") and isinstance(
+        request[operations[0]], dict
+    ):
+        inner = request[operations[0]]
+        if inner.get("base") and inner["base"] != request["base"]:
+            return _invalid("base_conflict", f"{request['base']} / {inner['base']}", ["one base"], TOOL_FORMS["compile"])
+        request = {**request, operations[0]: {**inner, "base": request["base"]}}
     if len(operations) != 1:
         return _invalid(
             "bad_operation",
@@ -691,6 +733,7 @@ def compile_tool(theorem: str, run_id: str, request: dict) -> dict:
     for item in items:
         if item.get("status") == "closed" and item.get("node"):
             _refresh_versions(item, history, projection)
+            _mark_ineligible(item, projection)
     for left, right, parent, steps in graph.merge_offers(projection, set(handles)):
         if reply.first_time(run_id, f"merge:{left},{right}"):
             facts.append(_render("merge_offer", left=left, right=right, parent=parent, steps=", ".join(steps)))
