@@ -1103,19 +1103,23 @@ def search_tool(theorem: str, run_id: str, request: dict) -> dict:
     return reply.attach_context(run_id, reply.reply(items=items, handles=handles), include_map=False)
 
 
-_FILE_HANDLE = re.compile(r"([^\s:]+\.lean):([1-9][0-9]*)-([1-9][0-9]*)")
+# A leading `<source>:` (the packet prints sources as `arklib:path`) is dropped; a range is optional.
+_FILE_HANDLE = re.compile(r"(?:[A-Za-z_][\w-]*:)?([^\s:]+\.lean)(?::(?:first-last|([1-9][0-9]*)-([1-9][0-9]*)))?")
 
 
 def _file_read(theorem: str, run_id: str, handle: str) -> dict:
     """`<path>.lean:first-last` inside the run's Lean project or its dependencies, with file line numbers."""
-    valid = ["decl:<qualified-name>[:first-last]", "<path>.lean:first-last"]
+    valid = ["decl:<qualified-name>[:20-50]", "<path>.lean:20-50"]
     match = _FILE_HANDLE.fullmatch(handle)
-    if not match or handle.startswith("/") or ".." in match.group(1).split("/"):
+    if not match or match.group(1).startswith("/") or ".." in match.group(1).split("/"):
         return _invalid("bad_handle", handle, valid, TOOL_FORMS["read"])
-    path, first, last = match.group(1), int(match.group(2)), int(match.group(3))
+    path = match.group(1)
+    size = int(text.numbers().get("read_source_lines", 400))
+    # Without a range the read starts at the top of the file, capped at one read's size.
+    first = int(match.group(2) or 1)
+    last = int(match.group(3)) if match.group(3) else first + size - 1
     if last < first:
         return _invalid("bad_handle", handle, ["first <= last"], TOOL_FORMS["read"])
-    size = int(text.numbers().get("read_source_lines", 400))
     end = min(last, first + size - 1)
     try:
         result = campaign.source_range(theorem, path, first, end)
@@ -1139,9 +1143,9 @@ def _file_read(theorem: str, run_id: str, handle: str) -> dict:
 def _decl_read(theorem: str, run_id: str, handle: str) -> dict:
     if not handle.startswith("decl:"):
         return _file_read(theorem, run_id, handle)
-    match = re.fullmatch(r"(decl:[^:\s]+)(?::([1-9][0-9]*)-([1-9][0-9]*))?", handle)
+    match = re.fullmatch(r"(decl:[^:\s]+)(?::(?:first-last|([1-9][0-9]*)-([1-9][0-9]*)))?", handle)
     if not match:
-        return _invalid("bad_handle", handle, ["decl:<qualified-name>[:first-last]"], TOOL_FORMS["read"])
+        return _invalid("bad_handle", handle, ["decl:<qualified-name>[:20-50]"], TOOL_FORMS["read"])
     canonical, first, last = match.groups()
     name = canonical.removeprefix("decl:")
     if name == theorem or theorem.endswith("." + name):
@@ -1254,6 +1258,24 @@ def _cut_outline(lines: list[str]) -> list[str]:
     return kept
 
 
+# A handle naming a node or hole reads exactly like the `node` or `hole` parameter.
+_NODE_HANDLE = re.compile(r"node:(n[1-9][0-9]*)")
+_HOLE_HANDLE = re.compile(r"hole:(n[1-9][0-9]*\.h[1-9][0-9]*)")
+
+
+def _handle_as_target(request: dict) -> dict:
+    handle = request.get("handle")
+    if not isinstance(handle, str):
+        return request
+    node = _NODE_HANDLE.fullmatch(handle)
+    hole = _HOLE_HANDLE.fullmatch(handle)
+    if not node and not hole:
+        return request
+    key, value = ("node", node.group(1)) if node else ("hole", hole.group(1))
+    rest = {name: item for name, item in request.items() if name != "handle"}
+    return {**rest, key: value}
+
+
 def read_tool(theorem: str, run_id: str, request: dict) -> dict:
     if _is_empty(request, "read"):
         return _empty_error("read")
@@ -1261,6 +1283,7 @@ def read_tool(theorem: str, run_id: str, request: dict) -> dict:
     unknown = sorted(set(request) - set(valid))
     if unknown:
         return _invalid("unknown_argument", unknown[0], valid, TOOL_FORMS["read"])
+    request = _handle_as_target(request)
     view = request.get("view", "source")
     if request.get("handle") and view != "source":
         return _invalid("bad_view", view, ["source"], TOOL_FORMS["read"])

@@ -396,3 +396,45 @@ class ToolReplyTextTests(CascadeToolCase):
         )
         missing = tools.read_tool("T", "logic", {"node": node, "view": "outline", "step": "s9"})
         self.assertEqual(missing["error"]["code"], "unknown_step")
+
+
+class ReadHandleForgivingTests(CascadeToolCase):
+    def test_decl_handle_with_a_literal_first_last_suffix_reads_the_whole_declaration(self):
+        with (
+            patch("arena.tools.search.resolve_handle", return_value={"line": 1, "end_line": 2}),
+            patch.object(
+                campaign,
+                "source_range",
+                return_value={"source": "p", "first": 1, "last": 2, "text": "1: x", "next_first": None},
+            ),
+        ):
+            result = tools.read_tool(
+                "T", "logic", {"handle": "decl:Binius.BinaryBasefold.fold_advances_evaluation_poly:first-last"}
+            )
+        self.assertNotEqual((result.get("error") or {}).get("code"), "bad_handle")
+        self.assertTrue(result["ok"])
+
+    def test_file_handle_with_a_source_prefix_reads_the_range_like_the_plain_path(self):
+        source = {"source": "p", "first": 1000, "last": 1080, "text": "1000: x", "next_first": None}
+        with patch.object(campaign, "source_range", return_value=source) as read:
+            result = tools.read_tool(
+                "T", "logic", {"handle": "arklib:ArkLib/ProofSystem/Binius/BinaryBasefold/Prelude.lean:1000-1080"}
+            )
+        self.assertNotEqual((result.get("error") or {}).get("code"), "bad_handle")
+        self.assertTrue(result["ok"])
+        read.assert_called_once_with("T", "ArkLib/ProofSystem/Binius/BinaryBasefold/Prelude.lean", 1000, 1080)
+
+    def test_node_handle_reads_exactly_like_the_node_parameter(self):
+        node = self.sketch()
+        self.assertRegex(node, r"^n[1-9][0-9]*$")
+        by_handle = tools.read_tool("T", "logic", {"handle": f"node:{node}"})
+        by_node = tools.read_tool("T", "logic", {"node": node})
+        self.assertNotEqual((by_handle.get("error") or {}).get("code"), "bad_handle")
+        self.assertEqual(by_handle, by_node)
+
+    def test_hole_handle_reads_exactly_like_the_hole_parameter(self):
+        node = self.sketch()
+        by_handle = tools.read_tool("T", "logic", {"handle": f"hole:{node}.h1"})
+        by_hole = tools.read_tool("T", "logic", {"hole": f"{node}.h1"})
+        self.assertNotEqual((by_handle.get("error") or {}).get("code"), "bad_handle")
+        self.assertEqual(by_handle, by_hole)
