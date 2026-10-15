@@ -82,6 +82,29 @@ def _jsonl(path: Path) -> list[dict]:
     return rows
 
 
+# The only Pi event types any reader of events.jsonl uses. A run's file is 100-160 MB, almost all `message_update`
+# stream chunks (~0.3% of lines are kept), so lines are filtered by their head before any JSON is parsed.
+KEPT_EVENTS = ("message_end", "tool_execution_end")
+
+
+def read_events(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    rows = []
+    with path.open(errors="replace") as handle:
+        for line in handle:
+            head = line[:48]
+            if not any(f'"{kind}"' in head for kind in KEPT_EVENTS):
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(row, dict) and row.get("type") in KEPT_EVENTS:
+                rows.append(row)
+    return rows
+
+
 def _json(path: Path) -> dict | None:
     try:
         return json.loads(path.read_text())
@@ -369,7 +392,7 @@ def _progress(ledger: list[dict]) -> dict:
 
 def build_summary(directory: Path) -> dict:
     ledger = _jsonl(directory / "ledger.jsonl")
-    events = _jsonl(directory / "events.jsonl")
+    events = read_events(directory / "events.jsonl")
     cost_events = _jsonl(directory / "cost-ledger.jsonl")
     trace = trace_rows(directory / "trace-journal.jsonl")
     config = _read_json(directory / "run-config.json")

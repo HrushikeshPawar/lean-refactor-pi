@@ -28,6 +28,7 @@ from arena.summary import (
     configured_cap,
     hit_rate_pct,
     ledger_spend,
+    read_events,
     session_spend,
     trace_rows,
 )
@@ -76,6 +77,20 @@ def read_jsonl(path: Path) -> list[dict]:
         for old in jsonl_keys[: max(0, len(jsonl_keys) - 23)]:  # keep memory bounded: oldest files go first
             _CACHE.pop(old, None)
         _CACHE.pop(key, None)
+        _CACHE[key] = (stamp, rows)
+    return rows
+
+
+def _events(path: Path) -> list[dict]:
+    """The assistant-message and tool-result events of events.jsonl, re-read only when the file changes."""
+    key, stamp = ("events", str(path)), _stamp(path)
+    hit = _CACHE.get(key)
+    if hit and hit[0] == stamp:
+        return hit[1]
+    rows = read_events(path)
+    with _CACHE_LOCK:
+        for old in [k for k in _CACHE if k[0] == "events" and k != key][:-3]:  # a few runs at most
+            _CACHE.pop(old, None)
         _CACHE[key] = (stamp, rows)
     return rows
 
@@ -293,7 +308,7 @@ def spend_series(directory: Path, start: float | None, limit: float | None) -> d
     cost_events = read_jsonl(directory / "cost-ledger.jsonl")
     settles = [e for e in cost_events if e.get("kind") == "settle"]
     try:
-        turns = _turns(read_jsonl(directory / "events.jsonl"), settles)
+        turns = _turns(_events(directory / "events.jsonl"), settles)
     except (KeyError, TypeError):
         turns = []
     priced = iter(turns)
