@@ -1174,14 +1174,18 @@ def read_tool(theorem: str, run_id: str, request: dict) -> dict:
             ]
             if len(tree["rows"]) > len(shown_rows):
                 lines.append(_render("read_tree_more", count=len(tree["rows"]) - len(shown_rows)))
-            lines.append(
-                _render(
-                    "read_tree_total",
-                    measured=reply.shown(tree["measured"]),
-                    attributed=reply.shown(tree["attributed"]),
-                    rest=reply.shown(tree["unattributed"]),
+            totals = {
+                "measured": reply.shown(tree["measured"]),
+                "attributed": reply.shown(tree["attributed"]),
+                "rest": reply.shown(tree["unattributed"]),
+            }
+            if tree.get("floor") is not None and isinstance(tree["unattributed"], int):
+                floor = tree["floor"]
+                lines.append(
+                    _render("read_tree_total_floor", **totals, floor=floor, after=max(0, tree["unattributed"] - floor))
                 )
-            )
+            else:
+                lines.append(_render("read_tree_total", **totals))
         data["tree"] = tree
     elif view == "map":
         result = reply.attach_context(

@@ -605,3 +605,16 @@ class LeanUnhealthyTests(unittest.TestCase):
         self.assertEqual(rc.provider_unreachable_rows([row]), [row])
         text = rc.render(rc.aggregate([row], {"A": "h"}))
         self.assertIn(f"PROVIDER UNREACHABLE (rerun): 1 run(s): {row['run_id']} ($0.0300)", text)
+
+
+class RepeatedTextTests(unittest.TestCase):
+    def test_body_repeats_are_listed_with_savings_and_the_statement_is_skipped(self):
+        from arena.campaign import repeated_text
+
+        span = "(hA.of_le (right_eq_inf.mp rfl))"
+        proof = f"theorem t (h : {span}) : True := by\n  exact f {span}\n  exact g {span} x\n  exact k {span}\n  simp {span}\n"
+        items = repeated_text(proof, 0.5)
+        self.assertEqual([(item["text"], item["count"]) for item in items], [(span, 4)])
+        self.assertEqual((items[0]["tokens"], items[0]["saved_tokens"]), (7, 3 * 7 - 11))
+        self.assertEqual(items[0]["points"], round(items[0]["saved_tokens"] * 0.5, 2))
+        self.assertEqual(repeated_text("theorem t : True := by\n  simp\n  rfl\n", 0.5), [])

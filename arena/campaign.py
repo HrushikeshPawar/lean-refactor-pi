@@ -2394,6 +2394,12 @@ def cost_tree(name: str, run_id: str, reference: str) -> dict:
                 ),
             }
         )
+    from arena.profile import cached_heartbeat_floor
+
+    try:
+        floor = cached_heartbeat_floor(name)
+    except (ValueError, OSError, KeyError):
+        floor = None
     return {
         "node": _update_id(history, proof_id),
         "profiled": profile is not None,
@@ -2401,6 +2407,7 @@ def cost_tree(name: str, run_id: str, reference: str) -> dict:
         "measured": (profile or {}).get("measured_total"),
         "attributed": (profile or {}).get("profiled_total"),
         "unattributed": (profile or {}).get("unattributed"),
+        "floor": floor,
     }
 
 
@@ -2462,7 +2469,10 @@ def map_view_from(history: list[dict], directory: Path) -> dict:
     scored = [node for node in graph.nodes if node.score is not None]
     if scored:
         best = max(scored, key=lambda node: node.score)
-        view["line_costs"] = _line_costs(best.proof_text, profiles.get(best.proof_id))
+        view["line_costs"] = {
+            **_line_costs(best.proof_text, profiles.get(best.proof_id)),
+            "repeated": repeated_text(best.proof_text, price_rates["points_per_token"]),
+        }
     return view
 
 
@@ -3615,3 +3625,78 @@ def _failure_text(result: dict) -> str:
         if info.get("error"):
             return str(info["error"])[:160]
     return "compile failed"
+
+
+# Repeated source spans: at least this many competition tokens, at most this many listed.
+REPEAT_MIN_TOKENS = 6
+REPEAT_SHOWN = 3
+_REPEAT_WORDS = re.compile(r"[\w.'!?]+|[^\w\s]")
+_REPEAT_START_WORDS = 4
+
+
+def repeated_text(proof: str, points_per_token: float) -> list[dict]:
+    """Source spans repeated in the proof body (after `:= by`), each with the tokens saved if it is shared once
+    through a `have`: (count - 1) * tokens - (tokens + 4). Maximal spans only, positive savings only, and a span
+    contained in a larger listed span is dropped."""
+    from arena.profile import _mask_comments
+
+    marker = proof.find(":= by")
+    body = _mask_comments(proof[marker + len(":= by") :] if marker >= 0 else proof)
+    found = list(_REPEAT_WORDS.finditer(body))
+    words = [match.group() for match in found]
+    total = len(words)
+    level = [
+        (_REPEAT_START_WORDS, positions)
+        for key, positions in _group_starts(words, _REPEAT_START_WORDS).items()
+        if len(positions) >= 2
+    ]
+    maximal: list[tuple[int, list[int]]] = []
+    while level:
+        grown = []
+        for length, positions in level:
+            children: dict[str, list[int]] = {}
+            for p in positions:
+                if p + length < total:
+                    children.setdefault(words[p + length], []).append(p)
+            if not any(len(kids) == len(positions) for kids in children.values()):
+                maximal.append((length, positions))
+            grown.extend((length + 1, kids) for kids in children.values() if len(kids) >= 2)
+        level = grown
+    items: dict[str, dict] = {}
+    for length, positions in maximal:
+        before = {words[p - 1] if p > 0 else None for p in positions}
+        if len(before) == 1 and None not in before:
+            continue  # every occurrence extends to the left as well; the longer span is listed instead
+        kept: list[int] = []
+        for p in positions:
+            if not kept or p >= kept[-1] + length:
+                kept.append(p)
+        if len(kept) < 2:
+            continue
+        span = " ".join(body[found[kept[0]].start() : found[kept[0] + length - 1].end()].split())
+        tokens = snippet_tokens(span)
+        saved = (len(kept) - 1) * tokens - (tokens + 4)
+        if tokens < REPEAT_MIN_TOKENS or saved <= 0 or span in items:
+            continue
+        items[span] = {
+            "text": span,
+            "count": len(kept),
+            "tokens": tokens,
+            "saved_tokens": saved,
+            "points": round(saved * points_per_token, 2),
+        }
+    chosen: list[dict] = []
+    for item in sorted(items.values(), key=lambda row: -row["saved_tokens"]):
+        if any(f" {item['text']} " in f" {kept['text']} " for kept in chosen):
+            continue
+        chosen = [kept for kept in chosen if f" {kept['text']} " not in f" {item['text']} "] + [item]
+        if len(chosen) == REPEAT_SHOWN:
+            break
+    return sorted(chosen, key=lambda row: -row["saved_tokens"])
+
+
+def _group_starts(words: list[str], length: int) -> dict[tuple[str, ...], list[int]]:
+    groups: dict[tuple[str, ...], list[int]] = {}
+    for index in range(len(words) - length + 1):
+        groups.setdefault(tuple(words[index : index + length]), []).append(index)
+    return groups

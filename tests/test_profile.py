@@ -199,5 +199,24 @@ class PinnedPhyslibProfileTests(unittest.TestCase):
         self.assertTrue(any(span["end_file_line"] > span["file_line"] for span in spans))
 
 
+@slow
+@unittest.skipUnless(
+    (ROOT / "runs/analysis/claude-push/timederiv/best.lean").is_file(), "timederiv proof is not present"
+)
+class ConvProfileTests(unittest.TestCase):
+    def test_conv_block_lists_its_tactics_as_children(self):
+        name = "Electromagnetism.ElectromagneticPotential.time_deriv_time_deriv_electricField_of_isExtrema"
+        proof = (ROOT / "runs/analysis/claude-push/timederiv/best.lean").read_text()
+        entries = profiler.profile(name, proof)["entries"]
+        conv = next(e for e in entries if e["depth"] == 0 and e["proof_line"] == 22)
+        children = [
+            e
+            for e in entries
+            if e["depth"] == conv["depth"] + 1 and conv["proof_line"] < e["proof_line"] <= conv["end_proof_line"]
+        ]
+        self.assertTrue(children)
+        self.assertEqual({e["kind"] for e in children}, {"tactic"})
+
+
 if __name__ == "__main__":
     unittest.main()

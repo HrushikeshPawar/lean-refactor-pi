@@ -478,3 +478,13 @@ def heartbeat_floor(name: str) -> dict:
         cache.parent.mkdir(parents=True, exist_ok=True)
         cache.write_text(json.dumps(known, indent=1))
     return known[key]
+
+
+def cached_heartbeat_floor(name: str) -> int | None:
+    """The statement floor if `heartbeat_floor` already cached it for this row and commit; never starts Lean."""
+    row = problem(name)
+    _, commit = measure_version(row)
+    cache = ROOT / "runs" / "cache" / "floor.json"
+    known = json.loads(cache.read_text()) if cache.exists() else {}
+    entry = known.get(f"{name}@{commit}") or {}
+    return entry.get("heartbeats")

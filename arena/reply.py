@@ -253,7 +253,20 @@ def _line_cost_lines(data: dict) -> list[str]:
             )
             for row in costs["quiet"]
         )
-    if lines:
+    if costs.get("repeated"):
+        lines.append(text.render("replies/tools.map_repeated_head"))
+        lines.extend(
+            text.render(
+                "replies/tools.map_repeated_line",
+                count=row["count"],
+                tokens=shown(row["tokens"]),
+                saved=shown(row["saved_tokens"]),
+                points=shown(row["points"]),
+                text=cell(row["text"]),
+            )
+            for row in costs["repeated"]
+        )
+    if costs.get("tactic") or costs.get("quiet"):
         lines.append(text.render("replies/tools.map_lines_note"))
     return lines
 

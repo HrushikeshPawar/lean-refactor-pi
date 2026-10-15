@@ -7,6 +7,16 @@ elab "arena_hb_tac " line:num col:num depth:num endLine:num endCol:num seq:tacti
     let t1 ← IO.getNumHeartbeats
     logInfo m!"ARENA_PROFILE {line.getNat} {col.getNat} {depth.getNat} {endLine.getNat} {endCol.getNat} tactic {(t1 - t0) / 1000}"
 
+-- A conv tactic (inside `conv_lhs => ...`, `conv => ...`, `{ ... }`): same record as `arena_hb_tac`.
+open Lean Elab Tactic in
+elab "arena_hb_conv " line:num col:num depth:num endLine:num endCol:num seq:Lean.Parser.Tactic.Conv.convSeq : conv => do
+  let t0 ← IO.getNumHeartbeats
+  try
+    evalTactic seq
+  finally
+    let t1 ← IO.getNumHeartbeats
+    logInfo m!"ARENA_PROFILE {line.getNat} {col.getNat} {depth.getNat} {endLine.getNat} {endCol.getNat} tactic {(t1 - t0) / 1000}"
+
 -- A stated term (a chained relation's right side, a `show` or local declaration type): the heartbeats spent
 -- elaborating it where it stands. Work Lean postpones past this point is booked where it finally runs.
 open Lean Elab Term in
@@ -42,11 +52,13 @@ elab "arena_profile_heartbeats " cmd:command : command => do
       | .node info kind args =>
         let isSeq := kind == ``Lean.Parser.Tactic.tacticSeq1Indented ||
           kind == ``Lean.Parser.Tactic.tacticSeqBracketed
+        let isConvSeq := kind == ``Lean.Parser.Tactic.Conv.convSeq1Indented ||
+          kind == ``Lean.Parser.Tactic.Conv.convSeqBracketed
         let mut out : Array Lean.Syntax := #[]
         for arg in args do
           match arg with
           | .node ninfo `null items =>
-            if isSeq then
+            if isSeq || isConvSeq then
               let mut newItems : Array Lean.Syntax := #[]
               let mut i := 0
               for item in items do
@@ -55,8 +67,12 @@ elab "arena_profile_heartbeats " cmd:command : command => do
                   match place item with
                   | some (l, c, e, ec) =>
                     if depth <= maxDepth then
-                      let seq ← `(Lean.Parser.Tactic.tacticSeq| $(⟨inner⟩):tactic)
-                      newItems := newItems.push (← `(tactic| arena_hb_tac $(⟨lit l⟩) $(⟨lit c⟩) $(⟨lit depth⟩) $(⟨lit e⟩) $(⟨lit ec⟩) $seq))
+                      if isConvSeq then
+                        let seq ← `(Lean.Parser.Tactic.Conv.convSeq| $(⟨inner⟩):conv)
+                        newItems := newItems.push (← `(conv| arena_hb_conv $(⟨lit l⟩) $(⟨lit c⟩) $(⟨lit depth⟩) $(⟨lit e⟩) $(⟨lit ec⟩) $seq))
+                      else
+                        let seq ← `(Lean.Parser.Tactic.tacticSeq| $(⟨inner⟩):tactic)
+                        newItems := newItems.push (← `(tactic| arena_hb_tac $(⟨lit l⟩) $(⟨lit c⟩) $(⟨lit depth⟩) $(⟨lit e⟩) $(⟨lit ec⟩) $seq))
                     else newItems := newItems.push inner
                   | none => newItems := newItems.push inner
                 else newItems := newItems.push item
