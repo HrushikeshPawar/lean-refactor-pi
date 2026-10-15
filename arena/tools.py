@@ -130,10 +130,36 @@ def _filing_line(node, projection, result: dict) -> str:
     return _render("filing_root")
 
 
+_TARGET_MARK = "in the target expression"
+
+
+def _rewrite_parts(message: str) -> tuple[str, list[str]] | None:
+    """A failed rewrite's missing pattern (one line) and the lines after its target expression (the goal), or None
+    for any other message. Lean prints: headline, indented pattern, the mark, indented target, then the goal."""
+    lines = message.split("\n")
+    if _TARGET_MARK not in lines[1:] and not any(line.strip() == _TARGET_MARK for line in lines[1:]):
+        return None
+    mark = next(index for index, line in enumerate(lines) if line.strip() == _TARGET_MARK)
+    pattern = " ".join(line.strip() for line in lines[1:mark])
+    rest = lines[mark + 1 :]
+    start = next((index for index, line in enumerate(rest) if line and not line[0].isspace()), len(rest))
+    return pattern, rest[start:]
+
+
+def error_headline(message: str) -> str:
+    """A diagnostic's first line; a failed rewrite also names the pattern it did not find."""
+    parts = _rewrite_parts(message)
+    first = message.split("\n")[0]
+    return f"{first} `{parts[0]}`" if parts else first
+
+
 def message_goal(message: str) -> str | None:
     """The goal Lean prints under the first line of a diagnostic (case tag, hypotheses, `⊢`), without the tactic's own report."""
+    if message.startswith("No goals"):
+        return None
+    parts = _rewrite_parts(message)
     body: list[str] = []
-    for line in message.split("\n")[1:]:
+    for line in parts[1] if parts else message.split("\n")[1:]:
         if line.startswith("["):
             break
         body.append(line)
@@ -208,7 +234,9 @@ def all_errors(name: str, run_id: str, node, result: dict) -> tuple[list[dict], 
     ordered = sorted(revealed, key=lambda item: (item.get("proof_line") or 0, item.get("column") or 0))
     for index, item in enumerate(ordered, 1):
         item["goal"] = (
-            message_goal(item.get("message", "")) or item.get("goal") or goal_by_line.get(item.get("proof_line"))
+            None
+            if str(item.get("message", "")).startswith("No goals")
+            else message_goal(item.get("message", "")) or item.get("goal") or goal_by_line.get(item.get("proof_line"))
         )
         item["id"] = f"{node.id}.e{index}"
         item["line"] = item.get("proof_line")
@@ -313,7 +341,7 @@ def _compile_item(name: str, run_id: str, node_ref: str, result: dict, filing: s
                 "error_item",
                 id=item["id"],
                 line=item.get("line") or "?",
-                message=item.get("message", "").splitlines()[0],
+                message=error_headline(item.get("message", "")),
             )
         )
         if branches:

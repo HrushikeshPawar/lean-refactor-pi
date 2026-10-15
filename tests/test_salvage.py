@@ -69,6 +69,27 @@ class SalvagePlanningTests(unittest.TestCase):
         self.assertEqual(result["rounds"][0]["strategies"], ["S4"])
         self.assertIn("sorry", result["text"])
 
+    def test_s1_drops_a_trailing_tactic_that_finds_no_goals(self):
+        proof = "theorem t : True := by\n  trivial\n  rfl"
+        finished = {
+            "ok": True,
+            "compat": {
+                "v1": {
+                    "passed": False,
+                    "diagnostics": [{"severity": "error", "proof_line": 3, "message": "No goals to be solved"}],
+                }
+            },
+        }
+        compile, seen = scripted(
+            [
+                {**diagnostics(3), "result": finished},
+                {"clean": True, "error_lines": [], "unlocated": False, "result": {}},
+            ]
+        )
+        result = salvage.salvage("T", proof, compile)
+        self.assertEqual((result["status"], result["rounds"][0]["strategies"]), ("salvaged", ["S1"]))
+        self.assertEqual(seen[-1], "theorem t : True := by\n  trivial")
+
     def test_top_level_errors_do_not_replace_the_whole_proof(self):
         proof = "theorem t : True := by\n  bad\n  bad"
         compile, _ = scripted([diagnostics(2, 3)])

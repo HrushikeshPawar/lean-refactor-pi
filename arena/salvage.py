@@ -202,7 +202,7 @@ def _compiled(name: str, text: str, compile: Callable[[str], dict]) -> dict:
     if not isinstance(compiled, dict):
         raise ValueError("salvage compile must return a result dictionary")
     if {"clean", "error_lines", "unlocated", "result"} <= compiled.keys():
-        return compiled
+        return {**compiled, "finished_lines": _finished_lines(compiled["result"] or {})}
     result = compiled
     compat = result.get("compat") or {}
     first = next(iter(compat.values()), {})
@@ -211,7 +211,34 @@ def _compiled(name: str, text: str, compile: Callable[[str], dict]) -> dict:
     error_lines = [
         item["proof_line"] for item in diagnostics if item.get("severity") == "error" and item.get("proof_line")
     ]
-    return {"clean": clean, "error_lines": error_lines, "unlocated": not clean and not error_lines, "result": result}
+    return {
+        "clean": clean,
+        "error_lines": error_lines,
+        "finished_lines": _finished_lines(result),
+        "unlocated": not clean and not error_lines,
+        "result": result,
+    }
+
+
+def _finished_lines(result: dict) -> list[int]:
+    """Error lines when every error is "No goals" (the proof was already done there); otherwise none."""
+    first = next(iter((result.get("compat") or {}).values()), {})
+    errors = [item for item in first.get("diagnostics") or [] if item.get("severity") == "error"]
+    if not errors or not all(str(item.get("message", "")).startswith("No goals") for item in errors):
+        return []
+    return [item["proof_line"] for item in errors if item.get("proof_line")]
+
+
+def drop_finished(lines: list[str], roots: list[Node], finished: set[int]) -> list[str] | None:
+    """S1: the proof is already done before these one-line tactics ("No goals"); remove them. Only leaf steps
+    whose single line is the error line go; anything else is left to the other strategies."""
+    drop = set()
+    for line in finished:
+        node = deepest(roots, line)
+        if node is None or node.kids or node.start != line or node.end - node.start != 1:
+            return None
+        drop.add(line)
+    return [text for index, text in enumerate(lines) if index not in drop] if drop else None
 
 
 def _kept(original: str, final: str) -> float:
@@ -231,7 +258,7 @@ def _kept(original: str, final: str) -> float:
 
 
 def salvage(name: str, proof: str, compile: Callable[[str], dict]) -> dict:
-    """Attempt the replayed S2→S3→S4 chain using an injected compiler."""
+    """Attempt the replayed S1→S2→S3→S4 chain using an injected compiler."""
     roots = parse(proof.split("\n"))
     if roots is None:
         return {"status": "unparseable", "compiles": 0, "rounds": [], "text": None, "result": None, "kept": None}
@@ -272,6 +299,11 @@ def salvage(name: str, proof: str, compile: Callable[[str], dict]) -> dict:
         if tree is None:
             status = "broken-outside-steps"
             break
+        dropped = drop_finished(lines, tree, {line - 1 for line in compiled.get("finished_lines") or []})
+        if dropped is not None:
+            rounds.append({"round": index + 1, "errors": len(compiled["error_lines"]), "strategies": ["S1"]})
+            current = "\n".join(dropped)
+            continue
         next_lines, strategies, reason = plan(lines, tree, {line - 1 for line in compiled["error_lines"]})
         if reason:
             status = reason
