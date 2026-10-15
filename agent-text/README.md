@@ -110,8 +110,8 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `messages/salvage.fill_many` | 9 | Agent messages and notices | when the matching event occurs |
 | `messages/salvage.fill_none` | 5 | Agent messages and notices | when the matching event occurs |
 | `messages/salvage.fill_one` | 10 | Agent messages and notices | when the matching event occurs |
-| `messages/salvage.salvaged` | 5 | Agent messages and notices | when the matching event occurs |
-| `messages/salvage.salvaged_unseen` | 7 | Agent messages and notices | when the matching event occurs |
+| `messages/salvage.salvaged` | 6 | Agent messages and notices | when the matching event occurs |
+| `messages/salvage.salvaged_unseen` | 11 | Agent messages and notices | when the matching event occurs |
 | `messages/trim.result_stub` | 9 | Agent messages and notices | when a repeat is shortened |
 | `packet/price-table` | 7 | Prices action replies | when the table is requested |
 | `packet/price-table.legend` | 34 | Prices action replies | when the table is requested |
@@ -194,19 +194,19 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/price-row.row_root` | 12 | Compile replies | when a scored proof is compiled |
 | `replies/price-row.versions_full` | 1 | Compile replies | when a scored proof is compiled |
 | `replies/price-row.versions_pending` | 4 | Compile replies | when a scored proof is compiled |
-| `replies/tools.compile_filed` | 3 | Tool replies | when the matching tool result occurs |
+| `replies/tools.compile_filed` | 4 | Tool replies | when the matching tool result occurs |
 | `replies/tools.compile_item` | 4 | Tool replies | when the matching tool result occurs |
 | `replies/tools.duplicate` | 4 | Tool replies | when the matching tool result occurs |
 | `replies/tools.error_branches` | 8 | Tool replies | when the matching tool result occurs |
 | `replies/tools.error_goal` | 2 | Tool replies | when the matching tool result occurs |
 | `replies/tools.error_item` | 4 | Tool replies | when the matching tool result occurs |
 | `replies/tools.errors_incomplete` | 6 | Tool replies | when the matching tool result occurs |
-| `replies/tools.filing_draft` | 4 | Tool replies | when the matching tool result occurs |
-| `replies/tools.filing_fill` | 5 | Tool replies | when the matching tool result occurs |
+| `replies/tools.filing_draft` | 7 | Tool replies | when the matching tool result occurs |
+| `replies/tools.filing_fill` | 7 | Tool replies | when the matching tool result occurs |
 | `replies/tools.filing_focus` | 4 | Tool replies | when the matching tool result occurs |
-| `replies/tools.filing_merge` | 4 | Tool replies | when the matching tool result occurs |
-| `replies/tools.filing_root` | 5 | Tool replies | when the matching tool result occurs |
-| `replies/tools.filing_splice` | 5 | Tool replies | when the matching tool result occurs |
+| `replies/tools.filing_merge` | 8 | Tool replies | when the matching tool result occurs |
+| `replies/tools.filing_root` | 3 | Tool replies | when the matching tool result occurs |
+| `replies/tools.filing_splice` | 7 | Tool replies | when the matching tool result occurs |
 | `replies/tools.finish_archive` | 2 | Tool replies | when the matching tool result occurs |
 | `replies/tools.finish_points` | 8 | Tool replies | when the matching tool result occurs |
 | `replies/tools.goal_cases_omitted` | 7 | Tool replies | when the matching tool result occurs |
@@ -229,13 +229,15 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/tools.map_origin_from` | 3 | Tool replies | when the matching tool result occurs |
 | `replies/tools.map_origin_root` | 2 | Tool replies | when the matching tool result occurs |
 | `replies/tools.map_quiet_line` | 7 | Tool replies | when the matching tool result occurs |
-| `replies/tools.map_quiet_lines_head` | 25 | Tool replies | when the matching tool result occurs |
+| `replies/tools.map_quiet_lines_cols` | 8 | Tool replies | when the matching tool result occurs |
+| `replies/tools.map_quiet_lines_head` | 18 | Tool replies | when the matching tool result occurs |
+| `replies/tools.map_quiet_lines_note` | 19 | Tool replies | when the matching tool result occurs |
 | `replies/tools.map_recent` | 13 | Tool replies | when the matching tool result occurs |
-| `replies/tools.map_recent_head` | 34 | Tool replies | when the matching tool result occurs |
+| `replies/tools.map_recent_head` | 38 | Tool replies | when the matching tool result occurs |
 | `replies/tools.map_reference` | 7 | Tool replies | when the matching tool result occurs |
 | `replies/tools.map_routes` | 20 | Tool replies | when the matching tool result occurs |
 | `replies/tools.map_shape` | 13 | Tool replies | when the matching tool result occurs |
-| `replies/tools.map_shapes` | 35 | Tool replies | when the matching tool result occurs |
+| `replies/tools.map_shapes` | 37 | Tool replies | when the matching tool result occurs |
 | `replies/tools.map_step` | 15 | Tool replies | when the matching tool result occurs |
 | `replies/tools.map_steps_cols` | 17 | Tool replies | when the matching tool result occurs |
 | `replies/tools.map_steps_head` | 10 | Tool replies | when the matching tool result occurs |
@@ -246,6 +248,12 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/tools.merge_offer` | 13 | Tool replies | when the matching tool result occurs |
 | `replies/tools.no_goal` | 6 | Tool replies | when the matching tool result occurs |
 | `replies/tools.open_holes` | 2 | Tool replies | when the matching tool result occurs |
+| `replies/tools.outcome_broken` | 3 | Tool replies | when the matching tool result occurs |
+| `replies/tools.outcome_closed` | 1 | Tool replies | when the matching tool result occurs |
+| `replies/tools.outcome_sketch` | 5 | Tool replies | when the matching tool result occurs |
+| `replies/tools.outcome_sketch_one` | 5 | Tool replies | when the matching tool result occurs |
+| `replies/tools.outcome_sketch_open` | 4 | Tool replies | when the matching tool result occurs |
+| `replies/tools.outcome_timeout` | 2 | Tool replies | when the matching tool result occurs |
 | `replies/tools.own_theorem` | 12 | Tool replies | when the matching tool result occurs |
 | `replies/tools.price` | 7 | Tool replies | when the matching tool result occurs |
 | `replies/tools.read_diff` | 4 | Tool replies | when the matching tool result occurs |
@@ -284,7 +292,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/tools.try_open` | 3 | Tool replies | when the matching tool result occurs |
 | `replies/tools.try_replaces` | 29 | Tool replies | when the matching tool result occurs |
 | `replies/tools.try_timeout` | 2 | Tool replies | when the matching tool result occurs |
-| `skill/SKILL` | 148 | Agent skill instructions | once per run |
+| `skill/SKILL` | 155 | Agent skill instructions | once per run |
 | `skill/lean-facts` | 92 | Agent skill instructions | once per run |
 | `tools/compile.description` | 29 | Model tool definitions | every request |
 | `tools/compile.params.base` | 6 | Model tool definitions | every request |

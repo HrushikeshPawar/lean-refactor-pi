@@ -72,7 +72,7 @@ class CompileToolTests(CascadeCase):
         self.assertEqual(broken["status"], "broken")
         self.assertEqual(closed["status"], "closed")
         self.assertIsNotNone(closed["price"])
-        self.assertTrue(any("filed" in line or "focus" in line for line in closed["lines"]))
+        self.assertTrue(any("new root" in line or "focus" in line for line in closed["lines"]))
         self.assertNotIn("sorry", str(result))
         proof_ids = [event["proof_id"] for event in campaign.events(self.directory) if event.get("kind") == "probe"]
         self.assertEqual(len(set(proof_ids)), 1)

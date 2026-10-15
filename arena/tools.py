@@ -106,30 +106,28 @@ def _node_result(run_id: str, proof_id: str) -> dict:
 
 
 def _filing_line(node, projection, result: dict) -> str:
+    """How a node was filed, without its id: the operation and the node it came from."""
     edge = node.edge or {}
     sources = edge.get("from") or []
+
+    def node_id(source: str) -> str:
+        return next((item.id for item in projection.nodes if item.proof_id == source), "n?")
+
     if edge.get("type") == "filled_from" and sources:
-        parent = next((item for item in projection.nodes if item.proof_id == sources[0]), None)
         operation = edge.get("operation") or {}
-        hole = operation.get("hole", "")
-        return _render("filing_fill", node=node.id, parent=parent.id if parent else "n?", hole=hole.split(".")[-1])
+        parent = node_id(sources[0])
+        return _render("filing_fill", parent=parent, hole=f"{parent}.{operation.get('hole', '').split('.')[-1]}")
     if edge.get("type") == "edited_from" and sources:
-        parent = next((item for item in projection.nodes if item.proof_id == sources[0]), None)
         operation = edge.get("operation") or {}
         if operation.get("steps"):
-            return _render(
-                "filing_splice", node=node.id, parent=parent.id if parent else "n?", steps=operation["steps"]
-            )
-        return _render("filing_draft", node=node.id, parent=parent.id if parent else "n?")
+            return _render("filing_splice", parent=node_id(sources[0]), steps=operation["steps"])
+        return _render("filing_draft", parent=node_id(sources[0]))
     if edge.get("type") == "merged_from" and sources:
-        parents = ",".join(
-            next((item.id for item in projection.nodes if item.proof_id == source), "n?") for source in sources
-        )
-        return _render("filing_merge", node=node.id, parents=parents)
+        ids = [node_id(source) for source in sources]
+        return _render("filing_merge", base=ids[0], take=", ".join(ids[1:]) or "n?")
     if edge.get("type") == "filed_under_focus" and sources:
-        parent = next((item for item in projection.nodes if item.proof_id == sources[0]), None)
-        return _render("filing_focus", node=node.id, focus=parent.id if parent else "n?")
-    return _render("filing_root", node=node.id)
+        return _render("filing_focus", focus=node_id(sources[0]))
+    return _render("filing_root")
 
 
 def message_goal(message: str) -> str | None:
@@ -302,7 +300,7 @@ def _compile_item(name: str, run_id: str, node_ref: str, result: dict, filing: s
         errors = reply.deduplicate_diagnostics(run_id, node.id, errors)
     holes = node.holes
     status = "timeout" if timeout else node.status
-    lines = [_render("compile_filed", filing=filing, status=status)]
+    lines = [_render("compile_filed", node=node.id, outcome=reply.outcome(status, holes), filing=filing)]
     if timeout:
         lines.append(_render("timeout", seconds=engine.lean_timeout()))
     groups = _branch_groups(errors)

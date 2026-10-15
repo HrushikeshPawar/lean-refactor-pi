@@ -1,4 +1,4 @@
-description: "Compile up to {compile_max_drafts} proof drafts, or apply one graph edit: splice, fill or merge. Returns for each node its id, status, errors, open holes with goals, and price."
+description: "Compile up to {compile_max_drafts} proof drafts, or apply one graph edit: splice, fill or merge. Returns for each node its id, outcome, errors, open holes with goals, and price."
 params:
   drafts: "Up to {compile_max_drafts} plain strings, each the whole theorem, `by` plus tactics, or tactic lines alone."
   splice: "Replace a range of steps in one node."

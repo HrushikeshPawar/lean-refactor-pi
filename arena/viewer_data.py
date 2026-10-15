@@ -993,7 +993,7 @@ def _step_origin(directory: Path, history: list[dict], proof_id: str) -> dict:
     node = next((item for item in projection.nodes if item.proof_id == proof_id), None)
     if node is None:
         return {}
-    fields: dict = {"origin_line": _filing_line(node, projection, {})}
+    fields: dict = {"origin_line": f"{node.id} {_filing_line(node, projection, {})}"}
     holes = []
     for hole in node.holes:
         index = hole.get("index")

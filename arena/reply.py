@@ -114,6 +114,24 @@ def shown(value: object) -> object:
     return "-" if value is None or value == "" else value
 
 
+def outcome(status: object, holes: list | None = None) -> object:
+    """A node's internal status as the model reads it: its compile outcome phrase."""
+    if status == "closed":
+        return text.render("replies/tools.outcome_closed")
+    if status == "sketch":
+        count = len(holes or [])
+        if count == 1:
+            return text.render("replies/tools.outcome_sketch_one")
+        if count:
+            return text.render("replies/tools.outcome_sketch", count=count)
+        return text.render("replies/tools.outcome_sketch_open")
+    if status == "broken":
+        return text.render("replies/tools.outcome_broken")
+    if status == "timeout":
+        return text.render("replies/tools.outcome_timeout")
+    return shown(status)
+
+
 def _origin(item: dict) -> str:
     parents = ", ".join(item.get("from") or [])
     edge = str(item.get("edge") or "root")
@@ -223,6 +241,8 @@ def _line_cost_lines(data: dict) -> list[str]:
         )
     if costs.get("quiet"):
         lines.append(text.render("replies/tools.map_quiet_lines_head", node=node))
+        lines.append(text.render("replies/tools.map_quiet_lines_note"))
+        lines.append(text.render("replies/tools.map_quiet_lines_cols"))
         lines.extend(
             text.render(
                 "replies/tools.map_quiet_line",
@@ -270,7 +290,7 @@ def _map_lines(data: dict) -> list[str]:
             text.render(
                 "replies/tools.map_shape",
                 node=shown(item.get("node")),
-                status=shown(item.get("status")),
+                status=outcome(item.get("status")),
                 tokens=shown(item.get("tokens")),
                 heartbeats=_node_hb(item),
                 score=shown(item.get("score")),
@@ -289,7 +309,7 @@ def _map_lines(data: dict) -> list[str]:
                 "replies/tools.map_recent",
                 node=shown(item.get("node")),
                 origin=_origin(item),
-                status=shown(item.get("status")),
+                status=outcome(item.get("status")),
                 tokens=shown(item.get("tokens")),
                 heartbeats=_node_hb(item),
                 score=shown(item.get("score")),

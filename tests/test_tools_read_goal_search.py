@@ -289,7 +289,7 @@ class ToolReplyTextTests(CascadeToolCase):
         verdicts = [line for line in lines if line.startswith("t")]
         self.assertEqual(
             [line.split(", tokens")[0] for line in verdicts],
-            ["t1 closed", "t2 open goals 2", "t3 error: unknown tactic near x", "t4 timed out"],
+            ["t1 compiles", "t2 open goals 2", "t3 error: unknown tactic near x", "t4 timed out"],
         )
         self.assertTrue(all(", tokens " in line for line in verdicts))
         # An open snippet shows the goals it leaves, with each case's hypothesis names.

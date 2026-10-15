@@ -621,7 +621,7 @@ class NodeCallTests(unittest.TestCase):
             ],
         )
         found = viewer_data.node_calls(self.directory, "n2")
-        self.assertEqual(found["origin_line"], "n2 <- n1 splice s1")
+        self.assertEqual(found["origin_line"], "n2 made from n1 by replacing steps s1")
         self.assertEqual(found["ids"], {"n2": "c2", "n1": "ref"})
         self.assertEqual(found["holes"], [{"id": "n2.h1", "goal": "True", "status": "open", "fills": []}])
 

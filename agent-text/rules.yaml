@@ -37,7 +37,7 @@ graph_identifiers:
 node_status:
   template: "skill/SKILL"
   numbers: "none"
-  marker: "Status closed:"
+  marker: "compiles\" (the node compiles with no open hole)"
 price_columns:
   template: "packet/price-table.legend"
   numbers: "computed per step"

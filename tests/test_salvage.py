@@ -154,8 +154,8 @@ class SalvageCampaignTests(FakeRunCase):
             edge = next(item for item in history if item.get("kind") == "edge" and item.get("proof_id") == sketch_id)
             self.assertEqual((edge["type"], edge["from"], edge["exact"]), ("salvaged_from", [proof_id], True))
             self.assertTrue(any(item.get("kind") == "route" and item.get("proof_id") == sketch_id for item in history))
-            notice = next(item["text"] for item in campaign.state("logic")["updates"] if "sketch from" in item["text"])
-            self.assertRegex(notice, r"^n\d+: sketch from n\d+; line \d+ is a hole to fill \(`fill` hole n\d+\.h1\)\.$")
+            notice = next(item["text"] for item in campaign.state("logic")["updates"] if "compiling part of" in item["text"])
+            self.assertRegex(notice, r"^n\d+: compiling part of n\d+; line \d+ is a hole to fill \(`fill` hole n\d+\.h1\)\.$")
             self.assertEqual(campaign.autocheck("T", "logic")["checked"], [])
             self.assertTrue(first["ok"])
 
@@ -214,7 +214,7 @@ class SalvageCampaignTests(FakeRunCase):
                 campaign.autocheck("T", "logic")
             events = [item for item in campaign.events(self.directory) if item.get("kind") == "salvage"]
             self.assertEqual((len(events), events[0]["status"], events[0]["compiles"]), (1, "unavailable", 1))
-            self.assertFalse(any("sketch from" in item["text"] for item in campaign.state("logic")["updates"]))
+            self.assertFalse(any("compiling part of" in item["text"] for item in campaign.state("logic")["updates"]))
             campaign.autocheck("T", "logic")
             self.assertEqual(
                 len([item for item in campaign.events(self.directory) if item.get("kind") == "salvage"]), 1
