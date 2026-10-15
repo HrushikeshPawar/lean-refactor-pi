@@ -4,7 +4,7 @@
 import { numbers, render } from "./text.ts";
 
 export const DEFAULT_LIMIT_USD = 0.5;
-export const MAX_LIMIT_USD = 2;
+export const MAX_LIMIT_USD = 2.5;
 // The model may finish only when at most this fraction of the limit is left.
 const sharedNumbers = await numbers();
 export const FINISH_REMAINING_FRACTION = sharedNumbers.finish_remaining_pct / 100;

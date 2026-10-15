@@ -53,7 +53,7 @@ HELPER_DECL = re.compile(r"(?m)^\s*(?:private\s+|protected\s+)?(?:theorem|lemma)
 MIN_FREE_GB = 8.0  # MemAvailable needed before another run starts (nothing else in flight)
 CLEANUP_WAIT_S = 300.0  # longest wait for finished runs' Lean processes to go and memory to come back
 EVALUATIONS = ROOT / "runs" / "evaluations"
-MAX_LIMIT_USD = 2.0  # keep equal to MAX_LIMIT_USD in packages/arena-pi/extensions/spend.ts
+MAX_LIMIT_USD = 2.5  # keep equal to MAX_LIMIT_USD in packages/arena-pi/extensions/spend.ts
 LEAN_UNHEALTHY_EXIT = 75  # keep equal to arena.lean_health.EXIT_CODE
 
 

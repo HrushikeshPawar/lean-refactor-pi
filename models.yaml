@@ -13,6 +13,9 @@ thinking:
   default: high                # reasoning level when --thinking is not given
   levels: [off, minimal, low, medium, high, xhigh, max]
 
+# Providers Pi ships with its own login (OAuth), selectable per model without registration.
+builtin_providers: [openai]
+
 # Providers Pi does not ship. The Arena extension registers each one with Pi at start, with the models below that
 # name it; Pi then prices their calls from the `price` given here. The key is read from the named environment
 # variable (`arena run` loads .env).
@@ -50,6 +53,19 @@ models:
       # output <= 850K + 25K + 120K cap = 995K < 1M (typical summaries are ~10K); a normal 64K output
       # turn needs 850K + 25K + 64K = 939K < 1M.
       at_tokens: 850000
+      keep_recent_tokens: 40000
+
+  gpt-6.1-sol:                 # OpenAI Responses API via Pi's built-in openai provider (ChatGPT/Codex OAuth login)
+    provider: openai
+    # Pi catalog list prices; the subscription is not billed per token, but the run's spend is counted at list
+    # price so its limit and results compare with paid runs. Prompts above 272K tokens cost 2x (catalog tier).
+    price: {input: 2.0, output: 10.0, cache_read: 0.1, cache_write: 2.5}
+    context_window: 272000
+    max_tokens: 128000
+    request_output_tokens: 32000
+    compaction:
+      # Window 272K: compaction at 200K leaves room for one turn's results (~25K) and a 32K output turn.
+      at_tokens: 200000
       keep_recent_tokens: 40000
 
   mimo-v2.6-pro:               # OpenAI chat completions on primalabs; probed 2026-10-10 (plan §9a)

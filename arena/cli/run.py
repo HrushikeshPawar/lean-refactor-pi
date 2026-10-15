@@ -31,7 +31,7 @@ from arena.summary import configured_cap, cost_report_from_ledger, render_text, 
 from arena.traces import langfuse_environment, langfuse_extension, plugin_problems
 
 DEFAULT_LIMIT_USD = 0.5
-MAX_LIMIT_USD = 2.0  # keep equal to MAX_LIMIT_USD in packages/arena-pi/extensions/spend.ts
+MAX_LIMIT_USD = 2.5  # keep equal to MAX_LIMIT_USD in packages/arena-pi/extensions/spend.ts
 
 SYSTEM_PROMPT = text.render("messages/run.system_prompt")
 

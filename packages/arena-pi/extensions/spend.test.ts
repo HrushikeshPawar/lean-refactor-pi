@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { callCost, finishAllowed, limitReached, limitUsd, spendFooter } from "./spend.ts";
 
-test("the limit defaults to fifty cents and anything above two dollars is refused at startup", () => {
+test("the limit defaults to fifty cents and anything above two and a half dollars is refused at startup", () => {
   assert.equal(limitUsd({}), 0.5);
-  assert.equal(limitUsd({ ARENA_LIMIT_USD: "2" }), 2);
-  assert.throws(() => limitUsd({ ARENA_LIMIT_USD: "2.01" }), /above the maximum/);
+  assert.equal(limitUsd({ ARENA_LIMIT_USD: "2.5" }), 2.5);
+  assert.throws(() => limitUsd({ ARENA_LIMIT_USD: "2.51" }), /above the maximum/);
   assert.throws(() => limitUsd({ ARENA_LIMIT_USD: "0" }), /positive/);
   assert.throws(() => limitUsd({ ARENA_LIMIT_USD: "abc" }), /positive/);
 });

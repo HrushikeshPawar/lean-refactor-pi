@@ -163,8 +163,9 @@ def validate(config: dict) -> dict:
                 raise ModelConfigError(f"models.yaml: providers.{name}.{key} is required")
     for name, model in models.items():
         provider = model.get("provider", config["provider"])
-        if provider != config["provider"] and provider not in providers:
-            raise ModelConfigError(f"models.yaml: {name}.provider {provider!r} is neither the default nor in providers")
+        builtin = config.get("builtin_providers") or []
+        if provider != config["provider"] and provider not in providers and provider not in builtin:
+            raise ModelConfigError(f"models.yaml: {name}.provider {provider!r} is neither the default, in providers, nor in builtin_providers")
         if provider in providers and not isinstance(model.get("reasoning"), bool):
             raise ModelConfigError(f"models.yaml: {name}.reasoning (true/false) is required for a registered provider")
     for name, preset in (config.get("presets") or {}).items():
