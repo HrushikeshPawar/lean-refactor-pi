@@ -250,6 +250,8 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/tools.map_steps_head` | 10 | Tool replies | when the matching tool result occurs |
 | `replies/tools.map_steps_legend` | 40 | Tool replies | when the matching tool result occurs |
 | `replies/tools.map_steps_more` | 8 | Tool replies | when the matching tool result occurs |
+| `replies/tools.map_steps_untried` | 6 | Tool replies | when the matching tool result occurs |
+| `replies/tools.map_steps_untried_item` | 5 | Tool replies | when the matching tool result occurs |
 | `replies/tools.map_tactic_line` | 9 | Tool replies | when the matching tool result occurs |
 | `replies/tools.map_tactic_lines_head` | 22 | Tool replies | when the matching tool result occurs |
 | `replies/tools.merge_offer` | 13 | Tool replies | when the matching tool result occurs |
@@ -324,7 +326,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/tools.try_replaces` | 29 | Tool replies | when the matching tool result occurs |
 | `replies/tools.try_timeout` | 2 | Tool replies | when the matching tool result occurs |
 | `skill/SKILL` | 155 | Agent skill instructions | once per run |
-| `skill/lean-facts` | 92 | Agent skill instructions | once per run |
+| `skill/lean-facts` | 115 | Agent skill instructions | once per run |
 | `tools/compile.description` | 29 | Model tool definitions | every request |
 | `tools/compile.params.base` | 6 | Model tool definitions | every request |
 | `tools/compile.params.check` | 11 | Model tool definitions | every request |

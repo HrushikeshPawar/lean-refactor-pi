@@ -153,3 +153,20 @@ class ReplyTests(unittest.TestCase):
         with patch.object(campaign, "state", return_value={"updates": [update]}):
             seen = reply.attach_context(self.run_id, shown)
         self.assertEqual(seen["facts"], ["## Updates", update["text"]])
+
+
+class UntriedStepTests(unittest.TestCase):
+    def test_barely_tried_steps_below_the_table_are_named(self):
+        from arena.reply import _untried_steps
+
+        hidden = [
+            {"step": "s10", "variants": 0, "at_stake": 1.39},
+            {"step": "s5", "variants": 67, "at_stake": 0.77},
+            {"step": "s12", "variants": 1, "at_stake": 0.27},
+        ]
+        line = _untried_steps(hidden)
+        self.assertIn("s10 (0 tries, 1.39 pts)", line)
+        self.assertNotIn("s5", line)
+        self.assertNotIn("s12", line)
+        self.assertIsNone(_untried_steps(hidden[1:]))
+

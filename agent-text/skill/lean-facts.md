@@ -3,3 +3,4 @@ A submitted proof may contain no `sorry`, `admit`, `axiom`, `native_decide`, `#e
 A dotted name such as `h.1`, `x.inl` or `Nat.succ_le` is one run of letters, digits, `.`, `_` and `'`, so it counts 1 token.
 Measured: `case inl x y => exact x` is 7 tokens; `case inl => rename_i x y; exact x` is 9.
 `all_goals tac` and `tac <;> tac'` run one tactic on every goal.
+A closing step costs more heartbeats on a bigger goal: state the needed identity as a small equation, prove it, then substitute it.

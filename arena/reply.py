@@ -308,7 +308,33 @@ def _effort_lines(data: dict) -> list[str]:
         lines.append(
             text.render("replies/tools.map_steps_more", count=len(rest), at_stake=shown(rest[0].get("at_stake")))
         )
+    untried = _untried_steps(rest)
+    if untried:
+        lines.append(untried)
     return lines
+
+
+def _untried_steps(hidden: list[dict]) -> str | None:
+    """One line naming the steps below the table that still hold points but were barely tried: the table shows only
+    the top steps, and in v7-em2 a 512-heartbeat step sat there untouched for the whole run."""
+    numbers = text.numbers()
+    most = int(numbers.get("untried_step_max_tries", 2))
+    least = float(numbers.get("untried_step_min_pts", 0.5))
+    picked = [
+        item for item in hidden if int(item.get("variants") or 0) <= most and (item.get("at_stake") or 0) >= least
+    ][:3]
+    if not picked:
+        return None
+    named = ", ".join(
+        text.render(
+            "replies/tools.map_steps_untried_item",
+            step=shown(item.get("step")),
+            tries=int(item.get("variants") or 0),
+            at_stake=shown(item.get("at_stake")),
+        )
+        for item in picked
+    )
+    return text.render("replies/tools.map_steps_untried", steps=named)
 
 
 LINE_TEXT_CHARS = 90

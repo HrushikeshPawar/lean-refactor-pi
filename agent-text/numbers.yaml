@@ -44,6 +44,9 @@ packet_local_type_chars: 320
 memory_library_lines: 15
 memory_read_entries: 30
 budget:
-  static_words: 640
+  static_words: 660
   packet_words: 214
   reply_words: 40
+# Steps below the step table are named when tried at most this often and still worth at least this many points.
+untried_step_max_tries: 2
+untried_step_min_pts: 0.5
