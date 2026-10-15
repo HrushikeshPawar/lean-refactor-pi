@@ -37,6 +37,39 @@ def snippet_tokens(text: str) -> int:
     return _proof_length("theorem x : True := " + text)
 
 
+def _line(item: dict) -> int | None:
+    line = item.get("proof_line")
+    return line if isinstance(line, int) else None
+
+
+def _step_hb(entries: list[dict], step, entry: dict | None) -> int | None:
+    """Heartbeats spent on a step's own lines. A top-level entry keeps its inclusive count less its direct children
+    that lie in other steps (a `calc` line less its relation steps); a step without one (a `calc` relation) sums the
+    shallowest entries inside its lines."""
+    if entry is not None and entry.get("hb") is not None:
+        later = [
+            line for item in entries if item.get("depth") == 0 and (line := _line(item)) and line > step.first_line
+        ]
+        end = min(later, default=None)
+        moved = [
+            int(item.get("hb") or 0)
+            for item in entries
+            if item.get("depth") == 1
+            and (line := _line(item)) is not None
+            and line > step.first_line
+            and (end is None or line < end)
+            and not step.first_line <= line <= step.last_line
+        ]
+        return int(entry["hb"]) - sum(moved)
+    inside = [
+        item for item in entries if (line := _line(item)) is not None and step.first_line <= line <= step.last_line
+    ]
+    if not inside:
+        return None
+    depth = min(int(item.get("depth") or 0) for item in inside)
+    return sum(int(item.get("hb") or 0) for item in inside if int(item.get("depth") or 0) == depth)
+
+
 def step_table(
     proof: str,
     profile: dict | None,
@@ -62,7 +95,7 @@ def step_table(
             None,
         )
         self_hb = entry.get("self_hb") if entry else None
-        incl_hb = entry.get("hb") if entry else None
+        incl_hb = _step_hb(entries, step, entry)
         points = tokens * rates["points_per_token"] + (incl_hb or 0) / 1000 * rates["points_per_1k_hb"]
         first_line = step.text.splitlines()[0].strip() if step.text.splitlines() else ""
         rows.append(

@@ -39,7 +39,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `messages/continuation.restart` | 9 | Agent messages and notices | when the matching event occurs |
 | `messages/continuation.skeleton` | 17 | Agent messages and notices | when the matching event occurs |
 | `messages/continuation.turn_cut` | 2 | Agent messages and notices | when the matching event occurs |
-| `messages/continuation.turn_ended_with_text` | 18 | Agent messages and notices | when the matching event occurs |
+| `messages/continuation.turn_ended_with_text` | 14 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.ambiguous_symbol` | 5 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.cold_session_unavailable` | 4 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.cold_verification_paused` | 7 | Agent messages and notices | when the matching event occurs |
@@ -117,6 +117,9 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `packet/price-table.legend` | 34 | Prices action replies | when the table is requested |
 | `packet/price-table.row` | 7 | Prices action replies | when the table is requested |
 | `packet/price-table.total` | 11 | Prices action replies | when the table is requested |
+| `packet/restart.island_blank` | 29 | Initial theorem packet | once per run |
+| `packet/restart.island_start` | 22 | Initial theorem packet | once per run |
+| `packet/restart.island_statement` | 6 | Initial theorem packet | once per run |
 | `packet/restart.prices_heading` | 6 | Initial theorem packet | once per run |
 | `packet/restart.start` | 18 | Initial theorem packet | once per run |
 | `packet/restart.tried_failed` | 2 | Initial theorem packet | once per run |
@@ -276,7 +279,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/tools.try_open` | 3 | Tool replies | when the matching tool result occurs |
 | `replies/tools.try_replaces` | 29 | Tool replies | when the matching tool result occurs |
 | `replies/tools.try_timeout` | 2 | Tool replies | when the matching tool result occurs |
-| `skill/SKILL` | 154 | Agent skill instructions | once per run |
+| `skill/SKILL` | 148 | Agent skill instructions | once per run |
 | `skill/lean-facts` | 92 | Agent skill instructions | once per run |
 | `tools/compile.description` | 29 | Model tool definitions | every request |
 | `tools/compile.params.base` | 6 | Model tool definitions | every request |

@@ -1,5 +1,5 @@
 request_failed: "The request failed{cause_clause}.\n{facts}"
-turn_ended_with_text: "The turn ended with text and no tool call. Call a tool next; no summary is needed.\n{facts}"
+turn_ended_with_text: "The turn ended with text and no tool call; no summary is needed.\n{facts}"
 turn_cut: "{cut}\n{facts}"
 cause_clause: ": {cause}"
 skeleton: "The last {attempts} attempts all keep the best proof's skeleton; step {top_step} is {top_share_pct}% of its cost."

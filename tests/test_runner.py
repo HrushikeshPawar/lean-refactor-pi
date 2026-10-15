@@ -164,14 +164,19 @@ def offered_tools(request: dict) -> list[str]:
     return tools
 
 
-def _points_left(measured: int, original: int) -> str:
-    """Points not yet earned on one axis: a third of the percentage of the original still left."""
-    return f"{100 * measured / original / 3:.1f}"
-
-
 def _spend_numbers(spent: float, cap: float) -> list[str]:
     """The spend facts as digits: spent and limit in dollars, whole percent of the limit left."""
     return [f"{spent:.2f}", f"{cap:.2f}", str(round(100 * (1 - spent / cap)))]
+
+
+def _spend_facts(message: str) -> str:
+    """A continuation up to its focus move: the focus line and the proof and prices after it are not spend facts."""
+    from arena import text
+
+    focus = text.render("messages/continuation.focus_moved", label="n0").replace("n0", r"n\d+")
+    lines = message.splitlines()
+    cut = next((i for i, line in enumerate(lines) if re.fullmatch(focus, line)), len(lines))
+    return "\n".join(lines[:cut])
 
 
 def cheap_tool(name: str, arguments: dict, **usage) -> dict:
@@ -779,20 +784,21 @@ class ErrorLoopAndContinuationTests(unittest.TestCase):
 
     def test_failed_request_continuation_names_failure_without_calling_it_text(self):
         from arena import text
-        from arena.scoring import reference
 
+        # Outputs stay under the stall restart (0.12 of the $0.1 limit spent with no new best), which would replace
+        # the failure continuation with a restart packet.
         run = self.fake(
             [
-                cheap_tool("compile", {"drafts": [FIXTURE.read_text()], "check": "lean"}, output=50_000),
+                cheap_tool("compile", {"drafts": [FIXTURE.read_text()], "check": "lean"}, output=10_000),
                 {"error": "brief outage"},
-                cheap_tool("read", {"node": "n1"}, output=50_000),
+                cheap_tool("read", {"node": "n1"}, output=5_000),
                 {"text": "finished"},
                 {"text": "more"},
                 cheap_tool("read", {"view": "map"}, output=SPEND_90_PCT),
                 {"text": "last"},
                 {"text": "last"},
             ],
-            env={"ARENA_BACKOFF_MS": "10", "ARENA_AUTOCONTINUE": "1"},
+            env={"ARENA_BACKOFF_MS": "10", "ARENA_AUTOCONTINUE": "1", "ARENA_ISLANDS": "0"},
         )
         # Every user message after the packet is a continuation: the first after the failure, then after text turns.
         failed, *completed = [message_text(m) for m in run.requests[-1]["messages"][2:] if m["role"] == "user"]
@@ -816,18 +822,15 @@ class ErrorLoopAndContinuationTests(unittest.TestCase):
             if row["kind"] == "control" and not row.get("stop"):
                 spent_at.append(next(r["spent_usd"] for r in reversed(rows[:index]) if r["kind"] == "settle"))
         self.assertEqual(len(spent_at), 1 + len(completed), rows)
-        self.assertGreater(spent_at[1], spent_at[0] + 0.02)
+        self.assertGreater(spent_at[1], spent_at[0])
         submission = run.json("submission.json")
         self.assertEqual((submission["tokens"], submission["heartbeats"]), FIXTURE_SCORE[:2])
 
-        points = [_points_left(m, o) for m, o in zip(FIXTURE_SCORE[:2], reference(NAME), strict=True)]
         cap = float(run.json("run-config.json")["limit_usd"])
         for message, spent in zip([failed, *completed], spent_at, strict=True):
             with self.subTest(message=message[:40]):
-                numbers = re.findall(r"\d+(?:\.\d+)?", message)
-                self.assertEqual(
-                    [n for n in _spend_numbers(spent, cap) + points if n not in numbers], [], (message, rows)
-                )
+                numbers = re.findall(r"\d+(?:\.\d+)?", _spend_facts(message))
+                self.assertEqual([n for n in _spend_numbers(spent, cap) if n not in numbers], [], (message, rows))
 
     def continuations(self, run: FakeRun) -> list[tuple[str, float]]:
         """Each continuation the model read, with the settled spend when it was sent (from the ledger)."""
@@ -844,7 +847,6 @@ class ErrorLoopAndContinuationTests(unittest.TestCase):
 
     def test_continuation_before_the_final_tenth_states_only_spend_and_points_left(self):
         from arena import text
-        from arena.scoring import reference
 
         run = self.fake(
             [
@@ -855,36 +857,40 @@ class ErrorLoopAndContinuationTests(unittest.TestCase):
                 {"text": "done"},
                 {"text": "done"},
             ],
-            env={"ARENA_AUTOCONTINUE": "1"},
+            env={"ARENA_AUTOCONTINUE": "1", "ARENA_ISLANDS": "0"},
         )
         pct = text.numbers()["finish_remaining_pct"]
         cap = float(run.json("run-config.json")["limit_usd"])
         submission = run.json("submission.json")
         self.assertEqual((submission["tokens"], submission["heartbeats"]), FIXTURE_SCORE[:2])
-        points = [_points_left(m, o) for m, o in zip(FIXTURE_SCORE[:2], reference(NAME), strict=True)]
         # Only continuations sent before spend reached the final tenth; those after it are checked elsewhere.
         before_tenth = [(m, s) for m, s in self.continuations(run) if 1 - s / cap > pct / 100]
         self.assertGreaterEqual(len(before_tenth), 2)
+        focus = text.render("messages/continuation.focus_moved", label="n0").replace("n0", r"(n\d+)")
         for message, spent in before_tenth:
             with self.subTest(message=message):
                 self.assertGreater(1 - spent / cap, pct / 100)
                 self.assertNotRegex(message, STOP_TEXT)
                 self.assertNotRegex(message, rf"(?<![\d.]){pct}(?!\d|\.\d)")
-                # Spend and points left per axis are the only facts, plus at most one focus move to a
-                # node id (a text-only turn moves the focus before the final tenth); no other number.
-                focus = text.render("messages/continuation.focus_moved", label="n0").replace("n0", r"(n\d+)")
+                # Spend is the only fact, plus at most one focus move to a node id (a text-only turn moves the
+                # focus before the final tenth); the proof and prices after a move are not counted.
                 moves = [line for line in message.splitlines() if re.fullmatch(focus, line)]
                 self.assertLessEqual(len(moves), 1)
-                rest = "\n".join(line for line in message.splitlines() if line not in moves)
-                numbers = re.findall(r"\d+(?:\.\d+)?", rest)
-                self.assertEqual(sorted(numbers), sorted(_spend_numbers(spent, cap) + points))
+                numbers = re.findall(r"\d+(?:\.\d+)?", _spend_facts(message))
+                self.assertEqual(sorted(numbers), sorted(_spend_numbers(spent, cap)))
 
     def test_continuation_inside_the_final_tenth_states_finish_available_once(self):
         from arena import text
 
+        # Inside the final tenth a text-only turn finishes the run, so the continuations come from failed requests.
         run = self.fake(
-            [cheap_tool("read", {"node": "n1"}, output=SPEND_90_PCT), {"text": "done"}, {"text": "still done"}],
-            env={"ARENA_AUTOCONTINUE": "1"},
+            [
+                cheap_tool("read", {"node": "n1"}, output=SPEND_90_PCT),
+                {"error": "brief outage"},
+                {"error": "brief outage"},
+                {"text": "done"},
+            ],
+            env={"ARENA_AUTOCONTINUE": "1", "ARENA_ISLANDS": "0", "ARENA_BACKOFF_MS": "10"},
         )
         pct = text.numbers()["finish_remaining_pct"]
         cap = float(run.json("run-config.json")["limit_usd"])
@@ -934,16 +940,28 @@ class ErrorLoopAndContinuationTests(unittest.TestCase):
         script: list = [read, {"text": "first final"}]
         for index in range(early):
             script += [read, {"text": f"final {index}"}]
-        script += [cheap_tool("read", {"node": "n1"}, output=SPEND_90_PCT), {"text": "late final"}]
+        # A text-only turn finishes the run in the final tenth, so the last two no-work turns end without visible text.
+        script += [cheap_tool("read", {"node": "n1"}, output=SPEND_90_PCT), {"text": ""}]
         script.append({"text": "must not be requested"})
-        run = self.fake(script, env={"ARENA_AUTOCONTINUE": "1"})
-        first, *repeats = tool_texts(run.requests[-1], "read")
-        self.assertEqual(len(repeats), early + 1)
+        run = self.fake(script, env={"ARENA_AUTOCONTINUE": "1", "ARENA_ISLANDS": "0"})
+        # Two turns without work in a row restart the context before the final tenth, so the reads are gathered
+        # across every request: each scripted read reaches the model once, in full or as a stub.
+        reads, previous = [], []
+        for request in run.requests:
+            current = tool_texts(request, "read")
+            if len(current) < len(previous):
+                previous = []
+            reads += current[len(previous) :]
+            previous = current
+        self.assertEqual(len(reads), early + 2)
+        first = reads[0]
         longest = max(first.splitlines(), key=len)
+        repeats = [read for read in reads if read != first]
+        self.assertTrue(repeats)
         for repeat in repeats:
             self.assertNotIn(longest, repeat)
             self.assertLess(len(repeat), len(first) / 2)
-        # The first read is new context; every stubbed repeat is a turn without work.
+        # The first read of each context is new context; every stubbed repeat is a turn without work.
         controls = [row for row in run.jsonl("cost-ledger.jsonl") if row.get("kind") == "control"]
         self.assertEqual(controls[-1]["stop"], "no_work_fallback")
         self.assertFalse(any(row.get("stop") for row in controls[:-1]))

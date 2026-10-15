@@ -1220,6 +1220,26 @@ def _restart_order(graph: Graph) -> list[Node]:
     return list(unique.values())
 
 
+def _island_order(graph: Graph) -> list[Node | None]:
+    """Island starting points in rotation: the statement alone (None), the original reference, then the best scored
+    node on another route than the best. Each island leaves the best node's skeleton behind."""
+    reference = next((node for node in graph.nodes if node.origin == "reference"), None)
+    scored = [node for node in graph.nodes if node.score is not None and not routes.is_draft(node.proof_text)]
+    best = max(scored, key=lambda node: node.score) if scored else None
+    other = next(
+        (
+            cell.node
+            for cell in _best_first(archive(graph))
+            if cell.node.score is not None
+            and not routes.is_draft(cell.node.proof_text)
+            and best is not None
+            and cell.route != best.route
+        ),
+        None,
+    )
+    return [None, *[node for node in (reference, other) if node is not None and node is not best]]
+
+
 def _tried_since_restart(history: list[dict], graph: Graph) -> list[str]:
     """Distinct ideas tried since the last restart that failed or did not beat the best so far, newest last."""
     start = max((seq for seq, item in enumerate(history) if item.get("kind") == "restart"), default=-1)
@@ -1292,7 +1312,13 @@ def _kickoff_within(sections: list[tuple[str, str]], limit: int) -> str:
     return "\n\n".join((f"{title}\n" if title else "") + "\n".join(body) for title, body in fitted) + "\n"
 
 
-def restart_packet(name: str, run_id: str) -> dict:
+def island_packet(name: str, run_id: str) -> dict:
+    """A new island after a turn that ended with text: a fresh context from the statement alone, the original
+    reference, or another route's best node, in rotation. The best so far stays recorded."""
+    return restart_packet(name, run_id, island=True)
+
+
+def restart_packet(name: str, run_id: str, island: bool = False) -> dict:
     """Restart the conversation at the next starting point: the kickoff packet, the start node, the costliest steps,
     the ideas already tried, and the map. The whole packet stays within the packet budget."""
     from arena import context, reply
@@ -1300,25 +1326,48 @@ def restart_packet(name: str, run_id: str) -> dict:
     directory = run_dir(run_id)
     history = events(directory)
     graph = Graph.from_history(history, _proof_reader(directory))
-    order = _restart_order(graph)
     restarts = sum(1 for item in history if item.get("kind") == "restart")
-    start = order[restarts % len(order)]
+    reference = next((node for node in graph.nodes if node.origin == "reference"), None)
+    if island:
+        islands = sum(1 for item in history if item.get("kind") == "restart" and item.get("island"))
+        pick = _island_order(graph)[islands % len(_island_order(graph))]
+        blank, start = pick is None, pick or reference
+    else:
+        order = _restart_order(graph)
+        blank, start = False, order[restarts % len(order)]
+    if start is None:
+        raise ValueError(text.render("messages/errors.node_reference_invalid", reference="restart start"))
+    scored = [node for node in graph.nodes if node.score is not None]
+    best_node = max(scored, key=lambda node: node.score) if scored else None
     tried = _tried_since_restart(history, graph)
-    _append(directory, {"kind": "restart", "proof_id": start.proof_id})
-    _append(directory, {"kind": "focus", "proof_id": start.proof_id, "reason": "restart"})
+    _append(directory, {"kind": "restart", "proof_id": start.proof_id, "island": island, "blank": blank})
+    _append(directory, {"kind": "focus", "proof_id": start.proof_id, "reason": "island" if island else "restart"})
     history = events(directory)
-    material = _start_material(name, run_id, start)
     graph_map = map_view_from(history, directory)
     map_lines = list(reply._map_lines({**graph_map, "open": []}))
     label = _update_id(history, start.proof_id)
+    best = f"{_update_id(history, best_node.proof_id)} (score {best_node.score})" if best_node is not None else label
+    if blank:
+        statement = problem(name)["statement"]
+        head = [
+            text.render("packet/restart.island_blank", best=best),
+            text.render("packet/restart.island_statement", statement=statement),
+        ]
+    else:
+        material = _start_material(name, run_id, start)
+        head = [
+            text.render("packet/restart.island_start", label=label, best=best)
+            if island
+            else text.render("packet/restart.start", label=label),
+            f"```lean\n{start.proof_text}\n```",
+            text.render("packet/restart.prices_heading"),
+            material["prices"].rstrip("\n"),
+        ]
     sections = context.packet_sections(name)
     while True:
         tail = "\n".join(
             [
-                text.render("packet/restart.start", label=label),
-                f"```lean\n{start.proof_text}\n```",
-                text.render("packet/restart.prices_heading"),
-                material["prices"].rstrip("\n"),
+                *head,
                 *([text.render("packet/restart.tried_heading"), *tried] if tried else []),
                 text.render("messages/compaction-memory.map_heading"),
                 *map_lines,

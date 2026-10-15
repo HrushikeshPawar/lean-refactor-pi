@@ -753,10 +753,15 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     // A finish: a turn that completed, stopped on its own (not cut by the length limit), wrote visible text and
     // asked for no tool, once the finish rule allows it.
     const remaining = finishAllowed(spentUsd, limit);
-    const finishTurn = remaining.allowed && !failed && lastAssistant?.stopReason === "stop"
+    // A turn that completed on its own with visible text and no tool call: it finishes the run in the final tenth
+    // and opens a new island before it.
+    const doneTurn = !failed && lastAssistant?.stopReason === "stop"
       && (lastAssistant.content ?? []).some(block => block.type === "text" && block.text.trim() !== "")
       && !(lastAssistant.content ?? []).some(block => block.type === "toolCall");
-    const { stop, moveFocus, restart } = stopDecision({ limitHit, finishTurn, noWorkThisTurn,
+    const finishTurn = remaining.allowed && doneTurn;
+    // ARENA_ISLANDS=0 keeps the plain continuation after a text-only turn (tests of continuation text use it).
+    const islandTurn = doneTurn && process.env.ARENA_ISLANDS !== "0";
+    const { stop, moveFocus, restart, island } = stopDecision({ limitHit, finishTurn, doneTurn: islandTurn, noWorkThisTurn,
       providerUnreachable: failure === "transport" && outageStartedAt !== undefined && nextWait(outageAttempt, Number(process.env.ARENA_BACKOFF_MS ?? 2000), outageStartedAt, Date.now(), Number(process.env.ARENA_OUTAGE_LIMIT_MS ?? 600000)).stop,
       errorLoop: failure === "model" && errorStreak >= MAX_ERROR_STREAK,
       continuations, noWorkTurns, plateau, stallUsd: spentUsd - spentAtBestChange, limitUsd: limit,
@@ -803,14 +808,14 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     // Second no-work turn in a row, before the final tenth: the run restarts from a packet at the next starting
     // point. The compaction draft keeps nothing before it, so the old reasoning leaves the model's context.
     if (restart) {
-      const restarted = await campaign("restart_packet");
+      const restarted = await campaign(island ? "island_packet" : "restart_packet");
       if (restarted.ok === true && typeof restarted.text === "string") {
         await campaign("reset_delivered");
         trimmer.forget();
         noWorkTurns = 0;
         plateau = 0;
         spentAtBestChange = spentUsd;
-        appendCost({ kind: "restart", continuations, restart: restarted.restart, label: restarted.label, chars: restarted.text.length });
+        appendCost({ kind: "restart", continuations, restart: restarted.restart, island, label: restarted.label, chars: restarted.text.length });
         const facts = await continuationFacts(spentUsd, limit, checks?.baseline, checks?.best ?? state.best, checks?.skeleton);
         return { entries: [...event.entries,
           { type: "compaction" as const, summary: restarted.text, firstKeptEntryId: null },

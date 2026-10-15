@@ -16,11 +16,13 @@ export type StopInput = {
   stallUsd: number; limitUsd: number;
   remainingFraction: number;
   noWorkThisTurn: boolean; finishAllowed: boolean;
+  // The turn completed with visible text and no tool call: before the final tenth it opens a new island.
+  doneTurn: boolean;
 };
 
 // A first turn without work moves the focus; a second one in a row, or a best that has not changed for
 // STALL_RESTART_FRACTION of the limit, restarts the conversation from a packet.
-export function stopDecision(input: StopInput): { stop: string | null; moveFocus: boolean; restart: boolean } {
+export function stopDecision(input: StopInput): { stop: string | null; moveFocus: boolean; restart: boolean; island: boolean } {
   const stop = input.limitHit ? "limit_reached"
     : input.finishTurn ? "finished"
     : input.providerUnreachable ? "provider_unreachable"
@@ -29,7 +31,8 @@ export function stopDecision(input: StopInput): { stop: string | null; moveFocus
     : input.finishAllowed && input.noWorkTurns >= 2 ? "no_work_fallback"
     : input.continuations >= 4 && input.plateau >= 4 && input.finishAllowed ? "plateau" : null;
   const early = stop === null && !input.finishAllowed && input.remainingFraction >= RESTART_MIN_REMAINING_FRACTION;
-  const restart = early && ((input.noWorkThisTurn && input.noWorkTurns >= 2)
+  const island = early && input.doneTurn;
+  const restart = early && (island || (input.noWorkThisTurn && input.noWorkTurns >= 2)
     || input.stallUsd >= STALL_RESTART_FRACTION * input.limitUsd);
-  return { stop, moveFocus: early && input.noWorkThisTurn && input.noWorkTurns < 2 && !restart, restart };
+  return { stop, moveFocus: early && input.noWorkThisTurn && input.noWorkTurns < 2 && !restart, restart, island };
 }
