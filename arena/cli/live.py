@@ -565,10 +565,14 @@ def start_run(
     lean: str = "off",
     merge_worker=None,
     console: Console | None = None,
+    clear: bool = False,
 ) -> RunDisplay | None:
-    """A started live view for this run, or None when output must stay plain."""
+    """A started live view for this run, or None when output must stay plain. `clear` wipes the setup lines off
+    the screen first; the caller shows them again inside the view."""
     if console is None and not enabled(plain):
         return None
+    if clear:
+        (console or Console()).clear()
     try:
         view = RunView(run_id, directory, theorem, model, limit_usd, lean, merge_worker)
         display = RunDisplay(view, console)

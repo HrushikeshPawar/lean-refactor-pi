@@ -50,6 +50,55 @@ _tool_result_count = 0
 _retry_count = 0
 # The live terminal view while Pi runs; None means plain lines (not a TTY, --plain or ARENA_PLAIN=1).
 _LIVE: live.RunDisplay | None = None
+# Pi's stderr lines shown as events while the live view is up; every line also goes to pi-stderr.log.
+PI_STDERR_SHOWN = ("alarm]", "[arena-restart]", "[arena-memory]")
+
+
+class _Echo:
+    """Passes writes through to a stream and keeps each complete line, so the setup lines printed before the
+    live view starts can be shown again inside it."""
+
+    def __init__(self, stream, lines: list[str]):
+        self.stream, self.lines, self.partial = stream, lines, ""
+
+    def write(self, data: str) -> int:
+        self.partial += data
+        *done, self.partial = self.partial.split("\n")
+        self.lines.extend(line for line in done if line.strip())
+        return self.stream.write(data)
+
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
+
+
+class _Setup:
+    """Echoes stdout and stderr from the start of the run until the live view takes the terminal."""
+
+    def __init__(self):
+        self.lines: list[str] = []
+        self.saved = (sys.stdout, sys.stderr)
+        sys.stdout, sys.stderr = _Echo(sys.stdout, self.lines), _Echo(sys.stderr, self.lines)
+
+    def restore(self) -> list[str]:
+        sys.stdout, sys.stderr = self.saved
+        return self.lines
+
+
+_SETUP: _Setup | None = None
+
+
+def drain_pi_stderr(stream, path: Path) -> None:
+    """Pi's stderr bypasses the live view's redirect (it is another process), so a raw line would break the
+    screen. Keep every line in pi-stderr.log; show alarms as events, or print all of them when output is plain."""
+    with path.open("a") as log:
+        for line in stream:
+            log.write(line)
+            log.flush()
+            line = line.rstrip("\n")
+            if _LIVE is None:
+                print(line, file=sys.stderr, flush=True)
+            elif any(mark in line for mark in PI_STDERR_SHOWN):
+                _LIVE.line(f"[{datetime.now().astimezone().strftime('%H:%M:%S')}] {line[:160]}")
 
 
 def pi_settings(args, config: dict) -> dict:
@@ -166,7 +215,9 @@ def log_event(event: dict) -> None:
 @contextlib.contextmanager
 def live_view(args, directory: Path, health: dict | None, worker: subprocess.Popen | None):
     """Show the live view while Pi runs; always gives the terminal back before the summary is printed."""
-    global _LIVE
+    global _LIVE, _SETUP
+    setup, _SETUP = _SETUP, None
+    lines = setup.restore() if setup else []
     if _LEAN["socket"] is None:
         lean = "no session (cold compiles)"
     elif health is None:
@@ -182,7 +233,11 @@ def live_view(args, directory: Path, health: dict | None, worker: subprocess.Pop
         limit_usd=args.limit_usd,
         lean=lean,
         merge_worker=worker,
+        clear=bool(lines),
     )
+    for line in lines:
+        if _LIVE is None or not _LIVE.line(line):
+            print(line, flush=True)
     try:
         yield
     finally:
@@ -410,6 +465,9 @@ def run(options: RunOptions) -> int:
     if directory.exists() != args.resume_run:
         print("error: --resume-run must be used exactly when the run ID already exists", file=sys.stderr)
         return 2
+    global _SETUP
+    if not args.dry_run and live.enabled(args.plain):
+        _SETUP = _Setup()
     if not args.dry_run and not args.no_lean_session:
         start_lean_session(directory, row, args.run_id)
     if args.resume_run:
@@ -641,11 +699,17 @@ def run(options: RunOptions) -> int:
             env=env,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
             start_new_session=True,
         )
         state["process"] = process
+        assert process.stderr is not None
+        stderr_reader = threading.Thread(
+            target=drain_pi_stderr, args=(process.stderr, directory / "pi-stderr.log"), daemon=True
+        )
+        stderr_reader.start()
         if _BACKGROUND["thread"] is not None:
             watch_background_failure(_BACKGROUND["failed"], directory, stop_for_lean)
         if state["signal"] is not None:
@@ -674,6 +738,7 @@ def run(options: RunOptions) -> int:
         except subprocess.TimeoutExpired:
             kill_group(process, signal.SIGKILL)
             exit_code = process.wait()
+        stderr_reader.join(timeout=5)
     if state["timer"] is not None:
         state["timer"].cancel()
     # Lean servers and evaluations Pi started share its process group.
