@@ -535,6 +535,15 @@ class OperatorStopTests(unittest.TestCase):
             self.assertIn("interrupted before any paid run", errors.getvalue())
 
 
+class RunArgsSplitTests(unittest.TestCase):
+    def test_tokens_after_double_dash_go_to_each_run(self):
+        from arena.cli import split_run_args
+
+        argv = ["campaign", "--prefix", "p", "--", "--test-extension", "f.ts", "--no-langfuse"]
+        self.assertEqual(split_run_args(argv), (argv[:3], ["--test-extension", "f.ts", "--no-langfuse"]))
+        self.assertEqual(split_run_args(["run", "--", "x"]), (["run", "--", "x"], []))
+
+
 if __name__ == "__main__":
     unittest.main()
 

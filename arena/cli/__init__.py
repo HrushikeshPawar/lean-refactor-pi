@@ -68,7 +68,7 @@ def campaign(
     load_env()
     from arena.cli.campaigns import cli_execute
 
-    return cli_execute(options, passthrough)
+    return cli_execute(options, (*passthrough, *_RUN_ARGS))
 
 
 @app.command()
@@ -657,6 +657,19 @@ def replay(
         return 1
 
 
+# `arena campaign ... -- <run options>`: cyclopts 5 does not hand tokens after `--` to the variadic parameter when
+# the options come from a flattened dataclass, so main() cuts them off before parsing.
+_RUN_ARGS: list[str] = []
+
+
+def split_run_args(argv: list[str]) -> tuple[list[str], list[str]]:
+    if argv[:1] == ["campaign"] and "--" in argv:
+        cut = argv.index("--")
+        return argv[:cut], argv[cut + 1 :]
+    return argv, []
+
+
 def main() -> None:
-    result = app()
+    argv, _RUN_ARGS[:] = split_run_args(sys.argv[1:])
+    result = app(argv)
     sys.exit(result if isinstance(result, int) else 0)

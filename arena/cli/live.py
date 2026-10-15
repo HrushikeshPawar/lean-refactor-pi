@@ -741,6 +741,13 @@ class CampaignView:
 
     # -- runs
 
+    def add_run(self, spec: dict) -> None:
+        """A run planned after the start (a row requeued after a memory refusal)."""
+        with self.lock:
+            run = CampaignRun(spec, poller=RunDirPoller(self.runs_root / spec["run_id"]))
+            self.runs.append(run)
+            self.by_id[spec["run_id"]] = run
+
     def run_started(self, spec: dict) -> None:
         with self.lock:
             run = self.by_id[spec["run_id"]]
@@ -927,6 +934,9 @@ class CampaignDisplay(LiveDisplay):
 
     def run_skipped(self, spec: dict) -> None:
         self.guard(lambda: self.view.run_skipped(spec))
+
+    def add_run(self, spec: dict) -> None:
+        self.guard(lambda: self.view.add_run(spec))
 
 
 def start_campaign(

@@ -391,7 +391,7 @@ class HousekeepingTests(unittest.TestCase):
         hk.before_run("cold")
         self.assertTrue(naps)
         self.assertEqual(hk.in_flight, 1)
-        self.assertTrue(any("MemAvailable 8.0 GB + Lean service 0.0 GB" in line for line in lines))
+        self.assertTrue(any("MemAvailable 8.0 GB + idle Lean service 0.0 GB" in line for line in lines))
 
     def test_service_memory_sums_server_process_trees_and_defaults_to_zero(self):
         status = {"ok": True, "servers": [{"gb": 1.25}, {"gb": 2.75}]}
@@ -447,20 +447,175 @@ class HousekeepingTests(unittest.TestCase):
         hk.before_run("x")
         self.assertTrue(any("starting x anyway" in line for line in lines))
 
-    def test_memory_is_not_required_while_another_run_is_in_flight(self):
+    def test_beside_a_live_run_memory_is_required_and_waits_without_deadline(self):
+        """v7-check3 admitted Binius beside EM with 7.8 GB; the Lean gate then had no room for a worker."""
+        clock, naps, lines = [0.0], [], []
+        free = [3.0] * 200 + [12.0]
+
+        def nap(seconds):
+            clock[0] += seconds
+            naps.append(seconds)
+            free.pop(0)
+
         hk = rc.Housekeeping(
             8.0,
             20.0,
             0.0,
-            mem_fn=lambda: 1.0,
+            mem_fn=lambda: free[0],
+            service_gb_fn=lambda: self.fail("a live run's Lean memory is not free"),
+            close_idle_fn=lambda: self.fail("closing beside a live run"),
             lingering_fn=lambda d: [],
-            sleep_fn=lambda s: self.fail("waited"),
-            now_fn=lambda: 0.0,
-            log=lambda m: None,
+            sleep_fn=nap,
+            now_fn=lambda: clock[0],
+            log=lines.append,
         )
         hk.in_flight = 1
         hk.before_run("second")
+        self.assertEqual(len(naps), 200)  # 1000 s, far past max_wait: no "starting anyway" beside a live run
+        self.assertFalse(any("anyway" in line for line in lines))
+        self.assertTrue(any("beside a live run" in line for line in lines))
         self.assertEqual(hk.in_flight, 2)
+
+    def test_after_run_closes_idle_lean_and_reports_it(self):
+        lines, closed = [], []
+        hk = rc.Housekeeping(
+            8.0,
+            20.0,
+            0.0,
+            mem_fn=lambda: 12.0,
+            reap_fn=lambda d: 0,
+            close_idle_fn=lambda: closed.append(1) or ["/w/cslib-v4.33.0", "/w/cslib-v4.32.0"],
+            sweep_fn=lambda root, since: 0,
+            log=lines.append,
+        )
+        hk.in_flight = 1
+        hk.after_run("a", Path("/runs/a"))
+        self.assertEqual(closed, [1])
+        self.assertIn("closed Lean cslib-v4.33.0, cslib-v4.32.0", lines[-1])
+
+    def test_alone_and_low_asks_the_service_to_close_idle_projects(self):
+        closed, free = [], [3.0, 12.0]
+        hk = rc.Housekeeping(
+            8.0,
+            20.0,
+            0.0,
+            mem_fn=lambda: free[0],
+            service_gb_fn=lambda: 0.0,
+            close_idle_fn=lambda: closed.append(1) or [],
+            lingering_fn=lambda d: [],
+            sleep_fn=lambda s: free.pop(0),
+            now_fn=lambda: 0.0,
+            log=lambda m: None,
+        )
+        hk.before_run("x")
+        self.assertEqual(closed, [1])
+
+    def test_requeue_only_lean_refusals_without_spend(self):
+        specs = [{"run_id": "a", "row": "A"}, {"run_id": "b", "row": "B"}, {"run_id": "c", "row": "C"}, {"run_id": "d"}]
+        results = [
+            {"exit_code": rc.LEAN_UNHEALTHY_EXIT, "spent_usd": 0.0},
+            {"exit_code": 0, "stop_reason": "lean_unhealthy", "spent_usd": 0.09},
+            {"exit_code": 0, "spent_usd": 0.5},
+            None,
+        ]
+        self.assertEqual(rc.requeue_specs(specs, results), [{"run_id": "a-retry", "row": "A"}])
+
+
+class MemoryWaitTests(unittest.TestCase):
+    """v7-check3: Binius, Core and SKI were lost to memory refusals counted as Lean faults."""
+
+    def test_gate_waits_for_memory_then_warms(self):
+        replies = [
+            {
+                "ok": False,
+                "workers": 0,
+                "seconds": [],
+                "failed": ["no room for a Lean worker: memory (7.8 GB available)"],
+            },
+            {"ok": True, "workers": 2, "seconds": [5.0], "failed": []},
+        ]
+        sleeps = []
+        report = lh.gate(
+            "T",
+            2,
+            None,
+            row_fn=lambda name: {"name": name},
+            versions_fn=lambda row: [("v1", "c1")],
+            warm_fn=lambda *a, **kw: replies.pop(0),
+            check_fn=lambda *a, **kw: ok(1.0),
+            log=lambda m: None,
+            sleep_fn=sleeps.append,
+        )
+        self.assertEqual(report["verdict"], "healthy")
+        self.assertEqual(sleeps, [lh.ROOM_POLL_S])
+
+    def test_gate_gives_up_after_the_room_wait(self):
+        refused = {"ok": False, "workers": 0, "seconds": [], "failed": ["no room for a Lean worker: memory"]}
+        report = lh.gate(
+            "T",
+            2,
+            None,
+            row_fn=lambda name: {"name": name},
+            versions_fn=lambda row: [("v1", "c1")],
+            warm_fn=lambda *a, **kw: refused,
+            check_fn=lambda *a, **kw: ok(1.0),
+            log=lambda m: None,
+            sleep_fn=lambda s: None,
+            room_wait_s=0,
+        )
+        self.assertEqual(report["verdict"], "unhealthy")
+
+    def _others(self, directory, results, retries=2):
+        calls, sleeps = [], []
+
+        def check(row, version, commit, lane="model"):
+            calls.append(version)
+            return results.pop(0)
+
+        rows = lh.check_others(
+            "T",
+            directory,
+            row_fn=lambda _: {},
+            versions_fn=lambda _: [("v1", "c1"), ("v2", "c2")],
+            check_fn=check,
+            sleep_fn=sleeps.append,
+            retries=retries,
+            retry_s=5,
+            log=lambda m: None,
+        )
+        return rows, calls, sleeps
+
+    def test_memory_starved_cold_check_is_retried_and_recovers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            run_gate({"v1": ok(2)}, directory=directory)
+            starved = {**ok(30), "path": "cold-fallback", "reason": "no room for a Lean worker: memory (6.8 GB)"}
+            rows, calls, sleeps = self._others(directory, [starved, {**ok(3), "path": "lsp"}])
+            self.assertEqual(calls, ["v2", "v2"])
+            self.assertEqual(sleeps, [5])
+            self.assertIsNone(lh.tripped(directory))
+            self.assertTrue(rows[0]["passed"])
+
+    def test_persistent_starvation_trips_with_an_honest_detail(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            run_gate({"v1": ok(2)}, directory=directory)
+            starved = {**ok(896), "path": "cold-fallback", "reason": "no memory to load a Lean worker (6.8 GB)"}
+            _rows, calls, _ = self._others(directory, [dict(starved) for _ in range(3)])
+            self.assertEqual(len(calls), 3)
+            marker = lh.tripped(directory)
+            self.assertIn("cold path (no memory to load a Lean worker", marker["detail"])
+            self.assertIn("reference passed in 896 s", marker["detail"])
+            self.assertNotIn("reference failed", marker["detail"])
+
+    def test_genuine_failure_is_not_retried(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            run_gate({"v1": ok(2)}, directory=directory)
+            bad = {"seconds": 3, "passed": False, "timed_out": False, "detail": "unknown constant", "path": "lsp"}
+            _rows, calls, sleeps = self._others(directory, [bad])
+            self.assertEqual((calls, sleeps), (["v2"], []))
+            self.assertEqual(lh.tripped(directory)["detail"], "unknown constant")
 
 
 if __name__ == "__main__":

@@ -1754,3 +1754,35 @@ Fresh runs with only the theorem and reference proof, $0.50 each, before the pha
   - The finish-available line names the 10% rule and how to finish.
 
 **Not done:** MiMo output cap and effort (MiMo paused), the primalabs billing check, the Lean output tail on timeouts (`run_lean` returns nothing on a timeout), and a decision on the budget footer under D42.
+
+### 12i. v7-check3 campaign (2026-10-15) and its fixes (`v7/22-campaign-handoff`)
+
+**Results.** 6 DeepSeek rows were planned at `--jobs 2`.
+- Wick reached **82.18** (best ever; official 75.58). It got there through scratch scouting, then single-step splices and salvage holes.
+- Fsub reached 73.25 (v7-check 77.01). It used explicit terms and `case` labels where the earlier run used flat lines closed by automation; its standalone scratch tests of closers had failed because they lacked the proof context.
+- The operator stopped EM at 73.72.
+- Binius, Core and SKI were lost to `lean_unhealthy`.
+
+**Root cause: memory, never Lean.** The machine has 30 GB, with 7 GB available and swap full; Brave alone used 7.6 GB. Four things combined:
+- The `hold` kept every queued row's toolchains open.
+- Pre-warm opened the next row while two runs were live.
+- `Housekeeping.before_run` checked memory only when no run was in flight, so the second run of each pair was never checked.
+- Gate and background checks counted a memory refusal, or a cold fallback, as a Lean fault. In fact Core's v4.26.0 and SKI's v4.30.0 references *passed* on the cold path.
+
+**Fixed.** The rule now is that only live runs hold Lean memory.
+- **Lean service:** a new `close_idle` op closes, at once, every project no lease or hold names. The campaign calls it after every run, and before a solo run when memory is low.
+- **Campaign:**
+  - `--prewarm-minutes` defaults to 0, and queued rows are held only when pre-warming.
+  - Admission checks memory before *every* run. Beside a live run only real MemAvailable counts, and the wait has no deadline.
+  - A row refused by Lean before any spend is requeued once, at the end of the queue (`-retry`).
+- **Lean health:**
+  - The gate waits up to 600 s for room to warm.
+  - A background reference check that went cold for memory is retried 3 times, 60 s apart.
+  - A cold path trips with an honest detail (`cold path (reason); reference passed in N s`). Stale gate-time warm states no longer trip.
+- **CLI:** `arena campaign ... -- <run args>` passthrough never worked, because cyclopts 5 binds the tokens to `preset`. `main()` now splits at `--` first.
+- **Replies:**
+  - Lean `Note:` lines are no longer printed as the goal.
+  - No "barely tried" line on a first node.
+  - The incomplete-errors note names its node and line and sits in that node's result.
+- **Fact:** a scratch `example` has only the hypotheses it states; try a step that needs the proof's context with `goal` at its line.
+- **Slow test** `tests/test_campaign_handoff_slow.py`: a real two-row campaign (strata, then cslib) with the scripted model on a private Lean service. It checks that both gates are healthy, that every strata toolchain closed before the first cslib server started, that cleanup reports the closed toolchains, and that no server is left after the campaign.

@@ -523,6 +523,17 @@ def render(report: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def requeue_specs(specs: list[dict], results: list[dict | None]) -> list[dict]:
+    """One retry spec for each run that stopped Lean-unhealthy without spending on the model."""
+    return [
+        {**spec, "run_id": f"{spec['run_id']}-retry"}
+        for spec, row in zip(specs, results, strict=True)
+        if row is not None
+        and not row.get("spent_usd")
+        and (row.get("exit_code") == LEAN_UNHEALTHY_EXIT or row.get("stop_reason") == "lean_unhealthy")
+    ]
+
+
 def lean_unhealthy_rows(runs: list[dict]) -> list[dict]:
     return [
         run for run in runs if run.get("stop_reason") == "lean_unhealthy" or run.get("exit_code") == LEAN_UNHEALTHY_EXIT
@@ -554,6 +565,12 @@ def service_gb(status_fn=None) -> float:
     if not status or not status.get("ok"):
         return 0.0
     return sum(float(server.get("gb", 0.0)) for server in status.get("servers", []))
+
+
+def close_idle_servers(request_fn=None) -> list[str]:
+    """Close every Lean project no live run names; [] when the service is unavailable."""
+    reply = (request_fn or lean_session.request)({"op": "close_idle", "protocol": lean_session.PROTOCOL}, 30)
+    return list(reply.get("closed", [])) if reply and reply.get("ok") else []
 
 
 def read_session_info(directory: Path) -> dict:
@@ -672,6 +689,7 @@ class Housekeeping:
         *,
         mem_fn=mem_available_gb,
         service_gb_fn=service_gb,
+        close_idle_fn=close_idle_servers,
         reap_fn=reap_run,
         lingering_fn=lingering,
         sweep_fn=sweep_candidate_dirs,
@@ -681,7 +699,7 @@ class Housekeeping:
     ):
         self.min_free_gb, self.max_wait, self.evaluations = min_free_gb, max_wait, evaluations
         self.started = time.time() if started is None else started
-        self.mem_fn, self.service_gb_fn = mem_fn, service_gb_fn
+        self.mem_fn, self.service_gb_fn, self.close_idle_fn = mem_fn, service_gb_fn, close_idle_fn
         self.reap_fn, self.lingering_fn, self.sweep_fn = reap_fn, lingering_fn, sweep_fn
         self.sleep_fn, self.now_fn, self.log = sleep_fn, now_fn, log
         self.lock = threading.Lock()
@@ -693,8 +711,10 @@ class Housekeeping:
         self.log(f"{time.strftime('%H:%M:%S')} {message}", flush=True) if self.log is print else self.log(message)
 
     def before_run(self, run_id: str) -> None:
-        """Wait (printing progress, at most `max_wait`) until no Lean process of a finished run remains and, when
-        nothing else is running, MemAvailable is at least `min_free_gb`."""
+        """Wait (printing progress) until no Lean process of a finished run remains and MemAvailable is at least
+        `min_free_gb`. Alone, idle Lean service memory counts as free (closing it makes room) and the wait ends after
+        `max_wait`; beside a live run only real MemAvailable counts and the wait has no deadline, because that run
+        finishing is what frees memory (v7-check3 lost Binius to a second run admitted with 7.8 GB)."""
         deadline = self.now_fn() + self.max_wait
         last = None
         while True:
@@ -703,25 +723,30 @@ class Housekeeping:
                 finished = list(self.finished)
             stray = [pid for directory in finished for pid in self.lingering_fn(directory)]
             free = self.mem_fn()
-            service = self.service_gb_fn()
-            low = alone and free is not None and free + service < self.min_free_gb
+            service = self.service_gb_fn() if alone else 0.0
+            low = free is not None and free + service < self.min_free_gb
             shown = "?" if free is None else f"{free:.1f}"
             if (not stray and not low) or (self.cancel is not None and self.cancel.is_set()):
                 break
-            if self.now_fn() >= deadline:
+            if not alone:
+                deadline = self.now_fn() + self.max_wait
+            elif self.now_fn() >= deadline:
                 self.say(
                     f"cleanup: starting {run_id} anyway after {self.max_wait:.0f}s "
                     f"(Lean pids left {stray}, MemAvailable {shown} GB, Lean service {service:.1f} GB)"
                 )
                 break
-            state = (tuple(stray), low)
+            state = (tuple(stray), low, alone)
             if state != last:
                 self.say(
                     f"waiting before {run_id}: {len(stray)} Lean process(es) of finished runs still alive, "
-                    f"MemAvailable {shown} GB + Lean service {service:.1f} GB "
-                    f"(need {self.min_free_gb:g} GB total)"
+                    f"MemAvailable {shown} GB"
+                    + (f" + idle Lean service {service:.1f} GB" if alone else " beside a live run")
+                    + f" (need {self.min_free_gb:g} GB)"
                 )
                 last = state
+            if alone and low:
+                self.close_idle_fn()
             self.sleep_fn(5)
         with self.lock:
             self.in_flight += 1
@@ -733,6 +758,7 @@ class Housekeeping:
 
     def after_run(self, run_id: str, directory: Path) -> None:
         reaped = self.reap_fn(directory)
+        closed = self.close_idle_fn()
         with self.lock:
             self.in_flight -= 1
             self.finished.append(directory)
@@ -741,6 +767,7 @@ class Housekeeping:
         free = self.mem_fn()
         self.say(
             f"cleanup {run_id}: reaped {reaped}"
+            + (f", closed Lean {', '.join(Path(name).name for name in closed)}" if closed else "")
             + (f", removed {swept} temporary dir(s)" if swept else "")
             + f", MemAvailable {'?' if free is None else f'{free:.1f}'} GB"
         )
@@ -809,7 +836,7 @@ def execute(
     return run_row(spec, summary, proc.returncode, packet_sha, expected, directory if directory.exists() else None)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)  # keyword-only: tokens after `--` go to the run, never to `preset`
 class CampaignOptions:
     prefix: str
     preset: str | None = None
@@ -821,7 +848,7 @@ class CampaignOptions:
     thinking: str = CONFIG["thinking"]["default"]
     min_free_gb: float = MIN_FREE_GB
     cleanup_wait: float = CLEANUP_WAIT_S
-    prewarm_minutes: float = 12
+    prewarm_minutes: float = 0  # >0 opens the next row's Lean early; off: only live runs hold memory
     skip_preflight: bool = False
     dry_run: bool = False
     json: bool = False
@@ -1009,7 +1036,8 @@ def _campaign_body(
                 os.getpid(),
                 lambda payload, timeout: lean_session.request(payload, timeout, path=socket_path),
             )
-            hold.start(row_info)
+            # Holding queued rows keeps their toolchains in memory between runs; only pre-warming needs that.
+            hold.start(row_info if prewarm else [])
         except Exception as error:
             progress.note(f"Lean service hold unavailable ({error}); continuing with cold fallback")
         if prewarm:
@@ -1072,6 +1100,14 @@ def _campaign_body(
         # The board polls each run directory; the runs' own stdout goes to their log files as before.
         with ThreadPoolExecutor(max_workers=args.jobs) as pool:
             results = list(pool.map(tracked, specs))
+            # A row the Lean gate refused before any model spend (memory, a cold toolchain) gets one more turn at
+            # the end of the queue, when the machine is quieter; its first attempt stays in the report.
+            retries = requeue_specs(specs, results) if not stop.requested else []
+            for spec in retries:
+                progress.event(f"requeue {spec['run_id']}: Lean refused the first attempt before any spend")
+                if board:
+                    board.add_run(spec)
+            results += list(pool.map(tracked, retries))
         runs = [row for row in results if row is not None]
     finally:
         stop_helpers.set()

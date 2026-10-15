@@ -754,6 +754,38 @@ class ServiceLeaseTests(Base):
             self.assertTrue(self.reap(session, project))
         self.assertEqual(self.settled("didClose", len(self.events("didOpen"))), len(self.events("didOpen")))
 
+    def test_close_idle_closes_a_released_project_at_once_but_keeps_a_leased_one(self):
+        """Between campaign runs nothing of a finished run may stay in memory, grace period or not."""
+        session = self.session()
+        project, other = str(self.dir / "proj"), str(self.dir / "v2")
+        (self.dir / "v2").mkdir()
+        self.lease(session, "done", project)
+        self.lease(session, "live", other)
+        self.assertTrue(session.check(self.request(run_id="done"))["ok"])
+        self.assertTrue(session.check(self.request(run_id="live", project=other))["ok"])
+        session.release("done")
+        deadline = time.monotonic() + 5.0
+        closed = []
+        while time.monotonic() < deadline and project in session.entries:
+            closed += session.close_idle()["closed"]
+            time.sleep(0.05)
+        self.assertNotIn(project, session.entries)
+        self.assertIn(project, closed)
+        self.assertIn(other, session.entries)
+
+    def test_close_idle_stops_a_finished_runs_project_even_while_a_check_is_busy(self):
+        """v7/22 handoff test: the run's last background check outlived it and kept strata open past the next row."""
+        session = self.session()
+        project = str(self.dir / "proj")
+        self.lease(session, "done", project)
+        self.assertTrue(session.check(self.request(run_id="done"))["ok"])
+        session.release("done")
+        entry = session.entries[project]
+        for slot in entry.slots:
+            slot.busy = True  # a check still running after its run exited
+        self.assertIn(project, session.close_idle()["closed"])
+        self.assertNotIn(project, session.entries)
+
     def test_a_project_another_lease_or_a_hold_names_stays_open(self):
         session = self.session()
         project, other = str(self.dir / "proj"), str(self.dir / "v2")

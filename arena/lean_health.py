@@ -30,6 +30,17 @@ MAX_USE = 0.5  # a warm reference check may use at most this share of the limit
 BREAKER_LIMIT = 5
 TIMEOUT_ENV = "ARENA_LEAN_TIMEOUT"
 GATE_ENV = "ARENA_LEAN_GATE"  # "0" turns the gate off (offline tests with a fake Lean)
+# A worker refused for memory is a wait, not a Lean fault: the gate retries until ROOM_WAIT_S, and a background check
+# that fell back to the cold path for memory is retried ROOM_RETRIES times, ROOM_RETRY_S apart, before it trips.
+MEMORY_REFUSALS = ("no room for a Lean worker", "no memory to load a Lean worker")
+ROOM_WAIT_S = 600
+ROOM_POLL_S = 15
+ROOM_RETRIES = 3
+ROOM_RETRY_S = 60
+
+
+def memory_refused(*texts: object) -> bool:
+    return any(marker in str(text) for text in texts for marker in MEMORY_REFUSALS)
 
 
 def choose_limit(slowest_warm: float | None) -> int:
@@ -81,13 +92,15 @@ def _reference_check(row: dict, version: str, commit: str, timeout: int = LIMIT_
             "detail": f"could not run Lean: {type(error).__name__}: {str(error)[:160]}",
         }
     seconds = round(time.monotonic() - started, 2)
+    last = engine.last_lean_run()
     if done is None:
         return {
             "seconds": seconds,
             "passed": False,
             "timed_out": True,
             "detail": f"timed out after {timeout} s",
-            "path": engine.last_lean_run().get("path"),
+            "path": last.get("path"),
+            "reason": last.get("reason", ""),
         }
     returncode, output = done
     return {
@@ -95,7 +108,8 @@ def _reference_check(row: dict, version: str, commit: str, timeout: int = LIMIT_
         "passed": returncode == 0,
         "timed_out": False,
         "detail": "" if returncode == 0 else output.strip()[:200],
-        "path": engine.last_lean_run().get("path"),
+        "path": last.get("path"),
+        "reason": last.get("reason", ""),
     }
 
 
@@ -110,6 +124,8 @@ def gate(
     check_fn=None,
     log=print,
     now_fn=time.time,
+    sleep_fn=time.sleep,
+    room_wait_s: float = ROOM_WAIT_S,
 ) -> dict:
     """Warm and check the primary version, starting other toolchain warm-ups in the background.
 
@@ -130,10 +146,17 @@ def gate(
     version, commit = targets[0]
     entry: dict = {}
     report["versions"][version] = entry
-    try:
-        warmed = warm_fn(row, version, commit, slots, lane="model", wait=True)
-    except Exception as error:
-        warmed = {"ok": False, "workers": 0, "seconds": [], "failed": [f"{type(error).__name__}: {error}"]}
+    room_deadline = time.monotonic() + room_wait_s
+    while True:
+        try:
+            warmed = warm_fn(row, version, commit, slots, lane="model", wait=True)
+        except Exception as error:
+            warmed = {"ok": False, "workers": 0, "seconds": [], "failed": [f"{type(error).__name__}: {error}"]}
+        refused = isinstance(warmed, dict) and not warmed.get("workers") and memory_refused(*warmed.get("failed", []))
+        if not refused or time.monotonic() >= room_deadline:
+            break
+        _say(log, f"lean warm {version}: waiting for memory ({'; '.join(map(str, warmed.get('failed', [])))[:120]})")
+        sleep_fn(ROOM_POLL_S)
     if warmed is None:
         entry.update(workers=None, header_seconds=None, warm_failed=[])
         _say(log, f"lean warm {version}: no session configured; the reference check below includes the import")
@@ -242,8 +265,14 @@ def check_others(
     cancelled=lambda: False,
     log=print,
     now_fn=time.time,
+    sleep_fn=time.sleep,
+    retries: int = ROOM_RETRIES,
+    retry_s: float = ROOM_RETRY_S,
 ) -> list[dict]:
-    """Run pending cross-version reference checks serially and trip on the first failure."""
+    """Run pending cross-version reference checks serially and trip on the first failure.
+
+    A check that ran on the cold path because no worker had memory is retried (`retries` times, `retry_s` apart)
+    before it counts: memory is a wait, and a passing cold check says nothing bad about the toolchain."""
     report = read_health(directory)
     if report is None:
         return []
@@ -261,25 +290,33 @@ def check_others(
         entry = report.get("versions", {}).get(version, {})
         if entry.get("checked"):
             continue
-        check = check_fn(row, version, commit, lane="background")
+        for attempt in range(retries + 1):
+            check = check_fn(row, version, commit, lane="background")
+            starved = check.get("path") == "cold-fallback" and memory_refused(check.get("reason", ""))
+            if not starved or attempt == retries or cancelled():
+                break
+            _say(log, f"reference {version}: no memory for a warm worker; retry {attempt + 1} in {retry_s:.0f} s")
+            sleep_fn(retry_s)
+        cold = check.get("path") == "cold-fallback"
         entry.update(
             checked=True,
             check_seconds=check["seconds"],
             passed=bool(check["passed"]),
             timed_out=bool(check.get("timed_out")),
             detail=check.get("detail", ""),
+            path=check.get("path"),
         )
         report["versions"][version] = entry
         report["pending"] = [pending for pending in report.get("pending", []) if pending != version]
         _write_health(directory, report)
         completed.append({"version": version, **entry})
-        detail = entry["detail"] or ("timed out" if entry["timed_out"] else "reference failed")
-        if (
-            not entry["passed"]
-            or entry.get("workers") == 0
-            or entry.get("warm_ok") is False
-            or check.get("path") == "cold-fallback"
-        ):
+        if not entry["passed"] or cold:
+            outcome = "timed out" if entry["timed_out"] else ("passed" if entry["passed"] else "failed")
+            detail = (
+                f"cold path ({check.get('reason') or 'no warm worker'}); reference {outcome} in {entry['check_seconds']:.0f} s"
+                if cold
+                else entry["detail"] or outcome
+            )
             trip_unhealthy(directory, version, detail, now_fn=now_fn)
             break
         _say(log, f"reference {version}: {entry['check_seconds']:.0f} s passed")

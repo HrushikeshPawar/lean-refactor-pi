@@ -965,6 +965,32 @@ class Session:
         self.repl.close_project(entry.project)
         _log(f"closed: no run or queued row needs it ({entry.project.name})")
 
+    def close_idle(self) -> dict:
+        """Close now, without the grace period, every project no live lease or hold names: a campaign calls this
+        between runs so nothing of a finished run stays in memory. A project a finished run leased is closed even
+        while busy (its last background check outlives the run, and nobody is left to read the answer); an ad hoc
+        project that is busy has a live client and is left alone."""
+        self.reap_dead()
+        with self.lock:
+            entries = list(self.entries.values())
+        for entry in entries:
+            busy = any(slot.busy for slot in entry.slots)
+            if not (busy and entry.was_referenced):
+                self._close_unreferenced(entry)
+                continue
+            with entry.condition:
+                with self.lock:
+                    name = str(entry.project)
+                    if self._referenced_locked(name) or self.entries.get(name) is not entry:
+                        continue
+                    self.entries.pop(name)
+                self._stop_entry(entry)
+            self.repl.close_project(entry.project)
+            _log(f"closed: its run ended while a check was still running ({entry.project.name})")
+        with self.lock:
+            closed = [str(entry.project) for entry in entries if self.entries.get(str(entry.project)) is not entry]
+        return {"ok": True, "closed": closed}
+
     def reap_dead(self) -> None:
         """Drop leases and holds whose process is gone; their projects start the grace countdown."""
         with self.lock:
@@ -1717,6 +1743,8 @@ class _Handler(socketserver.StreamRequestHandler):
                 reply = session.hold(request)
             elif op == "unhold":
                 reply = session.unhold(str(request.get("owner", "")))
+            elif op == "close_idle":
+                reply = session.close_idle()
             elif op == "shutdown":
                 reply = {"ok": True}
                 threading.Thread(target=self.server.shutdown, daemon=True).start()
