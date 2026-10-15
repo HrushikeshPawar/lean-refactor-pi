@@ -131,11 +131,12 @@ GOAL_CHARS = 200
 
 
 def _goal_line(goal: object) -> object:
-    """A hole's case tag and its target line (`⊢ ...`), without the hypothesis context."""
+    """A hole's case tag and its target (`⊢ ...`, continued lines joined), without the hypothesis context."""
     if not isinstance(goal, str) or not goal.strip():
         return shown(goal)
     lines = [line.strip() for line in goal.splitlines() if line.strip()]
-    target = next((line for line in reversed(lines) if line.startswith("⊢")), None)
+    start = next((index for index in range(len(lines) - 1, -1, -1) if lines[index].startswith("⊢")), None)
+    target = " ".join(lines[start:]) if start is not None else None
     tag = lines[0] if lines[0].startswith("case ") else None
     found = " ".join(part for part in (tag, target) if part) or lines[0]
     return found if len(found) <= GOAL_CHARS else found[: GOAL_CHARS - 1] + "…"
