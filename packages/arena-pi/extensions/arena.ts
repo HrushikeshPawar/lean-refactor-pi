@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { dirname, resolve, relative, sep } from "node:path";
 import { Type } from "typebox";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
+import { RawArguments, repairMalformedToolArguments } from "./rawargs.ts";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { nearestToolName, normalizeToolArguments, requireToolArguments } from "./toolnames.ts";
 import { BlobStore, DeltaChain, splitRequest, stampRecord } from "./journal.ts";
@@ -23,41 +24,6 @@ const root = resolve(import.meta.dirname, "../../..");
 const workspaces = resolve(root, "workspaces");
 const MAX_ERROR_STREAK = 3;
 const ARENA_TOOLS = new Set(["compile", "goal", "search", "read", "scratch"]);
-
-function validObjectJson(raw: string | undefined): boolean {
-  if (raw === undefined) return false;
-  try {
-    const value: unknown = JSON.parse(raw);
-    return value !== null && typeof value === "object" && !Array.isArray(value);
-  } catch {
-    return false;
-  }
-}
-
-/** The raw argument JSON of each streamed tool call, in the order Pi's stream delivered it. */
-class RawArguments {
-  private raw = new Map<number, string>();
-  reset() { this.raw.clear(); }
-  start(index: number, partialJson: string | undefined) { if (partialJson !== undefined) this.raw.set(index, partialJson); }
-  delta(index: number, text: string) { this.raw.set(index, (this.raw.get(index) ?? "") + text); }
-  get(index: number) { return this.raw.get(index); }
-}
-
-/**
- * Pi parses failed JSON as {} before tool validation. A tool call whose streamed arguments were not an
- * object gets `null` arguments instead (`null` is deliberately not an object, so even argument-free tools
- * fail validation instead of running with invented defaults). Returns the repaired message, or undefined
- * when every tool call was fine.
- */
-function repairMalformedToolArguments(message: AssistantMessage, raw: RawArguments): AssistantMessage | undefined {
-  let changed = false;
-  const content = message.content.map((block, index) => {
-    if (block.type !== "toolCall" || validObjectJson(raw.get(index))) return block;
-    changed = true;
-    return { ...block, arguments: null } as unknown as typeof block;
-  });
-  return changed ? { ...message, content } : undefined;
-}
 
 function inside(path: string, parent: string): boolean {
   const rel = relative(parent, path);
