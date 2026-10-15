@@ -8,7 +8,7 @@ import re
 
 from arena import campaign, engine, graph, reply, salvage, search, text
 from arena.forbidden import official_filter
-from arena.prices import snippet_tokens
+from arena.prices import rates, snippet_tokens
 from arena.steps import parse, split_steps, step_range
 
 TOOL_FORMS = {
@@ -618,6 +618,9 @@ def compile_tool(theorem: str, run_id: str, request: dict) -> dict:
     if closed_nodes:
         seconds = float(text.numbers().get("cross_version_wait_seconds", 10))
         campaign.autocheck(theorem, run_id, max_seconds=seconds, kinds=("full",))
+        # The step table describes the newest best node; without its profile every step would read "pending".
+        seconds = float(text.numbers().get("profile_wait_seconds", 10))
+        campaign.autocheck(theorem, run_id, max_seconds=seconds, kinds=("profiles",))
     # Everything below reads one snapshot taken after the in-call check.
     history, projection = _nodes(run_id)
     for item in items:
@@ -887,6 +890,15 @@ def _try_verdict(item: dict) -> str:
     return _render("try_closed")
 
 
+def _missing_line(row: dict, label: str) -> str | None:
+    """First line of an exact-name miss that has visible names under a prefix of it."""
+    if not row.get("missing") or not row.get("siblings"):
+        return None
+    return _render(
+        "search_missing", query=label, prefix=row.get("sibling_prefix", ""), names=", ".join(row["siblings"])
+    )
+
+
 def search_tool(theorem: str, run_id: str, request: dict) -> dict:
     if _is_empty(request, "search"):
         return _empty_error("search")
@@ -914,7 +926,10 @@ def search_tool(theorem: str, run_id: str, request: dict) -> dict:
             continue
         row = by_index[index]
         query = row.get("query", "")
+        # The after form without queries has an empty query: its prefix names the miss instead.
+        label = str(query) or (after or "")
         error = row.get("error")
+        missing = _missing_line(row, label)
         if error:
             suggestions = error.get("suggestions") or row.get("suggestions") or []
             items.append(
@@ -925,17 +940,18 @@ def search_tool(theorem: str, run_id: str, request: dict) -> dict:
                     error.get("valid", ["nonempty query"]),
                     TOOL_FORMS["search"],
                     [
+                        *([missing] if missing else []),
                         _render(
                             "search_miss",
-                            query=query,
+                            query=label,
                             reason=error.get("code", "not found"),
                             suggestions=", ".join(suggestions) or "none",
-                        )
+                        ),
                     ],
                 )
             )
             continue
-        lines = []
+        lines = [missing] if missing else []
         for hit in row.get("hits", []):
             handle = hit.get("handle") or f"decl:{hit.get('name', '')}"
             handles.append(handle)
@@ -954,7 +970,7 @@ def search_tool(theorem: str, run_id: str, request: dict) -> dict:
             lines.append(
                 _render(
                     "search_miss",
-                    query=query,
+                    query=label,
                     reason=row.get("hint") or "no hit",
                     suggestions=", ".join(suggestions) or "none",
                 )
@@ -1224,6 +1240,31 @@ def _scratch_messages(output: str) -> list[dict]:
     return [{**item, "message": "\n".join(item["message"]).strip()} for item in found]
 
 
+_UNKNOWN_NAME = re.compile(r"Unknown\s(?:constant|identifier)\s`([^`\s]+)`")
+_DECLARATION_START = re.compile(r"(?:@\[[^\]]*\]\s*)?(?:(?:private|protected|noncomputable)\s+)*(?:example|theorem|lemma)\b")
+# The measure definition without its bare trailing call, which would measure the snippet's first command a second time.
+# Lean prints info messages without a position, so the values are read in the order the declarations ran.
+_MEASURE_DEFINITION = engine.HEARTBEAT_WRAPPER.removesuffix("arena_measure_heartbeats\n")
+_ARENA_LINE = re.compile(r"(?:.*:\sinfo:\s)?ARENA_HEARTBEATS\s(\d+)")
+
+
+def _measured_snippet(code: str) -> tuple[str, list[int]]:
+    """The snippet with the heartbeat measure in front of each top-level declaration, on the declaration's own
+    line, so no line of the snippet moves. A declaration right after a doc comment or an attribute line stays
+    unmeasured: the measure would separate it from its doc comment or attribute."""
+    lines, starts, previous = [], [], ""
+    for number, line in enumerate(code.splitlines(), 1):
+        stripped = line.strip()
+        if _DECLARATION_START.match(line) and not previous.endswith("-/") and not previous.startswith("@["):
+            starts.append(number)
+            lines.append("arena_measure_heartbeats " + line)
+        else:
+            lines.append(line)
+        if stripped:
+            previous = stripped
+    return "\n".join(lines) + ("\n" if code.endswith("\n") else ""), starts
+
+
 def scratch_tool(theorem: str, run_id: str, request: dict) -> dict:
     """Lean commands run in the target's environment in place of its declaration. Never a node, never scored."""
     if _is_empty(request, "scratch"):
@@ -1247,26 +1288,52 @@ def scratch_tool(theorem: str, run_id: str, request: dict) -> dict:
     row = campaign.problem(theorem)
     version, commit = engine.versions(row)[0]
     # The snippet takes the target declaration's place in the same file the compile tool checks.
-    built = engine.candidate_file(row, code, version, commit)
+    measured_code, measured_starts = _measured_snippet(code)
+    built = engine.candidate_file(row, measured_code, version, commit)
     digest = hashlib.sha256(code.encode()).hexdigest()
     earlier = sum(
         1 for event in _history(run_id) if event.get("kind") == "scratch" and event.get("code_sha256") == digest
     )
     campaign._append(campaign.run_dir(run_id), {"kind": "scratch", "code_sha256": digest})
     facts = [_render("scratch_repeat", count=earlier + 1)] if earlier else []
-    output = engine.run_lean(row, built["path"], built["text"], prefix_end=built["head"])
+    has_declaration = any(_DECLARATION_START.match(line) for line in code.splitlines())
+    lean_text, wrapper_start = built["text"], None
+    if measured_starts:
+        # The measure definition goes in front of the snippet, as compile does; its lines are mapped back below.
+        wrapper_start = built["text"][: built["head"]].count("\n") + 1
+        lean_text = built["text"][: built["head"]] + _MEASURE_DEFINITION + built["text"][built["head"] :]
+    output = engine.run_lean(row, built["path"], lean_text, prefix_end=built["head"])
     lines = []
+    heartbeats: dict[int, int] = {}
     if output is None:
         lines.append(_render("scratch_timeout"))
     else:
-        for message in _scratch_messages(output[1]):
-            snippet_line = message["line"] - built["start_line"] + 1 if message["line"] else None
+        measured_values, kept = [], []
+        for raw_line in output[1].splitlines():
+            found = _ARENA_LINE.fullmatch(raw_line.strip())
+            if found:
+                measured_values.append(int(found.group(1)))
+            else:
+                kept.append(raw_line)
+        if len(measured_values) == len(measured_starts):
+            heartbeats = dict(zip(measured_starts, measured_values, strict=True))
+        messages = []
+        for message in _scratch_messages("\n".join(kept)):
+            candidate_line = message["line"]
+            if candidate_line is not None and wrapper_start is not None:
+                candidate_line, in_wrapper = engine.map_measured_line(
+                    candidate_line, wrapper_start, _MEASURE_DEFINITION.count("\n")
+                )
+                if in_wrapper:
+                    continue
+            snippet_line = candidate_line - built["start_line"] + 1 if candidate_line else None
             # Messages before the snippet come from the harness wrapper; sorry warnings are the allowed sorry itself.
             if snippet_line is not None and snippet_line < 1:
                 continue
             body = message["message"]
             if message["severity"] == "warning" and "declaration uses" in body and "sorry" in body:
                 continue
+            messages.append((snippet_line, message))
             lines.append(
                 _render(
                     "scratch_message",
@@ -1275,10 +1342,38 @@ def scratch_tool(theorem: str, run_id: str, request: dict) -> dict:
                     message=message["message"][: engine._MESSAGE_LIMIT],
                 )
             )
-    for number, line in enumerate(code.splitlines(), 1):
-        count = snippet_tokens(line) if line.strip() else 0
-        if count:
-            lines.append(_render("scratch_line_tokens", line=number, tokens=count))
+        seen_names: list[str] = []
+        for _snippet_line, message in messages:
+            for name in _UNKNOWN_NAME.findall(message["message"]):
+                if name not in seen_names:
+                    seen_names.append(name)
+        for name in seen_names:
+            prefix, siblings = search.sibling_names(theorem, name)
+            if siblings:
+                lines.append(
+                    _render("scratch_unknown_names", name=name, prefix=prefix, names=", ".join(siblings))
+                )
+    if measured_starts and output is not None:
+        code_lines = code.splitlines()
+        from arena.scoring import reference as scoring_reference
+
+        price_rates = rates(*scoring_reference(theorem), len(engine.versions(row)))
+        bounds = measured_starts[1:] + [len(code_lines) + 1]
+        for start, end in zip(measured_starts, bounds, strict=True):
+            hb = heartbeats.get(start)
+            if hb is None:
+                continue
+            span = "\n".join(code_lines[start - 1 : end - 1])
+            tokens = snippet_tokens(span)
+            points = tokens * price_rates["points_per_token"] + hb / 1000 * price_rates["points_per_1k_hb"]
+            lines.append(
+                _render("scratch_decl_cost", line=start, tokens=tokens, heartbeats=hb, points=round(points, 1))
+            )
+    if has_declaration:
+        for number, line in enumerate(code.splitlines(), 1):
+            count = snippet_tokens(line) if line.strip() else 0
+            if count:
+                lines.append(_render("scratch_line_tokens", line=number, tokens=count))
     lines.append(_render("scratch_tokens", tokens=snippet_tokens(code)))
     item = {"ref": "scratch", "ok": True, "lines": lines, "error": None, "repeat": bool(earlier)}
     return reply.reply(facts=facts, items=[item])

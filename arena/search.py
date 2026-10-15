@@ -96,6 +96,41 @@ def _trigram_candidates(connection: sqlite3.Connection, component: str) -> list[
     return _visible_rows(connection, f"component_id IN (SELECT id FROM components WHERE {predicate})", parameters)
 
 
+def _like_prefix(value: str) -> str:
+    """A LIKE pattern matching names that start with `value` (case folded, `%` `_` `\\` escaped)."""
+    return value.casefold().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
+def _siblings(connection: sqlite3.Connection, lookup: str) -> tuple[str, list[str]]:
+    """Visible names under the longest prefix of `lookup` cut after a `.` or `_` that any name starts with.
+
+    `Time.deriv_sub` tries `Time.deriv_`, then `Time.`. At most 12 names, shortest first; no index work beyond
+    the prefix scans.
+    """
+    cuts = sorted({index_ + 1 for index_, char in enumerate(lookup) if char in "._"}, reverse=True)
+    for cut in cuts:
+        prefix = lookup[:cut]
+        rows = _visible_rows(connection, "instr(name, ?) = 1", (prefix,))
+        if rows:
+            rows.sort(key=lambda row: (len(row["name"]), row["name"]))
+            return prefix, [row["name"] for row in rows[:12]]
+    return "", []
+
+
+def sibling_names(theorem: str, name: str) -> tuple[str, list[str]]:
+    """Index-only siblings of a name Lean did not find; empty when the index is missing. Never starts Lean."""
+    if index.index_path(theorem) is None:
+        return "", []
+    try:
+        connection = index.open_index(theorem)
+    except (OSError, sqlite3.Error, ValueError):
+        return "", []
+    try:
+        return _siblings(connection, name)
+    finally:
+        connection.close()
+
+
 def _name_query(connection: sqlite3.Connection, theorem: dict, query: str, after: str | None, limit: int) -> dict:
     result = {"query": query, "hits": [], "hint": None, "truncated": False, "error": None}
     exact_only = query.startswith("decl:")
@@ -105,11 +140,11 @@ def _name_query(connection: sqlite3.Connection, theorem: dict, query: str, after
         return result
 
     if after is not None:
-        prefix = f"{after}.{lookup}"
+        # Completions are the dotted children and the `_` siblings of the prefix, never deeper dotted names.
         rows = _visible_rows(
             connection,
-            "folded_name LIKE ? ESCAPE '\\' AND instr(substr(name, ?), '.') = 0",
-            (prefix.casefold().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%", len(after) + 2),
+            "(folded_name LIKE ? ESCAPE '\\' OR folded_name LIKE ? ESCAPE '\\') AND instr(substr(name, ?), '.') = 0",
+            (*(_like_prefix(f"{after}{separator}{lookup}") for separator in (".", "_")), len(after) + 2),
         )
         rows.sort(key=lambda row: (len(row["name"].rsplit(".", 1)[-1]), row["name"]))
         result["hits"] = [_hit(row, theorem, "completion") for row in rows[:limit]]
@@ -117,6 +152,9 @@ def _name_query(connection: sqlite3.Connection, theorem: dict, query: str, after
         return result
 
     exact = _visible_rows(connection, "name = ?", (lookup,))
+    if not exact and not exact_only:
+        prefix, siblings = _siblings(connection, lookup)
+        result.update(missing=True, sibling_prefix=prefix, siblings=siblings)
     exact_last = [] if "." in lookup else _visible_rows(connection, "last_component = ?", (lookup,))
     exact_last.sort(key=lambda row: (len(row["name"]), row["name"]))
     candidates: list[tuple[sqlite3.Row, str]] = [(row, "exact") for row in exact]

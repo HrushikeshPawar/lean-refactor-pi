@@ -3144,10 +3144,15 @@ def autocheck(
     started = time.monotonic()
     checked: list[str] = []
     with (directory / "autocheck.lock").open("a") as handle:
-        try:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return {"ok": True, "checked": [], "running_elsewhere": True}
+        while True:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                # An in-call wait (kinds given) takes its turn after the background job; the background loop does not.
+                if kinds is None or max_seconds is None or time.monotonic() - started >= max_seconds:
+                    return {"ok": True, "checked": [], "running_elsewhere": True}
+                time.sleep(0.2)
         while max_seconds is None or time.monotonic() - started < max_seconds:
             if lean_health.tripped(directory):
                 break  # Lean is unhealthy: background checks pause with the model's work

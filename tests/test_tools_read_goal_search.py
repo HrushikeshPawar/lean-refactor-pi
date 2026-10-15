@@ -27,6 +27,29 @@ class ToolCase(FakeRunCase):
             self.addCleanup(item.stop)
 
 
+class ScratchLineTokenTests(ToolCase):
+    def test_scratch_line_tokens_appear_only_when_the_snippet_declares(self):
+        built = {"path": "p", "text": "", "head": 0, "start_line": 1, "end_line": 1, "offset": 0}
+        with (
+            patch.object(tools.engine, "versions", return_value=[("v", "c")]),
+            patch("arena.scoring.reference", return_value=(1000, 10000)),
+            patch.object(tools.engine, "candidate_file", return_value=built),
+            patch.object(tools.engine, "run_lean", return_value=(0, "")),
+            patch.object(tools, "_history", return_value=[]),
+            patch.object(campaign, "_append"),
+            patch.object(campaign, "run_dir", return_value=self.directory),
+        ):
+            check = tools.scratch_tool("T", "logic", {"code": "#check Nat.add_comm\n"})
+            proof = tools.scratch_tool("T", "logic", {"code": "example : True := trivial\n"})
+
+        def lines(result):
+            return (result.get("details") or result)["items"][0]["lines"]
+
+        self.assertFalse([line for line in lines(check) if line.startswith("line 1 tokens")])
+        self.assertTrue(any(line.startswith("snippet tokens") for line in lines(check)))
+        self.assertTrue([line for line in lines(proof) if line.startswith("line 1 tokens")])
+
+
 class CascadeToolCase(ToolCase):
     cascade_errors = True
 

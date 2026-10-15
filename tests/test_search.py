@@ -95,6 +95,16 @@ class SearchTests(unittest.TestCase):
         self.assertEqual([hit["name"] for hit in result["hits"]], ["Nat.add_comm", "Nat.add_assoc"])
         self.assertTrue(all(hit["why"] == "completion" for hit in result["hits"]))
 
+    def test_exact_miss_lists_names_under_the_longest_existing_prefix(self):
+        result = search.search(ROW_NAME, ["Nat.add_zz"])["queries"][0]
+        self.assertTrue(result["missing"])
+        self.assertEqual(result["sibling_prefix"], "Nat.add_")
+        self.assertEqual(result["siblings"], ["Nat.add_comm", "Nat.add_assoc"])
+
+    def test_after_completes_underscore_siblings_and_not_deeper_names(self):
+        result = search.search(ROW_NAME, [""], after="Nat.add")["queries"][0]
+        self.assertEqual([hit["name"] for hit in result["hits"]], ["Nat.add_comm", "Nat.add_assoc"])
+
     def test_batch_keeps_one_empty_query_error_and_the_next_query_hits(self):
         result = search.search(ROW_NAME, ["", "Nat.add_comm"])
         self.assertEqual(result["queries"][0]["error"]["code"], "empty_query")
