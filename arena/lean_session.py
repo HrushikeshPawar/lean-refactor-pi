@@ -1129,7 +1129,7 @@ class Session:
                             self._waited(entry, lane, started)
                             return slot
                         if blocked != "slots" and not mine:
-                            if self._evict_background(entry):
+                            if self._evict_background(entry) or self._evict_unleased(entry):
                                 continue
                             assert blocked is not None
                             self._refused(entry, blocked)
@@ -1184,6 +1184,34 @@ class Session:
                 other.slots.remove(slot)
                 self._free(slot)
                 _log(f"background worker evicted from {other.project.name} to make room for {keep.project.name}")
+            finally:
+                other.condition.release()
+            return True
+
+    def _evict_unleased(self, keep: _Entry) -> bool:
+        """Close the longest-idle model worker of a project no running run uses as its primary toolchain (a pre-warm
+        or hold for a row that has not started), so a starting run is never refused while such workers sit idle."""
+        with self.lock:
+            primaries = {lease["primary"] for lease in self.leases.values()}
+            idle = [
+                (slot.used, other, slot)
+                for other in self.entries.values()
+                if other is not keep and str(other.project) not in primaries
+                for slot in other.slots
+                if not slot.busy and slot.text is not None
+            ]
+            if not idle:
+                return False
+            _, other, slot = min(idle, key=lambda item: item[0])
+            if not other.condition.acquire(blocking=False):
+                return False
+            try:
+                if slot.busy:
+                    return False
+                other.server.close_doc(slot)
+                other.slots.remove(slot)
+                self._free(slot)
+                _log(f"idle worker evicted from {other.project.name} to make room for {keep.project.name}")
             finally:
                 other.condition.release()
             return True

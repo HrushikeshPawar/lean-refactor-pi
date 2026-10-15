@@ -483,12 +483,22 @@ class BackgroundWorkerTests(Base):
         self.assertEqual(len(session.entries[v2].lane_slots("background")), 0)
         self.assertEqual(len(session.entries[v3].lane_slots("background")), 1)
 
-    def test_model_request_is_refused_instead_of_evicting_a_model_worker(self):
+    def test_model_request_is_refused_instead_of_evicting_a_running_runs_primary_worker(self):
         session = self.session(limit=1)
+        primary = self.request()["project"]
+        self.assertTrue(session.lease({"run_id": "run", "pid": os.getpid(), "primary": primary, "others": []})["ok"])
         self.assertEqual(session.warm({**self.request(), "slots": 1})["workers"], 1)
         reply = session.check({**self.request(), "project": self.other("v2")})
         self.assertFalse(reply["ok"])
         self.assertEqual(self.events("didClose"), [])
+
+    def test_an_idle_pre_warmed_worker_no_run_uses_is_evicted_for_a_starting_run(self):
+        # v7-check2: workers pre-warmed for a later row filled the machine cap and a starting row was refused.
+        session = self.session(limit=1)
+        self.assertEqual(session.warm({**self.request(), "slots": 1})["workers"], 1)
+        reply = session.check({**self.request(), "project": self.other("v2")})
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(len(self.events("didClose")), 1)
 
 
 class AsyncWarmAndPssTests(Base):
