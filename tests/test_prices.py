@@ -25,11 +25,11 @@ class PriceUnitTests(unittest.TestCase):
             self.assertEqual(round(expected["points_per_1k_hb"] / 10, 3), rounded["points_per_100_heartbeats"])
             self.assertEqual(round(expected["points_per_version"], 2), rounded["points_per_lost_version"])
 
-    def test_formatters_keep_hb_scale_and_signed_minus(self):
-        self.assertEqual(prices.fmt_hb(1234), "1.2K")
+    def test_formatters_show_exact_heartbeats_and_signed_minus(self):
+        self.assertEqual(prices.fmt_hb(1234), "1234")
         self.assertEqual(prices.fmt_hb(999), "999")
         self.assertEqual(prices.fmt_hb(0), "0")
-        self.assertEqual(prices.fmt_signed(4000), "+4.0K")
+        self.assertEqual(prices.fmt_signed(4000), "+4000")
         self.assertEqual(prices.fmt_signed(-9), "−9")
 
     def test_step_table_attributes_tokens_and_uses_inclusive_heartbeat_cost(self):

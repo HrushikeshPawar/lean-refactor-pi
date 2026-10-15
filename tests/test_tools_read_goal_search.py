@@ -11,6 +11,9 @@ ROW = {
 }
 
 
+RESULT = "## Result"
+
+
 class ToolCase(FakeRunCase):
     def setUp(self):
         super().setUp()
@@ -201,7 +204,7 @@ class ReadGoalSearchTests(CascadeToolCase):
             return_value={"queries": [{"query": "Nat.ad", "hits": [], "suggestions": ["Nat.add", "Nat.sub"]}]},
         ):
             result = tools.search_tool("T", "logic", {"queries": ["Nat.ad"]})
-        self.assertIn("Nat.add, Nat.sub", result["items"][0]["lines"][0])
+        self.assertIn("Nat.add, Nat.sub", result["items"][0]["lines"][1])  # [0] is the result section header
 
     def test_decl_read_appends_event_and_invalid_hole_view_lists_source(self):
         with (
@@ -225,7 +228,7 @@ class ReadGoalSearchTests(CascadeToolCase):
         total = {"tokens": 290, "heartbeats": None, "versions": "0/3"}
         with patch.object(campaign, "price_table", return_value={"total": total}):
             result = tools.read_tool("T", "logic", {"node": node, "view": "prices"})
-        line = result["items"][0]["lines"][0]
+        line = result["items"][0]["lines"][1]  # [0] is the result section header
         self.assertIn("heartbeats n/a", line)
         self.assertNotIn("None", line)
 
@@ -329,9 +332,11 @@ class ToolReplyTextTests(CascadeToolCase):
     def test_outline_shows_recorded_step_goals_and_no_placeholder(self):
         node = tools.compile_tool("T", "logic", {"drafts": ["by\n  skip\n  trivial"]})["items"][0]["node"]
         bare = tools.read_tool("T", "logic", {"node": node, "view": "outline"})["items"][0]["lines"]
-        self.assertEqual(bare, ["s1 lines 2-2", "s2 lines 3-3"])
+        self.assertEqual(bare, [RESULT, "s1 lines 2-2", "s2 lines 3-3"])
         proof_id = campaign.resolve_node_ref(campaign.events(self.directory), node)
         goals = [{"id": "s1", "before": "⊢ True", "after": "⊢ True"}, {"id": "s2", "before": "⊢ True", "after": None}]
         campaign._append(self.directory, {"kind": "step_goals", "proof_id": proof_id, "goals": goals})
         shown = tools.read_tool("T", "logic", {"node": node, "view": "outline"})["items"][0]["lines"]
-        self.assertEqual(shown, ["s1 lines 2-2", "before: ⊢ True", "after: ⊢ True", "s2 lines 3-3", "before: ⊢ True"])
+        self.assertEqual(
+            shown, [RESULT, "s1 lines 2-2", "before: ⊢ True", "after: ⊢ True", "s2 lines 3-3", "before: ⊢ True"]
+        )

@@ -19,9 +19,8 @@ def rates(reference_tokens: int, reference_heartbeats: int, total_versions: int)
 def fmt_hb(n: int | float | None) -> str:
     if n is None:
         return "n/a"
-    if abs(n) < 1000:
-        return str(int(n)) if int(n) == n else str(n)
-    return f"{n / 1000:.1f}K"
+    # Exact counts: a rounded "1.2K" hides changes of a few hundred heartbeats.
+    return str(int(n)) if int(n) == n else str(round(n))
 
 
 def fmt_signed(n: int | float | None, unit: str = "") -> str:

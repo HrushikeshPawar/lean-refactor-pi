@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from arena import campaign, reply
+from arena import campaign, reply, text
 
 
 class ReplyTests(unittest.TestCase):
@@ -78,7 +78,7 @@ class ReplyTests(unittest.TestCase):
         shown = reply.deduplicate_diagnostics(self.run_id, "n2", [{"id": "n2.e1", "goal": "⊢ True", "message": "m"}])
         self.assertEqual(shown[0]["goal"], "⊢ True")
 
-    def test_map_lines_show_node_ids_reference_and_route_legend_but_never_none(self):
+    def test_map_lines_label_every_section_and_rank_steps_but_never_show_none(self):
         lines = reply._map_lines(
             {
                 "best": {"node": "n2", "score": 33.31, "tokens": 407, "heartbeats": 1384},
@@ -88,21 +88,42 @@ class ReplyTests(unittest.TestCase):
                     {"node": "n4", "edge": "edited_from", "from": ["n2"], "status": "broken", "score": None},
                     {"node": "n5", "edge": "root", "from": [], "status": "broken", "score": None},
                 ],
-                "effort": [{"step": "s1", "at_stake": 0.49, "variants": 1, "best_dtok": None, "last_gain": None}],
-                "open": [],
+                "effort": [
+                    {"step": "s1", "at_stake": 0.49, "variants": 1, "best_dtok": None, "last_gain": None},
+                    {
+                        "step": "s2",
+                        "at_stake": 2.5,
+                        "tokens": 30,
+                        "heartbeats": 90,
+                        "variants": 4,
+                        "best_dtok": 3,
+                        "last_gain": 2,
+                    },
+                ],
+                "open": [{"hole": "n9.h1", "line": 4, "goal": "case inl\nh : P\n⊢ Q"}],
             }
         )
         self.assertEqual(
             lines,
             [
+                text.render("replies/tools.map_best_head"),
                 "best n2 score 33.31 tokens 407 heartbeats 1384",
                 "n1 original proof tokens 407 heartbeats 1383",
-                "Letters: each marks the best node of one proof shape, depth band and status; visits counts the nodes "
-                "sharing them.",
-                "B n9 sketch score - visits 1",
-                "n4 edited from n2 broken score -",
-                "n5 new root broken score -",
-                "s1 at stake 0.49 variants 1 best delta - last gain -",
+                text.render("replies/tools.map_shapes"),
+                "| n9 | sketch | - | - | - | 1 |",
+                text.render("replies/tools.map_recent_head"),
+                "| n4 | edited from n2 | broken | - | - | - |",
+                "| n5 | new root | broken | - | - | - |",
+                text.render("replies/tools.map_steps_head", node="n2"),
+                text.render("replies/tools.map_steps_legend"),
+                text.render("replies/tools.map_steps_cols"),
+                # Ranked by points at stake, not by step order.
+                "| s2 | 30 | 90 | 2.5 | 4 | +3 | 2 |",
+                # Step heartbeats not yet profiled are pending, not missing.
+                "| s1 | - | pending | 0.49 | 1 | - | - |",
+                text.render("replies/tools.map_holes_head"),
+                # The hole shows its case tag and target line, not the hypothesis context.
+                "- n9.h1 line 4: case inl ⊢ Q",
             ],
         )
         self.assertNotIn("None", "\n".join(lines))
@@ -116,7 +137,7 @@ class ReplyTests(unittest.TestCase):
         ):
             first = reply.attach_context(self.run_id, reply.reply(), include_map=True)
             second = reply.attach_context(self.run_id, reply.reply(), include_map=True)
-        self.assertEqual(first["facts"], ["update"])
+        self.assertEqual(first["facts"], ["## Updates", "update"])
         self.assertEqual(second["facts"], [])
         self.assertEqual(first["map"], [])
         self.assertIsNone(second["map"])
@@ -126,9 +147,9 @@ class ReplyTests(unittest.TestCase):
         update["unseen_text"] = "n11: sketch from earlier broken nodes; line 3 is a hole to fill."
         with patch.object(campaign, "state", return_value={"updates": [update]}):
             unseen = reply.attach_context(self.run_id, reply.reply())
-        self.assertEqual(unseen["facts"], [update["unseen_text"]])
+        self.assertEqual(unseen["facts"], ["## Updates", update["unseen_text"]])
         (campaign.run_dir(self.run_id) / reply.DELIVERY_FILE).write_text('{"delivered_seq": -1}\n')
         shown = reply.reply(items=[{"ref": "d1", "ok": True, "lines": ["n7 <- n2 draft status broken."]}])
         with patch.object(campaign, "state", return_value={"updates": [update]}):
             seen = reply.attach_context(self.run_id, shown)
-        self.assertEqual(seen["facts"], [update["text"]])
+        self.assertEqual(seen["facts"], ["## Updates", update["text"]])

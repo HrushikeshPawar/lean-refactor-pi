@@ -88,8 +88,11 @@ class CompileToolTests(CascadeCase):
         self.assertTrue(second["items"][0]["repeat"])
         self.assertTrue(third["items"][0]["repeat"])
         self.assertEqual(third["items"][0]["node"], node)
-        self.assertIn(f"{node} is identical to an earlier attempt (seen 3 times)", "\n".join(third["facts"]))
-        self.assertIn("seen 2 times", "\n".join(second["facts"]))
+        # A repeat fact names this call's own node, so it is part of the result section.
+        self.assertIn(
+            f"{node} is identical to an earlier attempt (seen 3 times)", "\n".join(third["items"][0]["lines"])
+        )
+        self.assertIn("seen 2 times", "\n".join(second["items"][0]["lines"]))
 
     def test_tokens_do_not_file_or_compile(self):
         before = len(campaign.events(self.directory))

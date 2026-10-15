@@ -201,7 +201,7 @@ class ReplayTests(unittest.TestCase):
             title = [name for name, _ in rerender_v7(loaded, 2)][list(V7_SECTIONS).index("map")]
             early = dict(rerender_v7(loaded, 2))[title]
             late = dict(rerender_v7(loaded, 3))[title]
-            best = early.splitlines()[0]
+            best = next(line for line in early.splitlines() if line.startswith("best "))
             self.assertRegex(best, r"\bn2\b.*\b2\.5\b.*\b11\b.*\b4\b")
             self.assertNotRegex(early, r"\bn4\b")
             self.assertRegex(late, r"\bn4\b")

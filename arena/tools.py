@@ -302,10 +302,13 @@ def _compile_item(name: str, run_id: str, node_ref: str, result: dict, filing: s
         errors = reply.deduplicate_diagnostics(run_id, node.id, errors)
     holes = node.holes
     status = "timeout" if timeout else node.status
-    lines = [_render("compile_item", node=node.id, filing=filing, status=status)]
+    lines = [_render("compile_filed", filing=filing, status=status)]
     if timeout:
         lines.append(_render("timeout", seconds=engine.lean_timeout()))
-    for item, branches in _branch_groups(errors):
+    groups = _branch_groups(errors)
+    if groups:
+        lines.append(_render("lean_messages"))
+    for item, branches in groups:
         lines.append(
             _render(
                 "error_item",
@@ -318,6 +321,8 @@ def _compile_item(name: str, run_id: str, node_ref: str, result: dict, filing: s
             lines.append(_render("error_branches", count=branches))
         if item.get("goal"):
             lines.append(_render("error_goal", goal=item["goal"]))
+    if holes:
+        lines.append(_render("open_holes"))
     lines.extend(
         [
             _render(

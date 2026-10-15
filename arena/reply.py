@@ -124,9 +124,81 @@ def _origin(item: dict) -> str:
     )
 
 
+# Steps shown in full, by points at stake; the rest are one summary line.
+EFFORT_SHOWN = 4
+SHAPES_SHOWN = 5
+GOAL_CHARS = 200
+
+
+def _goal_line(goal: object) -> object:
+    """A hole's case tag and its target line (`⊢ ...`), without the hypothesis context."""
+    if not isinstance(goal, str) or not goal.strip():
+        return shown(goal)
+    lines = [line.strip() for line in goal.splitlines() if line.strip()]
+    target = next((line for line in reversed(lines) if line.startswith("⊢")), None)
+    tag = lines[0] if lines[0].startswith("case ") else None
+    found = " ".join(part for part in (tag, target) if part) or lines[0]
+    return found if len(found) <= GOAL_CHARS else found[: GOAL_CHARS - 1] + "…"
+
+
+def _step_hb(value: object) -> object:
+    """A step's heartbeats wait for the best node's background profile."""
+    return text.render("replies/tools.hb_pending") if value is None else value
+
+
+def _node_hb(item: dict) -> object:
+    """A broken node's partial elaboration is not a heartbeat cost."""
+    return "-" if item.get("status") == "broken" else shown(item.get("heartbeats"))
+
+
+def _shortest(item: dict) -> object:
+    """The shortest compiling replacement's token change and the node it is in."""
+    delta, node = item.get("best_dtok"), item.get("best_dtok_node")
+    return f"{_signed(delta)} in {node}" if node and delta is not None else _signed(delta)
+
+
+def _signed(value: object) -> object:
+    return f"{value:+d}" if isinstance(value, int) else shown(value)
+
+
+def _effort_lines(data: dict) -> list[str]:
+    """The best node's steps ranked by points at stake, with units the model can act on."""
+    rows = sorted(data.get("effort", []), key=lambda item: -(item.get("at_stake") or 0))
+    if not rows:
+        return []
+    best = data.get("best") or {}
+    lines = [
+        text.render("replies/tools.map_steps_head", node=shown(best.get("node"))),
+        text.render("replies/tools.map_steps_legend"),
+        text.render("replies/tools.map_steps_cols"),
+    ]
+    for item in rows[:EFFORT_SHOWN]:
+        gain = item.get("last_gain")
+        lines.append(
+            text.render(
+                "replies/tools.map_step",
+                step=shown(item.get("step")),
+                tokens=shown(item.get("tokens")),
+                heartbeats=_step_hb(item.get("heartbeats")),
+                at_stake=shown(item.get("at_stake")),
+                variants=item.get("variants") or 0,
+                best_delta=_shortest(item),
+                last_gain=shown(gain),
+            )
+        )
+    rest = rows[EFFORT_SHOWN:]
+    if rest:
+        lines.append(
+            text.render("replies/tools.map_steps_more", count=len(rest), at_stake=shown(rest[0].get("at_stake")))
+        )
+    return lines
+
+
 def _map_lines(data: dict) -> list[str]:
     lines: list[str] = []
     best = data.get("best")
+    if best or data.get("reference"):
+        lines.append(text.render("replies/tools.map_best_head"))
     if best:
         lines.append(
             text.render(
@@ -149,20 +221,25 @@ def _map_lines(data: dict) -> list[str]:
         )
     archive = data.get("archive", [])
     if archive:
-        lines.append(text.render("replies/tools.map_routes"))
+        lines.append(text.render("replies/tools.map_shapes"))
     lines.extend(
         [
             text.render(
-                "replies/tools.map_archive",
-                letter=shown(item.get("letter")),
+                "replies/tools.map_shape",
                 node=shown(item.get("node")),
                 status=shown(item.get("status")),
+                tokens=shown(item.get("tokens")),
+                heartbeats=_node_hb(item),
                 score=shown(item.get("score")),
                 visits=item.get("visits") or 0,
             )
-            for item in archive
+            for item in sorted(archive, key=lambda item: (item.get("score") is None, -(item.get("score") or 0)))[
+                :SHAPES_SHOWN
+            ]
         ]
     )
+    if data.get("recent"):
+        lines.append(text.render("replies/tools.map_recent_head"))
     lines.extend(
         [
             text.render(
@@ -170,34 +247,25 @@ def _map_lines(data: dict) -> list[str]:
                 node=shown(item.get("node")),
                 origin=_origin(item),
                 status=shown(item.get("status")),
+                tokens=shown(item.get("tokens")),
+                heartbeats=_node_hb(item),
                 score=shown(item.get("score")),
             )
             for item in data.get("recent", [])
         ]
     )
+    lines.extend(_effort_lines(data))
+    holes = data.get("open", [])
+    if holes:
+        lines.append(text.render("replies/tools.map_holes_head"))
     lines.extend(
-        [
-            text.render(
-                "replies/tools.map_effort",
-                step=shown(item.get("step")),
-                at_stake=shown(item.get("at_stake")),
-                variants=item.get("variants") or 0,
-                best_delta=shown(item.get("best_dtok")),
-                last_gain=shown(item.get("last_gain")),
-            )
-            for item in data.get("effort", [])
-        ]
-    )
-    lines.extend(
-        [
-            text.render(
-                "replies/tools.map_hole",
-                hole=shown(item.get("hole")),
-                line=shown(item.get("line")),
-                goal=shown(item.get("goal")),
-            )
-            for item in data.get("open", [])
-        ]
+        text.render(
+            "replies/tools.map_hole_goal",
+            hole=shown(item.get("hole")),
+            line=shown(item.get("line")),
+            goal=_goal_line(item.get("goal")),
+        )
+        for item in holes
     )
     return lines
 
@@ -226,14 +294,32 @@ def attach_context(
         lines = _map_lines(data)
         digest = hashlib.sha256("\n".join(lines).encode()).hexdigest()
         if force_map or digest != state.get("map_hash"):
-            result["map"] = lines
+            result["map"] = [text.render("replies/tools.section_map"), *lines] if lines else lines
             state["map_hash"] = digest
     # Node ids the model has been shown; an update never names a node outside them.
     seen = set(state.get("seen_nodes", [])) | _node_ids(result)
     facts = [_update_text(item, seen) for item in fresh if isinstance(item.get("text"), str)] + result.get("facts", [])
     if fresh:
         state["delivered_seq"] = max(int(item.get("seq", -1)) for item in fresh)
-    result["facts"] = facts
+    # Sections: updates from background checks, this call's result, then the search map.
+    # A reply can pass through here more than once; each header is added once.
+    updates_head, result_head = (
+        text.render("replies/tools.section_updates"),
+        text.render("replies/tools.section_result"),
+    )
+    facts = [line for line in facts if line != updates_head]
+    first = next((item for item in result.get("items", []) if item.get("lines")), None)
+    # An update about a node this call filed (its cross-version verdict) belongs with this call's result.
+    own = set(result.get("handles", []))
+    mine = [
+        line for line in facts if own and re.match(r"(n[1-9][0-9]*)\b", line) and line.split()[0].rstrip(":") in own
+    ]
+    if first is not None and mine:
+        facts = [line for line in facts if line not in mine]
+    result["facts"] = [updates_head, *facts] if facts else facts
+    if first is not None:
+        body = first["lines"][1:] if first["lines"][0] == result_head else first["lines"]
+        first["lines"] = [result_head, *[line for line in mine if line not in body], *body]
     state["seen_nodes"] = sorted(seen | _node_ids(result))
     _save(run_id, state)
     return result

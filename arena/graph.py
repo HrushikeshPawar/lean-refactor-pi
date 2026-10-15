@@ -471,6 +471,8 @@ def map_view(graph: Graph, effort: list[dict] | None = None, reference: tuple[in
             "node": cell.node.id,
             "label": cell.node.label,
             "score": cell.node.score,
+            "tokens": cell.node.tokens,
+            "heartbeats": cell.node.heartbeats,
             "visits": cell.visits,
         }
         for cell in archive(graph)
@@ -485,6 +487,8 @@ def map_view(graph: Graph, effort: list[dict] | None = None, reference: tuple[in
             "from": [node_ids.get(parent, parent) for parent in (node.edge or {}).get("from") or []],
             "status": node.status,
             "score": node.score,
+            "tokens": node.tokens,
+            "heartbeats": node.heartbeats,
         }
         for node in [item for item in graph.nodes if item is not original][-8:]
     ]
@@ -503,7 +507,8 @@ def map_view(graph: Graph, effort: list[dict] | None = None, reference: tuple[in
             "label": node.label,
             "hole": hole["id"],
             "line": hole["line"],
-            "goal": (hole["goal"] or "")[:120] or None,
+            # The full goal: the reply keeps its case tag and target line, which a prefix cut would lose.
+            "goal": hole["goal"] or None,
         }
         for cell in archive(graph)
         if cell.node.status == "sketch"
@@ -566,7 +571,9 @@ def effort_table(graph: Graph, step_tables: dict[str, dict]) -> list[dict]:
                 old_steps = best.steps[old_start:old_end]
                 new_steps = node.steps[new_start:new_end]
                 if node.status == "closed" and len(old_steps) == len(new_steps) == 1:
-                    replacements.append(snippet_tokens(new_steps[0].text) - snippet_tokens(old_steps[0].text))
+                    replacements.append(
+                        (snippet_tokens(new_steps[0].text) - snippet_tokens(old_steps[0].text), node.id)
+                    )
                 parent_ids = (node.edge or {}).get("from") or []
                 parent = by_id.get(parent_ids[0]) if parent_ids else None
                 if (
@@ -583,8 +590,12 @@ def effort_table(graph: Graph, step_tables: dict[str, dict]) -> list[dict]:
             {
                 "step": step.id,
                 "at_stake": best_rows[step_index]["pts_if_gone"],
+                "tokens": best_rows[step_index].get("tokens"),
+                "heartbeats": best_rows[step_index].get("incl_hb"),
                 "variants": len(variants),
-                "best_dtok": min(replacements) if replacements else None,
+                # The shortest compiling replacement and the node that holds it, so the model can read it.
+                "best_dtok": min(replacements)[0] if replacements else None,
+                "best_dtok_node": min(replacements)[1] if replacements else None,
                 "last_gain": len(graph.nodes) - 1 - latest_gain if latest_gain is not None else None,
             }
         )
