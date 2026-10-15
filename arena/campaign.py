@@ -2859,22 +2859,27 @@ def _check_text(node: str, result: dict, total: int) -> str:
     )
 
 
-def _autocheck_jobs(rows: list[dict], closing: bool = False) -> list[dict]:
-    """Candidates that compile on the primary version but were never checked on every version,
-    most promising first."""
-    jobs = [
+def _unchecked(rows: list[dict]) -> list[dict]:
+    """Candidates that compile on the primary version but were never checked on every version."""
+    return [
         r
         for r in rows
         if r["origin"] != "reference"
         and r["status"] == "primary"
         and not any(e["mode"] == "full" for e in r["evaluations"])
     ]
-    if not closing:
-        verified = [row for row in rows if row["verified"]]
-        best_verified = _best(verified) if verified else None
-        bar = best_verified["score"] if best_verified else None
-        if bar is not None:
-            jobs = [row for row in jobs if row["score"] is None or row["score"] >= bar]
+
+
+def _autocheck_jobs(rows: list[dict], closing: bool = False) -> list[dict]:
+    """Unchecked candidates whose single-version score estimate can still beat or tie the best verified
+    candidate (an unknown estimate is checked), most promising first. The skip applies to the closing
+    drain too: a candidate the estimate rules out cannot become the submission."""
+    jobs = _unchecked(rows)
+    verified = [row for row in rows if row["verified"]]
+    best_verified = _best(verified) if verified else None
+    bar = best_verified["score"] if best_verified else None
+    if bar is not None:
+        jobs = [row for row in jobs if row["score"] is None or row["score"] >= bar]
     return sorted(jobs, key=lambda r: (r["score"] if r["score"] is not None else float("-inf"), r["n"]), reverse=True)
 
 
@@ -3266,11 +3271,26 @@ def autocheck(
                     break
             else:
                 break
-    return {
-        "ok": True,
-        "checked": checked,
-        "remaining": [f"#{r['n']}" for r in _autocheck_jobs(_summaries(events(directory)), closing=closing)],
-    }
+    rows = _summaries(events(directory))
+    remaining = [f"#{r['n']}" for r in _autocheck_jobs(rows, closing=closing)]
+    outcome = {"ok": True, "checked": checked, "remaining": remaining}
+    if closing:
+        kept = set(remaining) | set(checked)
+        outcome["skipped"] = [f"#{r['n']}" for r in _unchecked(rows) if f"#{r['n']}" not in kept]
+        timed_out = bool(remaining) and max_seconds is not None and time.monotonic() - started >= max_seconds
+        outcome["timed_out"] = timed_out
+        _append(
+            directory,
+            {
+                "kind": "closing_drain",
+                "checked": len(checked),
+                "skipped": outcome["skipped"],
+                "unchecked_at_cap": remaining if timed_out else [],
+                "timed_out": timed_out,
+                "seconds": round(time.monotonic() - started, 2),
+            },
+        )
+    return outcome
 
 
 def _skeleton(history: list[dict], rows: list[dict], best: dict | None, run_id: str) -> dict:

@@ -490,7 +490,9 @@ def build_summary(directory: Path) -> dict:
     ]
     stopped = stop_reason_of(directory, controls)
     route_rows = route_table(ledger)
+    drains = [e for e in ledger if e.get("kind") == "closing_drain"]
     return {
+        "closing_drain": {k: v for k, v in drains[-1].items() if k not in ("kind", "ts")} if drains else None,
         "run_id": directory.name,
         "theorem": config.get("theorem") or report.get("theorem"),
         "model": config.get("model"),

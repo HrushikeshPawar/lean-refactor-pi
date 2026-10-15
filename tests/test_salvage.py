@@ -206,6 +206,17 @@ class SalvageCampaignTests(FakeRunCase):
         self.assertEqual(outcome["checked"], ["#2"])
         self.assertEqual(kinds, ["full"])
 
+    def test_closing_drain_cap_leaves_candidates_unchecked_and_records_it(self):
+        with (
+            patch.object(campaign.lean_health, "tripped", return_value=False),
+            patch.object(campaign, "problem", return_value={"name": "T", "statement": "theorem t : True"}),
+        ):
+            self.evaluate("theorem t : True := by\n  a")
+            outcome = campaign.autocheck("T", "logic", 0, closing=True)
+        self.assertEqual((outcome["checked"], outcome["remaining"], outcome["timed_out"]), ([], ["#2"], True))
+        drain = [e for e in campaign.events(self.directory) if e.get("kind") == "closing_drain"][-1]
+        self.assertEqual((drain["timed_out"], drain["unchecked_at_cap"]), (True, ["#2"]))
+
     def test_full_only_drain_skips_salvage_step_goals_and_profiles(self):
         outcome, kinds = self.autocheck_kinds(closing=False, kinds=("full",))
         self.assertEqual(outcome["checked"], ["#2"])
@@ -522,3 +533,28 @@ class FillAndMapTests(FakeRunCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ClosingDrainSkipTests(unittest.TestCase):
+    @staticmethod
+    def row(n, status, score, verified=False, full=False):
+        evaluations = [{"mode": "full" if full else "fast", "status": status, "result": {}, "score": score}]
+        return {
+            "id": f"p{n}", "n": n, "origin": "model", "status": status, "score": score,
+            "verified": verified, "evaluations": evaluations,
+        }  # fmt: skip
+
+    def test_closing_drain_skips_candidates_that_cannot_beat_the_verified_best(self):
+        rows = [
+            self.row(1, "full", 90.0, verified=True, full=True),
+            self.row(2, "primary", 80.0),
+            self.row(3, "primary", 90.0),
+            self.row(4, "primary", 95.0),
+            self.row(5, "primary", None),
+        ]
+        jobs = campaign._autocheck_jobs(rows, closing=True)
+        self.assertEqual([r["n"] for r in jobs], [4, 3, 5])
+
+    def test_closing_drain_keeps_everything_without_a_verified_best(self):
+        rows = [self.row(1, "primary", 10.0), self.row(2, "primary", 90.0)]
+        self.assertEqual([r["n"] for r in campaign._autocheck_jobs(rows, closing=True)], [2, 1])

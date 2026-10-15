@@ -40,7 +40,7 @@ SYSTEM_PROMPT = text.render("messages/run.system_prompt")
 CONFIG = model_config.load()
 MODELS = model_config.models()
 # After Pi exits, pending background full checks get this long before the submission is chosen.
-DRAIN_S = 300
+DRAIN_S = 180  # wall-clock cap on the closing drain; candidates left unchecked are recorded in the summary
 # How long Pi gets to finish an in-flight evaluation and write cost.json after a stop request.
 STOP_GRACE_S = 45
 THINKING_LEVELS = tuple(CONFIG["thinking"]["levels"])
@@ -870,9 +870,9 @@ def finish(
         # and on an operator stop alike, so the submission reflects every candidate the model produced.
         # Only an unhealthy Lean skips them.
         drained = closing_drain(args.theorem, args.run_id) if not tripped else None
-        if drained and (drained["checked"] or drained.get("remaining")):
+        if drained and (drained["checked"] or drained.get("remaining") or drained.get("skipped")):
             print(
-                f"Background checks after Pi exited: {drained['checked']}; still pending {drained.get('remaining', [])}",
+                f"Background checks after Pi exited: {drained['checked']}; skipped (cannot beat the best) {drained.get('skipped', [])}; still pending {drained.get('remaining', [])}{' (drain cap reached)' if drained.get('timed_out') else ''}",
                 flush=True,
             )
         write_state(args.run_id)
