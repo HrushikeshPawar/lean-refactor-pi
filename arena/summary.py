@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import threading
 from collections import Counter
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -83,26 +84,44 @@ def _jsonl(path: Path) -> list[dict]:
 
 
 # The only Pi event types any reader of events.jsonl uses. A run's file is 100-160 MB, almost all `message_update`
-# stream chunks (~0.3% of lines are kept), so lines are filtered by their head before any JSON is parsed.
+# stream chunks (~0.1% of lines are kept), so lines are filtered by their head before any JSON is parsed, and a live
+# file is read incrementally: each call parses only the complete lines appended since the last one.
 KEPT_EVENTS = ("message_end", "tool_execution_end")
+_EVENT_NAMES = tuple(f'"{kind}"'.encode() for kind in KEPT_EVENTS)  # Pi writes "type" first; spacing may vary
+_EVENTS: dict[str, tuple[int, int, list[dict]]] = {}  # path -> (inode, bytes consumed, kept rows)
+_EVENTS_LOCK = threading.Lock()
 
 
 def read_events(path: Path) -> list[dict]:
-    if not path.exists():
+    try:
+        stat = path.stat()
+    except OSError:
         return []
-    rows = []
-    with path.open(errors="replace") as handle:
-        for line in handle:
-            head = line[:48]
-            if not any(f'"{kind}"' in head for kind in KEPT_EVENTS):
-                continue
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(row, dict) and row.get("type") in KEPT_EVENTS:
-                rows.append(row)
-    return rows
+    key = str(path)
+    with _EVENTS_LOCK:
+        inode, offset, rows = _EVENTS.get(key, (stat.st_ino, 0, []))
+        if inode != stat.st_ino or stat.st_size < offset:  # replaced or truncated: start over
+            offset, rows = 0, []
+        rows = list(rows)
+        with path.open("rb") as handle:
+            handle.seek(offset)
+            for line in handle:
+                if not line.endswith(b"\n"):
+                    break  # the half-written tail of a live file: read it next time
+                offset += len(line)
+                head = line[:48]
+                if not any(name in head for name in _EVENT_NAMES):
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(row, dict) and row.get("type") in KEPT_EVENTS:
+                    rows.append(row)
+        _EVENTS[key] = (stat.st_ino, offset, rows)
+        if len(_EVENTS) > 8:  # a few runs at most
+            _EVENTS.pop(next(iter(_EVENTS)))
+        return rows
 
 
 def _json(path: Path) -> dict | None:

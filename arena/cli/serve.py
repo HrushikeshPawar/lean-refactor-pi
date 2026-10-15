@@ -18,6 +18,8 @@ import json
 import re
 import signal
 import sys
+import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -78,6 +80,28 @@ def slim_probes(payload: dict, history: list[dict]) -> list[dict]:
             }
         )
     return rows
+
+
+# A live run's ledger changes every few seconds, so file stamps never let a cache hit, and rebuilding a large graph
+# takes seconds (v7-check4 Binius: graph 5.8 s, dashboard 4.8 s, polled by every open tab). Each run's payloads are
+# rebuilt at most once per MEMO_SECONDS; concurrent requests for the same payload wait for one build.
+MEMO_SECONDS = 10.0
+_MEMO: dict[tuple[str, str], tuple[float, bytes]] = {}
+_MEMO_LOCKS: dict[tuple[str, str], threading.Lock] = {}
+_MEMO_GUARD = threading.Lock()
+
+
+def memo_json(kind: str, run_id: str, build) -> bytes:
+    key = (kind, run_id)
+    with _MEMO_GUARD:
+        lock = _MEMO_LOCKS.setdefault(key, threading.Lock())
+    with lock:
+        hit = _MEMO.get(key)
+        if hit and time.monotonic() - hit[0] < MEMO_SECONDS:
+            return hit[1]
+        body = json.dumps(build(), ensure_ascii=False).encode()
+        _MEMO[key] = (time.monotonic(), body)
+        return body
 
 
 def graph_payload(run_id: str) -> dict:
@@ -281,12 +305,10 @@ def handler_for(runs: Runs | str, langfuse: Langfuse | None = None):
         def viewer(self, run_id: str, rest: str) -> None:
             node_match = re.fullmatch(r"node/([A-Za-z0-9._-]+)\.json", rest)
             if rest == "graph.json":
-                self.send(
-                    json.dumps(graph_payload(run_id), ensure_ascii=False).encode(), "application/json; charset=utf-8"
-                )
+                self.send(memo_json("graph", run_id, lambda: graph_payload(run_id)), "application/json; charset=utf-8")
             elif rest == "dashboard.json":
                 self.send(
-                    json.dumps(run_dashboard(run_id, run_dir(run_id)), ensure_ascii=False).encode(),
+                    memo_json("dashboard", run_id, lambda: run_dashboard(run_id, run_dir(run_id))),
                     "application/json; charset=utf-8",
                 )
             elif rest == "langfuse.json":
