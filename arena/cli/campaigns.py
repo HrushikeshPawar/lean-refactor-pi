@@ -243,6 +243,7 @@ def command(spec: dict, limit: float, thinking: str, passthrough: list[str]) -> 
         f"{limit:g}",
         "--thinking",
         thinking,
+        *(["--seed-run", spec["seed_run"]] if spec.get("seed_run") else []),
         *passthrough,
     ]
 
@@ -565,17 +566,33 @@ def subscription_room(max_pct: float, limits_fn=codex_limits.read_limits) -> tup
     return limits.five_hour_pct < max_pct and limits.weekly_pct < max_pct, reading
 
 
+def free_run_id(run_id: str, taken: set[str]) -> str:
+    """`run_id`, or `run_id-s1`, `-s2`... when a run directory or an earlier spec already uses it."""
+    candidate, number = run_id, 0
+    while candidate in taken or (RUNS / candidate).exists():
+        number += 1
+        candidate = f"{run_id}-s{number}"
+    return candidate
+
+
 def usage_limit_specs(
     specs: list[dict], results: list[dict | None], fallback: str | None, limit: float = FALLBACK_LIMIT_USD
 ) -> list[dict]:
-    """The fallback run for each subscription run the provider stopped for a spent usage window."""
+    """The fallback run for each subscription run the provider stopped for a spent usage window.
+
+    Each continues from the stopped run: it is seeded with that run's graph and history."""
     if not fallback:
         return []
-    return [
-        fallback_spec(spec, fallback, limit)
-        for spec, row in zip(specs, results, strict=True)
-        if row is not None and row.get("stop_reason") == "usage_limit" and spec["model"] != fallback
-    ]
+    taken = {spec["run_id"] for spec in specs}
+    moved = []
+    for spec, row in zip(specs, results, strict=True):
+        if row is None or row.get("stop_reason") != "usage_limit" or spec["model"] == fallback:
+            continue
+        spec_moved = {**fallback_spec(spec, fallback, limit), "seed_run": str(RUNS / spec["run_id"])}
+        spec_moved["run_id"] = free_run_id(spec_moved["run_id"], taken)
+        taken.add(spec_moved["run_id"])
+        moved.append(spec_moved)
+    return moved
 
 
 def lean_unhealthy_rows(runs: list[dict]) -> list[dict]:
@@ -1197,6 +1214,7 @@ def _campaign_body(
                 if not stop.requested
                 else []
             )
+            planned = len(specs) + len(retries) + len(moved)
             for spec in moved:
                 progress.event(f"requeue {spec['run_id']}: the subscription's usage window ran out")
                 if board:
@@ -1214,7 +1232,7 @@ def _campaign_body(
         stopped = [row for row in runs if row["exit_code"] != 0]
         summaries = [str(RUNS / row["run_id"] / "summary.json") for row in stopped]
         message = (
-            f"stopped by operator: {len(stopped)} run(s) stopped, {len(specs) - len(runs)} never launched, "
+            f"stopped by operator: {len(stopped)} run(s) stopped, {planned - len(runs)} never launched, "
             f"${sum(row['spent_usd'] or 0 for row in runs):.4f} spent"
         )
         # The live view's last frame lists each stopped run with its summary path.
@@ -1258,9 +1276,7 @@ def _campaign_body(
         except (submission.SubmissionError, OSError, ValueError, KeyError) as error:
             print(f"submission not built: {error}", file=sys.stderr)
             return 1
-        print(
-            f"submission: {built['out']} ({len(built['changed'])} rows changed, mean {built['mean']})", flush=True
-        )
+        print(f"submission: {built['out']} ({len(built['changed'])} rows changed, mean {built['mean']})", flush=True)
     if not report["identical_packets"]:
         print("Packets differ between runs; the comparison is not valid.", file=sys.stderr)
         return 1

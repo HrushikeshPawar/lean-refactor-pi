@@ -26,6 +26,7 @@ from arena.campaign import autocheck, init, packet, run_dir, submission, write_s
 from arena.cli import live
 from arena.engine import ROOT
 from arena.provenance import code_version
+from arena.seed import check_seed, prior_work
 from arena.skill import skill_hash, skill_prompt
 from arena.summary import configured_cap, cost_report_from_ledger, render_text, write_summary
 from arena.traces import langfuse_environment, langfuse_extension, plugin_problems
@@ -437,6 +438,7 @@ class RunOptions:
     no_langfuse: bool = False
     test_extension: list[Path] = field(default_factory=list)
     resume_run: bool = False
+    seed_run: Path | None = None  # an ended run whose graph and history this run continues from
     dry_run: bool = False
     plain: bool = False
 
@@ -506,6 +508,15 @@ def run(options: RunOptions) -> int:
     if directory.exists() != args.resume_run:
         print("error: --resume-run must be used exactly when the run ID already exists", file=sys.stderr)
         return 2
+    if args.seed_run is not None:
+        if args.resume_run or args.preflight:
+            print("error: --seed-run starts a new run; it cannot go with --resume-run or --preflight", file=sys.stderr)
+            return 2
+        try:
+            check_seed(args.seed_run)
+        except ValueError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
     global _SETUP
     if not args.dry_run and live.enabled(args.plain):
         _SETUP = _Setup(args.run_id)
@@ -587,7 +598,13 @@ def run(options: RunOptions) -> int:
         print("\n".join(price_problems), file=sys.stderr)
         return 1
     if not args.resume_run:
-        init(args.theorem, args.run_id, extra)
+        init(args.theorem, args.run_id, extra, seed=args.seed_run)
+        if args.seed_run is not None:
+            # The recorded packet hash stays that of the plain packet; the prior work follows it.
+            section = prior_work(args.run_id, args.seed_run)
+            with (directory / "packet.txt").open("a") as packet_file:
+                packet_file.write("\n" + section)
+            command[-1] = prompt + "\n" + section
         (directory / "run-config.json").write_text(
             json.dumps(
                 {
@@ -597,6 +614,7 @@ def run(options: RunOptions) -> int:
                     "limit_usd": args.limit_usd,
                     "packet_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
                     "thinking": args.thinking,
+                    "seed_run": None if args.seed_run is None else str(args.seed_run),
                     "merge_worker": args.merge_worker,
                     "compact_at_tokens": args.compact_at_tokens,
                     "compact_keep_tokens": args.compact_keep_tokens,

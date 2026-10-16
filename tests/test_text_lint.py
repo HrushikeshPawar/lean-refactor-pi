@@ -18,6 +18,7 @@ PYTHON_FILES = (
     "arena/merges.py",
     "arena/goalstate.py",
     "arena/skill.py",
+    "arena/seed.py",
 )
 TS_FILES = (
     "packages/arena-pi/extensions/arena.ts",

@@ -10,6 +10,9 @@ messages:
   footer:
     where: "Agent messages and notices"
     per_run: "after each tool result"
+  prior_work:
+    where: "Initial theorem packet"
+    per_run: "once per seeded run"
   trim:
     where: "Agent messages and notices"
     per_run: "when a repeat is shortened"

@@ -741,7 +741,8 @@ def _copy_tracked(project: Path, shadow: Path) -> None:
         shutil.copy2(source, target)
 
 
-def init(name: str, run_id: str, extra: str = "") -> dict:
+def init(name: str, run_id: str, extra: str = "", seed: Path | None = None) -> dict:
+    """Start a run. With `seed`, the graph of that ended run replaces the reference-only start."""
     directory = run_dir(run_id)
     # The runner may already have started the run's Lean session here; nothing else counts as a run.
     if directory.exists() and any(
@@ -770,6 +771,15 @@ def init(name: str, run_id: str, extra: str = "") -> dict:
     )
     reference_id = hashlib.sha256((name + "\0" + row["src"]).encode()).hexdigest()
     _snapshot(directory, reference_id, row["src"])
+    if seed is not None:
+        from arena.seed import carry_over
+
+        carry_over(name, run_id, seed)
+        return {
+            "packet": str(directory / "packet.txt"),
+            "shadow": str(shadow),
+            "candidate_path": str(shadow / source_path(row)),
+        }
     _append(
         directory,
         {

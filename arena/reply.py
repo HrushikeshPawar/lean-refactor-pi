@@ -73,6 +73,20 @@ def _save(run_id: str, value: dict) -> None:
     os.replace(temporary, path)
 
 
+def map_text(run_id: str) -> str:
+    """The map exactly as `read view=map` renders it."""
+    lines = _map_lines(campaign.map_view(run_id))
+    return "\n".join([text.render("replies/tools.section_map"), *lines])
+
+
+def mark_delivered(run_id: str, seq: int, shown: str) -> None:
+    """Treat ledger rows up to `seq` as delivered and the nodes named in `shown` as seen."""
+    state = _load(run_id)
+    state["delivered_seq"] = seq
+    state["seen_nodes"] = sorted(set(state.get("seen_nodes", [])) | set(re.findall(r"\bn[1-9][0-9]*\b", shown)))
+    _save(run_id, state)
+
+
 def reset_delivered(run_id: str) -> None:
     state = _load(run_id)
     state.pop("map_hash", None)

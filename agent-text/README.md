@@ -104,6 +104,15 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `messages/notices.block_workspace` | 4 | Agent messages and notices | when the matching event occurs |
 | `messages/notices.closest_tool` | 4 | Agent messages and notices | when the matching event occurs |
 | `messages/phase.stall_focus` | 14 | Agent messages and notices | when the matching event occurs |
+| `messages/prior-work.call` | 3 | Initial theorem packet | once per seeded run |
+| `messages/prior-work.digest_heading` | 8 | Initial theorem packet | once per seeded run |
+| `messages/prior-work.heading` | 32 | Initial theorem packet | once per seeded run |
+| `messages/prior-work.map_heading` | 7 | Initial theorem packet | once per seeded run |
+| `messages/prior-work.omitted` | 6 | Initial theorem packet | once per seeded run |
+| `messages/prior-work.reasoning` | 2 | Initial theorem packet | once per seeded run |
+| `messages/prior-work.result` | 2 | Initial theorem packet | once per seeded run |
+| `messages/prior-work.said` | 2 | Initial theorem packet | once per seeded run |
+| `messages/prior-work.turn` | 2 | Initial theorem packet | once per seeded run |
 | `messages/run.preflight` | 9 | Agent messages and notices | when the matching event occurs |
 | `messages/run.resume` | 10 | Agent messages and notices | when the matching event occurs |
 | `messages/run.system_prompt` | 18 | Agent messages and notices | when the matching event occurs |
