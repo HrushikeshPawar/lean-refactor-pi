@@ -59,7 +59,8 @@ Ordered by expected gain per effort. Model-facing text stays neutral and the hid
    - Campaign and run seeding should take the best cold-verified proof from any source (runs, `runs/analysis/**`, earlier submissions), not only a run dir.
    - Add `--seed-proof <file>`, or extend `--seed-run` to accept a proof file.
    - Pool loose proofs in `arena submission` too, so nothing like the claude-push fiber/inter proofs is missed.
-4. **Hidden plateau stop.** End a run, harness-side, after N turns or $X with no new best. It must not be visible to the model (D42).
+4. **Stall escalation, then a hidden plateau stop.** v8b SKI: last gain at turn 23; turns 24–80 made 33 nodes, all on the best's route r2, 19 compiled candidates and none above the best. The harness sent one `stall` nudge at turn 47 (count 12, mode `best_other_cell`), Sol ignored it, and nothing escalated. Ladder: (1) the current nudge; (2) if ignored for N more tries, an automatic restart from the best node on another route (`_restart_order` exists); (3) compile replies report the route's tally, e.g. "route r2: 30 variants, none above best"; (4) the hidden plateau stop below. Neutral wording; the stop stays hidden.
+   - **Hidden plateau stop.** End a run, harness-side, after N turns or $X with no new best. It must not be visible to the model (D42).
 5. **Row-independent playbook in the packet.** The queued L1–L8 lessons (v7 PLAN §12f), plus the claude-push `LOG.md` structural moves, phrased neutrally.
 6. **Restart on text-only turns** (deferred from v7). It helped DeepSeek on EM (44 → 78).
 7. **recombine.py, smaller items:** rank donors by proxy, not tokens; per-arm/nested swaps keyed by goal; seed rows from loose proofs.
