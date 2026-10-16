@@ -85,6 +85,77 @@ v8a tool use over 19 runs: compile 946 calls (1 error), scratch 434 (10), read 3
 - **Readable reasoning from OpenAI models.** v8b Sol turns carry no text blocks and only about 35 readable reasoning characters per turn; the rest is encrypted. Find where pi-ai's OpenAI provider builds `reasoning` and request `summary: "detailed"` (Responses API). Check on one short capped Sol run that summaries get longer on the ChatGPT backend. If it works, the summaries feed the seeded-run digest; otherwise add an optional `note` argument to `compile`, stored on the node.
 - **Remove:** nothing yet. Re-check each tool's share of calls and of new bests after v8b.
 
+## 2c. Ideas borrowed from OpenProver and autoresearch (2026-10-16)
+
+Sources: [OpenProver](https://github.com/kripner/OpenProver) (README only, code not read; paper arXiv 2607.09217) and karpathy/autoresearch `program.md`.
+
+- **OpenProver:**
+  - A planner LLM keeps `WHITEBOARD.md` (a terse scratchpad) and a `repo/` of lemmas, observations and findings linked by `[[wikilinks]]`.
+  - It spawns up to `-P` parallel workers. Workers have `lean_verify` (runs `lake env lean`), `lean_store` (a verified snippet prepended to later checks) and `lean_search`.
+  - Budget flags: `--max-time` / `--max-tokens`; `--conclude-after 0.99` starts a conclusion phase; `--history-budget` caps the planner's history.
+  - State lives on disk (`steps/step_NNN/`, `archive/calls/`), so a run can resume.
+- **autoresearch:**
+  - A strict hill-climb: edit, then run on a fixed 5-minute budget, then append one row to `results.tsv` (commit, metric, memory, `keep`/`discard`/`crash`, short description), then keep or `git reset` to the best.
+  - Simplicity criterion: an equal score with less code is a win.
+  - The agent never stops to ask.
+  - The human iterates on `program.md`; the code stays fixed.
+
+### Build list, in order
+
+1. **A required one-line description per candidate** (from autoresearch's `results.tsv`).
+   - *Why:* `compile`'s `note` is optional. In v8c only 22 of 32 (CCS) and 15 of 33 (Wick) candidates carried one. Sol's reasoning is encrypted, and the `"detailed"` summary request made no difference (64 vs 57 readable characters per block), so the note is the only readable record of intent.
+   - *Change:* make `note` required in `agent-text/tools/compile.yaml`, wording neutral (what it changes, a few words). A missing note is a tool error with a one-line hint and no lost candidate. Alternatively, accept the candidate and send the hint in the reply; decide by whether the error rate stays below 1%.
+   - *Viewer:* add a "Log" tab to `arena serve`, one row per candidate: #, parent, route, tokens, HB, fast estimate, full score, status (best / kept / below best / failed / salvaged), note. It is our `results.tsv`, derived from the ledger, with no new storage.
+   - *Seeded runs:* the prior-work digest lists the last N notes per route, so the next model sees what was tried, not only scores.
+2. **Campaign playbook** (from autoresearch's `program.md`, already listed in §2).
+   - *Change:* `--playbook <file>` on `arena campaign` and `arena run`. A markdown file the operator edits between campaigns, rendered into the first packet under a neutral heading. Per-row overrides go in a `## <row name>` section.
+   - *Content:* route-level lessons from earlier runs, e.g. merging `rintro` steps, a cheaper closing tactic for a family of goals, lemmas known to cost many heartbeats. Facts only; no stop or finish wording (hidden stop rule).
+   - *Rule:* it lives with the run outputs (copied into the run dir and hashed in `summary.json`), not in `agent-text/`, because it changes per campaign. The neutral-framing rule still applies to its text.
+3. **Whiteboard plus observations, tied to the graph** (from OpenProver; this is the §2b scratch overhaul with a concrete shape).
+   - *Whiteboard:* one short model-written text (cap about 1,500 characters), replaced on every write and shown in every packet. Its ledger row is `{"kind":"whiteboard","text":...}`, so seeded runs carry it.
+   - *Observations:* `observe(at: <node>[.<step>], text)`, or an `observe` field on an anchored scratch probe, stores a short fact on a graph position, e.g. "`omega` closes this goal" or "`simp` here costs about 400 HB". Shown under the node on the map and in packets when that node is in focus.
+   - *Difference from OpenProver:* their memory is written by the model only. Ours keeps the harness-computed facts (route tally, lemma costs, step goals) and adds model-written ones next to them, both anchored to nodes, not free-floating.
+4. **Default parent is the best node after a stall nudge** (from autoresearch's reset).
+   - After a nudge, a `compile` without an explicit parent is built from the best node, not the last candidate. Explicit parents still work, so branching from non-best nodes stays possible. In v8c, CCS and Wick found late bests that way.
+   - This is softer than the `STALL_RESTART_TRIES=2` restart, which never fired in v8c (models changed route after each nudge). Keep both.
+5. **Parallel workers for the open track** (from OpenProver's `-P`).
+   - *Why:* on 4×A100 the marginal token cost is zero, and the limit is 48 h for 50 rows (about 58 min per row). Four copies of Qwen3.8-27B (55.6 GB BF16 each, one per GPU) or a planner plus three workers fit.
+   - *Shape:* the planner (our normal run) gets a `delegate(at: <node>.<step>, goal)` tool. A worker gets one step goal and the step's context, with only `compile` and `search`, and a short budget (turns or seconds). Its candidates enter the same graph with `origin: worker`.
+   - Optional: a Lean-trained model as a worker (Goedel-Prover-V2-32B, about 64 GB). It fits next to Qwen (about 120 GB total) and returns whole-step proofs that the harness compiles.
+   - *Closed track:* only with a cheap worker model (DeepSeek), and only once the per-row $3 cap accounting covers workers.
+6. **Pinned verified helpers** (from OpenProver's `lean_store`, lower priority).
+   - A verified `have` or helper lemma can be pinned to a route, and later candidates on that route reuse it by name. Fits poorly for single-theorem refactors; revisit if candidates often retype the same helper.
+
+### Do not copy
+
+- **A visible conclusion phase** (`--conclude-after`). It breaks the hidden stop rule; v5/v6 models gamed visible stops.
+- **An LLM verifier after each worker.** Lean is the verifier.
+- **Strict keep-or-reset.** Our graph branches from non-best nodes, and v8c's late gains came from that.
+
+### Related v8c finding: full checks wait behind salvage
+
+- **What happened:** on Binius `fiberwise`, the best stayed at #10 while #12 (188 tok / 2610 HB) and #13 (185 / 2614) had better fast estimates. None of the three had a full check yet.
+  - A full check takes about 150 s (4 toolchains) and runs one at a time.
+  - `autocheck` (`arena/campaign.py`) drains `("salvage", "assembly", "full", "step_goals", "profiles")` in that order, so salvage jobs (117 s, 70 s, 9 s, the last two failed) ran before the full check of the leader.
+  - #14 then overtook #12 and #13, which were correctly skipped once #14 verified at 90.57.
+- **Effect:** the model's packet showed a stale best for about 4 minutes, so it compared variants against the wrong node and could get a stall nudge while a better proof waited in the queue.
+- **Fix (after v8c ends):**
+  - put `"full"` first in the background order, so a candidate whose fast estimate beats the verified best is checked before any salvage;
+  - later, run the extra toolchains of one full check in parallel when free memory allows (Wick dropped to 7.8 GB).
+
+### v8c early results (Sol $1.0, DeepSeek fallback $0.25, seeded from submission-final)
+
+| Row | Baseline | v8c | Gain |
+|---|---|---|---|
+| CCS `bisimilarity_congr_choice` | 86.76 | 87.21 | +0.45 |
+| Wick `ι_timeOrderF_superCommuteF_eq_time` | 84.11 | 84.93 | +0.82 |
+| Binius `fiberwise` (running) | 87.01 | 91.34 | +4.33 |
+| `interleaved_affine_gaps` (running) | 87.15 | 89.54 | +2.39 |
+
+- Stall nudges at 8 fired 1, 3, 0 and 2 times. A new best followed each nudge in CCS and Wick.
+- The forced restart after 2 tries never fired.
+- The golf pass accepted 1 edit on Wick and none on CCS.
+
 ## 3. Test next
 
 1. **Pi + Lean MCP exploratory run with Sol.**
