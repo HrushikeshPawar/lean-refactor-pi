@@ -217,6 +217,18 @@ Three bugs in the background checker. Together they hid most of v8c's gains from
 - *Why earlier runs did not hang:* before fix 1 the tail was the same, but shorter runs had fewer broken candidates, so the salvage queue emptied within minutes of the stop.
 
 **Still to build.**
+- *Show the run phase and the checker's work in the log and in serve* (user request, 2026-10-16: "our logs and server should show that"). Today the campaign log prints only `start`, `cleanup` and `done`. Ledger rows for `closing_drain` and `golf` land only when each phase ends, so during the 10-minute golf pass or a 265 s salvage job nothing says what the run is doing.
+  - *Phase events:* append `{"kind":"phase","phase":..., "state":"start"|"end", "seconds", ...}` to the ledger. The phases are:
+    - `model` (agent loop);
+    - `closing_drain` (jobs queued at start, checked at end);
+    - `golf` (cap seconds at start; variants tried and accepted, tokens and HB before and after at end);
+    - `cold_verify` (proxy and pass/fail per toolchain at end);
+    - `summary`.
+  - *Checker job events:* a `{"kind":"job","job":"full"|"salvage"|"assembly"|"step_goals"|"profiles","state":"start"|"end","candidate":#n,"seconds"}` pair per background job, plus the queue lengths at each start (full / salvage / assembly).
+  - *Campaign log:* one line per phase change and per job longer than 30 s, e.g. `15:31:02 golf    v8c-Binius…: start (cap 600 s)`, `15:41:05 golf    v8c-Binius…: 2 of 37 accepted, 167→161 tok, 2204→2190 HB`, `15:43:40 verify  v8c-Binius…: cold 91.71 on 4/4`. The same lines go to the run's `stderr` log.
+  - *serve:* a status strip per run with the current phase, elapsed time and cap; the checker's current job and its age; the queue lengths; and the age of the newest full check versus the newest fast check. Mark the full-check age red at 10 minutes or more while fast checks are still arriving (the same rule as the watcher alarm). In the run list, show the phase next to each run so "golf 7/10 min" is visible without opening the run.
+  - *Watcher:* read the phase and job events instead of guessing from stderr.
+  - *Smoke test:* one fake run that goes through all phases and checks that the log lines and the serve status JSON contain each phase.
 - *Watcher alarm:* raise an alarm when a run's newest full check is more than 10 minutes old while fast checks keep arriving, and when Pi has made no LLM call for 5 minutes while its process is alive. Both bugs were found by the operator reading the viewer.
 - *Parallel toolchains:* run the 3 extra toolchains of one full check in parallel when free memory allows (Wick dropped to 7.8 GB with 2 jobs).
 - *Salvage limits:* cap the salvage time per run (e.g. 15% of wall time) or skip salvage of a node whose route already has a closed node with a better score. Most v8c salvage jobs ended `broken-no-progress` after 70–265 s.
