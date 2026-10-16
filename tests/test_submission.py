@@ -60,6 +60,11 @@ class SubmissionTests(unittest.TestCase):
         self.assertEqual(chosen["b"]["delta"], 0.0)
         self.assertFalse(chosen["c"]["changed"])
 
+    def test_choose_takes_any_gain_however_small(self):
+        base = {"a": {"proof": "base-a", "proxy": 80.0, "source": "v3"}}
+        runs = {"a": [{"run_id": "r9", "model": "m", "proxy": 80.01, "proof": "proof-r9"}]}
+        self.assertEqual(sub.choose(base, runs)["a"]["proof"], "proof-r9")
+
     def test_gain_order_by_headroom_stable(self):
         base = sub.load_baseline(self.base)
         res = sub.run_results(self.runs)

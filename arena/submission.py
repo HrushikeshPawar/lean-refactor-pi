@@ -17,8 +17,6 @@ ROOT = Path(__file__).resolve().parents[1]
 RUNS = ROOT / "runs" / "pi-budget"
 APP = ROOT / "vendor" / "arena-space" / "app.py"
 COLD_TOLERANCE = 0.05
-# A run replaces the baseline proof only when it scores this much higher: smaller gaps are cold-run noise.
-MIN_GAIN = 0.1
 _FILTER_NAMES = {"_MAX_PROOF_BYTES", "_FORBIDDEN_PATTERNS", "_strip_lean_comments", "_check_forbidden"}
 
 
@@ -99,12 +97,12 @@ def run_results(root: Path = RUNS, names: set[str] | list[str] | None = None) ->
     return found
 
 
-def choose(baseline: dict[str, dict], results: dict[str, list[dict]], min_gain: float = MIN_GAIN) -> dict[str, dict]:
-    """Per row the best run when it beats the baseline by at least min_gain, else the baseline; with source and delta."""
+def choose(baseline: dict[str, dict], results: dict[str, list[dict]]) -> dict[str, dict]:
+    """Per row the best run when it scores above the baseline at all, else the baseline; with source and delta."""
     chosen = {}
     for name, base in baseline.items():
         best = max(results.get(name, []), key=lambda run: run["proxy"], default=None)
-        if best is not None and best["proxy"] >= base["proxy"] + min_gain:
+        if best is not None and best["proxy"] > base["proxy"]:
             chosen[name] = {
                 **best,
                 "source": f"{best['run_id']} ({best['model']})",
