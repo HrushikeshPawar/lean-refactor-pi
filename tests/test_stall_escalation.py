@@ -26,8 +26,10 @@ def _run(after_scores, routes_after):
 
 def test_stall_due_after_n_same_route_tries_without_new_best():
     n = campaign.STALL_RESTART_TRIES
-    due, tally = _run([0.6] * n, ["r2"] * n)
-    assert due and "r2:" in tally
+    assert _run([0.6] * n, ["r2"] * n)[0]
     assert _run([0.6] * (n - 1), ["r2"] * (n - 1))[0] is False
     assert _run([0.6] * (n - 1) + [0.8], ["r2"] * n)[0] is False
     assert _run([0.6] * n, ["r2"] * (n - 1) + ["r3"])[0] is False
+    t = campaign.ROUTE_TALLY_MIN
+    assert "r2:" in _run([0.6] * t, ["r2"] * t)[1]
+    assert _run([0.6] * (t - 1), ["r2"] * (t - 1))[1] is None

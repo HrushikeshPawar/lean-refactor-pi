@@ -1184,6 +1184,7 @@ def _check_stall(directory: Path, graph: Graph, newly_filed: set[str]) -> None:
 
 
 STALL_RESTART_TRIES = 2  # candidates after a stall nudge, same route and no new best, before the harness restarts
+ROUTE_TALLY_MIN = 8  # variants on one route, none above the best, before compile replies show the tally
 
 
 def _route_nodes_after_stall(history: list[dict], graph: Graph) -> tuple[list[Node], float | None]:
@@ -1213,7 +1214,7 @@ def stall_due(run_id: str) -> bool:
 
 
 def route_tally(run_id: str) -> str | None:
-    """One line when the route of the newest node has STALL_RESTART_TRIES or more variants and none beats
+    """One line when the route of the newest node has ROUTE_TALLY_MIN or more variants and none beats
     the best node overall."""
     directory = run_dir(run_id)
     graph = Graph.from_history(events(directory), _proof_reader(directory))
@@ -1226,7 +1227,7 @@ def route_tally(run_id: str) -> str | None:
     best = max(scored, key=lambda node: node.score)
     start = graph.nodes.index(best) + 1 if best.route == route else 0
     members = [node for node in graph.nodes[start:] if node.route == route]
-    if len(members) < STALL_RESTART_TRIES:
+    if len(members) < ROUTE_TALLY_MIN:
         return None
     return text.render("messages/phase.route_tally", label=route, variants=len(members))
 
