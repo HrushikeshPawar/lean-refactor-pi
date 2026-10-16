@@ -118,13 +118,73 @@ Sources: [OpenProver](https://github.com/kripner/OpenProver) (README only, code 
 4. **Default parent is the best node after a stall nudge** (from autoresearch's reset).
    - After a nudge, a `compile` without an explicit parent is built from the best node, not the last candidate. Explicit parents still work, so branching from non-best nodes stays possible. In v8c, CCS and Wick found late bests that way.
    - This is softer than the `STALL_RESTART_TRIES=2` restart, which never fired in v8c (models changed route after each nudge). Keep both.
-5. **Parallel workers for the open track** (from OpenProver's `-P`).
+5. **Parallel workers for the open track** (from OpenProver's `-P`). The closed-track version, Sol with DeepSeek minions, is detailed in the next subsection.
    - *Why:* on 4×A100 the marginal token cost is zero, and the limit is 48 h for 50 rows (about 58 min per row). Four copies of Qwen3.8-27B (55.6 GB BF16 each, one per GPU) or a planner plus three workers fit.
    - *Shape:* the planner (our normal run) gets a `delegate(at: <node>.<step>, goal)` tool. A worker gets one step goal and the step's context, with only `compile` and `search`, and a short budget (turns or seconds). Its candidates enter the same graph with `origin: worker`.
    - Optional: a Lean-trained model as a worker (Goedel-Prover-V2-32B, about 64 GB). It fits next to Qwen (about 120 GB total) and returns whole-step proofs that the harness compiles.
    - *Closed track:* only with a cheap worker model (DeepSeek), and only once the per-row $3 cap accounting covers workers.
 6. **Pinned verified helpers** (from OpenProver's `lean_store`, lower priority).
    - A verified `have` or helper lemma can be pinned to a route, and later candidates on that route reuse it by name. Fits poorly for single-theorem refactors; revisit if candidates often retype the same helper.
+
+### Sol planner with DeepSeek minions (closed track; extends item 5)
+
+**Idea.** Sol is good at ideas but expensive per turn, because every turn re-sends its long context. DeepSeek V4.1 Flash is cheap and reliable at a narrow loop. Sol picks the idea and the anchor; a DeepSeek minion runs an autoresearch-style hill-climb on that anchor and returns a short table. Sol reads about 300 tokens instead of 6 compile replies. In v8b, SKI spent 33 Sol nodes on one route doing this kind of variant search by hand.
+
+**Two search levels.**
+- *Inside a minion:* a strict hill-climb (keep the variant if it beats the minion's local best, else revert). This suits golfing one step.
+- *Across the graph:* Sol keeps branching from non-best nodes. CCS and Wick found their late v8c bests that way, so the graph level stays as it is.
+
+**Minion contract.**
+- *Input:*
+  - the anchor `node.step`: that step's `goal_before` / `goal_after`, the step text and the surrounding proof;
+  - the idea text (written by Sol or by the harness);
+  - the parent proof;
+  - `tries`.
+- *Hidden from it:* the packet, the graph, other routes, the budget and any stop wording (hidden stop rule).
+- *Tools:* `compile` (fast mode, replacing only the anchored step) and `search`. No `read` of other nodes, no scratch, no `delegate`.
+- *Loop:* edit, then fast compile, then keep or revert. It stops at `tries` compiles (default 6) or its dollar cap (default $0.03), whichever comes first.
+- *Output:* one table row per try (`#`, tokens Δ, HB Δ, status `kept`/`worse`/`failed`, a description of a few words). Its best kept variant, only if it beats the parent, enters the graph as a normal candidate with `origin: "minion"`, parent = the anchor node and `hypothesis` = the idea, then goes through the normal full-check queue. Failed tries are recorded as `probe`-style events under the anchor, so seeded runs and the digest see them.
+- *Prompt:* a short system text in `agent-text/minion/` with the same neutral route framing. No model-facing strings in code.
+
+**Lean capacity is the limit, not tokens.**
+- Fast checks take about 30–40 s and full checks about 150 s. Free memory fell to 7.8 GB with 2 jobs (Wick, v8c). The fiberwise full-check starvation (fixed in `vkz`) shows what happens when background work crowds out the checks that matter.
+- Minion compiles get their own lane, priority below the model's compiles and full checks: model compile, then full check, then minion compile, then salvage, assembly, step goals, profiles.
+- At most 1 minion compile in flight per run on this machine (2 with `--jobs 1`), configurable through `ARENA_MINION_LANES`. On the open track's 4×A100 node it can go wider.
+- The lane scheduler already checks `lean_health`. Minions pause with the model's work when Lean is unhealthy.
+
+**Budget and accounting.**
+- Minion LLM spend goes into the same per-row cost ledger as Sol's. The run limit is checked after every LLM call (budget rule v7), with no estimates or reservations.
+- Campaign flags: `--minion-model deepseek-v4.1-flash`, `--minion-pool-usd 0.25`, `--minion-try-usd 0.03`. Once the pool is empty, minions stop and nothing changes for Sol.
+- The per-row total across all runs, Sol plus minions plus fallback, must stay under the $3 track limit.
+
+**Step 1: harness-triggered minions (no new Sol tool).**
+- *Trigger:* when a stall nudge fires (`ARENA_STALL_M=8`), the harness sends one minion before the nudge text is delivered. Its result table is appended to the nudge reply.
+- *Anchor:* the best node's most expensive step by per-lemma / per-step HB cost (§2 item 2; until that exists, the step with the most tokens).
+- *Idea:* a fixed neutral text from `agent-text/minion/`, "shorten or cheapen this step, same goal".
+- *Why first:* it tests whether minions find gains at all, without changing Sol's behavior, and it reuses the stall machinery from v8/02.
+- *Ticket:* `v8/04-minion-on-stall`. Smoke test: one fake session where a stall fires and a fake minion returns one kept variant that lands as an `origin: minion` candidate.
+
+**Step 2: a `delegate` tool for Sol (only if step 1 shows gains).**
+- `delegate(at: <node>.<step>, idea: <text>, tries: <1..8>)`. It returns right away with a job id; the table arrives in a later compile reply like the other background updates, so Sol keeps working while the minion runs.
+- At most 2 open delegate jobs per run. Further calls are refused with a short reason.
+- It needs the graph anchoring from the scratch overhaul (§2b item 1), so build that first.
+- *Ticket:* `v8/05-delegate`.
+
+**Test: an A/B run on 3 rows** (SKI, Binius `fiberwise`, Wick), seeded from the current final proofs.
+- *Arm A:* Sol $1.0 alone. *Arm B:* Sol $0.75 plus a $0.25 minion pool.
+- *Measure:*
+  - gain per dollar;
+  - share of new bests with `origin: minion`;
+  - minion tool-call error rate;
+  - Lean wait time for Sol's own compiles (minions must not slow Sol);
+  - duplicate tries across minions.
+- *Decide:* keep minions if arm B's gain per dollar is at least as good as arm A's and Sol's compile wait does not grow by more than 10%.
+
+**Risks.**
+- *DeepSeek tool-call format errors:* small in our fallback runs; count them per minion.
+- *Minions repeating each other:* one minion per anchor at a time, and the harness rejects an anchor and idea pair already tried.
+- *Minion candidates crowding the full-check queue:* only the minion's single best kept variant becomes a candidate.
+- *Sol over-delegating instead of thinking (step 2):* the 2-open-jobs cap and the per-try cost show up in the cost ledger.
 
 ### Do not copy
 
