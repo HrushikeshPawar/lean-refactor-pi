@@ -64,6 +64,25 @@ Ordered by expected gain per effort. Model-facing text stays neutral and the hid
 6. **Restart on text-only turns** (deferred from v7). It helped DeepSeek on EM (44 → 78).
 7. **recombine.py, smaller items:** rank donors by proxy, not tokens; per-arm/nested swaps keyed by goal; seed rows from loose proofs.
 
+## 2b. Tool surface review (2026-10-16)
+
+v8a tool use over 19 runs: compile 946 calls (1 error), scratch 434 (10), read 357 (9), search 260 (0), goal 109 (0). Scratch is a fifth of all calls and sits entirely outside the graph: its ledger row keeps only `code_sha256`, with no code, result, graph position or link to the node it explored. What Sol learns there (a working sub-proof, a cheaper tactic, a lemma's heartbeat cost) is lost to the graph, to salvage, to recombine, to seeded runs and to the session digest.
+
+### Scratch overhaul (v8/02, after v8/01 lands)
+1. **Anchor to a graph position.** Optional `at: <node>` / `at: <node>.<step>`. The harness builds the snippet's context from that position's recorded goal (`goal_before`), so an experiment is "try this tactic for step s of node n".
+2. **Record in the graph.** Store the code, the outcome (OK or FAILED, error lines, body tokens, heartbeats per declaration) and the anchor as a `probe`-style event, shown under the node on the map. Seeded runs and the prior-work digest then carry experiments too.
+3. **Promote, don't discard.** An anchored experiment that closes its step's goal and is cheaper than the step becomes a replacement candidate, scored through the normal compile path (one click for the model, no retyping). An unanchored snippet that proves the full target statement is offered as a candidate the same way.
+4. **Keep free exploration.** `#check`, `#print` and `example` stay possible without an anchor, but are still recorded (code and outcome), so the next session can see what was already looked up.
+5. Model-facing wording stays neutral, as for the rest of the tool text.
+
+### Other tools
+- **compile:** keep. Add the score preview from §2 item 2 ("tokens Δ, hb Δ, score Δ" against the parent and the best).
+- **read:** keep; look at its 9 errors (Core had 4) for argument-form confusion.
+- **goal:** keep, or fold into `read` as a view; 109 calls, no errors.
+- **search:** keep. Seeded runs do not carry earlier search and read results (§12k), so a seeded run repeats lookups; carry a compact list of names already read.
+- **New, to try:** `cost` (per-lemma heartbeat cost and unused-lemma marks for one node, §2 item 2), and a model-invoked bounded `golf` (one pass on one node through the lane scheduler; §2 item 1). Decide after the Pi + Lean MCP exploratory run (§3 item 1), which shows which tools Sol reaches for unprompted.
+- **Remove:** nothing yet. Re-check each tool's share of calls and of new bests after v8b.
+
 ## 3. Test next
 
 1. **Pi + Lean MCP exploratory run with Sol.**
