@@ -1799,3 +1799,13 @@ Fresh runs with only the theorem and reference proof, $0.50 each, before the pha
 - `--baseline runs/analysis/submission-v3`: rows run by headroom (100 minus best known score); the campaign ends by
   building `<campaign>/submission` (a run replaces a baseline row only when it beats it by ≥0.1).
 - Not changed: the island restart on text-only turns (it lifted EM 44→78 on DS); Core-like tails (hidden stop rule).
+
+### 12k. Seeded runs: a fallback builds on the stopped run (2026-10-16)
+
+v8a showed the gap: two Sol rows stopped on `usage_limit` (FieldSpec at 83.88, CallElim extractedOld at 81.27) and the requeue started DeepSeek from the original proof, so the fallback would have spent its $0.5 rediscovering Sol's work. Decision (user): a fallback continues the stopped run.
+
+- `arena run --seed-run <run_dir>` (`arena/seed.py`): the new run's ledger gets the seed's graph rows (nodes, lineage, evaluations, probes, salvage; not search/read/scratch, restarts, stops or cost), its proofs/blobs/diagnostics, a `seeded` provenance row, and focus/current on the seed's best verified node. Node ids are unchanged; new work is measured against the seed's best; spend starts at $0 with the run's own limit.
+- The first prompt gains a neutral "prior work" section (`messages/prior-work.*`): the graph map plus a digest of the seed session's turns (readable reasoning, text, tool calls, one-line outcomes), capped at 24k chars, latest turns kept. Sol's reasoning is mostly encrypted (FieldSpec: about 6k readable chars over 109 thinking blocks), so the digest carries what is readable.
+- The campaign's `usage_limit` requeue seeds from the stopped run automatically; an existing run id gets `-s1`, `-s2`. A fallback chosen before a row starts has nothing to seed.
+- Fixed: the operator-stop summary counted requeued runs as "-N never launched".
+- v8a: the two unseeded DeepSeek requeues were stopped at $0.02 each and rerun seeded (`-r1-s1`); the submission is built after them.
