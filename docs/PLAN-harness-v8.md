@@ -192,29 +192,52 @@ Sources: [OpenProver](https://github.com/kripner/OpenProver) (README only, code 
 - **An LLM verifier after each worker.** Lean is the verifier.
 - **Strict keep-or-reset.** Our graph branches from non-best nodes, and v8c's late gains came from that.
 
-### Related v8c finding: full checks wait behind salvage
+### v8c findings: the background checker (2026-10-16)
 
-- **What happened:** on Binius `fiberwise`, the best stayed at #10 while #12 (188 tok / 2610 HB) and #13 (185 / 2614) had better fast estimates. None of the three had a full check yet.
-  - A full check takes about 150 s (4 toolchains) and runs one at a time.
-  - `autocheck` (`arena/campaign.py`) drains `("salvage", "assembly", "full", "step_goals", "profiles")` in that order, so salvage jobs (117 s, 70 s, 9 s, the last two failed) ran before the full check of the leader.
-  - #14 then overtook #12 and #13, which were correctly skipped once #14 verified at 90.57.
-- **Effect:** the model's packet showed a stale best for about 4 minutes, so it compared variants against the wrong node and could get a stall nudge while a better proof waited in the queue.
-- **Fix (after v8c ends):**
-  - put `"full"` first in the background order, so a candidate whose fast estimate beats the verified best is checked before any salvage;
-  - later, run the extra toolchains of one full check in parallel when free memory allows (Wick dropped to 7.8 GB).
+Three bugs in the background checker. Together they hid most of v8c's gains from the model for about half of each long run, and kept two finished runs alive.
 
-### v8c early results (Sol $1.0, DeepSeek fallback $0.25, seeded from submission-final)
+**1. Full checks starved by salvage (fixed, `vkz`).**
+- *What happened:* `autocheck` (`arena/campaign.py`) restarts from the top of `("salvage", "assembly", "full", "step_goals", "profiles")` after every job. Each broken candidate adds a salvage job (70–265 s each, most ending `broken-no-progress`), so the salvage queue never emptied and full checks never ran.
+- *Fiberwise:* the last full check was at minute 29 (#18, 91.34). In the next 33 minutes, #22 (167 tok / 2204 HB) and several others had better fast estimates and were never checked. Earlier in the same run, #12 and #13 waited behind three salvage jobs until #14 overtook them.
+- *Interleaved:* the last full check was at minute 23 (#17, 89.54). The real best was **92.29** (#35), found only after the checker restarted.
+- *Effect:* the model's packet showed a stale best for 20–30 minutes. Sol compared variants against the wrong node, and stall nudges fired on a best that was not stuck.
+- *Fix:* `"full"` first in the background order. `_autocheck_jobs` only queues candidates whose estimate can beat the verified best, so salvage still runs once the leaders are checked. The test `test_background_drain_runs_full_checks_before_salvage` was updated.
 
-| Row | Baseline | v8c | Gain |
-|---|---|---|---|
-| CCS `bisimilarity_congr_choice` | 86.76 | 87.21 | +0.45 |
-| Wick `ι_timeOrderF_superCommuteF_eq_time` | 84.11 | 84.93 | +0.82 |
-| Binius `fiberwise` (running) | 87.01 | 91.34 | +4.33 |
-| `interleaved_affine_gaps` (running) | 87.15 | 89.54 | +2.39 |
+**2. A hot fix does not reach a running checker (operator note).**
+- *What happened:* the Pi extension starts one checker per run (`packages/arena-pi/extensions/arena.ts`, `kickAutocheck`), and it loops for as long as it has work. It keeps the code it loaded at start, so fix 1 did not reach the live runs.
+- *Workaround used:* stopped each checker by PID. Its queue lives in the ledger and an interrupted salvage job is requeued, so nothing was lost. The next compile started a fresh checker with the new order, and within 2 minutes both runs logged new bests (fiberwise 91.53, interleaved 92.29).
+- *Rule:* after changing `arena/campaign.py` during a campaign, restart the live checkers by PID; the runs themselves can keep going.
 
-- Stall nudges at 8 fired 1, 3, 0 and 2 times. A new best followed each nudge in CCS and Wick.
-- The forced restart after 2 tries never fired.
-- The golf pass accepted 1 edit on Wick and none on CCS.
+**3. A finished run stays alive while its checker runs (fixed in `arena.ts`, not yet committed).**
+- *What happened:* both runs ended their agent loop in the final tenth (Sol 97% and 93.5% spent; its last turn was text only). Pi then sat idle for 15–20 minutes with no network connection, because the spawned checker child kept the Node process alive. The checker was still draining salvage for a model that had stopped. `arena run` waits for Pi to exit before its closing drain, golf and cold verification, so the run never finished.
+- *Workaround used:* stopped the checkers by PID. Pi exited at once and `arena run` went into `finish()`.
+- *Fix:* in the stop branch of the agent-end handler, clear `kickAgain` and `checker?.kill("SIGTERM")`. The closing drain in `arena/cli/run.py` (`autocheck(..., closing=True)`) still full-checks every candidate that could beat the best, so the submission does not change.
+  - Do not `unref()` the child instead: an orphaned checker would hold `autocheck.lock`, and the closing drain returns `running_elsewhere` without checking.
+  - Extension tests pass (43). The golden session must pass on an idle machine before this is called ready.
+- *Why earlier runs did not hang:* before fix 1 the tail was the same, but shorter runs had fewer broken candidates, so the salvage queue emptied within minutes of the stop.
+
+**Still to build.**
+- *Watcher alarm:* raise an alarm when a run's newest full check is more than 10 minutes old while fast checks keep arriving, and when Pi has made no LLM call for 5 minutes while its process is alive. Both bugs were found by the operator reading the viewer.
+- *Parallel toolchains:* run the 3 extra toolchains of one full check in parallel when free memory allows (Wick dropped to 7.8 GB with 2 jobs).
+- *Salvage limits:* cap the salvage time per run (e.g. 15% of wall time) or skip salvage of a node whose route already has a closed node with a better score. Most v8c salvage jobs ended `broken-no-progress` after 70–265 s.
+
+### v8c results (Sol $1.0, DeepSeek fallback $0.25, seeded from submission-final)
+
+| Row | Baseline | v8c | Gain | Spent |
+|---|---|---|---|---|
+| CCS `bisimilarity_congr_choice` | 86.76 | 87.21 | +0.45 | $0.92 |
+| Wick `ι_timeOrderF_superCommuteF_eq_time` | 84.11 | 84.93 | +0.82 | $0.95 |
+| Binius `fiberwise` | 87.01 | 91.53 (before closing) | +4.52 | $0.97 |
+| `interleaved_affine_gaps` | 87.15 | 92.29 (before closing) | +5.14 | $0.93 |
+| `Core.InitsUpdatesComm` | 87.29 | queued | | |
+
+- Total so far **+10.93 points**, about **+0.73 on the 15-row mean**.
+- *Stall nudges (at 8):* fired 1, 3, 0 and 2 times. A new best followed each nudge in CCS and Wick. The forced restart after 2 tries never fired; Sol changed route after every nudge.
+- *Notes:* 22 of 32 (CCS) and 15 of 33 (Wick) candidates carried a note.
+- *Reasoning summaries:* the `"detailed"` request made no visible difference: 64 readable characters per block, vs 57 in v8a. The ChatGPT backend appears to ignore it.
+- *Golf pass:* accepted 1 edit on Wick and none on CCS.
+- *Why the long rows gained most:* fiberwise went from 1,463 reference tokens to about 167. Heartbeats fell with tokens (2904 → about 2200 HB), because elaboration cost scales with the tactic steps.
+- Fixes 1 and 3 changed a live campaign. Compare v8c with v8b with that in mind.
 
 ## 3. Test next
 
@@ -236,6 +259,59 @@ Sources: [OpenProver](https://github.com/kripner/OpenProver) (README only, code 
 - Per-step heartbeat profiles of the final proofs, rows with the lowest HB reduction first: subst, SKI, inter, extract, fiber.
 - Viewer data: turns spent on search/read vs edits; tool error kinds (Core had 4 `read` and 3 `scratch` errors).
 - Official vs local deltas: fiber was +0.57 higher officially; the others within 0.2.
+
+### Open-source track (2026-10-16)
+
+**Rules.** Open weights only. Inference on at most 4× 80 GB A100, and the full 50-row benchmark within 48 h (about 58 min per row). Deliverables: the JSONL, the inference code, and a short tech report on OpenReview. Full benchmark released November 1, deadline November 8.
+
+**Leaderboard.** Fetch it with `gradio_api/call/_leaderboard_open_html`, the same two-step call as the closed board.
+- Leader 79.1% (addarshh-refactor-open), then LARA-EPFL 78.2% and Vexorium 69.1% (self-hosted on 4×A100).
+- RMA is 8th at 55.9% with Qwen3.8-27B-FP8 plus DeepSeek-V4-Flash on vLLM.
+- Our closed score is 88.45%, so the harness has headroom here if it carries over to a weaker model.
+
+**Models that fit at full precision** (320 GB; sizes from secondary sources, verify on the model cards):
+
+| Model | Weights | Fits? | Notes |
+|---|---|---|---|
+| Qwen3.8-27B (dense, 262K context, Apache 2.0) | 55.6 GB BF16 | yes | First choice. Not on OpenCode Go. On OpenRouter as `qwen/qwen3.8-27b`, with a free variant that may have ended; NRP API for researchers. |
+| Gemma 4 31B (256K context, native function calling) | about 62 GB BF16 | yes | Free endpoints on NVIDIA NIM, SiliconFlow and an OpenRouter free variant. SWE-bench Verified reportedly only 31%. |
+| Goedel-Prover-V2-32B (Lean-trained, Qwen-based) | about 64 GB | yes | Writes whole proofs and has no tool calling. Use it as a worker behind the planner. |
+| StepFun-Prover Preview 32B | about 64 GB | yes | Trained with Lean REPL feedback, 20K context, its own format. |
+| GLM-5.3-Flash / Qwen3.8-Flash(-Next) / MiMo-V2.6-Flash / MiniMax M3 | 309–428B | no | Weights exceed 320 GB at native precision. |
+| DeepSeek V4.1 Flash | very large MoE | no | Loads on 4×A100 but only with a 4K context (HF discussion 43). |
+
+None of the OpenCode Go models fit comfortably at full precision. Go is still a cheap way to probe whether a larger open model beats the 27B.
+
+**Plan.**
+1. Add `qwen/qwen3.8-27b` (OpenRouter) and `gemma-4-31b-it` to Pi's `models.json` as OpenAI-compatible providers. Run 1 row each (SKI) at $0.25, cold start (no `--seed-proofs`).
+2. Compare scores and count tool-call format errors in `tool-errors.log`.
+3. If the winner reaches about 80 or more on a row, rent one A100 for an afternoon and serve the real BF16 weights with vLLM for comparable numbers. Then try the planner plus workers shape (§2c item 5): Qwen at about 55 GB plus Goedel at about 64 GB fit together.
+
+### Reading list for harness ideas (mostly outside Lean)
+
+- **Evolutionary search with an evaluator:**
+  - [AlphaEvolve](https://arxiv.org/abs/2506.13131) (program database and sampling policy);
+  - [FunSearch](https://www.nature.com/articles/s41586-023-06924-6) (islands with periodic reset, best-shot prompting);
+  - [OpenEvolve](https://github.com/codelion/openevolve) (open code);
+  - [ShinkaEvolve](https://arxiv.org/abs/2509.19349) (rejects near-duplicates before evaluation, which matters because Lean checks are our bottleneck);
+  - [MAP-Elites](https://arxiv.org/abs/1504.04909) (best per tokens × HB cell; we already log `best_other_cell`);
+  - [OPRO](https://arxiv.org/abs/2309.03409) (scored past solutions, sorted, in the prompt).
+- **Superoptimization** (golfing a proof is one):
+  - [STOKE](https://theory.stanford.edu/~aiken/publications/papers/asplos13.pdf) (MCMC with a cost function that tolerates incorrect intermediates; a model for a smarter golf pass);
+  - [egg / equality saturation](https://arxiv.org/abs/2004.03082) (explore equivalent rewrites, extract the cheapest);
+  - [delta debugging](https://www.st.cs.uni-saarland.de/papers/tse2002/) (the theory behind `tools/golf/dd.py`; finer-grained variants could cut inside `simp` lemma lists).
+- **Agent memory and loop:**
+  - [Reflexion](https://arxiv.org/abs/2303.11366) (written reflections; our required notes and whiteboard);
+  - [Voyager](https://arxiv.org/abs/2305.16291) (skill library; playbook and pinned helpers);
+  - [LATS](https://arxiv.org/abs/2310.04406) (tree search over agent actions);
+  - [SWE-agent](https://arxiv.org/abs/2405.15793) (tool interface design);
+  - [STOP](https://arxiv.org/abs/2310.02304) (an LLM improves its own scaffold);
+  - [The AI Scientist](https://arxiv.org/abs/2408.06292) (experiment logging and review).
+- **Lean, on our task:**
+  - [ImProver](https://arxiv.org/abs/2410.04753) (an agent that rewrites Lean proofs to optimize a chosen metric; the closest prior work);
+  - [LeanDojo](https://arxiv.org/abs/2306.15626) and [Lean Copilot](https://arxiv.org/abs/2404.12534).
+- **Read first:** ShinkaEvolve (fewer checks), STOKE (golf pass), ImProver (direct prior work).
+- Citations are from memory except the OpenProver and autoresearch pages. Check them before quoting.
 
 ## 5. Process notes
 
