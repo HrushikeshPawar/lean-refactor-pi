@@ -25,8 +25,9 @@ from arena import models as model_config
 from arena.campaign import autocheck, init, packet, run_dir, submission, write_state
 from arena.cli import live
 from arena.engine import ROOT
+from arena.golf import golf_run, summary_line
 from arena.provenance import code_version
-from arena.seed import check_seed, prior_work
+from arena.seed import check_seed, prior_work, read_seed_proof, start_from_proof
 from arena.skill import skill_hash, skill_prompt
 from arena.summary import configured_cap, cost_report_from_ledger, render_text, write_summary
 from arena.traces import langfuse_environment, langfuse_extension, plugin_problems
@@ -42,6 +43,8 @@ CONFIG = model_config.load()
 MODELS = model_config.models()
 # After Pi exits, pending background full checks get this long before the submission is chosen.
 DRAIN_S = 180  # wall-clock cap on the closing drain; candidates left unchecked are recorded in the summary
+# After the drain, one greedy golf pass (Lean only, one check at a time) over the best verified proof.
+GOLF_S = 600  # wall-clock cap on the golf pass's checks
 # How long Pi gets to finish an in-flight evaluation and write cost.json after a stop request.
 STOP_GRACE_S = 45
 THINKING_LEVELS = tuple(CONFIG["thinking"]["levels"])
@@ -439,6 +442,8 @@ class RunOptions:
     test_extension: list[Path] = field(default_factory=list)
     resume_run: bool = False
     seed_run: Path | None = None  # an ended run whose graph and history this run continues from
+    seed_proof: Path | None = None  # a proof file this run starts from instead of the reference proof
+    no_golf: bool = False  # skip the golf pass that follows the closing drain
     dry_run: bool = False
     plain: bool = False
 
@@ -504,6 +509,12 @@ def run(options: RunOptions) -> int:
         return 2
     extra = args.prompt_file.read_text().strip() if args.prompt_file else ""
 
+    if args.seed_proof is not None and (args.seed_run is not None or args.resume_run or args.preflight):
+        print(
+            "error: --seed-proof starts a new run; it cannot go with --seed-run, --resume-run or --preflight",
+            file=sys.stderr,
+        )
+        return 2
     directory = run_dir(args.run_id)
     if directory.exists() != args.resume_run:
         print("error: --resume-run must be used exactly when the run ID already exists", file=sys.stderr)
@@ -514,6 +525,12 @@ def run(options: RunOptions) -> int:
             return 2
         try:
             check_seed(args.seed_run)
+        except ValueError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
+    if args.seed_proof is not None:
+        try:
+            read_seed_proof(args.theorem, args.seed_proof)
         except ValueError as error:
             print(f"error: {error}", file=sys.stderr)
             return 2
@@ -615,6 +632,7 @@ def run(options: RunOptions) -> int:
                     "packet_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
                     "thinking": args.thinking,
                     "seed_run": None if args.seed_run is None else str(args.seed_run),
+                    "seed_proof": None if args.seed_proof is None else str(args.seed_proof),
                     "merge_worker": args.merge_worker,
                     "compact_at_tokens": args.compact_at_tokens,
                     "compact_keep_tokens": args.compact_keep_tokens,
@@ -628,6 +646,21 @@ def run(options: RunOptions) -> int:
     health = lean_gate(args.theorem, directory)
     if health is not None and health["verdict"] != "healthy":
         return stop_unhealthy(args, directory, health["reasons"])
+    if args.seed_proof is not None:
+        try:
+            seeded = start_from_proof(args.theorem, args.run_id, args.seed_proof)
+        except ValueError as error:
+            print(f"error: {error}; no model spend, the run did not start", file=sys.stderr)
+            return 2
+        if seeded.get("reference"):
+            print(f"Seed proof {args.seed_proof} is the reference proof; starting as usual", flush=True)
+        else:
+            print(f"Seeded from {args.seed_proof}: proxy {seeded['best_proxy']}", flush=True)
+            # The recorded packet hash stays that of the plain packet; the prior work follows it.
+            section = prior_work(args.run_id)
+            with (directory / "packet.txt").open("a") as packet_file:
+                packet_file.write("\n" + section)
+            command[-1] = prompt + "\n" + section
     start_background_checks(args.theorem, directory, health)
     shadow = directory / "scratch" / "project"
     env = os.environ.copy()
@@ -848,8 +881,8 @@ def kill_group(process: subprocess.Popen, number: int) -> None:
         os.killpg(process.pid, number)
 
 
-def closing_drain(theorem: str, run_id: str) -> dict | None:
-    """Full-check queued candidates for up to DRAIN_S; a further stop request skips the rest (None)."""
+def _until_stopped(job, skipped: str):
+    """Run `job()`; a further stop request skips what is left of it (None)."""
 
     def skip(_signum, _frame):
         raise KeyboardInterrupt
@@ -858,13 +891,25 @@ def closing_drain(theorem: str, run_id: str) -> dict | None:
     if threading.current_thread() is threading.main_thread():
         previous = {number: signal.signal(number, skip) for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
     try:
-        return autocheck(theorem, run_id, DRAIN_S, closing=True)
+        return job()
     except KeyboardInterrupt:
-        print("Closing checks skipped by a further stop request", file=sys.stderr, flush=True)
+        print(skipped, file=sys.stderr, flush=True)
         return None
     finally:
         for number, handler in previous.items():
             signal.signal(number, handler)
+
+
+def closing_drain(theorem: str, run_id: str) -> dict | None:
+    """Full-check queued candidates for up to DRAIN_S; a further stop request skips the rest (None)."""
+    return _until_stopped(
+        lambda: autocheck(theorem, run_id, DRAIN_S, closing=True), "Closing checks skipped by a further stop request"
+    )
+
+
+def closing_golf(theorem: str, run_id: str):
+    """One golf pass over the best verified proof, up to GOLF_S; a further stop request skips the rest (None)."""
+    return _until_stopped(lambda: golf_run(theorem, run_id, GOLF_S), "Golf pass skipped by a further stop request")
 
 
 def finish(
@@ -893,6 +938,14 @@ def finish(
                 f"Background checks after Pi exited: {drained['checked']}; skipped (cannot beat the best) {drained.get('skipped', [])}; still pending {drained.get('remaining', [])}{' (drain cap reached)' if drained.get('timed_out') else ''}",
                 flush=True,
             )
+        if not tripped and not args.no_golf:
+            try:
+                golfed = closing_golf(args.theorem, args.run_id)
+            except Exception as error:  # the pass only adds candidates; a failure must never cost the run its answer
+                golfed = None
+                print(f"Golf pass failed: {error}", file=sys.stderr)
+            if golfed is not None:
+                print(summary_line(golfed), flush=True)
         write_state(args.run_id)
         answer = submission(args.run_id)
         print(

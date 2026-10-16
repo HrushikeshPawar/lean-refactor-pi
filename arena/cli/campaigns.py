@@ -244,8 +244,44 @@ def command(spec: dict, limit: float, thinking: str, passthrough: list[str]) -> 
         "--thinking",
         thinking,
         *(["--seed-run", spec["seed_run"]] if spec.get("seed_run") else []),
+        # A run continuing a stopped run already carries its graph; the original seed proof is in it.
+        *(["--seed-proof", spec["seed_proof"]] if spec.get("seed_proof") and not spec.get("seed_run") else []),
         *passthrough,
     ]
+
+
+SEED_PROOFS_FILE = "submission.jsonl"
+
+
+def load_seed_proofs(directory: Path) -> dict[str, str]:
+    """Row name -> proof from `<directory>/submission.jsonl` (one {name, proof} per line)."""
+    path = directory / SEED_PROOFS_FILE
+    proofs = {}
+    for number, line in enumerate(path.read_text().splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+            proofs[row["name"]] = row["proof"]
+        except (ValueError, KeyError, TypeError) as error:
+            raise ValueError(f"{path} line {number} is not a {{name, proof}} row: {error}") from error
+    return proofs
+
+
+def assign_seed_proofs(specs: list[dict], proofs: dict[str, str], out: Path) -> list[str]:
+    """Point each spec at its row's seed file under `<out>/seeds/`; the rows with no proof (unseeded), in order."""
+    for spec in specs:
+        if spec["row"] in proofs:
+            spec["seed_proof"] = str(out / "seeds" / f"{slug(spec['row'], 200)}.lean")
+    return list(dict.fromkeys(spec["row"] for spec in specs if spec["row"] not in proofs))
+
+
+def write_seed_proofs(specs: list[dict], proofs: dict[str, str]) -> None:
+    for spec in specs:
+        if spec.get("seed_proof"):
+            path = Path(spec["seed_proof"])
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(proofs[spec["row"]].strip() + "\n")
 
 
 def check_packets(rows: list[str], packet_fn=None, progress: Progress | None = None) -> dict[str, str]:
@@ -916,6 +952,7 @@ class CampaignOptions:
     # With a baseline submission: rows run in order of headroom (100 minus the best known score) and the campaign
     # ends by building the next submission into <campaign dir>/submission from the baseline and every run's best.
     baseline: Path | None = None
+    seed_proofs: Path | None = None  # a directory with submission.jsonl: each row's runs start from that row's proof
     submission_cold: bool = False  # re-compile changed rows cold before writing the submission
     skip_preflight: bool = False
     dry_run: bool = False
@@ -976,6 +1013,15 @@ def cli_execute(options: CampaignOptions, passthrough: tuple[str, ...] = ()) -> 
     except ValueError as error:
         print(error, file=sys.stderr)
         return 2
+    if args.seed_proofs is not None:
+        try:
+            proofs = load_seed_proofs(args.seed_proofs)
+        except (OSError, ValueError) as error:
+            print(f"--seed-proofs {args.seed_proofs}: {error}", file=sys.stderr)
+            return 2
+        for row in assign_seed_proofs(specs, proofs, RUNS / f"{args.prefix}-campaign"):
+            print(f"note: {args.seed_proofs / SEED_PROOFS_FILE} has no proof for {row}; its runs start unseeded")
+        args.seed_texts = proofs
     overview = campaign_plan(args, rows, models, specs, passthrough_tokens)
     if live.enabled(args.plain):
         # The live view shows the plan itself; a dry run shows it once, with every command.
@@ -1066,6 +1112,8 @@ def _campaign_body(
         "codex_max_pct": getattr(args, "codex_max_pct", CODEX_MAX_PCT),
         "fallback_limit_usd": getattr(args, "fallback_limit_usd", FALLBACK_LIMIT_USD),
         "baseline": str(args.baseline) if getattr(args, "baseline", None) else None,
+        "seed_proofs": str(args.seed_proofs) if getattr(args, "seed_proofs", None) else None,
+        "seeded_rows": list(dict.fromkeys(spec["row"] for spec in specs if spec.get("seed_proof"))),
         "order": [spec["run_id"] for spec in specs],
         "started": lock_info["started"],
         "cpu_count": os.cpu_count(),
@@ -1091,6 +1139,7 @@ def _campaign_body(
     out.mkdir(parents=True)
     campaign_path = out / "campaign.json"
     campaign_path.write_text(json.dumps({"settings": settings}, indent=2) + "\n")
+    write_seed_proofs(specs, getattr(args, "seed_texts", {}))
     row_order = list(dict.fromkeys(spec["row"] for spec in specs))
     housekeeping = Housekeeping(args.min_free_gb, args.cleanup_wait)
     housekeeping.log = progress.event

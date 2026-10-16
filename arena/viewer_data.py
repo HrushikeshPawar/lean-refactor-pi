@@ -710,7 +710,7 @@ def shape_langfuse(run_id: str, rows: list[dict], base: str, project: str | None
 
 # A call field above this is cut. 200 KB, so one node panel cannot ship a whole journal.
 _FIELD_LIMIT = 200 * 1024
-_HARNESS_ORIGINS = {"reference", "auto_merge", "assembly"}
+_HARNESS_ORIGINS = {"reference", "auto_merge", "assembly", "seed", "golf"}
 _CALL_KEYS = ("tool_call_id", "name", "args", "delivered", "untrimmed", "trimmed", "footer", "is_error")
 
 
