@@ -46,9 +46,10 @@ Rows above 90 (fold 94.0, Fsub 91.1, variational 90.6, Putnams 95.7–99.1) are 
 
 Ordered by expected gain per effort. Model-facing text stays neutral and the hidden stop rule stays absolute.
 
-1. **Background golf pass on every new best.**
-   - *What:* a Lean-only job, like autocheck, that tries single deletions (each `[..]` list item, each line, each `;`/`<;>` segment) and small rewrites (`intro h; clear h` → `rintro -`; `dsimp only` → `simp only` before `grind`/`simp_all`).
-   - *Rules:* accept by full proxy. Improvements reach the model through the existing reply news.
+1. **Golf pass after the run, never in the background during it** (user, 2026-10-16: background edits would compete with the agent for Lean and memory).
+   - *When:* once, after Pi exits, inside the closing drain, under a time cap and with one Lean check at a time; also usable offline over a submission. Optionally a model-invoked tool that runs one bounded pass through the normal lane scheduler.
+   - *What:* tries single deletions (each `[..]` list item, each line, each `;`/`<;>` segment) and small rewrites (`intro h; clear h` → `rintro -`; `dsimp only` → `simp only` before `grind`/`simp_all`).
+   - *Rules:* accept by full proxy; the result feeds the submission, not the running model.
    - *Prior art:* `tools/golf/dd.py` (minion script, copied from the session scratchpad), `runs/analysis/hybrid-push/ablate.py`, `mk.py`.
    - *Tool help:* `arena.prices.snippet_tokens` pre-filters token deltas offline.
 2. **Per-lemma heartbeat costs.**
@@ -69,12 +70,14 @@ Ordered by expected gain per effort. Model-facing text stays neutral and the hid
    - *Setup:* Pi with `lean-lsp-mcp` tools (goal state, hover, search, diagnostics) and its built-ins, without our harness tools.
    - *Row and cap:* SKI at a **$1.5** cap. Check Codex limits first with `python -m arena.codex_limits`.
    - *Prerequisite:* find or write an MCP adapter extension for Pi; Pi has no built-in MCP client as far as we know.
+   - *Isolation (from scratch):* Pi runs in a sandbox (bubblewrap) whose only writable dir is a fresh temp copy of the row's Lake project with the theorem file reset to the reference proof (`engine.candidate_file`). The toolchain and `.lake` build outputs are mounted read-only. `runs/`, `runs/analysis/`, the repo, `~/.pi` sessions and other workspaces are not mounted, so no earlier proof is reachable. Pi gets no context files or skills (`--no-context-files --no-skills`), the network is limited to the model provider, and there is no web search.
+   - *Lean verification:* inside the sandbox, `lean-lsp-mcp` (diagnostics, goals) and `lake env lean <file>` against that project copy; `count_heartbeats in` gives heartbeats natively. Optionally a small read-only score command (our `engine.evaluate` fast mode) exposed as a tool, so the agent optimizes the real proxy. The official answer comes after the run: the harness cold-checks the final file outside the sandbox on every toolchain.
    - *What to learn:* which tools Sol reaches for, how it searches and how it golfs. Turn the useful patterns into harness tickets.
 2. **Next campaign on the weak rows** listed in §0: SKI, subst, extract, EM, Field, CCS, Core, inter, fiber.
    - Sol at $1.5 per row with the DeepSeek $0.5 fallback, seeded from the final proofs (needs item 2.3).
    - Per-row spend across all runs must stay under $3.
    - Sol's 5h window reset at 11:51 on 2026-10-16.
-3. Run the background golf pass (2.1) offline over the current final proofs first, to measure what it adds before wiring it into runs.
+3. Run the golf pass (2.1) offline over the current final proofs first, to measure what it adds before wiring it into runs.
 
 ## 4. Where to look for more
 
