@@ -225,10 +225,10 @@ class SalvageCampaignTests(FakeRunCase):
             any(item.get("kind") in ("profile", "profile_error") for item in campaign.events(self.directory))
         )
 
-    def test_background_drain_runs_salvage_before_full_checks(self):
+    def test_background_drain_runs_full_checks_before_salvage(self):
         outcome, kinds = self.autocheck_kinds(closing=False)
         self.assertEqual(outcome["checked"], ["#2"])
-        self.assertEqual(kinds[:2], ["salvage", "full"])
+        self.assertEqual(kinds[:2], ["full", "salvage"])
 
     def test_interrupted_job_is_requeued_and_unavailable_is_terminal_without_notice(self):
         with (

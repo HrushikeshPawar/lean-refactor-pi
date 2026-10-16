@@ -3339,7 +3339,7 @@ def autocheck(
             # Closing drain: the model has stopped, so only full checks (and assemblies, whose
             # results become new candidates) matter; salvage, step goals and profiles (which only
             # feed price tables) only serve the model.
-            order = ("full", "assembly") if closing else ("salvage", "assembly", "full", "step_goals", "profiles")
+            order = ("full", "assembly") if closing else ("full", "salvage", "assembly", "step_goals", "profiles")
             if kinds is not None:
                 order = tuple(kind for kind in order if kind in kinds)
             for kind in order:
