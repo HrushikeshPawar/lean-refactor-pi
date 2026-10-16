@@ -752,6 +752,10 @@ export default async function arenaExtension(pi: ExtensionAPI) {
           outage_started_at: outageStartedAt ?? null, outage_attempt: outageAttempt,
           ...(failure === "transport" ? { outage_ms: Date.now() - (outageStartedAt ?? Date.now()) } : {}) });
       }
+      // The background checker keeps Pi alive while it runs; after the stop its salvage only serves a stopped
+      // model, and the run's closing drain does the full checks, so end it now.
+      kickAgain = false;
+      checker?.kill("SIGTERM");
       return { continue: false };
     }
     if (failed) {
