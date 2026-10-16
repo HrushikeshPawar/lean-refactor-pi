@@ -4,7 +4,18 @@ Started 2026-10-16, after v7 landed on main (`428cb6c`, tag `v7`). This doc list
 
 ## 0. Where we stand
 
-- Official closed track: **88.45%, rank 7** (2026-10-16). Leaders: 91.28 (emergence-mini), 91.15 (RMA, Claude Sonnet 5), 89.77.
+- **Latest (v8c submission, 2026-10-16 evening): official 89.35%, up one rank** (local projection 89.29). Built from `runs/pi-budget/v8c-campaign/submission-final/`.
+  - Gap to the leader (91.28) is 1.93 on the mean, about 29 row-points; one axis point on one row is worth 1/45 of a mean point.
+  - Weakest axes:
+    - *heartbeats:* subst 60.17, SKI 65.08, extract 75.85;
+    - *length:* SKI 65.85, Core 67.86, CCS 70.52, EM 72.67, Wick 73.13, extract 74.32.
+  - Zero-shot is full on every row.
+- **What counts from Nov 1:** the full 50-problem benchmark. Submissions are reproduced by the organizers.
+  - The closed-track cap is the *maximum* per-problem API spend of **$3**, priced at list prices and counting every call, retries and discarded candidates included. Exceeding it is a desk reject.
+  - The proofs must come from the submitted harness, and the tech report must account for spend per problem.
+  - So hand golf (the claude-push proofs) and repeated campaigns on one row do not transfer. The deliverable is **one harness pass per problem under $3**.
+  - Cumulative spend on the 15 dev rows is already above $3 on 7 rows (SKI $7.87, EM $6.02, Wick $5.55, Core $5.38, Fsub $3.85, fold $3.36, variational $3.30). This is fine for practice, but the full-benchmark pipeline must be a single budgeted pass.
+- Previous: official closed track **88.45%, rank 7** (2026-10-16 morning). Leaders: 91.28 (emergence-mini), 91.15 (RMA, Claude Sonnet 5), 89.77.
 - Our biggest gap is **heartbeats**: heartbeat reduction 83.73% vs about 89–90% for the top two. Length reduction is 81.63% vs 84.58%.
 - Final submission: `runs/pi-budget/v8a-campaign/submission-final/` (MANIFEST.md lists the source per row). Built by `runs/analysis/hybrid-push/build_final.py`.
 - v8a campaign: 15 rows, Sol at $1.5 per row, DeepSeek fallback at $0.5, about $16.3 spent. Mean 87.64 from runs alone; 88.39 local after the claude-push proofs and the minion golf pass.
