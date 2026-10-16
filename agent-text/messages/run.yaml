@@ -1,0 +1,3 @@
+system_prompt: "You are improving one Lean proof in the Arena. Only the listed tools are available. Keep replies short."
+preflight: "For preflight, call read once with {{\"node\":\"n1\"}}, then stop."
+resume: "Continue this Arena run from its recorded graph and spend."

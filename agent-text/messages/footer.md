@@ -1,0 +1,1 @@
+budget: ${spent} of ${limit} spent · {left}% left

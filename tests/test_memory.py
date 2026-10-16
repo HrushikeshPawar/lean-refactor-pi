@@ -1,50 +1,48 @@
-"""Post-compaction memory: built from the harness's own state, no model bookkeeping."""
+"""Compaction memory is a projection of stored harness state."""
 
 import unittest
 
 from arena.memory import memory_text
 
-FRONT = {
-    "best": {"candidate": "#4", "tokens": 120, "heartbeats": 900, "proxy": 61.5, "status": "full"},
-    "routes": [{"route": "r1", "label": "no induction: updatedStatesComm", "original": True, "attempts": 0,
-                "best_proxy": None, "best_candidate": None},
-               {"route": "r2", "label": "induction", "original": False, "attempts": 3, "best_proxy": 61.5,
-                "best_candidate": "#4"}],
-    "ideas": [{"id": "i1", "title": "rewrite", "status": "parked", "attempts": 2, "best": None, "last_failure": "#3: unsolved goals"},
-              {"id": "i2", "title": "induct", "status": "active", "attempts": 3,
-               "best": {"candidate": "#4", "tokens": 120, "heartbeats": 900, "proxy": 61.5}}],
-    "recent_failures": [{"ref": "#3", "idea_id": "i1", "error": "unsolved goals"}],
-    "advisory": None, "candidates": 5, "evaluations": 7, "probes": 2,
-}
-
 
 class MemoryTests(unittest.TestCase):
-    def test_memory_states_best_routes_ideas_failures_and_allowance(self):
-        text = memory_text(FRONT, 1.25, 3)
-        self.assertIn("#4 proxy 61.5 (verified)", text)
-        self.assertIn("r2 \u00b7 3 attempts \u00b7 best proxy 61.5 (#4)", text)
-        self.assertNotIn("updatedStatesComm", text)
-        self.assertIn("i2 \"induct\" [active]: 3 attempts, best #4", text)
-        self.assertIn("#3 (i1): unsolved goals", text)
-        self.assertIn("$1.2500 of $3 spent, $1.7500 left", text)
+    def test_memory_preserves_best_map_used_declarations_reads_and_holes(self):
+        state = {
+            "best": {
+                "id": "n2",
+                "price": "tokens 12, heartbeats 34, versions 2/2, score 70.00",
+                "proof": "exact Lib.used",
+            },
+            "map": ["best n2 score 70.0 tokens 12 heartbeats 34"],
+            "library": [
+                {"name": "Lib.used", "handle": "decl:Lib.used", "module": "Lib", "signature": "Lib.used : X"},
+                {"name": "Lib.unused", "handle": "decl:Lib.unused", "module": "Lib", "signature": "Lib.unused : Y"},
+            ],
+            "reads": [
+                {"kind": "read", "handle": "decl:Lib.used", "first": 10, "last": 20},
+                {"kind": "read", "handle": "decl:Lib.used", "first": 15, "last": 30},
+                {"kind": "read", "handle": "decl:Other", "first": 2, "last": 3},
+            ],
+            "holes": [{"hole": "n2.h1", "goal": "X"}],
+        }
+        compacted = memory_text(state)
+        seed = memory_text(state, seed=True)
+        self.assertIn("exact Lib.used", compacted)
+        self.assertIn(state["map"][0], compacted)
+        self.assertIn("decl:Lib.used · Lib · Lib.used : X", compacted)
+        self.assertNotIn("Lib.unused", compacted)
+        self.assertIn("decl:Lib.used lines 10-30", compacted)
+        self.assertIn("n2.h1: X", compacted)
+        for old_item in ("Allowance:", "idea", "route"):
+            self.assertNotIn(old_item, compacted)
+        self.assertEqual(compacted.splitlines()[1:], seed.splitlines()[1:])
+        self.assertNotEqual(compacted.splitlines()[0], seed.splitlines()[0])
 
-    def test_active_ideas_come_first_and_the_list_is_capped(self):
-        ideas = [{"id": f"i{n}", "title": "t", "status": "parked", "attempts": n} for n in range(12)]
-        ideas.append({"id": "act", "title": "t", "status": "active", "attempts": 0})
-        text = memory_text({**FRONT, "ideas": ideas})
-        self.assertLess(text.index("act \"t\""), text.index("i11"))
-        self.assertIn("(+5 more)", text)
-
-    def test_depth_fields_on_route_rows_add_only_neutral_facts(self):
-        depth = {"depth": 4, "new_states": 4, "min_holes": 0, "stale_streak": 6, "stale": True, "compiled": True,
-                 "explored": True, "credited": True, "skeleton": True}
-        deeper = {**FRONT, "routes": [{**row, **depth} for row in FRONT["routes"]]}
-        self.assertIn("r2 (credited) \u00b7 3 attempts \u00b7 4 goal states \u00b7 best proxy 61.5 (#4)", memory_text(deeper, 1.25, 3))
-
-    def test_empty_run_still_renders(self):
-        text = memory_text({})
-        self.assertIn("none verified yet", text)
-        self.assertNotIn("Allowance", text)
+    def test_empty_state_has_explicit_sections(self):
+        result = memory_text({})
+        self.assertIn("Best node:", result)
+        self.assertIn("Map:", result)
+        self.assertIn("Read so far:", result)
 
 
 if __name__ == "__main__":

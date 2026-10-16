@@ -2,8 +2,13 @@
   "name": "lean-refactor-arena-pi",
   "private": true,
   "version": "0.1.0",
+  "scripts": {
+    "test": "node --test extensions/*.test.ts"
+  },
   "pi": {
-    "extensions": ["./extensions/arena.ts"]
+    "extensions": [
+      "./extensions/arena.ts"
+    ]
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

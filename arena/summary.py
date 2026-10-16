@@ -9,20 +9,24 @@ from __future__ import annotations
 import json
 import math
 import re
+import threading
 from collections import Counter
 from difflib import SequenceMatcher
 from pathlib import Path
 
 from arena.merges import merge_report, merge_text
-from arena.routes import progress as route_progress, route_table, routes_detail_text
+from arena.routes import progress as route_progress
+from arena.routes import route_table, routes_detail_text
 
-HARD_CAP_USD = 3.0  # keep equal to MAX_HARD_CAP_USD in packages/arena-pi/extensions/budget.ts
+COMPACTION_SOURCES = (
+    "compaction",
+    "orphan_stream",
+)  # settle rows of Pi's summary requests; the old name is kept for old runs
 
 
 def configured_cap(config: dict) -> float | None:
-    """The run's configured spend cap, a soft cap on settled spend (only HARD_CAP_USD is hard). run-config.json
-    now says `soft_cap_usd`; older files called it `hard_cap_usd`, after the CLI flag."""
-    return config.get("soft_cap_usd") or config.get("hard_cap_usd")
+    """The run's spend limit. run-config.json says `limit_usd`; older files called it `soft_cap_usd` or `hard_cap_usd`."""
+    return config.get("limit_usd") or config.get("soft_cap_usd") or config.get("hard_cap_usd")
 
 
 STOP_FILE = "stop-reason.txt"  # a stop the runner imposed (e.g. "interrupted"); wins over the cost ledger's control row
@@ -38,8 +42,7 @@ def stop_reason_of(directory: Path, controls: list[dict]) -> str:
     return noted or (controls[-1].get("stop") if controls else None) or "model_stopped"
 
 
-COMPILE_TOOLS = {"arena_evaluate", "arena_probe", "arena_profile"}
-BOOKKEEPING_TOOLS = {"arena_idea", "arena_frontier", "arena_state", "arena_finish"}
+COMPILE_TOOLS = {"compile"}
 LOCAL_EDIT_MAX_LINES = 2
 WARMUP_REQUESTS = 2
 
@@ -60,7 +63,7 @@ def trace_rows(path: Path) -> list[dict]:
         for line in handle:
             cut = _HEAVY_FIELD.search(line, 0, 600)
             try:
-                row = json.loads(line[:cut.start()] + "}" if cut else line)
+                row = json.loads(line[: cut.start()] + "}" if cut else line)
             except json.JSONDecodeError:
                 continue
             if isinstance(row, dict):
@@ -78,6 +81,47 @@ def _jsonl(path: Path) -> list[dict]:
         except json.JSONDecodeError:
             continue
     return rows
+
+
+# The only Pi event types any reader of events.jsonl uses. A run's file is 100-160 MB, almost all `message_update`
+# stream chunks (~0.1% of lines are kept), so lines are filtered by their head before any JSON is parsed, and a live
+# file is read incrementally: each call parses only the complete lines appended since the last one.
+KEPT_EVENTS = ("message_end", "tool_execution_end")
+_EVENT_NAMES = tuple(f'"{kind}"'.encode() for kind in KEPT_EVENTS)  # Pi writes "type" first; spacing may vary
+_EVENTS: dict[str, tuple[int, int, list[dict]]] = {}  # path -> (inode, bytes consumed, kept rows)
+_EVENTS_LOCK = threading.Lock()
+
+
+def read_events(path: Path) -> list[dict]:
+    try:
+        stat = path.stat()
+    except OSError:
+        return []
+    key = str(path)
+    with _EVENTS_LOCK:
+        inode, offset, rows = _EVENTS.get(key, (stat.st_ino, 0, []))
+        if inode != stat.st_ino or stat.st_size < offset:  # replaced or truncated: start over
+            offset, rows = 0, []
+        rows = list(rows)
+        with path.open("rb") as handle:
+            handle.seek(offset)
+            for line in handle:
+                if not line.endswith(b"\n"):
+                    break  # the half-written tail of a live file: read it next time
+                offset += len(line)
+                head = line[:48]
+                if not any(name in head for name in _EVENT_NAMES):
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(row, dict) and row.get("type") in KEPT_EVENTS:
+                    rows.append(row)
+        _EVENTS[key] = (stat.st_ino, offset, rows)
+        if len(_EVENTS) > 8:  # a few runs at most
+            _EVENTS.pop(next(iter(_EVENTS)))
+        return rows
 
 
 def _json(path: Path) -> dict | None:
@@ -130,55 +174,43 @@ def session_spend(directory: Path) -> dict | None:
     return {"usd": usd, "compaction_usd": compaction_usd, "compactions": compactions}
 
 
-def reconcile_spend(cost_events: list[dict], session_usd: float | None = None) -> dict:
-    """One complete spend figure from the cost ledger and Pi's session record, with the gap exposed.
+def ledger_spend(cost_events: list[dict], session_usd: float | None = None) -> dict:
+    """The run's spend: the sum of the cost ledger's settle rows, each one call's actual cost.
 
-    Every reserve should end in a settle, release or unknown. A reserve with no end is `open`; spend
-    Pi recorded that no settle covers is `gap_usd`. The spend never falls below Pi's session total,
-    so a request the ledger lost cannot lower it. Open reserves a gap covers are not also counted
-    as unresolved."""
-    reserved: dict[str, float] = {}
-    unknown: dict[str, float] = {}
-    settled = orphan_settled = 0.0
-    orphan_settles = 0
+    Pi's own session total is a cross-check: the spend never falls below it, so a call the ledger lost
+    cannot lower it, and `gap_usd` exposes the difference."""
+    settled = compaction_settled = 0.0
+    compaction_settles = 0
     for event in cost_events:
-        key, kind = str(event.get("id")), event.get("kind")
-        if kind == "reserve":
-            reserved[key] = float(event.get("usd") or 0.0)
-        elif kind == "unknown" and key in reserved:
-            unknown[key] = reserved.pop(key)
-        elif kind in ("settle", "release") and (key in reserved or key in unknown):
-            reserved.pop(key, None)
-            unknown.pop(key, None)
-            if kind == "settle" and event.get("usage_known") is not False:
-                settled += float(event.get("usd") or 0.0)
-                if event.get("source") == "orphan_stream":
-                    orphan_settled += float(event.get("usd") or 0.0)
-                    orphan_settles += 1
+        if event.get("kind") == "settle" and event.get("usage_known") is not False:
+            settled += float(event.get("usd") or 0.0)
+            if event.get("source") in COMPACTION_SOURCES:
+                compaction_settled += float(event.get("usd") or 0.0)
+                compaction_settles += 1
     gap = max(0.0, session_usd - settled) if session_usd is not None else 0.0
     gap = gap if gap > 1e-9 else 0.0
-    open_usd = sum(reserved.values())
-    unresolved = sum(unknown.values()) + (0.0 if gap else open_usd)
-    return {"ledger_settled_usd": round(settled, 6), "orphan_settled_usd": round(orphan_settled, 6),
-            "orphan_settles": orphan_settles,
-            "session_usd": None if session_usd is None else round(session_usd, 6),
-            "gap_usd": round(gap, 6), "spent_usd": max(settled, session_usd or 0.0),
-            "unresolved_usd": unresolved,
-            "open_reserves": [{"id": k, "usd": round(v, 6)} for k, v in reserved.items()],
-            "open_reserves_usd": round(open_usd, 6),
-            "unknown_requests": [{"id": k, "usd": round(v, 6)} for k, v in unknown.items()],
-            "balanced": not gap and not reserved}
+    return {
+        "ledger_settled_usd": round(settled, 6),
+        "compaction_settled_usd": round(compaction_settled, 6),
+        "compaction_settles": compaction_settles,
+        "session_usd": None if session_usd is None else round(session_usd, 6),
+        "gap_usd": round(gap, 6),
+        "spent_usd": max(settled, session_usd or 0.0),
+    }
 
 
 def cost_report_from_ledger(directory: Path) -> dict:
     """Reconstruct the cost report from the durable journal when Pi could not write it."""
     session = session_spend(directory)
-    recon = reconcile_spend(_jsonl(directory / "cost-ledger.jsonl"), session["usd"] if session else None)
-    spent, unresolved = recon["spent_usd"], recon["unresolved_usd"]
+    spend = ledger_spend(_jsonl(directory / "cost-ledger.jsonl"), session["usd"] if session else None)
     config = _read_json(directory / "run-config.json")
-    return {"theorem": config.get("theorem"), "model": config.get("model"),
-            "hard_cap_usd": HARD_CAP_USD, "soft_cap_usd": configured_cap(config), "spent_usd": spent,
-            "unresolved_usd": unresolved, "written_by": "runner_ledger_reconstruction"}
+    return {
+        "theorem": config.get("theorem"),
+        "model": config.get("model"),
+        "limit_usd": configured_cap(config),
+        "spent_usd": spend["spent_usd"],
+        "written_by": "runner_ledger_reconstruction",
+    }
 
 
 def _read_json(path: Path) -> dict:
@@ -194,8 +226,9 @@ def _turns(events: list[dict], settles: list[dict]) -> list[dict]:
     for event in events:
         if event.get("type") == "tool_execution_end":
             results[str(event.get("toolCallId"))] = _result_ok(event)
-    priced = iter(s for s in settles if s.get("usage_known") is not False
-                  and s.get("source") != "orphan_stream")  # orphans are not agent messages
+    priced = iter(
+        s for s in settles if s.get("usage_known") is not False and s.get("source") not in COMPACTION_SOURCES
+    )  # compaction summaries are not agent messages
     turns = []
     for event in events:
         message = event.get("message") or {}
@@ -212,7 +245,7 @@ def _turns(events: list[dict], settles: list[dict]) -> list[dict]:
             kind = "rejected"
         elif any(name in COMPILE_TOOLS for name in names):
             kind = "compile"
-        elif any(name in BOOKKEEPING_TOOLS for name in names):
+        elif names and all(_new_bookkeeping_call(call) for call in calls):
             kind = "bookkeeping"
         elif names:
             kind = "context"
@@ -220,14 +253,55 @@ def _turns(events: list[dict], settles: list[dict]) -> list[dict]:
             kind = "reasoning"
         parts = (settle or {}).get("ledger_components_usd") or {}
         tokens = (settle or {}).get("tokens") or {}
-        turns.append({"kind": kind, "tools": names, "usd": float(settle["usd"]) if settle else 0.0,
-                      "input": usage.get("input", 0),
-                      "cache_read": usage.get("cacheRead", 0), "cache_write": usage.get("cacheWrite", 0),
-                      "input_side_usd": sum(float(parts.get(k) or 0) for k in ("input", "cacheRead", "cacheWrite")),
-                      "uncached_rate": (float(parts["input"]) / tokens["input"]
-                                        if parts.get("input") and tokens.get("input") else None),
-                      "stop_reason": message.get("stopReason")})
+        turns.append(
+            {
+                "kind": kind,
+                "tools": names,
+                "usd": float(settle["usd"]) if settle else 0.0,
+                "input": usage.get("input", 0),
+                "cache_read": usage.get("cacheRead", 0),
+                "cache_write": usage.get("cacheWrite", 0),
+                "input_side_usd": sum(float(parts.get(k) or 0) for k in ("input", "cacheRead", "cacheWrite")),
+                "uncached_rate": (
+                    float(parts["input"]) / tokens["input"] if parts.get("input") and tokens.get("input") else None
+                ),
+                "stop_reason": message.get("stopReason"),
+            }
+        )
     return turns
+
+
+def _new_bookkeeping_call(call: dict) -> bool:
+    name = call.get("name")
+    arguments = call.get("arguments") or {}
+    if not isinstance(arguments, dict):
+        return False
+    if name == "read":
+        return arguments.get("view", "source") in ("map", "outline")
+    if name == "goal":
+        return not arguments.get("try")
+    return name == "finish"
+
+
+def _compile_counters(events: list[dict]) -> dict:
+    calls = []
+    for event in events:
+        message = event.get("message") or {}
+        if event.get("type") == "message_end" and message.get("role") == "assistant":
+            calls.extend(block for block in message.get("content", []) if block.get("type") == "toolCall")
+    selected = [call for call in calls if call.get("name") in COMPILE_TOOLS]
+    first = next((index for index, call in enumerate(calls) if call.get("name") in COMPILE_TOOLS), None)
+    operation_names = {"splice", "fill", "merge"}
+    with_operation = sum(
+        bool(set((call.get("arguments") or {}).keys()) & operation_names or (call.get("arguments") or {}).get("base"))
+        for call in selected
+        if call.get("name") == "compile"
+    )
+    return {
+        "compile_calls": len(selected),
+        "compile_calls_with_operation": with_operation,
+        "calls_before_first_compile": len(calls[:first]) if first is not None else len(calls),
+    }
 
 
 def hit_rate_pct(read: int, write: int, uncached: int) -> float | None:
@@ -260,19 +334,29 @@ def _edit_classes(ledger: list[dict], directory: Path) -> dict:
         proof_path = directory / "proofs" / f"{event['candidate_id']}.lean"
         proofs[event["candidate_id"]] = proof_path.read_text() if proof_path.exists() else ""
         parent = (event.get("parents") or [None])[0]
+        if not isinstance(parent, str):
+            counts["unclassified"] += 1
+            continue
         if parent not in proofs:
             parent_path = directory / "proofs" / f"{parent}.lean"
-            proofs[parent] = parent_path.read_text() if parent and parent_path.exists() else None
-        if proofs.get(parent) is None:
+            if parent_path.exists():
+                proofs[parent] = parent_path.read_text()
+        if parent not in proofs:
             counts["unclassified"] += 1
             continue
         old, new = proofs[parent].splitlines(), proofs[event["candidate_id"]].splitlines()
-        changed = sum(max(a1 - a0, b1 - b0) for tag, a0, a1, b0, b1 in
-                      SequenceMatcher(None, old, new, autojunk=False).get_opcodes() if tag != "equal")
+        changed = sum(
+            max(a1 - a0, b1 - b0)
+            for tag, a0, a1, b0, b1 in SequenceMatcher(None, old, new, autojunk=False).get_opcodes()
+            if tag != "equal"
+        )
         counts["local" if changed <= LOCAL_EDIT_MAX_LINES else "structural"] += 1
-    return {"local": counts["local"], "structural": counts["structural"],
-            "unclassified": counts["unclassified"],
-            "rule": f"local = at most {LOCAL_EDIT_MAX_LINES} changed lines against the first parent"}
+    return {
+        "local": counts["local"],
+        "structural": counts["structural"],
+        "unclassified": counts["unclassified"],
+        "rule": f"local = at most {LOCAL_EDIT_MAX_LINES} changed lines against the first parent",  # log: operator run summary
+    }
 
 
 def _progress(ledger: list[dict]) -> dict:
@@ -287,17 +371,32 @@ def _progress(ledger: list[dict]) -> dict:
         if event.get("kind") != "evaluation":
             continue
         result, metrics = event["result"], event["result"].get("metrics") or {}
-        row = {"candidate": labels.get(event["candidate_id"]), "mode": event["mode"],
-               "tokens": result.get("tokens"), "heartbeats": result.get("heartbeat"),
-               "proxy": metrics.get("proxy"), "estimated_proxy": metrics.get("estimated_proxy"),
-               "compiled": bool(metrics.get("compiled")),
-               "t": round(event["ts"] - start, 1) if start else None}
+        row = {
+            "candidate": labels.get(event["candidate_id"]),
+            "mode": event["mode"],
+            "tokens": result.get("tokens"),
+            "heartbeats": result.get("heartbeat"),
+            "proxy": metrics.get("proxy"),
+            "estimated_proxy": metrics.get("estimated_proxy"),
+            "compiled": bool(metrics.get("compiled")),
+            "t": round(event["ts"] - start, 1) if start else None,
+        }
         timeline.append(row)
         if not row["compiled"]:
             continue
-        if event["mode"] == "full" and metrics.get("proxy") is not None:
-            candidate = {"candidate": row["candidate"], "tokens": row["tokens"],
-                         "heartbeats": row["heartbeats"], "proxy": metrics["proxy"]}
+        compat = metrics.get("axes", {}).get("compat", {})
+        if (
+            event["mode"] == "full"
+            and metrics.get("proxy") is not None
+            and compat.get("total") is not None
+            and compat.get("passed") == compat.get("total")
+        ):
+            candidate = {
+                "candidate": row["candidate"],
+                "tokens": row["tokens"],
+                "heartbeats": row["heartbeats"],
+                "proxy": metrics["proxy"],
+            }
             if best_verified_candidate is None or candidate["proxy"] > best_verified_candidate["proxy"]:
                 best_verified_candidate = candidate
         for key, lower in (("tokens", True), ("heartbeats", True), ("proxy", False), ("estimated_proxy", False)):
@@ -312,7 +411,7 @@ def _progress(ledger: list[dict]) -> dict:
 
 def build_summary(directory: Path) -> dict:
     ledger = _jsonl(directory / "ledger.jsonl")
-    events = _jsonl(directory / "events.jsonl")
+    events = read_events(directory / "events.jsonl")
     cost_events = _jsonl(directory / "cost-ledger.jsonl")
     trace = trace_rows(directory / "trace-journal.jsonl")
     config = _read_json(directory / "run-config.json")
@@ -323,14 +422,11 @@ def build_summary(directory: Path) -> dict:
     request_events = [event for event in trace if event.get("kind") == "request"]
     retries = sum(event.get("retry_of") is not None for event in request_events)
     session = session_spend(directory)
-    recon = reconcile_spend(cost_events, session["usd"] if session else None)
-    # The complete figure: never below the cost report, the ledger's settles or Pi's session total.
+    recon = ledger_spend(cost_events, session["usd"] if session else None)
+    # The one spend figure: never below the cost report, the ledger's settles or Pi's session total.
     spent = max(float(report.get("spent_usd") or 0.0), recon["spent_usd"])
     recon["cost_report_usd"] = report.get("spent_usd")
-    # Only $3 is a hard cap; the configured cap is a soft cap on actual settled spend (see configured_cap).
-    # Older reports carried the configured cap as hard_cap_usd.
-    cap = report.get("soft_cap_usd") or configured_cap(config) or report.get("hard_cap_usd")
-    unresolved = recon["unresolved_usd"] if cost_events else float(report.get("unresolved_usd") or 0.0)
+    cap = report.get("limit_usd") or configured_cap(config) or report.get("soft_cap_usd") or report.get("hard_cap_usd")
     remaining = max(0.0, float(cap or 0.0) - spent)
     by_kind: dict[str, dict] = {}
     for turn in turns:
@@ -338,10 +434,12 @@ def build_summary(directory: Path) -> dict:
         row["requests"] += 1
         row["usd"] = round(row["usd"] + turn["usd"], 6)
     # Pi's compaction summaries are paid requests that are not agent turns.
-    compaction_usd = recon["orphan_settled_usd"] or (session or {}).get("compaction_usd", 0.0)
+    compaction_usd = recon["compaction_settled_usd"] or (session or {}).get("compaction_usd", 0.0)
     if compaction_usd:
-        by_kind["compaction"] = {"requests": recon["orphan_settles"] or (session or {}).get("compactions", 0),
-                                 "usd": round(compaction_usd, 6)}
+        by_kind["compaction"] = {
+            "requests": recon["compaction_settles"] or (session or {}).get("compactions", 0),
+            "usd": round(compaction_usd, 6),
+        }
     evaluations = [e for e in ledger if e.get("kind") == "evaluation"]
     probes = {e["proof_id"] for e in ledger if e.get("kind") == "probe"}
     read = sum(t["cache_read"] for t in turns)
@@ -361,29 +459,14 @@ def build_summary(directory: Path) -> dict:
                     if result_ok.get(str(block["id"])) is False:
                         errors[block["name"]] += 1
     controls = [e for e in cost_events if e.get("kind") == "control"]
-    ideas: dict[str, dict] = {}
-    idea_attempts: dict[str, set[str]] = {}
-    for event in ledger:
-        if event.get("kind") == "idea":
-            ideas[event["id"]] = {"id": event["id"], "title": event["title"], "status": event["status"],
-                                  "attempts": 0, "probes": 0}
-            idea_attempts[event["id"]] = set()
-        elif event.get("kind") == "idea_update" and event["id"] in ideas:
-            ideas[event["id"]].update({k: event[k] for k in ("status", "title") if k in event})
-        elif event.get("kind") == "candidate" and event.get("idea_id") in ideas:
-            idea_attempts[event["idea_id"]].add(event["candidate_id"])
-        elif event.get("kind") == "probe" and event.get("idea_id") in ideas:
-            idea_attempts[event["idea_id"]].add(event["proof_id"])
-    for idea_id, idea in ideas.items():
-        idea["attempts"] = len(idea_attempts[idea_id])
-        idea["probes"] = sum(1 for event in ledger if event.get("kind") == "probe"
-                             and event.get("idea_id") == idea_id)
     overshoot = max(0.0, spent - cap) if cap else 0.0
     progress = _progress(ledger)
     if submission_result and submission_result.get("candidate"):
         progress["best_verified_candidate"] = {
-            "candidate": submission_result["candidate"], "tokens": submission_result.get("tokens"),
-            "heartbeats": submission_result.get("heartbeats"), "proxy": submission_result.get("proxy"),
+            "candidate": submission_result["candidate"],
+            "tokens": submission_result.get("tokens"),
+            "heartbeats": submission_result.get("heartbeats"),
+            "proxy": submission_result.get("proxy"),
         }
     best_verified = progress.get("best_verified_candidate")
     best_at = None
@@ -391,51 +474,79 @@ def build_summary(directory: Path) -> dict:
         candidate_ids = [event["candidate_id"] for event in ledger if event.get("kind") == "candidate"]
         try:
             best_id = candidate_ids[int(best_verified["candidate"].removeprefix("#")) - 1]
-            best_at = min(event["ts"] for event in ledger if event.get("kind") == "evaluation"
-                          and event.get("candidate_id") == best_id and event.get("mode") == "full"
-                          and (event.get("result", {}).get("metrics") or {}).get("proxy") is not None)
+            best_at = min(
+                event["ts"]
+                for event in ledger
+                if event.get("kind") == "evaluation"
+                and event.get("candidate_id") == best_id
+                and event.get("mode") == "full"
+                and (event.get("result", {}).get("metrics") or {}).get("proxy") is not None
+            )
         except (IndexError, KeyError, ValueError, TypeError):
             best_at = None
-    later_settles = [event for event in settles if best_at is not None
-                     and float(event.get("ts", 0)) / 1000 > best_at]
-    later_requests = [event for event in request_events if best_at is not None
-                      and float(event.get("ts", 0)) / 1000 > best_at]
-    ideas_without_attempts = [idea["id"] for idea in ideas.values() if idea["attempts"] == 0]
+    later_settles = [event for event in settles if best_at is not None and float(event.get("ts", 0)) / 1000 > best_at]
+    later_requests = [
+        event for event in request_events if best_at is not None and float(event.get("ts", 0)) / 1000 > best_at
+    ]
     stopped = stop_reason_of(directory, controls)
     route_rows = route_table(ledger)
+    drains = [e for e in ledger if e.get("kind") == "closing_drain"]
     return {
-        "run_id": directory.name, "theorem": config.get("theorem") or report.get("theorem"),
-        "model": config.get("model"), "thinking": config.get("thinking"),
+        "closing_drain": {k: v for k, v in drains[-1].items() if k not in ("kind", "ts")} if drains else None,
+        "run_id": directory.name,
+        "theorem": config.get("theorem") or report.get("theorem"),
+        "model": config.get("model"),
+        "thinking": config.get("thinking"),
         "skill": (config.get("skill") or {}).get("sha256"),
         "stop_reason": stopped,
         "lean": lean_stats(ledger, directory, stopped),
-        "cost": {"spent_usd": round(spent, 6), "unresolved_usd": round(unresolved, 6),
-                 "hard_cap_usd": HARD_CAP_USD, "soft_cap_usd": cap, "remaining_usd": round(remaining, 6), "overshoot_usd": round(overshoot, 6),
-                 "requests": len(request_events) if request_events else len(turns),
-                 "priced_responses": len(turns), "retries": retries,
-                 "requests_after_best": len(later_requests),
-                 "spent_after_best_usd": round(sum(float(event["usd"]) for event in later_settles), 6),
-                 "by_turn_type": by_kind, "reconciliation": recon,
-                 "bookkeeping_and_rejected_pct": round(100 * sum(by_kind.get(k, {"usd": 0})["usd"]
-                                                                 for k in ("bookkeeping", "rejected")) / spent, 1) if spent else 0.0,
-                 "usd_per_evaluation": round(spent / len(evaluations), 6) if evaluations else None,
-                 "report_source": report.get("written_by", "pi_session_shutdown")},
+        "cost": {
+            "spent_usd": round(spent, 6),
+            "limit_usd": cap,
+            "remaining_usd": round(remaining, 6),
+            "overshoot_usd": round(overshoot, 6),
+            "requests": len(request_events) if request_events else len(turns),
+            "priced_responses": len(turns),
+            "retries": retries,
+            "requests_after_best": len(later_requests),
+            "spent_after_best_usd": round(sum(float(event["usd"]) for event in later_settles), 6),
+            "by_turn_type": by_kind,
+            "reconciliation": recon,
+            "bookkeeping_and_rejected_pct": round(
+                100 * sum(by_kind.get(k, {"usd": 0})["usd"] for k in ("bookkeeping", "rejected")) / spent, 1
+            )
+            if spent
+            else 0.0,
+            "usd_per_evaluation": round(spent / len(evaluations), 6) if evaluations else None,
+            "report_source": report.get("written_by", "pi_session_shutdown"),
+        },
         # reuse_pct is the cache hit rate (cache_read / (input + cache_read + cache_write)); the key
         # name is kept for stored summaries and the viewer.
-        "cache": {"reuse_pct": hit_rate_pct(read, write, uncached),
-                  "reuse_pct_recent_10": hit_rate_pct(recent_read, recent_write, recent_uncached),
-                  "savings_pct": cache_savings_pct(turns),
-                  "savings_pct_recent_10": cache_savings_pct(recent),
-                  "read_tokens": read, "write_tokens": write, "input_tokens": uncached, "alarms": len(alarms),
-                  "per_request": [[t["cache_read"], t["cache_write"], t["input"]] for t in turns]},
-        "progress": progress, "edits": _edit_classes(ledger, directory),
-        "evaluations": len(evaluations), "probes": len(probes),
-        "tools": {"calls": dict(calls), "results": sum(event.get("type") == "tool_execution_end" for event in events),
-                  "errors": dict(errors), "error_total": sum(errors.values())},
-        "ideas": list(ideas.values()),
-        "routes": route_rows, "route_progress": route_progress(route_rows),
-        "merge_report": merge_report(ledger),
-        "ideas_without_attempts": ideas_without_attempts,
+        "cache": {
+            "reuse_pct": hit_rate_pct(read, write, uncached),
+            "reuse_pct_recent_10": hit_rate_pct(recent_read, recent_write, recent_uncached),
+            "savings_pct": cache_savings_pct(turns),
+            "savings_pct_recent_10": cache_savings_pct(recent),
+            "read_tokens": read,
+            "write_tokens": write,
+            "input_tokens": uncached,
+            "alarms": len(alarms),
+            "per_request": [[t["cache_read"], t["cache_write"], t["input"]] for t in turns],
+        },
+        "progress": progress,
+        "edits": _edit_classes(ledger, directory),
+        "evaluations": len(evaluations),
+        "probes": len(probes),
+        "tools": {
+            "calls": dict(calls),
+            "results": sum(event.get("type") == "tool_execution_end" for event in events),
+            "errors": dict(errors),
+            "error_total": sum(errors.values()),
+            **_compile_counters(events),
+        },
+        "routes": route_rows,
+        "route_progress": route_progress(route_rows),
+        "merge_report": merge_report(ledger, directory),
         "submission": submission_result,
     }
 
@@ -474,70 +585,105 @@ def lean_stats(ledger: list[dict], directory: Path | None = None, stop_reason: s
     if directory is not None:
         gate = _json(directory / "lean-health.json")
     unhealthy = stop_reason == "lean_unhealthy"
-    return {"checks": checks, "p50_seconds": _percentile(seconds, 0.5), "p95_seconds": _percentile(seconds, 0.95),
-            "timeouts": timeouts, "timeout_rate": rate, "warm_kept": warm_kept, "cold_path": cold,
-            "gate": ({"verdict": gate.get("verdict"), "timeout": gate.get("timeout"),
-                      "slowest_warm_seconds": gate.get("slowest_warm_seconds")} if gate else None),
-            "alarm": rate > LEAN_ALARM_TIMEOUT_RATE or unhealthy}
+    return {
+        "checks": checks,
+        "p50_seconds": _percentile(seconds, 0.5),
+        "p95_seconds": _percentile(seconds, 0.95),
+        "timeouts": timeouts,
+        "timeout_rate": rate,
+        "warm_kept": warm_kept,
+        "cold_path": cold,
+        "gate": (
+            {
+                "verdict": gate.get("verdict"),
+                "timeout": gate.get("timeout"),
+                "slowest_warm_seconds": gate.get("slowest_warm_seconds"),
+            }
+            if gate
+            else None
+        ),
+        "alarm": rate > LEAN_ALARM_TIMEOUT_RATE or unhealthy,
+    }
 
 
 def lean_text(lean: dict | None) -> str:
     if not lean:
         return "lean: no data"
+
     def sec(value):
         return "n/a" if value is None else f"{value:.1f}s"
+
     gate = lean.get("gate")
-    return ("lean: " + f"{lean['checks']} model-lane checks, p50 {sec(lean['p50_seconds'])} p95 {sec(lean['p95_seconds'])}, "
-            f"timeout rate {round(100 * lean['timeout_rate'])}% ({lean['timeouts']}), warm-kept {lean['warm_kept']}, "
-            f"cold path {lean['cold_path']}"
-            + (f"; gate {gate['verdict']} limit {gate['timeout']}s" if gate else "")
-            + ("; ALARM" if lean.get("alarm") else ""))
+    return (
+        "lean: "
+        + f"{lean['checks']} model-lane checks, p50 {sec(lean['p50_seconds'])} p95 {sec(lean['p95_seconds'])}, "  # log: operator run summary
+        f"timeout rate {round(100 * lean['timeout_rate'])}% ({lean['timeouts']}), warm-kept {lean['warm_kept']}, "
+        f"cold path {lean['cold_path']}"
+        + (f"; gate {gate['verdict']} limit {gate['timeout']}s" if gate else "")
+        + ("; ALARM" if lean.get("alarm") else "")
+    )
 
 
 def route_depth_text(depth: dict | None) -> str:
     if not depth:
         return "route depth: no route events"
-    head = f"route depth: {depth['credited_routes']} credited routes, {depth['explored_routes']} explored"
+    head = f"route depth: {depth['credited_routes']} credited routes, {depth['explored_routes']} explored"  # log: operator run summary
     if depth.get("new_state_share") is None:
         return head + "; no attempts on a route yet"
-    return head + f"; {round(100 * depth['new_state_share'])}% of attempts produced a goal state new to their route"
+    share = round(100 * depth["new_state_share"])
+    return head + f"; {share}% of attempts produced a goal state new to their route"  # log: operator run summary
 
 
 def render_text(summary: dict) -> str:
     best, cost, cache = summary["progress"]["best"], summary["cost"], summary["cache"]
+
     def pick(key: str) -> str:
         item = best.get(key)
         return f"{item['value']} ({item['candidate']})" if item else "none"
+
     kinds = ", ".join(f"{k} {v['requests']}×${v['usd']:.4f}" for k, v in sorted(cost["by_turn_type"].items()))
     verified = summary["progress"].get("best_verified_candidate")
-    verified_line = (f"best verified candidate: {verified['candidate']} proxy {verified['proxy']} "
-                     f"({verified['tokens']} tok, {verified['heartbeats']} HB)" if verified
-                     else "best verified candidate: none (original proof baseline stands)")
-    return "\n".join([
-        f"{summary['run_id']}: {summary['theorem']} · {summary['model']} · thinking {summary['thinking']} · stop {summary['stop_reason']}",
-        (f"cost ${cost['spent_usd']:.4f} settled + ${cost['unresolved_usd']:.4f} unresolved of ${cost['soft_cap_usd']} soft cap "
-         f"(hard ${cost['hard_cap_usd']:g}; remaining ${cost['remaining_usd']:.4f}; overshoot ${cost['overshoot_usd']:.4f}) over "
-         f"{cost['requests']} requests / {summary['tools']['results']} tool results "
-         f"({cost['retries']} retries); {kinds}; bookkeeping+rejected {cost['bookkeeping_and_rejected_pct']}%"),
-        *([f"SPEND RECONCILIATION: ledger settled ${cost['reconciliation']['ledger_settled_usd']:.4f}, Pi session "
-           f"${cost['reconciliation']['session_usd'] or 0:.4f}, gap ${cost['reconciliation']['gap_usd']:.4f}, "
-           f"{len(cost['reconciliation']['open_reserves'])} reserve(s) still open"]
-          if not cost["reconciliation"]["balanced"] else []),
-        lean_text(summary.get("lean")),
-        f"cache hit rate {cache['reuse_pct']}% (recent {cache['reuse_pct_recent_10']}%), cost savings {cache['savings_pct']}%, alarms {cache['alarms']}",
-        verified_line,
-        f"per-axis highs: tokens {pick('tokens')}, heartbeats {pick('heartbeats')}, proxy {pick('proxy')}, "
-        f"estimated proxy {pick('estimated_proxy')}",
-        f"evaluations {summary['evaluations']}, probes {summary['probes']}, edits "
-        f"structural {summary['edits']['structural']} / local {summary['edits']['local']}",
-        f"post-best spend ${cost['spent_after_best_usd']:.4f} over {cost['requests_after_best']} requests; "
-        f"ideas without attempts {len(summary['ideas_without_attempts'])}",
-        "routes tried: " + routes_detail_text(summary.get("routes") or []),
-        route_depth_text(summary.get("route_progress")),
-        "harness merge check: " + merge_text(summary.get("merge_report") or []),
-        f"tool errors {summary['tools']['error_total']}: {summary['tools']['errors']}",
-        f"submission: {(summary.get('submission') or {}).get('candidate') or 'none'}",
-    ]) + "\n"
+    verified_line = (
+        f"best verified candidate: {verified['candidate']} proxy {verified['proxy']} "  # log: operator run summary
+        f"({verified['tokens']} tok, {verified['heartbeats']} HB)"
+        if verified
+        else "best verified candidate: none (original proof baseline stands)"  # log: operator run summary
+    )
+    return (
+        "\n".join(
+            [
+                f"{summary['run_id']}: {summary['theorem']} · {summary['model']} · thinking {summary['thinking']} · stop {summary['stop_reason']}",
+                (
+                    f"cost ${cost['spent_usd']:.4f} of ${cost['limit_usd']} limit "  # log: operator run summary
+                    f"(remaining ${cost['remaining_usd']:.4f}; overshoot ${cost['overshoot_usd']:.4f}) over "
+                    f"{cost['requests']} requests / {summary['tools']['results']} tool results "
+                    f"({cost['retries']} retries); {kinds}; bookkeeping+rejected {cost['bookkeeping_and_rejected_pct']}%"
+                ),
+                *(
+                    [
+                        f"SPEND GAP: ledger settled ${cost['reconciliation']['ledger_settled_usd']:.4f}, Pi session "  # log: operator run summary
+                        f"${cost['reconciliation']['session_usd'] or 0:.4f}, gap ${cost['reconciliation']['gap_usd']:.4f}"
+                    ]
+                    if cost["reconciliation"]["gap_usd"]
+                    else []
+                ),
+                lean_text(summary.get("lean")),
+                f"cache hit rate {cache['reuse_pct']}% (recent {cache['reuse_pct_recent_10']}%), cost savings {cache['savings_pct']}%, alarms {cache['alarms']}",  # log: operator run summary
+                verified_line,
+                f"per-axis highs: tokens {pick('tokens')}, heartbeats {pick('heartbeats')}, proxy {pick('proxy')}, "  # log: operator run summary
+                f"estimated proxy {pick('estimated_proxy')}",
+                f"evaluations {summary['evaluations']}, probes {summary['probes']}, edits "  # log: operator run summary
+                f"structural {summary['edits']['structural']} / local {summary['edits']['local']}",
+                f"post-best spend ${cost['spent_after_best_usd']:.4f} over {cost['requests_after_best']} requests; "  # log: operator run summary
+                "routes tried: " + routes_detail_text(summary.get("routes") or []),
+                route_depth_text(summary.get("route_progress")),
+                "harness merge check: " + merge_text(summary.get("merge_report") or []),
+                f"tool errors {summary['tools']['error_total']}: {summary['tools']['errors']}",
+                f"submission: {(summary.get('submission') or {}).get('candidate') or 'none'}",
+            ]
+        )
+        + "\n"
+    )
 
 
 def write_summary(directory: Path, stop_reason: str | None = None) -> dict:

@@ -1,24 +1,41 @@
+import importlib
 import json
 import os
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import patch
 
-from tests.slow import slow
 from arena import engine, environments
 from arena.engine import ROOT
-from tools import arena_certify
+from tests.slow import slow
 
-GIT_ENV = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
-           "GIT_COMMITTER_EMAIL": "t@t"}
+arena_certify = importlib.import_module("arena.cli.certify")
+
+GIT_ENV = {
+    **os.environ,
+    "GIT_AUTHOR_NAME": "t",
+    "GIT_AUTHOR_EMAIL": "t@t",
+    "GIT_COMMITTER_NAME": "t",
+    "GIT_COMMITTER_EMAIL": "t@t",
+}
 
 
 def make_repo(path: Path, message: str = "x") -> str:
     path.mkdir(parents=True)
-    run = lambda *args: subprocess.run(["git", *args], cwd=path, env=GIT_ENV, check=True,  # noqa: E731
-                                       capture_output=True, text=True)
+
+    def run(*args):
+        return subprocess.run(
+            ["git", *args],
+            cwd=path,
+            env=GIT_ENV,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
     run("init", "-q")
     (path / "A.lean").write_text(f"-- {message}\n")
     run("add", ".")
@@ -64,23 +81,33 @@ class RegistryTests(unittest.TestCase):
 
 
 class StandaloneTests(unittest.TestCase):
-    ROW = {"name": "putnam_1999_a1", "source": "putnambench", "file_path": "", "header": "import Mathlib\n\nopen Nat\n\n",
-           "statement": "theorem putnam_1999_a1 : True", "src": "theorem putnam_1999_a1 : True := by\n  trivial",
-           "version_info": [{"v4.25.0": "c1"}]}
+    ROW: ClassVar[dict] = {
+        "name": "putnam_1999_a1",
+        "source": "putnambench",
+        "file_path": "",
+        "header": "import Mathlib\n\nopen Nat\n\n",
+        "statement": "theorem putnam_1999_a1 : True",
+        "src": "theorem putnam_1999_a1 : True := by\n  trivial",
+        "version_info": [{"v4.25.0": "c1"}],
+    }
 
     def test_the_file_is_the_header_followed_by_the_candidate(self):
         with patch.object(engine, "workspace", return_value=Path("/ws")):
             built = engine.candidate_file(self.ROW, self.ROW["src"], "v4.25.0", "c1")
-        self.assertEqual(built["text"], "import Mathlib\n\nopen Nat\n\ntheorem putnam_1999_a1 : True := by\n  trivial\n")
+        self.assertEqual(
+            built["text"], "import Mathlib\n\nopen Nat\n\ntheorem putnam_1999_a1 : True := by\n  trivial\n"
+        )
         self.assertEqual((built["start_line"], built["end_line"]), (5, 6))
         self.assertEqual(built["text"].splitlines()[built["start_line"] - 1], "theorem putnam_1999_a1 : True := by")
         self.assertEqual(engine.source_path(self.ROW), "ArenaScratch/putnam_1999_a1.lean")
         self.assertTrue(engine.is_standalone(self.ROW))
 
     def test_a_standalone_row_without_a_header_is_refused(self):
-        with patch.object(engine, "workspace", return_value=Path("/ws")):
-            with self.assertRaisesRegex(ValueError, "needs its header"):
-                engine.candidate_file({**self.ROW, "header": ""}, self.ROW["src"], "v4.25.0", "c1")
+        with (
+            patch.object(engine, "workspace", return_value=Path("/ws")),
+            self.assertRaisesRegex(ValueError, "needs its header"),
+        ):
+            engine.candidate_file({**self.ROW, "header": ""}, self.ROW["src"], "v4.25.0", "c1")
 
     def test_repository_rows_keep_their_file_path(self):
         row = engine.problem("Core.InitsUpdatesComm")
@@ -95,47 +122,67 @@ class StandaloneTests(unittest.TestCase):
 
 
 class MeasurementVersionTests(unittest.TestCase):
-    ROW = {"name": "R", "version_info": [{"v2": "b"}, {"v1": "a"}]}
+    ROW: ClassVar[dict] = {"name": "R", "version_info": [{"v4.27.0": "b"}, {"v4.26.0": "a"}]}
 
-    def test_default_is_the_primary_listed_version_and_overrides_must_be_listed(self):
+    def test_override_wins_when_listed_and_default_selects_newest(self):
         with tempfile.TemporaryDirectory() as temporary:
             overrides = Path(temporary) / "m.json"
             with patch.object(engine, "_MEASURE_OVERRIDES", overrides):
-                self.assertEqual(engine.measure_version(self.ROW), ("v2", "b"))
-                overrides.write_text(json.dumps({"R": "v1"}))
-                self.assertEqual(engine.measure_version(self.ROW), ("v1", "a"))
-                overrides.write_text(json.dumps({"R": "v9"}))
+                self.assertEqual(engine.measure_version(self.ROW), ("v4.27.0", "b"))
+                overrides.write_text(json.dumps({"R": "v4.26.0"}))
+                self.assertEqual(engine.measure_version(self.ROW), ("v4.26.0", "a"))
+                overrides.write_text(json.dumps({"R": "v9.0.0"}))
                 with self.assertRaisesRegex(ValueError, "not listed"):
                     engine.measure_version(self.ROW)
+                oldest_first = {"name": "OldestFirst", "version_info": [{"v4.25.0": "a"}, {"v4.27.0": "b"}]}
+                overrides.write_text("{}")
+                self.assertEqual(engine.measure_version(oldest_first), ("v4.27.0", "b"))
 
     def test_fast_mode_also_compiles_the_measurement_version_and_records_it(self):
         calls = []
 
-        def compile_stub(row, proof, version, commit, measure=False, probe=False, report_start_line=None,
-                         lane="model"):
+        def compile_stub(row, proof, version, commit, measure=False, probe=False, report_start_line=None, lane="model"):
             calls.append((version, measure))
-            return {"passed": True, "heartbeats": 100 if measure else None, "diagnostics": [],
-                    "diagnostic_counts": {}, "outside_target": {}, "goals": [], "error_headlines": []}
+            return {
+                "passed": True,
+                "heartbeats": 100 if measure else None,
+                "diagnostics": [],
+                "diagnostic_counts": {},
+                "outside_target": {},
+                "goals": [],
+                "error_headlines": [],
+            }
+
         row = {**self.ROW, "statement": "theorem R : True", "name": "R", "source": "s", "proof_length": 9}
-        with patch.object(engine, "problem", return_value=row), patch.object(engine, "validate_proof", return_value=5), \
-                patch.object(engine, "compile_version", side_effect=compile_stub), \
-                patch.object(engine, "candidate_file", return_value={"start_line": 1}), \
-                patch.object(engine, "measure_version", return_value=("v1", "a")), \
-                patch("arena.scoring.metrics", return_value={"compiled": True}):
+        with (
+            patch.object(engine, "problem", return_value=row),
+            patch.object(engine, "validate_proof", return_value=5),
+            patch.object(engine, "compile_version", side_effect=compile_stub),
+            patch.object(engine, "candidate_file", return_value={"start_line": 1}),
+            patch.object(engine, "measure_version", return_value=("v4.26.0", "a")),
+            patch("arena.scoring.metrics", return_value={"compiled": True}),
+        ):
             result = engine.evaluate("R", "theorem R : True := by trivial", "fast")
-        self.assertEqual(calls, [("v2", False), ("v1", True)])
-        self.assertEqual((result["measured_on"], result["heartbeat"]), ("v1", 100))
+        self.assertEqual(calls, [("v4.27.0", False), ("v4.26.0", True)])
+        self.assertEqual((result["measured_on"], result["heartbeat"]), ("v4.26.0", 100))
 
 
 class CertificationTests(unittest.TestCase):
     def good(self, tokens=224, heartbeats=4251, passed=True):
-        return {"tokens": tokens, "heartbeat": heartbeats, "measured_on": "v4.29.1", "local_proxy": 33.33,
-                "compat": {"v4.29.1": {"passed": True}, "v4.27.0": {"passed": passed}}}
+        return {
+            "tokens": tokens,
+            "heartbeat": heartbeats,
+            "measured_on": "v4.29.1",
+            "local_proxy": 33.33,
+            "compat": {"v4.29.1": {"passed": True}, "v4.27.0": {"passed": passed}},
+        }
 
     def run_certify(self, result, provisioned=True):
         found = [("v", "c", Path("/ws") if provisioned else None)]
-        with patch.object(arena_certify.environments, "provisioned", return_value=found), \
-                patch.object(arena_certify, "evaluate", return_value=result):
+        with (
+            patch.object(arena_certify.environments, "provisioned", return_value=found),
+            patch.object(arena_certify, "evaluate", return_value=result),
+        ):
             return arena_certify.certify("Core.InitsUpdatesComm")
 
     def test_matching_reference_is_certified(self):

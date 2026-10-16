@@ -1,68 +1,42 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { objectToolArguments, compactDiagnostics, ResultTrimmer } from "./trim.ts";
+import { render } from "./text.ts";
+import { nothingToSummarize, objectToolArguments, ResultTrimmer } from "./trim.ts";
 
-const skill = "# Proof golfing\n".repeat(40);
+const context = "# Pinned source\n".repeat(40);
 
-test("a repeated read of the same skill file becomes a stub, a changed one does not", () => {
+test("repeated identical search and read results become stubs until compaction", async () => {
   const trimmer = new ResultTrimmer();
-  assert.equal(trimmer.trim("arena_skill_read", { path: "SKILL.md" }, skill), skill);
-  const again = trimmer.trim("arena_skill_read", { path: "SKILL.md" }, skill);
-  assert.match(again, /already loaded earlier in this run; unchanged/);
-  assert.ok(again.length < skill.length);
-  assert.equal(trimmer.trim("arena_skill_read", { path: "SKILL.md" }, skill + "edit"), skill + "edit");
-  assert.equal(trimmer.trim("arena_skill_read", { path: "other.md" }, skill), skill);
-});
-
-test("a compaction makes the earlier text unavailable, so the next read is full again", () => {
-  const trimmer = new ResultTrimmer();
-  trimmer.trim("arena_source", { handle: "h" }, skill);
+  const stub = await render("messages/trim.result_stub");
+  assert.equal(await trimmer.trim("search", { queries: ["Core.a"] }, context), context);
+  assert.equal(await trimmer.trim("search", { queries: ["Core.a"] }, context), stub);
+  assert.equal(await trimmer.trim("read", { node: "n1" }, context), context);
+  assert.equal(await trimmer.trim("read", { node: "n1" }, context), stub);
+  assert.doesNotMatch(stub, /[{}]/);
   trimmer.forget();
-  assert.equal(trimmer.trim("arena_source", { handle: "h" }, skill), skill);
+  assert.equal(await trimmer.trim("read", { node: "n1" }, context), context);
 });
 
-test("proof-bearing and goal results are never stubbed", () => {
+test("compile and goal results are never stubbed", async () => {
   const trimmer = new ResultTrimmer();
-  trimmer.trim("arena_probe", { proof: "x" }, skill);
-  assert.equal(trimmer.trim("arena_probe", { proof: "x" }, skill), skill);
-  trimmer.trim("mcp__arena_lean__lean_goal", { line: 3 }, skill);
-  assert.equal(trimmer.trim("mcp__arena_lean__lean_goal", { line: 3 }, skill), skill);
+  for (const name of ["compile", "goal", "finish"]) {
+    await trimmer.trim(name, {}, context);
+    assert.equal(await trimmer.trim(name, {}, context), context);
+  }
 });
 
-const longError = "unsolved goals\n" + "h : x = y\n".repeat(30) + "⊢ False";
-
-test("Lean diagnostics: compact JSON, repeated messages pointed back, errors kept in full", () => {
-  const raw = JSON.stringify({ items: [
-    { snippet: "a", diagnostics: [{ severity: "error", message: longError, line: 9, column: 2, lean_tags: null, category: "diagnostic", hint: null }] },
-    { snippet: "b", diagnostics: [{ severity: "error", message: longError, line: 9, column: 2, lean_tags: null, category: "diagnostic", hint: null },
-      { severity: "error", message: "unknown identifier 'foo'", line: 11, column: 4 }] },
-  ] }, null, 2);
-  const out = compactDiagnostics(raw);
-  const parsed = JSON.parse(out);
-  assert.ok(out.length < raw.length);
-  assert.equal(parsed.items[0].diagnostics[0].message, longError);
-  assert.equal(parsed.items[1].diagnostics[0].message, "same message as the error at 9:2");
-  assert.equal(parsed.items[1].diagnostics[1].message, "unknown identifier 'foo'");
-  assert.ok(!("hint" in parsed.items[0].diagnostics[0]));
-});
-
-test("only long non-error messages are cut", () => {
-  const long = "linter says ".repeat(120);
-  const out = JSON.parse(compactDiagnostics(JSON.stringify({ diagnostics: [
-    { severity: "warning", message: long, line: 1, column: 1 }, { severity: "error", message: long, line: 2, column: 1 }] }, null, 1)));
-  assert.match(out.diagnostics[0].message, /more characters of this warning omitted/);
-  assert.equal(out.diagnostics[1].message, long);
-});
-
-test("text that is not JSON is untouched", () => {
-  assert.equal(compactDiagnostics("plain goal text"), "plain goal text");
-});
-
-test("tool calls with unparsed arguments get an object, so Pi's compaction serializer cannot crash", () => {
+test("tool calls with unparsed arguments get an object before compaction", () => {
   const messages = [{ role: "user", content: "x" },
-    { role: "assistant", content: [{ type: "toolCall", name: "arena_probe", arguments: null }, { type: "text", text: "t" },
-      { type: "toolCall", name: "arena_find", arguments: { queries: ["a"] } }] }];
+    { role: "assistant", content: [{ type: "toolCall", name: "compile", arguments: null }, { type: "text", text: "t" },
+      { type: "toolCall", name: "read", arguments: { node: "n1" } }] }];
   assert.equal(objectToolArguments(messages), 1);
-  assert.deepEqual((messages[1].content as Array<{ arguments?: unknown }>).map(block => block.arguments), [{}, undefined, { queries: ["a"] }]);
+  assert.deepEqual((messages[1].content as Array<{ arguments?: unknown }>).map(block => block.arguments), [{}, undefined, { node: "n1" }]);
   assert.equal(objectToolArguments(undefined), 0);
+});
+
+test("a compaction with no history to summarize is skipped", () => {
+  assert.equal(nothingToSummarize({ messagesToSummarize: [], turnPrefixMessages: [] }), true);
+  assert.equal(nothingToSummarize({ messagesToSummarize: [{ role: "user" }], turnPrefixMessages: [] }), false);
+  assert.equal(nothingToSummarize({ messagesToSummarize: [], turnPrefixMessages: [{ role: "assistant" }] }), false);
+  assert.equal(nothingToSummarize({}), true);
 });

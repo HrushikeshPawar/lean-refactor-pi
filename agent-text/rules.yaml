@@ -1,0 +1,44 @@
+score:
+  template: "packet/scoring"
+  numbers: "none"
+  marker: "Score: the mean of three percentages"
+exchange_rates:
+  template: "packet/scoring"
+  numbers: "computed per theorem"
+  marker: "Rates: 1 token ="
+token_counting:
+  template: "packet/scoring"
+  numbers: "computed per theorem"
+  marker: "Token count: proof text after"
+statement_immutability:
+  template: "skill/lean-facts"
+  numbers: "none"
+  marker: "The theorem statement"
+forbidden_constructs:
+  template: "skill/lean-facts"
+  numbers: "none"
+  marker: "A submitted proof may contain"
+spend_limit:
+  template: "messages/footer"
+  numbers: "run limit and settled spend"
+  marker: "budget:"
+finish_availability:
+  template: "messages/continuation.finish_available"
+  numbers: "finish_remaining_pct"
+  marker: "now finishes the run"
+graph_operations:
+  template: "tools/compile.description"
+  numbers: "compile_max_drafts"
+  marker: "graph edit: splice, fill or merge"
+graph_identifiers:
+  template: "skill/SKILL"
+  numbers: "none"
+  marker: "Ids: node nN"
+node_status:
+  template: "skill/SKILL"
+  numbers: "none"
+  marker: "compiles\" (the node compiles with no open hole)"
+price_columns:
+  template: "packet/price-table.legend"
+  numbers: "computed per step"
+  marker: "self_hb: heartbeats"

@@ -12,27 +12,39 @@ Mathlib from NTFS against a 180 s budget). Two protections, both free of model c
 
 from __future__ import annotations
 
-import inspect
+import contextlib
 import json
 import os
 import time
 from pathlib import Path
+from typing import cast
 
 HEALTH_FILE = "lean-health.json"
 TRIPPED_FILE = "lean-unhealthy.json"
 STOP_REASON = "lean_unhealthy"
 EXIT_CODE = 75  # runner exit status for a Lean-unhealthy row (EX_TEMPFAIL): the campaign skips the row and goes on
-LIMIT_FLOOR = 180
+LIMIT_FLOOR = 60
 LIMIT_CAP = 900
 LIMIT_FACTOR = 3
 MAX_USE = 0.5  # a warm reference check may use at most this share of the limit
 BREAKER_LIMIT = 5
 TIMEOUT_ENV = "ARENA_LEAN_TIMEOUT"
 GATE_ENV = "ARENA_LEAN_GATE"  # "0" turns the gate off (offline tests with a fake Lean)
+# A worker refused for memory is a wait, not a Lean fault: the gate retries until ROOM_WAIT_S, and a background check
+# that fell back to the cold path for memory is retried ROOM_RETRIES times, ROOM_RETRY_S apart, before it trips.
+MEMORY_REFUSALS = ("no room for a Lean worker", "no memory to load a Lean worker")
+ROOM_WAIT_S = 600
+ROOM_POLL_S = 15
+ROOM_RETRIES = 3
+ROOM_RETRY_S = 60
+
+
+def memory_refused(*texts: object) -> bool:
+    return any(marker in str(text) for text in texts for marker in MEMORY_REFUSALS)
 
 
 def choose_limit(slowest_warm: float | None) -> int:
-    """clamp(max(180, 3 x slowest warm reference check), <= 900)."""
+    """clamp(max(60, 3 x the primary warm reference check), <= 900)."""
     return int(min(LIMIT_CAP, max(LIMIT_FLOOR, LIMIT_FACTOR * (slowest_warm or 0.0))))
 
 
@@ -48,40 +60,74 @@ def gate_versions(row: dict) -> list[tuple[str, str]]:
     return [first] + [pair for pair in engine.versions(row) if pair != first]
 
 
-def _warm(row: dict, version: str, commit: str, slots: int, lane: str = "model") -> dict | None:
+def _warm(row: dict, version: str, commit: str, slots: int, lane: str = "model", wait: bool = True) -> dict | None:
     from arena import engine
 
     warm = getattr(engine, "warm_session", None)
     if not warm:
         return None
-    return warm(row, version, commit, slots) if lane == "model" else warm(row, version, commit, slots, lane=lane)
+    return warm(row, version, commit, slots, lane=lane, wait=wait)
 
 
-def _reference_check(row: dict, version: str, commit: str, timeout: int = LIMIT_CAP) -> dict:
+def _reference_check(row: dict, version: str, commit: str, timeout: int = LIMIT_CAP, lane: str = "model") -> dict:
     """Compile the untouched reference proof through the normal path (the session when one is configured)."""
     from arena import engine
 
     built = engine.candidate_file(row, row["src"], version, commit)
-    kwargs = {"prefix_end": built["head"], "timeout": timeout}
-    if "lane" in inspect.signature(engine.run_lean).parameters:
-        kwargs["lane"] = "model"
     started = time.monotonic()
     try:
-        done = engine.run_lean(row, built["path"], built["text"], **kwargs)
-    except Exception as error:  # noqa: BLE001 - any failure to run Lean is a failed check
-        return {"seconds": round(time.monotonic() - started, 2), "passed": False, "timed_out": False,
-                "detail": f"could not run Lean: {type(error).__name__}: {str(error)[:160]}"}
+        done = engine.run_lean(
+            row,
+            cast(Path, built["path"]),
+            str(built["text"]),
+            prefix_end=cast(int, built["head"]),
+            timeout=timeout,
+            lane=lane,
+        )
+    except Exception as error:
+        return {
+            "seconds": round(time.monotonic() - started, 2),
+            "passed": False,
+            "timed_out": False,
+            "detail": f"could not run Lean: {type(error).__name__}: {str(error)[:160]}",
+        }
     seconds = round(time.monotonic() - started, 2)
+    last = engine.last_lean_run()
     if done is None:
-        return {"seconds": seconds, "passed": False, "timed_out": True, "detail": f"timed out after {timeout} s"}
+        return {
+            "seconds": seconds,
+            "passed": False,
+            "timed_out": True,
+            "detail": f"timed out after {timeout} s",
+            "path": last.get("path"),
+            "reason": last.get("reason", ""),
+        }
     returncode, output = done
-    return {"seconds": seconds, "passed": returncode == 0, "timed_out": False,
-            "detail": "" if returncode == 0 else output.strip()[:200]}
+    return {
+        "seconds": seconds,
+        "passed": returncode == 0,
+        "timed_out": False,
+        "detail": "" if returncode == 0 else output.strip()[:200],
+        "path": last.get("path"),
+        "reason": last.get("reason", ""),
+    }
 
 
-def gate(theorem: str, slots: int, directory: Path | None = None, *, row_fn=None, versions_fn=None,
-         warm_fn=None, check_fn=None, log=print, now_fn=time.time) -> dict:
-    """Warm the session, check the reference on every version, decide the row's limit and verdict.
+def gate(
+    theorem: str,
+    slots: int,
+    directory: Path | None = None,
+    *,
+    row_fn=None,
+    versions_fn=None,
+    warm_fn=None,
+    check_fn=None,
+    log=print,
+    now_fn=time.time,
+    sleep_fn=time.sleep,
+    room_wait_s: float = ROOM_WAIT_S,
+) -> dict:
+    """Warm and check the primary version, starting other toolchain warm-ups in the background.
 
     Blocking and free of model calls. The four functions are injected in tests. Persists `lean-health.json` in
     `directory` when given. Returns {"verdict": "healthy"|"unhealthy", "timeout": int, "reasons": [...],
@@ -89,6 +135,7 @@ def gate(theorem: str, slots: int, directory: Path | None = None, *, row_fn=None
     """
     if row_fn is None:
         from arena import engine
+
         row_fn = engine.problem
     row = row_fn(theorem)
     targets = (versions_fn or gate_versions)(row)
@@ -96,56 +143,193 @@ def gate(theorem: str, slots: int, directory: Path | None = None, *, row_fn=None
     check_fn = check_fn or _reference_check
     report: dict = {"theorem": theorem, "slots": slots, "started": now_fn(), "versions": {}}
     started = time.monotonic()
-    for number, (version, commit) in enumerate(targets):
-        entry: dict = {}
-        report["versions"][version] = entry
+    version, commit = targets[0]
+    entry: dict = {}
+    report["versions"][version] = entry
+    room_deadline = time.monotonic() + room_wait_s
+    while True:
         try:
-            # The measure version (first) gets model workers; every other version one background worker, which
-            # is what its compatibility checks use.
-            warmed = (warm_fn(row, version, commit, slots) if number == 0
-                      else warm_fn(row, version, commit, 1, lane="background"))
-        except Exception as error:  # noqa: BLE001
+            warmed = warm_fn(row, version, commit, slots, lane="model", wait=True)
+        except Exception as error:
             warmed = {"ok": False, "workers": 0, "seconds": [], "failed": [f"{type(error).__name__}: {error}"]}
-        if warmed is None:
-            entry.update(workers=None, header_seconds=None, warm_failed=[])
-            _say(log, f"lean warm {version}: no session configured; the reference check below includes the import")
+        refused = isinstance(warmed, dict) and not warmed.get("workers") and memory_refused(*warmed.get("failed", []))
+        if not refused or time.monotonic() >= room_deadline:
+            break
+        _say(log, f"lean warm {version}: waiting for memory ({'; '.join(map(str, warmed.get('failed', [])))[:120]})")
+        sleep_fn(ROOM_POLL_S)
+    if warmed is None:
+        entry.update(workers=None, header_seconds=None, warm_failed=[])
+        _say(log, f"lean warm {version}: no session configured; the reference check below includes the import")
+    else:
+        warm_result = warmed if isinstance(warmed, dict) else {}
+        seconds_value = warm_result.get("seconds")
+        seconds = [float(s) for s in seconds_value] if isinstance(seconds_value, list) else []
+        failed_value = warm_result.get("failed")
+        failed = [str(item) for item in failed_value] if isinstance(failed_value, list) else []
+        entry.update(
+            workers=warm_result.get("workers"),
+            header_seconds=round(max(seconds), 1) if seconds else None,
+            warm_failed=failed,
+            warm_ok=bool(warm_result.get("ok")),
+        )
+        if entry["workers"]:
+            took = f" in {max(seconds):.0f} s" if seconds else ""
+            _say(
+                log,
+                f"lean warm {version}: {entry['workers']} workers ready{took}"
+                + (f"; {len(failed)} failed" if failed else ""),
+            )
         else:
-            seconds = [float(s) for s in warmed.get("seconds") or []]
-            entry.update(workers=warmed.get("workers"), header_seconds=round(max(seconds), 1) if seconds else None,
-                         warm_failed=list(warmed.get("failed") or []), warm_ok=bool(warmed.get("ok")))
-            if warmed.get("workers"):
-                took = f" in {max(seconds):.0f} s" if seconds else ""
-                _say(log, f"lean warm {version}: {warmed['workers']} workers ready{took}"
-                          + (f"; {len(entry['warm_failed'])} failed" if entry["warm_failed"] else ""))
-            else:
-                _say(log, f"lean warm {version}: NO worker ready ({'; '.join(map(str, entry['warm_failed']))[:160]})")
-        checked = check_fn(row, version, commit)
-        entry.update(check_seconds=checked["seconds"], passed=bool(checked["passed"]),
-                     timed_out=bool(checked.get("timed_out")), detail=checked.get("detail", ""))
-        _say(log, f"reference {version}: {checked['seconds']:.0f} s "
-                  + ("passed" if checked["passed"] else f"FAILED ({'timed out' if checked.get('timed_out') else entry['detail'][:100]})"))
-    slowest = max((e["check_seconds"] for e in report["versions"].values()), default=0.0)
+            _say(log, f"lean warm {version}: NO worker ready ({'; '.join(failed)[:160]})")
+    checked = check_fn(row, version, commit, lane="model")
+    entry.update(
+        check_seconds=checked["seconds"],
+        passed=bool(checked["passed"]),
+        timed_out=bool(checked.get("timed_out")),
+        detail=checked.get("detail", ""),
+    )
+    _say(
+        log,
+        f"reference {version}: {checked['seconds']:.0f} s "
+        + ("passed" if checked["passed"] else f"FAILED ({entry['detail'][:100]})"),
+    )
+    pending = []
+    for other_version, other_commit in targets[1:]:
+        pending.append(other_version)
+        try:
+            warmed = warm_fn(row, other_version, other_commit, 1, lane="background", wait=False)
+        except Exception as error:
+            warmed = {"ok": False, "workers": 0, "seconds": [], "failed": [f"{type(error).__name__}: {error}"]}
+        warm_result = warmed if isinstance(warmed, dict) else {}
+        seconds_value = warm_result.get("seconds")
+        seconds = [float(s) for s in seconds_value] if isinstance(seconds_value, list) else []
+        failed_value = warm_result.get("failed")
+        failed = [str(item) for item in failed_value] if isinstance(failed_value, list) else []
+        report["versions"][other_version] = {
+            "warmup": "background",
+            "checked": False,
+            "workers": warm_result.get("workers"),
+            "header_seconds": round(max(seconds), 1) if seconds else None,
+            "warm_failed": failed,
+            "warm_ok": bool(warm_result.get("ok")),
+        }
+    report["pending"] = pending
+    slowest = float(entry["check_seconds"])
     limit = choose_limit(slowest)
     reasons = []
-    for version, entry in report["versions"].items():
-        if entry.get("workers") == 0:
-            reasons.append(f"{version}: no Lean worker could open the file header")
-        if not entry["passed"]:
-            reasons.append(f"{version}: reference proof did not pass ({'timed out' if entry['timed_out'] else entry['detail'][:100] or 'failed'})")
-        elif entry["check_seconds"] > MAX_USE * limit:
-            reasons.append(f"{version}: warm reference check took {entry['check_seconds']:.0f} s, over "
-                           f"{int(MAX_USE * 100)}% of the {limit} s limit")
-    report.update(timeout=limit, slowest_warm_seconds=slowest, reasons=reasons,
-                  verdict="unhealthy" if reasons else "healthy", wall_seconds=round(time.monotonic() - started, 1),
-                  finished=now_fn())
+    if entry.get("workers") == 0:
+        reasons.append(f"{version}: no Lean worker could open the file header")
+    if not entry["passed"]:
+        reasons.append(
+            f"{version}: reference proof did not pass ({'timed out' if entry['timed_out'] else entry['detail'][:100] or 'failed'})"
+        )
+    elif entry["check_seconds"] > MAX_USE * limit:
+        reasons.append(
+            f"{version}: warm reference check took {entry['check_seconds']:.0f} s, over "
+            f"{int(MAX_USE * 100)}% of the {limit} s limit"
+        )
+    report.update(
+        timeout=limit,
+        slowest_warm_seconds=slowest,
+        reasons=reasons,
+        verdict="unhealthy" if reasons else "healthy",
+        wall_seconds=round(time.monotonic() - started, 1),
+        finished=now_fn(),
+    )
     if directory is not None:
-        try:
-            (Path(directory) / HEALTH_FILE).write_text(json.dumps(report, indent=2) + "\n")
-        except OSError:
-            pass
-    _say(log, f"lean gate {report['verdict']}: limit {limit} s"
-              + (" (" + "; ".join(reasons) + ")" if reasons else ""))
+        _write_health(directory, report)
+    _say(log, f"lean gate {report['verdict']}: limit {limit} s" + (" (" + "; ".join(reasons) + ")" if reasons else ""))
     return report
+
+
+def trip_unhealthy(directory: Path, version: str, detail: str, now_fn=time.time) -> dict:
+    marker = {
+        "ts": now_fn(),
+        "stop_reason": STOP_REASON,
+        "source": "reference_check",
+        "version": version,
+        "detail": detail,
+    }
+    (Path(directory) / TRIPPED_FILE).write_text(json.dumps(marker) + "\n")
+    _say(print, f"Lean reference check failed on {version}: {detail[:160]}")
+    return marker
+
+
+def check_others(
+    theorem: str,
+    directory: Path,
+    *,
+    row_fn=None,
+    versions_fn=None,
+    check_fn=None,
+    cancelled=lambda: False,
+    log=print,
+    now_fn=time.time,
+    sleep_fn=time.sleep,
+    retries: int = ROOM_RETRIES,
+    retry_s: float = ROOM_RETRY_S,
+) -> list[dict]:
+    """Run pending cross-version reference checks serially and trip on the first failure.
+
+    A check that ran on the cold path because no worker had memory is retried (`retries` times, `retry_s` apart)
+    before it counts: memory is a wait, and a passing cold check says nothing bad about the toolchain."""
+    report = read_health(directory)
+    if report is None:
+        return []
+    if row_fn is None:
+        from arena import engine
+
+        row_fn = engine.problem
+    row = row_fn(theorem)
+    targets = (versions_fn or gate_versions)(row)
+    check_fn = check_fn or _reference_check
+    completed = []
+    for version, commit in targets[1:]:
+        if cancelled():
+            break
+        entry = report.get("versions", {}).get(version, {})
+        if entry.get("checked"):
+            continue
+        for attempt in range(retries + 1):
+            check = check_fn(row, version, commit, lane="background")
+            starved = check.get("path") == "cold-fallback" and memory_refused(check.get("reason", ""))
+            if not starved or attempt == retries or cancelled():
+                break
+            _say(log, f"reference {version}: no memory for a warm worker; retry {attempt + 1} in {retry_s:.0f} s")
+            sleep_fn(retry_s)
+        cold = check.get("path") == "cold-fallback"
+        entry.update(
+            checked=True,
+            check_seconds=check["seconds"],
+            passed=bool(check["passed"]),
+            timed_out=bool(check.get("timed_out")),
+            detail=check.get("detail", ""),
+            path=check.get("path"),
+        )
+        report["versions"][version] = entry
+        report["pending"] = [pending for pending in report.get("pending", []) if pending != version]
+        _write_health(directory, report)
+        completed.append({"version": version, **entry})
+        if not entry["passed"] or cold:
+            outcome = "timed out" if entry["timed_out"] else ("passed" if entry["passed"] else "failed")
+            detail = (
+                f"cold path ({check.get('reason') or 'no warm worker'}); reference {outcome} in {entry['check_seconds']:.0f} s"
+                if cold
+                else entry["detail"] or outcome
+            )
+            trip_unhealthy(directory, version, detail, now_fn=now_fn)
+            break
+        _say(log, f"reference {version}: {entry['check_seconds']:.0f} s passed")
+    return completed
+
+
+def _write_health(directory: Path, report: dict) -> None:
+    """Replace lean-health.json whole: check_others rewrites it while the run may be reading it."""
+    path = Path(directory) / HEALTH_FILE
+    temporary = path.with_name(f".{HEALTH_FILE}.{os.getpid()}.tmp")
+    with contextlib.suppress(OSError):
+        temporary.write_text(json.dumps(report, indent=2) + "\n")
+        os.replace(temporary, path)
 
 
 def read_health(directory: Path) -> dict | None:
@@ -156,6 +340,7 @@ def read_health(directory: Path) -> dict | None:
 
 
 # ---- circuit breaker --------------------------------------------------------------------------------------------
+
 
 def is_timeout(entry: dict) -> bool:
     return str(entry.get("error") or "").startswith("Lean timed out")
@@ -177,8 +362,12 @@ def check_outcome(result: dict) -> str | None:
 
 def model_checks(ledger: list[dict]) -> list[dict]:
     """Probe and evaluation records of the model lane, in order."""
-    return [e for e in ledger if e.get("result") is not None
-            and ((e.get("kind") == "probe") or (e.get("kind") == "evaluation" and e.get("trigger", "model") == "model"))]
+    return [
+        e
+        for e in ledger
+        if e.get("result") is not None
+        and ((e.get("kind") == "probe") or (e.get("kind") == "evaluation" and e.get("trigger", "model") == "model"))
+    ]
 
 
 def streak(ledger: list[dict]) -> int:
@@ -209,14 +398,18 @@ def trip_if_unhealthy(directory: Path, ledger: list[dict], limit: int = BREAKER_
     count = streak(ledger)
     if count < limit:
         return None
-    last = next((e for e in reversed(model_checks(ledger)) if check_outcome(e["result"]) in ("timeout", "unavailable")), {})
-    marker = {"ts": now_fn(), "consecutive": count, "limit": limit,
-              "last_outcome": check_outcome(last.get("result") or {}),
-              "stop_reason": STOP_REASON}
-    try:
+    last = next(
+        (e for e in reversed(model_checks(ledger)) if check_outcome(e["result"]) in ("timeout", "unavailable")), {}
+    )
+    marker = {
+        "ts": now_fn(),
+        "consecutive": count,
+        "limit": limit,
+        "last_outcome": check_outcome(last.get("result") or {}),
+        "stop_reason": STOP_REASON,
+    }
+    with contextlib.suppress(OSError):
         (Path(directory) / TRIPPED_FILE).write_text(json.dumps(marker) + "\n")
-    except OSError:
-        pass
     return marker
 
 

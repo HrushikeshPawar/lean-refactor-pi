@@ -1,4 +1,4 @@
-"""Read-only data shaping for the local run viewer (tools/serve_candidate_graph.py).
+"""Read-only data shaping for the local run viewer (arena/cli/serve.py).
 
 Everything is derived from files a run already writes; nothing here starts, stops or writes to a
 run. Langfuse is read server-side only: the keys never reach a response, a log line or an error.
@@ -9,26 +9,41 @@ from __future__ import annotations
 import base64
 import json
 import re
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timedelta, timezone
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Callable
 
-from arena.routes import progress as route_progress, route_table
-from arena.summary import HARD_CAP_USD, configured_cap, _result_ok, _turns, build_summary, hit_rate_pct, reconcile_spend, session_spend, trace_rows
+from arena.routes import progress as route_progress
+from arena.routes import route_table
+from arena.summary import (
+    COMPACTION_SOURCES,
+    _result_ok,
+    _turns,
+    build_summary,
+    configured_cap,
+    hit_rate_pct,
+    ledger_spend,
+    read_events,
+    session_spend,
+    trace_rows,
+)
 
 BASELINE_PROXY = round(100 / 3, 2)
 STALL_SECONDS = 15 * 60
 TEXT_LIMIT = 4000
 _CACHE: dict = {}
+_CACHE_LOCK = threading.Lock()  # `arena serve` answers requests on threads; eviction iterates the cache
 
 
 # ---------------------------------------------------------------------------------------------
 # File access with cheap caching
 # ---------------------------------------------------------------------------------------------
+
 
 def _stamp(path: Path):
     try:
@@ -57,11 +72,26 @@ def read_jsonl(path: Path) -> list[dict]:
                     rows.append(row)
         except OSError:
             rows = []
-    jsonl_keys = [k for k in _CACHE if k[0] == "jsonl"]
-    for old in jsonl_keys[: max(0, len(jsonl_keys) - 23)]:  # keep memory bounded: oldest files go first
-        _CACHE.pop(old, None)
-    _CACHE.pop(key, None)
-    _CACHE[key] = (stamp, rows)
+    with _CACHE_LOCK:
+        jsonl_keys = [k for k in _CACHE if k[0] == "jsonl"]
+        for old in jsonl_keys[: max(0, len(jsonl_keys) - 23)]:  # keep memory bounded: oldest files go first
+            _CACHE.pop(old, None)
+        _CACHE.pop(key, None)
+        _CACHE[key] = (stamp, rows)
+    return rows
+
+
+def _events(path: Path) -> list[dict]:
+    """The assistant-message and tool-result events of events.jsonl, re-read only when the file changes."""
+    key, stamp = ("events", str(path)), _stamp(path)
+    hit = _CACHE.get(key)
+    if hit and hit[0] == stamp:
+        return hit[1]
+    rows = read_events(path)
+    with _CACHE_LOCK:
+        for old in [k for k in _CACHE if k[0] == "events" and k != key][:-3]:  # a few runs at most
+            _CACHE.pop(old, None)
+        _CACHE[key] = (stamp, rows)
     return rows
 
 
@@ -111,6 +141,7 @@ def _reference(theorem: str | None) -> dict | None:
         return None
     try:
         from arena.scoring import reference as published
+
         tokens, heartbeats = published(theorem)
     except (ValueError, ImportError, KeyError):
         return None
@@ -150,10 +181,12 @@ def _start_end(directory: Path) -> tuple[float | None, float | None]:
 # Hub: one row per run
 # ---------------------------------------------------------------------------------------------
 
+
 def hub_row(run_id: str, directory: Path, campaign: str | None = None, now: float | None = None) -> dict:
     now = time.time() if now is None else now
-    config, state, answer = (read_json(directory / name) for name in ("run-config.json", "state.json",
-                                                                       "submission.json"))
+    config, state, answer = (
+        read_json(directory / name) for name in ("run-config.json", "state.json", "submission.json")
+    )
     summary = _live_summary(directory)
     finished = bool(read_json(directory / "summary.json"))
     cost = summary.get("cost") or {}
@@ -170,36 +203,59 @@ def hub_row(run_id: str, directory: Path, campaign: str | None = None, now: floa
     best = state.get("best") or {}
     verified = (summary.get("progress") or {}).get("best_verified_candidate") or {}
     if not best and verified:
-        best = {"candidate": verified.get("candidate"), "proxy": verified.get("proxy"),
-                "tokens": verified.get("tokens"), "heartbeats": verified.get("heartbeats")}
+        best = {
+            "candidate": verified.get("candidate"),
+            "proxy": verified.get("proxy"),
+            "tokens": verified.get("tokens"),
+            "heartbeats": verified.get("heartbeats"),
+        }
     reference = _reference(config.get("theorem"))
     stalled = not finished and last is not None and now - last > STALL_SECONDS
     status = "finished" if finished else "stalled" if stalled else "live"
     ended = last if finished or stalled else now
     proxy = best.get("proxy")
     return {
-        "run_id": run_id, "campaign": campaign, "model": config.get("model"),
-        "theorem": config.get("theorem"), "reference": reference, "thinking": config.get("thinking"),
-        "soft_cap_usd": cost.get("soft_cap_usd") or configured_cap(config),
-        "cap_usd": configured_cap(config), "hard_cap_usd": HARD_CAP_USD,
-        "spent_usd": round(spent, 6), "requests": cost.get("requests") or requests,
-        "tool_results": tools.get("results"), "tool_errors": tools.get("error_total"),
+        "run_id": run_id,
+        "campaign": campaign,
+        "model": config.get("model"),
+        "theorem": config.get("theorem"),
+        "reference": reference,
+        "thinking": config.get("thinking"),
+        "limit_usd": cost.get("limit_usd") or configured_cap(config),
+        "spent_usd": round(spent, 6),
+        "requests": cost.get("requests") or requests,
+        "tool_results": tools.get("results"),
+        "tool_errors": tools.get("error_total"),
         "cache_reuse_pct": cache.get("reuse_pct"),
         "cache_savings_pct": cache.get("savings_pct"),
         "bookkeeping_pct": cost.get("bookkeeping_and_rejected_pct"),
         "spent_after_best_usd": cost.get("spent_after_best_usd"),
         "requests_after_best": cost.get("requests_after_best"),
-        "best": {"candidate": best.get("candidate"), "proxy": proxy, "tokens": best.get("tokens"),
-                 "heartbeats": best.get("heartbeats")} if best else None,
+        "best": {
+            "candidate": best.get("candidate"),
+            "proxy": proxy,
+            "tokens": best.get("tokens"),
+            "heartbeats": best.get("heartbeats"),
+        }
+        if best
+        else None,
         "delta_proxy": round(proxy - BASELINE_PROXY, 2) if isinstance(proxy, (int, float)) else None,
-        "leading_unverified": state.get("leading_unverified"), "checking": state.get("checking", []),
-        "finished": finished, "status": status,
+        "leading_unverified": state.get("leading_unverified"),
+        "checking": state.get("checking", []),
+        "finished": finished,
+        "status": status,
         "stop_reason": summary.get("stop_reason") if finished else None,
         "submission": answer.get("candidate"),
-        "submission_info": {"candidate": answer.get("candidate"), "proxy": answer.get("proxy"),
-                            "verified_by": answer.get("verified_by"),
-                            "cold_verified": answer.get("verified_by") == "cold compile"} if answer else None,
-        "started": start, "ended": ended,
+        "submission_info": {
+            "candidate": answer.get("candidate"),
+            "proxy": answer.get("proxy"),
+            "verified_by": answer.get("verified_by"),
+            "cold_verified": answer.get("verified_by") == "cold compile",
+        }
+        if answer
+        else None,
+        "started": start,
+        "ended": ended,
         "duration_s": round(ended - start, 1) if start and ended else None,
         "langfuse_url": None,
     }
@@ -208,6 +264,7 @@ def hub_row(run_id: str, directory: Path, campaign: str | None = None, now: floa
 # ---------------------------------------------------------------------------------------------
 # Per-run dashboard
 # ---------------------------------------------------------------------------------------------
+
 
 def _candidate_labels(ledger: list[dict]) -> dict[str, str]:
     labels: dict[str, str] = {}
@@ -229,43 +286,65 @@ def score_timeline(ledger: list[dict], start: float | None) -> list[dict]:
         proxy = metrics.get("proxy")
         if event.get("mode") == "full" and metrics.get("compiled") and proxy is not None:
             best = proxy if best is None else max(best, proxy)
-        rows.append({"n": number, "t": round(event["ts"] - start, 1) if start else None,
-                     "candidate": labels.get(event.get("candidate_id")), "candidate_id": event.get("candidate_id"),
-                     "mode": event.get("mode"),
-                     "proxy": proxy, "estimated_proxy": metrics.get("estimated_proxy"),
-                     "tokens": result.get("tokens"), "heartbeats": result.get("heartbeat"),
-                     "compiled": bool(metrics.get("compiled")), "best_verified": best})
+        rows.append(
+            {
+                "n": number,
+                "t": round(event["ts"] - start, 1) if start else None,
+                "candidate": labels.get(event.get("candidate_id")),
+                "candidate_id": event.get("candidate_id"),
+                "mode": event.get("mode"),
+                "proxy": proxy,
+                "estimated_proxy": metrics.get("estimated_proxy"),
+                "tokens": result.get("tokens"),
+                "heartbeats": result.get("heartbeat"),
+                "compiled": bool(metrics.get("compiled")),
+                "best_verified": best,
+            }
+        )
     return rows
 
 
-def spend_series(directory: Path, start: float | None, soft_cap: float | None) -> dict:
+def spend_series(directory: Path, start: float | None, limit: float | None) -> dict:
     cost_events = read_jsonl(directory / "cost-ledger.jsonl")
     settles = [e for e in cost_events if e.get("kind") == "settle"]
     try:
-        turns = _turns(read_jsonl(directory / "events.jsonl"), settles)
+        turns = _turns(_events(directory / "events.jsonl"), settles)
     except (KeyError, TypeError):
         turns = []
     priced = iter(turns)
     session = session_spend(directory)
-    recon = reconcile_spend(cost_events, session["usd"] if session else None)
+    recon = ledger_spend(cost_events, session["usd"] if session else None)
     names = {"input": "input", "output": "output", "cacheRead": "cache_read", "cacheWrite": "cache_write"}
     points, spent = [], 0.0
     for settle in settles:
         if settle.get("usage_known") is False:
             continue
-        turn = {"kind": "compaction"} if settle.get("source") == "orphan_stream" else next(priced, {})
+        turn = {"kind": "compaction"} if settle.get("source") in COMPACTION_SOURCES else next(priced, {})
         parts = {names[k]: float(v) for k, v in (settle.get("ledger_components_usd") or {}).items() if k in names}
         tokens = settle.get("tokens") or {}
         spent += float(settle.get("usd") or 0)
         stamp = _seconds(settle.get("ts"))
         read, write, fresh = tokens.get("cache_read", 0), tokens.get("cache_write", 0), tokens.get("input", 0)
-        points.append({"n": len(points) + 1, "t": round(stamp - start, 1) if start and stamp else None,
-                       "request_usd": float(settle.get("usd") or 0), "spent_usd": round(spent, 6),
-                       "parts": parts, "tokens": tokens, "kind": turn.get("kind"), "tools": turn.get("tools", []),
-                       "reuse_pct": hit_rate_pct(read, write, fresh)})
-    return {"points": points, "spent_usd": round(max(spent, recon["spent_usd"]), 6), "soft_cap_usd": soft_cap,
-            "hard_cap_usd": HARD_CAP_USD, "unresolved_usd": round(recon["unresolved_usd"], 6),
-            "unsettled_usd": recon["gap_usd"], "reconciliation": recon}
+        points.append(
+            {
+                "n": len(points) + 1,
+                "t": round(stamp - start, 1) if start and stamp else None,
+                "request_usd": float(settle.get("usd") or 0),
+                "spent_usd": round(spent, 6),
+                "parts": parts,
+                "tokens": tokens,
+                "kind": turn.get("kind"),
+                "tools": turn.get("tools", []),
+                "reuse_pct": hit_rate_pct(read, write, fresh),
+            }
+        )
+    return {
+        "points": points,
+        "spent_usd": round(max(spent, recon["spent_usd"]), 6),
+        "limit_usd": limit,
+        "unsettled_usd": recon["gap_usd"],
+        "reconciliation": recon,
+    }
 
 
 def tool_timeline(directory: Path, start: float | None) -> list[dict]:
@@ -275,14 +354,22 @@ def tool_timeline(directory: Path, start: float | None) -> list[dict]:
         kind = row.get("kind")
         key = str(row.get("tool_call_id"))
         if kind == "tool_call":
-            calls[key] = {"id": key, "name": row.get("name"), "start": _seconds(row.get("ts")),
-                          "end": None, "args": _clip(row.get("args")), "result": None, "is_error": False}
+            calls[key] = {
+                "id": key,
+                "name": row.get("name"),
+                "start": _seconds(row.get("ts")),
+                "end": None,
+                "args": _clip(row.get("args")),
+                "result": None,
+                "is_error": False,
+            }
         elif kind == "tool_result" and key in calls:
             result = row.get("result")
             text = row.get("text")
             if text is None and isinstance(result, dict):
-                text = "\n".join(block.get("text", "") for block in result.get("content", [])
-                                 if isinstance(block, dict))
+                text = "\n".join(
+                    block.get("text", "") for block in result.get("content", []) if isinstance(block, dict)
+                )
             call = calls[key]
             call["end"] = _seconds(row.get("ts"))
             call["result"] = _clip(text if text is not None else result)
@@ -314,60 +401,56 @@ def tool_timeline(directory: Path, start: float | None) -> list[dict]:
     return ordered
 
 
-def ideas_view(ledger: list[dict]) -> list[dict]:
-    labels = _candidate_labels(ledger)
-    ideas: dict[str, dict] = {}
-    for event in ledger:
-        kind = event.get("kind")
-        if kind == "idea":
-            ideas[event["id"]] = {"id": event["id"], "title": event.get("title"), "hypothesis": event.get("hypothesis"),
-                                  "region": event.get("region"), "expected_effect": event.get("expected_effect"),
-                                  "status": event.get("status"), "reason": event.get("reason"),
-                                  "attempts": [], "probes": 0, "best_proxy": None}
-        elif kind == "idea_update" and event.get("id") in ideas:
-            ideas[event["id"]].update({k: event[k] for k in ("status", "title", "reason") if k in event})
-        elif kind == "candidate" and event.get("idea_id") in ideas:
-            ideas[event["idea_id"]]["attempts"].append({"candidate": labels.get(event["candidate_id"]),
-                                                       "id": event["candidate_id"], "parents": [
-                                                           labels.get(p, p) for p in event.get("parents", [])]})
-        elif kind == "probe" and event.get("idea_id") in ideas:
-            ideas[event["idea_id"]]["probes"] += 1
-    owner = {a["id"]: i for i, idea in ideas.items() for a in idea["attempts"]}
-    for event in ledger:
-        metrics = (event.get("result") or {}).get("metrics") or {} if event.get("kind") == "evaluation" else {}
-        idea = ideas.get(owner.get(event.get("candidate_id")))
-        if idea and event.get("mode") == "full" and metrics.get("compiled") and metrics.get("proxy") is not None:
-            idea["best_proxy"] = max(idea["best_proxy"] or metrics["proxy"], metrics["proxy"])
-    for idea in ideas.values():
-        for attempt in idea["attempts"]:
-            attempt.pop("id")
-    return list(ideas.values())
-
-
 def control_events(directory: Path, start: float | None) -> list[dict]:
     rows = []
-    soft_crossed = False
+    limit_reached = False
     for event in read_jsonl(directory / "cost-ledger.jsonl"):
         kind = event.get("kind")
         stamp = _seconds(event.get("ts"))
         t = round(stamp - start, 1) if start and stamp else None
         if kind == "finish":
-            rows.append({"t": t, "kind": "finish", "label": f"finish {event.get('phase')}",
-                         "detail": {k: v for k, v in event.items() if k not in ("ts", "kind", "phase")}})
+            rows.append(
+                {
+                    "t": t,
+                    "kind": "finish",
+                    "label": f"finish {event.get('phase')}",
+                    "detail": {k: v for k, v in event.items() if k not in ("ts", "kind", "phase")},
+                }
+            )
         elif kind == "control":
             label = f"control: stop {event['stop']}" if event.get("stop") else "control"
-            rows.append({"t": t, "kind": "control", "label": label,
-                         "detail": {k: v for k, v in event.items() if k not in ("ts", "kind")}})
-        elif kind == "gate" and event.get("decision") != "allow":
-            rows.append({"t": t, "kind": "gate", "label": f"gate {event.get('decision')}",
-                         "detail": {k: event.get(k) for k in ("reason", "estimate_usd", "remaining_usd", "spent_usd")}})
+            rows.append(
+                {
+                    "t": t,
+                    "kind": "control",
+                    "label": label,
+                    "detail": {k: v for k, v in event.items() if k not in ("ts", "kind")},
+                }
+            )
         elif kind == "cache_alarm":
-            rows.append({"t": t, "kind": "cache_alarm", "label": "cache alarm", "detail": {
-                k: v for k, v in event.items() if k not in ("ts", "kind")}})
-        elif kind == "settle" and not soft_crossed and (event.get("soft_overshoot_usd") or 0) > 0:
-            soft_crossed = True
-            rows.append({"t": t, "kind": "soft_cap", "label": "soft cap crossed",
-                         "detail": {"soft_overshoot_usd": event.get("soft_overshoot_usd")}})
+            rows.append(
+                {
+                    "t": t,
+                    "kind": "cache_alarm",
+                    "label": "cache alarm",
+                    "detail": {k: v for k, v in event.items() if k not in ("ts", "kind")},
+                }
+            )
+        elif (
+            kind == "settle"
+            and not limit_reached
+            and event.get("limit_usd")
+            and (event.get("spent_usd") or 0) >= event["limit_usd"]
+        ):
+            limit_reached = True
+            rows.append(
+                {
+                    "t": t,
+                    "kind": "limit",
+                    "label": "spend limit reached",
+                    "detail": {"spent_usd": event.get("spent_usd"), "limit_usd": event["limit_usd"]},
+                }
+            )
     return rows
 
 
@@ -394,27 +477,32 @@ def run_dashboard(run_id: str, directory: Path) -> dict:
     ledger = read_jsonl(directory / "ledger.jsonl")
     start, last = _start_end(directory)
     summary = _live_summary(directory)
-    soft = (summary.get("cost") or {}).get("soft_cap_usd") or configured_cap(read_json(directory / "run-config.json"))
+    limit = (summary.get("cost") or {}).get("limit_usd") or configured_cap(read_json(directory / "run-config.json"))
     packet = directory / "packet.txt"
     try:
         packet_text = packet.read_text(errors="replace")
     except OSError:
         packet_text = None
     # A live summary always carries a default stop_reason, so only summary.json means the run ended.
-    return {"run_id": run_id, "started": start, "last_activity": last,
-            "finished": bool(read_json(directory / "summary.json")),
-            "config": read_json(directory / "run-config.json"),
-            "summary": summary, "submission": read_json(directory / "submission.json") or None,
-            "reference": _reference(summary.get("theorem")),
-            "baseline_proxy": BASELINE_PROXY,
-            "scores": score_timeline(ledger, start),
-            "spend": spend_series(directory, start, soft),
-            "tools": tool_timeline(directory, start),
-            "ideas": ideas_view(ledger),
-            "routes": (route_rows := route_table(ledger)), "route_progress": route_progress(route_rows),
-            "controls": control_events(directory, start),
-            "lean": lean_mix(ledger),
-            "packet": packet_text}
+    return {
+        "run_id": run_id,
+        "started": start,
+        "last_activity": last,
+        "finished": bool(read_json(directory / "summary.json")),
+        "config": read_json(directory / "run-config.json"),
+        "summary": summary,
+        "submission": read_json(directory / "submission.json") or None,
+        "reference": _reference(summary.get("theorem")),
+        "baseline_proxy": BASELINE_PROXY,
+        "scores": score_timeline(ledger, start),
+        "spend": spend_series(directory, start, limit),
+        "tools": tool_timeline(directory, start),
+        "routes": (route_rows := route_table(ledger)),
+        "route_progress": route_progress(route_rows),
+        "controls": control_events(directory, start),
+        "lean": lean_mix(ledger),
+        "packet": packet_text,
+    }
 
 
 # ---------------------------------------------------------------------------------------------
@@ -447,14 +535,21 @@ def _config_fetch(config_path: Path) -> tuple[Fetch, str]:
             raise LangfuseUnavailable(f"Langfuse answered HTTP {error.code}") from None
         except (urllib.error.URLError, OSError, ValueError):
             raise LangfuseUnavailable("Langfuse is not reachable") from None
+
     return fetch, base
 
 
 class Langfuse:
     """Session view of one run, cached for `ttl` seconds. `fetch(path, query)` is injectable."""
 
-    def __init__(self, config_path: Path | None = None, fetch: Fetch | None = None,
-                 base_url: str | None = None, ttl: float = 45.0, clock: Callable[[], float] = time.monotonic):
+    def __init__(
+        self,
+        config_path: Path | None = None,
+        fetch: Fetch | None = None,
+        base_url: str | None = None,
+        ttl: float = 45.0,
+        clock: Callable[[], float] = time.monotonic,
+    ):
         self.config_path = config_path or Path.home() / ".pi" / "agent" / "langfuse.json"
         self._fetch, self._base, self.ttl, self.clock = fetch, base_url, ttl, clock
         self._project: tuple[float, str | None] | None = None
@@ -504,10 +599,14 @@ class Langfuse:
     def _load(self, run_id: str, started: float | None) -> dict:
         fetch, base = self._ready()
         project = self.project_id()
-        begin = datetime.fromtimestamp((started or time.time() - 14 * 86400) - 300, timezone.utc)
-        query = {"sessionId": run_id, "fromStartTime": begin.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                 "toStartTime": (datetime.now(timezone.utc) + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                 "fields": _LF_FIELDS, "limit": "1000"}
+        begin = datetime.fromtimestamp((started or time.time() - 14 * 86400) - 300, UTC)
+        query = {
+            "sessionId": run_id,
+            "fromStartTime": begin.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "toStartTime": (datetime.now(UTC) + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "fields": _LF_FIELDS,
+            "limit": "1000",
+        }
         rows: list[dict] = []
         for _ in range(5):
             page = fetch("/api/public/v2/observations", query)
@@ -539,22 +638,42 @@ def shape_langfuse(run_id: str, rows: list[dict], base: str, project: str | None
         cost = row.get("totalCost")
         if cost is None:
             cost = (row.get("costDetails") or {}).get("total")
-        item = {"id": row.get("id"), "trace_id": row.get("traceId"), "parent_id": row.get("parentObservationId"),
-                "type": row.get("type"), "name": row.get("name"), "level": row.get("level"),
-                "status_message": row.get("statusMessage") or None, "model": row.get("model") or None,
-                "start": _iso(row.get("startTime")), "latency_s": row.get("latency"),
-                "cost_usd": cost,
-                "input_tokens": number(row.get("inputUsage")) or number(usage.get("input")),
-                "output_tokens": number(row.get("outputUsage")) or number(usage.get("output")),
-                "cache_read_tokens": number(usage.get("cache_read_input_tokens")),
-                "cache_write_tokens": sum(number(v) for k, v in usage.items()
-                                          if "cache_creation" in k or "cache_write" in k),
-                "url": f"{root}/traces/{row.get('traceId')}?observation={row.get('id')}" if root else None}
+        item = {
+            "id": row.get("id"),
+            "trace_id": row.get("traceId"),
+            "parent_id": row.get("parentObservationId"),
+            "type": row.get("type"),
+            "name": row.get("name"),
+            "level": row.get("level"),
+            "status_message": row.get("statusMessage") or None,
+            "model": row.get("model") or None,
+            "start": _iso(row.get("startTime")),
+            "latency_s": row.get("latency"),
+            "cost_usd": cost,
+            "input_tokens": number(row.get("inputUsage")) or number(usage.get("input")),
+            "output_tokens": number(row.get("outputUsage")) or number(usage.get("output")),
+            "cache_read_tokens": number(usage.get("cache_read_input_tokens")),
+            "cache_write_tokens": sum(
+                number(v) for k, v in usage.items() if "cache_creation" in k or "cache_write" in k
+            ),
+            "url": f"{root}/traces/{row.get('traceId')}?observation={row.get('id')}" if root else None,
+        }
         observations.append(item)
-        trace = traces.setdefault(row.get("traceId"), {
-            "trace_id": row.get("traceId"), "name": None, "start": item["start"], "latency_s": None,
-            "cost_usd": 0.0, "generations": 0, "tools": 0, "errors": 0, "models": set(),
-            "url": f"{root}/traces/{row.get('traceId')}" if root else None})
+        trace = traces.setdefault(
+            row.get("traceId"),
+            {
+                "trace_id": row.get("traceId"),
+                "name": None,
+                "start": item["start"],
+                "latency_s": None,
+                "cost_usd": 0.0,
+                "generations": 0,
+                "tools": 0,
+                "errors": 0,
+                "models": set(),
+                "url": f"{root}/traces/{row.get('traceId')}" if root else None,
+            },
+        )
         if item["parent_id"] is None:
             trace["name"], trace["latency_s"] = item["name"], item["latency_s"]
         trace["start"] = min(filter(None, (trace["start"], item["start"])), default=None)
@@ -570,12 +689,348 @@ def shape_langfuse(run_id: str, rows: list[dict], base: str, project: str | None
         trace["cost_usd"] = round(trace["cost_usd"], 6)
     generations = [o for o in observations if o["type"] == "GENERATION"]
     latencies = [o["latency_s"] for o in generations if isinstance(o["latency_s"], (int, float))]
-    return {"available": True, "run_id": run_id, "project_id": project, "traces": trace_rows,
-            "observations": observations,
-            "session_url": f"{root}/sessions/{quoted}" if root else None,
-            "totals": {"observations": len(observations), "generations": len(generations),
-                       "tools": sum(o["type"] == "TOOL" for o in observations),
-                       "errors": sum(o["level"] == "ERROR" for o in observations),
-                       "cost_usd": round(sum(number(o["cost_usd"]) for o in observations), 6),
-                       "mean_generation_latency_s": round(sum(latencies) / len(latencies), 2) if latencies else None,
-                       "max_generation_latency_s": max(latencies) if latencies else None}}
+    return {
+        "available": True,
+        "run_id": run_id,
+        "project_id": project,
+        "traces": trace_rows,
+        "observations": observations,
+        "session_url": f"{root}/sessions/{quoted}" if root else None,
+        "totals": {
+            "observations": len(observations),
+            "generations": len(generations),
+            "tools": sum(o["type"] == "TOOL" for o in observations),
+            "errors": sum(o["level"] == "ERROR" for o in observations),
+            "cost_usd": round(sum(number(o["cost_usd"]) for o in observations), 6),
+            "mean_generation_latency_s": round(sum(latencies) / len(latencies), 2) if latencies else None,
+            "max_generation_latency_s": max(latencies) if latencies else None,
+        },
+    }
+
+
+# A call field above this is cut. 200 KB, so one node panel cannot ship a whole journal.
+_FIELD_LIMIT = 200 * 1024
+_HARNESS_ORIGINS = {"reference", "auto_merge", "assembly"}
+_CALL_KEYS = ("tool_call_id", "name", "args", "delivered", "untrimmed", "trimmed", "footer", "is_error")
+
+
+def node_calls(directory: Path, node: str) -> dict:
+    """The journal turn that created `node`: its call, as delivered and untrimmed, and its reasoning.
+
+    v7 nodes join on `tool_call_id`. Older nodes join when one tool-call window encloses the
+    ledger timestamp. A missing journal is an empty panel, not an error.
+    """
+    if not (directory / "trace-journal.jsonl").is_file():
+        return _no_call(node, "no journal")
+    from arena.replay import ReplayError, node_turn
+
+    index = _journal_index(directory)
+    run, calls = index["run"], index["calls"]
+    proof_id = _proof_of(run.ledger, node)
+    if proof_id is None:
+        return _no_call(node, "no call matched")
+    event = _creator(run.ledger, proof_id)
+    if event is None:
+        return _no_call(node, "no call matched")
+    if event.get("origin") in _HARNESS_ORIGINS:
+        return _no_call(node, "harness-made")
+    tool_call = event.get("tool_call_id")
+    reason = None
+    if tool_call:
+        try:
+            turn = node_turn(run, node)
+        except ReplayError:
+            return _no_call(node, "no call matched")
+        chosen = next((call for call in calls if call["tool_call_id"] == tool_call and call["turn"] == turn), None)
+        if chosen is None:
+            chosen = next((call for call in calls if call["tool_call_id"] == tool_call), None)
+        if chosen is None:
+            return _no_call(node, "no call matched")
+    else:
+        stamp = event.get("ts")
+        if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
+            return _no_call(node, "no call matched")
+        enclosing = [call for call in calls if _encloses(call, float(stamp))]
+        if not enclosing:
+            return _no_call(node, "no call matched")
+        enclosing.sort(key=lambda call: (call["start"], call["turn"], str(call["tool_call_id"])))
+        chosen = enclosing[0]
+        if len(enclosing) > 1:
+            reason = "ambiguous"
+    found = {
+        "node": node,
+        "turn": chosen["turn"],
+        "call": {key: chosen[key] for key in _CALL_KEYS},
+        "reasoning": index["reasoning"].get(chosen["turn"], []),
+        "siblings": _siblings(run.ledger, chosen, proof_id),
+    }
+    if reason:
+        found["reason"] = reason
+    found.update(_step_origin(directory, run.ledger, proof_id))
+    return found
+
+
+def _journal_index(directory: Path) -> dict:
+    """The calls, per-turn reasoning and slim turns `node_calls` joins on, rebuilt only when the
+    journal or the ledger changes. Request payloads are never expanded or held; a line that does
+    not decode (the half-written tail of a live run) is skipped, as `read_jsonl` does."""
+    from arena.replay import Run, _group
+
+    journal, ledger = directory / "trace-journal.jsonl", directory / "ledger.jsonl"
+    key, stamp = ("calls", str(directory)), (_stamp(journal), _stamp(ledger))
+    hit = _CACHE.get(key)
+    if hit and hit[0] == stamp:
+        return hit[1]
+    rows: list[dict] = []
+    try:
+        lines = journal.read_text(errors="replace").splitlines()
+    except OSError:
+        lines = []
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        if row.get("kind") == "request":
+            rows.append({field: row[field] for field in ("kind", "id", "turn", "ts") if field in row})
+        elif row.get("kind") in ("tool_call", "tool_result", "response"):
+            rows.append(row)
+    run = Run(directory, {}, rows, read_jsonl(ledger), [], [], {})
+    _group(run)
+    index = {"run": run, "calls": _calls(run), "reasoning": {item.number: _reasoning(item) for item in run.turns}}
+    # node_turn needs only each tool row's kind, id and time; drop the texts once the calls hold them.
+    run.journal = []
+    for item in run.turns:
+        item.request = {}
+        item.rows = [
+            {field: row.get(field) for field in ("kind", "tool_call_id", "ts")}
+            for row in item.rows
+            if row.get("kind") in ("tool_call", "tool_result")
+        ]
+    with _CACHE_LOCK:
+        for old in [k for k in _CACHE if k[0] == "calls" and k != key][:-3]:  # a few runs at most
+            _CACHE.pop(old, None)
+        _CACHE[key] = (stamp, index)
+    return index
+
+
+def _no_call(node: str, reason: str) -> dict:
+    return {"node": node, "turn": None, "call": None, "reasoning": [], "siblings": [], "reason": reason}
+
+
+def _proof_of(history: list[dict], node: str) -> str | None:
+    from arena.campaign import resolve_node_ref
+
+    try:
+        return resolve_node_ref(history, node)
+    except ValueError:
+        return None
+
+
+def _creator(history: list[dict], proof_id: str) -> dict | None:
+    for event in _creators(history):
+        if _event_proof(event) == proof_id:
+            return event
+    return None
+
+
+def _creators(history: list[dict]) -> list[dict]:
+    seen: set[str] = set()
+    found = []
+    for event in history:
+        proof_id = _event_proof(event)
+        if not proof_id or proof_id in seen:
+            continue
+        seen.add(proof_id)
+        found.append(event)
+    return found
+
+
+def _event_proof(event: dict) -> str:
+    if event.get("kind") == "probe":
+        return str(event.get("proof_id") or "")
+    if event.get("kind") == "candidate":
+        return str(event.get("candidate_id") or "")
+    return ""
+
+
+def _journal_seconds(ts) -> float | None:
+    """Journal stamps are milliseconds. Ledger stamps are already seconds."""
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)):
+        return None
+    return float(ts) / 1000
+
+
+def _text_blocks(result) -> str:
+    if not isinstance(result, dict):
+        return ""
+    content = result.get("content")
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts = []
+    for block in content:
+        if isinstance(block, str):
+            parts.append(block)
+        elif isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
+            parts.append(block["text"])
+    return "\n".join(parts)
+
+
+def _delivered(row: dict) -> str:
+    if isinstance(row.get("delivered_text"), str):
+        return row["delivered_text"]
+    return _text_blocks(row.get("result"))
+
+
+def _untrimmed(row: dict) -> str:
+    if isinstance(row.get("text"), str):
+        return row["text"]
+    return _text_blocks(row.get("result"))
+
+
+def _is_error(row: dict) -> bool:
+    if isinstance(row.get("is_error"), bool):
+        return row["is_error"]
+    result = row.get("result")
+    return bool(isinstance(result, dict) and result.get("isError"))
+
+
+def _cap(text: str) -> str:
+    if len(text) <= _FIELD_LIMIT:
+        return text
+    omitted = len(text) - _FIELD_LIMIT
+    return f"{text[:_FIELD_LIMIT]}\n[truncated: {omitted} more characters; use arena replay]"
+
+
+def _cap_args(args):
+    """Arguments as sent; serialized and cut when the JSON is over the field limit."""
+    if args is None:
+        return {}
+    serialized = json.dumps(args, ensure_ascii=False, default=str)
+    return args if len(serialized) <= _FIELD_LIMIT else _cap(serialized)
+
+
+def _calls(run) -> list[dict]:
+    calls = []
+    for item in run.turns:
+        pending: dict = {}
+        order: list = []
+        for row in item.rows:
+            kind = row.get("kind")
+            if kind == "tool_call":
+                ident = row.get("tool_call_id")
+                start = _journal_seconds(row.get("ts"))
+                pending[ident] = {
+                    "tool_call_id": ident,
+                    "name": str(row.get("name") or ""),
+                    "args": _cap_args(row.get("args")),
+                    "delivered": "",
+                    "untrimmed": "",
+                    "trimmed": False,
+                    "footer": "",
+                    "is_error": False,
+                    "turn": item.number,
+                    "start": start,
+                    "end": start,
+                }
+                order.append(ident)
+            elif kind == "tool_result" and row.get("tool_call_id") in pending:
+                call = pending[row.get("tool_call_id")]
+                call["delivered"] = _cap(_delivered(row))
+                call["untrimmed"] = _cap(_untrimmed(row))
+                call["trimmed"] = bool(row.get("trimmed"))
+                call["footer"] = row.get("footer") if isinstance(row.get("footer"), str) else ""
+                call["is_error"] = _is_error(row)
+                end = _journal_seconds(row.get("ts"))
+                if end is not None:
+                    call["end"] = end
+        calls.extend(pending[ident] for ident in order)
+    return calls
+
+
+def _encloses(call: dict, stamp: float) -> bool:
+    start, end = call["start"], call["end"]
+    return start is not None and end is not None and start <= stamp <= end
+
+
+def _reasoning(item) -> list[dict]:
+    response = next((row for row in item.rows if row.get("kind") == "response"), None)
+    if not isinstance(response, dict):
+        return []
+    blocks = []
+    for block in response.get("content") or []:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "thinking" and isinstance(block.get("thinking"), str):
+            blocks.append({"type": "thinking", "text": _cap(block["thinking"])})
+        elif block.get("type") == "text" and isinstance(block.get("text"), str):
+            blocks.append({"type": "text", "text": _cap(block["text"])})
+    return blocks
+
+
+def _siblings(history: list[dict], chosen: dict, proof_id: str) -> list[str]:
+    """Proof ids, the same ids the graph viewer selects. Ordered by ledger time."""
+    matched = []
+    for event in _creators(history):
+        ident = _event_proof(event)
+        if not ident or ident == proof_id or event.get("origin") in _HARNESS_ORIGINS:
+            continue
+        if not _same_call(event, chosen):
+            continue
+        matched.append(event)
+    matched.sort(key=lambda event: (event.get("ts") or 0, _event_proof(event)))
+    return [_event_proof(event) for event in matched]
+
+
+def _same_call(event: dict, chosen: dict) -> bool:
+    ident = event.get("tool_call_id")
+    if ident and chosen.get("tool_call_id"):
+        return ident == chosen["tool_call_id"]
+    stamp = event.get("ts")
+    if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
+        return False
+    return _encloses(chosen, float(stamp))
+
+
+def _step_origin(directory: Path, history: list[dict], proof_id: str) -> dict:
+    """Filing line and holes from the v7 graph. A ledger with no edge for this node has neither."""
+    edge = next((event for event in history if event.get("kind") == "edge" and event.get("proof_id") == proof_id), None)
+    if edge is None:
+        return {}
+    from arena.graph import Graph
+    from arena.tools import _filing_line
+
+    def read(ident: str) -> str | None:
+        path = directory / "proofs" / f"{ident}.lean"
+        return path.read_text(encoding="utf-8") if path.is_file() else None
+
+    projection = Graph.from_history(history, read)
+    node = next((item for item in projection.nodes if item.proof_id == proof_id), None)
+    if node is None:
+        return {}
+    fields: dict = {"origin_line": f"{node.id} {_filing_line(node, projection, {})}"}
+    holes = []
+    for hole in node.holes:
+        index = hole.get("index")
+        holes.append(
+            {
+                "id": hole.get("id") or (f"{node.id}.h{index}" if index else ""),
+                "goal": hole.get("goal"),
+                "status": hole.get("status") or "open",
+                "fills": list(hole.get("fills") or []),
+            }
+        )
+    if holes:
+        fields["holes"] = holes
+    # The text names nodes by graph id (`n3`); the viewer keys them on proof ids.
+    proofs = {item.id: item.proof_id for item in projection.nodes}
+    named = re.findall(r"\bn[1-9][0-9]*\b", fields["origin_line"])
+    named += [str(fill) for hole in node.holes for fill in hole.get("fills") or []]
+    ids = {name: proofs[name] for name in named if name in proofs}
+    if ids:
+        fields["ids"] = ids
+    return fields

@@ -18,6 +18,7 @@ CLOSED = "closed"
 _TOKEN = re.compile(r"[\w'✝!?]+")
 _HYGIENE = re.compile(r"✝[⁰¹²³⁴⁵⁶⁷⁸⁹]*")
 _META = re.compile(r"\?(?:m|_uniq|u)\.\d+|_uniq\.\d+|_hyg\.\d+|@\.\d+")
+# not-model-facing: parser pattern removes source coordinates from goal signatures.
 _POSITION = re.compile(r"\b\d+:\d+\b|\bline \d+\b(?:,? column \d+)?", re.I)
 _QUOTED = re.compile(r"`[^`\n]*`|'[^'\n]*'|\"[^\"\n]*\"")
 _BINDER = re.compile(r"^([^\s:][^:]*?) :(?: |$)")
@@ -83,8 +84,10 @@ def closed(result: dict | None) -> bool:
     primary = next(iter(compat.values()), {}) if compat else {}
     if not primary.get("passed") or (result or {}).get("contains_sorry"):
         return False
-    return not any(item.get("severity") == "error" or "`sorry`" in item.get("message", "")
-                   for item in primary.get("diagnostics") or [])
+    return not any(
+        item.get("severity") == "error" or "`sorry`" in item.get("message", "")
+        for item in primary.get("diagnostics") or []
+    )
 
 
 def signature(result: dict | None) -> str:

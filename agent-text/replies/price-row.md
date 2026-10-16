@@ -1,0 +1,1 @@
+{label} from {parent_label}: {lines} lines changed · tokens {tokens}{tokens_part} · heartbeats {hb}{hb_part} · versions {versions} · score {score_part}

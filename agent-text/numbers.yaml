@@ -1,0 +1,52 @@
+finish_remaining_pct: 10
+original_candidate: 1
+max_failures: 3
+max_drafts: 4
+compile_max_drafts: 4
+error_passes_max: 3
+error_message_chars: 400
+cross_version_wait_seconds: 10
+goal_try_max: 6
+goal_cases_max: 12
+goal_try_chars: 1500
+scratch_max_chars: 8000
+scratch_message_chars: 3000
+scratch_output_chars: 300
+goal_hyp_chars: 1000
+outline_max_chars: 6000
+read_source_lines: 400
+finish_points_lines: 4
+source_lines_per_call: 400
+find_files_per_query: 30
+search_hits_default: 10
+search_hits_max: 30
+search_fuzzy_hits: 5
+search_signature_chars: 200
+packet_max_chars: 40000
+packet_goals: 40
+packet_goal_chars: 700
+packet_goal_floor: 8
+packet_used: 5
+packet_used_chars: 320
+packet_earlier: 60
+packet_earlier_budget: 12000
+packet_earlier_chars: 240
+packet_earlier_filler: 5
+packet_types: 8
+packet_type_chars: 700
+packet_profile_lines: 12
+packet_scope: 25
+packet_scope_chars: 600
+packet_library: 60
+packet_library_budget: 7000
+packet_library_chars: 340
+packet_local_type_chars: 320
+memory_library_lines: 15
+memory_read_entries: 30
+budget:
+  static_words: 685
+  packet_words: 214
+  reply_words: 40
+# Steps below the step table are named when tried at most this often and still worth at least this many points.
+untried_step_max_tries: 2
+untried_step_min_pts: 0.5

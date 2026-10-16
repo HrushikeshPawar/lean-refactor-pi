@@ -1,0 +1,5 @@
+queued: "Versions queued for checking: {count}."
+could_not_run: "{node} version check did not run: {error}"
+passed: "{node} compiles on all {total} versions; score {score}."
+failed: "{node} fails on {failing}; {passed} of {total} versions compile: {reason}"
+diagnostic: "line {file_line} (proof line {proof_line}): {message}"

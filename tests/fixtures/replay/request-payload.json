@@ -1,0 +1,51 @@
+{
+  "model": "demo",
+  "stream": false,
+  "messages": [
+    {
+      "role": "system",
+      "content": "Be exact.\n\n<addendum>\nThe skill body.\n</addendum>\n\n<cwd>\n/tmp\n</cwd>"
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Packet line.\nSecond line."
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": null,
+      "reasoning_content": "Think once.",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "type": "function",
+          "function": {
+            "name": "compile",
+            "arguments": "{}"
+          }
+        }
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "compile",
+        "description": "Compile a draft. Keep going.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "note": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  ]
+}

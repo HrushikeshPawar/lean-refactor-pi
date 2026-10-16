@@ -1,16 +1,17 @@
 import unittest
+from typing import ClassVar
 from unittest.mock import patch
 
-from tests.slow import slow
 from arena import profile as profiler
 from arena.engine import ROOT, _proof_length, problem
+from tests.slow import slow
 
-OUTPUT = """ARENA_PROFILE 120 2 0 120 10
-ARENA_PROFILE 121 4 1 121 30
-ARENA_PROFILE 122 4 1 122 20
-ARENA_PROFILE 121 2 0 122 55
-ARENA_PROFILE 123 2 0 123 5
-ARENA_PROFILE 123 2 0 123 7
+OUTPUT = """ARENA_PROFILE 120 2 0 120 99 tactic 10
+ARENA_PROFILE 121 4 1 121 99 tactic 30
+ARENA_PROFILE 122 4 1 122 99 tactic 20
+ARENA_PROFILE 121 2 0 122 99 tactic 55
+ARENA_PROFILE 123 2 0 123 99 tactic 5
+ARENA_PROFILE 123 2 0 123 99 tactic 7
 ARENA_PROFILE_TOTAL 80
 """
 
@@ -50,9 +51,16 @@ class AggregationTests(unittest.TestCase):
 
     def test_hotspots_rank_full_self_costs_and_include_both_line_coordinates(self):
         tokens = {11: 4, 12: 7, 13: 2}
-        summary = profiler.summarize(self.records, [f"line {i}" for i in range(1, 40)],
-                                     measured=100, instrumented=80, line_tokens=tokens,
-                                     reference_tokens=130, reference_heartbeats=100, proof_tokens=13)
+        summary = profiler.summarize(
+            self.records,
+            [f"line {i}" for i in range(1, 40)],
+            measured=100,
+            instrumented=80,
+            line_tokens=tokens,
+            reference_tokens=130,
+            reference_heartbeats=100,
+            proof_tokens=13,
+        )
         self.assertTrue(summary["token_attribution_available"])
         self.assertEqual(summary["line_tokens_total"], 13)
         hotspot = summary["hotspots"][0]
@@ -64,15 +72,31 @@ class AggregationTests(unittest.TestCase):
 
     @staticmethod
     def _record(proof_line, end_proof_line, depth, self_hb):
-        return {"file_line": proof_line + 9, "end_file_line": end_proof_line + 9, "proof_line": proof_line,
-                "end_proof_line": end_proof_line, "depth": depth, "column": 2 + 2 * depth, "hb": self_hb,
-                "self_hb": self_hb, "calls": 1}
+        return {
+            "file_line": proof_line + 9,
+            "end_file_line": end_proof_line + 9,
+            "proof_line": proof_line,
+            "end_proof_line": end_proof_line,
+            "depth": depth,
+            "column": 2 + 2 * depth,
+            "hb": self_hb,
+            "self_hb": self_hb,
+            "calls": 1,
+        }
 
     def _hotspots(self, records, tokens):
         with patch.object(profiler, "attribute"):
-            return profiler.summarize(records, [f"line {i}" for i in range(1, 40)], measured=100, instrumented=80,
-                                      line_tokens=tokens, reference_tokens=100, reference_heartbeats=100,
-                                      proof_tokens=sum(tokens.values()), file_start_line=10)["hotspots"]
+            return profiler.summarize(
+                records,
+                [f"line {i}" for i in range(1, 40)],
+                measured=100,
+                instrumented=80,
+                line_tokens=tokens,
+                reference_tokens=100,
+                reference_heartbeats=100,
+                proof_tokens=sum(tokens.values()),
+                file_start_line=10,
+            )["hotspots"]
 
     def test_ranked_candidates_carry_every_proof_token(self):
         tokens = {1: 5, 2: 6, 3: 7, 4: 1, 5: 9, 7: 2}
@@ -81,25 +105,25 @@ class AggregationTests(unittest.TestCase):
         self.assertEqual(sum(item["tokens"] for item in hotspots), sum(tokens.values()))
 
     def test_multi_line_tactic_collects_its_continuation_lines(self):
-        hotspots = self._hotspots([self._record(2, 4, 0, 10), self._record(3, 3, 1, 5)],
-                                  {1: 5, 2: 6, 3: 7, 4: 1})
+        hotspots = self._hotspots([self._record(2, 4, 0, 10), self._record(3, 3, 1, 5)], {1: 5, 2: 6, 3: 7, 4: 1})
         outer = next(item for item in hotspots if item["proof_line"] == 2)
         inner = next(item for item in hotspots if item["proof_line"] == 3)
-        self.assertEqual((outer["tokens"], outer["self_hb"], outer["end_proof_line"], outer["end_file_line"]),
-                         (7, 10, 4, 13))
+        self.assertEqual(
+            (outer["tokens"], outer["self_hb"], outer["end_proof_line"], outer["end_file_line"]), (7, 10, 4, 13)
+        )
         self.assertEqual(inner["tokens"], 7)  # the innermost span owns its own line
         self.assertEqual((inner["end_proof_line"], inner["self_hb"]), (3, 5))
 
     def test_uncovered_line_is_a_token_only_entry(self):
         hotspots = self._hotspots([self._record(2, 4, 0, 10)], {1: 5, 2: 6, 7: 2})
         loose = next(item for item in hotspots if item["proof_line"] == 7)
-        self.assertEqual((loose["self_hb"], loose["tokens"], loose["file_line"], loose["tactic_spans"]),
-                         (0, 2, 16, []))
+        self.assertEqual((loose["self_hb"], loose["tokens"], loose["file_line"], loose["tactic_spans"]), (0, 2, 16, []))
         self.assertEqual(next(item for item in hotspots if item["proof_line"] == 1)["tokens"], 5)
 
     def test_token_attribution_is_unavailable_when_counts_do_not_reconcile(self):
-        summary = profiler.summarize(self.records, [f"line {i}" for i in range(1, 40)],
-                                     measured=100, instrumented=80, line_tokens={11: 3})
+        summary = profiler.summarize(
+            self.records, [f"line {i}" for i in range(1, 40)], measured=100, instrumented=80, line_tokens={11: 3}
+        )
         self.assertFalse(summary["token_attribution_available"])
         self.assertIsNone(summary["line_tokens_total"])
         self.assertEqual(summary["hotspots"], [])
@@ -112,36 +136,43 @@ class AggregationTests(unittest.TestCase):
 
 
 class DegradationTests(unittest.TestCase):
-    row = {"name": "T", "statement": "theorem t : True", "file_path": "T.lean"}
+    row: ClassVar[dict] = {"name": "T", "statement": "theorem t : True", "file_path": "T.lean"}
 
-    def fake_instrumented(self, row, proof, version, commit, depth):
+    def fake_instrumented(self, row, proof, version, commit, depth, lane):
+        del lane
         if depth:
             raise ValueError("instrumented compile failed: boom")
         records, total = profiler.parse_profile("ARENA_PROFILE 5 2 0 5 7\nARENA_PROFILE_TOTAL 7", 0, 1)
         return records, total, {"text": "a\nb\nc\nd\ne\n", "start_line": 1}, ""
 
     def test_failed_instrumentation_degrades_to_the_outermost_tactics(self):
-        with patch.object(profiler, "problem", return_value=self.row), \
-             patch.object(profiler, "measure_version", return_value=("v1", "c")), \
-             patch.object(profiler, "versions", return_value=[("v1", "c")]), \
-             patch.object(profiler, "exchange_rates", return_value={"reference_tokens": 2,
-                                                                      "reference_heartbeats": 9}), \
-             patch.object(profiler, "_instrumented", side_effect=self.fake_instrumented):
+        with (
+            patch.object(profiler, "problem", return_value=self.row),
+            patch.object(profiler, "measure_version", return_value=("v1", "c")),
+            patch.object(profiler, "versions", return_value=[("v1", "c")]),
+            patch.object(profiler, "exchange_rates", return_value={"reference_tokens": 2, "reference_heartbeats": 9}),
+            patch.object(profiler, "_instrumented", side_effect=self.fake_instrumented),
+        ):
             result = profiler.profile("T", "theorem t : True := by\n  trivial", measured=9)
         self.assertEqual(result["granularity"], "top_level")
         self.assertIn("degraded", result["note"])
         self.assertEqual(result["measured_total"], 9)
 
     def test_non_compiling_and_sorry_proofs_get_one_line_actionable_errors(self):
-        with patch.object(profiler, "problem", return_value=self.row), \
-             patch.object(profiler, "measure_version", return_value=("v1", "c")), \
-             patch.object(profiler, "versions", return_value=[("v1", "c")]), \
-             patch.object(profiler, "_instrumented", side_effect=ValueError("instrumented compile failed: x")), \
-             patch.object(profiler, "compile_version", return_value={"passed": False,
-                          "error_headlines": ["line 3 (proof line 2): unsolved goals"]}):
+        with (
+            patch.object(profiler, "problem", return_value=self.row),
+            patch.object(profiler, "measure_version", return_value=("v1", "c")),
+            patch.object(profiler, "versions", return_value=[("v1", "c")]),
+            patch.object(profiler, "_instrumented", side_effect=ValueError("instrumented compile failed: x")),
+            patch.object(
+                profiler,
+                "compile_version",
+                return_value={"passed": False, "error_headlines": ["line 3 (proof line 2): unsolved goals"]},
+            ),
+        ):
             with self.assertRaisesRegex(ValueError, "does not compile.*unsolved goals"):
                 profiler.profile("T", "theorem t : True := by\n  skip")
-            with self.assertRaisesRegex(ValueError, "without sorry"):
+            with self.assertRaisesRegex(ValueError, "no open hole"):
                 profiler.profile("T", "theorem t : True := by\n  sorry")
 
 
@@ -156,14 +187,35 @@ class PinnedPhyslibProfileTests(unittest.TestCase):
         self.assertTrue(result["token_attribution_available"])
         self.assertEqual(result["line_tokens_total"], result["tokens"])
         self.assertEqual(result["line_profile"][0]["file_line"], row["start_line"])
-        self.assertEqual([item["proof_line"] for item in result["line_profile"]],
-                         sorted(item["proof_line"] for item in result["line_profile"]))
+        self.assertEqual(
+            [item["proof_line"] for item in result["line_profile"]],
+            sorted(item["proof_line"] for item in result["line_profile"]),
+        )
         self.assertLessEqual(len(result["hotspots"]), 10)
         costs = [item["baseline_cost_points"] for item in result["hotspots"]]
         self.assertEqual(costs, sorted(costs, reverse=True))
         spans = [span for line in result["line_profile"] for span in line["tactic_spans"]]
         self.assertTrue(any(span["depth"] > 0 for span in spans))
         self.assertTrue(any(span["end_file_line"] > span["file_line"] for span in spans))
+
+
+@slow
+@unittest.skipUnless(
+    (ROOT / "runs/analysis/claude-push/timederiv/best.lean").is_file(), "timederiv proof is not present"
+)
+class ConvProfileTests(unittest.TestCase):
+    def test_conv_block_lists_its_tactics_as_children(self):
+        name = "Electromagnetism.ElectromagneticPotential.time_deriv_time_deriv_electricField_of_isExtrema"
+        proof = (ROOT / "runs/analysis/claude-push/timederiv/best.lean").read_text()
+        entries = profiler.profile(name, proof)["entries"]
+        conv = next(e for e in entries if e["depth"] == 0 and e["proof_line"] == 22)
+        children = [
+            e
+            for e in entries
+            if e["depth"] == conv["depth"] + 1 and conv["proof_line"] < e["proof_line"] <= conv["end_proof_line"]
+        ]
+        self.assertTrue(children)
+        self.assertEqual({e["kind"] for e in children}, {"tactic"})
 
 
 if __name__ == "__main__":

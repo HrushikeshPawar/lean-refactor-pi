@@ -1,52 +1,30 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { MISSING_ARGUMENTS_ERROR, nearestToolName, normalizeToolArguments, requireToolArguments } from "./toolnames.ts";
+import { nearestToolName, normalizeToolArguments, requireToolArguments } from "./toolnames.ts";
+import { render } from "./text.ts";
 
-const registered = ["read", "bash", "arena_candidate", "arena_declarations", "arena_evaluate", "arena_find", "arena_probe",
-  "arena_profile", "arena_source", "arena_state", "arena_finish", "mcp__arena_lean__lean_goal",
-  "mcp__arena_lean__lean_diagnostic_messages", "mcp__arena_lean__lean_hover_info"];
+const registered = ["compile", "finish", "goal", "read", "search"];
 
-test("suggests the nearest registered tool across prefix mistakes", () => {
-  assert.equal(nearestToolName("probe", registered), "arena_probe");
-  assert.equal(nearestToolName("arenaprobe", registered), "arena_probe");
-  assert.equal(nearestToolName("arena_declaraton", registered), "arena_declarations");
-  assert.equal(nearestToolName("lean_goal", registered), "mcp__arena_lean__lean_goal");
-  assert.equal(nearestToolName("mcp__arena_lean__goal", registered), "mcp__arena_lean__lean_goal");
-  assert.equal(nearestToolName("mcp__arena_lean__lean_declaration", registered), "arena_declarations");
-  assert.equal(nearestToolName("arena_finnish", registered), "arena_finish");
-  assert.equal(nearestToolName("arena_stat", registered), "arena_state");
-});
-
-test("suggests nothing for unrelated names and is order independent", () => {
+test("suggests the nearest name from the five registered tools", () => {
+  assert.equal(nearestToolName("compil", registered), "compile");
+  assert.equal(nearestToolName("arena_compil", registered), "compile");
   assert.equal(nearestToolName("completely_different_thing", registered), undefined);
-  assert.equal(nearestToolName("arena_evalute", registered), nearestToolName("arena_evalute", [...registered].reverse()));
-  assert.equal(nearestToolName("probe", []), undefined);
 });
 
-test("treats empty optional fields as absent and parses arrays sent as text", () => {
-  const schema = { properties: { proof: { type: "string" }, drafts: { type: "array" }, items: { type: "array" },
-    cursor: { type: "string" }, first: { type: "number" } } };
-  assert.deepEqual(normalizeToolArguments({ proof: "", drafts: ["by rfl"], cursor: "" }, schema), { drafts: ["by rfl"] });
-  assert.deepEqual(normalizeToolArguments({ proof: "by rfl", drafts: [""] }, schema), { proof: "by rfl" });
-  assert.deepEqual(normalizeToolArguments({ drafts: "[\"by\\n  simp\", \"by rfl\"]" }, schema), { drafts: ["by\n  simp", "by rfl"] });
-  assert.deepEqual(normalizeToolArguments({ items: "['Core.a', \"Core.b'\"]" }, schema), { items: ["Core.a", "Core.b'"] });
-  assert.deepEqual(normalizeToolArguments({ items: "Core.a" }, schema), { items: ["Core.a"] });
-  assert.deepEqual(normalizeToolArguments({ items: ["['Core.a', 'Core.b']"] }, schema), { items: ["Core.a", "Core.b"] });
-  assert.deepEqual(normalizeToolArguments({ first: 0, proof: "  " }, schema), { first: 0 });
+test("normalizes stringified arrays and the proof and draft aliases for compile", () => {
+  const schema = { properties: { drafts: { type: "array" }, check: { type: "string" } } };
+  assert.deepEqual(normalizeToolArguments({ draft: "by rfl", check: "" }, schema), { drafts: ["by rfl"] });
+  assert.deepEqual(normalizeToolArguments({ proof: "by rfl" }, schema), { drafts: ["by rfl"] });
+  assert.deepEqual(normalizeToolArguments({ drafts: "[\"by simp\", \"by rfl\"]" }, schema), { drafts: ["by simp", "by rfl"] });
+  assert.deepEqual(normalizeToolArguments({ drafts: [""] }, schema), {});
+  assert.deepEqual(normalizeToolArguments({ unknown: "value" }, schema), { unknown: "value" });
 });
 
-test("an unknown argument key maps to the schema field it stands for, never over a given field", () => {
-  const probe = { properties: { proof: { type: "string" }, drafts: { type: "array" }, label: { type: "string" } } };
-  assert.deepEqual(normalizeToolArguments({ draft: "by simp" }, probe), { drafts: ["by simp"] });
-  assert.deepEqual(normalizeToolArguments({ code: "by rfl" }, probe), { proof: "by rfl" });
-  assert.deepEqual(normalizeToolArguments({ proof: "by rfl", code: "by simp" }, probe), { proof: "by rfl", code: "by simp" });
-  const idea = { properties: { title: { type: "string" }, status: { type: "string" } } };
-  assert.deepEqual(normalizeToolArguments({ idea: "equational route" }, idea), { title: "equational route" });
-  assert.deepEqual(normalizeToolArguments({ project: "x" }, idea), { project: "x" });
-});
-
-test("a null or absent argument object is one clear error, an empty object is not", () => {
-  assert.throws(() => requireToolArguments(null), new RegExp(MISSING_ARGUMENTS_ERROR));
-  assert.throws(() => requireToolArguments(undefined), /resend it with its arguments/);
-  assert.deepEqual(requireToolArguments({}), {});
+test("null and empty argument calls render the empty or malformed error with valid keys", async () => {
+  const valid = "drafts, splice, fill, merge, base, from, note, check";
+  const missing = await render("messages/errors.empty_arguments", { valid });
+  assert.match(missing, /arrived empty or malformed/);
+  assert.match(missing, /drafts, splice, fill, merge, base, from, note, check/);
+  assert.throws(() => requireToolArguments(null, missing), new RegExp(missing));
+  assert.deepEqual(normalizeToolArguments({}, { properties: {} }), {});
 });

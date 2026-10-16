@@ -1,0 +1,2 @@
+assembled: "{node} assembled from {sketch}: tokens {tokens}, score {score}. Fills: {used}. Other fills: {alternatives}."
+assembly_failed: "{sketch} assembled with its fills does not compile."

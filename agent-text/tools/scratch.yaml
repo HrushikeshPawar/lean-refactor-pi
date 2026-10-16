@@ -1,0 +1,3 @@
+description: "Run Lean commands in this theorem's environment, such as example ... := by trace_state; rfl, #check or #print. Nothing becomes a node or is scored. Replies give OK or FAILED, error and warning counts, body tokens (after :=), messages by line, and each declaration's heartbeats and points."
+params:
+  code: "Lean commands that take the target declaration's place; no import lines. sorry is allowed here."

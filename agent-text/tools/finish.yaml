@@ -1,0 +1,1 @@
+description: "End the run. Returns the archive and the points left per axis. Offered when at most {finish_remaining_pct}% of the spend limit remains."

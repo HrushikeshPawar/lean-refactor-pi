@@ -18,7 +18,7 @@ import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -53,16 +53,16 @@ def _expected_source(orig: Path, patch: Path) -> str:
     with tempfile.TemporaryDirectory() as tmp:
         dest = Path(tmp) / "plugin"
         shutil.copytree(orig, dest)
-        proc = subprocess.run(["patch", "-p1", "--batch", "--forward", "-i", str(patch)],
-                              cwd=dest, text=True, capture_output=True)
+        proc = subprocess.run(
+            ["patch", "-p1", "--batch", "--forward", "-i", str(patch)], cwd=dest, text=True, capture_output=True
+        )
         if proc.returncode != 0:
             detail = (proc.stderr or proc.stdout).strip()
             raise RuntimeError(detail or "plugin patch did not apply")
         return (dest / "src/index.ts").read_text()
 
 
-def plugin_problems(installed: Path | None = None, orig: Path | None = None,
-                    patch: Path | None = None) -> list[str]:
+def plugin_problems(installed: Path | None = None, orig: Path | None = None, patch: Path | None = None) -> list[str]:
     """Empty when `installed` is exactly the vendored patch applied to the 0.1.2 backup."""
     installed = installed or INSTALLED_PLUGIN
     orig = orig or ORIG_PLUGIN
@@ -76,12 +76,12 @@ def plugin_problems(installed: Path | None = None, orig: Path | None = None,
     package = installed / "package.json"
     source = installed / "src/index.ts"
     if not package.is_file() or not source.is_file():
-        return problems + [f"Langfuse plugin {PLUGIN_VERSION} is not installed at {installed}"]
+        return [*problems, f"Langfuse plugin {PLUGIN_VERSION} is not installed at {installed}"]
     version = json.loads(package.read_text()).get("version")
     if version != PLUGIN_VERSION:
         problems.append(f"installed Langfuse plugin is {version}, expected {PLUGIN_VERSION}")
     if not (orig / "src/index.ts").is_file():
-        return problems + [f"original plugin backup is missing: {orig}"]
+        return [*problems, f"original plugin backup is missing: {orig}"]
     if problems:
         return problems
     expected = _expected_source(orig, patch)
@@ -90,8 +90,7 @@ def plugin_problems(installed: Path | None = None, orig: Path | None = None,
     return problems
 
 
-def apply_plugin(installed: Path | None = None, orig: Path | None = None,
-                 patch: Path | None = None) -> str:
+def apply_plugin(installed: Path | None = None, orig: Path | None = None, patch: Path | None = None) -> str:
     """Rewrite an unpatched 0.1.2 install from the vendored patch. Leave a patched tree alone."""
     installed = installed or INSTALLED_PLUGIN
     orig = orig or ORIG_PLUGIN
@@ -124,21 +123,33 @@ def langfuse_environment() -> dict[str, str]:
         host = str(config["baseUrl"]).rstrip("/")
     except (OSError, KeyError, TypeError, json.JSONDecodeError) as error:
         raise RuntimeError(f"Langfuse config at {path} is unusable ({type(error).__name__})") from None
-    return {"LANGFUSE_PUBLIC_KEY": public, "LANGFUSE_SECRET_KEY": secret, "LANGFUSE_HOST": host,
-            "LANGFUSE_BASE_URL": host, "PI_LANGFUSE_MAX_CHARS": "100000000", "LANGFUSE_TIMEOUT": "60"}
+    return {
+        "LANGFUSE_PUBLIC_KEY": public,
+        "LANGFUSE_SECRET_KEY": secret,
+        "LANGFUSE_HOST": host,
+        "LANGFUSE_BASE_URL": host,
+        "PI_LANGFUSE_MAX_CHARS": "100000000",
+        "LANGFUSE_TIMEOUT": "60",
+    }
 
 
 def list_observations(session_id: str, started: datetime) -> list[dict]:
     """Every observation for one Arena run, read back through Observations API v2."""
     env = langfuse_environment()
     token = base64.b64encode(f"{env['LANGFUSE_PUBLIC_KEY']}:{env['LANGFUSE_SECRET_KEY']}".encode()).decode()
-    start = (started.astimezone(timezone.utc) - timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    end = (datetime.now(timezone.utc) + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    start = (started.astimezone(UTC) - timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    end = (datetime.now(UTC) + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
     rows: list[dict] = []
     cursor = None
     while True:
-        query = {"sessionId": session_id, "fromStartTime": start, "toStartTime": end,
-                 "fields": _FIELDS, "expandMetadata": _EXPAND, "limit": "1000"}
+        query = {
+            "sessionId": session_id,
+            "fromStartTime": start,
+            "toStartTime": end,
+            "fields": _FIELDS,
+            "expandMetadata": _EXPAND,
+            "limit": "1000",
+        }
         if cursor:
             query["cursor"] = cursor
         url = f"{env['LANGFUSE_HOST']}/api/public/v2/observations?{urllib.parse.urlencode(query)}"
@@ -226,11 +237,30 @@ class JournalError(ValueError):
     """A delta row that cannot be restored: its base is missing or the restored bytes fail their hash."""
 
 
+def call_context() -> dict:
+    """Identity of the Pi tool call that spawned this process, taken from the environment.
+
+    The extension sets `ARENA_TOOL_CALL_ID`, `ARENA_REQUEST_ID` and `ARENA_TURN` only around a tool
+    execution. An unset or empty variable is left out. `turn` is an int.
+    """
+    found = {}
+    tool_call = os.environ.get("ARENA_TOOL_CALL_ID")
+    request = os.environ.get("ARENA_REQUEST_ID")
+    turn = os.environ.get("ARENA_TURN")
+    if tool_call:
+        found["tool_call_id"] = tool_call
+    if request:
+        found["request_id"] = request
+    if turn and turn.isdecimal():
+        found["turn"] = int(turn)
+    return found
+
+
 def _restore(base: bytes | None, row: dict, middle: str, prefix_key: str, suffix_key: str) -> bytes:
     if base is None:
         raise JournalError(f"{row.get('kind')} {row.get('id')} is a delta with no earlier row to apply it to")
     suffix = row[suffix_key]
-    return base[:row[prefix_key]] + middle.encode() + (base[len(base) - suffix:] if suffix else b"")
+    return base[: row[prefix_key]] + middle.encode() + (base[len(base) - suffix :] if suffix else b"")
 
 
 def expand_journal(rows: list[dict]) -> list[dict]:
@@ -243,21 +273,59 @@ def expand_journal(rows: list[dict]) -> list[dict]:
     out, wire, hook = [], None, None
     for row in rows:
         if row.get("kind") == "wire" and isinstance(row.get("body"), str):
-            data = _restore(wire, row, row["body"], "prefix", "suffix") if row.get("encoding") == "delta" else row["body"].encode()
+            data = (
+                _restore(wire, row, row["body"], "prefix", "suffix")
+                if row.get("encoding") == "delta"
+                else row["body"].encode()
+            )
             if row.get("sha256") and hashlib.sha256(data).hexdigest() != row["sha256"]:
                 raise JournalError(f"wire body of {row.get('id')} does not match its sha256")
             wire = data
-            row = {key: value for key, value in row.items() if key not in ("encoding", "prefix", "suffix")} | {"body": data.decode()}
+            row = {key: value for key, value in row.items() if key not in ("encoding", "prefix", "suffix")} | {
+                "body": data.decode()
+            }
         elif row.get("kind") == "request" and row.get("post_hook_encoding"):
-            data = (_restore(hook, row, row["post_hook"], "post_hook_prefix", "post_hook_suffix")
-                    if row["post_hook_encoding"] == "delta" else row["post_hook"].encode())
+            data = (
+                _restore(hook, row, row["post_hook"], "post_hook_prefix", "post_hook_suffix")
+                if row["post_hook_encoding"] == "delta"
+                else row["post_hook"].encode()
+            )
             if hashlib.sha256(data).hexdigest() != row.get("post_hook_sha256"):
                 raise JournalError(f"post-hook payload of {row.get('id')} does not match its sha256")
             hook = data
-            row = {key: value for key, value in row.items()
-                   if not key.startswith("post_hook_")} | {"post_hook": json.loads(data)}
+            row = {key: value for key, value in row.items() if not key.startswith("post_hook_")} | {
+                "post_hook": json.loads(data)
+            }
         out.append(row)
     return out
+
+
+def post_hook_bytes(stored_rows: list[dict]) -> dict[str, bytes]:
+    """Original post-hook payload bytes keyed by request id.
+
+    Walks unexpanded rows the same way `expand_journal` restores a request. The bytes are the payload
+    that was hashed, with no extra newline. `expand_journal` itself still returns the parsed object.
+    """
+    found: dict[str, bytes] = {}
+    hook = None
+    for row in stored_rows:
+        if (
+            row.get("kind") != "request"
+            or not row.get("post_hook_encoding")
+            or not isinstance(row.get("post_hook"), str)
+        ):
+            continue
+        data = (
+            _restore(hook, row, row["post_hook"], "post_hook_prefix", "post_hook_suffix")
+            if row["post_hook_encoding"] == "delta"
+            else row["post_hook"].encode()
+        )
+        if hashlib.sha256(data).hexdigest() != row.get("post_hook_sha256"):
+            raise JournalError(f"post-hook payload of {row.get('id')} does not match its sha256")
+        hook = data
+        if isinstance(row.get("id"), str):
+            found[row["id"]] = data
+    return found
 
 
 def read_journal(path: Path) -> list[dict]:
@@ -271,11 +339,9 @@ def judge(journal: list[dict], observations: list[dict]) -> list[str]:
     """Problems that mean the Langfuse export is missing, clipped, or cannot join the journal.
 
     Generations pair with requests in time order. A retry resends the same payload, so a
-    single generation must not satisfy two requests. Every request also needs its byte-exact
-    wire row. The ledger's settled cost is authoritative; Pi prices from a catalog that
-    `catalogPriceProblem` holds equal to the ledger, so Langfuse totalCost must match it,
-    except where the ledger applied Luna's conservative high tier. Tool spans join their
-    journal rows by tool call ID.
+    single generation must not satisfy two requests. A journal that has wire rows needs one
+    for every request. The ledger's settled cost is Pi's own cost for the call, so Langfuse
+    totalCost must match it. Tool spans join their journal rows by tool call ID.
     """
     try:
         journal = expand_journal(journal)
@@ -283,12 +349,15 @@ def judge(journal: list[dict], observations: list[dict]) -> list[str]:
         return [str(error)]
     problems = [f"truncated observation {item.get('id')}" for item in observations if _truncated(item)]
     for row in journal:
-        problems.extend(f"credential field {field} on {row.get('kind')} {row.get('id')}"
-                        for field in _credential_keys(row))
+        problems.extend(
+            f"credential field {field} on {row.get('kind')} {row.get('id')}" for field in _credential_keys(row)
+        )
         if row.get("kind") == "wire" and isinstance(row.get("body"), str):
             try:
-                problems.extend(f"credential field {field} in wire {row.get('id')}"
-                                for field in _credential_keys(json.loads(row["body"])))
+                problems.extend(
+                    f"credential field {field} in wire {row.get('id')}"
+                    for field in _credential_keys(json.loads(row["body"]))
+                )
             except json.JSONDecodeError:
                 problems.append(f"wire {row.get('id')} is not utf-8 json")
 
@@ -297,20 +366,23 @@ def judge(journal: list[dict], observations: list[dict]) -> list[str]:
     for row in journal:
         if row.get("kind") == "wire":
             wires.setdefault(row.get("id"), []).append(row.get("retry_index"))
-    for request in requests:
+    # Wire rows exist only in journals written before the arena-guard provider went away; newer ones journal the
+    # post-hook payload (the `request` row) and have none, so a journal without any wire row is not faulted.
+    for request in requests if wires else []:
         indexes = wires.get(request.get("id"))
         if not indexes:
             problems.append(f"missing wire body for request {request.get('id')}")
         elif sorted(indexes) != list(range(len(indexes))):
             problems.append(f"wire retry indexes {indexes} are not 0..n for request {request.get('id')}")
 
-    generations = sorted((row for row in observations
-                          if row.get("type") == "GENERATION" and row.get("name") == "LLM Call"),
-                         key=lambda row: row.get("startTime") or "")
+    generations = sorted(
+        (row for row in observations if row.get("type") == "GENERATION" and row.get("name") == "LLM Call"),
+        key=lambda row: row.get("startTime") or "",
+    )
     if len(generations) != len(requests):
         problems.append(f"unjoinable generations: {len(requests)} requests and {len(generations)} Langfuse generations")
     responses = {row.get("id"): row for row in journal if row.get("kind") == "response"}
-    for request, generation in zip(requests, generations):
+    for request, generation in zip(requests, generations, strict=False):
         if redact(request.get("post_hook")) != _parsed(generation.get("input")):
             problems.append(f"generation input does not match request {request.get('id')}")
         response = responses.get(request.get("id"))
@@ -323,8 +395,11 @@ def judge(journal: list[dict], observations: list[dict]) -> list[str]:
             problems.append(f"generation output shorter than journal for {request.get('id')}")
         elif seen != expected:
             problems.append(f"generation output does not match journal text for {request.get('id')}")
-        calls = [(block.get("id"), block.get("name")) for block in response.get("content") or []
-                 if isinstance(block, dict) and block.get("type") == "toolCall"]
+        calls = [
+            (block.get("id"), block.get("name"))
+            for block in response.get("content") or []
+            if isinstance(block, dict) and block.get("type") == "toolCall"
+        ]
         if calls != _output_tool_calls(generation):
             problems.append(f"generation tool calls do not match journal for {request.get('id')}")
         usage = response.get("usage")
@@ -335,19 +410,27 @@ def judge(journal: list[dict], observations: list[dict]) -> list[str]:
             problems.append(f"settled cost missing for {request.get('id')}")
         details = generation.get("usageDetails") if isinstance(generation.get("usageDetails"), dict) else {}
         # Pi's output count includes reasoning. Langfuse splits that subset into its own bucket.
-        seen = {"input": _usage_count(details, "input"),
-                "output": _usage_count(details, "output") + _usage_count(details, "output_reasoning_tokens"),
-                "cache_read_input_tokens": _usage_count(details, "cache_read_input_tokens"),
-                "cache_creation_input_tokens": _usage_count(details, "cache_creation_input_tokens")}
-        expected_usage = {"input": usage.get("input", 0), "output": usage.get("output", 0),
-                          "cache_read_input_tokens": usage.get("cache_read", 0),
-                          "cache_creation_input_tokens": usage.get("cache_write", 0)}
+        seen = {
+            "input": _usage_count(details, "input"),
+            "output": _usage_count(details, "output") + _usage_count(details, "output_reasoning_tokens"),
+            "cache_read_input_tokens": _usage_count(details, "cache_read_input_tokens"),
+            "cache_creation_input_tokens": _usage_count(details, "cache_creation_input_tokens"),
+        }
+        expected_usage = {
+            "input": usage.get("input", 0),
+            "output": usage.get("output", 0),
+            "cache_read_input_tokens": usage.get("cache_read", 0),
+            "cache_creation_input_tokens": usage.get("cache_write", 0),
+        }
         if seen != expected_usage:
             problems.append(f"usage does not join attempt {request.get('id')}")
         total = generation.get("totalCost")
-        if settled is not None and response.get("price_tier") != "high":
-            if total is None or abs(float(total) - float(settled)) > 1e-6:
-                problems.append(f"Langfuse cost {total} does not equal settled ${settled} for {request.get('id')}")
+        if (
+            settled is not None
+            and response.get("price_tier") != "high"
+            and (total is None or abs(float(total) - float(settled)) > 1e-6)
+        ):
+            problems.append(f"Langfuse cost {total} does not equal settled ${settled} for {request.get('id')}")
 
     calls = {row.get("tool_call_id"): row for row in journal if row.get("kind") == "tool_call"}
     tools = [row for row in journal if row.get("kind") == "tool_result"]
@@ -425,8 +508,7 @@ def preflight_block(models: list[str]) -> str | None:
     if receipt.get("patch_sha256") != PATCH_SHA256:
         return "preflight receipt patch hash does not match the vendored plugin patch"
     covered = receipt.get("models") or {}
-    missing = [model for model in dict.fromkeys(models)
-               if not (covered.get(model) or {}).get("trace_ids")]
+    missing = [model for model in dict.fromkeys(models) if not (covered.get(model) or {}).get("trace_ids")]
     if missing:
         return f"preflight receipt has no passing trace for {', '.join(missing)}"
     problems = plugin_problems()

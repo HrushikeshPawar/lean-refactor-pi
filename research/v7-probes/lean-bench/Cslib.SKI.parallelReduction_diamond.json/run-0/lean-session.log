@@ -1,0 +1,12 @@
+17:34:41 session up (pid 2907936, max slots 4, reserve 5.0 GB)
+17:34:42 server cslib-v4.33.0-rc2 started
+17:34:42 share 8 (1 live sessions): model 7, background 1
+17:34:42 warm cslib-v4.33.0-rc2 slot 1 opening
+17:34:42 warm cslib-v4.33.0-rc2 slot 2 opening
+17:34:42 warm cslib-v4.33.0-rc2 slot 3 opening
+17:34:42 warm cslib-v4.33.0-rc2 slot 4 opening
+17:34:43 warm cslib-v4.33.0-rc2 slot 1 ready in 0.8 s
+17:34:44 warm cslib-v4.33.0-rc2 slot 2 ready in 1.8 s
+17:34:45 warm cslib-v4.33.0-rc2 slot 3 ready in 2.7 s
+17:34:46 warm cslib-v4.33.0-rc2 slot 4 ready in 3.8 s
+17:34:56 session shutdown

@@ -1,0 +1,18 @@
+[17:34:41] run 0: daemon pid 2907936
+[17:34:41] warming 1 runs at once (Cslib.SKI.parallelReduction_diamond on v4.33.0-rc2)
+[17:34:46] run 0: warm-up 5.62 s ok=True 
+[17:34:46] load: 1 worker threads for 2.0 min
+[17:34:56] 8 requests, 0 unexpected failures
+# Lean load test: FAIL
+
+## Criteria
+
+- PASS  1 no timeouts or failures except the deliberate slow kind: 0 timeouts, 0 other failures
+- FAIL  2 post-timeout probe p95 < 10 s: no probes measured; 0 slow checks timed out
+- PASS  3 model-lane non-slow p95 < 30 s after warm-up: n=8, p95=0.3 s
+- PASS  4 zero fresh worker opens after warm-up (except after a crash): 0 fresh opens, 0 crashes logged
+- PASS  5 zero orphan Lean/lake processes: 0 orphans
+- PASS  6 MemAvailable never below 3 GB: min 20.71 GB
+
+## Configuration
+[17:34:59] report: runs/analysis/experiments/lean-bench/Cslib.SKI.parallelReduction_diamond.json/report.md

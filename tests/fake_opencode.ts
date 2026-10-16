@@ -7,11 +7,12 @@
  * ARENA_FAKE_LOG receives one JSON line per request: the full message transcript and thinking level.
  *
  * Wire mode: ARENA_FAKE_WIRE_URL points at a local HTTP server (tests/pi_support.py AnthropicWire).
- * Qwen is then served by Pi's real Anthropic Messages client, so the exact payload Pi and the
- * budget guard build is what the server validates.
+ * The model is then served by Pi's real Anthropic Messages client, so the exact payload Pi builds
+ * is what the server validates.
  */
 import { appendFileSync, readFileSync } from "node:fs";
-import { createAssistantMessageEventStream } from "@earendil-works/pi-ai/compat";
+import { collapseSystemMessages, contentText, createAssistantMessageEventStream, getCurrentTools, getSystemMessageText }
+  from "@earendil-works/pi-ai/compat";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
@@ -26,10 +27,46 @@ type Step = {
 
 // Fixture prices and limits come from models.yaml (via ARENA_MODELS_JSON), as Pi's real catalog must equal them.
 const configured = JSON.parse(process.env.ARENA_MODELS_JSON ?? "{}");
+// The fake bills like Pi does: tokens times the configured price. Cost is what the run's spend rule reads.
+const costOf = (usage: { input: number; output: number; cacheRead: number; cacheWrite: number }) => {
+  const price = configured.models["deepseek-v4.1-flash"].price;
+  const parts = { input: usage.input * price.input / 1e6, output: usage.output * price.output / 1e6,
+    cacheRead: usage.cacheRead * price.cacheRead / 1e6, cacheWrite: usage.cacheWrite * price.cacheWrite / 1e6 };
+  return { ...parts, total: parts.input + parts.output + parts.cacheRead + parts.cacheWrite };
+};
 const catalogModel = (id: string) => {
   const { price, contextWindow, maxTokens } = configured.models[id];
   return { cost: price, contextWindow, maxTokens };
 };
+
+/** The OpenAI chat body Pi's `openai-completions` client builds for a configured model (models.yaml compat:
+ *  system role, `max_tokens`), so `before_provider_request` sees the real payload shape. Minimal: text only. */
+function chatBody(modelId: string, messages: any[], maxTokens: number) {
+  const chat: Array<Record<string, unknown>> = [];
+  for (const message of collapseSystemMessages({ messages } as never).messages as any[]) {
+    if (message.role === "system") {
+      const text = getSystemMessageText(message);
+      if (text.length > 0) chat.push({ role: "system", content: text });
+    } else if (message.role === "user") {
+      chat.push({ role: "user", content: typeof message.content === "string" ? message.content
+        : message.content.filter((part: any) => part.type === "text" && part.text.length > 0)
+          .map((part: any) => ({ type: "text", text: part.text })) });
+    } else if (message.role === "assistant") {
+      const text = message.content.filter((part: any) => part.type === "text" && part.text.trim().length > 0)
+        .map((part: any) => part.text).join("");
+      const calls = message.content.filter((part: any) => part.type === "toolCall").map((call: any) => (
+        { id: call.id, type: "function", function: { name: call.name, arguments: JSON.stringify(call.arguments) } }));
+      if (!text && !calls.length) continue;
+      chat.push({ role: "assistant", content: text || null, ...(calls.length ? { tool_calls: calls } : {}) });
+    } else if (message.role === "toolResult") {
+      chat.push({ role: "tool", content: contentText(message.content) || "(no tool output)",
+        tool_call_id: message.toolCallId });
+    }
+  }
+  const tools = getCurrentTools(messages).map(tool => (
+    { type: "function", function: { name: tool.name, description: tool.description, parameters: tool.parameters } }));
+  return { model: modelId, messages: chat, stream: true, max_tokens: maxTokens, ...(tools.length ? { tools } : {}) };
+}
 
 export default function fakeOpenCode(pi: ExtensionAPI) {
   let request = 0;
@@ -51,17 +88,17 @@ export default function fakeOpenCode(pi: ExtensionAPI) {
   if (process.env.ARENA_FAKE_WIRE_URL) {
     pi.registerProvider(configured.provider, {
       api: "anthropic-messages", apiKey: "offline-test", baseUrl: process.env.ARENA_FAKE_WIRE_URL,
-      models: [{ id: "qwen3.8-flash", name: "Offline Qwen wire fixture", api: "anthropic-messages",
+      models: [{ id: "deepseek-v4.1-flash", name: "Offline wire fixture", api: "anthropic-messages",
         baseUrl: process.env.ARENA_FAKE_WIRE_URL, reasoning: true, input: ["text"],
         compat: { allowEmptySignature: true },
-        ...catalogModel("qwen3.8-flash") }],
+        ...catalogModel("deepseek-v4.1-flash") }],
     });
     return;
   }
   pi.registerProvider(configured.provider, {
     api: "openai-responses", apiKey: "offline-test", baseUrl: "http://127.0.0.1:0",
-    models: [{ id: "gpt-6-luna", name: "Offline Luna fixture", reasoning: true,
-      input: ["text"], ...catalogModel("gpt-6-luna") }],
+    models: [{ id: "deepseek-v4.1-flash", name: "Offline fixture", reasoning: true,
+      input: ["text"], ...catalogModel("deepseek-v4.1-flash") }],
     streamSimple(model, context, options) {
       const stream = createAssistantMessageEventStream();
       // Pi's own summarization requests (compaction) carry no system sections; they are answered
@@ -75,9 +112,10 @@ export default function fakeOpenCode(pi: ExtensionAPI) {
           const input = [...context.messages];
           const padInput = Number(process.env.ARENA_FAKE_PAD_INPUT ?? "0");
           if (padInput > 0) input.push({ role: "user", content: "x".repeat(padInput) } as never);
-          const payload = await options?.onPayload?.({ model: model.id, input,
-            max_output_tokens: options.maxTokens ?? 128_000 });
-          if (!payload || Number((payload as { max_output_tokens?: number }).max_output_tokens) > 16_000) {
+          // Pi's compaction summaries do not go through extension hooks, so only agent requests are held to the ceiling.
+          const raw = chatBody(model.id, input, options?.maxTokens ?? 128_000);
+          const payload = (await options?.onPayload?.(raw)) ?? (summarizing ? raw : undefined);
+          if (!payload || (!summarizing && Number((payload as { max_tokens?: number }).max_tokens) > 64_000)) {
             throw new Error("Arena did not enforce the fake provider output ceiling");
           }
           if (process.env.ARENA_FAKE_LOG) {
@@ -85,14 +123,30 @@ export default function fakeOpenCode(pi: ExtensionAPI) {
               max_tokens: (payload as any)?.max_tokens ?? null,
               thinking: (payload as any)?.thinking ?? null,
               reasoning: (payload as any)?.reasoning ?? null };
+            const definitions = new Map<string, unknown>();
+            for (const message of context.messages as any[]) {
+              for (const tool of message.toolsAdded ?? []) definitions.set(tool.name, tool);
+            }
+            for (const tool of context.tools ?? []) {
+              definitions.set(tool.name, { name: tool.name, description: tool.description, parameters: tool.parameters });
+            }
             appendFileSync(process.env.ARENA_FAKE_LOG, `${JSON.stringify({ index,
               thinking: options?.reasoning ?? null, tools: (context.tools ?? []).map(tool => tool.name),
+              tool_definitions: [...definitions.values()],
               request_shape: requestShape, messages: context.messages })}\n`);
           }
           if (process.env.ARENA_FAKE_CRASH === "1") process.exit(23);
           if (process.env.ARENA_FAKE_ERROR === "1") throw new Error("Offline provider failure with unknown usage");
           if (step?.delay_ms) await new Promise(done => setTimeout(done, step.delay_ms));
-          if (step?.error) throw new Error(step.error);
+          if (step?.error) {
+            const billed = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, ...step.usage };
+            const usage = step.usage ? { ...billed, totalTokens: billed.input + billed.output + billed.cacheRead + billed.cacheWrite,
+              cost: costOf(billed) } : { ...billed, totalTokens: 0, cost: zeroCost };
+            stream.push({ type: "error", reason: "error", error: {
+              role: "assistant", content: [], api: model.api, provider: model.provider, model: model.id,
+              usage, stopReason: "error", errorMessage: step.error, timestamp: Date.now() } });
+            return;
+          }
           const content: Array<Record<string, unknown>> = [];
           if (step?.text || !step?.tool_calls?.length) {
             content.push({ type: "text", text: step?.text ?? "Offline fixture response." });
@@ -103,7 +157,7 @@ export default function fakeOpenCode(pi: ExtensionAPI) {
           const message = { role: "assistant" as const, content: content as never, api: model.api,
             provider: model.provider, model: model.id,
             usage: { ...usage, totalTokens: usage.input + usage.output + usage.cacheRead + usage.cacheWrite,
-              cost: zeroCost },
+              cost: costOf(usage) },
             stopReason: step?.stop_reason ?? (step?.tool_calls?.length ? "toolUse" as const : "stop" as const),
             timestamp: Date.now() };
           stream.push({ type: "start", partial: { ...message, content: [] } });

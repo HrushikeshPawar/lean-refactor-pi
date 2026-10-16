@@ -1,0 +1,5 @@
+salvaged: "{sketch}: compiling part of {sources}; {fill}."
+salvaged_unseen: "{sketch}: compiling part of earlier nodes that do not compile; {fill}."
+fill_one: "line {lines} is a hole to fill (`fill` hole {ids})"
+fill_many: "lines {lines} are holes to fill (`fill` holes {ids})"
+fill_none: "no hole left to fill"

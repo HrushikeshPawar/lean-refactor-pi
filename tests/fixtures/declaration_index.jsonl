@@ -1,0 +1,48 @@
+{"name": "Nat.add_comm", "kind": "theorem", "module": "Nat", "line": 1, "end_line": 1, "generated": false, "private": false, "type": "∀ a b : Nat, Nat.add a b = Nat.add b a", "head": "Nat.add", "consts": ["Nat.add", "HAppend.hAppend"]}
+{"name": "Nat.add_assoc", "kind": "theorem", "module": "Nat", "line": 2, "end_line": 2, "generated": false, "private": false, "type": "True", "head": "Nat.add", "consts": ["Nat.add", "HAppend.hAppend"]}
+{"name": "Extra.add_left_comm", "kind": "theorem", "module": "Extra", "line": 3, "end_line": 3, "generated": false, "private": false, "type": "True", "head": "Nat.add", "consts": ["Nat.add", "HAppend.hAppend"]}
+{"name": "Extra.add_comm_of_le", "kind": "theorem", "module": "Extra", "line": 4, "end_line": 4, "generated": false, "private": false, "type": "True", "head": "Nat.add", "consts": ["Nat.add", "HAppend.hAppend"]}
+{"name": "Extra.add_commute", "kind": "theorem", "module": "Extra", "line": 5, "end_line": 5, "generated": false, "private": false, "type": "True", "head": "Nat.add", "consts": ["Nat.add", "HAppend.hAppend"]}
+{"name": "Extra.add_one", "kind": "theorem", "module": "Extra", "line": 6, "end_line": 6, "generated": false, "private": false, "type": "True", "head": "Nat.add", "consts": ["Nat.add", "HAppend.hAppend"]}
+{"name": "Extra.add_zero", "kind": "theorem", "module": "Extra", "line": 7, "end_line": 7, "generated": false, "private": false, "type": "True", "head": "Nat.add", "consts": ["Nat.add", "HAppend.hAppend"]}
+{"name": "Extra.add_sub_cancel", "kind": "theorem", "module": "Extra", "line": 8, "end_line": 8, "generated": false, "private": false, "type": "True", "head": "Nat.add", "consts": ["Nat.add", "HAppend.hAppend"]}
+{"name": "Extra.add_mul", "kind": "theorem", "module": "Extra", "line": 9, "end_line": 9, "generated": false, "private": false, "type": "True", "head": "Nat.add", "consts": ["Nat.add", "HAppend.hAppend"]}
+{"name": "Extra.add_lt_add_left", "kind": "theorem", "module": "Extra", "line": 10, "end_line": 10, "generated": false, "private": false, "type": "True", "head": "Nat.add", "consts": ["Nat.add", "HAppend.hAppend"]}
+{"name": "Extra.add_lt_add_right", "kind": "theorem", "module": "Extra", "line": 11, "end_line": 11, "generated": false, "private": false, "type": "True", "head": "Nat.add", "consts": ["Nat.add", "HAppend.hAppend"]}
+{"name": "Extra.add_le_add_left", "kind": "theorem", "module": "Extra", "line": 12, "end_line": 12, "generated": false, "private": false, "type": "True", "head": "Nat.add", "consts": ["Nat.add", "HAppend.hAppend"]}
+{"name": "Extra.add_le_add_right", "kind": "theorem", "module": "Extra", "line": 13, "end_line": 13, "generated": false, "private": false, "type": "True", "head": "Nat.add", "consts": ["Nat.add", "HAppend.hAppend"]}
+{"name": "Extra.add_eq_zero", "kind": "theorem", "module": "Extra", "line": 14, "end_line": 14, "generated": false, "private": false, "type": "True", "head": "Nat.add", "consts": ["Nat.add", "HAppend.hAppend"]}
+{"name": "Extra.add_ne_zero", "kind": "theorem", "module": "Extra", "line": 15, "end_line": 15, "generated": false, "private": false, "type": "True", "head": "Nat.add", "consts": ["Nat.add", "HAppend.hAppend"]}
+{"name": "Extra.add_lt_iff_lt_sub", "kind": "theorem", "module": "Extra", "line": 16, "end_line": 16, "generated": false, "private": false, "type": "True", "head": "Nat.add", "consts": ["Nat.add", "HAppend.hAppend"]}
+{"name": "Extra.add_left_cancel", "kind": "theorem", "module": "Extra", "line": 17, "end_line": 17, "generated": false, "private": false, "type": "True", "head": "Nat.add", "consts": ["Nat.add", "HAppend.hAppend"]}
+{"name": "Extra.add_right_cancel", "kind": "theorem", "module": "Extra", "line": 18, "end_line": 18, "generated": false, "private": false, "type": "True", "head": "Nat.add", "consts": ["Nat.add", "HAppend.hAppend"]}
+{"name": "Extra.add_one_le_iff", "kind": "theorem", "module": "Extra", "line": 19, "end_line": 19, "generated": false, "private": false, "type": "True", "head": "Nat.add", "consts": ["Nat.add", "HAppend.hAppend"]}
+{"name": "Extra.add_commutative", "kind": "theorem", "module": "Extra", "line": 20, "end_line": 20, "generated": false, "private": false, "type": "True", "head": "Nat.add", "consts": ["Nat.add", "HAppend.hAppend"]}
+{"name": "List.length_append", "kind": "theorem", "module": "List", "line": 1, "end_line": 1, "generated": false, "private": false, "type": "True", "head": "List.length", "consts": ["List.length", "HAppend.hAppend"]}
+{"name": "List.length", "kind": "def", "module": "List", "line": 2, "end_line": 2, "generated": false, "private": false, "type": "True", "head": "List.length", "consts": ["List.length"]}
+{"name": "List.append_assoc", "kind": "theorem", "module": "List", "line": 3, "end_line": 3, "generated": false, "private": false, "type": "True", "head": "List.append", "consts": ["List.append", "HAppend.hAppend"]}
+{"name": "List.append_nil", "kind": "theorem", "module": "List", "line": 4, "end_line": 4, "generated": false, "private": false, "type": "True", "head": "List.append", "consts": ["List.append", "HAppend.hAppend"]}
+{"name": "List.nil_append", "kind": "theorem", "module": "List", "line": 5, "end_line": 5, "generated": false, "private": false, "type": "True", "head": "List.append", "consts": ["List.append", "HAppend.hAppend"]}
+{"name": "List.map_append", "kind": "theorem", "module": "List", "line": 6, "end_line": 6, "generated": false, "private": false, "type": "True", "head": "List.map", "consts": ["List.map", "List.append"]}
+{"name": "List.reverse_append", "kind": "theorem", "module": "List", "line": 7, "end_line": 7, "generated": false, "private": false, "type": "True", "head": "List.reverse", "consts": ["List.reverse", "List.append"]}
+{"name": "List.mem_append", "kind": "theorem", "module": "List", "line": 8, "end_line": 8, "generated": false, "private": false, "type": "True", "head": "List.mem", "consts": ["List.mem", "List.append"]}
+{"name": "List.take_append_drop", "kind": "theorem", "module": "List", "line": 9, "end_line": 9, "generated": false, "private": false, "type": "True", "head": "List.take", "consts": ["List.take", "List.drop"]}
+{"name": "List.filter_append", "kind": "theorem", "module": "List", "line": 10, "end_line": 10, "generated": false, "private": false, "type": "True", "head": "List.filter", "consts": ["List.filter", "List.append"]}
+{"name": "HAppend.hAppend", "kind": "def", "module": "List", "line": 11, "end_line": 11, "generated": false, "private": false, "type": "Nat", "head": "Nat", "consts": ["Nat"]}
+{"name": "Real.sqrt", "kind": "def", "module": "Real", "line": 1, "end_line": 1, "generated": false, "private": false, "type": "True", "head": "Real.sqrt", "consts": ["Real.sqrt"]}
+{"name": "Real.sqrt_nonneg", "kind": "theorem", "module": "Real", "line": 2, "end_line": 2, "generated": false, "private": false, "type": "True", "head": "Real.sqrt", "consts": ["Real.sqrt", "Real.le"]}
+{"name": "Real.sqrt_eq_iff", "kind": "theorem", "module": "Real", "line": 3, "end_line": 3, "generated": false, "private": false, "type": "True", "head": "Real.sqrt", "consts": ["Real.sqrt", "Real.mul"]}
+{"name": "Real.sqrt_mul_self", "kind": "theorem", "module": "Real", "line": 4, "end_line": 4, "generated": false, "private": false, "type": "True", "head": "Real.sqrt", "consts": ["Real.sqrt", "Real.mul"]}
+{"name": "Real.sqrt_le_iff", "kind": "theorem", "module": "Real", "line": 5, "end_line": 5, "generated": false, "private": false, "type": "True", "head": "Real.sqrt", "consts": ["Real.sqrt", "Real.le"]}
+{"name": "Real.sqrt_lt_iff", "kind": "theorem", "module": "Real", "line": 6, "end_line": 6, "generated": false, "private": false, "type": "True", "head": "Real.sqrt", "consts": ["Real.sqrt", "Real.lt"]}
+{"name": "𝔽q", "kind": "theorem", "module": "(this file)", "line": 7, "end_line": 7, "generated": false, "private": false, "type": "True", "head": "Real.sqrt", "consts": ["Real.sqrt"]}
+{"name": "ℱq", "kind": "theorem", "module": "(this file)", "line": 8, "end_line": 8, "generated": false, "private": false, "type": "True", "head": "Real.sqrt", "consts": ["Real.sqrt"]}
+{"name": "Foo.casesOn", "kind": "recursor", "module": "(this file)", "line": 9, "end_line": 9, "generated": true, "private": false, "head": "", "consts": []}
+{"name": "Foo.rec", "kind": "recursor", "module": "(this file)", "line": 10, "end_line": 10, "generated": true, "private": false, "head": "", "consts": []}
+{"name": "Private.hidden", "kind": "theorem", "module": "Real", "line": 11, "end_line": 11, "generated": false, "private": true, "head": "", "consts": []}
+{"name": "Fixture.localDeclaration", "kind": "theorem", "module": "(this file)", "line": 12, "end_line": 12, "generated": false, "private": false, "type": "True", "head": "(this file)", "consts": ["List.length", "HAppend.hAppend"]}
+{"name": "add_comm", "kind": "theorem", "module": "List", "line": null, "end_line": null, "generated": false, "private": false, "type": "True", "head": "Nat.add", "consts": ["Nat.add"]}
+{"name": "add_comm_extra", "kind": "theorem", "module": "List", "line": null, "end_line": null, "generated": false, "private": false, "type": "True", "head": "Nat.add", "consts": ["Nat.add"]}
+{"name": "Nat.ad_comm", "kind": "theorem", "module": "Nat", "line": 21, "end_line": 21, "generated": false, "private": false, "type": "True", "head": "Nat.add", "consts": ["Nat.add"]}
+{"name": "Other.add_comm", "kind": "theorem", "module": "List", "line": null, "end_line": null, "generated": false, "private": false, "type": "True", "head": "Nat.add", "consts": ["Nat.add"]}
+{"name": "Foo.Fq", "kind": "theorem", "module": "Real", "line": 13, "end_line": 13, "generated": false, "private": false, "type": "True", "head": "True", "consts": []}

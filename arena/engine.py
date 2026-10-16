@@ -7,7 +7,6 @@ matches the Arena worker. Compilation and token counts are still useful gates.
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import json
 import os
 import re
@@ -17,15 +16,18 @@ import subprocess
 import tempfile
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from functools import lru_cache
 from pathlib import Path
 
+from arena import text, vendor
+from arena import text as agent_text
+
 ROOT = Path(__file__).resolve().parents[1]
 BENCHMARK = ROOT / "benchmark/original/warmup.jsonl"
-UPSTREAM_CHECKER = ROOT / "vendor/lean-refactor/lean_refactor/cc_agent/tools/check_proof.py"
-HEARTBEAT_WRAPPER = '''open Lean Elab Command in
+# not-model-facing: Lean code injected for heartbeat measurement.
+HEARTBEAT_WRAPPER = """open Lean Elab Command in
 elab "arena_measure_heartbeats " cmd:command : command => do
   let t0 ← IO.getNumHeartbeats
   try
@@ -39,7 +41,7 @@ elab "arena_measure_heartbeats " cmd:command : command => do
     logInfo m!"ARENA_HEARTBEATS {(t1 - t0) / 1000}"
 
 arena_measure_heartbeats
-'''
+"""
 WRAPPER_LINES = HEARTBEAT_WRAPPER.count("\n")
 
 
@@ -51,15 +53,12 @@ def _proof_length(proof: str, statement: str | None = None) -> int:
     count. The published denominators count the proof only, so the statement is swapped for a neutral one.
     """
     if statement is not None and proof.startswith(statement):
-        proof = "theorem x : True" + proof[len(statement):]
-    spec = importlib.util.spec_from_file_location("pinned_check_proof", UPSTREAM_CHECKER)
-    if spec is None or spec.loader is None:
-        raise RuntimeError("Pinned proof utility is unavailable")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+        # not-model-facing: minimal Lean theorem text used by the source normalizer.
+        proof = "theorem x : True" + proof[len(statement) :]
+    module = vendor.checker()
     length = module._proof_length(proof)
     if length >= 10**9:
-        raise ValueError("Pinned proof utility could not parse the candidate")
+        raise ValueError(text.render("messages/errors.proof_utility_parse"))
     return length
 
 
@@ -78,24 +77,35 @@ def versions(row: dict) -> list[tuple[str, str]]:
 def validate_proof(row: dict, proof: str, allow_sorry: bool = False) -> int:
     statement = row["statement"]
     if not proof.startswith(statement):
-        at = next((i for i, (a, b) in enumerate(zip(statement, proof)) if a != b), min(len(statement), len(proof)))
+        at = next(
+            (i for i, (a, b) in enumerate(zip(statement, proof, strict=False)) if a != b),
+            min(len(statement), len(proof)),
+        )
         line = statement.count("\n", 0, at) + 1
-        raise ValueError(f"STATEMENT_MODIFIED: candidate must begin with the exact benchmark statement; first "
-                         f"difference on statement line {line}: expected {statement[at:at + 40]!r}, got "
-                         f"{proof[at:at + 40]!r}. Copy the statement from the packet byte for byte.")
-    if not re.match(r"\s*:=", proof[len(statement):]):
-        raise ValueError("STATEMENT_MODIFIED: the statement must be followed directly by `:=`; got "
-                         f"{proof[len(statement):len(statement) + 30]!r}")
-    from tools.arena_check import FORBIDDEN, remove_comments
+        raise ValueError(
+            text.render(
+                "messages/errors.statement_modified_first",
+                line=line,
+                expected=repr(statement[at : at + 40]),
+                actual=repr(proof[at : at + 40]),
+            )
+        )
+    if not re.match(r"\s*:=", proof[len(statement) :]):
+        raise ValueError(
+            text.render(
+                "messages/errors.statement_modified_suffix", suffix=repr(proof[len(statement) : len(statement) + 30])
+            )
+        )
+    from arena.forbidden import FORBIDDEN, remove_comments
 
     clean = remove_comments(proof)
-    if re.search(r"(?m)^(?:theorem|lemma|end|namespace|section|open|set_option)\b", clean[len(statement):]):
-        raise ValueError("EXTRA_COMMAND: candidate contains a second top-level command")
+    if re.search(r"(?m)^(?:theorem|lemma|end|namespace|section|open|set_option)\b", clean[len(statement) :]):
+        raise ValueError(text.render("messages/errors.extra_command"))
     for label, pattern in FORBIDDEN:
         if allow_sorry and label in ("sorry", "admit"):
             continue
         if pattern.search(clean):
-            raise ValueError(f"FORBIDDEN: {label}")
+            raise ValueError(text.render("messages/errors.forbidden_construct", label=label))
     return _proof_length(proof, statement)
 
 
@@ -104,6 +114,21 @@ def workspace(row: dict, version: str, commit: str) -> Path:
     from arena import environments
 
     return environments.resolve(row["source"], version, commit)
+
+
+def lease_projects(row: dict) -> tuple[str, list[str]]:
+    """The workspaces a run of `row` leases on the Lean service: the measuring toolchain's, then every other
+    provisioned one. An unprovisioned toolchain is left out; calls on it compile cold."""
+    primary_version = measure_version(row)
+    others = []
+    for version, commit in versions(row):
+        if (version, commit) == primary_version:
+            continue
+        try:
+            others.append(str(workspace(row, version, commit)))
+        except FileNotFoundError:
+            continue
+    return str(workspace(row, *primary_version)), others
 
 
 def source_path(row: dict) -> str:
@@ -121,16 +146,30 @@ _MEASURE_OVERRIDES = ROOT / "benchmark/derived/measure-versions.json"
 
 
 def measure_version(row: dict) -> tuple[str, str]:
-    """Toolchain on which heartbeats are measured: explicit per row, default the primary listed version."""
+    """Toolchain for heartbeats: optional per-row override, otherwise the newest listed version.
+
+    `benchmark/derived/measure-versions.json` is an optional per-row override (plan §7.2).
+    """
     listed = versions(row)
     if _MEASURE_OVERRIDES.exists():
         wanted = json.loads(_MEASURE_OVERRIDES.read_text()).get(row["name"])
         if wanted:
             match = next((pair for pair in listed if pair[0] == wanted), None)
             if match is None:
-                raise ValueError(f"Measurement version {wanted} is not listed for {row['name']}")
+                raise ValueError(
+                    text.render("messages/errors.measure_version_missing", wanted=wanted, name=row["name"])
+                )
             return match
-    return listed[0]
+    return max(listed, key=lambda pair: toolchain_key(pair[0]))
+
+
+def toolchain_key(version: str) -> tuple[int, int, int, int, int]:
+    """Sort Lean releases numerically, with each release candidate before its matching release."""
+    match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)(?:-rc(\d+))?", version)
+    if not match:
+        raise ValueError(version)
+    major, minor, patch, rc = match.groups()
+    return int(major), int(minor), int(patch), int(rc is None), int(rc or 0)
 
 
 _COMBINATOR_START = re.compile(r"(?:omit|include|open|variable|set_option|attribute|universe)\b")
@@ -146,7 +185,7 @@ def _prefix_combinator(before: str) -> int | None:
         return None
     for back in range(1, min(6, len(lines)) + 1):
         if _COMBINATOR_START.match(lines[-back]):
-            return len("\n".join(lines[:len(lines) - back])) + (1 if back < len(lines) else 0)
+            return len("\n".join(lines[: len(lines) - back])) + (1 if back < len(lines) else 0)
     return None
 
 
@@ -161,11 +200,12 @@ def declaration_head(text: str, offset: int) -> int:
         before = text[:head].rstrip()
         if before.endswith("-/"):
             start = before.rfind("/--")
-            if start == -1 or "/-" in before[start + 3:-2]:
+            if start == -1 or "/-" in before[start + 3 : -2]:
                 return head
             head = start
-        elif re.fullmatch(r"@\[[^\n]*\]", (last := before[before.rfind("\n") + 1:]).strip()) \
-                and not re.search(r"\b(section|namespace)\b", last):
+        elif re.fullmatch(r"@\[[^\n]*\]", (last := before[before.rfind("\n") + 1 :]).strip()) and not re.search(
+            r"\b(section|namespace)\b", last
+        ):
             # Only a whole line that is an attribute list belongs to the declaration; a `]` that
             # ends a `variable` binder, or `@[expose] public section`, does not.
             head = before.rfind("\n") + 1
@@ -190,7 +230,7 @@ def locate_source(source: str, original: str, version: str) -> tuple[int, int]:
         found = list(pattern.finditer(source))
         if len(found) == 1:
             return found[0].start(), found[0].end()
-    raise ValueError(f"FILE_MODIFIED: pinned theorem is absent or ambiguous on {version}")
+    raise ValueError(text.render("messages/errors.pinned_statement_missing", version=version))
 
 
 def candidate_file(row: dict, proof: str, version: str, commit: str, truncate: bool = True) -> dict:
@@ -198,7 +238,7 @@ def candidate_file(row: dict, proof: str, version: str, commit: str, truncate: b
 
     With `truncate`, everything after the target declaration is dropped so
     compile time never depends on later declarations. The returned text is the
-    single file every compile and every `lean_goal` lookup uses. Standalone rows
+    single file every compile and every goal lookup uses. Standalone rows
     (no file in the repository) are rebuilt as their header followed by the proof.
     """
     path = workspace(row, version, commit)
@@ -206,22 +246,37 @@ def candidate_file(row: dict, proof: str, version: str, commit: str, truncate: b
     if is_standalone(row):
         header = row.get("header") or ""
         if not row.get("statement") or not header.strip():
-            raise ValueError("A standalone row needs its header and statement")
-        return {"path": path, "text": header + body + "\n", "offset": len(header), "head": len(header),
-                "start_line": header.count("\n") + 1, "end_line": header.count("\n") + 1 + body.count("\n")}
+            raise ValueError(agent_text.render("messages/errors.standalone_row"))
+        return {
+            "path": path,
+            "text": header + body + "\n",
+            "offset": len(header),
+            "head": len(header),
+            "start_line": header.count("\n") + 1,
+            "end_line": header.count("\n") + 1 + body.count("\n"),
+        }
     if not row.get("start_line") or not row.get("end_line"):
-        raise ValueError("The row does not say where its theorem lives")
+        raise ValueError(agent_text.render("messages/errors.theorem_location_missing"))
     source = subprocess.run(
         ["git", "show", f"{commit}:{row['file_path']}"],
-        cwd=path, text=True, capture_output=True, check=True,
+        cwd=path,
+        text=True,
+        capture_output=True,
+        check=True,
     ).stdout
     offset, end = locate_source(source, row["src"], version)
     text = source[:offset] + body + source[end:]
     if truncate:
-        text = text[:offset + len(body)] + "\n"
+        text = text[: offset + len(body)] + "\n"
     start = source.count("\n", 0, offset) + 1
-    return {"path": path, "text": text, "offset": offset, "head": declaration_head(text, offset),
-            "start_line": start, "end_line": start + body.count("\n")}
+    return {
+        "path": path,
+        "text": text,
+        "offset": offset,
+        "head": declaration_head(text, offset),
+        "start_line": start,
+        "end_line": start + body.count("\n"),
+    }
 
 
 def reconstruct(row: dict, proof: str, version: str, commit: str, truncate: bool = False) -> tuple[Path, str]:
@@ -230,11 +285,14 @@ def reconstruct(row: dict, proof: str, version: str, commit: str, truncate: bool
     return built["path"], built["text"]
 
 
-_HEADER = re.compile(r"^(?P<file>.*?):(?P<line>\d+):(?P<column>\d+): (?P<severity>error|warning|info)(?:: ?|:)?(?P<rest>.*)$")
+_HEADER = re.compile(
+    r"^(?P<file>.*?):(?P<line>\d+):(?P<column>\d+): (?P<severity>error|warning|info)(?:: ?|:)?(?P<rest>.*)$"
+)
 # Lean's command line prints informational messages without a position, so
 # these would otherwise read as continuation lines of the previous diagnostic.
 _UNPOSITIONED_INFO = re.compile(r"^(?:ARENA_[A-Z_]+\b|Try this:)")
-_MESSAGE_LIMIT = 800
+# A goal state sits at the end of a message; it must survive whole for the reply to show its target.
+_MESSAGE_LIMIT = 6000
 _DIAGNOSTIC_LIMIT = 8
 
 
@@ -244,8 +302,14 @@ def parse_diagnostics(output: str) -> list[dict]:
     for line in output.splitlines():
         match = _HEADER.match(line)
         if match:
-            found.append({"severity": match["severity"], "line": int(match["line"]),
-                          "column": int(match["column"]), "message": [match["rest"]]})
+            found.append(
+                {
+                    "severity": match["severity"],
+                    "line": int(match["line"]),
+                    "column": int(match["column"]),
+                    "message": [match["rest"]],
+                }
+            )
         elif _UNPOSITIONED_INFO.match(line):
             found.append({"severity": "info", "line": None, "column": None, "message": [line]})
         elif found:
@@ -268,14 +332,20 @@ def map_measured_line(line: int, wrapper_start: int, wrapper_lines: int = WRAPPE
     return line - wrapper_lines, False
 
 
-def structure_diagnostics(output: str, text: str, start_line: int, end_line: int,
-                          wrapper_start: int | None = None, report_start_line: int | None = None) -> dict:
+def structure_diagnostics(
+    output: str,
+    text: str,
+    start_line: int,
+    end_line: int,
+    wrapper_start: int | None = None,
+    report_start_line: int | None = None,
+) -> dict:
     """Return headlines for the target declaration plus a count of the rest.
 
     `text` is the candidate file the diagnostics are about. `report_start_line`
     is where the target starts in the file the model can inspect (the primary
     version's); `file_line` is always expressed in that file, so a diagnostic
-    from another toolchain still points at the right line for `lean_goal`.
+    from another toolchain still points at the right line for goal lookups.
     """
     lines = text.splitlines()
     shift = (report_start_line or start_line) - start_line
@@ -285,18 +355,23 @@ def structure_diagnostics(output: str, text: str, start_line: int, end_line: int
     for item in parse_diagnostics(output):
         if item["severity"] == "info":
             continue
-        line, in_wrapper = (map_measured_line(item["line"], wrapper_start) if wrapper_start
-                            else (item["line"], False))
+        line, in_wrapper = map_measured_line(item["line"], wrapper_start) if wrapper_start else (item["line"], False)
         if in_wrapper:
             continue
         if start_line <= line <= end_line and item["severity"] != "info":
             message = item["message"]
             if len(message) > _MESSAGE_LIMIT:
                 message = message[:_MESSAGE_LIMIT] + "… [truncated]"
-            inside.append({"severity": item["severity"], "file_line": line + shift,
-                           "proof_line": line - start_line + 1, "column": item["column"],
-                           "message": message,
-                           "source_line_text": lines[line - 1] if 0 < line <= len(lines) else ""})
+            inside.append(
+                {
+                    "severity": item["severity"],
+                    "file_line": line + shift,
+                    "proof_line": line - start_line + 1,
+                    "column": item["column"],
+                    "message": message,
+                    "source_line_text": lines[line - 1] if 0 < line <= len(lines) else "",
+                }
+            )
         elif item["severity"] == "error":
             outside["errors"] += 1
             outside["first_error"] = outside["first_error"] or f"line {line}: {item['message'].splitlines()[0]}"
@@ -304,33 +379,63 @@ def structure_diagnostics(output: str, text: str, start_line: int, end_line: int
             outside["warnings"] += 1
     rank = {"error": 0, "warning": 1}
     ordered = sorted(inside, key=lambda item: (rank[item["severity"]], item["file_line"], item["column"]))
-    return {"diagnostics": ordered[:_DIAGNOSTIC_LIMIT],
-            "diagnostic_counts": {"errors": sum(i["severity"] == "error" for i in inside),
-                                  "warnings": sum(i["severity"] == "warning" for i in inside),
-                                  "omitted": max(0, len(ordered) - _DIAGNOSTIC_LIMIT)},
-            "outside_target": outside, "goals": goals[:12],
-            "error_headlines": [f"line {i['file_line']} (proof line {i['proof_line']}): "
-                                f"{i['message'].splitlines()[0] if i['message'] else ''}"
-                                for i in ordered if i["severity"] == "error"][:_DIAGNOSTIC_LIMIT]}
+    return {
+        "diagnostics": ordered[:_DIAGNOSTIC_LIMIT],
+        "diagnostic_counts": {
+            "errors": sum(i["severity"] == "error" for i in inside),
+            "warnings": sum(i["severity"] == "warning" for i in inside),
+            "omitted": max(0, len(ordered) - _DIAGNOSTIC_LIMIT),
+        },
+        "outside_target": outside,
+        "goals": goals[:12],
+        "error_headlines": [
+            agent_text.render(
+                "replies/check.diagnostic",
+                file_line=i["file_line"],
+                proof_line=i["proof_line"],
+                message=i["message"].splitlines()[0] if i["message"] else "",
+            )
+            for i in ordered
+            if i["severity"] == "error"
+        ][:_DIAGNOSTIC_LIMIT],
+    }
 
 
 # Tactic positions: a line start (after a bullet), `by`, `<;>`, and the `=>` of a match or case arm
 # (`| .inl h => sorry`, `case h => sorry`, `next => sorry`).
+# not-model-facing: regex that locates Lean syntax positions for probe instrumentation.
 _SORRY_TACTIC = re.compile(
+    # not-model-facing: compiler-instrumentation pattern, not diagnostic prose.
     r"(?m)(^[ \t]*(?:[·.][ \t]*)?|\bby[ \t]+|<;>[ \t]*|"
-    r"(?:\||\bcase\b|\bnext\b)[^\n=]*=>[ \t]*)sorry\b(?![_'])")
+    # not-model-facing: compiler-instrumentation pattern, not diagnostic prose.
+    # not-model-facing: compiler-instrumentation pattern, not diagnostic prose.
+    r"(?:\||\bcase\b|\bnext\b)[^\n=]*=>[ \t]*)sorry\b(?![_'])"
+)
 _GOAL_MARKER = re.compile(r"^ARENA_SORRY (\d+)$")
+# A `sorry` directly after one of these is a term, where a bare tactic sequence is not valid.
+# not-model-facing: regex that locates Lean term positions for probe instrumentation.
+_TERM_BEFORE = re.compile(r"(?::=|[(,⟨↦]|\b(?:exact|refine|apply|use)|\bfun\b[^\n]*=>)\s*$")
+# Diagnostics that only the instrumentation can produce; the probe then compiles the plain draft.
+# not-model-facing: pattern for harness-origin errors, never shown to the model.
+_HARNESS_ERROR = re.compile(r"Unknown identifier `trace(?:_state)?`|unexpected token ';'")
 
 
 def instrument_sorries(proof: str) -> str:
     """Make each tactic-position `sorry` print its goals without moving any line.
 
     Lean's command line prints informational messages without positions, so
-    each trace is preceded by a marker naming the proof line.
+    each trace is preceded by a marker naming the proof line. In term position
+    the trace block is wrapped in `by`, which is valid there and in tactic position alike.
     """
+
     def replace(match: re.Match) -> str:
         line = proof.count("\n", 0, match.start()) + 1
-        return f'{match[1]}(trace "ARENA_SORRY {line}"; trace_state; sorry)'
+        # not-model-facing: generated Lean syntax used only by the compiler.
+        block = f'trace "ARENA_SORRY {line}"; trace_state; sorry'
+        prefix = match[1]
+        term = "by" not in prefix and "<;>" not in prefix and _TERM_BEFORE.search(proof[: match.start()])
+        return f"{prefix}(by {block})" if term else f"{prefix}({block})"
+
     return _SORRY_TACTIC.sub(replace, proof)
 
 
@@ -342,17 +447,24 @@ def extract_goals(output: str, start_line: int) -> tuple[list[dict], str]:
     for line in output.splitlines():
         marker = _GOAL_MARKER.match(line)
         if marker:
-            current = {"proof_line": int(marker[1]), "file_line": start_line + int(marker[1]) - 1,
-                       "text": []}
+            current = {"proof_line": int(marker[1]), "file_line": start_line + int(marker[1]) - 1, "text": []}
             goals.append(current)
         elif current is not None and not _HEADER.match(line):
             current["text"].append(line)
         else:
             current = None
             rest.append(line)
-    return ([{"file_line": item["file_line"], "proof_line": item["proof_line"],
-              "goals": "\n".join(item["text"]).strip()[:1500]} for item in goals],
-            "\n".join(rest))
+    return (
+        [
+            {
+                "file_line": item["file_line"],
+                "proof_line": item["proof_line"],
+                "goals": "\n".join(item["text"]).strip()[:1500],
+            }
+            for item in goals
+        ],
+        "\n".join(rest),
+    )
 
 
 _FORCE_COLD: ContextVar[bool] = ContextVar("arena_force_cold", default=False)
@@ -435,28 +547,39 @@ def _run_cold(row: dict, project: Path, text: str, timeout: int) -> tuple[int, s
             command, env = [direct[0], str(candidate)], {**os.environ, **direct[1]}
         else:
             command, env = ["lake", "env", "lean", str(candidate)], None
-        proc = subprocess.Popen(command, cwd=project, text=True, env=env,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        proc = subprocess.Popen(
+            command,
+            cwd=project,
+            text=True,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
         try:
             stdout, stderr = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
-            try:
+            with suppress(ProcessLookupError):
                 os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
             proc.communicate()
             return None
     return proc.returncode, (stdout + stderr).replace(str(candidate), source_path(row)).strip()
 
 
 def _session_request(row: dict, project: Path, text: str, prefix_end: int | None) -> dict:
-    return {"project": str(project), "fingerprint": _fingerprint(str(project)), "text": text,
-            "display": source_path(row), "header_end": prefix_end,
-            "prefix_sha": None if prefix_end is None else hashlib.sha256(text[:prefix_end].encode()).hexdigest()[:16]}
+    return {
+        "project": str(project),
+        "fingerprint": _fingerprint(str(project)),
+        "text": text,
+        "display": source_path(row),
+        "header_end": prefix_end,
+        "prefix_sha": None if prefix_end is None else hashlib.sha256(text[:prefix_end].encode()).hexdigest()[:16],
+    }
 
 
-def run_lean(row: dict, project: Path, text: str, timeout: int | None = None,
-             prefix_end: int | None = None, lane: str = "model") -> tuple[int, str] | None:
+def run_lean(
+    row: dict, project: Path, text: str, timeout: int | None = None, prefix_end: int | None = None, lane: str = "model"
+) -> tuple[int, str] | None:
     """Compile `text` as the target's file inside the pinned project; None on timeout.
 
     With a per-run Lean session configured, only the changed part of the file is
@@ -473,20 +596,45 @@ def run_lean(row: dict, project: Path, text: str, timeout: int | None = None,
     started = time.monotonic()
     info: dict = {"path": "cold"}
     if lean_session.configured() and not _FORCE_COLD.get():
-        payload = {**_session_request(row, project, text, prefix_end), "op": "check",
-                   "protocol": lean_session.PROTOCOL, "timeout": timeout, "lane": lane}
+        payload = {
+            **_session_request(row, project, text, prefix_end),
+            "op": "check",
+            "protocol": lean_session.PROTOCOL,
+            "timeout": timeout,
+            "lane": lane,
+            "row": row.get("name", "") if lane == "batch" else "",
+            "toolchain": (project / "lean-toolchain").read_text().strip()
+            if lane == "batch" and (project / "lean-toolchain").is_file()
+            else "",
+            "measure": "arena_measure_heartbeats" in text,
+        }
+        if payload["toolchain"].startswith("leanprover/lean4:"):
+            payload["toolchain"] = payload["toolchain"].removeprefix("leanprover/lean4:")
+        if run_id := os.environ.get(lean_session.RUN_ID_ENV):
+            payload["run_id"] = run_id
         # queue for a worker + header open + the check (+ a restore after a timeout) + slack
         queue = lean_session.MODEL_QUEUE_TIMEOUT if lane == "model" else timeout + lean_session.OPEN_TIMEOUT
         wait = queue + lean_session.OPEN_TIMEOUT + 2 * timeout + 60
         reply = lean_session.request(payload, wait) or {}
         if reply.get("ok"):
-            _LAST.info = {"path": "session", "seconds": round(time.monotonic() - started, 2),
-                          "new_worker": reply.get("new_worker"), "changed_from_line": reply.get("changed_from_line"),
-                          "lane": lane}
+            _LAST.info = {
+                "path": "session",
+                "seconds": round(time.monotonic() - started, 2),
+                "new_worker": reply.get("new_worker"),
+                "changed_from_line": reply.get("changed_from_line"),
+                "lane": reply.get("lane", lane),
+                "engine": reply.get("engine", "lsp"),
+            }
+            if reply.get("partial_output") is not None:
+                _LAST.info["partial_output"] = reply["partial_output"]
+            if reply.get("progress_line") is not None:
+                _LAST.info["progress_line"] = reply["progress_line"]
             if reply.get("header_seconds") is not None:
                 _LAST.info["header_seconds"] = reply["header_seconds"]
             if reply.get("warm_kept"):
                 _LAST.info["warm_kept"] = True
+            if reply.get("fallback"):
+                _LAST.info["fallback"] = reply["fallback"]
             return None if reply.get("timeout") else (reply["returncode"], reply["output"])
         info = {"path": "cold-fallback", "reason": str(reply.get("reason") or "session unavailable")[:200]}
     done = _run_cold(row, project, text, timeout)
@@ -494,7 +642,9 @@ def run_lean(row: dict, project: Path, text: str, timeout: int | None = None,
     return done
 
 
-def warm_session(row: dict, version: str, commit: str, slots: int, lane: str = "model") -> dict | None:
+def warm_session(
+    row: dict, version: str, commit: str, slots: int, lane: str = "model", wait: bool = True
+) -> dict | None:
     """Ask the run's Lean session to load the file header into `slots` workers, in parallel, before anything is
     checked. Builds the candidate file as `run_lean` does (the reference proof stands in for a draft). None when no
     session is configured; otherwise the daemon's reply (`ok`, `workers`, `seconds`, `failed`)."""
@@ -503,42 +653,120 @@ def warm_session(row: dict, version: str, commit: str, slots: int, lane: str = "
     if not lean_session.configured():
         return None
     built = candidate_file(row, row.get("src") or row.get("statement") or "", version, commit)
-    payload = {**_session_request(row, built["path"], built["text"], built["head"]), "op": "warm",
-               "protocol": lean_session.PROTOCOL, "slots": slots, "timeout": lean_session.OPEN_TIMEOUT,
-               "lane": lane}
+    payload = {
+        **_session_request(row, built["path"], built["text"], built["head"]),
+        "op": "warm",
+        "protocol": lean_session.PROTOCOL,
+        "slots": slots,
+        "timeout": lean_session.OPEN_TIMEOUT,
+        "lane": lane,
+        "wait": wait,
+    }
+    if run_id := os.environ.get(lean_session.RUN_ID_ENV):
+        payload["run_id"] = run_id
     return lean_session.request(payload, lean_session.OPEN_TIMEOUT + 120)
 
 
-def compile_version(row: dict, proof: str, version: str, commit: str,
-                    measure: bool = False, probe: bool = False,
-                    report_start_line: int | None = None, lane: str = "model") -> dict:
+def lean_goals(
+    row: dict, project: Path, text: str, prefix_end: int, line: int, column: int, timeout: int | None = None
+) -> dict | None:
+    """Ask the configured LSP session for goals at a code-point position; no cold fallback."""
+    from arena import lean_session
+
+    if not lean_session.configured():
+        return None
+    payload = {
+        **_session_request(row, project, text, prefix_end),
+        "op": "goal",
+        "protocol": lean_session.PROTOCOL,
+        "position": {"line": line, "column": column},
+        "timeout": lean_timeout() if timeout is None else timeout,
+        "lane": "model",
+    }
+    if run_id := os.environ.get(lean_session.RUN_ID_ENV):
+        payload["run_id"] = run_id
+    return lean_session.request(
+        payload, lean_session.MODEL_QUEUE_TIMEOUT + lean_session.OPEN_TIMEOUT + 2 * payload["timeout"] + 60
+    )
+
+
+def lean_try(
+    row: dict, project: Path, text: str, prefix_end: int, hole: dict, snippets: list[str], timeout: int | None = None
+) -> dict | None:
+    """Run snippets at a hole on the configured LSP session; no cold fallback."""
+    from arena import lean_session
+
+    if not lean_session.configured():
+        return None
+    payload = {
+        **_session_request(row, project, text, prefix_end),
+        "op": "try",
+        "protocol": lean_session.PROTOCOL,
+        "hole": hole,
+        "snippets": snippets,
+        "timeout": lean_timeout() if timeout is None else timeout,
+        "lane": "model",
+    }
+    if run_id := os.environ.get(lean_session.RUN_ID_ENV):
+        payload["run_id"] = run_id
+    return lean_session.request(
+        payload,
+        lean_session.MODEL_QUEUE_TIMEOUT + lean_session.OPEN_TIMEOUT + (len(snippets) + 1) * payload["timeout"] + 60,
+    )
+
+
+def compile_version(
+    row: dict,
+    proof: str,
+    version: str,
+    commit: str,
+    measure: bool = False,
+    probe: bool = False,
+    report_start_line: int | None = None,
+    lane: str = "model",
+) -> dict:
     built = candidate_file(row, proof, version, commit)
-    text = built["text"]
-    if probe:
-        body = proof.rstrip("\n")
-        text = text[:built["offset"]] + instrument_sorries(body) + text[built["offset"] + len(body):]
-    wrapper_start = None
-    if measure:
-        wrapper_start = text[:built["head"]].count("\n") + 1
-        text = text[:built["head"]] + HEARTBEAT_WRAPPER + text[built["head"]:]
+
+    def assemble(instrument: bool) -> str:
+        text = built["text"]
+        if probe and instrument:
+            body = proof.rstrip("\n")
+            text = text[: built["offset"]] + instrument_sorries(body) + text[built["offset"] + len(body) :]
+        if measure:
+            text = text[: built["head"]] + HEARTBEAT_WRAPPER + text[built["head"] :]
+        return text
+
+    wrapper_start = built["text"][: built["head"]].count("\n") + 1 if measure else None
     timeout = lean_timeout()
-    output = run_lean(row, built["path"], text, timeout=timeout, prefix_end=built["head"], lane=lane)
+    output = run_lean(row, built["path"], assemble(True), timeout=timeout, prefix_end=built["head"], lane=lane)
+    if output is not None and probe and output[0] != 0 and _HARNESS_ERROR.search(output[1]):
+        # Harness-origin error: the model must see only the plain draft's own result.
+        output = run_lean(row, built["path"], assemble(False), timeout=timeout, prefix_end=built["head"], lane=lane)
     lean_run = last_lean_run()
     if output is None:
-        return {"passed": False, "error": f"Lean timed out after {timeout} seconds", "lean": lean_run}
+        return {
+            "passed": False,
+            "error": agent_text.render("messages/errors.lean_timeout", timeout=timeout),
+            "lean": lean_run,
+        }
     returncode, output = output
     match = re.search(r"ARENA_HEARTBEATS (\d+)", output) if measure else None
     passed = returncode == 0 and (not measure or match is not None)
-    structured = structure_diagnostics(output, built["text"], built["start_line"],
-                                       built["end_line"], wrapper_start, report_start_line)
-    result = {"passed": passed, "exit_code": returncode,
-              "heartbeats": int(match.group(1)) if match else None,
-              **structured, "raw_output": output, "lean": lean_run}
+    structured = structure_diagnostics(
+        output, built["text"], built["start_line"], built["end_line"], wrapper_start, report_start_line
+    )
+    result = {
+        "passed": passed,
+        "exit_code": returncode,
+        "heartbeats": int(match.group(1)) if match else None,
+        **structured,
+        "raw_output": output,
+        "lean": lean_run,
+    }
     return result
 
 
-def evaluate(name: str, proof: str, mode: str = "fast", known: dict | None = None,
-             lane: str = "model") -> dict:
+def evaluate(name: str, proof: str, mode: str = "fast", known: dict | None = None, lane: str = "model") -> dict:
     """Compile one proof. `probe` allows `sorry`, checks one version, never scores.
 
     `known` maps versions to compile results already obtained for this exact
@@ -546,7 +774,7 @@ def evaluate(name: str, proof: str, mode: str = "fast", known: dict | None = Non
     `lane` "background" keeps harness-side checks off the model's Lean workers.
     """
     if mode not in ("fast", "full", "probe"):
-        raise ValueError("mode must be fast, full or probe")
+        raise ValueError(text.render("messages/errors.mode_invalid"))
     from arena.scoring import local_proxy, metrics
 
     row = problem(name)
@@ -554,12 +782,12 @@ def evaluate(name: str, proof: str, mode: str = "fast", known: dict | None = Non
     length = validate_proof(row, proof, allow_sorry=probe)
     targets = versions(row)
     if not targets:
-        raise ValueError("No toolchain versions listed")
+        raise ValueError(text.render("messages/errors.toolchains_missing"))
     measured_on = measure_version(row)
     checked = targets if mode == "full" else targets[:1]
     if mode == "fast" and measured_on != targets[0]:
         checked = [targets[0], measured_on]
-    # Only the primary version's file is materialized for `lean_goal`; every
+    # Only the primary version's file is materialized for goal lookups; every
     # version's diagnostics are reported in that file's line numbers.
     primary_start = candidate_file(row, proof, *targets[0])["start_line"] if len(checked) > 1 else None
     compat = {}
@@ -567,9 +795,16 @@ def evaluate(name: str, proof: str, mode: str = "fast", known: dict | None = Non
         if known and version in known:
             compat[version] = known[version]
             continue
-        compat[version] = compile_version(row, proof, version, commit,
-                                          measure=(version, commit) == measured_on and not probe,
-                                          probe=probe, report_start_line=primary_start, lane=lane)
+        compat[version] = compile_version(
+            row,
+            proof,
+            version,
+            commit,
+            measure=(version, commit) == measured_on and not probe,
+            probe=probe,
+            report_start_line=primary_start,
+            lane=lane,
+        )
         if mode != "full" and not compat[version]["passed"]:
             break
     primary = compat[targets[0][0]]
@@ -578,10 +813,17 @@ def evaluate(name: str, proof: str, mode: str = "fast", known: dict | None = Non
     if mode == "full" and heartbeat is not None:
         proxy = local_proxy(name, length, heartbeat, compat)
     result = {
-        "ok": True, "name": name, "mode": mode, "tokens": length,
-        "reference_tokens": row["proof_length"], "compat": compat,
-        "heartbeat": heartbeat, "measured_on": measured_on[0], "local_proxy": proxy, "score": None,
-        "calibration": "pending official Arena worker comparison",
+        "ok": True,
+        "name": name,
+        "mode": mode,
+        "tokens": length,
+        "reference_tokens": row["proof_length"],
+        "compat": compat,
+        "heartbeat": heartbeat,
+        "measured_on": measured_on[0],
+        "local_proxy": proxy,
+        "score": None,
+        "calibration": "pending official Arena worker comparison",  # log: internal record # not-model-facing
     }
     if probe:
         result["scored"] = False

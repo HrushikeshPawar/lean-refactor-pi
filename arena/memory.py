@@ -1,57 +1,133 @@
-"""Harness-built memory for after a context compaction.
-
-Pi compacts older turns into a model-written summary, which can drop what the run has already found.
-The harness therefore restates it from its own ledger: the best verified candidate, the routes tried,
-the ideas and how they went, the latest failures and the allowance left. The model writes and maintains
-nothing; the text is rebuilt from `frontier` each time and injected once, right after a compaction.
-"""
+"""Harness-built memory for compaction and fresh-context seeds."""
 
 from __future__ import annotations
 
-from arena.routes import routes_text
+import re
 
-MAX_IDEAS = 8
-MAX_FAILURES = 3
-
-
-def _metrics(row: dict | None) -> str:
-    if not row:
-        return "none yet"
-    score = f"proxy {row['proxy']} (verified)" if row.get("proxy") is not None else f"est. proxy {row.get('estimated_proxy')} (not yet verified)"
-    return f"{row['candidate']} {score}, {row.get('tokens')} tok, {row.get('heartbeats')} HB"
+from arena.text import numbers, render
 
 
-def _idea(idea: dict) -> str:
-    attempts = idea.get("attempts", 0)
-    best = idea.get("best")
-    outcome = f"best {_metrics(best)}" if best else (f"last failure {idea['last_failure']}" if idea.get("last_failure") else "no scored proof")
-    return f"{idea['id']} \"{idea.get('title', '')}\" [{idea.get('status', '?')}]: {attempts} attempt{'s' if attempts != 1 else ''}, {outcome}"
+def _read_lines(events: list[dict]) -> list[str]:
+    by_handle: dict[str, list[tuple[int, int]]] = {}
+    order: list[str] = []
+    for event in events:
+        if event.get("kind") != "read" or not event.get("handle"):
+            continue
+        first, last = event.get("first"), event.get("last")
+        if not isinstance(first, int) or not isinstance(last, int):
+            continue
+        handle = event["handle"]
+        if handle in order:
+            order.remove(handle)
+        order.append(handle)
+        by_handle.setdefault(handle, []).append((first, last))
+    lines = []
+    for handle in order:
+        spans: list[list[int]] = []
+        for first, last in sorted(by_handle[handle]):
+            if spans and first <= spans[-1][1] + 1:
+                spans[-1][1] = max(last, spans[-1][1])
+            else:
+                spans.append([first, last])
+        lines.append(
+            render("messages/compaction-memory.read", handle=handle, ranges=", ".join(f"{a}-{b}" for a, b in spans))
+        )
+    return lines[-int(numbers()["memory_read_entries"]) :]
 
 
-def memory_text(front: dict, spent_usd: float | None = None, cap_usd: float | None = None) -> str:
-    """The memory block, a pure function of `frontier` output and the settled spend."""
-    best = next((row for row in [front.get("best")] if row), None)
-    verified = [row for row in [best] if row and row.get("proxy") is not None]
-    lines = ["[arena memory] Context was just compacted. This is the harness's own record of the run; "
-             "it replaces nothing you must write and needs no reply."]
-    lines.append("Best verified candidate: " + (_metrics(verified[0]) + f"; arena_candidate {verified[0]['candidate']} returns its source."
-                 if verified else "none verified yet" + (f"; leading unverified: {_metrics(best)}" if best else "")))
-    lines.append("Routes tried (harness fingerprints): " + routes_text(front.get("routes") or []))
-    ideas = front.get("ideas") or []
-    shown = sorted(ideas, key=lambda idea: (idea.get("status") != "active", -idea.get("attempts", 0)))[:MAX_IDEAS]
-    lines.append("Ideas: " + ("; ".join(_idea(idea) for idea in shown) if shown else "none recorded")
-                 + (f" (+{len(ideas) - len(shown)} more)" if len(ideas) > len(shown) else ""))
-    failures = (front.get("recent_failures") or [])[-MAX_FAILURES:]
-    lines.append("Latest failures: " + ("; ".join(f"{row['ref']} ({row.get('idea_id') or 'no idea'}): {row['error']}" for row in failures)
-                                        if failures else "none"))
-    if front.get("advisory"):
-        lines.append(f"Blocker: {front['advisory']}")
-    lines.append(f"Work so far: {front.get('candidates', 0)} candidates, {front.get('evaluations', 0)} evaluations, {front.get('probes', 0)} probes.")
-    if spent_usd is not None and cap_usd is not None:
-        lines.append(f"Allowance: ${spent_usd:.4f} of ${cap_usd:g} spent, ${max(0.0, cap_usd - spent_usd):.4f} left.")
+def memory_text(state: dict, seed: bool = False) -> str:
+    """Format only the supplied graph and provenance state."""
+    best = state.get("best") or {}
+    proof = best.get("proof", "")
+    header = "seed_header" if seed else "compaction_header"
+    lines = [render(f"messages/compaction-memory.{header}")]
+    if best:
+        lines.append(render("messages/compaction-memory.best", node=best["id"], price=best["price"], proof=proof))
+    else:
+        lines.append(render("messages/compaction-memory.no_best"))
+    lines.append(render("messages/compaction-memory.map_heading"))
+    lines.extend(state.get("map", []))
+    used = [
+        row
+        for row in state.get("library", [])
+        if re.search(r"(?<![\w'.])" + re.escape(row["name"]) + r"(?![\w'.])", proof)
+    ][: int(numbers()["memory_library_lines"])]
+    lines.append(render("messages/compaction-memory.library_heading"))
+    lines.extend(
+        render(
+            "messages/compaction-memory.library", handle=row["handle"], module=row["module"], signature=row["signature"]
+        )
+        for row in used
+    )
+    lines.append(render("messages/compaction-memory.read_heading"))
+    lines.extend(_read_lines(state.get("reads", [])))
+    lines.append(render("messages/compaction-memory.holes_heading"))
+    lines.extend(
+        render("messages/compaction-memory.hole", hole=row["hole"], goal=row.get("goal") or "n/a")
+        for row in state.get("holes", [])
+    )
     return "\n".join(lines)
 
 
 def memory(run_id: str, spent_usd: float | None = None, cap_usd: float | None = None) -> dict:
-    from arena.campaign import frontier  # noqa: PLC0415 - campaign imports are heavy
-    return {"ok": True, "text": memory_text(frontier(run_id), spent_usd, cap_usd)}
+    """Build compaction state from stored run records; spend is shown by the footer."""
+    from arena import campaign, context, reply
+    from arena.graph import Graph
+
+    directory = campaign.run_dir(run_id)
+    history = campaign.events(directory)
+    graph = Graph.from_history(history, campaign._proof_reader(directory))
+    graph_map = campaign.map_view(run_id)
+    best_id = (graph_map.get("best") or {}).get("node")
+    best_node = next((node for node in graph.nodes if node.id == best_id), None)
+    best = None
+    if best_node:
+        theorem = history[0]["theorem"]
+        # The best node's step rows and totals, from the same renderer as the packet and the read view.
+        best = {
+            "id": best_node.id,
+            "proof": best_node.proof_text,
+            "price": campaign.price_table(theorem, run_id, best_node.id)["text"],
+        }
+    library: dict[str, dict] = {}
+    if history:
+        for row in context.cached_context(history[0]["theorem"]).get("library", [])[: int(numbers()["packet_library"])]:
+            if row.get("sig"):
+                library[row["name"]] = {
+                    "name": row["name"],
+                    "handle": f"decl:{row['name']}",
+                    "module": row["module"],
+                    "signature": row["sig"],
+                }
+    for event in history:
+        if event.get("kind") == "search":
+            for row in event.get("hits", []):
+                if row.get("name") and row.get("signature"):
+                    library[row["name"]] = {
+                        "name": row["name"],
+                        "handle": row["handle"],
+                        "module": row["module"],
+                        "signature": row["signature"],
+                    }
+        elif event.get("kind") == "read" and str(event.get("handle", "")).startswith("decl:"):
+            name = event["handle"][5:]
+            if name not in library:
+                from arena.search import resolve_handle
+
+                row = resolve_handle(history[0]["theorem"], event["handle"])
+                if row:
+                    library[name] = {
+                        "name": name,
+                        "handle": event["handle"],
+                        "module": row["module"],
+                        "signature": row["signature"],
+                    }
+    state = {
+        "best": best,
+        # Open holes are listed once, in their own section with their goals, not again in the map.
+        "map": reply._map_lines({**graph_map, "open": []}),
+        "library": list(library.values()),
+        "reads": history,
+        "holes": graph_map.get("open", []),
+    }
+    return {"ok": True, "text": memory_text(state)}

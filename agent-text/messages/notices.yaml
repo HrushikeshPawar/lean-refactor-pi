@@ -1,0 +1,3 @@
+block_shell: "Shell commands are disabled in this run."
+block_workspace: "Arena workspaces are read-only."
+closest_tool: "Closest tool name: {suggestion}."

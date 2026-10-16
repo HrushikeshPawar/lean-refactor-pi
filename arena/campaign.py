@@ -2,33 +2,69 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
-import base64
+import inspect
 import json
 import os
 import re
 import shutil
 import subprocess
-import sys
-import fcntl
+import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
 
-import inspect
-
-from arena import goalstate, lean_health, lean_session
-from arena.engine import (ROOT, candidate_file, evaluate, force_cold, measure_version, problem, source_path,
-                          validate_proof, versions, workspace)
-from arena.profile import heartbeat_floor, profile
-from arena.graph import common_base, edit_fingerprint, merge_text, ranked_frontier
+from arena import goalstate, lean_health, lean_session, routes, text
+from arena import text as agent_text
+from arena.engine import (
+    ROOT,
+    candidate_file,
+    evaluate,
+    force_cold,
+    measure_version,
+    problem,
+    source_path,
+    validate_proof,
+    versions,
+    workspace,
+)
+from arena.graph import (
+    FILING_MIN_SIMILARITY,
+    Cell,
+    Graph,
+    Node,
+    archive,
+    changed_lines,
+    common_base,
+    edit_fingerprint,
+    effort_table,
+    measured_parent,
+    merge_steps,
+    merge_text,
+    quality,
+    ranked_frontier,
+    similarity,
+    splice_text,
+    stall_fires,
+    stall_target,
+)
+from arena.graph import map_view as graph_map_view
+from arena.prices import changed_steps, fmt_hb, fmt_signed, rates, snippet_tokens, step_table
+from arena.prices import price_row as build_price_row
+from arena.profile import profile
+from arena.salvage import fill_cost, fill_text
+from arena.salvage import holes as find_holes
+from arena.salvage import salvage as salvage_proof
+from arena.traces import call_context
 
 
 def run_dir(run_id: str) -> Path:
     if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?", run_id):
-        raise ValueError("Invalid run ID")
+        raise ValueError(text.render("messages/errors.invalid_run_id"))
     return ROOT / "runs" / "pi-budget" / run_id
 
 
@@ -36,11 +72,17 @@ class AmbiguousDeclaration(ValueError):
     """More than one distinct qualified declaration matches an unqualified or partial name."""
 
     def __init__(self, symbol: str, candidates: list[str]):
-        super().__init__(f"{symbol} is ambiguous: {', '.join(candidates[:12])}")
+        super().__init__(
+            text.render("messages/errors.ambiguous_symbol", symbol=symbol, candidates=", ".join(candidates[:12]))
+        )
         self.candidates = candidates
 
 
-_SESSION: ContextVar["_Session | None"] = ContextVar("arena_source_session", default=None)
+_SESSION: ContextVar[_Session | None] = ContextVar("source_session", default=None)
+_NAMED_PARENT_UNSET = object()
+_BATCH_FOCUS: ContextVar[tuple[bool, str | None]] = ContextVar("arena_batch_focus", default=(False, None))
+_BATCH_NEWLY_FILED: ContextVar[set[str] | None] = ContextVar("arena_batch_newly_filed", default=None)
+_SALVAGE_DIRECTORY: ContextVar[Path | None] = ContextVar("arena_salvage_directory", default=None)
 
 
 class _Session:
@@ -66,8 +108,12 @@ class _Session:
         process = self.processes.get(str(root))
         if process is None:
             process = self.processes[str(root)] = subprocess.Popen(
-                ["git", "cat-file", "--batch"], cwd=root, stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                ["git", "cat-file", "--batch"],
+                cwd=root,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
         process.stdin.write(spec.encode() + b"\n")
         process.stdin.flush()
         header = process.stdout.readline().split()
@@ -106,12 +152,13 @@ def _session():
 
 def _git_source(project: Path, commit: str, path: str) -> str:
     if not path.endswith(".lean") or Path(path).is_absolute() or ".." in Path(path).parts:
-        raise ValueError("Only relative .lean paths inside the pinned project are allowed")
+        raise ValueError(text.render("messages/errors.pinned_project_path"))
     session = _SESSION.get()
     if session is not None:
         return session.read(project, commit, path)
-    return subprocess.run(["git", "show", f"{commit}:{path}"], cwd=project,
-                          text=True, capture_output=True, check=True).stdout
+    return subprocess.run(
+        ["git", "show", f"{commit}:{path}"], cwd=project, text=True, capture_output=True, check=True
+    ).stdout
 
 
 def _context(name: str) -> dict:
@@ -126,132 +173,15 @@ def _context(name: str) -> dict:
     return session.contexts[name]
 
 
-MAX_SOURCE_LINES = 400
-MAX_DECLARATION_PAGE_CHARS = 16_000
-
-
-def declarations(name: str, items: list[str] | None = None, cursor: str | None = None) -> dict:
-    """Resolve a batch of declaration handles against the kickoff's tagged constant index."""
-    if bool(items) == bool(cursor):
-        raise ValueError("Pass exactly one of items (a nonempty list of declaration names or handles) "
-                         "or cursor (next_cursor from a previous page)")
-    with _session():
-        return _declarations(name, items, cursor)
-
-
-def _declarations(name: str, items: list[str] | None, cursor: str | None) -> dict:
-    from arena.context import constant_index
-
-    if cursor:
-        try:
-            state = json.loads(base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)))
-            if state.get("version") != 1 or state.get("theorem") != name:
-                raise ValueError
-            items, offset = state["items"], state["offset"]
-        except (ValueError, KeyError, TypeError, json.JSONDecodeError):
-            raise ValueError("Invalid declaration cursor") from None
-    else:
-        offset = 0
-    if not isinstance(items, list) or not items or not all(isinstance(item, str) and item for item in items):
-        raise ValueError("items must be a nonempty list of declaration names or handles")
-
-    inventory = _context(name)
-    if inventory.get("error"):
-        return {"items": [{"input": item, "kind": "unavailable", "reason": "unavailable",
-                           "detail": inventory["error"]} for item in items[offset:]], "next_cursor": None}
-    constants = constant_index(inventory)
-    locals_by_name = {item["name"]: item for item in inventory.get("local", [])}
-    results: list[dict] = []
-    size = 0
-    index = offset
-    while index < len(items):
-        original = items[index]
-        query = original[5:] if original.startswith("decl:") else original
-        if query in locals_by_name:
-            local = locals_by_name[query]
-            result = {"input": original, "kind": "local", "name": query,
-                      "type": local["type"], "scope": local["scope"]}
-        else:
-            matches = constant_index(inventory, name=query)
-            if not matches and "." not in query:
-                matches = [item for item in constants if item["name"].split(".")[-1] == query]
-            if len(matches) > 1:
-                result = {"input": original, "kind": "ambiguous",
-                          "suggestions": [item["name"] for item in matches[:12]]}
-            elif not matches:
-                found = _source_declaration(name, query)
-                if not found.get("found") and re.search(r"(?:^|\.)_[A-Za-z0-9_']", query):
-                    # Generated elaborator names can be absent from source indexes and still resolve in Lean.
-                    found = declaration(name, query)
-                if found.get("ambiguous"):
-                    result = {"input": original, "kind": "ambiguous", "suggestions": found["ambiguous"]}
-                elif not found.get("found"):
-                    result = {"input": original, "kind": "error", "error": "not_found",
-                              "hint": found.get("hint"),
-                              "suggestions": _declaration_suggestions(query, constants)}
-                elif found.get("alternatives"):
-                    result = {"input": original, "kind": "ambiguous",
-                              "suggestions": [found["name"], *found["alternatives"]]}
-                elif found.get("source_text"):
-                    result = {"input": original, "kind": "declaration", **found}
-                else:
-                    entry = {"name": found.get("name", query), "kind": found.get("kind", "generated")}
-                    result = {"input": original, **found, "kind": "unavailable",
-                              "reason": _unavailable_reason(entry, found),
-                              "handle": f"decl:{entry['name']}"}
-            else:
-                entry = matches[0]
-                found = declaration(name, entry["name"])
-                if found.get("source_text"):
-                    result = {"input": original, "kind": "declaration", **found, "index": entry}
-                else:
-                    result = {"input": original, "kind": "unavailable",
-                              "reason": _unavailable_reason(entry, found), "name": entry["name"],
-                              "handle": f"decl:{entry['name']}", "index": entry,
-                              "module": found.get("module") or entry.get("module"),
-                              "signature": found.get("signature") or entry.get("sig"),
-                              "location": found.get("source")}
-        encoded_size = len(json.dumps(result, ensure_ascii=False))
-        if results and size + encoded_size > MAX_DECLARATION_PAGE_CHARS:
-            break
-        results.append(result)
-        size += encoded_size
-        index += 1
-    next_cursor = None
-    if index < len(items):
-        raw = json.dumps({"version": 1, "theorem": name, "items": items, "offset": index}).encode()
-        next_cursor = base64.urlsafe_b64encode(raw).decode().rstrip("=")
-    return {"items": results, "next_cursor": next_cursor}
-
-
-def _declaration_suggestions(query: str, constants: list[dict]) -> list[str]:
-    """Offer qualified-name suggestions using name overlap, without claiming lemma relevance."""
-    parts = {part.lower() for part in query.split(".") if part}
-    ranked = []
-    for item in constants:
-        name = item["name"]
-        overlap = len(parts & {part.lower() for part in name.split(".")})
-        if overlap:
-            ranked.append((-overlap, name))
-    return [name for _, name in sorted(ranked)[:8]]
-
-
-def _unavailable_reason(entry: dict, found: dict) -> str:
-    if entry.get("tag") == "generated" or "._" in entry["name"]:
-        return "generated"
-    if entry["name"].startswith("_private."):
-        return "private"
-    if found.get("kind") == "opaque" or entry.get("kind") == "opaque":
-        return "opaque"
-    if found.get("module") not in (None, "this file"):
-        return "external"
-    return "unavailable"
+MAX_SOURCE_LINES = int(text.numbers()["source_lines_per_call"])
+MAX_DRAFTS = int(text.numbers()["max_drafts"])
 
 
 def source_range(name: str, path: str, first: int | None = None, last: int | None = None) -> dict:
     """Read pinned source; `next_first` continues a range cut at the limit.
 
     Without `first`, a `decl:` handle starts at its declaration and a path at the top of the file.
+    Without `last`, a `decl:` handle stops where its declaration ends (see `declaration_end`).
     """
     # Lines are 1-based; some models send 0 to mean "not given".
     first, last = (first or None), (last or None)
@@ -259,10 +189,33 @@ def source_range(name: str, path: str, first: int | None = None, last: int | Non
         return _source_range(name, path, first, last)
 
 
+# A column-0 line starting with one of these ends the declaration before it.
+_TOP_LEVEL = re.compile(
+    r"(?:/--|/-!|/-|@\[|--|#|end\b|namespace\b|section\b|open\b|variable\b|universe\b|set_option\b|"
+    r"(?:(?:private|protected|noncomputable|unsafe|partial|nonrec)\s+)*"
+    r"(?:theorem|lemma|def|abbrev|instance|structure|class|inductive|axiom|opaque|example|macro|syntax|"
+    r"notation|infix|infixl|infixr|prefix|postfix|elab|local|scoped|attribute|deriving|export|mutual)\b)"
+)
+
+
+def declaration_end(lines: list[str], first: int) -> int:
+    """The last line (1-based) of the declaration starting at `first`: the line before the next top-level
+    command, without the blank lines that separate them."""
+    end = first
+    for number in range(first + 1, len(lines) + 1):
+        line = lines[number - 1]
+        if line and not line[0].isspace() and _TOP_LEVEL.match(line):
+            break
+        if line.strip():
+            end = number
+    return end
+
+
 def _source_range(name: str, path: str, first: int | None, last: int | None) -> dict:
     row = problem(name)
     version, commit = measure_version(row)
     project = workspace(row, version, commit)
+    to_declaration_end = path.startswith("decl:") and last is None
     if path.startswith("decl:"):
         source_symbol, module, span = _source_hint(name, path[5:])
         try:
@@ -284,168 +237,26 @@ def _source_range(name: str, path: str, first: int | None, last: int | None) -> 
         if not path.startswith(STDLIB_ALIAS):
             lines = _git_source(project, commit, path).splitlines()
     except subprocess.CalledProcessError:
-        raise ValueError(f"{path} does not exist in the pinned project at {commit[:8]}") from None
+        raise ValueError(text.render("messages/errors.project_file_missing", path=path, commit=commit[:8])) from None
     first = 1 if first is None else first
     if first < 1 or first > len(lines):
-        raise ValueError(f"{path} has {len(lines)} lines; first={first} is out of range")
+        raise ValueError(text.render("messages/errors.source_line_range", path=path, count=len(lines), first=first))
     wanted = last if last is not None else first + 199
+    if to_declaration_end:
+        wanted = declaration_end(lines, first)
     end = min(wanted, len(lines), first + MAX_SOURCE_LINES - 1)
     if end < first:
-        raise ValueError("last must not precede first")
-    return {"source": f"{row['source']}@{commit}:{path}:{first}-{end}", "pin": commit,
-            "path": path, "file_lines": len(lines),
-            "first": first, "last": end, "next_first": end + 1 if end < len(lines) and wanted > end else None,
-            "text": "\n".join(f"{i}: {lines[i-1]}" for i in range(first, end + 1))}
-
-
-def find(name: str, queries: list[str], limit: int = 20) -> dict:
-    """Search declaration lines of the pinned trees and the kickoff index, counting each qualified declaration once."""
-    if not queries or not all(isinstance(query, str) and query.strip() for query in queries):
-        raise ValueError("queries must be a nonempty list of names or search strings")
-    if limit < 1:
-        raise ValueError("limit must be positive")
-    limit = min(limit, 100)
-    with _session():
-        return _find(name, queries, limit)
-
-
-def _find(name: str, queries: list[str], limit: int) -> dict:
-    from arena.context import constant_index
-
-    inventory = _context(name)
-    indexed = constant_index(inventory) if not inventory.get("error") else []
-    entries = indexed + [{**item, "kind": item.get("decl")} for item in inventory.get("source", [])
-                         if not inventory.get("error")]
-    row = problem(name)
-    version, commit = measure_version(row)
-    project = workspace(row, version, commit)
-    roots = _roots(project, commit)
-    needles = [query[5:] if query.startswith("decl:") else query for query in queries]
-    named = [bool(re.fullmatch(_LEAN_NAME, needle)) for needle in needles]
-    # A name the kickoff index holds exactly resolves without searching the source trees.
-    pending = [needle for needle, is_name in zip(needles, named)
-               if not (is_name and any(item["name"] == needle for item in entries))]
-    hits = _declaration_hits(roots, list(dict.fromkeys(pending))) if pending else []
-    per_query = []
-    for query, needle, is_name in zip(queries, needles, named):
-        exact_only = query.startswith("decl:")
-        folded = needle.casefold()
-        found: dict[str, dict] = {}
-        if is_name:
-            for item in entries:
-                if not (item["name"] == needle if exact_only else folded in item["name"].casefold()) \
-                        or item["name"] in found:
-                    continue
-                matched = _indexed_row(item, roots, (project, commit, row["file_path"]))
-                if matched is None and item["name"] == needle:
-                    matched = _unavailable_row(item)
-                if matched is not None:
-                    found[item["name"]] = matched
-        files_truncated = False
-        scanned = 0
-        if needle in pending:
-            candidates = _candidate_files(hits, needle, is_name, exact_only)
-            files_truncated = len(candidates) > MAX_SCAN_FILES
-            for index, pin, path in candidates[:MAX_SCAN_FILES]:
-                read = _scan(roots[index][0], pin, path)
-                if read is None:
-                    continue
-                scanned += 1
-                lines, starts = read
-                for number, (line_number, qualified) in enumerate(starts):
-                    if qualified in found:
-                        continue
-                    end = _declaration_end(lines, starts, number)
-                    if exact_only:
-                        matched = qualified == needle
-                    elif is_name:
-                        matched = folded in qualified.casefold()
-                    else:
-                        matched = folded in "\n".join(lines[line_number - 1:end]).casefold()
-                    if matched:
-                        found[qualified] = _declaration_row(pin, path, lines, qualified,
-                                                            _declaration_start(lines, line_number), end)
-        if not found:
-            per_query.append({"query": query, "matches": [], "error": "not_found",
-                              "suggestions": _declaration_suggestions(needle, indexed),
-                              "files_scanned": scanned, "files_truncated": files_truncated})
-            continue
-        selected = sorted(found.values(), key=lambda item: (
-            0 if item["name"].casefold() == folded else 1 if item["name"].casefold().endswith("." + folded) else 2,
-            item["name"]))[:limit]
-        per_query.append({"query": query, "matches": selected, "distinct_count": len(found),
-                          "truncated": len(found) > len(selected), "files_scanned": scanned,
-                          "files_truncated": files_truncated})
-    return {"queries": per_query, "pin": commit, "limit": limit}
-
-
-def _indexed_row(item: dict, roots: list[tuple[Path, str, str]], own_file: tuple) -> dict | None:
-    """Locate one kickoff-index declaration in pinned source, or None when its source cannot be found."""
-    module = item.get("module")
-    if item.get("tag") == "generated" or module is None:
-        return None
-    if module == "this file":
-        read = _scan(*own_file)
-        if read is None:
-            return None
-        lines, starts = read
-        for number, (line_number, qualified) in enumerate(starts):
-            if qualified == item["name"] or qualified.endswith("." + item["name"]):
-                return _declaration_row(own_file[1], own_file[2], lines, item["name"],
-                                        _declaration_start(lines, line_number),
-                                        _declaration_end(lines, starts, number))
-        return None
-    if "start_line" not in item:
-        return None
-    located = _module_file(roots, module)
-    if located is None:
-        return None
-    root, pin, path = located
-    lines = _git_source(root, pin, path).splitlines()
-    return _declaration_row(pin, path, lines, item["name"], item["start_line"], item["end_line"])
-
-
-def _unavailable_row(item: dict) -> dict:
-    """An index-only match for a declaration whose source is not in the pinned trees (core, generated)."""
-    matched = {"name": item["name"], "handle": f"decl:{item['name']}", "kind": item.get("kind"),
-               "module": item.get("module"), "source_unavailable": _unavailable_reason(item, item)}
-    for key in ("type", "signature"):
-        if item.get(key):
-            matched[key] = item[key]
-    return matched
-
-
-def _declaration_row(pin: str, path: str, lines: list[str], qualified: str, start: int, end: int) -> dict:
-    return {"name": qualified, "handle": f"decl:{qualified}", "path": path, "line": start,
-            "end_line": end, "pin": pin, "signature": _signature(lines, start, end)}
-
-
-def _candidate_files(hits: list[tuple[int, str, str, int, str]], needle: str, is_name: bool,
-                     exact_only: bool) -> list[tuple[int, str, str]]:
-    """Files worth reading for one query, best first: exact leaf names, then prefixes, then substrings."""
-    folded = needle.casefold()
-    parts = needle.split(".")
-    leaf = parts[-1].casefold()
-    namespaced = {(index, path) for index, _, path, _, text in hits
-                  if len(parts) > 1 and re.match(r"^\s*namespace\s", text, re.I)
-                  and parts[-2].casefold() in text.casefold()}
-    ranked: dict[tuple[int, str, str], int] = {}
-    for index, pin, path, _, text in hits:
-        declared = _DECLARATION_PATTERN.match(text)
-        if is_name:
-            if not declared:
-                continue
-            local = declared.group(1).casefold()
-            if leaf not in local or (len(parts) > 1 and folded not in local and (index, path) not in namespaced):
-                continue
-            tier = 0 if local.split(".")[-1] == leaf else 1 if local.split(".")[-1].startswith(leaf) else 2
-        elif folded in text.casefold():
-            tier = 2
-        else:
-            continue
-        key = (index, pin, path)
-        ranked[key] = min(ranked.get(key, tier), tier)
-    return [key for key, _ in sorted(ranked.items(), key=lambda item: (item[1], item[0][0], item[0][2]))]
+        raise ValueError(text.render("messages/errors.source_range_order"))
+    return {
+        "source": f"{row['source']}@{commit}:{path}:{first}-{end}",
+        "pin": commit,
+        "path": path,
+        "file_lines": len(lines),
+        "first": first,
+        "last": end,
+        "next_first": end + 1 if end < len(lines) and wanted > end else None,
+        "text": "\n".join(f"{i}: {lines[i - 1]}" for i in range(first, end + 1)),
+    }
 
 
 _HANDLE_SUFFIX = re.compile(r"^(.*\.lean):(\d+)(?:-(\d+))?$")
@@ -462,8 +273,12 @@ def _split_source_handle(path: str, pin: str) -> tuple[str, int | None, int | No
     printed = _HANDLE_PIN.match(path)
     if printed:
         if not pin.startswith(printed.group(1)):
-            raise ValueError(f"Source handle commit {printed.group(1)[:12]} is not the pinned commit {pin[:8]}")
-        path = path[printed.end():]
+            raise ValueError(
+                text.render(
+                    "messages/errors.source_commit_mismatch", source_commit=printed.group(1)[:12], pinned_commit=pin[:8]
+                )
+            )
+        path = path[printed.end() :]
     return path, first, last
 
 
@@ -472,12 +287,12 @@ STDLIB_ALIAS = ".lean-stdlib/lean/"
 
 def _stdlib_source(version: str, path: str) -> str:
     """Lean's own library source from the measured toolchain, which elan installs read-only per version."""
-    relative = Path(path[len(STDLIB_ALIAS):])
+    relative = Path(path[len(STDLIB_ALIAS) :])
     if relative.is_absolute() or ".." in relative.parts or relative.suffix != ".lean":
-        raise ValueError("Only relative .lean paths inside Lean's library are allowed")
+        raise ValueError(text.render("messages/errors.library_path"))
     target = Path.home() / ".elan" / "toolchains" / f"leanprover--lean4---{version}" / "src" / "lean" / relative
     if not target.is_file():
-        raise ValueError(f"{path} does not exist in Lean {version}'s library")
+        raise ValueError(text.render("messages/errors.library_file_missing", path=path, version=version))
     return target.read_text()
 
 
@@ -485,11 +300,11 @@ def _canonical_source_path(row: dict, path: str) -> str:
     """Normalize documented project aliases to a path inside the pinned checkout."""
     for alias in ("strata", "physlib", "mathlib", "cslib", "arklib"):
         if path.startswith(alias + ":") or path.startswith(alias + "/"):
-            path = path[len(alias) + 1:]
+            path = path[len(alias) + 1 :]
             break
     path = path.removeprefix("./")
     if path.startswith("/") or ".." in Path(path).parts or not path.endswith(".lean"):
-        raise ValueError("Only relative .lean paths inside the pinned project are allowed")
+        raise ValueError(text.render("messages/errors.pinned_project_path"))
     return path
 
 
@@ -510,27 +325,29 @@ def _package_roots(project: Path) -> list[tuple[Path, str, str]]:
         package = packages / package_name
         if not package.is_dir():
             continue
-        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=package, text=True,
-                              capture_output=True, check=False)
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=package, text=True, capture_output=True, check=False)
         if head.returncode == 0 and head.stdout.strip() == revision:
             roots.append((package, revision, package_name))
     return roots
 
 
-def _source_target(project: Path, commit: str, path: str,
-                   module: str | None = None) -> tuple[Path, str, str]:
+def _source_target(project: Path, commit: str, path: str, module: str | None = None) -> tuple[Path, str, str]:
     """Resolve a canonical project or dependency path to its pinned Git root."""
     if isinstance(project, Path) and (project / path).is_file():
-        exists = subprocess.run(["git", "cat-file", "-e", f"{commit}:{path}"], cwd=project,
-                                capture_output=True, check=False).returncode == 0
+        exists = (
+            subprocess.run(
+                ["git", "cat-file", "-e", f"{commit}:{path}"], cwd=project, capture_output=True, check=False
+            ).returncode
+            == 0
+        )
         if exists:
             return project, commit, path
     module_path = module.replace(".", "/") + ".lean" if module else None
-    for root, pin, package in _package_roots(project):
+    for root, pin, _package in _package_roots(project):
         for candidate in (module_path, path):
             if candidate and (root / candidate).is_file():
                 return root, pin, candidate
-    raise ValueError(f"{path} does not exist in the pinned project or its dependency roots")
+    raise ValueError(text.render("messages/errors.source_path_missing", path=path))
 
 
 # One Lean 4 identifier: dotted components, each a Unicode letter or `_` followed by letters, digits,
@@ -541,14 +358,20 @@ _LEAN_NAME = re.compile(_LEAN_NAME_BODY)
 _DECLARATION_PATTERN = re.compile(
     r"^\s*(?:@\[[^\]]*\]\s*)*(?:(?:private|protected|noncomputable|nonrec|unsafe|partial)\s+)*"
     r"(?:theorem|lemma|def|opaque|example|instance|abbrev|inductive|structure|class|axiom)\s+"
-    r"(" + _LEAN_NAME_BODY + r")")
+    r"(" + _LEAN_NAME_BODY + r")"
+)
 _SCOPE_PATTERN = re.compile(
-    r"^\s*(?:@\[[^\]]*\]\s*)*(?:(?:public|noncomputable|meta)\s+)*(namespace|section)\b(?:\s+(" + _LEAN_NAME_BODY + r"))?\s*$")
+    r"^\s*(?:@\[[^\]]*\]\s*)*(?:(?:public|noncomputable|meta)\s+)*(namespace|section)\b(?:\s+("
+    + _LEAN_NAME_BODY
+    + r"))?\s*$"
+)
 _END_PATTERN = re.compile(r"^\s*end(?:\s+(" + _LEAN_NAME_BODY + r"))?\s*$")
 # The same shape for `git grep -E`, which only needs declaration lines and never body text.
-_DECLARATION_GREP = (r"^[[:space:]]*(@\[[^]]*\][[:space:]]*)*((private|protected|noncomputable|nonrec|unsafe|partial)"
-                     r"[[:space:]]+)*(theorem|lemma|def|opaque|instance|abbrev|inductive|structure|class|axiom)[[:space:]]+")
-MAX_SCAN_FILES = 30
+_DECLARATION_GREP = (
+    r"^[[:space:]]*(@\[[^]]*\][[:space:]]*)*((private|protected|noncomputable|nonrec|unsafe|partial)"
+    r"[[:space:]]+)*(theorem|lemma|def|opaque|instance|abbrev|inductive|structure|class|axiom)[[:space:]]+"
+)
+MAX_SCAN_FILES = int(text.numbers()["find_files_per_query"])
 
 
 def _source_declarations(lines: list[str]) -> list[tuple[int, str]]:
@@ -559,23 +382,30 @@ def _source_declarations(lines: list[str]) -> list[tuple[int, str]]:
         code = line.split("--", 1)[0]
         scope = _SCOPE_PATTERN.match(code)
         if scope:
-            scopes.append((scope.group(2), scope.group(2) or "") if scope.group(1) == "namespace"
-                          else (scope.group(2) or "", ""))
+            scopes.append(
+                (scope.group(2), scope.group(2) or "") if scope.group(1) == "namespace" else (scope.group(2) or "", "")
+            )
             continue
         closed = _END_PATTERN.match(code)
         if closed:
             label = closed.group(1)
-            index = next((i for i in range(len(scopes) - 1, -1, -1) if label is not None and
-                          (scopes[i][0] == label or (scopes[i][0] or "").endswith("." + label))), None)
+            index = next(
+                (
+                    i
+                    for i in range(len(scopes) - 1, -1, -1)
+                    if label is not None and (scopes[i][0] == label or (scopes[i][0] or "").endswith("." + label))
+                ),
+                None,
+            )
             if label is None or index is None:
                 index = len(scopes) - 1
-            del scopes[max(index, 0):]
+            del scopes[max(index, 0) :]
             continue
         match = _DECLARATION_PATTERN.match(line)
         if match:
             local = match.group(1)
             if local.startswith("_root_."):
-                qualified = local[len("_root_."):]
+                qualified = local[len("_root_.") :]
             else:
                 qualified = ".".join([prefix for _, prefix in scopes if prefix] + [local])
             declarations.append((line_number, qualified))
@@ -588,8 +418,9 @@ def _declaration_start(lines: list[str], line: int) -> int:
     while start > 1 and lines[start - 2].lstrip().startswith("@["):
         start -= 1
     if start > 1 and lines[start - 2].rstrip().endswith("-/"):
-        opener = next((i for i in range(start - 2, max(start - 80, -1), -1)
-                       if lines[i].lstrip().startswith("/--")), None)
+        opener = next(
+            (i for i in range(start - 2, max(start - 80, -1), -1) if lines[i].lstrip().startswith("/--")), None
+        )
         if opener is not None:
             start = opener + 1
     return start
@@ -599,21 +430,14 @@ def _declaration_end(lines: list[str], starts: list[tuple[int, str]], index: int
     """The last line of a declaration: before the next one's docs and attributes, ignoring blank lines."""
     following = starts[index + 1][0] if index + 1 < len(starts) else len(lines) + 1
     end = _declaration_start(lines, following) - 1 if following <= len(lines) else len(lines)
-    while end > starts[index][0] and (not lines[end - 1].strip() or lines[end - 1].lstrip().startswith("--")
-                                      or _SCOPE_PATTERN.match(lines[end - 1]) or _END_PATTERN.match(lines[end - 1])):
+    while end > starts[index][0] and (
+        not lines[end - 1].strip()
+        or lines[end - 1].lstrip().startswith("--")
+        or _SCOPE_PATTERN.match(lines[end - 1])
+        or _END_PATTERN.match(lines[end - 1])
+    ):
         end -= 1
     return end
-
-
-def _signature(lines: list[str], start: int, end: int) -> str:
-    """The first declaration lines after any doc comment and attributes, up to the line that opens the body."""
-    shown = []
-    keyword = next((i for i in range(start, end + 1) if _DECLARATION_PATTERN.match(lines[i - 1])), start)
-    for text in lines[keyword - 1:min(end, keyword + 5)]:
-        shown.append(text.rstrip())
-        if ":=" in text or text.rstrip().endswith("where") or text.strip().startswith("|"):
-            break
-    return "\n".join(shown)
 
 
 def _roots(project: Path, commit: str) -> list[tuple[Path, str, str]]:
@@ -621,7 +445,7 @@ def _roots(project: Path, commit: str) -> list[tuple[Path, str, str]]:
     key = str(project)
     if session is not None and key in session.roots:
         return session.roots[key]
-    roots = [(project, commit, "")] + _package_roots(project)
+    roots = [(project, commit, ""), *_package_roots(project)]
     if session is not None:
         session.roots[key] = roots
     return roots
@@ -631,7 +455,7 @@ def _module_file(roots: list[tuple[Path, str, str]], module: str) -> tuple[Path,
     """The pinned root that holds module `A.B.C` as `A/B/C.lean`; its own package is tried first."""
     path = module.replace(".", "/") + ".lean"
     head = module.split(".")[0].casefold()
-    for root, pin, package in sorted(roots, key=lambda item: item[2].casefold() != head):
+    for root, pin, _package in sorted(roots, key=lambda item: item[2].casefold() != head):
         try:
             _git_source(root, pin, path)
         except subprocess.CalledProcessError:
@@ -664,13 +488,19 @@ def _declaration_hits(roots: list[tuple[Path, str, str]], needles: list[str]) ->
 
     def grep(entry: tuple[int, tuple[Path, str, str]]) -> list[tuple[int, str, str, int, str]]:
         index, (root, pin, _) = entry
-        result = subprocess.run(["git", "grep", "-n", "-I", "-i", "-E", "-e", pattern, pin, "--", "*.lean"],
-                                cwd=root, text=True, errors="replace", capture_output=True, check=False)
+        result = subprocess.run(
+            ["git", "grep", "-n", "-I", "-i", "-E", "-e", pattern, pin, "--", "*.lean"],
+            cwd=root,
+            text=True,
+            errors="replace",
+            capture_output=True,
+            check=False,
+        )
         if result.returncode not in (0, 1):
-            raise RuntimeError(result.stderr.strip() or "Pinned source search failed")
+            raise RuntimeError(result.stderr.strip() or text.render("messages/errors.source_search_failed"))
         hits = []
         for raw in result.stdout.splitlines():
-            parts = raw[len(pin) + 1:].split(":", 2)
+            parts = raw[len(pin) + 1 :].split(":", 2)
             if len(parts) == 3 and parts[1].isdigit():
                 hits.append((index, pin, parts[0], int(parts[1]), parts[2]))
         return hits
@@ -680,22 +510,17 @@ def _declaration_hits(roots: list[tuple[Path, str, str]], needles: list[str]) ->
 
 
 def _scan(root: Path, pin: str, path: str) -> tuple[list[str], list[tuple[int, str]]] | None:
-    session = _SESSION.get()
-    key = (str(root), pin, path)
-    if session is not None and key in session.scans:
-        return session.scans[key]
+    """Read one pinned Lean file and index its declaration starts for source handles."""
     try:
         lines = _git_source(root, pin, path).splitlines()
     except subprocess.CalledProcessError:
         return None
-    scanned = lines, _source_declarations(lines)
-    if session is not None:
-        session.scans[key] = scanned
-    return scanned
+    return lines, _source_declarations(lines)
 
 
-def _resolve_declaration_source(name: str, symbol: str, module: str | None = None,
-                                span: tuple[int, int] | None = None) -> dict:
+def _resolve_declaration_source(
+    name: str, symbol: str, module: str | None = None, span: tuple[int, int] | None = None
+) -> dict:
     """Find one declaration's pinned file and lines, excluding scratch copies.
 
     `module` and `span` come from the kickoff index and resolve the declaration exactly with no
@@ -703,7 +528,7 @@ def _resolve_declaration_source(name: str, symbol: str, module: str | None = Non
     match wins; several distinct qualified matches raise AmbiguousDeclaration.
     """
     if not re.fullmatch(_LEAN_NAME, symbol):
-        raise ValueError("Invalid declaration name")
+        raise ValueError(agent_text.render("messages/errors.invalid_declaration"))
     row = problem(name)
     version, commit = measure_version(row)
     project = workspace(row, version, commit)
@@ -715,14 +540,18 @@ def _resolve_declaration_source(name: str, symbol: str, module: str | None = Non
     elif module:
         located = _module_file(roots, module)
         if located is None:
-            raise ValueError(f"{symbol} is defined in {module}, which is not in the pinned project or its dependency roots")
+            raise ValueError(agent_text.render("messages/errors.module_missing", symbol=symbol, module=module))
         files = [located]
     else:
         hits = _declaration_hits(roots, [symbol])
         files = []
         for index, pin, path, _, text in hits:
             declared = _DECLARATION_PATTERN.match(text)
-            if declared and leaf.casefold() in declared.group(1).casefold() and (roots[index][0], pin, path) not in files:
+            if (
+                declared
+                and leaf.casefold() in declared.group(1).casefold()
+                and (roots[index][0], pin, path) not in files
+            ):
                 files.append((roots[index][0], pin, path))
     scanned = 0
     found: dict[str, dict] = {}
@@ -734,22 +563,42 @@ def _resolve_declaration_source(name: str, symbol: str, module: str | None = Non
         if read is None:
             continue
         lines, starts = read
-        if span is not None and 1 <= span[0] <= span[1] <= len(lines) and leaf in "\n".join(lines[span[0] - 1:span[1]]):
-            return {"root": root, "pin": pin, "path": path, "line": span[0], "end": span[1],
-                    "qualified": symbol, "file_lines": len(lines)}
+        if (
+            span is not None
+            and 1 <= span[0] <= span[1] <= len(lines)
+            and leaf in "\n".join(lines[span[0] - 1 : span[1]])
+        ):
+            return {
+                "root": root,
+                "pin": pin,
+                "path": path,
+                "line": span[0],
+                "end": span[1],
+                "qualified": symbol,
+                "file_lines": len(lines),
+            }
         for index, (line_number, qualified) in enumerate(starts):
             if qualified == symbol or qualified.endswith("." + symbol):
                 start = _declaration_start(lines, line_number)
-                found.setdefault(qualified, {"root": root, "pin": pin, "path": path, "line": start,
-                                             "end": _declaration_end(lines, starts, index),
-                                             "qualified": qualified, "file_lines": len(lines)})
+                found.setdefault(
+                    qualified,
+                    {
+                        "root": root,
+                        "pin": pin,
+                        "path": path,
+                        "line": start,
+                        "end": _declaration_end(lines, starts, index),
+                        "qualified": qualified,
+                        "file_lines": len(lines),
+                    },
+                )
     if symbol in found:
         return found[symbol]
     if len(found) > 1:
         raise AmbiguousDeclaration(symbol, sorted(found))
     if found:
         return next(iter(found.values()))
-    raise ValueError(f"Declaration not found in pinned project: {symbol}")
+    raise ValueError(agent_text.render("messages/errors.declaration_missing", symbol=symbol))
 
 
 def _indexed_entry(name: str, symbol: str) -> dict | None:
@@ -778,71 +627,6 @@ def _source_hint(name: str, symbol: str) -> tuple[str, str | None, tuple[int, in
     return symbol, module, span
 
 
-def declaration(name: str, symbol: str) -> dict:
-    with _session():
-        return _declaration(name, symbol)
-
-
-def _declaration(name: str, symbol: str) -> dict:
-    found = _source_declaration(name, symbol)
-    if found.get("found"):
-        return found
-    return _declaration_in_lean(name, symbol.removeprefix("decl:"))
-
-
-def _source_declaration(name: str, symbol: str) -> dict:
-    """Resolve a source-backed declaration without invoking Lean for a missing name."""
-    if symbol.startswith("decl:"):
-        symbol = symbol[5:]
-    if not re.fullmatch(_LEAN_NAME, symbol):
-        raise ValueError("Invalid declaration name")
-    source_symbol, module, span = _source_hint(name, symbol)
-    try:
-        located = _resolve_declaration_source(name, source_symbol, module, span)
-    except AmbiguousDeclaration as error:
-        return {"symbol": symbol, "found": True, "ambiguous": error.candidates}
-    except ValueError:
-        located = None
-    if located is not None:
-        lines = _git_source(located["root"], located["pin"], located["path"]).splitlines()
-        qualified = located["qualified"] if module is None else symbol
-        return {"symbol": symbol, "handle": f"decl:{qualified}", "name": qualified, "found": True,
-                "pin": located["pin"], "path": located["path"], "line": located["line"],
-                "end_line": located["end"], "file_lines": located["file_lines"],
-                "source_text": "\n".join(lines[located["line"] - 1:located["end"]])}
-    entry = _indexed_entry(name, symbol)
-    if entry is not None and module not in (None, "this file"):
-        # Indexed, but no pinned source root holds its module (for example the Lean toolchain).
-        return {"symbol": symbol, "found": True, "name": symbol, "kind": entry.get("kind"),
-                "module": module, "signature": entry.get("sig")}
-    return {"symbol": symbol, "found": False,
-            "hint": "No pinned source declaration matched this name."}
-
-
-def _declaration_in_lean(name: str, symbol: str) -> dict:
-    """Resolve a name the way the theorem's own file does (namespaces, opens, imported libraries)."""
-    from arena.engine import candidate_file, run_lean
-
-    row = problem(name)
-    version, commit = measure_version(row)
-    built = candidate_file(row, row["src"], version, commit)
-    inserted = (Path(__file__).with_name("lean") / "declaration.lean").read_text() + f"arena_decl {symbol}\n\n"
-    text = built["text"][:built["head"]] + inserted + built["text"][built["head"]:]
-    ran = run_lean(row, built["path"], text, prefix_end=built["head"])
-    if ran is None:
-        raise ValueError("Lean timed out while resolving the name")
-    records = [json.loads(raw) for raw in re.findall(r"^ARENA_DECL (\{.*\})$", ran[1], re.M)]
-    found = [item for item in records if item.get("found")]
-    if not found:
-        return {"symbol": symbol, "found": False,
-                "hint": "No declaration of that name is visible where the theorem is stated; try the full name or a prefix."}
-    best = found[0]
-    return {"symbol": symbol, "found": True, "name": best["name"], "kind": best["kind"], "module": best["module"],
-            "source": f"{best['module']}" + (f":{best['line']}" if best.get("line") else ""),
-            "signature": best["signature"],
-            **({"alternatives": [item["name"] for item in found[1:]]} if len(found) > 1 else {})}
-
-
 def packet(name: str) -> str:
     """Kickoff packet: task, exchange rates, source-derived context. Built once per row and cached."""
     from arena.context import render_packet
@@ -852,11 +636,13 @@ def packet(name: str) -> str:
 
 def _append(directory: Path, event: dict) -> None:
     directory.mkdir(parents=True, exist_ok=True)
+    # The event's own keys win. A tool call id already on the row is not replaced by the environment.
+    context = {key: value for key, value in call_context().items() if key not in event}
     fd = os.open(directory / "ledger.jsonl", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
-        data = (json.dumps({"ts": time.time(), **event}, ensure_ascii=False,
-                           separators=(",", ":")) + "\n").encode()
+        row = {"ts": time.time(), **context, **event}
+        data = (json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
         os.write(fd, data)
         os.fsync(fd)
     finally:
@@ -874,198 +660,11 @@ def _evaluate(name: str, proof: str, mode: str, known: dict | None = None, lane:
 def _refuse_if_tripped(directory: Path) -> None:
     """After the Lean circuit breaker tripped, model-lane work is refused: the runner is stopping the run."""
     if lean_health.tripped(directory):
-        raise ValueError("The harness has stopped this run")
+        raise ValueError(text.render("messages/errors.stopped_run"))
 
 
 def _check_breaker(directory: Path) -> None:
     lean_health.trip_if_unhealthy(directory, events(directory))
-
-
-def _route_features(directory: Path, name: str, proof_id: str, proof: str) -> dict | None:
-    """Kernel-term features of an attempt (a compiled proof, or a draft whose declaration Lean still added, with
-    `sorryAx` where holes or errors are), read by Lean in the background lane after it was scored, so they never
-    count toward its metrics. None when the term could not be read; the route then uses text features."""
-    from arena import route_features
-
-    try:
-        with lean_lock(directory, "background"):
-            features = route_features.extract(name, {proof_id: proof})[proof_id]
-    except Exception:
-        return None
-    return features if features.get("ok") or features.get("read") else None
-
-
-def _record_route_later(directory: Path, name: str, proof_id: str, proof: str) -> None:
-    """Queue the attempt for fingerprinting by the run's one background worker: extraction recompiles the file
-    prefix (seconds to minutes), and the model's call must not wait for a bookkeeping result it only sees later.
-    One process per attempt piled up 130 waiting processes once every probe draft was fingerprinted."""
-    if os.environ.get("ARENA_ROUTES_INLINE") == "1":
-        _record_route(directory, name, proof_id, proof)
-        return
-    _snapshot(directory, proof_id, proof)
-    with (directory / "route-queue.jsonl").open("a") as queue:
-        fcntl.flock(queue, fcntl.LOCK_EX)
-        queue.write(json.dumps({"proof_id": proof_id, "name": name}) + "\n")
-    if _worker_running(directory):
-        return  # it re-reads the queue before exiting, so this entry is not stranded
-    code = "import sys; from pathlib import Path; from arena.campaign import _route_worker; _route_worker(Path(sys.argv[1]))"
-    try:
-        subprocess.Popen([sys.executable, "-c", code, str(directory)], cwd=ROOT, stdin=subprocess.DEVNULL,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-    except OSError:
-        pass
-
-
-def _worker_running(directory: Path) -> bool:
-    with (directory / "route-worker.lock").open("a") as handle:
-        try:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return True
-        return False
-
-
-def _route_queue(directory: Path) -> list[dict]:
-    """Queued attempts with no route event yet, oldest first, the reference proof's before any other: every later
-    route is compared against it, so it is fingerprinted first."""
-    try:
-        lines = (directory / "route-queue.jsonl").read_text().splitlines()
-    except OSError:
-        return []
-    filed = {item["proof_id"] for item in events(directory) if item.get("kind") == "route"}
-    pending, seen = [], set()
-    for line in lines:
-        entry = json.loads(line)
-        if entry["proof_id"] not in filed and entry["proof_id"] not in seen:
-            seen.add(entry["proof_id"])
-            pending.append(entry)
-    references = {item["candidate_id"] for item in events(directory)
-                  if item.get("kind") == "candidate" and item.get("origin") == "reference"}
-    return sorted(pending, key=lambda entry: entry["proof_id"] not in references)  # stable
-
-
-def _route_worker(directory: Path) -> None:
-    """Drain the run's route queue in one process. An attempt whose extraction fails is not retried in this
-    process (the reference proof is, REFERENCE_ROUNDS times); a later worker (or a backfill) tries it again."""
-    tried: set[str] = set()
-    failed: dict[str, int] = {}
-    while True:
-        with (directory / "route-worker.lock").open("a") as handle:
-            try:
-                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                return
-            while pending := [entry for entry in _route_queue(directory) if entry["proof_id"] not in tried]:
-                if lean_health.tripped(directory):
-                    return
-                entry = pending[0]
-                _yield_to_lean_session(directory)
-                _room_for_extraction(wait=float("inf"))
-                try:
-                    proof = (directory / "proofs" / f"{entry['proof_id']}.lean").read_text()
-                except OSError:
-                    tried.add(entry["proof_id"])
-                    continue
-                filed = _record_route(directory, entry["name"], entry["proof_id"], proof)
-                failed[entry["proof_id"]] = failed.get(entry["proof_id"], 0) + 1
-                if filed is not None or failed[entry["proof_id"]] >= (
-                        REFERENCE_ROUNDS if _origin(directory, entry["proof_id"]) == "reference" else 1):
-                    tried.add(entry["proof_id"])
-        # Released: an entry queued while the lock was held saw a running worker, so look once more.
-        if not [entry for entry in _route_queue(directory) if entry["proof_id"] not in tried]:
-            return
-
-
-ROUTE_SLOTS = 2
-ROUTE_EXTRACT_GB = 2.0      # one cold Lean process with the theorem's imports
-ROUTE_WAIT_SECONDS = 180.0
-REFERENCE_TRIES = 3         # kernel extractions of the reference proof per _record_route call
-REFERENCE_ROUNDS = 3        # worker passes over a reference that still has no kernel print
-REFERENCE_RETRY_SECONDS = 20.0
-
-
-def _origin(directory: Path, proof_id: str) -> str | None:
-    return next((item.get("origin", "model") for item in events(directory)
-                 if item.get("kind") == "candidate" and item["candidate_id"] == proof_id), None)
-
-
-def _yield_to_lean_session(directory: Path) -> None:
-    """Hold route extraction back while the run's own Lean session is refusing workers for memory (it leaves a
-    marker, see lean_session.memory_pressure): the model's probes come first, extraction is bookkeeping. The marker
-    ages out 2 minutes after the last refusal, so this ends by itself."""
-    from arena.lean_session import memory_pressure
-
-    while memory_pressure(directory):
-        time.sleep(5)
-
-
-def _room_for_extraction(wait: float = ROUTE_WAIT_SECONDS) -> bool:
-    """Wait until an extraction leaves the Lean session daemons their reserve plus one more worker (else an
-    extraction started at 7 GB free starves the session, which needs 8 GB to open a worker); False if never."""
-    from arena.lean_session import RESERVE_GB, WORKER_GB, _available_gb
-
-    deadline = time.monotonic() + wait
-    while True:
-        free = _available_gb()
-        if free is None or free - ROUTE_EXTRACT_GB >= RESERVE_GB + WORKER_GB:
-            return True
-        if time.monotonic() >= deadline:
-            return False
-        time.sleep(5)
-
-
-def _record_route(directory: Path, name: str, proof_id: str, proof: str) -> dict | None:
-    """Fingerprint an attempt (compiled candidate or probe draft, with holes or errors) and file it under a route.
-    Harness-only: the model sees the result in finish reviews and pushes, never as a tool argument. Once per proof;
-    failures are ignored. An attempt opens a credited route only through a kernel fingerprint that matches no
-    existing route; one without (the term could not be read) joins the route its text features match best."""
-    from arena import routes
-    from arena.context import cached_context
-
-    try:
-        if lean_health.tripped(directory):
-            return None
-        if any(item.get("kind") == "route" and item["proof_id"] == proof_id for item in events(directory)):
-            return None
-        # Each probe draft is now fingerprinted, and one extraction is a cold Lean process of 1-2 GB: one at a time
-        # per run, and at most ROUTE_SLOTS across the parallel runs of a campaign.
-        slot = directory.parent / f".route-extract-{int(proof_id[:8], 16) % ROUTE_SLOTS if re.fullmatch(r'[0-9a-f]{8}.*', proof_id) else 0}.lock"
-        # The reference proof is every route's yardstick: it is never filed from text. Without a kernel print it
-        # stays unfiled (the worker tries again later) rather than become an exemplar that absorbs kernel attempts.
-        reference = _origin(directory, proof_id) == "reference"
-        features = None
-        inline = os.environ.get("ARENA_ROUTES_INLINE") == "1"
-        for attempt in range(REFERENCE_TRIES if reference and not inline else 1):
-            if attempt:
-                time.sleep(REFERENCE_RETRY_SECONDS)
-            with (directory / "route-extract.lock").open("a") as own, slot.open("a") as shared:
-                fcntl.flock(own, fcntl.LOCK_EX)
-                fcntl.flock(shared, fcntl.LOCK_EX)
-                if not inline:
-                    _yield_to_lean_session(directory)
-                    if not _room_for_extraction():
-                        continue  # the run's own Lean workers come first; the attempt simply gets no route (yet)
-                features = _route_features(directory, name, proof_id, proof)
-            if features:
-                break
-        if reference and not features:
-            return None
-        with (directory / "route.lock").open("a") as handle:
-            fcntl.flock(handle, fcntl.LOCK_EX)
-            history = events(directory)
-            earlier = [item for item in history if item.get("kind") == "route"]
-            if any(item["proof_id"] == proof_id for item in earlier):
-                return None
-            context = cached_context(name)
-            print_ = routes.fingerprint(proof, routes.vocabulary(context), name, features)
-            origin = next((item.get("origin", "model") for item in history
-                           if item.get("kind") == "candidate" and item["candidate_id"] == proof_id), None)
-            probe = routes.attempt_results(history).get(proof_id, ("candidate",))[0] == "probe"
-            event = routes.file_attempt(earlier, proof_id, print_, features, origin, probe)
-            _append(directory, event)
-            return event
-    except Exception:
-        return None
 
 
 def events(directory: Path) -> list[dict]:
@@ -1128,8 +727,11 @@ def _copy_tracked(project: Path, shadow: Path) -> None:
     Shared workspaces accumulate untracked candidate files from earlier compiles (other runs' proofs);
     copying the directory would let a new run find them with lean_local_search.
     """
-    listed = subprocess.run(["git", "-C", str(project), "ls-files", "-z"], check=True,
-                            capture_output=True).stdout.decode().split("\0")
+    listed = (
+        subprocess.run(["git", "-C", str(project), "ls-files", "-z"], check=True, capture_output=True)
+        .stdout.decode()
+        .split("\0")
+    )
     for relative in filter(None, listed):
         source = project / relative
         if not source.is_file():
@@ -1139,12 +741,14 @@ def _copy_tracked(project: Path, shadow: Path) -> None:
         shutil.copy2(source, target)
 
 
-def init(name: str, run_id: str, extra: str = "") -> dict:
+def init(name: str, run_id: str, extra: str = "", seed: Path | None = None) -> dict:
+    """Start a run. With `seed`, the graph of that ended run replaces the reference-only start."""
     directory = run_dir(run_id)
     # The runner may already have started the run's Lean session here; nothing else counts as a run.
-    if directory.exists() and any(item.name not in lean_session.SESSION_FILES and item.name != "lean-session.log"
-                                  for item in directory.iterdir()):
-        raise ValueError(f"Run ID already exists: {directory}")
+    if directory.exists() and any(
+        item.name not in lean_session.SESSION_FILES and item.name != "lean-session.log" for item in directory.iterdir()
+    ):
+        raise ValueError(agent_text.render("messages/errors.run_exists", directory=directory))
     row = problem(name)
     version, commit = versions(row)[0]
     project = workspace(row, version, commit)
@@ -1154,20 +758,49 @@ def init(name: str, run_id: str, extra: str = "") -> dict:
     shadow = directory / "scratch" / "project"
     _copy_tracked(project, shadow)
     (shadow / ".lake").symlink_to(project / ".lake", target_is_directory=True)
-    _append(directory, {"kind": "init", "theorem": name, "version": version, "commit": commit,
-                        "versions": versions(row),
-                        "packet_sha256": hashlib.sha256(text.encode()).hexdigest()})
+    _append(
+        directory,
+        {
+            "kind": "init",
+            "theorem": name,
+            "version": version,
+            "commit": commit,
+            "versions": versions(row),
+            "packet_sha256": hashlib.sha256(text.encode()).hexdigest(),
+        },
+    )
     reference_id = hashlib.sha256((name + "\0" + row["src"]).encode()).hexdigest()
     _snapshot(directory, reference_id, row["src"])
-    _append(directory, {"kind": "candidate", "candidate_id": reference_id, "parents": [],
-                        "hypothesis": "Pinned original reference proof", "origin": "reference",
-                        "source_versions": versions(row),
-                        "evaluator_sha256": hashlib.sha256(Path(__file__).with_name("engine.py").read_bytes()).hexdigest()})
+    if seed is not None:
+        from arena.seed import carry_over
+
+        carry_over(name, run_id, seed)
+        return {
+            "packet": str(directory / "packet.txt"),
+            "shadow": str(shadow),
+            "candidate_path": str(shadow / source_path(row)),
+        }
+    _append(
+        directory,
+        {
+            "kind": "candidate",
+            "candidate_id": reference_id,
+            "parents": [],
+            "hypothesis": "Pinned original reference proof",  # log: internal record # not-model-facing
+            "origin": "reference",
+            "source_versions": versions(row),
+            "evaluator_sha256": hashlib.sha256(Path(__file__).with_name("engine.py").read_bytes()).hexdigest(),
+        },
+    )
+    _file_node(directory, events(directory), reference_id, row["src"], operation={"type": "root", "from": []})
+    _append(directory, {"kind": "focus", "proof_id": reference_id, "reason": "start"})
     materialize(name, run_id, row["src"])
     _append(directory, {"kind": "current", "candidate_id": reference_id})
-    _record_route_later(directory, name, reference_id, row["src"])
-    return {"packet": str(directory / "packet.txt"), "shadow": str(shadow),
-            "candidate_path": str(shadow / source_path(row))}
+    return {
+        "packet": str(directory / "packet.txt"),
+        "shadow": str(shadow),
+        "candidate_path": str(shadow / source_path(row)),
+    }
 
 
 def _externalize_output(directory: Path, key: str, result: dict) -> dict:
@@ -1206,6 +839,55 @@ def _label(history: list[dict], candidate_id: str) -> str | None:
     return f"#{ids.index(candidate_id) + 1}" if candidate_id in ids else None
 
 
+def node_label(history: list[dict], proof_id: str) -> str:
+    """Return the stable candidate or probe label used by graph views."""
+    candidate = _label(history, proof_id)
+    return candidate or _probe_numbers(history).get(proof_id, f"p{proof_id[:8]}")
+
+
+def _compact_ids(ids: list[str]) -> str:
+    """`n2, n3, n4, n5, n9` as `n2–n5, n9`; ids that are not plain nK stay as they are."""
+    parts: list[tuple[int, int] | str] = []
+    for ref in ids:
+        number = int(ref[1:]) if re.fullmatch(r"n[0-9]+", ref) else None
+        if number is None:
+            parts.append(ref)
+        elif parts and isinstance(parts[-1], tuple) and parts[-1][1] == number - 1:
+            parts[-1] = (parts[-1][0], number)
+        else:
+            parts.append((number, number))
+    return ", ".join(
+        part if isinstance(part, str) else f"n{part[0]}" if part[0] == part[1] else f"n{part[0]}–n{part[1]}"
+        for part in parts
+    )
+
+
+def _update_id(history: list[dict], proof_id: str) -> str:
+    """The graph id (nK) that model-facing updates use, falling back to the stored label."""
+    try:
+        return _graph_node_id(history, proof_id)
+    except KeyError:
+        return node_label(history, proof_id)
+
+
+def _graph_node_id(history: list[dict], proof_id: str) -> str:
+    """Resolve the projection's nK id without rebuilding route signatures."""
+    seen: set[str] = set()
+    for item in history:
+        if item.get("kind") == "candidate":
+            current = item["candidate_id"]
+        elif item.get("kind") == "probe":
+            current = item["proof_id"]
+        else:
+            continue
+        if current in seen:
+            continue
+        seen.add(current)
+        if current == proof_id:
+            return f"n{len(seen)}"
+    raise KeyError(proof_id)
+
+
 def resolve_candidate_ref(history: list[dict], reference: str) -> str:
     candidates = _candidate_ids(history)
     reference = reference.strip()
@@ -1219,7 +901,7 @@ def resolve_candidate_ref(history: list[dict], reference: str) -> str:
         matches = [candidate for candidate in candidates if candidate.startswith(reference)]
         if len(matches) == 1:
             return matches[0]
-    raise ValueError(f"Unknown candidate {reference}; candidates are #1-#{len(candidates)}")
+    raise ValueError(text.render("messages/errors.node_reference_invalid", reference=reference))
 
 
 def _current(history: list[dict]) -> str | None:
@@ -1244,83 +926,507 @@ def resolve_probe_ref(history: list[dict], reference: str) -> str:
     for proof_id, label in _probe_numbers(history).items():
         if reference in (label, proof_id):
             return proof_id
-    raise ValueError(f"Unknown probe {reference}; probes are p1-p{len(_probe_numbers(history))}")
+    raise ValueError(text.render("messages/errors.node_reference_invalid", reference=reference))
 
 
 def resolve_parent_ref(history: list[dict], reference: str) -> str:
     """A parent given as a candidate (#N) or as a probe (pN); a probe stands for the candidate it was built on."""
     if re.fullmatch(r"\s*[pP][1-9][0-9]*\s*", reference):
         proof_id = resolve_probe_ref(history, reference)
-        parent = next((item.get("parent") for item in reversed(history)
-                       if item.get("kind") == "probe" and item["proof_id"] == proof_id), None)
+        parent = next(
+            (
+                item.get("parent")
+                for item in reversed(history)
+                if item.get("kind") == "probe" and item["proof_id"] == proof_id
+            ),
+            None,
+        )
         if parent:
             return parent
-        raise ValueError(f"Probe {reference.strip()} has no recorded parent candidate")
+        raise ValueError(text.render("messages/errors.node_reference_invalid", reference=reference.strip()))
     return resolve_candidate_ref(history, reference)
 
 
-IDEA_STATUSES = ("active", "parked", "succeeded", "abandoned")
+def _graph_proof_ids(history: list[dict]) -> list[str]:
+    found: list[str] = []
+    for event in history:
+        if event.get("kind") == "candidate":
+            proof_id = event["candidate_id"]
+        elif event.get("kind") == "probe":
+            proof_id = event["proof_id"]
+        else:
+            continue
+        if proof_id not in found:
+            found.append(proof_id)
+    return found
 
 
-def _current_active_idea(history: list[dict]) -> str | None:
-    """The latest idea still marked active, derived from append-only idea events."""
-    statuses: dict[str, str] = {}
-    for item in history:
-        if item.get("kind") == "idea":
-            statuses[item["id"]] = item.get("status", "active")
-        elif item.get("kind") == "idea_update" and item.get("id") in statuses:
-            statuses[item["id"]] = item.get("status", statuses[item["id"]])
-    return next((idea_id for idea_id, status in reversed(list(statuses.items())) if status == "active"), None)
+def resolve_node_ref(history: list[dict], reference: str) -> str:
+    value = reference.strip()
+    proof_ids = _graph_proof_ids(history)
+    if re.fullmatch(r"n[1-9][0-9]*", value):
+        index = int(value[1:])
+        if index <= len(proof_ids):
+            return proof_ids[index - 1]
+    elif re.fullmatch(r"#[1-9][0-9]*", value):
+        try:
+            return resolve_candidate_ref(history, value)
+        except ValueError:
+            pass
+    elif re.fullmatch(r"[pP][1-9][0-9]*", value):
+        try:
+            return resolve_probe_ref(history, value)
+        except ValueError:
+            pass
+    elif re.fullmatch(r"[0-9a-fA-F]{8,64}", value):
+        matches = [proof_id for proof_id in proof_ids if proof_id.startswith(value.lower())]
+        if len(matches) == 1:
+            return matches[0]
+    raise ValueError(text.render("messages/errors.node_reference_invalid", reference=value))
 
 
-def _region(text: str) -> list[int] | str:
-    """Proof lines such as "12-30", "lines 12–30", "L12..L30" or "line 7"; anything else is kept as text."""
-    numbers = [int(n) for n in re.findall(r"\d+", text)][:2]
-    if not numbers:
-        return text.strip()[:120]
-    return [min(numbers), max(numbers)]
+def _named_parent_id(history: list[dict], reference: str | None) -> str | None:
+    if not reference:
+        return None
+    try:
+        if re.fullmatch(r"\s*[pP][1-9][0-9]*\s*", reference):
+            return resolve_probe_ref(history, reference)
+        return resolve_candidate_ref(history, reference)
+    except ValueError:
+        return None
 
 
-def record_idea(run_id: str, title: str | None = None, hypothesis: str = "", region: str | None = None,
-                expected_effect: dict | None = None, idea_id: str | None = None,
-                status: str | None = None, reason: str = "") -> dict:
-    """Create or update a model-owned idea. The harness never authors or schedules ideas."""
+def _proof_reader(directory: Path) -> Callable[[str], str | None]:
+    """Read a stored proof by id, or None when the file is missing."""
+
+    def read(ident: str) -> str | None:
+        path = directory / "proofs" / f"{ident}.lean"
+        return path.read_text() if path.is_file() else None
+
+    return read
+
+
+def _file_node(
+    directory: Path,
+    history: list[dict],
+    proof_id: str,
+    proof: str,
+    named_parent: str | None = None,
+    operation: dict | None = None,
+    projection_out: list[Graph] | None = None,
+) -> tuple[dict, bool]:
+    """Append exactly one graph edge per proof id under the run's graph lock."""
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / "graph.lock").open("a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        history = events(directory)
+        existing = next(
+            (event for event in history if event.get("kind") == "edge" and event.get("proof_id") == proof_id), None
+        )
+        if existing:
+            if projection_out is not None:
+                projection_out.append(Graph.from_history(history, _proof_reader(directory)))
+            return existing, False
+        read = _proof_reader(directory)
+        graph = Graph.from_history(history, read)
+        recent = [
+            node.proof_id
+            for node in graph.nodes
+            if node.proof_id != proof_id and (directory / "proofs" / f"{node.proof_id}.lean").is_file()
+        ][-20:]
+        prior_texts = [(ident, read(ident)) for ident in recent]
+        measured_id, measured_score = measured_parent(prior_texts, proof)
+        focus_similarity = None
+        if operation is not None:
+            edge_type = operation["type"]
+            sources = list(operation.get("from", []))
+            exact = True
+            operation_data = (
+                {"hole": operation["hole"], "text": operation["text"]}
+                if edge_type == "filled_from"
+                else dict(operation)
+            )
+        else:
+            in_batch, batch_focus = _BATCH_FOCUS.get()
+            focus_id = batch_focus if in_batch else graph.focus
+            focus_proof = read(focus_id) if focus_id else None
+            focus_similarity = similarity(focus_proof, proof) if focus_proof is not None else None
+            if focus_id and focus_similarity is not None and focus_similarity >= FILING_MIN_SIMILARITY:
+                edge_type, sources, exact = "filed_under_focus", [focus_id], False
+            else:
+                edge_type, sources, exact = "root", [], False
+            operation_data = None
+        event = {
+            "kind": "edge",
+            "proof_id": proof_id,
+            "type": edge_type,
+            "from": sources,
+            "exact": exact,
+            "similarity": focus_similarity,
+            "named_parent": named_parent,
+            "measured_parent": measured_id,
+            "measured_similarity": measured_score,
+            "operation": operation_data,
+        }
+        _append(directory, event)
+        earlier: dict[str, list[dict]] = {}
+        graph_nodes = {node.proof_id: node for node in graph.nodes}
+        for node in graph.nodes:
+            if node.route is not None:
+                earlier.setdefault(node.route, []).append(node.signature)
+        parent = sources[0] if sources else None
+        parent_node = graph_nodes.get(parent)
+        if routes.is_draft(proof):
+            # Harness and test sketches never open a route; they belong to their base's route.
+            assignment = routes.attach(earlier, routes.signature(proof), parent_node.route if parent_node else None)
+        else:
+            assignment = routes.assign(
+                earlier,
+                routes.signature(proof),
+                parent_node.route if parent_node else None,
+                routes.line_diff(parent_node.proof_text, proof) if parent_node and parent_node.route else None,
+            )
+        origin = next(
+            (
+                item.get("origin", "model")
+                for item in history
+                if item.get("kind") == "candidate" and item.get("candidate_id") == proof_id
+            ),
+            "model",
+        )
+        attempt_kind = (
+            "probe"
+            if any(item.get("kind") == "probe" and item.get("proof_id") == proof_id for item in history)
+            else "candidate"
+        )
+        _append(
+            directory,
+            {
+                "kind": "route",
+                "proof_id": proof_id,
+                **assignment,
+                "assigned_by": "signature",
+                "parent": parent,
+                "holes": len(re.findall(r"\bsorry\b", proof)),
+                "credited": assignment["new"] and origin == "model",
+                "label": assignment["route"],
+                "short_label": assignment["route"],
+                "attempt_kind": attempt_kind,
+            },
+        )
+        batch_newly_filed = _BATCH_NEWLY_FILED.get()
+        if batch_newly_filed is not None:
+            batch_newly_filed.add(proof_id)
+        if projection_out is not None:
+            projection_out.append(Graph.from_history(events(directory), read))
+        return event, True
+
+
+def _settle_focus(directory: Path, proof_ids: list[str], graph: Graph | None = None) -> Graph:
+    history = events(directory)
+    graph = graph or Graph.from_history(history, _proof_reader(directory))
+    nodes = {node.proof_id: node for node in graph.nodes}
+    eligible = [nodes[ident] for ident in proof_ids if ident in nodes and nodes[ident].status in ("closed", "sketch")]
+    if not eligible:
+        return graph
+
+    def rank(node: Node) -> tuple[int, float]:
+        if node.status == "closed":
+            return (1, node.score if node.score is not None else 0.0)
+        proof = (directory / "proofs" / f"{node.proof_id}.lean").read_text()
+        return (0, -len(re.findall(r"\bsorry\b", proof)))
+
+    winner = max(eligible, key=rank)
+    if winner.proof_id != graph.focus:
+        _append(directory, {"kind": "focus", "proof_id": winner.proof_id, "reason": "batch_best"})
+        graph.focus = winner.proof_id
+    return graph
+
+
+def _check_stall(directory: Path, graph: Graph, newly_filed: set[str]) -> None:
+    raw_threshold = os.environ.get("ARENA_STALL_M", "12")
+    try:
+        threshold = int(raw_threshold)
+    except ValueError as error:
+        raise ValueError(text.render("messages/errors.stall_threshold")) from error
+    mode = os.environ.get("ARENA_STALL_TARGET", "best_other_cell")
+    if mode not in ("best_other_cell", "least_visited", "map_only"):
+        raise ValueError(text.render("messages/errors.stall_target", mode=mode))
+    current_focus = graph.focus
+    for fired in stall_fires(graph, threshold):
+        if fired["after"] not in newly_filed:
+            continue
+        target = stall_target(graph, fired, mode)
+        _append(
+            directory,
+            {
+                "kind": "stall",
+                "root": fired["root"],
+                "count": fired["count"],
+                "mode": mode,
+                "target": target.node.proof_id if target else None,
+            },
+        )
+        if target is None or target.node.proof_id == current_focus:
+            continue
+        _append(
+            directory,
+            {
+                "kind": "focus",
+                "proof_id": target.node.proof_id,
+                "reason": "stall",
+                "root": fired["root"],
+                "cell": target.letter,
+                "visits": target.visits,
+            },
+        )
+        current_focus = target.node.proof_id
+
+
+def _best_first(cells: list[Cell]) -> list[Cell]:
+    return sorted(cells, key=lambda cell: (-(quality(cell.node) or 0.0), cell.letter))
+
+
+def _no_work_candidates(graph: Graph, current_route: str | None) -> list[Node]:
+    """Starting points in order: best cells of other routes, the original, then other closed nodes by quality."""
+    others = [
+        cell.node
+        for cell in _best_first(archive(graph))
+        if (current_route is None or cell.route != current_route) and not routes.is_draft(cell.node.proof_text)
+    ]
+    original = [node for node in graph.nodes if node.origin == "reference"]
+    closed = sorted(
+        (node for node in graph.nodes if node.status == "closed" and not routes.is_draft(node.proof_text)),
+        key=lambda node: (-(quality(node) or 0.0), node.id),
+    )
+    unique: dict[str, Node] = {}
+    for node in [*others, *original, *closed]:
+        unique.setdefault(node.proof_id, node)
+    return list(unique.values())
+
+
+def _start_material(theorem: str, run_id: str, node: Node) -> dict:
+    """The node's proof and its three costliest steps by tokens, from the same price rows as the read view."""
+    table = price_table(theorem, run_id, node.id)
+    rows = sorted(table["rows"], key=lambda row: (-row["tokens"], row["first_line"]))[:3]
+    return {"proof": node.proof_text, "prices": render_price_table({**table, "rows": rows})}
+
+
+def no_work_focus(run_id: str, theorem: str) -> dict:
+    """Move focus after a turn with no work: never to the current focus, never to a starting point already offered."""
     directory = run_dir(run_id)
     history = events(directory)
-    if not history or not history[0].get("theorem"):
-        raise ValueError("Run is uninitialized")
-    if status is not None and status not in IDEA_STATUSES:
-        raise ValueError(f"status must be one of {', '.join(IDEA_STATUSES)}")
-    if status in ("parked", "abandoned", "succeeded") and not reason.strip():
-        raise ValueError(f"Give a one-line reason when marking an idea {status}")
-    effect = {str(k): str(v)[:80] for k, v in (expected_effect or {}).items()
-              if k in ("tokens", "heartbeats", "compat")}
-    span = _region(region) if region and region.strip() else None
-    known = {item["id"]: item for item in history if item.get("kind") == "idea"}
-    if idea_id:
-        idea_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", idea_id.strip())[:40] or None
-    if idea_id and idea_id not in known and not (title and title.strip()):
-        raise ValueError(f"Unknown idea {idea_id}; give a title to create it "
-                         f"(recorded ideas: {', '.join(known) or 'none yet'})")
-    if idea_id and idea_id in known:
-        update = {"kind": "idea_update", "id": idea_id}
-        if title: update["title"] = title.strip()[:120]
-        if hypothesis: update["hypothesis"] = hypothesis.strip()[:600]
-        if span: update["region"] = span
-        if effect: update["expected_effect"] = effect
-        if status: update["status"] = status
-        if reason.strip(): update["reason"] = reason.strip()[:300]
-        _append(directory, update)
-        return {"ok": True, **{k: v for k, v in update.items() if k != "kind"}}
-    if not title or not title.strip():
-        raise ValueError("A new idea needs a title")
-    # Models often name their own ideas; keep that name so later updates by it work.
-    identifier = idea_id or next(f"i{n}" for n in range(len(known) + 1, len(known) + 1000) if f"i{n}" not in known)
-    item = {"kind": "idea", "id": identifier, "title": title.strip()[:120],
-            "hypothesis": hypothesis.strip()[:600], "region": span, "expected_effect": effect,
-            "status": status or "active", "reason": reason.strip()[:300]}
-    _append(directory, item)
-    return {"ok": True, **{k: v for k, v in item.items() if k != "kind"}}
+    graph = Graph.from_history(history, _proof_reader(directory))
+    current = next((node for node in graph.nodes if node.proof_id == graph.focus), None)
+    offered = {item["proof_id"] for item in history if item.get("kind") == "focus" and item.get("reason") == "no_work"}
+    candidates = [
+        node for node in _no_work_candidates(graph, current.route if current else None) if node.proof_id != graph.focus
+    ]
+    fresh = [node for node in candidates if node.proof_id not in offered]
+    # Once every candidate was offered, the cycle starts again; the current focus stays excluded.
+    pool = fresh or candidates
+    if not pool:
+        return {"moved": False}
+    target = pool[0]
+    _append(directory, {"kind": "focus", "proof_id": target.proof_id, "reason": "no_work"})
+    history = events(directory)
+    return {"moved": True, "label": _update_id(history, target.proof_id), **_start_material(theorem, run_id, target)}
+
+
+def _restart_order(graph: Graph) -> list[Node]:
+    """Restart starting points in rotation: the best clean node, the original reference, then the best cell of each
+    other route that scores no lower than that best. Sketches and test drafts never start a restart."""
+    reference = next((node for node in graph.nodes if node.origin == "reference"), None)
+    scored = [node for node in graph.nodes if node.score is not None and not routes.is_draft(node.proof_text)]
+    best = max(scored, key=lambda node: node.score) if scored else reference
+    if best is None:
+        raise ValueError(text.render("messages/errors.node_reference_invalid", reference="restart start"))
+    excluded = {node.route for node in (best, reference) if node is not None}
+    per_route: dict[str | None, Node] = {}
+    for cell in _best_first(archive(graph)):
+        node = cell.node
+        if cell.route in excluded or routes.is_draft(node.proof_text) or node.score is None:
+            continue
+        if best.score is not None and node.score < best.score:
+            continue
+        per_route.setdefault(cell.route, node)
+    unique: dict[str, Node] = {}
+    for node in [best, reference, *per_route.values()]:
+        if node is not None:
+            unique.setdefault(node.proof_id, node)
+    return list(unique.values())
+
+
+def _island_order(graph: Graph) -> list[Node | None]:
+    """Island starting points in rotation: the statement alone (None), the original reference, then the best scored
+    node on another route than the best. Each island leaves the best node's skeleton behind."""
+    reference = next((node for node in graph.nodes if node.origin == "reference"), None)
+    scored = [node for node in graph.nodes if node.score is not None and not routes.is_draft(node.proof_text)]
+    best = max(scored, key=lambda node: node.score) if scored else None
+    other = next(
+        (
+            cell.node
+            for cell in _best_first(archive(graph))
+            if cell.node.score is not None
+            and not routes.is_draft(cell.node.proof_text)
+            and best is not None
+            and cell.route != best.route
+        ),
+        None,
+    )
+    return [None, *[node for node in (reference, other) if node is not None and node is not best]]
+
+
+def _tried_since_restart(history: list[dict], graph: Graph) -> list[str]:
+    """Distinct ideas tried since the last restart that failed or did not beat the best so far, newest last."""
+    start = max((seq for seq, item in enumerate(history) if item.get("kind") == "restart"), default=-1)
+    nodes = {node.proof_id: node for node in graph.nodes}
+    best = max(
+        (
+            score
+            for score in (
+                _metric_score((item.get("result") or {}).get("metrics"))
+                for item in history[: start + 1]
+                if item.get("kind") == "evaluation"
+            )
+            if score is not None
+        ),
+        default=None,
+    )
+    lines: list[str] = []
+    for item in history[start + 1 :]:
+        result = item.get("result") or {}
+        if item.get("kind") == "probe":
+            proof_id = item["proof_id"]
+            verdict = _failure_text(result) if _probe_failed(result) else None
+        elif item.get("kind") == "evaluation":
+            proof_id = item["candidate_id"]
+            metrics = result.get("metrics") or {}
+            score = _metric_score(metrics)
+            if not metrics.get("compiled"):
+                verdict = _failure_text(result)
+            elif score is None or (best is not None and score <= best):
+                verdict = None
+            else:
+                best = score
+                continue
+        else:
+            continue
+        node = nodes.get(proof_id)
+        parents = (node.edge or {}).get("from") or [] if node else []
+        parent = nodes.get(parents[0]) if parents else None
+        changes = changed_steps(parent.steps, node.steps) if parent and node else []
+        steps = ", ".join(step_id for change in changes for step_id in change["ids"]) or "whole proof"
+        outcome = (
+            text.render("packet/restart.tried_failed", reason=verdict)
+            if verdict
+            else text.render("packet/restart.tried_no_gain")
+        )
+        lines.append(
+            text.render(
+                "packet/restart.tried_line",
+                label=_update_id(history, proof_id),
+                steps=steps,
+                verdict=outcome,
+            )
+        )
+    distinct = [line for index, line in enumerate(lines) if line not in lines[index + 1 :]]
+    return distinct[-8:]
+
+
+def _kickoff_within(sections: list[tuple[str, str]], limit: int) -> str:
+    """The kickoff packet fitted to `limit` characters, shedding entries in the packet's own priority order."""
+    from arena import context
+
+    parts = []
+    for title, content in sections:
+        head = f"{title}\n"
+        if title and content.startswith(head):
+            parts.append((title, content[len(head) :].split("\n")))
+        else:
+            parts.append(("", content.split("\n")))
+    fitted = context._fit_sections(parts, limit)
+    return "\n\n".join((f"{title}\n" if title else "") + "\n".join(body) for title, body in fitted) + "\n"
+
+
+def island_packet(name: str, run_id: str) -> dict:
+    """A new island after a turn that ended with text: a fresh context from the statement alone, the original
+    reference, or another route's best node, in rotation. The best so far stays recorded."""
+    return restart_packet(name, run_id, island=True)
+
+
+def restart_packet(name: str, run_id: str, island: bool = False) -> dict:
+    """Restart the conversation at the next starting point: the kickoff packet, the start node, the costliest steps,
+    the ideas already tried, and the map. The whole packet stays within the packet budget."""
+    from arena import context, reply
+
+    directory = run_dir(run_id)
+    history = events(directory)
+    graph = Graph.from_history(history, _proof_reader(directory))
+    restarts = sum(1 for item in history if item.get("kind") == "restart")
+    reference = next((node for node in graph.nodes if node.origin == "reference"), None)
+    if island:
+        islands = sum(1 for item in history if item.get("kind") == "restart" and item.get("island"))
+        pick = _island_order(graph)[islands % len(_island_order(graph))]
+        blank, start = pick is None, pick or reference
+    else:
+        order = _restart_order(graph)
+        blank, start = False, order[restarts % len(order)]
+    if start is None:
+        raise ValueError(text.render("messages/errors.node_reference_invalid", reference="restart start"))
+    scored = [node for node in graph.nodes if node.score is not None]
+    best_node = max(scored, key=lambda node: node.score) if scored else None
+    tried = _tried_since_restart(history, graph)
+    _append(directory, {"kind": "restart", "proof_id": start.proof_id, "island": island, "blank": blank})
+    _append(directory, {"kind": "focus", "proof_id": start.proof_id, "reason": "island" if island else "restart"})
+    history = events(directory)
+    graph_map = map_view_from(history, directory)
+    map_lines = list(reply._map_lines({**graph_map, "open": []}))
+    label = _update_id(history, start.proof_id)
+    best = f"{_update_id(history, best_node.proof_id)} (score {best_node.score})" if best_node is not None else label
+    if blank:
+        statement = problem(name)["statement"]
+        head = [
+            text.render("packet/restart.island_blank", best=best),
+            text.render("packet/restart.island_statement", statement=statement),
+        ]
+    else:
+        material = _start_material(name, run_id, start)
+        head = [
+            text.render("packet/restart.island_start", label=label, best=best)
+            if island
+            else text.render("packet/restart.start", label=label),
+            f"```lean\n{start.proof_text}\n```",
+            text.render("packet/restart.prices_heading"),
+            material["prices"].rstrip("\n"),
+        ]
+    sections = context.packet_sections(name)
+    while True:
+        tail = "\n".join(
+            [
+                *head,
+                *([text.render("packet/restart.tried_heading"), *tried] if tried else []),
+                text.render("messages/compaction-memory.map_heading"),
+                *map_lines,
+            ]
+        )
+        try:
+            kickoff = _kickoff_within(sections, context.MAX_PACKET_CHARS - len(tail) - 2)
+            break
+        except ValueError:
+            # The kickoff cannot shrink further: shed the map first, then the tried list.
+            if map_lines:
+                map_lines.pop()
+            elif tried:
+                tried.pop(0)
+            else:
+                raise
+    return {
+        "ok": True,
+        "text": kickoff.rstrip("\n") + "\n" + tail + "\n",
+        "label": label,
+        "restart": restarts + 1,
+    }
 
 
 def _metric_score(metrics: dict | None) -> float | None:
@@ -1343,46 +1449,74 @@ def _summaries(history: list[dict]) -> list[dict]:
     rows: dict[str, dict] = {}
     for item in history:
         if item.get("kind") == "candidate":
-            rows[item["candidate_id"]] = {"id": item["candidate_id"], "n": len(rows) + 1,
-                "idea_id": item.get("idea_id"), "origin": item.get("origin", "model"),
-                "parents": item.get("parents", []), "evaluations": []}
+            rows[item["candidate_id"]] = {
+                "id": item["candidate_id"],
+                "n": len(rows) + 1,
+                "origin": item.get("origin", "model"),
+                "parents": item.get("parents", []),
+                "evaluations": [],
+            }
         elif item.get("kind") == "evaluation" and item["candidate_id"] in rows:
             result = item["result"]
-            rows[item["candidate_id"]]["evaluations"].append({
-                "mode": item["mode"], "status": _evaluation_status(result, item["mode"], total),
-                "result": result, "score": _metric_score(result.get("metrics"))})
+            rows[item["candidate_id"]]["evaluations"].append(
+                {
+                    "mode": item["mode"],
+                    "status": _evaluation_status(result, item["mode"], total),
+                    "result": result,
+                    "score": _metric_score(result.get("metrics")),
+                }
+            )
     for row in rows.values():
         full = [e for e in row["evaluations"] if e["status"] == "full"]
         primary = [e for e in row["evaluations"] if e["status"] == "primary"]
-        chosen = (max(full, key=lambda e: e["score"] or -1) if full else
-                  max(primary, key=lambda e: e["score"] or -1) if primary else
-                  (row["evaluations"][-1] if row["evaluations"] else None))
+        chosen = (
+            max(full, key=lambda e: e["score"] or -1)
+            if full
+            else max(primary, key=lambda e: e["score"] or -1)
+            if primary
+            else (row["evaluations"][-1] if row["evaluations"] else None)
+        )
         row["status"] = chosen["status"] if chosen else "unevaluated"
         result = chosen["result"] if chosen else {}
-        row.update(tokens=result.get("tokens"), heartbeats=result.get("heartbeat"),
-                   score=chosen["score"] if chosen else None,
-                   verified=bool(full), metrics=result.get("metrics"), evaluated=chosen is not None)
+        row.update(
+            tokens=result.get("tokens"),
+            heartbeats=result.get("heartbeat"),
+            score=chosen["score"] if chosen else None,
+            verified=bool(full),
+            metrics=result.get("metrics"),
+            evaluated=chosen is not None,
+        )
     return list(rows.values())
 
 
 def _brief(row: dict | None) -> dict | None:
     if not row:
         return None
-    return {"candidate": f"#{row['n']}", "tokens": row["tokens"], "heartbeats": row["heartbeats"],
-            ("proxy" if row["verified"] else "estimated_proxy"): row["score"], "status": row["status"]}
+    return {
+        "candidate": f"#{row['n']}",
+        "tokens": row["tokens"],
+        "heartbeats": row["heartbeats"],
+        ("proxy" if row["verified"] else "estimated_proxy"): row["score"],
+        "status": row["status"],
+    }
 
 
 def _best(rows: list[dict], exclude: str | None = None) -> dict | None:
-    pool = [r for r in rows if r["id"] != exclude and r["score"] is not None
-            and r["status"] in ("full", "primary") and r["origin"] != "reference"]
+    pool = [
+        r
+        for r in rows
+        if r["id"] != exclude
+        and r["score"] is not None
+        and r["status"] in ("full", "primary")
+        and r["origin"] != "reference"
+    ]
     return max(pool, key=lambda r: (r["verified"], r["score"]), default=None)
 
 
 def _delta(current: dict, other: dict | None) -> dict | None:
     if not other or other.get("tokens") is None or other.get("heartbeats") is None:
         return None
-    out = {"tokens": current["tokens"] - other["tokens"],
-           "heartbeats": current["heartbeats"] - other["heartbeats"]}
+    out = {"tokens": current["tokens"] - other["tokens"], "heartbeats": current["heartbeats"] - other["heartbeats"]}
     if current.get("score") is not None and other.get("score") is not None:
         out["proxy"] = round(current["score"] - other["score"], 2)
     return out
@@ -1404,6 +1538,7 @@ def _advisory(rows: list[dict], window: int = 4) -> str | None:
                 found.add(parent)
                 stack.extend(by_id[parent]["parents"])
         return found
+
     recent = model[-window:]
     shared = set.intersection(*(lineage(r) for r in recent)) - {r["id"] for r in rows if r["origin"] == "reference"}
     if not shared:
@@ -1412,15 +1547,37 @@ def _advisory(rows: list[dict], window: int = 4) -> str | None:
     base = by_id[root]["score"]
     if any(r["score"] is not None and (base is None or r["score"] > base) for r in recent):
         return None
-    return (f"The last {window} candidates (#{recent[0]['n']}-#{recent[-1]['n']}) all descend from "
-            f"#{by_id[root]['n']} and none improved on its score" + (f" of {base}." if base is not None else "."))
+    first, last, origin = recent[0]["n"], recent[-1]["n"], by_id[root]["n"]
+    score_suffix = f" of {base}." if base is not None else "."
+    return f"The last {window} candidates (#{first}-#{last}) all descend from #{origin} and none improved on its score{score_suffix}"  # log: operator state # not-model-facing
 
 
 def _model_view(result: dict) -> dict:
     """Compact, non-duplicated payload for the model; the ledger keeps the full result."""
-    view = {key: result[key] for key in ("ok", "mode", "candidate", "probe", "tokens", "heartbeat",
-            "idea_id", "cached", "candidate_path", "start_line", "end_line", "error", "notes",
-            "full_check", "advisory", "scored", "contains_sorry", "goals") if result.get(key) not in (None, [], "")}
+    view = {
+        key: result[key]
+        for key in (
+            "ok",
+            "mode",
+            "candidate",
+            "probe",
+            "tokens",
+            "heartbeat",
+            "cached",
+            "candidate_path",
+            "start_line",
+            "end_line",
+            "error",
+            "notes",
+            "full_check",
+            "advisory",
+            "price_row",
+            "scored",
+            "contains_sorry",
+            "goals",
+        )
+        if result.get(key) not in (None, [], "")
+    }
     # `ok` says the tool ran; `compiled` says whether the draft compiled. On a failed compile the
     # heartbeat is only the work done before the error, not a cost of the draft.
     failed = any(not info.get("passed") for info in (result.get("compat") or {}).values())
@@ -1429,10 +1586,12 @@ def _model_view(result: dict) -> dict:
         view["compiled"] = False
     metrics = result.get("metrics")
     if metrics and metrics.get("axes"):
-        view["metrics"] = {key: metrics[key] for key in ("proxy", "estimated_proxy", "assumes_full_compat",
-                                                         "deltas") if key in metrics}
-        view["metrics"]["axes"] = {axis: {k: v for k, v in info.items() if k != "reference"}
-                                   for axis, info in metrics["axes"].items()}
+        view["metrics"] = {
+            key: metrics[key] for key in ("proxy", "estimated_proxy", "assumes_full_compat", "deltas") if key in metrics
+        }
+        view["metrics"]["axes"] = {
+            axis: {k: v for k, v in info.items() if k != "reference"} for axis, info in metrics["axes"].items()
+        }
     elif metrics is not None and not metrics.get("compiled"):
         view["metrics"] = {"compiled": False}
     compat = {}
@@ -1445,7 +1604,7 @@ def _model_view(result: dict) -> dict:
         if lean.get("path") == "session":
             item["lean"] = "session"
         elif lean.get("path") == "cold-fallback":
-            item["lean"] = f"cold (session unavailable: {lean.get('reason')})"
+            item["lean"] = text.render("messages/errors.cold_session_unavailable", reason=lean.get("reason"))
         counts = info.get("diagnostic_counts") or {}
         if counts.get("omitted"):
             item["omitted_diagnostics"] = counts["omitted"]
@@ -1466,20 +1625,34 @@ def _compiled_versions(history: list[dict], candidate_id: str, row: dict) -> dic
     """Passing per-version results of this evaluator's fast check of a candidate, for reuse."""
     key = _evaluation_key(candidate_id, "fast", row)
     fast = next((item for item in history if item.get("kind") == "evaluation" and item.get("key") == key), None)
-    return {version: info for version, info in ((fast or {}).get("result", {}).get("compat") or {}).items()
-            if info.get("passed")}
+    return {
+        version: info
+        for version, info in ((fast or {}).get("result", {}).get("compat") or {}).items()
+        if info.get("passed")
+    }
 
 
-def record_evaluation(name: str, run_id: str, proof: str, mode: str,
-                      parents: list[str] | None = None, hypothesis: str = "",
-                      origin: str = "model", merge: dict | None = None,
-                      materialize_live: bool = True, idea_id: str | None = None,
-                      lane: str = "model", trigger: str = "model", precomputed: dict | None = None) -> dict:
+def record_evaluation(
+    name: str,
+    run_id: str,
+    proof: str,
+    mode: str,
+    parents: list[str] | None = None,
+    hypothesis: str = "",
+    origin: str = "model",
+    merge: dict | None = None,
+    materialize_live: bool = True,
+    lane: str = "model",
+    trigger: str = "model",
+    precomputed: dict | None = None,
+    operation: dict | None = None,
+    named_parent: str | object | None = _NAMED_PARENT_UNSET,
+) -> dict:
     """Record a candidate and its evaluation. `precomputed` is a result the caller already
     compiled for this exact proof and mode; `trigger` says whether the model or the
     harness asked for it."""
     if mode not in ("fast", "full"):
-        raise ValueError("mode must be fast or full")
+        raise ValueError(text.render("messages/errors.evaluation_mode"))
     directory = run_dir(run_id)
     if lane == "model" and trigger == "model":
         _refuse_if_tripped(directory)
@@ -1492,45 +1665,60 @@ def record_evaluation(name: str, run_id: str, proof: str, mode: str,
     with _candidate_lock(directory, candidate_id):
         history = events(directory)
         if not history or history[0].get("theorem") != name:
-            raise ValueError("Run is uninitialized or theorem differs")
+            raise ValueError(text.render("messages/errors.run_theorem_mismatch"))
         if history[0].get("versions") and history[0]["versions"] != [list(pair) for pair in versions(row)]:
-            raise ValueError("Pinned source versions changed since run initialization")
+            raise ValueError(text.render("messages/errors.source_versions_changed"))
         known = set(_candidate_ids(history))
-        if candidate_id not in known and idea_id is None:
-            idea_id = _current_active_idea(history)
         explicit: list[str] = []
         for reference in parents or []:
             try:
                 resolved = resolve_candidate_ref(history, reference)
             except ValueError as error:
-                notes.append(f"parent {reference} ignored: {error}")
+                notes.append(text.render("messages/errors.parent_ignored", reference=reference, error=error))
                 continue
             if resolved != candidate_id and resolved not in explicit:
                 explicit.append(resolved)
         lineage = explicit or ([_current(history)] if candidate_id not in known and _current(history) else [])
         lineage = [parent for parent in lineage if parent != candidate_id]
-        if candidate_id in known and idea_id is None:
-            idea_id = next(item.get("idea_id") for item in history
-                           if item.get("kind") == "candidate" and item["candidate_id"] == candidate_id)
-        if idea_id and idea_id not in {item["id"] for item in history if item.get("kind") == "idea"}:
-            notes.append(f"idea_id {idea_id} is not a recorded idea; kept as a label")
         _snapshot(directory, candidate_id, proof)
         if candidate_id not in known:
-            _append(directory, {"kind": "candidate", "candidate_id": candidate_id,
-                                "parents": lineage, "hypothesis": hypothesis,
-                                "origin": origin, "merge": merge, "idea_id": idea_id,
-                                "source_versions": versions(row),
-                                "evaluator_sha256": _evaluator_sha()})
-        elif explicit and not any(item.get("kind") == "derivation"
-                                  and item.get("candidate_id") == candidate_id
-                                  and item.get("parents") == explicit for item in history):
-            original = next(item for item in history if item.get("kind") == "candidate"
-                            and item["candidate_id"] == candidate_id)
+            _append(
+                directory,
+                {
+                    "kind": "candidate",
+                    "candidate_id": candidate_id,
+                    "parents": lineage,
+                    "hypothesis": hypothesis,
+                    "origin": origin,
+                    "merge": merge,
+                    "source_versions": versions(row),
+                    "evaluator_sha256": _evaluator_sha(),
+                },
+            )
+        elif explicit and not any(
+            item.get("kind") == "derivation"
+            and item.get("candidate_id") == candidate_id
+            and item.get("parents") == explicit
+            for item in history
+        ):
+            original = next(
+                item for item in history if item.get("kind") == "candidate" and item["candidate_id"] == candidate_id
+            )
             if original.get("parents", []) != explicit:
-                _append(directory, {"kind": "derivation", "candidate_id": candidate_id,
-                                    "parents": explicit, "origin": origin, "merge": merge})
+                _append(
+                    directory,
+                    {
+                        "kind": "derivation",
+                        "candidate_id": candidate_id,
+                        "parents": explicit,
+                        "origin": origin,
+                        "merge": merge,
+                    },
+                )
         key = _evaluation_key(candidate_id, mode, row)
-        prior = next((item for item in reversed(history) if item.get("kind") == "evaluation" and item["key"] == key), None)
+        prior = next(
+            (item for item in reversed(history) if item.get("kind") == "evaluation" and item["key"] == key), None
+        )
         if prior:
             result = json.loads(json.dumps(prior["result"]))
         elif precomputed is not None:
@@ -1538,33 +1726,73 @@ def record_evaluation(name: str, run_id: str, proof: str, mode: str,
         else:
             try:
                 with lean_lock(directory, lane):
-                    result = _evaluate(name, proof, mode, known=_compiled_versions(history, candidate_id, row)
-                                       if mode == "full" else None, lane=lane)
+                    result = _evaluate(
+                        name,
+                        proof,
+                        mode,
+                        known=_compiled_versions(history, candidate_id, row) if mode == "full" else None,
+                        lane=lane,
+                    )
             except (ValueError, FileNotFoundError) as error:
-                result = {"ok": False, "name": name, "mode": mode, "error": str(error),
-                          "compat": {}, "tokens": None, "heartbeat": None, "local_proxy": None}
+                result = {
+                    "ok": False,
+                    "name": name,
+                    "mode": mode,
+                    "error": str(error),
+                    "compat": {},
+                    "tokens": None,
+                    "heartbeat": None,
+                    "local_proxy": None,
+                }
                 if isinstance(error, FileNotFoundError):
                     result["lean_unavailable"] = True  # Lean (or the workspace) could not run: counts for the breaker
         if not prior:
             _externalize_output(directory, candidate_id, result)
-            _append(directory, {"kind": "evaluation", "candidate_id": candidate_id, "key": key,
-                                "mode": mode, "trigger": trigger, "result": result})
+            _append(
+                directory,
+                {
+                    "kind": "evaluation",
+                    "candidate_id": candidate_id,
+                    "key": key,
+                    "mode": mode,
+                    "trigger": trigger,
+                    "result": result,
+                },
+            )
     if lane == "model" and trigger == "model" and not prior:
         _check_breaker(directory)
-    if result.get("tokens") is not None and goalstate.closed(result):
-        # Route credit is for compiled proofs only: a failed compile is not queued for extraction.
-        _record_route_later(directory, name, candidate_id, proof)
     location = materialize(name, run_id, proof) if materialize_live and result.get("tokens") is not None else {}
     if location:
         _append(directory, {"kind": "current", "candidate_id": candidate_id})
+    filing_history = events(directory)
+    in_batch, _ = _BATCH_FOCUS.get()
+    projection_out: list[Graph] = []
+    _, newly_filed = _file_node(
+        directory,
+        filing_history,
+        candidate_id,
+        proof,
+        _named_parent_id(
+            filing_history,
+            (parents or [None])[0] if named_parent is _NAMED_PARENT_UNSET else named_parent,
+        ),
+        operation,
+        None if in_batch else projection_out,
+    )
+    if not in_batch:
+        graph = _settle_focus(directory, [candidate_id], projection_out[0] if projection_out else None)
+        _check_stall(directory, graph, {candidate_id} if newly_filed else set())
     history = events(directory)
     rows = _summaries(history)
     me = next((r for r in rows if r["id"] == candidate_id), None)
     result.setdefault("metrics", None)
     if me and result["metrics"] and result["metrics"].get("axes"):
         deltas = result["metrics"].setdefault("deltas", {})
-        current = {"tokens": result["tokens"], "heartbeats": result["heartbeat"],
-                   "score": _metric_score(result["metrics"])}
+        current = {
+            "tokens": result["tokens"],
+            "heartbeats": result["heartbeat"],
+            "score": _metric_score(result["metrics"]),
+        }
         first_parent = next((r for r in rows if r["id"] == (explicit or lineage or [None])[0]), None)
         if first_parent and first_parent["evaluated"]:
             deltas["vs_parent"] = {"candidate": f"#{first_parent['n']}", **(_delta(current, first_parent) or {})}
@@ -1576,43 +1804,61 @@ def record_evaluation(name: str, run_id: str, proof: str, mode: str,
     best_line = {"verified": _brief(verified)}
     if fast and (not verified or (fast["score"] or 0) > (verified["score"] or 0)):
         best_line["fast_only"] = _brief(fast)
-    return {**result, "candidate_id": candidate_id, "candidate": _label(history, candidate_id),
-            "node_number": _candidate_ids(history).index(candidate_id) + 1,
-            "idea_id": idea_id, "cached": prior is not None, "notes": notes,
-            "best_so_far": best_line, "advisory": _advisory(rows), **location}
+    reply = {
+        **result,
+        "candidate_id": candidate_id,
+        "candidate": _label(history, candidate_id),
+        "node_number": _candidate_ids(history).index(candidate_id) + 1,
+        "cached": prior is not None,
+        "notes": notes,
+        "best_so_far": best_line,
+        "advisory": _advisory(rows),
+        **location,
+    }
+    if me and (result.get("metrics") or {}).get("axes") and not re.search(r"\bsorry\b", proof):
+        projection = projection_out[0] if projection_out else Graph.from_history(history, _proof_reader(directory))
+        node = next((item for item in projection.nodes if item.proof_id == candidate_id), None)
+        if node is not None and node.score is not None:
+            parent_ids = (node.edge or {}).get("from") or []
+            by_id = {item.proof_id: item for item in projection.nodes}
+            parent_node = by_id.get(parent_ids[0]) if parent_ids else None
+            scored = [item for item in projection.nodes if item.score is not None and item.proof_id != node.proof_id]
+            best_node = max(scored, key=lambda item: item.score) if scored else None
+            cached_profiles = _cached_profiles(name, history)
+            old_profile = cached_profiles.get(parent_node.proof_id) if parent_node else None
+            new_profile = cached_profiles.get(node.proof_id)
+            old_hb = _step_heartbeats(parent_node, old_profile)
+            new_hb = _step_heartbeats(node, new_profile)
+            changes = changed_steps(parent_node.steps, node.steps, old_hb, new_hb) if parent_node else []
+            row = build_price_row(
+                node,
+                parent_node,
+                best_node,
+                changed_lines(parent_node.proof_text, node.proof_text)
+                if parent_node
+                else len(node.proof_text.splitlines()),
+                changes,
+            )
+            # The model sees graph ids (nK) everywhere else; stored labels (#k, pK) stay internal.
+            row["label"] = _update_id(history, node.proof_id)
+            row["parent_label"] = _update_id(history, parent_node.proof_id) if parent_node else None
+            total_versions = len(versions(problem(name)))
+            row["versions"] = _versions_text(node.versions, total_versions)
+            reply["price_row"] = render_price_row(row, parent_node is None, parent_node is best_node)
+    return reply
 
 
-def evaluate_request(name: str, run_id: str, proof: str | None = None, mode: str = "fast",
-                     parents: list[str] | None = None, hypothesis: str = "", idea_id: str | None = None,
-                     candidate_ref: str | None = None, from_probe: str | None = None) -> dict:
-    """Entry for the model: evaluate a proof, an existing `#N`, or a probe by ID."""
-    if proof is not None and not proof.strip():
-        proof = None
-    candidate_ref = candidate_ref or None
-    from_probe = from_probe or None
-    if sum(value is not None for value in (proof, candidate_ref, from_probe)) != 1:
-        raise ValueError("Pass exactly one of proof, candidate, or from_probe")
-    directory = run_dir(run_id)
-    history = events(directory)
-    if candidate_ref:
-        candidate_id = resolve_candidate_ref(history, candidate_ref)
-        proof = (directory / "proofs" / f"{candidate_id}.lean").read_text()
-    elif from_probe:
-        proof_id = resolve_probe_ref(history, from_probe)
-        source = next(item for item in reversed(history)
-                      if item.get("kind") == "probe" and item["proof_id"] == proof_id)
-        proof = (directory / "proofs" / f"{proof_id}.lean").read_text()
-        idea_id = idea_id or source.get("idea_id")
-        parents = parents or ([source["parent"]] if source.get("parent") else None)
-    if not proof:
-        raise ValueError("Supply proof, candidate (#N) or from_probe (pN)")
-    try:
-        result = record_evaluation(name, run_id, proof, mode, parents, hypothesis, idea_id=idea_id)
-    except ValueError as error:
-        if str(error) in ("FORBIDDEN: sorry", "FORBIDDEN: admit"):
-            raise ValueError(f"{error}; use arena_probe to inspect a draft with holes") from None
-        raise
-    return _model_view({**result, "full_check": _full_check_status(events(directory), result["candidate_id"])})
+def evaluate_request(
+    name: str,
+    run_id: str,
+    proof: str,
+    mode: str = "fast",
+    parents: list[str] | None = None,
+    hypothesis: str = "",
+) -> dict:
+    """Evaluate one complete proof and return its scored view."""
+    result = record_evaluation(name, run_id, proof, mode, parents, hypothesis)
+    return _model_view({**result, "full_check": _full_check_status(events(run_dir(run_id)), result["candidate_id"])})
 
 
 def _full_check_status(history: list[dict], candidate_id: str) -> str | None:
@@ -1624,12 +1870,12 @@ def _full_check_status(history: list[dict], candidate_id: str) -> str | None:
     total = len(history[0].get("versions") or [1])
     done = next((e for e in reversed(row["evaluations"]) if e["mode"] == "full"), None)
     if done:
-        return _check_text(row["n"], done["result"], total)
-    return f"queued: the other {total - 1} version(s) are checked in the background"
+        return _check_text(_update_id(history, candidate_id), done["result"], total)
+    return text.render("replies/check.queued", count=total - 1)
 
 
 # Results compiled ahead of time for the current batch, keyed by normalized draft text.
-_PRECOMPILED: ContextVar[dict[str, dict]] = ContextVar("arena_precompiled_probes", default={})
+_PRECOMPILED: ContextVar[dict[str, dict] | None] = ContextVar("arena_precompiled_probes", default=None)
 PROBE_GB = 2.0  # one Lean process compiling a Mathlib-sized file
 PROBE_WORKERS = 4
 
@@ -1659,8 +1905,13 @@ def _compile_probe(name: str, row: dict, proof: str) -> dict:
     try:
         return evaluate(name, proof, "fast" if complete else "probe")
     except (ValueError, FileNotFoundError) as error:
-        return {"ok": False, "mode": "probe", "error": str(error), "compat": {},
-                **({"lean_unavailable": True} if isinstance(error, FileNotFoundError) else {})}
+        return {
+            "ok": False,
+            "mode": "probe",
+            "error": str(error),
+            "compat": {},
+            **({"lean_unavailable": True} if isinstance(error, FileNotFoundError) else {}),
+        }
 
 
 def _compile_probes(name: str, directory: Path, drafts: list[str]) -> dict[str, dict]:
@@ -1685,18 +1936,26 @@ def _compile_probes(name: str, directory: Path, drafts: list[str]) -> dict[str, 
     if not pending:
         return {}
     compiled: dict[str, dict] = {}
-    with lean_lock(directory):
-        with ThreadPoolExecutor(max_workers=_probe_workers(len(pending))) as pool:
-            futures = {proof: pool.submit(_compile_probe, name, row, proof) for proof in pending}
-            for proof, future in futures.items():
-                try:
-                    compiled[proof] = future.result()
-                except Exception:
-                    continue  # `probe` recompiles this one on its own
+    with lean_lock(directory), ThreadPoolExecutor(max_workers=_probe_workers(len(pending))) as pool:
+        futures = {proof: pool.submit(_compile_probe, name, row, proof) for proof in pending}
+        for proof, future in futures.items():
+            try:
+                compiled[proof] = future.result()
+            except Exception:
+                continue  # `probe` recompiles this one on its own
     return compiled
 
 
-def probe(name: str, run_id: str, proof: str, idea_id: str | None = None, parent: str | None = None) -> dict:
+def probe(
+    name: str,
+    run_id: str,
+    proof: str,
+    parent: str | None = None,
+    operation: dict | None = None,
+    mode: str = "fast",
+    note: str | None = None,
+    named_parent: str | object | None = _NAMED_PARENT_UNSET,
+) -> dict:
     """Compile a draft (sorry allowed) in the shadow project without creating a candidate."""
     proof = normalize_draft(name, proof)
     directory = run_dir(run_id)
@@ -1709,46 +1968,111 @@ def probe(name: str, run_id: str, proof: str, idea_id: str | None = None, parent
         try:
             parent_id = resolve_parent_ref(history, parent)
         except ValueError as error:
-            notes.append(f"parent {parent} ignored: {error}")
+            notes.append(text.render("messages/errors.parent_ignored", reference=parent, error=error))
     parent_id = parent_id or _current(history)
     proof_id = hashlib.sha256((name + "\0" + proof).encode()).hexdigest()
     if proof_id in set(_candidate_ids(history)):
-        return evaluate_request(name, run_id, proof, idea_id=idea_id, parents=[parent] if parent else None)
-    earlier = next((item for item in reversed(history)
-                    if item.get("kind") == "probe" and item["proof_id"] == proof_id), None)
-    idea_id = idea_id or (earlier or {}).get("idea_id") or _current_active_idea(history)
+        return evaluate_request(name, run_id, proof, mode, parents=[parent] if parent else None)
+    earlier = next(
+        (item for item in reversed(history) if item.get("kind") == "probe" and item["proof_id"] == proof_id), None
+    )
+    newly_filed: set[str] = set()
     if earlier:
         result = earlier["result"]
     else:
         validate_proof(row, proof, allow_sorry=True)
         complete = not _has_hole(row, proof)
-        result = _PRECOMPILED.get().get(proof)
+        result = (_PRECOMPILED.get() or {}).get(proof)
         if result is None:
             with lean_lock(directory):
                 result = _compile_probe(name, row, proof)
         if complete and next(iter((result.get("compat") or {}).values()), {}).get("passed"):
-            recorded = record_evaluation(name, run_id, proof, "fast", [parent] if parent else None,
-                                         idea_id=idea_id, precomputed=result)
-            view = _model_view({**recorded, "full_check": _full_check_status(events(directory), recorded["candidate_id"])})
-            view.setdefault("notes", []).append(f"complete draft compiled, recorded as candidate {recorded['candidate']}")
+            recorded = record_evaluation(
+                name,
+                run_id,
+                proof,
+                mode,
+                [parent] if parent else None,
+                hypothesis=note or "",
+                precomputed=result if mode == "fast" else None,
+                operation=operation,
+                named_parent=named_parent,
+            )
+            view = _model_view(
+                {**recorded, "full_check": _full_check_status(events(directory), recorded["candidate_id"])}
+            )
+            view.setdefault("notes", []).append(
+                f"complete draft compiled, recorded as candidate {recorded['candidate']}"  # log: internal record # not-model-facing
+            )
             return view
         result = {**result, "mode": "probe", "scored": False}
         _externalize_output(directory, proof_id, result)
         _snapshot(directory, proof_id, proof)
-        _append(directory, {"kind": "probe", "proof_id": proof_id, "idea_id": idea_id,
-                            "parent": parent_id, "result": result})
+        _append(
+            directory,
+            {
+                "kind": "probe",
+                "proof_id": proof_id,
+                "parent": parent_id,
+                "named_parent": None if named_parent is _NAMED_PARENT_UNSET else named_parent,
+                "note": note,
+                "result": result,
+            },
+        )
+        filing_history = events(directory)
+        in_batch, _ = _BATCH_FOCUS.get()
+        projection_out: list[Graph] = []
+        _, new_node = _file_node(
+            directory,
+            filing_history,
+            proof_id,
+            proof,
+            _named_parent_id(history, parent if named_parent is _NAMED_PARENT_UNSET else named_parent),
+            operation,
+            None if in_batch else projection_out,
+        )
+        if new_node:
+            newly_filed.add(proof_id)
         _check_breaker(directory)
         # A draft (holes, errors or a failed compile) never opens a route, so it is not queued for extraction.
+    if earlier:
+        # A repeat leaves its own row, so the reply can say how often this text has been tried.
+        _append(directory, {"kind": "repeat", "proof_id": proof_id})
+        filing_history = events(directory)
+        in_batch, _ = _BATCH_FOCUS.get()
+        projection_out = []
+        _, new_node = _file_node(
+            directory,
+            filing_history,
+            proof_id,
+            proof,
+            _named_parent_id(history, parent if named_parent is _NAMED_PARENT_UNSET else named_parent),
+            operation,
+            None if in_batch else projection_out,
+        )
+        if new_node:
+            newly_filed.add(proof_id)
+    in_batch, _ = _BATCH_FOCUS.get()
+    if not in_batch:
+        graph = _settle_focus(directory, [proof_id], projection_out[0] if projection_out else None)
+        _check_stall(directory, graph, newly_filed)
     location = materialize(name, run_id, proof) if result.get("tokens") is not None else {}
     label = _probe_numbers(events(directory))[proof_id]
-    return _model_view({**result, "probe": label, "idea_id": idea_id or (earlier or {}).get("idea_id"),
-                        "cached": earlier is not None, "notes": notes, **location})
+    return _model_view(
+        {
+            **result,
+            "probe": label,
+            "cached": earlier is not None,
+            "notes": notes,
+            **location,
+        }
+    )
 
 
 def normalize_draft(name: str, draft: str) -> str:
     """Add the exact benchmark declaration to a proof body without altering complete proofs."""
     if not isinstance(draft, str) or not draft.strip():
-        raise ValueError("Draft must be nonempty proof text")
+        raise ValueError(text.render("messages/errors.draft_missing"))
     statement = problem(name)["statement"]
     body = draft.lstrip()
     if body.startswith(statement):
@@ -1764,149 +2088,544 @@ def normalize_draft(name: str, draft: str) -> str:
     return statement + " := by\n" + block
 
 
-def probe_batch(name: str, run_id: str, drafts: list[str], idea_id: str | None = None,
-                parent: str | None = None) -> dict:
+def probe_batch(
+    name: str,
+    run_id: str,
+    drafts: list[str],
+    parent: str | None = None,
+    note: str | None = None,
+    named_parent: str | object | None = _NAMED_PARENT_UNSET,
+) -> dict:
     """Probe one to four drafts in order, keeping their parent fixed across promotions."""
-    if not isinstance(drafts, list) or not 1 <= len(drafts) <= 4:
-        raise ValueError("Pass between one and four drafts")
+    if not isinstance(drafts, list) or not 1 <= len(drafts) <= MAX_DRAFTS:
+        raise ValueError(text.render("messages/errors.draft_limit"))
     history = events(run_dir(run_id))
     fixed_parent = resolve_parent_ref(history, parent) if parent else _current(history)
+    starting_focus = next((item["proof_id"] for item in reversed(history) if item.get("kind") == "focus"), None)
     outcomes = []
     token = _PRECOMPILED.set(_compile_probes(name, run_dir(run_id), drafts) if len(drafts) > 1 else {})
+    focus_token = _BATCH_FOCUS.set((True, starting_focus))
+    newly_filed: set[str] = set()
+    filed_token = _BATCH_NEWLY_FILED.set(newly_filed)
     try:
         for index, draft in enumerate(drafts, 1):
             try:
-                outcome = probe(name, run_id, draft, idea_id, fixed_parent)
+                outcome = probe(name, run_id, draft, fixed_parent, note=note, named_parent=named_parent)
             except (OSError, ValueError, RuntimeError) as error:
                 outcome = {"ok": False, "mode": "probe", "error": " ".join(str(error).split())[:400]}
             outcomes.append({"index": index, **outcome})
     finally:
+        _BATCH_FOCUS.reset(focus_token)
+        _BATCH_NEWLY_FILED.reset(filed_token)
         _PRECOMPILED.reset(token)
+    directory = run_dir(run_id)
+    filed = []
+    for draft in drafts:
+        try:
+            proof = normalize_draft(name, draft)
+        except ValueError:
+            continue
+        proof_id = hashlib.sha256((name + "\0" + proof).encode()).hexdigest()
+        if proof_id not in filed:
+            filed.append(proof_id)
+    graph = _settle_focus(directory, filed)
+    _check_stall(directory, graph, newly_filed)
     return {"ok": True, "drafts": outcomes}
 
 
-def candidate(name: str, run_id: str, reference: str) -> dict:
-    """Restore a candidate (`#N`) or a probe (`pN`) into the shadow project."""
+def compile_operation(
+    name: str,
+    run_id: str,
+    operation: dict,
+    mode: str = "fast",
+    note: str | None = None,
+    named_parent: str | object | None = _NAMED_PARENT_UNSET,
+) -> dict:
+    """Build, compile and file one operation-derived proof."""
+    if mode not in ("fast", "full"):
+        raise ValueError(text.render("messages/errors.evaluation_mode"))
     directory = run_dir(run_id)
     history = events(directory)
-    if re.fullmatch(r"p[0-9]+", reference.strip().lower()):
-        proof_id = resolve_probe_ref(history, reference)
-        proof = (directory / "proofs" / f"{proof_id}.lean").read_text()
-        entry = next(item for item in reversed(history)
-                     if item.get("kind") == "probe" and item["proof_id"] == proof_id)
-        return {"ok": True, "probe": reference.strip().lower(), "proof": proof,
-                "last_result": _model_view({**entry["result"], "probe": reference}),
-                **materialize(name, run_id, proof)}
-    candidate_id = resolve_candidate_ref(history, reference)
-    proof_path = directory / "proofs" / f"{candidate_id}.lean"
-    if not proof_path.exists():
-        raise ValueError("Unknown candidate")
-    proof = proof_path.read_text()
-    location = materialize(name, run_id, proof)
-    _append(directory, {"kind": "current", "candidate_id": candidate_id})
-    row = next((r for r in _summaries(events(directory)) if r["id"] == candidate_id), None)
-    return {"ok": True, "candidate": _label(history, candidate_id), "proof": proof,
-            "idea_id": row and row["idea_id"],
-            "evaluations": [{"mode": e["mode"], "status": e["status"], "tokens": e["result"].get("tokens"),
-                             "heartbeats": e["result"].get("heartbeat"), "score": e["score"]}
-                            for e in (row["evaluations"] if row else [])], **location}
 
+    def proof_for(reference: str) -> str:
+        proof_id = resolve_node_ref(history, reference)
+        return (directory / "proofs" / f"{proof_id}.lean").read_text()
 
-def profile_request(name: str, run_id: str, reference: str | None = None, proof: str | None = None) -> dict:
-    """Per-tactic heartbeat profile of a compiling candidate (`#N`), probe (`pN`) or proof text.
+    kind = operation.get("type")
+    if kind == "draft":
+        base_id = resolve_node_ref(history, operation.get("base", ""))
+        proof = operation.get("text")
+        if not isinstance(proof, str):
+            raise ValueError(text.render("messages/errors.draft_operation_text"))
+        edge_operation = {"type": "edited_from", "from": [base_id]}
+    elif kind == "splice":
+        base_id = resolve_node_ref(history, operation.get("base", ""))
+        base = proof_for(operation.get("base", ""))
+        proof = splice_text(base, operation.get("steps", ""), operation.get("text", ""))
+        edge_operation = {
+            "type": "edited_from",
+            "from": [base_id],
+            "steps": operation["steps"],
+        }
+    elif kind == "merge":
+        base_ref = operation.get("base", "")
+        base_id = resolve_node_ref(history, base_ref)
+        base = proof_for(base_ref)
+        takes = operation.get("take")
+        if not isinstance(takes, list):
+            raise ValueError(text.render("messages/errors.merge_operation_take"))
+        resolved_takes = []
+        sources = [base_id]
+        operation_takes = []
+        for take in takes:
+            donor_id = resolve_node_ref(history, take.get("from", ""))
+            sources.append(donor_id)
+            resolved_takes.append({"text": proof_for(take["from"]), "step": take.get("step", "")})
+            operation_takes.append({"from": donor_id, "step": take.get("step")})
+        proof = merge_steps(base, resolved_takes)
+        edge_operation = {"type": "merged_from", "from": sources, "take": operation_takes}
+    elif kind == "fill":
+        hole_ref = operation.get("hole", "")
+        if not isinstance(hole_ref, str):
+            hole_ref = str(hole_ref)
+        projection = Graph.from_history(history, _proof_reader(directory))
+        sketch = next((node for node in projection.nodes if hole_ref.startswith(f"{node.id}.h")), None)
+        valid_holes = [
+            f"{hole['id']} line {hole['line']}"
+            for node in projection.nodes
+            if node.status == "sketch"
+            for hole in node.holes
+        ]
+        if sketch is None or sketch.status != "sketch":
+            raise ValueError(
+                text.render("messages/errors.fill_hole", hole=hole_ref, valid=", ".join(valid_holes) or "none")
+            )
+        hole = next((row for row in sketch.holes if row["id"] == hole_ref), None)
+        if hole is None:
+            raise ValueError(
+                text.render("messages/errors.fill_hole", hole=hole_ref, valid=", ".join(valid_holes) or "none")
+            )
+        fill = operation.get("text")
+        if not isinstance(fill, str):
+            raise ValueError(text.render("messages/errors.fill_text"))
+        base_id = sketch.proof_id
+        proof = fill_text(sketch.proof_text, hole, fill)
+        edge_operation = {"type": "filled_from", "from": [base_id], "hole": hole_ref, "text": fill}
+    else:
+        raise ValueError(text.render("messages/errors.operation_type_invalid", kind=kind))
 
-    Defaults to the candidate whose file is currently materialized.
-    """
-    directory = run_dir(run_id)
-    history = events(directory)
-    label = None
-    if proof is not None and not proof.strip():
-        proof = None  # models often send an empty optional string alongside `candidate`
-    if proof is None:
-        if reference and re.fullmatch(r"p[0-9]+", reference.strip().lower()):
-            proof_id = resolve_probe_ref(history, reference)
-            label = reference.strip().lower()
-        else:
-            proof_id = resolve_candidate_ref(history, reference) if reference else _current(history)
-            if proof_id is None:
-                raise ValueError("No candidate to profile; give candidate (#N) or probe (pN)")
-            label = _label(history, proof_id)
-        proof = (directory / "proofs" / f"{proof_id}.lean").read_text()
+    proof = normalize_draft(name, proof)
+    result = probe(
+        name,
+        run_id,
+        proof,
+        operation=edge_operation,
+        mode=mode,
+        note=note,
+        named_parent=named_parent,
+    )
     proof_id = hashlib.sha256((name + "\0" + proof).encode()).hexdigest()
-    cached = next((item for item in reversed(history)
-                   if item.get("kind") == "profile" and item["proof_id"] == proof_id), None)
-    if cached:
-        return {**cached["result"], "target": label, "cached": True}
-    measured = next((e["result"].get("heartbeat") for row in _summaries(history) if row["id"] == proof_id
-                     for e in row["evaluations"] if e["result"].get("heartbeat") is not None), None)
-    with lean_lock(directory):
-        result = profile(name, proof, measured)
-        result["statement_floor_hb"] = heartbeat_floor(name)["heartbeats"]
-    _append(directory, {"kind": "profile", "proof_id": proof_id, "result": result})
-    return {**result, "target": label, "cached": False}
+    filed = next(
+        event for event in events(directory) if event.get("kind") == "edge" and event.get("proof_id") == proof_id
+    )
+    node = _graph_node_id(events(directory), proof_id)
+    return {**result, "node": node, "edge": {"type": filed["type"], "from": filed["from"]}}
 
 
-def set_decision(run_id: str, candidate_id: str, decision: str, reason: str) -> dict:
-    if decision not in ("pursue", "park") or not reason.strip():
-        raise ValueError("Decision must be pursue or park with a reason")
+def _cached_profiles(name: str, history: list[dict]) -> dict[str, dict]:
+    del name
+    return {
+        event["proof_id"]: event["result"]
+        for event in history
+        if event.get("kind") == "profile" and isinstance(event.get("result"), dict)
+    }
+
+
+def _step_heartbeats(node: Node | None, profile_result: dict | None) -> dict[str, int] | None:
+    if node is None or profile_result is None:
+        return None
+    return {
+        step.id: entry["hb"]
+        for step in node.steps
+        for entry in (profile_result.get("entries") or [])
+        if entry.get("depth") == 0 and entry.get("proof_line") == step.first_line and entry.get("hb") is not None
+    }
+
+
+def _versions_text(statuses: dict[str, bool], total: int) -> str:
+    checked = len(statuses)
+    passed = sum(bool(value) for value in statuses.values())
+    if checked == total:
+        return text.render("replies/price-row.versions_full", passed=passed, total=total)
+    return text.render("replies/price-row.versions_pending", checked=checked, total=total)
+
+
+def _versions_total(statuses: dict[str, bool], total: int) -> str:
+    return f"{sum(bool(value) for value in statuses.values())}/{total}"
+
+
+def _price_change_text(changes: list[dict]) -> str:
+    values = []
+    for change in changes:
+        label = ",".join(change["ids"]) or "—"
+        value = f"{label} ({change['old_tokens']}→{change['new_tokens']} tok"
+        if "old_hb" in change:
+            value += f", {fmt_hb(change['old_hb'])}→{fmt_hb(change['new_hb'])} hb"
+        values.append(value + ")")
+    return "; ".join(values)
+
+
+def _comparison(vs_parent, vs_best, parent_label: str, parent_is_best: bool, with_names: bool = False) -> str:
+    """The parenthesis after a value: its change against the parent and against the best node, only the known
+    ones; nothing at all when neither is known."""
+    parts = []
+    if vs_parent is not None:
+        delta = fmt_signed(vs_parent)
+        parts.append(text.render("replies/price-row.vs_node", delta=delta, node=parent_label) if with_names else delta)
+    if not parent_is_best and vs_best is not None:
+        parts.append(text.render("replies/price-row.vs_best", delta=fmt_signed(vs_best)))
+    return text.render("replies/price-row.parenthesis", parts=", ".join(parts)) if parts else ""
+
+
+def render_price_row(row: dict, root: bool = False, parent_is_best: bool = False) -> str:
+    if root:
+        return text.render(
+            "replies/price-row.row_root",
+            label=row["label"],
+            tokens=row["tokens"],
+            hb=fmt_hb(row["hb"]),
+            versions=row["versions"],
+        )
+    tokens_part = _comparison(
+        row["tokens_vs_parent"], row["tokens_vs_best"], row["parent_label"], parent_is_best, with_names=True
+    )
+    hb_part = _comparison(row["hb_vs_parent"], row["hb_vs_best"], row["parent_label"], parent_is_best)
+    score_part = "n/a" if row["score_vs_best"] is None else f"{row['score_vs_best']:+.1f} vs best"
+    rendered = [
+        text.render(
+            "replies/price-row",
+            label=row["label"],
+            parent_label=row["parent_label"],
+            lines=row["lines"],
+            tokens=row["tokens"],
+            tokens_part=tokens_part,
+            hb=fmt_hb(row["hb"]),
+            hb_part=hb_part,
+            versions=row["versions"],
+            score_part=score_part,
+        )
+    ]
+    if row["changed"]:
+        rendered.append(text.render("replies/price-row.changed", changes=_price_change_text(row["changed"])))
+    return "\n".join(rendered)
+
+
+def render_price_table(table: dict) -> str:
+    rows = [text.render("packet/price-table").strip()]
+    rows.extend(
+        [
+            text.render(
+                "packet/price-table.row",
+                step=row["id"],
+                lines=f"{row['first_line']}-{row['last_line']}",
+                tokens=row["tokens"],
+                self_hb=fmt_hb(row["self_hb"]),
+                incl_hb=fmt_hb(row["incl_hb"]),
+                pts_if_gone="-" if row["pts_if_gone"] is None else f"{row['pts_if_gone']:+.2f}",
+                text=row["text"],
+            )
+            for row in table["rows"]
+        ]
+    )
+    total = table["total"]
+    rows.append(
+        text.render(
+            "packet/price-table.total",
+            tokens=total["tokens"],
+            heartbeats=fmt_hb(total["heartbeats"]),
+            versions=total["versions"] or "-",
+            score="-" if total["proxy"] is None else f"{total['proxy']:.2f}",
+        )
+    )
+    return "\n".join(rows)
+
+
+def _reference_tokens(name: str, node: Node) -> int:
+    """The packet's token count for the reference (proof body only); other unscored nodes count their text."""
+    if node.origin == "reference":
+        length = problem(name).get("proof_length")
+        if isinstance(length, int):
+            return length
+    return snippet_tokens(node.proof_text)
+
+
+def _table_for_node(name: str, node: Node, profiles: dict[str, dict], price_rates: dict, total_versions: int) -> dict:
+    profile_result = profiles.get(node.proof_id)
+    if profile_result is None and node.origin == "reference":
+        from arena.context import reference_profile
+
+        try:
+            profile_result = reference_profile(name, cache_only=True)
+        except (ValueError, OSError):
+            profile_result = None
+    table = step_table(
+        node.proof_text,
+        profile_result,
+        price_rates,
+        node.tokens if node.tokens is not None else _reference_tokens(name, node),
+        node.heartbeats,
+        _versions_total(node.versions, total_versions),
+    )
+    table["total"]["proxy"] = node.score
+    return table
+
+
+def _span(lines: list[str], entry: dict) -> str:
+    """The source text a profile entry covers, from its start line and column to its end line and column."""
+    first, last = entry.get("proof_line"), entry.get("end_proof_line") or entry.get("proof_line")
+    if not isinstance(first, int) or not 0 < first <= len(lines):
+        return ""
+    start, end = int(entry.get("column") or 0), entry.get("end_column")
+    last = min(int(last), len(lines))
+    if first == last:
+        return lines[first - 1][start : end if isinstance(end, int) else None]
+    body = [
+        lines[first - 1][start:],
+        *lines[first : last - 1],
+        lines[last - 1][: end if isinstance(end, int) else None],
+    ]
+    return "\n".join(body)
+
+
+def cost_tree(name: str, run_id: str, reference: str) -> dict:
+    """A node's measured cost tree: every profiled tactic and stated term in source order with its nesting depth,
+    tokens of its source span, total and own heartbeats, and the points it would return if it cost nothing.
+    Cached data only; never Lean."""
     directory = run_dir(run_id)
-    candidate_id = resolve_candidate_ref(events(directory), candidate_id)
-    record = {"kind": "decision", "candidate_id": candidate_id,
-              "decision": decision, "reason": reason.strip()}
-    _append(directory, record)
-    return record
+    history = events(directory)
+    graph = Graph.from_history(history, _proof_reader(directory))
+    proof_id = resolve_node_ref(history, reference)
+    node = next(node for node in graph.nodes if node.proof_id == proof_id)
+    profile = _cached_profiles(name, history).get(proof_id)
+    if profile is None and node.origin == "reference":
+        from arena.context import reference_profile
+
+        try:
+            profile = reference_profile(name, cache_only=True) or None
+        except (ValueError, OSError):
+            profile = None
+    from arena.scoring import reference as scoring_reference
+
+    price_rates = rates(*scoring_reference(name), len(versions(problem(name))))
+    lines = node.proof_text.splitlines()
+    rows = []
+    for entry in (profile or {}).get("entries") or []:
+        span = _span(lines, entry)
+        tokens = snippet_tokens(span) if span.strip() else 0
+        heartbeats = int(entry.get("hb") or 0)
+        rows.append(
+            {
+                "line": entry.get("proof_line"),
+                "depth": int(entry.get("depth") or 0),
+                "kind": entry.get("kind", "tactic"),
+                "text": " ".join(span.split()),
+                "tokens": tokens,
+                "heartbeats": heartbeats,
+                "own_heartbeats": entry.get("self_hb"),
+                "points": round(
+                    tokens * price_rates["points_per_token"] + heartbeats / 1000 * price_rates["points_per_1k_hb"], 2
+                ),
+            }
+        )
+    from arena.profile import cached_heartbeat_floor
+
+    try:
+        floor = cached_heartbeat_floor(name)
+    except (ValueError, OSError, KeyError):
+        floor = None
+    return {
+        "node": _update_id(history, proof_id),
+        "profiled": profile is not None,
+        "rows": rows,
+        "measured": (profile or {}).get("measured_total"),
+        "attributed": (profile or {}).get("profiled_total"),
+        "unattributed": (profile or {}).get("unattributed"),
+        "floor": floor,
+    }
+
+
+def price_table(name: str, run_id: str, reference: str | None = None) -> dict:
+    """Return prices from cached proof/profile data only; this action never starts Lean."""
+    directory = run_dir(run_id)
+    history = events(directory)
+    graph = Graph.from_history(history, _proof_reader(directory))
+    scored = [node for node in graph.nodes if node.score is not None]
+    if reference:
+        proof_id = resolve_node_ref(history, reference)
+        node = next(node for node in graph.nodes if node.proof_id == proof_id)
+    else:
+        if not scored:
+            raise ValueError(text.render("messages/errors.node_reference_invalid", reference="best scored node"))
+        node = max(scored, key=lambda item: item.score)
+    from arena.scoring import reference as scoring_reference
+
+    reference_tokens, reference_heartbeats = scoring_reference(name)
+    total_versions = len(versions(problem(name)))
+    price_rates = rates(reference_tokens, reference_heartbeats, total_versions)
+    profiles = _cached_profiles(name, history)
+    profiled = node.proof_id in profiles
+    if node.origin == "reference" and not profiled:
+        from arena.context import reference_profile
+
+        try:
+            reference_result = reference_profile(name, cache_only=True)
+        except (ValueError, OSError):
+            reference_result = {}
+        if reference_result:
+            profiles[node.proof_id] = reference_result
+            profiled = True
+    table = _table_for_node(name, node, profiles, price_rates, total_versions)
+    return {**table, "text": render_price_table(table), "profiled": profiled}
+
+
+def map_view(run_id: str) -> dict:
+    """Return the hidden JSON map without rendering it into model-facing prose."""
+    directory = run_dir(run_id)
+    return map_view_from(events(directory), directory)
+
+
+def map_view_from(history: list[dict], directory: Path) -> dict:
+    """The map for `history`, reading stored proofs from `directory`. Cached data only, never Lean."""
+    graph = Graph.from_history(history, _proof_reader(directory))
+    from arena.scoring import reference as scoring_reference
+
+    name = history[0]["theorem"]
+    try:
+        reference_tokens, reference_heartbeats = scoring_reference(name)
+    except ValueError:
+        return graph_map_view(graph)
+    total_versions = len(history[0].get("versions") or [1])
+    price_rates = rates(reference_tokens, reference_heartbeats, total_versions)
+    profiles = _cached_profiles(name, history)
+    tables = {node.proof_id: _table_for_node(name, node, profiles, price_rates, total_versions) for node in graph.nodes}
+    view = graph_map_view(graph, effort_table(graph, tables), (reference_tokens, reference_heartbeats))
+    scored = [node for node in graph.nodes if node.score is not None]
+    if scored:
+        best = max(scored, key=lambda node: node.score)
+        view["line_costs"] = {
+            **_line_costs(best.proof_text, profiles.get(best.proof_id)),
+            "repeated": repeated_text(best.proof_text, price_rates["points_per_token"]),
+        }
+    return view
+
+
+# Rows in each of the best node's two line lists.
+LINE_COSTS_SHOWN = 5
+
+
+def _line_costs(proof: str, profile: dict | None) -> dict:
+    """The best node's costliest lines in two lists: lines whose own tactic spent heartbeats, by those heartbeats,
+    and lines that run no tactic (stated terms, continued arguments), by tokens, with the heartbeats spent
+    elaborating a stated term measured on its line."""
+    if not profile:
+        return {}
+    lines = proof.splitlines()
+    tokens = profile.get("line_tokens") if profile.get("token_attribution_available") else None
+    tokens = tokens if isinstance(tokens, dict) else {}
+    spent: dict[int, int] = {}
+    stated: dict[int, int] = {}
+    for item in profile.get("entries") or []:
+        line = item.get("proof_line")
+        if isinstance(line, int) and item.get("self_hb") is not None:
+            book = stated if item.get("kind") == "term" else spent
+            book[line] = book.get(line, 0) + int(item["self_hb"])
+
+    def count(line: int) -> int | None:
+        return tokens.get(line, tokens.get(str(line)))
+
+    def row(line: int, hb: dict[int, int]) -> dict:
+        return {
+            "line": line,
+            "text": lines[line - 1].strip() if 0 < line <= len(lines) else "",
+            "tokens": count(line),
+            "heartbeats": hb.get(line),
+        }
+
+    tactic = sorted(spent, key=lambda line: -spent[line])[:LINE_COSTS_SHOWN]
+    quiet = [line for line in range(1, len(lines) + 1) if line not in spent and isinstance(count(line), int)]
+    quiet = sorted(quiet, key=lambda line: (-int(count(line)), -stated.get(line, 0)))[:LINE_COSTS_SHOWN]
+    return {"tactic": [row(line, spent) for line in tactic], "quiet": [row(line, stated) for line in quiet]}
 
 
 def graph_state(run_id: str) -> dict:
     directory = run_dir(run_id)
     history = events(directory)
     if not history:
-        return {"run_id": run_id, "nodes": [], "evaluations": 0, "merge_checks": [],
-                "milestones": [], "frontier": []}
+        return {
+            "run_id": run_id,
+            "nodes": [],
+            "evaluations": 0,
+            "merge_checks": [],
+            "milestones": [],
+            "frontier": [],
+            "focus": None,
+        }
     theorem = history[0]["theorem"]
     total_versions = len(history[0].get("versions") or versions(problem(theorem)))
     nodes: dict[str, dict] = {}
     order: list[str] = []
     checks: list[dict] = []
-    ideas: list[dict] = []
     probes: list[dict] = []
     timeline: list[dict] = []
     for event in history:
         kind = event.get("kind")
-        if kind == "idea":
-            ideas.append({key: event.get(key) for key in ("id", "title", "hypothesis", "region",
-                                                          "expected_effect", "status", "reason")})
-        elif kind == "idea_update":
-            target = next((i for i in ideas if i["id"] == event["id"]), None)
-            if target:
-                target.update({k: v for k, v in event.items() if k not in ("kind", "id", "ts")})
-        elif kind == "probe":
-            probes.append({"proof_id": event["proof_id"], "idea_id": event.get("idea_id"),
-                           "parent": event.get("parent"), "result": event["result"], "ts": event.get("ts")})
+        if kind == "probe":
+            probes.append(
+                {
+                    "proof_id": event["proof_id"],
+                    "parent": event.get("parent"),
+                    "result": event["result"],
+                    "ts": event.get("ts"),
+                }
+            )
         elif kind == "candidate":
             identifier = event["candidate_id"]
-            nodes[identifier] = {"id": identifier, "index": len(order) + 1,
-                                 "parents": event.get("parents", []),
-                                 "derivations": [event], "origin": event.get("origin", "model"),
-                                 "hypothesis": event.get("hypothesis", ""),
-                                 "idea_id": event.get("idea_id"),
-                                 "merge": event.get("merge"), "evaluations": [],
-                                 "source_versions": event.get("source_versions", []),
-                                 "evaluator_sha256": event.get("evaluator_sha256"),
-                                 "proof": (directory / "proofs" / f"{identifier}.lean").read_text(),
-                                 "children": [], "decision": "pursue", "route": None}
+            nodes[identifier] = {
+                "id": identifier,
+                "index": len(order) + 1,
+                "parents": event.get("parents", []),
+                "derivations": [event],
+                "origin": event.get("origin", "model"),
+                "hypothesis": event.get("hypothesis", ""),
+                "merge": event.get("merge"),
+                "evaluations": [],
+                "source_versions": event.get("source_versions", []),
+                "evaluator_sha256": event.get("evaluator_sha256"),
+                "proof": (directory / "proofs" / f"{identifier}.lean").read_text(),
+                "children": [],
+                "decision": "pursue",
+                "route": None,
+            }
             order.append(identifier)
         elif kind == "derivation" and event["candidate_id"] in nodes:
             nodes[event["candidate_id"]]["derivations"].append(event)
         elif kind == "evaluation" and event["candidate_id"] in nodes:
             index = len(timeline) + 1
             nodes[event["candidate_id"]]["evaluations"].append(
-                {"number": index, "mode": event["mode"], "result": event["result"]})
+                {"number": index, "mode": event["mode"], "result": event["result"]}
+            )
             result = event["result"]
-            timeline.append({"number": index, "candidate_id": event["candidate_id"],
-                             "mode": event["mode"], "tokens": result.get("tokens"),
-                             "heartbeat": result.get("heartbeat"),
-                             "local_proxy": result.get("local_proxy"), "ts": event.get("ts")})
+            timeline.append(
+                {
+                    "number": index,
+                    "candidate_id": event["candidate_id"],
+                    "mode": event["mode"],
+                    "tokens": result.get("tokens"),
+                    "heartbeat": result.get("heartbeat"),
+                    "local_proxy": result.get("local_proxy"),
+                    "ts": event.get("ts"),
+                }
+            )
         elif kind == "merge_check":
             checks.append(event)
         elif kind == "route" and event["proof_id"] in nodes:
@@ -1920,9 +2639,13 @@ def graph_state(run_id: str) -> dict:
         evaluation = next(e for e in node["evaluations"] if e["number"] == row["number"])
         result = evaluation["result"]
         compat = result.get("compat", {})
-        row["status"] = "full" if evaluation["mode"] == "full" and len(compat) == total_versions and all(
-            version.get("passed") for version in compat.values()) else (
-            "primary" if next(iter(compat.values()), {}).get("passed") else "fail")
+        row["status"] = (
+            "full"
+            if evaluation["mode"] == "full"
+            and len(compat) == total_versions
+            and all(version.get("passed") for version in compat.values())
+            else ("primary" if next(iter(compat.values()), {}).get("passed") else "fail")
+        )
         if row["status"] == "full" and row["local_proxy"] is not None and row["local_proxy"] > best_proxy:
             best_proxy = row["local_proxy"]
             milestones.append(row.copy())
@@ -1932,34 +2655,56 @@ def graph_state(run_id: str) -> dict:
         for parent in node["parents"]:
             if parent in nodes:
                 nodes[parent]["children"].append(identifier)
-        full = [e for e in node["evaluations"] if next(
-            (row["status"] for row in timeline if row["number"] == e["number"]), "fail") == "full"]
-        primary = [e for e in node["evaluations"] if next(
-            (row["status"] for row in timeline if row["number"] == e["number"]), "fail") == "primary"]
-        selected = max(full, key=lambda e: e["result"].get("local_proxy") or -1) if full else (
-            min(primary, key=lambda e: e["result"].get("tokens") or 10**9) if primary else
-            (node["evaluations"][-1] if node["evaluations"] else None))
+        full = [
+            e
+            for e in node["evaluations"]
+            if next((row["status"] for row in timeline if row["number"] == e["number"]), "fail") == "full"
+        ]
+        primary = [
+            e
+            for e in node["evaluations"]
+            if next((row["status"] for row in timeline if row["number"] == e["number"]), "fail") == "primary"
+        ]
+        selected = (
+            max(full, key=lambda e: e["result"].get("local_proxy") or -1)
+            if full
+            else (
+                min(primary, key=lambda e: e["result"].get("tokens") or 10**9)
+                if primary
+                else (node["evaluations"][-1] if node["evaluations"] else None)
+            )
+        )
         result = selected["result"] if selected else {}
         node["status"] = "full" if full else "primary" if primary else "fail" if selected else "unevaluated"
         node["tokens"] = result.get("tokens")
         node["heartbeat"] = result.get("heartbeat")
         node["local_proxy"] = result.get("local_proxy") if full else None
         parent_attempts = [nodes[p].get("attempts_since_gain", 0) for p in node["parents"] if p in nodes]
-        node["attempts_since_gain"] = 0 if node["status"] == "full" and any(
-            m["candidate_id"] == identifier for m in milestones) else 1 + (min(parent_attempts) if parent_attempts else 0)
+        node["attempts_since_gain"] = (
+            0
+            if node["status"] == "full" and any(m["candidate_id"] == identifier for m in milestones)
+            else 1 + (min(parent_attempts) if parent_attempts else 0)
+        )
         first_parent = nodes.get(node["parents"][0]) if node["parents"] else None
         fingerprint = edit_fingerprint(first_parent["proof"], node["proof"]) if first_parent else {node["proof"]}
-        node["novelty"] = 1.0 - max((len(fingerprint & earlier) / len(fingerprint | earlier)
-                                     for earlier in fingerprints.values() if fingerprint | earlier), default=0.0)
+        node["novelty"] = 1.0 - max(
+            (
+                len(fingerprint & earlier) / len(fingerprint | earlier)
+                for earlier in fingerprints.values()
+                if fingerprint | earlier
+            ),
+            default=0.0,
+        )
         fingerprints[identifier] = fingerprint
         node["merge_partners"] = 0
     checked_pairs = {tuple(sorted(check["parents"])) for check in checks}
-    open_nodes = [node for node in nodes.values() if node["status"] in ("full", "primary")
-                  and node["decision"] != "park"]
+    open_nodes = [
+        node for node in nodes.values() if node["status"] in ("full", "primary") and node["decision"] != "park"
+    ]
     ancestry = {node["id"]: node["parents"] for node in nodes.values()}
     reference = next((node for node in nodes.values() if node["origin"] == "reference"), None)
     for index, left in enumerate(open_nodes):
-        for right in open_nodes[index + 1:]:
+        for right in open_nodes[index + 1 :]:
             if tuple(sorted((left["id"], right["id"]))) in checked_pairs:
                 continue
             common = common_base(left["id"], right["id"], ancestry)
@@ -1969,14 +2714,31 @@ def graph_state(run_id: str) -> dict:
                 right["merge_partners"] += 1
     rows = [nodes[identifier] for identifier in order]
     ranked = ranked_frontier(rows)
-    for idea in ideas:
-        idea["attempts"] = sum(1 for node in rows if node["idea_id"] == idea["id"] and node["origin"] == "model")
-        idea["probes"] = sum(1 for item in probes if item["idea_id"] == idea["id"])
-    idea_rows = ideas
-    return {"run_id": run_id, "theorem": theorem, "nodes": rows, "ledger_events": len(history), "evaluations": len(timeline),
-            "timeline": timeline, "merge_checks": checks, "milestones": milestones,
-            "frontier": ranked, "ideas": idea_rows, "probes": probes, "routes": (route_rows := route_table(history)),
-            "route_progress": _route_progress(route_rows)}
+    projection = Graph.from_history(history, _proof_reader(directory))
+    projected = {node.proof_id: node for node in projection.nodes}
+    for node in rows:
+        graph_node = projected.get(node["id"])
+        node["node"] = graph_node.id if graph_node else None
+        node["edge"] = graph_node.edge if graph_node else None
+    for probe_row in probes:
+        graph_node = projected.get(probe_row["proof_id"])
+        probe_row["node"] = graph_node.id if graph_node else None
+        probe_row["edge"] = graph_node.edge if graph_node else None
+    return {
+        "run_id": run_id,
+        "theorem": theorem,
+        "nodes": rows,
+        "ledger_events": len(history),
+        "evaluations": len(timeline),
+        "timeline": timeline,
+        "merge_checks": checks,
+        "milestones": milestones,
+        "frontier": ranked,
+        "probes": probes,
+        "routes": (route_rows := route_table(history)),
+        "route_progress": _route_progress(route_rows),
+        "focus": projection.focus,
+    }
 
 
 def merge_once(run_id: str, graph: dict | None = None) -> dict | None:
@@ -1986,8 +2748,7 @@ def merge_once(run_id: str, graph: dict | None = None) -> dict | None:
         return None
     directory = run_dir(run_id)
     nodes = {node["id"]: node for node in graph["nodes"]}
-    good = [node for node in graph["nodes"] if node["status"] in ("full", "primary")
-            and node["decision"] != "park"]
+    good = [node for node in graph["nodes"] if node["status"] in ("full", "primary") and node["decision"] != "park"]
     checked = {tuple(sorted(check["parents"])) for check in graph["merge_checks"]}
     ancestry = {node["id"]: node["parents"] for node in graph["nodes"]}
     reference = next((node for node in graph["nodes"] if node["origin"] == "reference"), None)
@@ -2008,28 +2769,47 @@ def merge_once(run_id: str, graph: dict | None = None) -> dict | None:
             if base["base"] is None:
                 outcome["reason"] = base["reason"]
             else:
-                merged = merge_text(nodes[base["base"]]["proof"], nodes[pair[0]]["proof"],
-                                    nodes[pair[1]]["proof"])
+                merged = merge_text(nodes[base["base"]]["proof"], nodes[pair[0]]["proof"], nodes[pair[1]]["proof"])
                 outcome["edits"] = {"left": merged["left_edits"], "right": merged["right_edits"]}
                 if merged["text"] is None:
                     outcome["reason"] = merged["reason"]
                 else:
-                    recorded = record_evaluation(graph["theorem"], run_id, merged["text"], "fast",
-                                                 pair, "Deterministic combination of disjoint edits",
-                                                 origin="auto_merge", merge={"base": base["base"],
-                                                                               "base_inferred_from_reference": inferred,
-                                                                               "edits": outcome["edits"]},
-                                                 materialize_live=False)
+                    recorded = record_evaluation(
+                        graph["theorem"],
+                        run_id,
+                        merged["text"],
+                        "fast",
+                        pair,
+                        text.render("replies/merge.hypothesis"),
+                        origin="auto_merge",
+                        merge={
+                            "base": base["base"],
+                            "base_inferred_from_reference": inferred,
+                            "edits": outcome["edits"],
+                        },
+                        materialize_live=False,
+                        operation={"type": "merged_from", "from": pair},
+                    )
                     outcome["candidate_id"] = recorded["candidate_id"]
                     outcome["node_number"] = recorded["node_number"]
                     outcome["fast_passed"] = any(v.get("passed") for v in recorded.get("compat", {}).values())
                     if outcome["fast_passed"]:
-                        full = record_evaluation(graph["theorem"], run_id, merged["text"], "full",
-                                                 pair, "Deterministic combination of disjoint edits",
-                                                 origin="auto_merge", merge={"base": base["base"],
-                                                                               "base_inferred_from_reference": inferred,
-                                                                               "edits": outcome["edits"]},
-                                                 materialize_live=False)
+                        full = record_evaluation(
+                            graph["theorem"],
+                            run_id,
+                            merged["text"],
+                            "full",
+                            pair,
+                            text.render("replies/merge.hypothesis"),
+                            origin="auto_merge",
+                            merge={
+                                "base": base["base"],
+                                "base_inferred_from_reference": inferred,
+                                "edits": outcome["edits"],
+                            },
+                            materialize_live=False,
+                            operation={"type": "merged_from", "from": pair},
+                        )
                         outcome["full_passed"] = all(v.get("passed") for v in full.get("compat", {}).values())
             _append(directory, outcome)
             graph["merge_checks"].append(outcome)
@@ -2053,69 +2833,514 @@ def merge_batch(run_id: str, max_checks: int = 64) -> dict:
     return {"checks": checks, "last": last}
 
 
+def _hole_errors() -> tuple[str, ...]:
+    return tuple(text.render("messages/errors.forbidden_construct", label=label) for label in ("sorry", "admit"))
+
+
 def _has_hole(row: dict, proof: str) -> bool:
     try:
         validate_proof(row, proof)
     except ValueError as error:
-        if str(error) in ("FORBIDDEN: sorry", "FORBIDDEN: admit"):
+        if str(error) in _hole_errors():
             return True
         raise
     return False
 
 
-def _check_text(number: int, result: dict, total: int) -> str:
+def _check_text(node: str, result: dict, total: int) -> str:
     compat = result.get("compat") or {}
     if result.get("ok") is False or not compat:
-        return f"#{number} full check could not run: {str(result.get('error') or 'unknown error')[:160]}"
+        return text.render(
+            "replies/check.could_not_run", node=node, error=str(result.get("error") or "unknown error")[:160]
+        )
     failing = [version for version, info in compat.items() if not info.get("passed")]
     if not failing and len(compat) == total:
-        proxy = (result.get("metrics") or {}).get("proxy", result.get("local_proxy"))
-        return f"#{number} passes all {total} versions: proxy {proxy}"
+        score = (result.get("metrics") or {}).get("proxy", result.get("local_proxy"))
+        return text.render("replies/check.passed", node=node, total=total, score=score)
     first = compat[failing[0]]
     reason = (first.get("error_headlines") or [first.get("error") or "compile failed"])[0]
-    return f"#{number} fails {', '.join(failing)} ({len(compat) - len(failing)}/{total} pass): {str(reason)[:160]}"
+    return text.render(
+        "replies/check.failed",
+        node=node,
+        failing=", ".join(failing),
+        passed=len(compat) - len(failing),
+        total=total,
+        reason=str(reason)[:160],
+    )
 
 
-def _autocheck_jobs(rows: list[dict]) -> list[dict]:
-    """Candidates that compile on the primary version but were never checked on every version,
-    most promising first."""
-    jobs = [r for r in rows if r["origin"] != "reference" and r["status"] == "primary"
-            and not any(e["mode"] == "full" for e in r["evaluations"])]
+def _unchecked(rows: list[dict]) -> list[dict]:
+    """Candidates that compile on the primary version but were never checked on every version."""
+    return [
+        r
+        for r in rows
+        if r["origin"] != "reference"
+        and r["status"] == "primary"
+        and not any(e["mode"] == "full" for e in r["evaluations"])
+    ]
+
+
+def _autocheck_jobs(rows: list[dict], closing: bool = False) -> list[dict]:
+    """Unchecked candidates whose single-version score estimate can still beat or tie the best verified
+    candidate (an unknown estimate is checked), most promising first. The skip applies to the closing
+    drain too: a candidate the estimate rules out cannot become the submission."""
+    jobs = _unchecked(rows)
+    verified = [row for row in rows if row["verified"]]
+    best_verified = _best(verified) if verified else None
+    bar = best_verified["score"] if best_verified else None
+    if bar is not None:
+        jobs = [row for row in jobs if row["score"] is None or row["score"] >= bar]
     return sorted(jobs, key=lambda r: (r["score"] if r["score"] is not None else float("-inf"), r["n"]), reverse=True)
 
 
-def autocheck(name: str, run_id: str, max_seconds: float | None = None) -> dict:
-    """Drain the full-check queue in the background lane. Only one checker runs per run;
-    the queue is derived from the ledger, so a killed checker loses nothing."""
+def _step_goal_jobs(history: list[dict], directory: Path) -> list[str]:
+    """Proof ids whose closed or sketch states have no terminal step-goal event."""
+    done = {
+        event["proof_id"]
+        for event in history
+        if event.get("kind") == "step_goals" and ("goals" in event or "error" in event)
+    }
+    candidate_ids = _candidate_ids(history)
+    rows = {row["id"]: row for row in _summaries(history)}
+    jobs: list[str] = []
+    for proof_id in candidate_ids:
+        if proof_id in done:
+            continue
+        row = rows[proof_id]
+        eligible = [item for item in row["evaluations"] if item["status"] in ("full", "primary")]
+        if not eligible:
+            continue
+        full = [item for item in eligible if item["status"] == "full"]
+        selected = max(full or eligible, key=lambda item: item["score"] if item["score"] is not None else -1)
+        proof = (directory / "proofs" / f"{proof_id}.lean").read_text()
+        if goalstate.closed(selected["result"]) and not re.search(r"\bsorry\b", proof):
+            jobs.append(proof_id)
+
+    seen = set(candidate_ids)
+    latest_probes: dict[str, dict] = {}
+    for event in history:
+        if event.get("kind") == "probe":
+            latest_probes[event["proof_id"]] = event["result"]
+    for proof_id, result in latest_probes.items():
+        if proof_id in seen or proof_id in done:
+            continue
+        proof_path = directory / "proofs" / f"{proof_id}.lean"
+        if not proof_path.is_file():
+            continue
+        proof = proof_path.read_text()
+        passed = next(iter((result.get("compat") or {}).values()), {}).get("passed", False)
+        if (goalstate.closed(result) and not re.search(r"\bsorry\b", proof)) or (
+            passed and re.search(r"\bsorry\b", proof)
+        ):
+            jobs.append(proof_id)
+    return jobs
+
+
+def _profile_jobs(history: list[dict], graph: Graph) -> list[Node]:
+    attempted = {event.get("proof_id") for event in history if event.get("kind") in {"profile", "profile_error"}}
+    return [
+        cell.node
+        for cell in archive(graph)
+        if cell.node.status == "closed" and cell.node.origin != "reference" and cell.node.proof_id not in attempted
+    ]
+
+
+def profile_in_call(name: str, run_id: str, node_refs: list[str]) -> None:
+    """Profile closed nodes inside the model's own tool call, on the model lane: the background lane and the
+    autocheck lock can be held for tens of seconds by other jobs, and the reply must not read "pending"."""
+    directory = run_dir(run_id)
+    history = events(directory)
+    graph = Graph.from_history(history, _proof_reader(directory))
+    attempted = {event.get("proof_id") for event in history if event.get("kind") in {"profile", "profile_error"}}
+    for ref in node_refs:
+        try:
+            proof_id = resolve_node_ref(history, ref)
+        except (ValueError, KeyError):
+            continue
+        node = next((item for item in graph.nodes if item.proof_id == proof_id), None)
+        if node is None or node.status != "closed" or proof_id in attempted:
+            continue
+        started = time.monotonic()
+        try:
+            result = profile(name, node.proof_text, node.heartbeats, lane="model")
+            event = {"kind": "profile", "proof_id": proof_id, "result": result}
+        except Exception as error:  # the background job does not retry a node that failed here
+            event = {"kind": "profile_error", "proof_id": proof_id, "error": str(error)[:300]}
+        _append(directory, {**event, "seconds": round(time.monotonic() - started, 2), "trigger": "in_call"})
+
+
+def _run_profile_job(name: str, run_id: str, node: Node) -> None:
+    directory = run_dir(run_id)
+    started = time.monotonic()
+    try:
+        with lean_lock(directory, "background"):
+            result = profile(name, node.proof_text, node.heartbeats, lane="background")
+        _append(
+            directory,
+            {
+                "kind": "profile",
+                "proof_id": node.proof_id,
+                "result": result,
+                "seconds": round(time.monotonic() - started, 2),
+            },
+        )
+    except Exception as error:  # any failure is terminal for this node; the loop keeps going
+        _append(
+            directory,
+            {
+                "kind": "profile_error",
+                "proof_id": node.proof_id,
+                "error": str(error)[:300],
+                "seconds": round(time.monotonic() - started, 2),
+            },
+        )
+    write_state(run_id)
+
+
+def _salvage_jobs(history: list[dict], directory: Path, graph: Graph | None = None) -> list[Node]:
+    """Broken, filed graph nodes with no terminal salvage event yet."""
+    done = {item.get("proof_id") for item in history if item.get("kind") == "salvage"}
+    graph = graph or Graph.from_history(history, _proof_reader(directory))
+    # The pinned reference compiles by definition; it reads as broken only because it is never evaluated.
+    return [
+        node
+        for node in graph.nodes
+        if node.status == "broken" and node.edge and node.origin != "reference" and node.proof_id not in done
+    ]
+
+
+def _assembly_jobs(history: list[dict], directory: Path, graph: Graph | None = None) -> list[Node]:
+    """Sketch nodes whose every hole has a closing fill and no assembly event."""
+    done = {item.get("sketch") for item in history if item.get("kind") == "assembly"}
+    graph = graph or Graph.from_history(history, _proof_reader(directory))
+    return [
+        node
+        for node in graph.nodes
+        if node.status == "sketch"
+        and node.holes
+        and all(hole["status"] == "filled" for hole in node.holes)
+        and node.proof_id not in done
+    ]
+
+
+def _salvage_compile(name: str, text_value: str) -> dict:
+    """Compile one salvage attempt in the background lane and normalize its diagnostics."""
+    directory = _SALVAGE_DIRECTORY.get()
+    if directory is None:
+        raise ValueError
+    with lean_lock(directory, "background"):
+        result = _evaluate(name, text_value, "probe", lane="background")
+    compat = result.get("compat") or {}
+    first = next(iter(compat.values()), {})
+    diagnostics = first.get("diagnostics") or []
+    clean = bool(first.get("passed")) and not any(item.get("severity") == "error" for item in diagnostics)
+    lines = [
+        item.get("proof_line") for item in diagnostics if item.get("severity") == "error" and item.get("proof_line")
+    ]
+    return {"clean": clean, "error_lines": lines, "unlocated": not clean and not lines, "result": result}
+
+
+def _run_salvage(name: str, run_id: str, node: Node) -> dict:
+    directory = run_dir(run_id)
+    started = time.monotonic()
+    proof = node.proof_text
+    token = _SALVAGE_DIRECTORY.set(directory)
+    try:
+        outcome = salvage_proof(name, proof, lambda candidate: _salvage_compile(name, candidate))
+    except (ValueError, FileNotFoundError):
+        outcome = {"status": "unavailable", "compiles": 0, "rounds": [], "text": None, "result": None, "kept": None}
+    finally:
+        _SALVAGE_DIRECTORY.reset(token)
+    sketch_id = None
+    if outcome["status"] == "salvaged":
+        sketch_text = outcome["text"]
+        sketch_id = hashlib.sha256((name + "\0" + sketch_text).encode()).hexdigest()
+        _snapshot(directory, sketch_id, sketch_text)
+        history = events(directory)
+        has_node = any(
+            item.get("proof_id") == sketch_id and item.get("kind") in ("probe", "candidate") for item in history
+        )
+        if not has_node:
+            result = dict(outcome["result"] or {})
+            result["mode"] = "probe"
+            result["scored"] = False
+            result["salvaged"] = True
+            _append(directory, {"kind": "probe", "proof_id": sketch_id, "parent": node.proof_id, "result": result})
+            _file_node(
+                directory,
+                events(directory),
+                sketch_id,
+                sketch_text,
+                operation={"type": "salvaged_from", "from": [node.proof_id]},
+            )
+    _append(
+        directory,
+        {
+            "kind": "salvage",
+            "proof_id": node.proof_id,
+            "status": outcome["status"],
+            "compiles": outcome["compiles"],
+            "rounds": outcome["rounds"],
+            "kept": outcome["kept"],
+            "sketch_id": sketch_id,
+            "seconds": round(time.monotonic() - started, 2),
+        },
+    )
+    write_state(run_id)
+    return outcome
+
+
+def _run_assembly(name: str, run_id: str, sketch: Node) -> None:
+    directory = run_dir(run_id)
+    started = time.monotonic()
+    fills: dict[str, str] = {}
+    alternatives: dict[str, list[str]] = {}
+    chosen: list[tuple[dict, Node]] = []
+    try:
+        graph = Graph.from_history(events(directory), _proof_reader(directory))
+        by_id = {node.id: node for node in graph.nodes}
+        for hole in sketch.holes:
+            candidates = [by_id[node_id] for node_id in hole["fills"]]
+            chosen_node = candidates[0]
+            chosen.append((hole, chosen_node))
+            fills[hole["id"]] = chosen_node.proof_id
+            alternatives[hole["id"]] = [node.proof_id for node in candidates[1:]]
+        proof = sketch.proof_text
+        operation_fills = []
+        for hole, fill_node in chosen:
+            operation = (fill_node.edge or {}).get("operation") or {}
+            operation_fills.append((hole, operation.get("text", ""), fill_node))
+        for hole, value, _ in sorted(operation_fills, key=lambda item: item[0]["line"], reverse=True):
+            proof = fill_text(proof, hole, value)
+        sources = [sketch.proof_id, *(node.proof_id for _, node in chosen)]
+        result = record_evaluation(
+            name,
+            run_id,
+            proof,
+            "fast",
+            lane="background",
+            trigger="auto",
+            origin="assembly",
+            materialize_live=False,
+            operation={"type": "merged_from", "from": sources, "assembly": True},
+        )
+        proof_id = hashlib.sha256((name + "\0" + proof).encode()).hexdigest()
+        passed = next(iter((result.get("compat") or {}).values()), {}).get("passed", False)
+        status = "closed" if passed and not _has_hole(problem(name), proof) else "broken"
+        _append(
+            directory,
+            {
+                "kind": "assembly",
+                "sketch": sketch.proof_id,
+                "node": proof_id,
+                "fills": fills,
+                "alternatives": alternatives,
+                "status": status,
+                "seconds": round(time.monotonic() - started, 2),
+            },
+        )
+    except Exception as error:
+        _append(
+            directory,
+            {
+                "kind": "assembly",
+                "sketch": sketch.proof_id,
+                "node": None,
+                "fills": fills,
+                "alternatives": alternatives,
+                "status": "error",
+                "error": str(error)[:300],
+                "seconds": round(time.monotonic() - started, 2),
+            },
+        )
+    write_state(run_id)
+
+
+def _run_full_check(name: str, run_id: str, job: dict) -> str:
+    directory = run_dir(run_id)
+    try:
+        proof = (directory / "proofs" / f"{job['id']}.lean").read_text()
+        record_evaluation(name, run_id, proof, "full", materialize_live=False, lane="batch", trigger="auto")
+    except Exception as error:  # record the failure so the queue moves on
+        _append(
+            directory,
+            {
+                "kind": "evaluation",
+                "candidate_id": job["id"],
+                "key": f"auto-error-{job['id']}",
+                "mode": "full",
+                "trigger": "auto",
+                "result": {"ok": False, "mode": "full", "error": str(error)[:300], "compat": {}},
+            },
+        )
+    write_state(run_id)
+    return f"#{job['n']}"
+
+
+def step_goals_in_call(name: str, run_id: str, proof_id: str) -> None:
+    """Record one node's step goals inside the model's own read, on the model lane, when the background job has
+    not reached it yet."""
+    directory = run_dir(run_id)
+    if any(
+        event.get("kind") == "step_goals"
+        and event.get("proof_id") == proof_id
+        and ("goals" in event or "error" in event)
+        for event in events(directory)
+    ):
+        return
+    started = time.monotonic()
+    try:
+        from arena import step_goals
+
+        goals = step_goals.step_goals(name, (directory / "proofs" / f"{proof_id}.lean").read_text(), lane="model")
+        event = {"kind": "step_goals", "proof_id": proof_id, "goals": goals}
+    except Exception as error:  # recorded so neither path retries it
+        event = {"kind": "step_goals", "proof_id": proof_id, "error": str(error)[:300]}
+    _append(directory, {**event, "seconds": round(time.monotonic() - started, 2), "trigger": "in_call"})
+
+
+def _run_step_goals(name: str, run_id: str, proof_id: str) -> None:
+    directory = run_dir(run_id)
+    started = time.monotonic()
+    try:
+        proof = (directory / "proofs" / f"{proof_id}.lean").read_text()
+        from arena import step_goals
+
+        with lean_lock(directory, "background"):
+            goals = step_goals.step_goals(name, proof, lane="background")
+        seconds = round(time.monotonic() - started, 2)
+        _append(directory, {"kind": "step_goals", "proof_id": proof_id, "goals": goals, "seconds": seconds})
+    except Exception as error:  # record the failure so this node does not block later jobs
+        _append(
+            directory,
+            {
+                "kind": "step_goals",
+                "proof_id": proof_id,
+                "error": str(error)[:300],
+                "seconds": round(time.monotonic() - started, 2),
+            },
+        )
+    write_state(run_id)
+
+
+def autocheck(
+    name: str,
+    run_id: str,
+    max_seconds: float | None = None,
+    closing: bool = False,
+    kinds: tuple[str, ...] | None = None,
+) -> dict:
+    """Drain salvage, assembly, full checks and step goals in the background lane.
+
+    With ``closing`` (the model has stopped) it drains only full checks, then assemblies.
+    ``kinds`` restricts the drain to those job kinds (in the usual order), e.g. ``("full",)``
+    for the compile tool's short in-call wait, which must not spend it on salvage.
+    Only one checker runs per run; all queues are derived from the ledger, so a
+    killed checker loses nothing.
+    """
     directory = run_dir(run_id)
     directory.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
     checked: list[str] = []
     with (directory / "autocheck.lock").open("a") as handle:
-        try:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return {"ok": True, "checked": [], "running_elsewhere": True}
+        while True:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                # An in-call wait (kinds given) takes its turn after the background job; the background loop does not.
+                if kinds is None or max_seconds is None or time.monotonic() - started >= max_seconds:
+                    return {"ok": True, "checked": [], "running_elsewhere": True}
+                time.sleep(0.2)
         while max_seconds is None or time.monotonic() - started < max_seconds:
             if lean_health.tripped(directory):
                 break  # Lean is unhealthy: background checks pause with the model's work
             history = events(directory)
-            jobs = _autocheck_jobs(_summaries(history))
-            if not jobs:
+            projection = Graph.from_history(history, _proof_reader(directory))
+            # Closing drain: the model has stopped, so only full checks (and assemblies, whose
+            # results become new candidates) matter; salvage, step goals and profiles (which only
+            # feed price tables) only serve the model.
+            order = ("full", "assembly") if closing else ("salvage", "assembly", "full", "step_goals", "profiles")
+            if kinds is not None:
+                order = tuple(kind for kind in order if kind in kinds)
+            for kind in order:
+                if kind == "salvage" and (salvage_jobs := _salvage_jobs(history, directory, projection)):
+                    _run_salvage(name, run_id, salvage_jobs[0])
+                    break
+                if kind == "assembly" and (assembly_jobs := _assembly_jobs(history, directory, projection)):
+                    _run_assembly(name, run_id, assembly_jobs[0])
+                    break
+                if kind == "full" and (jobs := _autocheck_jobs(_summaries(history), closing=closing)):
+                    checked.append(_run_full_check(name, run_id, jobs[0]))
+                    break
+                if kind == "step_goals" and (goal_jobs := _step_goal_jobs(history, directory)):
+                    _run_step_goals(name, run_id, goal_jobs[0])
+                    break
+                if kind == "profiles" and (profile_jobs := _profile_jobs(history, projection)):
+                    _run_profile_job(name, run_id, profile_jobs[0])
+                    break
+            else:
                 break
-            job = jobs[0]
-            try:
-                proof = (directory / "proofs" / f"{job['id']}.lean").read_text()
-                record_evaluation(name, run_id, proof, "full", materialize_live=False,
-                                  lane="background", trigger="auto")
-            except Exception as error:  # record the failure so the queue moves on
-                _append(directory, {"kind": "evaluation", "candidate_id": job["id"], "key": f"auto-error-{job['id']}",
-                                    "mode": "full", "trigger": "auto",
-                                    "result": {"ok": False, "mode": "full", "error": str(error)[:300], "compat": {}}})
-            checked.append(f"#{job['n']}")
-            write_state(run_id)
-    return {"ok": True, "checked": checked,
-            "remaining": [f"#{r['n']}" for r in _autocheck_jobs(_summaries(events(directory)))]}
+    rows = _summaries(events(directory))
+    remaining = [f"#{r['n']}" for r in _autocheck_jobs(rows, closing=closing)]
+    outcome = {"ok": True, "checked": checked, "remaining": remaining}
+    if closing:
+        kept = set(remaining) | set(checked)
+        outcome["skipped"] = [f"#{r['n']}" for r in _unchecked(rows) if f"#{r['n']}" not in kept]
+        timed_out = bool(remaining) and max_seconds is not None and time.monotonic() - started >= max_seconds
+        outcome["timed_out"] = timed_out
+        _append(
+            directory,
+            {
+                "kind": "closing_drain",
+                "checked": len(checked),
+                "skipped": outcome["skipped"],
+                "unchecked_at_cap": remaining if timed_out else [],
+                "timed_out": timed_out,
+                "seconds": round(time.monotonic() - started, 2),
+            },
+        )
+    return outcome
+
+
+def _skeleton(history: list[dict], rows: list[dict], best: dict | None, run_id: str) -> dict:
+    """Data for the continuation view: attempts since the best candidate, how many share its route, and the costliest
+    step of the best node with its share of tokens or heartbeats, whichever is larger."""
+    best_seq = max(
+        (
+            seq
+            for seq, item in enumerate(history)
+            if item.get("kind") == "evaluation" and best and item.get("candidate_id") == best["id"]
+        ),
+        default=-1,
+    )
+    attempts = {
+        item["proof_id"] if item["kind"] == "probe" else item.get("candidate_id")
+        for seq, item in enumerate(history)
+        if seq > best_seq and item.get("kind") in ("probe", "candidate")
+    }
+    routes_by_id = {item["proof_id"]: item.get("route") for item in history if item.get("kind") == "route"}
+    best_route = routes_by_id.get(best["id"]) if best else None
+    same_route = sum(1 for attempt in attempts if best_route is not None and routes_by_id.get(attempt) == best_route)
+    try:
+        table = price_table(history[0]["theorem"], run_id)
+    except ValueError:
+        table = {"rows": [], "total": {}}
+    total_tokens = table["total"].get("tokens") or 0
+    total_hb = table["total"].get("heartbeats") or 0
+
+    def share(row: dict) -> float:
+        token_pct = 100 * row["tokens"] / total_tokens if total_tokens and row["tokens"] else 0.0
+        hb_pct = 100 * row["self_hb"] / total_hb if total_hb and row.get("self_hb") else 0.0
+        return max(token_pct, hb_pct)
+
+    top = max(table["rows"], key=share, default=None)
+    return {
+        "attempts": len(attempts),
+        "same_route": same_route,
+        "top_step": top["id"] if top else None,
+        "top_share_pct": round(share(top), 1) if top else None,
+    }
 
 
 def state(run_id: str) -> dict:
@@ -2123,52 +3348,199 @@ def state(run_id: str) -> dict:
     better unverified one if any, what is being checked, and the harness's check results."""
     history = events(run_dir(run_id))
     if not history:
-        raise ValueError("Run is uninitialized")
+        raise ValueError(text.render("messages/errors.run_uninitialized"))
     rows = _summaries(history)
     total = len(history[0].get("versions") or [1])
     numbers = {r["id"]: r["n"] for r in rows}
+    assembly_candidates = {
+        item["candidate_id"] for item in history if item.get("kind") == "candidate" and item.get("origin") == "assembly"
+    }
     verified = _best([r for r in rows if r["verified"]])
     unverified = _best([r for r in rows if not r["verified"]])
-    leading = unverified if unverified and (not verified or (unverified["score"] or 0) > (verified["score"] or 0)) else None
-    updates = [{"seq": seq, "text": _check_text(numbers[item["candidate_id"]], item["result"], total)}
-               for seq, item in enumerate(history)
-               if item.get("kind") == "evaluation" and item.get("trigger") == "auto" and item["candidate_id"] in numbers]
+    leading = (
+        unverified if unverified and (not verified or (unverified["score"] or 0) > (verified["score"] or 0)) else None
+    )
+    updates: list[dict] = [
+        {"seq": seq, "text": _check_text(_update_id(history, item["candidate_id"]), item["result"], total)}
+        for seq, item in enumerate(history)
+        if item.get("kind") == "evaluation"
+        and item.get("trigger") == "auto"
+        and item["candidate_id"] in numbers
+        and not (item.get("mode") == "fast" and item["candidate_id"] in assembly_candidates)
+    ]
+    graph_ids: dict[str, str] = {}
+    for item in history:
+        proof_id = item.get("candidate_id") if item.get("kind") == "candidate" else item.get("proof_id")
+        if item.get("kind") not in ("candidate", "probe") or proof_id in graph_ids.values():
+            continue
+        graph_ids[f"n{len(graph_ids) + 1}"] = proof_id
+    probes = {item["proof_id"]: item for item in history if item.get("kind") == "probe"}
+    directory = run_dir(run_id)
+    salvage_events: dict[str, list[tuple[int, dict]]] = {}
+    for seq, item in enumerate(history):
+        if item.get("kind") == "salvage" and item.get("status") == "salvaged" and item.get("sketch_id"):
+            salvage_events.setdefault(item["sketch_id"], []).append((seq, item))
+    for seq, item in enumerate(history):
+        if item.get("kind") == "salvage" and item.get("status") == "salvaged" and item.get("sketch_id"):
+            sketch_id = item["sketch_id"]
+            if salvage_events[sketch_id][-1][0] != seq:
+                continue  # one line per sketch, written when its last source draft arrives
+            sketch_path = directory / "proofs" / f"{sketch_id}.lean"
+            sketch_text = sketch_path.read_text() if sketch_path.is_file() else ""
+            compile_result = (probes.get(sketch_id) or {}).get("result", {})
+            hole_rows = find_holes(sketch_text, compile_result.get("goals") or [])
+            sketch = _update_id(history, sketch_id)
+            fill = (
+                text.render(
+                    "messages/salvage.fill_many" if len(hole_rows) > 1 else "messages/salvage.fill_one",
+                    lines=", ".join(str(hole["line"]) for hole in hole_rows),
+                    ids=", ".join(f"{sketch}.h{hole['index']}" for hole in hole_rows),
+                )
+                if hole_rows
+                else text.render("messages/salvage.fill_none")
+            )
+            sources = list(
+                dict.fromkeys(_update_id(history, entry["proof_id"]) for _, entry in salvage_events[sketch_id])
+            )
+            # `source` lets the delivery name the broken nodes only when the model has seen every id.
+            updates.append(
+                {
+                    "seq": seq,
+                    "text": text.render(
+                        "messages/salvage.salvaged", sketch=sketch, sources=_compact_ids(sources), fill=fill
+                    ),
+                    "source": sources,
+                    "unseen_text": text.render("messages/salvage.salvaged_unseen", sketch=sketch, fill=fill),
+                }
+            )
+        elif item.get("kind") == "assembly" and item.get("status") in ("closed", "broken"):
+            sketch_id = item["sketch"]
+            sketch_ref = next((key for key, value in graph_ids.items() if value == sketch_id), "")
+            sketch_path = directory / "proofs" / f"{sketch_id}.lean"
+            sketch_text = sketch_path.read_text() if sketch_path.is_file() else ""
+            sketch_goals = (probes.get(sketch_id) or {}).get("result", {}).get("goals") or []
+            sketch_holes = find_holes(sketch_text, sketch_goals)
+            holes_by_id = {f"{sketch_ref}.h{hole['index']}": hole for hole in sketch_holes}
+            fill_events = {
+                event.get("proof_id"): event
+                for event in history
+                if event.get("kind") == "edge" and event.get("type") == "filled_from"
+            }
+            used = []
+            alternatives = []
+            for hole_id, fill_id in (item.get("fills") or {}).items():
+                hole = holes_by_id.get(hole_id, {})
+                label = _update_id(history, fill_id)
+                used.append(f"line {hole.get('line', '?')}: {label}")  # not-model-facing
+                for alternate in (item.get("alternatives") or {}).get(hole_id, []):
+                    operation = (fill_events.get(alternate) or {}).get("operation") or {}
+                    cost = fill_cost(operation.get("text", ""))
+                    alternatives.append(
+                        f"line {hole.get('line', '?')}: {_update_id(history, alternate)} ({cost} tokens)"  # not-model-facing
+                    )
+            if item["status"] == "broken":
+                notice = text.render("messages/assembly.assembly_failed", sketch=_update_id(history, sketch_id))
+            else:
+                row = next((row for row in rows if row["id"] == item.get("node")), {})
+                notice = text.render(
+                    "messages/assembly.assembled",
+                    node=_update_id(history, item["node"]),
+                    sketch=_update_id(history, sketch_id),
+                    tokens=row.get("tokens") or 0,
+                    score=row.get("score") or 0,
+                    used=", ".join(used) or "none",
+                    alternatives=", ".join(alternatives) or "none",
+                )
+            updates.append({"seq": seq, "text": notice})
+    candidate_rows = {row["id"]: row for row in rows}
+    route_events = {item["proof_id"]: item for item in history if item.get("kind") == "route"}
+    for seq, item in enumerate(history):
+        if item.get("kind") != "focus" or item.get("reason") != "stall":
+            continue
+        proof_id = item["proof_id"]
+        row = candidate_rows.get(proof_id)
+        probe_event = probes.get(proof_id)
+        result = (
+            row["evaluations"][-1]["result"] if row and row["evaluations"] else (probe_event or {}).get("result", {})
+        )
+        hole_count = (route_events.get(proof_id) or {}).get("holes", 0)
+        score = "sketch" if hole_count else _metric_score(result.get("metrics"))
+        if score is None:
+            score = 0.0
+        updates.append(
+            {
+                "seq": seq,
+                "text": text.render(
+                    "messages/phase.stall_focus",
+                    label=_update_id(history, proof_id),
+                    letter=item["cell"],
+                    score=score,
+                    visits=item["visits"],
+                ),
+            }
+        )
+    updates.sort(key=lambda update: update["seq"])
     reference_row = next((r for r in rows if r["origin"] == "reference"), None)
     baseline = None
     if reference_row:
-        from arena.scoring import reference
+        from arena.scoring import REFERENCE_SCORE, reference
+
         try:
             tokens, heartbeats = reference(history[0]["theorem"])
         except ValueError:
             # Synthetic protocol tests and imported legacy runs may have no published denominator.
             pass
         else:
-            baseline = {"candidate": "#1", "tokens": tokens, "heartbeats": heartbeats,
-                        "proxy": round(100 / 3, 2), "status": "pinned original baseline"}
-    return {"ok": True, "seq": len(history), "versions": total, "best": _brief(verified),
-            "baseline": baseline,
-            "leading_unverified": _brief(leading), "checking": [f"#{r['n']}" for r in _autocheck_jobs(rows)],
-            "updates": updates[-10:]}
+            baseline = {
+                "candidate": "#1",
+                "tokens": tokens,
+                "heartbeats": heartbeats,
+                "proxy": REFERENCE_SCORE,
+                "status": "pinned original baseline",
+            }
+    return {
+        "ok": True,
+        "seq": len(history),
+        "versions": total,
+        "best": _brief(verified),
+        "baseline": baseline,
+        "leading_unverified": _brief(leading),
+        "checking": [f"#{r['n']}" for r in _autocheck_jobs(rows)],
+        "updates": updates[-10:],
+        "skeleton": _skeleton(history, rows, _best(rows), run_id),
+    }
 
 
 def write_state(run_id: str) -> None:
     """Publish `state` atomically for the Pi extension, which reads it on every tool result."""
     directory = run_dir(run_id)
     target = directory / "state.json"
-    temporary = target.with_name(f"state.{os.getpid()}.tmp")
-    temporary.write_text(json.dumps(state(run_id), ensure_ascii=False))
-    temporary.replace(target)
+    snapshot = state(run_id)
+    # Tool calls and background checks publish concurrently: a slower writer holding an older snapshot must never
+    # replace a newer one (v7-check4 Binius showed its best fall from 90.26 back to 89.89, then return).
+    temporary = target.with_name(f"state.{os.getpid()}.{threading.get_ident()}.tmp")
+    with open(directory / "state.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            current = json.loads(target.read_text()).get("seq", -1)
+        except (OSError, ValueError, AttributeError):
+            current = -1
+        if isinstance(current, int) and snapshot.get("seq", 0) < current:
+            return
+        temporary.write_text(json.dumps(snapshot, ensure_ascii=False))
+        temporary.replace(target)
 
 
-COLD_TOLERANCE = 0.05  # same drift tolerance as tools/arena_certify.py
+COLD_TOLERANCE = 0.05  # same drift tolerance as arena certify
 
 
 def _used_session(row: dict) -> bool:
     """Whether the evaluation that made this candidate verified relied on a Lean session."""
     full = [e for e in row["evaluations"] if e["status"] == "full"]
     chosen = max(full, key=lambda e: e["score"] or -1, default=None)
-    return chosen is not None and any((info.get("lean") or {}).get("path") == "session"
-                                      for info in (chosen["result"].get("compat") or {}).values())
+    return chosen is not None and any(
+        (info.get("lean") or {}).get("path") == "session" for info in (chosen["result"].get("compat") or {}).values()
+    )
 
 
 def cold_verify(run_id: str, row: dict) -> dict:
@@ -2179,15 +3551,26 @@ def cold_verify(run_id: str, row: dict) -> dict:
     """
     directory = run_dir(run_id)
     history = events(directory)
-    done = next((item for item in reversed(history) if item.get("kind") == "cold_verification"
-                 and item["candidate_id"] == row["id"]), None)
+    done = next(
+        (
+            item
+            for item in reversed(history)
+            if item.get("kind") == "cold_verification" and item["candidate_id"] == row["id"]
+        ),
+        None,
+    )
     if done:
         return done
     if lean_health.tripped(directory):
         # Paused, not recorded: the verification can still run once Lean is healthy again.
-        return {"kind": "cold_verification", "candidate_id": row["id"], "confirmed": False,
-                "error": "Lean unhealthy; cold verification paused", "recorded_heartbeats": row["heartbeats"],
-                "paused": True}
+        return {
+            "kind": "cold_verification",
+            "candidate_id": row["id"],
+            "confirmed": False,
+            "error": text.render("messages/errors.cold_verification_paused"),
+            "recorded_heartbeats": row["heartbeats"],
+            "paused": True,
+        }
     name = history[0]["theorem"]
     proof = (directory / "proofs" / f"{row['id']}.lean").read_text()
     try:
@@ -2197,14 +3580,29 @@ def cold_verify(run_id: str, row: dict) -> dict:
         passed = {version: bool(info.get("passed")) for version, info in compat.items()}
         total = len(history[0].get("versions") or [1])
         recorded, measured = row["heartbeats"], cold.get("heartbeat")
-        close = (recorded is not None and measured is not None
-                 and abs(measured - recorded) <= COLD_TOLERANCE * max(recorded, 1))
+        close = (
+            recorded is not None
+            and measured is not None
+            and abs(measured - recorded) <= COLD_TOLERANCE * max(recorded, 1)
+        )
         confirmed = len(passed) == total and all(passed.values()) and close
-        event = {"kind": "cold_verification", "candidate_id": row["id"], "confirmed": confirmed,
-                 "passed": passed, "recorded_heartbeats": recorded, "cold_heartbeats": measured}
+        event = {
+            "kind": "cold_verification",
+            "candidate_id": row["id"],
+            "confirmed": confirmed,
+            "passed": passed,
+            "compat": cold["compat"],
+            "recorded_heartbeats": recorded,
+            "cold_heartbeats": measured,
+        }
     except Exception as error:  # an unverifiable candidate must not be submitted
-        event = {"kind": "cold_verification", "candidate_id": row["id"], "confirmed": False,
-                 "error": str(error)[:300], "recorded_heartbeats": row["heartbeats"]}
+        event = {
+            "kind": "cold_verification",
+            "candidate_id": row["id"],
+            "confirmed": False,
+            "error": str(error)[:300],
+            "recorded_heartbeats": row["heartbeats"],
+        }
     _append(directory, event)
     return event
 
@@ -2218,9 +3616,16 @@ def submission(run_id: str) -> dict:
     directory = run_dir(run_id)
     history = events(directory)
     rows = _summaries(history)
-    # Harness-combined proofs (auto_merge) are reported by arena.merges but never submitted: the answer is model-written.
-    pool = sorted((r for r in rows if r["verified"] and r["score"] is not None and r["status"] == "full"
-                   and r["origin"] not in ("reference", "auto_merge")), key=lambda r: (r["score"], -r["n"]), reverse=True)
+    # A harness-combined candidate is eligible when it is the best verified candidate.
+    pool = sorted(
+        (
+            r
+            for r in rows
+            if r["verified"] and r["score"] is not None and r["status"] == "full" and r["origin"] != "reference"
+        ),
+        key=lambda r: (r["score"], -r["n"]),
+        reverse=True,
+    )
     best, rejected, cold = None, [], None
     for row in pool:
         if not _used_session(row):
@@ -2230,25 +3635,52 @@ def submission(run_id: str) -> dict:
         if cold["confirmed"]:
             best = row
             break
-        rejected.append({"candidate": f"#{row['n']}", "recorded_heartbeats": cold.get("recorded_heartbeats"),
-                         "cold_heartbeats": cold.get("cold_heartbeats"), "passed": cold.get("passed"),
-                         "error": cold.get("error")})
+        rejected.append(
+            {
+                "candidate": f"#{row['n']}",
+                "recorded_heartbeats": cold.get("recorded_heartbeats"),
+                "cold_heartbeats": cold.get("cold_heartbeats"),
+                "passed": cold.get("passed"),
+                "error": cold.get("error"),
+            }
+        )
     if best is None:
-        answer = {"ok": True, "candidate": None,
-                  "reason": "no model candidate passed every version; the original proof stands"}
+        answer = {
+            "ok": True,
+            "candidate": None,
+            "reason": "no model candidate passed every version; the original proof stands",  # log: internal record # not-model-facing
+        }
         if rejected:
-            answer["reason"] = "no candidate that passed in the Lean session also passed a clean cold compile"
+            answer["reason"] = (
+                "no candidate that passed in the Lean session also passed a clean cold compile"  # log: internal record # not-model-facing
+            )
     else:
         proof = (directory / "proofs" / f"{best['id']}.lean").read_text()
         (directory / "submission.lean").write_text(proof)
-        answer = {"ok": True, "candidate": f"#{best['n']}", "candidate_id": best["id"],
-                  "tokens": best["tokens"], "heartbeats": best["heartbeats"], "proxy": best["score"],
-                  "proof_file": "submission.lean",
-                  "verified_by": "cold compile" if cold and cold["confirmed"] else "cold compile (no session used)"}
+        answer = {
+            "ok": True,
+            "candidate": f"#{best['n']}",
+            "candidate_id": best["id"],
+            "tokens": best["tokens"],
+            "heartbeats": best["heartbeats"],
+            "proxy": best["score"],
+            "proof_file": "submission.lean",
+            "verified_by": "cold compile"
+            if cold and cold["confirmed"]
+            else "cold compile (no session used)",  # log: internal record # not-model-facing
+        }
         if cold and cold["confirmed"]:
             # The clean compile is the certified measurement; the session figure is kept for audit.
             answer["session_heartbeats"] = best["heartbeats"]
             answer["heartbeats"] = cold["cold_heartbeats"]
+            # The score follows the certified measurement, not the session estimate it replaces.
+            if cold.get("compat"):
+                from arena.scoring import local_proxy
+
+                answer["session_proxy"] = best["score"]
+                answer["proxy"] = local_proxy(
+                    history[0]["theorem"], best["tokens"], cold["cold_heartbeats"], cold["compat"]
+                )
     if rejected:
         answer["rejected_on_cold"] = rejected
     (directory / "submission.json").write_text(json.dumps(answer, indent=2) + "\n")
@@ -2268,48 +3700,45 @@ def route_table(history: list[dict]) -> list[dict]:
 
 
 def frontier(run_id: str) -> dict:
-    """Compact status: best candidates, the model's ideas with their attempts, recent failures."""
+    """Compact status: best candidates and recent failures."""
     history = events(run_dir(run_id))
     if not history:
-        raise ValueError("Run is uninitialized")
+        raise ValueError(text.render("messages/errors.run_uninitialized"))
     rows = _summaries(history)
-    ideas: dict[str, dict] = {}
-    for item in history:
-        if item.get("kind") == "idea":
-            ideas[item["id"]] = {"id": item["id"], "title": item["title"], "status": item["status"],
-                                 "reason": item.get("reason") or None}
-        elif item.get("kind") == "idea_update" and item["id"] in ideas:
-            ideas[item["id"]].update({k: item[k] for k in ("title", "status", "reason") if k in item})
     probe_numbers = _probe_numbers(history)
     failures: list[dict] = []
-    for idea in ideas.values():
-        mine = [r for r in rows if r["idea_id"] == idea["id"] and r["origin"] == "model"]
-        drafts = [item for item in history if item.get("kind") == "probe" and item.get("idea_id") == idea["id"]]
-        idea["attempts"] = len({r["id"] for r in mine} | {d["proof_id"] for d in drafts})
-        idea["probes"] = len({d["proof_id"] for d in drafts})
-        idea["best"] = _brief(_best(mine))
-        failed = [r for r in mine if r["status"] == "fail" and r["evaluations"]]
-        last = failed[-1] if failed else None
-        idea["last_failure"] = (f"#{last['n']}: " + _failure_text(last["evaluations"][-1]["result"])) if last else None
-    for row in rows:
-        if row["status"] == "fail" and row["evaluations"]:
-            failures.append({"ref": f"#{row['n']}", "idea_id": row["idea_id"],
-                             "error": _failure_text(row["evaluations"][-1]["result"])})
-    for item in history:
-        if item.get("kind") == "probe" and _probe_failed(item["result"]):
-            failures.append({"ref": probe_numbers[item["proof_id"]], "idea_id": item.get("idea_id"),
-                             "error": _failure_text(item["result"])})
-    top = sorted((r for r in rows if r["status"] in ("full", "primary") and r["origin"] != "reference"),
-                 key=lambda r: (r["verified"], r["score"] or -1), reverse=True)[:5]
+    failures.extend(
+        {
+            "ref": f"#{row['n']}",
+            "error": _failure_text(row["evaluations"][-1]["result"]),
+        }
+        for row in rows
+        if row["status"] == "fail" and row["evaluations"]
+    )
+    failures.extend(
+        {
+            "ref": probe_numbers[item["proof_id"]],
+            "error": _failure_text(item["result"]),
+        }
+        for item in history
+        if item.get("kind") == "probe" and _probe_failed(item["result"])
+    )
+    top = sorted(
+        (r for r in rows if r["status"] in ("full", "primary") and r["origin"] != "reference"),
+        key=lambda r: (r["verified"], r["score"] or -1),
+        reverse=True,
+    )[:5]
     evaluations = sum(len(r["evaluations"]) for r in rows)
-    current_id = _current_active_idea(history)
-    current_idea = next((idea for idea in ideas.values() if idea["id"] == current_id), None)
-    return {"best": _brief(_best(rows)), "top": [_brief(r) | {"idea_id": r["idea_id"]} for r in top],
-            "ideas": list(ideas.values()), "recent_failures": failures[-3:],
-            "current_idea": current_idea,
-            "candidates": len(rows), "evaluations": evaluations,
-            "probes": len(probe_numbers), "advisory": _advisory(rows),
-            "routes": route_table(history)}
+    return {
+        "best": _brief(_best(rows)),
+        "top": [_brief(r) for r in top],
+        "recent_failures": failures[-3:],
+        "candidates": len(rows),
+        "evaluations": evaluations,
+        "probes": len(probe_numbers),
+        "advisory": _advisory(rows),
+        "routes": route_table(history),
+    }
 
 
 def _probe_failed(result: dict) -> bool:
@@ -2326,3 +3755,143 @@ def _failure_text(result: dict) -> str:
         if info.get("error"):
             return str(info["error"])[:160]
     return "compile failed"
+
+
+# Repeated source spans: at least this many competition tokens, at most this many listed.
+REPEAT_MIN_TOKENS = 6
+REPEAT_SHOWN = 3
+_REPEAT_WORDS = re.compile(r"[\w.'!?]+|[^\w\s]")
+_REPEAT_START_WORDS = 4
+
+
+def repeated_text(proof: str, points_per_token: float) -> list[dict]:
+    """Source spans repeated in the proof body (after `:= by`), each with the tokens saved if it is shared once
+    through a `have`: (count - 1) * tokens - (tokens + 4). Maximal spans only, positive savings only, and a span
+    contained in a larger listed span is dropped."""
+    from arena.profile import _mask_comments
+
+    marker = proof.find(":= by")
+    body = _mask_comments(proof[marker + len(":= by") :] if marker >= 0 else proof)
+    found = list(_REPEAT_WORDS.finditer(body))
+    words = [match.group() for match in found]
+    total = len(words)
+    level = [
+        (_REPEAT_START_WORDS, positions)
+        for key, positions in _group_starts(words, _REPEAT_START_WORDS).items()
+        if len(positions) >= 2
+    ]
+    maximal: list[tuple[int, list[int]]] = []
+    while level:
+        grown = []
+        for length, positions in level:
+            children: dict[str, list[int]] = {}
+            for p in positions:
+                if p + length < total:
+                    children.setdefault(words[p + length], []).append(p)
+            if not any(len(kids) == len(positions) for kids in children.values()):
+                maximal.append((length, positions))
+            grown.extend((length + 1, kids) for kids in children.values() if len(kids) >= 2)
+        level = grown
+    items: dict[str, dict] = {}
+    for length, positions in maximal:
+        before = {words[p - 1] if p > 0 else None for p in positions}
+        if len(before) == 1 and None not in before:
+            continue  # every occurrence extends to the left as well; the longer span is listed instead
+        trimmed = _balanced_span(body, found, words, positions, length)
+        if trimmed is None:
+            continue
+        offset, length = trimmed
+        occurrences = _non_overlapping([p + offset for p in positions], length)
+        if len(occurrences) < 2:
+            continue
+        span = " ".join(body[found[occurrences[0]].start() : found[occurrences[0] + length - 1].end()].split())
+        if span in items:
+            continue
+        tokens = snippet_tokens(span)
+        if tokens < REPEAT_MIN_TOKENS or _repeat_saved(len(occurrences), tokens) <= 0:
+            continue
+        items[span] = {
+            "text": span,
+            "tokens": tokens,
+            "ranges": [(found[p].start(), found[p + length - 1].end()) for p in occurrences],
+        }
+    # Greedy by savings; a span never overlaps one already chosen, in any occurrence (overlapping occurrences drop).
+    chosen: list[dict] = []
+    taken: list[tuple[int, int]] = []
+    pool = list(items.values())
+    while pool and len(chosen) < REPEAT_SHOWN:
+        scored = []
+        for item in pool:
+            ranges = [r for r in item["ranges"] if not any(r[0] < end and start < r[1] for start, end in taken)]
+            saved = _repeat_saved(len(ranges), item["tokens"]) if len(ranges) >= 2 else 0
+            if saved > 0:
+                scored.append((saved, item, ranges))
+        if not scored:
+            break
+        saved, item, ranges = max(scored, key=lambda entry: (entry[0], -len(entry[1]["text"])))
+        taken.extend(ranges)
+        pool.remove(item)
+        chosen.append(
+            {
+                "text": item["text"],
+                "count": len(ranges),
+                "tokens": item["tokens"],
+                "saved_tokens": saved,
+                "points": round(saved * points_per_token, 2),
+            }
+        )
+    return sorted(chosen, key=lambda row: -row["saved_tokens"])
+
+
+def _repeat_saved(count: int, tokens: int) -> int:
+    """Tokens saved by sharing a span of `tokens` that occurs `count` times: one `have` costs tokens + 4."""
+    return (count - 1) * tokens - (tokens + 4)
+
+
+def _non_overlapping(positions: list[int], length: int) -> list[int]:
+    kept: list[int] = []
+    for p in positions:
+        if not kept or p >= kept[-1] + length:
+            kept.append(p)
+    return kept
+
+
+_OPENERS = {"(": ")", "[": "]", "{": "}", "⟨": "⟩"}
+_CLOSERS = set(_OPENERS.values())
+
+
+def _balanced_span(
+    body: str, found: list, words: list[str], positions: list[int], length: int
+) -> tuple[int, int] | None:
+    """The longest part (offset, length in words) of a repeated word span that is bracket-balanced and starts and ends
+    at a term boundary (whitespace or a bracket) in every occurrence."""
+
+    def boundary(position: int, length_: int) -> bool:
+        first, last = found[position].start(), found[position + length_ - 1].end()
+        left = body[first - 1] if first > 0 else " "
+        right = body[last] if last < len(body) else " "
+        return (left.isspace() or left in _OPENERS) and (
+            right.isspace() or right in _OPENERS or right in _CLOSERS or right in ",;"
+        )
+
+    def balanced(start: int, size: int) -> bool:
+        stack: list[str] = []
+        for word in words[positions[0] + start : positions[0] + start + size]:
+            if word in _OPENERS:
+                stack.append(_OPENERS[word])
+            elif word in _CLOSERS and (not stack or stack.pop() != word):
+                return False
+        return not stack
+
+    for size in range(length, 0, -1):
+        for start in range(length - size + 1):
+            if balanced(start, size) and all(boundary(p + start, size) for p in positions):
+                return start, size
+    return None
+
+
+def _group_starts(words: list[str], length: int) -> dict[tuple[str, ...], list[int]]:
+    groups: dict[tuple[str, ...], list[int]] = {}
+    for index in range(len(words) - length + 1):
+        groups.setdefault(tuple(words[index : index + length]), []).append(index)
+    return groups

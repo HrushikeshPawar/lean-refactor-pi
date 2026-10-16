@@ -1,0 +1,60 @@
+messages:
+  where: "Agent messages and notices"
+  per_run: "when the matching event occurs"
+  continuation:
+    where: "Agent messages and notices"
+    per_run: "when the matching event occurs"
+  errors:
+    where: "Agent messages and notices"
+    per_run: "when the matching event occurs"
+  footer:
+    where: "Agent messages and notices"
+    per_run: "after each tool result"
+  prior_work:
+    where: "Initial theorem packet"
+    per_run: "once per seeded run"
+  trim:
+    where: "Agent messages and notices"
+    per_run: "when a repeat is shortened"
+packet:
+  where: "Initial theorem packet"
+  per_run: "once per run"
+  price_table:
+    where: "Prices action replies"
+    per_run: "when the table is requested"
+  task:
+    where: "Initial theorem packet"
+    per_run: "once per run"
+replies:
+  where: "Tool replies"
+  per_run: "when the matching tool result occurs"
+  tools:
+    where: "Tool replies"
+    per_run: "when the matching tool result occurs"
+  price_row:
+    where: "Compile replies"
+    per_run: "when a scored proof is compiled"
+skill:
+  where: "Agent skill instructions"
+  per_run: "once per run"
+  skill:
+    where: "Agent skill instructions"
+    per_run: "once per run"
+tools:
+  where: "Model tool definitions"
+  per_run: "every request"
+  compile:
+    where: "Model tool definitions"
+    per_run: "every request"
+  finish:
+    where: "Model tool definitions"
+    per_run: "every request"
+  goal:
+    where: "Model tool definitions"
+    per_run: "every request"
+  read:
+    where: "Model tool definitions"
+    per_run: "every request"
+  search:
+    where: "Model tool definitions"
+    per_run: "every request"

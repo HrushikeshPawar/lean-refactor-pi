@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Arena candidate graph</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <div><h1>Arena proof search</h1><div id="run-label" class="sub"></div></div>
+    <div id="metrics" class="metrics"></div>
+    <a class="navlink" href="dashboard.html">Dashboard &rarr;</a>
+    <div id="live" class="live">Connecting…</div>
+  </header>
+  <main>
+    <section class="overview">
+      <div class="section-title"><h2>Progress</h2><span class="sub">Select a point to inspect its candidate</span></div>
+      <div id="charts" class="charts"></div>
+      <div id="cost-note" class="cost-note" hidden></div>
+    </section>
+    <section class="workspace">
+      <div class="graph-pane">
+        <div class="toolbar">
+          <input id="search" type="search" placeholder="Search proof, ID, route, reasoning…" aria-label="Search nodes">
+          <div id="chips" class="chips" role="group" aria-label="Filter nodes by kind and result"></div>
+          <button id="reset-filters" type="button" class="linkish" hidden>Reset filters</button>
+        </div>
+        <div id="graph-wrap"><svg id="graph" role="img" aria-label="Candidate ancestry graph"></svg><div class="view-ctrl"><button id="best-path" type="button" class="toggle" aria-pressed="true" title="Highlight the path from the original proof to the best verified candidate">★ Best path</button><button id="clear-sel" type="button" title="Clear the selection (Esc)" disabled>Clear selection</button><button id="fit" type="button">Fit</button><button id="zoom-in" type="button" aria-label="Zoom in">+</button><button id="zoom-out" type="button" aria-label="Zoom out">−</button></div><div id="legend" class="legend-panel"></div><div id="node-tip" class="node-tip" hidden></div><svg id="minimap" role="img" aria-label="Graph minimap"></svg></div>
+      </div>
+      <aside id="detail"><p class="empty">Select a graph node, chart point, or frontier item.</p></aside>
+    </section>
+    <section class="lower">
+      <div class="panel"><h2>Frontier</h2><div id="frontier"></div></div>
+      <div class="panel"><h2>Merge worker</h2><div id="worker"></div><div id="merge-feed"></div></div>
+    </section>
+  </main>
+  <dialog id="chart-dialog" aria-label="Progress chart details"><div id="chart-dialog-body"></div></dialog>
+  <dialog id="code-dialog" aria-label="Proof and lineage details"><div id="code-dialog-body"></div></dialog>
+  <script src="highlight.js" defer></script>
+  <script src="app.js" defer></script>
+</body>
+</html>
