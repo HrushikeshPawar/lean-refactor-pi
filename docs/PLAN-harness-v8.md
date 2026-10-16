@@ -81,6 +81,7 @@ v8a tool use over 19 runs: compile 946 calls (1 error), scratch 434 (10), read 3
 - **goal:** keep, or fold into `read` as a view; 109 calls, no errors.
 - **search:** keep. Seeded runs do not carry earlier search and read results (§12k), so a seeded run repeats lookups; carry a compact list of names already read.
 - **New, to try:** `cost` (per-lemma heartbeat cost and unused-lemma marks for one node, §2 item 2), and a model-invoked bounded `golf` (one pass on one node through the lane scheduler; §2 item 1). Decide after the Pi + Lean MCP exploratory run (§3 item 1), which shows which tools Sol reaches for unprompted.
+- **Readable reasoning from OpenAI models.** v8b Sol turns carry no text blocks and only about 35 readable reasoning characters per turn; the rest is encrypted. Find where pi-ai's OpenAI provider builds `reasoning` and request `summary: "detailed"` (Responses API). Check on one short capped Sol run that summaries get longer on the ChatGPT backend. If it works, the summaries feed the seeded-run digest; otherwise add an optional `note` argument to `compile`, stored on the node.
 - **Remove:** nothing yet. Re-check each tool's share of calls and of new bests after v8b.
 
 ## 3. Test next
