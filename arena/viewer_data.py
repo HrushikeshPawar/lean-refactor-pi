@@ -965,9 +965,9 @@ def _reasoning(item) -> list[dict]:
     for block in response.get("content") or []:
         if not isinstance(block, dict):
             continue
-        if block.get("type") == "thinking" and isinstance(block.get("thinking"), str):
+        if block.get("type") == "thinking" and isinstance(block.get("thinking"), str) and block["thinking"].strip():
             blocks.append({"type": "thinking", "text": _cap(block["thinking"])})
-        elif block.get("type") == "text" and isinstance(block.get("text"), str):
+        elif block.get("type") == "text" and isinstance(block.get("text"), str) and block["text"].strip():
             blocks.append({"type": "text", "text": _cap(block["text"])})
     return blocks
 

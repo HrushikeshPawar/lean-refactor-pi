@@ -22,6 +22,8 @@ from arena.campaign import (
     island_packet,
     no_work_focus,
     restart_packet,
+    stall_due,
+    stall_restart_packet,
     run_dir,
     state,
     submission,
@@ -46,6 +48,8 @@ ACTIONS = (
     "no_work_focus",
     "restart_packet",
     "island_packet",
+    "stall_due",
+    "stall_restart_packet",
 )
 
 
@@ -75,6 +79,10 @@ def run(args: SimpleNamespace) -> dict:
         return no_work_focus(args.run_id, args.theorem)
     if args.action == "restart_packet":
         return restart_packet(args.theorem, args.run_id)
+    if args.action == "stall_due":
+        return {"due": stall_due(args.run_id)}
+    if args.action == "stall_restart_packet":
+        return stall_restart_packet(args.theorem, args.run_id)
     if args.action == "island_packet":
         return island_packet(args.theorem, args.run_id)
     if args.action == "frontier":

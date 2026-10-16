@@ -103,6 +103,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `messages/notices.block_shell` | 7 | Agent messages and notices | when the matching event occurs |
 | `messages/notices.block_workspace` | 4 | Agent messages and notices | when the matching event occurs |
 | `messages/notices.closest_tool` | 4 | Agent messages and notices | when the matching event occurs |
+| `messages/phase.route_tally` | 7 | Agent messages and notices | when the matching event occurs |
 | `messages/phase.stall_focus` | 14 | Agent messages and notices | when the matching event occurs |
 | `messages/prior-work.call` | 3 | Initial theorem packet | once per seeded run |
 | `messages/prior-work.digest_heading` | 8 | Initial theorem packet | once per seeded run |

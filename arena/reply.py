@@ -533,6 +533,9 @@ def attach_context(
     # Node ids the model has been shown; an update never names a node outside them.
     seen = set(state.get("seen_nodes", [])) | _node_ids(result)
     facts = [_update_text(item, seen) for item in fresh if isinstance(item.get("text"), str)] + result.get("facts", [])
+    tally = campaign.route_tally(run_id) if result.get("handles") else None
+    if tally:
+        facts.append(tally)
     if fresh:
         state["delivered_seq"] = max(int(item.get("seq", -1)) for item in fresh)
     # Sections: updates from background checks, this call's result, then the search map.

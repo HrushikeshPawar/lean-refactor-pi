@@ -17,7 +17,7 @@ import { continuationFacts, continuationPush } from "./rules.ts";
 import { cacheAlarm, cacheHitPct, callCost, finishAllowed, limitReached, limitUsd, spendFooter } from "./spend.ts";
 import { numbers as textNumbers, render as renderText } from "./text.ts";
 import { classifyFailure, nextWait } from "./outage.ts";
-import { applyToolTurnEffort } from "./thinking.ts";
+import { applyToolTurnEffort, requestDetailedSummary } from "./thinking.ts";
 import { renderReply } from "./reply.ts";
 
 const root = resolve(import.meta.dirname, "../../..");
@@ -258,7 +258,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     if (!active || !runDirectory) return;
     let payload = event.payload;
     const configuredModel = configuredModels.models?.[process.env.ARENA_MODEL ?? ""];
-    payload = applyToolTurnEffort(payload, configuredModel?.toolTurnReasoningEffort);
+    payload = requestDetailedSummary(applyToolTurnEffort(payload, configuredModel?.toolTurnReasoningEffort));
     // A fixed per-request output ceiling for the whole run (models.yaml request_output_tokens).
     if (outputLimit > 0 && payload && typeof payload === "object" && !Array.isArray(payload)) {
       const body = payload as Record<string, unknown>;
@@ -733,7 +733,8 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     const finishTurn = remaining.allowed && doneTurn;
     // ARENA_ISLANDS=0 keeps the plain continuation after a text-only turn (tests of continuation text use it).
     const islandTurn = doneTurn && process.env.ARENA_ISLANDS !== "0";
-    const { stop, moveFocus, restart, island } = stopDecision({ limitHit, finishTurn, doneTurn: islandTurn, noWorkThisTurn,
+    const stallDue = !failed && (await campaign("stall_due")).due === true;
+    const { stop, moveFocus, restart, island } = stopDecision({ stallDue, limitHit, finishTurn, doneTurn: islandTurn, noWorkThisTurn,
       providerUnreachable: failure === "transport" && outageStartedAt !== undefined && nextWait(outageAttempt, Number(process.env.ARENA_BACKOFF_MS ?? 2000), outageStartedAt, Date.now(), Number(process.env.ARENA_OUTAGE_LIMIT_MS ?? 600000)).stop,
       errorLoop: failure === "model" && errorStreak >= MAX_ERROR_STREAK,
       usageLimit: failure === "usage_limit",
@@ -781,7 +782,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     // Second no-work turn in a row, before the final tenth: the run restarts from a packet at the next starting
     // point. The compaction draft keeps nothing before it, so the old reasoning leaves the model's context.
     if (restart) {
-      const restarted = await campaign(island ? "island_packet" : "restart_packet");
+      const restarted = await campaign(island ? "island_packet" : stallDue ? "stall_restart_packet" : "restart_packet");
       if (restarted.ok === true && typeof restarted.text === "string") {
         await campaign("reset_delivered");
         trimmer.forget();

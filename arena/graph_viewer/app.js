@@ -409,7 +409,7 @@ const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;',
                  ['Route',node.route?routeBadge(node.route):'<span class="muted">none</span>'],['Parent',parents.length?parents.map(goBtn).join(' '):'<span class="muted">root</span>'],
                  ['Children',node.children.length?node.children.map(goBtn).join(' '):'<span class="muted">none</span>'],...((probeKids.get(node.id)||[]).length?[['Probes',(probeKids.get(node.id)).map(goBtn).join(' ')]]:[])])}
         <div class="actions"><button type="button" data-open="overview" class="primary">Details ↗</button><button type="button" data-open="diff">Diff ↗</button><button type="button" data-open="proof">Proof ↗</button><button type="button" data-open="lineage">Lineage ↗</button></div></div>
-      ${node.hypothesis||node.origin==='auto_merge'?`<div class="card hypcard"><h3>Stated hypothesis</h3><p class="hyp">${esc(node.hypothesis||'Deterministic combination of disjoint edits')}</p></div>`:''}
+      ${node.hypothesis||node.origin==='auto_merge'?`<div class="card hypcard"><h3>Note</h3><p class="hyp">${esc(node.hypothesis||'Deterministic combination of disjoint edits')}</p></div>`:''}
       <div class="card"><h3>Evaluations (${node.evaluations.length})</h3><div class="evals">${evals||'<p class="muted">None yet.</p>'}</div></div>
       <div class="card ancard"><h3>Ancestry (${chain.length})</h3><div class="evals">${chain.map(n=>`<div class="eval-line"><button data-go="${esc(n.id)}" class="${n.id===node.id?'primary':''}">#${esc(n.index)}</button><span class="tag ${n.status==='full'?'good':n.status==='fail'?'bad':''}">${esc(status(n))}</span><span>${esc(n.tokens ?? '?')} tok · ${esc(n.heartbeat ?? '?')} hb · ${esc(n.local_proxy?.toFixed?.(2) ?? '—')}</span></div>`).join('')}</div></div></div>`;
     $('detail').querySelectorAll('[data-go]').forEach(el=>el.onclick=()=>select(el.dataset.go));
@@ -453,7 +453,7 @@ const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;',
     const bind=()=>box.querySelectorAll('[data-go]').forEach(el=>el.onclick=()=>{select(el.dataset.go);openDetail(tab)});
     if(tab==='overview'){
       const relations=derived.map((d,i)=>`<div>${i?'Alternate derivation':'Recorded parents'}: ${d.parents.length?d.parents.map(goBtn).join(' '):'root'}${d.merge?.base?` · base ${goBtn(d.merge.base)}`:''}</div>`).join('');
-      box.innerHTML=`<code>${esc(node.id)}</code><h3>Stated hypothesis</h3><p class="hyp">${esc(node.hypothesis||(node.origin==='auto_merge'?'Deterministic combination of disjoint edits':'No hypothesis recorded'))}</p>
+      box.innerHTML=`<code>${esc(node.id)}</code><h3>Note</h3><p class="hyp">${esc(node.hypothesis||(node.origin==='auto_merge'?'Deterministic combination of disjoint edits':'No hypothesis recorded'))}</p>
         <h3>Relationships</h3><div class="row">${relations}</div>
         <p class="muted">Children: ${node.children.length?node.children.map(goBtn).join(' '):'none'} · Decision: ${esc(node.decision)}</p><button id="collapse" type="button">${collapsed.has(node.id)?'Expand descendants':'Collapse descendants'}</button>`;
       $('collapse').onclick=()=>{collapsed.has(node.id)?collapsed.delete(node.id):collapsed.add(node.id);view=null;layout();renderGraph();detail();openDetail(tab)};

@@ -20,6 +20,8 @@ export type StopInput = {
   noWorkThisTurn: boolean; finishAllowed: boolean;
   // The turn completed with visible text and no tool call: before the final tenth it opens a new island.
   doneTurn: boolean;
+  // Harness-side: more tries after a stall nudge on the same route, no new best.
+  stallDue?: boolean;
 };
 
 // A first turn without work moves the focus; a second one in a row, or a best that has not changed for
@@ -36,6 +38,6 @@ export function stopDecision(input: StopInput): { stop: string | null; moveFocus
   const early = stop === null && !input.finishAllowed && input.remainingFraction >= RESTART_MIN_REMAINING_FRACTION;
   const island = early && input.doneTurn;
   const restart = early && (island || (input.noWorkThisTurn && input.noWorkTurns >= 2)
-    || input.stallUsd >= STALL_RESTART_FRACTION * input.limitUsd);
+    || input.stallUsd >= STALL_RESTART_FRACTION * input.limitUsd || input.stallDue === true);
   return { stop, moveFocus: early && input.noWorkThisTurn && input.noWorkTurns < 2 && !restart, restart, island };
 }
