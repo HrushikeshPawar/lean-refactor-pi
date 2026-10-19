@@ -1742,13 +1742,17 @@ def record_evaluation(
     directory = run_dir(run_id)
     if lane == "model" and trigger == "model":
         _refuse_if_tripped(directory)
+    record_started = time.monotonic()
     row = problem(name)
     # Forbidden constructs and statement edits are rejected before anything is recorded,
     # so `sorry` drafts can never become candidates.
     validate_proof(row, proof)
     candidate_id = hashlib.sha256((name + "\0" + proof).encode()).hexdigest()
     notes: list[str] = []
+    lock_wait_started = time.monotonic()
+    lean_lock_wait_seconds = 0.0
     with _candidate_lock(directory, candidate_id):
+        lock_wait_seconds = round(time.monotonic() - lock_wait_started, 3)
         history = events(directory)
         if not history or history[0].get("theorem") != name:
             raise ValueError(text.render("messages/errors.run_theorem_mismatch"))
@@ -1811,7 +1815,9 @@ def record_evaluation(
             result = precomputed
         else:
             try:
+                lean_lock_started = time.monotonic()
                 with lean_lock(directory, lane):
+                    lean_lock_wait_seconds = round(time.monotonic() - lean_lock_started, 3)
                     result = _evaluate(
                         name,
                         proof,
@@ -1833,6 +1839,8 @@ def record_evaluation(
                 if isinstance(error, FileNotFoundError):
                     result["lean_unavailable"] = True  # Lean (or the workspace) could not run: counts for the breaker
         if not prior:
+            result.setdefault("harness_timing", {})
+            result["harness_timing"].update({"candidate_lock_wait_seconds": lock_wait_seconds, "lean_lock_wait_seconds": lean_lock_wait_seconds})
             _externalize_output(directory, candidate_id, result)
             _append(
                 directory,
@@ -1931,6 +1939,8 @@ def record_evaluation(
             total_versions = len(versions(problem(name)))
             row["versions"] = _versions_text(node.versions, total_versions)
             reply["price_row"] = render_price_row(row, parent_node is None, parent_node is best_node)
+    if not prior:
+        _append(directory, {"kind": "evaluation_span", "candidate_id": candidate_id, "mode": mode, "seconds": round(time.monotonic() - record_started, 3), "materialized": bool(location), "filed": newly_filed})
     return reply
 
 
@@ -3807,6 +3817,9 @@ def cold_verify(run_id: str, row: dict) -> dict:
         }
     name = history[0]["theorem"]
     proof = (directory / "proofs" / f"{row['id']}.lean").read_text()
+    phase_id = f"cold_verify:{os.getpid()}:{time.monotonic_ns()}"
+    started = time.monotonic()
+    _runtime_event(directory, {"kind": "phase", "phase": "cold_verify", "phase_id": phase_id, "status": "start", "candidate_id": row["id"]})
     try:
         with lean_lock(directory, "background"), force_cold():
             cold = _evaluate(name, proof, "full", lane="background")
@@ -3838,6 +3851,7 @@ def cold_verify(run_id: str, row: dict) -> dict:
             "recorded_heartbeats": row["heartbeats"],
         }
     _append(directory, event)
+    _runtime_event(directory, {"kind": "phase", "phase": "cold_verify", "phase_id": phase_id, "status": "error" if event.get("error") else "end", "candidate_id": row["id"], "seconds": round(time.monotonic() - started, 2), "confirmed": bool(event.get("confirmed")), "error": event.get("error")})
     return event
 
 

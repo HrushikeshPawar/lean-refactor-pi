@@ -631,6 +631,10 @@ def run_lean(
                 _LAST.info["progress_line"] = reply["progress_line"]
             if reply.get("header_seconds") is not None:
                 _LAST.info["header_seconds"] = reply["header_seconds"]
+            if reply.get("queue_seconds") is not None:
+                _LAST.info["queue_seconds"] = reply["queue_seconds"]
+            if reply.get("seconds") is not None:
+                _LAST.info["check_seconds"] = reply["seconds"]
             if reply.get("warm_kept"):
                 _LAST.info["warm_kept"] = True
             if reply.get("fallback"):
@@ -725,7 +729,9 @@ def compile_version(
     report_start_line: int | None = None,
     lane: str = "model",
 ) -> dict:
+    prepared_at = time.monotonic()
     built = candidate_file(row, proof, version, commit)
+    preparation_seconds = round(time.monotonic() - prepared_at, 3)
 
     def assemble(instrument: bool) -> str:
         text = built["text"]
@@ -743,6 +749,7 @@ def compile_version(
         # Harness-origin error: the model must see only the plain draft's own result.
         output = run_lean(row, built["path"], assemble(False), timeout=timeout, prefix_end=built["head"], lane=lane)
     lean_run = last_lean_run()
+    lean_run["candidate_prepare_seconds"] = preparation_seconds
     if output is None:
         return {
             "passed": False,

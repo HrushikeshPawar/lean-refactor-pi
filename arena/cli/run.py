@@ -22,7 +22,7 @@ from typing import TypedDict
 
 from arena import lean_health, lean_session, text
 from arena import models as model_config
-from arena.campaign import autocheck, init, packet, run_dir, submission, write_state
+from arena.campaign import _runtime_event, autocheck, init, packet, run_dir, submission, write_state
 from arena.cli import live
 from arena.engine import ROOT
 from arena.provenance import code_version
@@ -782,6 +782,7 @@ def run(options: RunOptions) -> int:
     for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(number, interrupt)
     with event_log.open("a") as output, live_view(args, directory, health, worker):
+        model_phase_id = f"model:{os.getpid()}:{time.monotonic_ns()}"
         process = subprocess.Popen(
             command,
             cwd=shadow,
@@ -793,6 +794,7 @@ def run(options: RunOptions) -> int:
             bufsize=1,
             start_new_session=True,
         )
+        _runtime_event(directory, {"kind": "phase", "phase": "model", "phase_id": model_phase_id, "status": "start"})
         state["process"] = process
         assert process.stderr is not None
         stderr_reader = threading.Thread(
@@ -828,6 +830,7 @@ def run(options: RunOptions) -> int:
             kill_group(process, signal.SIGKILL)
             exit_code = process.wait()
         stderr_reader.join(timeout=5)
+    _runtime_event(directory, {"kind": "phase", "phase": "model", "phase_id": model_phase_id, "status": "end", "exit_code": exit_code})
     if state["timer"] is not None:
         state["timer"].cancel()
     # Lean servers and evaluations Pi started share its process group.
@@ -920,6 +923,7 @@ def finish(
     if not report_path.exists() or report_path.stat().st_mtime < segment_started:
         report_path.write_text(json.dumps(cost_report_from_ledger(directory), indent=2) + "\n")
         print("Pi wrote no cost report for this segment; reconstructed it from the cost journal", file=sys.stderr)
+    summary_phase_ended = False
     try:
         # Checks still queued when the model stopped are finished here (no model cost), on a normal end
         # and on an operator stop alike, so the submission reflects every candidate the model produced.
@@ -930,8 +934,12 @@ def finish(
                 f"Background checks after Pi exited: {drained['checked']}; skipped (cannot beat the best) {drained.get('skipped', [])}; still pending {drained.get('remaining', [])}{' (drain cap reached)' if drained.get('timed_out') else ''}",
                 flush=True,
             )
+        summary_phase_id = f"summary:{os.getpid()}:{time.monotonic_ns()}"
+        _runtime_event(directory, {"kind": "phase", "phase": "summary", "phase_id": summary_phase_id, "status": "start"})
         write_state(args.run_id)
         answer = submission(args.run_id)
+        _runtime_event(directory, {"kind": "phase", "phase_id": summary_phase_id, "phase": "summary", "status": "end"})
+        summary_phase_ended = True
         print(
             f"Submission: {answer.get('candidate') or 'none'}"
             + (
@@ -942,6 +950,8 @@ def finish(
             flush=True,
         )
     except Exception as error:
+        if "summary_phase_id" in locals() and not summary_phase_ended:
+            _runtime_event(directory, {"kind": "phase", "phase": "summary", "phase_id": summary_phase_id, "status": "error", "error": str(error)[:300]})
         print(f"Choosing the submission failed: {error}", file=sys.stderr)
     try:
         print(
