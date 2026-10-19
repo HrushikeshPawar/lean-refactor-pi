@@ -1639,16 +1639,17 @@ def scratch_tool(theorem: str, run_id: str, request: dict) -> dict:
     label = official_filter()(re.sub(r"\bsorry\b", "trivial", code))
     if label:
         return _invalid("forbidden", label, ["no forbidden constructs"], TOOL_FORMS["scratch"])
+    digest = hashlib.sha256(code.encode()).hexdigest()
+    earlier = sum(
+        1 for event in _history(run_id) if event.get("kind") == "scratch" and event.get("code_sha256") == digest
+    )
+    # Retain the exact input before context construction or Lean can fail; instrumentation is not the source.
+    campaign._append(campaign.run_dir(run_id), {"kind": "scratch", "code_sha256": digest, "code": code})
     row = campaign.problem(theorem)
     version, commit = engine.versions(row)[0]
     # The snippet takes the target declaration's place in the same file the compile tool checks.
     measured_code, measured_starts = _measured_snippet(code)
     built = engine.candidate_file(row, measured_code, version, commit)
-    digest = hashlib.sha256(code.encode()).hexdigest()
-    earlier = sum(
-        1 for event in _history(run_id) if event.get("kind") == "scratch" and event.get("code_sha256") == digest
-    )
-    campaign._append(campaign.run_dir(run_id), {"kind": "scratch", "code_sha256": digest})
     facts = [_render("scratch_repeat", count=earlier + 1)] if earlier else []
     code_lines = code.splitlines()
     declarations = [number for number, line in enumerate(code_lines, 1) if _DECLARATION_START.match(line)]

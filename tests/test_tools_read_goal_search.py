@@ -1,3 +1,4 @@
+import hashlib
 from unittest.mock import patch
 
 from arena import campaign, tools
@@ -34,13 +35,33 @@ class ScratchResultTests(ToolCase):
             patch.object(tools.engine, "versions", return_value=[("v", "c")]),
             patch("arena.scoring.reference", return_value=(1000, 10000)),
             patch.object(tools.engine, "candidate_file", return_value=built),
-            patch.object(tools.engine, "run_lean", return_value=(0, output)),
+            patch.object(tools.engine, "run_lean", return_value=None if output is None else (0, output)),
             patch.object(tools, "_history", return_value=[]),
-            patch.object(campaign, "_append"),
             patch.object(campaign, "run_dir", return_value=self.directory),
         ):
             result = tools.scratch_tool("T", "logic", {"code": code})
         return (result.get("details") or result)["items"][0]["lines"]
+
+    def test_scratch_retains_exact_original_code_for_success_failure_and_timeout(self):
+        code = "-- original λ context\r\n#check Nat.add_comm\r\n  \r\n"
+        shift = tools._SNIPPET_PREFIX.count("\n")
+        for output in ("", f"f.lean:{shift + 1}:0: error: fixture failure\n", None):
+            with self.subTest(output=output):
+                self.scratch(code, output=output)
+                saved = [row for row in campaign.events(self.directory) if row["kind"] == "scratch"][-1]
+                self.assertEqual(saved["code"], code)
+                self.assertEqual(saved["code_sha256"], hashlib.sha256(code.encode()).hexdigest())
+
+    def test_scratch_retains_code_when_context_construction_fails(self):
+        code = "#check Nat.add_comm\n"
+        with (
+            patch.object(tools.engine, "versions", return_value=[("v", "c")]),
+            patch.object(tools.engine, "candidate_file", side_effect=RuntimeError("fixture context unavailable")),
+            self.assertRaisesRegex(RuntimeError, "fixture context unavailable"),
+        ):
+            tools.scratch_tool("T", "logic", {"code": code})
+        saved = [row for row in campaign.events(self.directory) if row["kind"] == "scratch"][-1]
+        self.assertEqual(saved["code"], code)
 
     def test_result_line_counts_messages_and_body_tokens_only_when_the_snippet_declares(self):
         check = self.scratch("#check Nat.add_comm\n")
