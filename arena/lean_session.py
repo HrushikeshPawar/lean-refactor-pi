@@ -24,6 +24,7 @@ import argparse
 import fcntl
 import hashlib
 import json
+import math
 import os
 import signal
 import socket
@@ -797,11 +798,10 @@ class _Entry:
         self.condition = threading.Condition()
         self.used = time.monotonic()
         self.worker_gb = WORKER_GB
-        self.last_text: str | None = None
-        self.growing = False
+        self.worker_gb_source = "fallback"
+        self.worker_gb_samples = 0
         self.prefixes: dict[tuple[str | None, str], str] = {}  # (run, file) -> hash of the text before the target
         self.unreferenced_since: float | None = None  # when the last lease or hold naming it ended
-        self.last_header_end: int | None = None
         self.was_referenced = False
         self.queues: dict[str, list[object]] = {
             "model": [],
@@ -1242,56 +1242,6 @@ class Session:
                 other.condition.release()
             return True
 
-    def _grow(self, entry: _Entry) -> None:
-        """Open the model toolchain's remaining documents in the background.
-
-        A batch of drafts needs one warm document each; opening them while the model is thinking
-        means the first batch is as fast as the later ones. Memory decides how many fit."""
-        with entry.condition:
-            if (
-                entry.growing
-                or self.closing
-                or len(entry.lane_slots("model")) >= PRIMARY_MAX_WORKERS
-                or entry.last_text is None
-            ):
-                return
-            entry.growing = True
-        threading.Thread(target=self._grow_all, args=(entry,), daemon=True, name="lean-grow").start()
-
-    def _grow_all(self, entry: _Entry) -> None:
-        workers: list[threading.Thread] = []
-        try:
-            while not self.closing:
-                with entry.condition:
-                    if not entry.server.alive():
-                        break
-                    with self.lock:
-                        slot, _blocked = self._new_slot(entry, "model")
-                        if slot is None:
-                            break
-                        text, header_end = entry.last_text, entry.last_header_end
-                        _log(f"worker open {entry.project.name} slot {len(entry.lane_slots('model'))} (pre-warm)")
-                worker = threading.Thread(
-                    target=self._warm, args=(entry, slot, text, header_end), daemon=True, name="lean-warm"
-                )
-                worker.start()
-                workers.append(worker)
-            for worker in workers:
-                worker.join()
-        finally:
-            entry.growing = False
-
-    def _warm(self, entry: _Entry, slot: _Doc, text: str, header_end: int | None = None) -> None:
-        try:
-            if header_end:
-                entry.server.open_header(slot, text[:header_end])
-            else:
-                entry.server.check(slot, text, 600)
-        except (SessionError, OSError):
-            pass
-        finally:
-            self._release(entry, slot)
-
     def _release(self, entry: _Entry, slot: _Doc) -> None:
         with entry.condition:
             slot.busy = False
@@ -1320,6 +1270,7 @@ class Session:
             return self._batch_check(request, project, timeout)
         header_end = request.get("header_end")
         header_end = header_end if isinstance(header_end, int) and 0 < header_end <= len(request["text"]) else None
+        queued_at = time.monotonic()
         try:
             entry = self._entry(project, key)
             self._guard_prefix(entry, request)
@@ -1327,6 +1278,7 @@ class Session:
             # The wait for a worker has its own limit; the check's timeout starts once the worker is held.
             queue = MODEL_QUEUE_TIMEOUT if lane == "model" else timeout + OPEN_TIMEOUT
             slot = self._acquire(entry, queue, lane, request["text"][:header_end] if header_end else None)
+            queue_seconds = round(time.monotonic() - queued_at, 3)
         except SessionError as error:
             return {"ok": False, "stale": str(error).startswith("stale"), "reason": str(error)}
         except OSError as error:
@@ -1341,6 +1293,7 @@ class Session:
         finally:
             self._release(entry, slot)
         if outcome.get("timeout"):
+            self._measure(entry)
             _log(
                 f"timeout {entry.project.name}: check ran past {timeout:.1f} s ({lane} lane"
                 + (", worker kept warm)" if outcome.get("warm_kept") else ", worker closed)")
@@ -1350,6 +1303,7 @@ class Session:
                 "timeout": True,
                 "warm_kept": bool(outcome.get("warm_kept")),
                 "header_seconds": outcome.get("header_seconds"),
+                "queue_seconds": queue_seconds,
                 "partial": outcome.get("partial", []),
                 "progress_line": outcome.get("progress_line"),
                 "partial_output": render(outcome.get("partial", []), request["text"], request["display"])[1],
@@ -1357,11 +1311,6 @@ class Session:
             }
         returncode, text = render(outcome["diagnostics"], request["text"], request["display"])
         self._measure(entry)
-        if lane == "model":
-            entry.last_text = request["text"]
-            entry.last_header_end = header_end
-            if self._is_primary(project) or self._is_held(project) or self._is_adhoc(entry):
-                self._grow(entry)
         return {
             "ok": True,
             "returncode": returncode,
@@ -1369,6 +1318,7 @@ class Session:
             "seconds": outcome["seconds"],
             "new_worker": fresh,
             "header_seconds": outcome.get("header_seconds"),
+            "queue_seconds": queue_seconds,
             "lane": lane,
             "changed_from_line": outcome.get("changed_from_line"),
             "unchanged": bool(outcome.get("unchanged")),
@@ -1468,6 +1418,7 @@ class Session:
                 started = time.monotonic()
                 outcome = entry.server.check(slot, variant, float(request.get("timeout", 180)), header_end)
                 if outcome.get("timeout"):
+                    self._measure(entry)
                     header_seconds = header_seconds or outcome.get("header_seconds")
                     results.append({"timeout": True, "seconds": round(time.monotonic() - started, 3)})
                     continue
@@ -1490,6 +1441,7 @@ class Session:
                     )
                     goals_after = reply.get("rendered") if reply.get("goals") else None
                 except TimeoutError:
+                    self._measure(entry)
                     results.append({"timeout": True, "seconds": round(time.monotonic() - started, 3)})
                     continue
                 results.append(
@@ -1546,8 +1498,6 @@ class Session:
         lane = self._lane(project, entry, request.get("lane", "model"))
         allowed = OTHER_WORKERS if lane == "background" else PRIMARY_MAX_WORKERS
         wanted = max(0, min(int(request.get("slots", 1)), allowed))
-        if lane == "model":
-            entry.last_text, entry.last_header_end = text, header_end
         seconds: list[float] = []
         failed: list[str] = []
         lock = threading.Lock()
@@ -1592,6 +1542,7 @@ class Session:
                 thread.start()
         for thread in threads:
             thread.join()
+        self._measure(entry)
         return {
             "ok": True,
             "workers": ready + len(seconds),
@@ -1601,11 +1552,26 @@ class Session:
         }
 
     def _measure(self, entry: _Entry) -> None:
-        opened = len([s for s in entry.slots if s.text is not None])
-        if opened and entry.worker_gb == WORKER_GB:
-            used = sum(self.pss_fn(entry.server.pgid).values())
-            if used:
-                entry.worker_gb = max(0.5, used / opened)
+        with entry.condition:
+            opened = len([s for s in entry.slots if s.text is not None])
+        if not opened:
+            return
+        try:
+            readings = self.pss_fn(entry.server.pgid).values()
+        except (OSError, TypeError, ValueError):
+            return
+        values = [
+            value
+            for value in readings
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0
+        ]
+        if not values:
+            return
+        measured = max(0.5, sum(values) / opened, max(values))
+        with entry.condition:
+            entry.worker_gb = measured if not entry.worker_gb_samples else max(entry.worker_gb, measured)
+            entry.worker_gb_samples += 1
+            entry.worker_gb_source = "conservative PSS planning high-water"
 
     def status(self) -> dict:
         with self.lock:
@@ -1620,6 +1586,11 @@ class Session:
         for entry in entries:
             readings = self.pss_fn(entry.server.pgid)
             lanes = {slot.uri: slot.lane for slot in list(entry.slots) if slot.text is not None}
+            with entry.condition:
+                busy = len([s for s in entry.slots if s.busy])
+                estimate = round(entry.worker_gb, 3)
+                estimate_source = entry.worker_gb_source
+                estimate_samples = entry.worker_gb_samples
             workers = [
                 {"pid": pid, "gb": round(gb, 3), "lane": lanes.get(self.document_fn(pid) or "")}
                 for pid, gb in sorted(readings.items())
@@ -1628,7 +1599,10 @@ class Session:
                 {
                     "project": str(entry.project),
                     "workers": workers,
-                    "busy": len([s for s in entry.slots if s.busy]),
+                    "busy": busy,
+                    "worker_gb_estimate": estimate,
+                    "worker_gb_source": estimate_source,
+                    "worker_gb_samples": estimate_samples,
                     "gb": round(sum(readings.values()), 2),
                     "pgid": entry.server.pgid,
                     "pids": trees[id(entry)],

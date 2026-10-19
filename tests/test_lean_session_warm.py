@@ -343,7 +343,9 @@ class LaneTests(Base):
         text = HEADER + "theorem t : True := by\n  sorry\n"
         reply = session.goal({**self.request(), "text": text, "position": {"line": 3, "column": 2}, "op": "goal"})
         self.assertEqual(reply["goals"], ["h : True\n⊢ True"])
-        self.settled("didOpen", lean_session.PRIMARY_MAX_WORKERS)  # the first model check grows the primary
+        self.assertEqual(self.settled("didOpen", lean_session.PRIMARY_MIN_WORKERS), lean_session.PRIMARY_MIN_WORKERS)
+        time.sleep(1)
+        self.assertEqual(len(self.events("didOpen")), lean_session.PRIMARY_MIN_WORKERS)
         sent = [e["uri"] for e in self.events() if e["method"] in ("didOpen", "didChange") and e["size"] == len(text)]
         asked = {e["uri"] for e in self.events("goal_position")}
         self.assertEqual(len(sent), 1)
@@ -502,6 +504,56 @@ class BackgroundWorkerTests(Base):
 
 
 class AsyncWarmAndPssTests(Base):
+    def test_worker_memory_estimate_tracks_conservative_pss_high_water(self):
+        readings = {10: 4.8, 20: 0.4, 30: 0.4}
+        session = lean_session.Session(
+            self.dir / "measured",
+            budget=lean_session.WorkerBudget(self.dir / "tokens", 8),
+            mem_fn=lambda: (9.0, None),
+            pss_fn=lambda _: readings,
+            external_fn=lambda _: {},
+        )
+        self.sessions.append(session)
+        with (
+            patch.object(lean_session, "PRIMARY_MAX_WORKERS", 4),
+            patch.object(lean_session, "PRIMARY_MIN_WORKERS", 4),
+        ):
+            reply = session.warm({**self.request(), "slots": 3})
+            entry = next(iter(session.entries.values()))
+            self.assertIn("memory", session._may_open(entry))  # 9 GB less 4.8 GB falls below the reserve
+        self.assertEqual(reply["workers"], 3)
+        self.assertEqual(entry.worker_gb, 4.8)  # the largest worker is not diluted by the three-slot average
+        self.assertEqual(entry.worker_gb_source, "conservative PSS planning high-water")
+        self.assertEqual(entry.worker_gb_samples, 1)
+        with patch.object(lean_session, "_available_gb", return_value=9.0):
+            with self.assertRaisesRegex(lean_session.SessionError, "no memory"):
+                with entry.server.open_gate(0.1):
+                    self.fail("opening gate should reject the measured requirement")
+        readings = {10: 0.7, 20: 0.6, 30: 0.5}
+        session._measure(entry)
+        self.assertEqual(entry.worker_gb, 4.8)  # an idle/smaller sample cannot lower the high-water mark
+        status = session.status()["servers"][0]
+        self.assertEqual(
+            (status["worker_gb_estimate"], status["worker_gb_source"], status["worker_gb_samples"]),
+            (4.8, "conservative PSS planning high-water", 2),
+        )
+
+    def test_invalid_worker_pss_keeps_the_default_admission_estimate(self):
+        readings = {10: 0.0, 20: float("nan"), 30: float("inf")}
+        session = lean_session.Session(
+            self.dir / "unmeasured",
+            budget=lean_session.WorkerBudget(self.dir / "tokens", 4),
+            mem_fn=lambda: (100.0, None),
+            pss_fn=lambda _: readings,
+            external_fn=lambda _: {},
+        )
+        self.sessions.append(session)
+        session.warm({**self.request(), "slots": 1})
+        entry = next(iter(session.entries.values()))
+        self.assertEqual(entry.worker_gb, lean_session.WORKER_GB)
+        self.assertEqual(entry.worker_gb_source, "fallback")
+        self.assertEqual(entry.worker_gb_samples, 0)
+
     def test_nonblocking_warm_returns_before_header_open_finishes(self):
         session = self.session()
         started = time.monotonic()

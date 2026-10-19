@@ -601,26 +601,26 @@ class CoreSessionTests(SessionHarness, unittest.TestCase):
         status = lean_session.request({"op": "status"}, 5, self.socket)
         self.assertGreaterEqual(len(status["servers"][0]["workers"]), 2)
 
-    @unittest.skipIf((lean_session._available_gb() or 0) < 12, "not enough free memory to grow the session")
-    def test_remaining_documents_warm_up_in_the_background_so_a_batch_is_incremental(self):
+    def test_concurrent_documents_are_allocated_on_demand(self):
         from concurrent.futures import ThreadPoolExecutor
 
         statement = self.row["statement"]
-        compile_version(self.row, statement + " := by\n  sorry", self.version, self.commit, probe=True)
+        first = compile_version(self.row, statement + " := by\n  sorry", self.version, self.commit, probe=True)
+        self.assertEqual(first["lean"]["path"], "session")
+        self.assertTrue(first["lean"]["new_worker"])
 
         def workers() -> int:
             return len(status_of(self.socket, 5)["servers"][0]["workers"])
 
-        self.assertTrue(
-            wait_until(lambda: workers() >= lean_session.PRIMARY_MAX_WORKERS, 120),
-            "the session did not open its remaining documents",
-        )
-        proofs = [statement + f" := by\n  intros\n  sorry\n  -- batch {n}" for n in range(4)]
+        self.assertEqual(workers(), 1)
+        proofs = [statement + f" := by\n  intros\n  sorry\n  -- demand {n}" for n in range(3)]
         with ThreadPoolExecutor(4) as pool:
             results = list(
                 pool.map(lambda p: compile_version(self.row, p, self.version, self.commit, probe=True), proofs)
             )
-        self.assertFalse(any(r["lean"]["new_worker"] for r in results), [r["lean"] for r in results])
+        self.assertTrue(all(r["lean"]["path"] == "session" for r in results), [r["lean"] for r in results])
+        self.assertTrue(any(r["lean"]["new_worker"] for r in results), [r["lean"] for r in results])
+        self.assertGreaterEqual(workers(), 2)
 
     def test_a_changed_pin_or_toolchain_is_stale_and_runs_cold(self):
         project = engine.workspace(self.row, self.version, self.commit)
