@@ -1,0 +1,438 @@
+[
+  {
+    "number": 3,
+    "slug": "exact-history",
+    "title": "Retain exact attempts and derivations",
+    "blocked_by": [],
+    "branch": "v8/03-exact-history",
+    "stacked_on": "v8/02-current-work",
+    "file": "issues/03-exact-history.md",
+    "status": "ready-for-agent",
+    "smoke_command": "uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_tools_compile.py::CompileToolTests::test_v8_duplicate_attempt_roundtrip",
+    "smoke_proposed": true,
+    "shared_contracts": [
+      "S1"
+    ]
+  },
+  {
+    "number": 4,
+    "slug": "actor-state-ownership",
+    "title": "Isolate actor state and enforce exact ownership",
+    "blocked_by": [
+      3
+    ],
+    "branch": "v8/04-actor-state-ownership",
+    "stacked_on": "v8/03-exact-history",
+    "file": "issues/04-actor-state-ownership.md",
+    "status": "ready-for-agent",
+    "smoke_command": "uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_tools_compile.py::CompileToolTests::test_v8_actor_focus_delivery_eligibility",
+    "smoke_proposed": true,
+    "shared_contracts": [
+      "S1",
+      "S6",
+      "S7"
+    ]
+  },
+  {
+    "number": 5,
+    "slug": "actual-cost-ledger",
+    "title": "Settle one shared actual-cost ledger",
+    "blocked_by": [
+      3
+    ],
+    "branch": "v8/05-actual-cost-ledger",
+    "stacked_on": "v8/04-actor-state-ownership",
+    "file": "issues/05-actual-cost-ledger.md",
+    "status": "ready-for-agent",
+    "smoke_command": "uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_orchestration.py::V8ControlSmokeTests::test_v8_shared_settlement",
+    "smoke_proposed": true,
+    "shared_contracts": [
+      "S1",
+      "S2"
+    ]
+  },
+  {
+    "number": 6,
+    "slug": "provider-dispatch-stop",
+    "title": "Enforce the stop before every provider dispatch",
+    "blocked_by": [
+      5
+    ],
+    "branch": "v8/06-provider-dispatch-stop",
+    "stacked_on": "v8/05-actual-cost-ledger",
+    "file": "issues/06-provider-dispatch-stop.md",
+    "status": "ready-for-agent",
+    "smoke_command": "cd packages/arena-pi && node --test --test-name-pattern=\"v8_dispatch_stop\" extensions/provider_gate.test.ts",
+    "smoke_proposed": true,
+    "shared_contracts": [
+      "S2",
+      "S3"
+    ]
+  },
+  {
+    "number": 7,
+    "slug": "cap-assurance",
+    "title": "Assess configuration cap exposure offline",
+    "blocked_by": [],
+    "branch": "v8/07-cap-assurance",
+    "stacked_on": "v8/06-provider-dispatch-stop",
+    "file": "issues/07-cap-assurance.md",
+    "status": "ready-for-agent",
+    "smoke_command": "uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_models.py::ModelConfigTests::test_v8_cap_exposure_report",
+    "smoke_proposed": true,
+    "shared_contracts": [
+      "S2"
+    ]
+  },
+  {
+    "number": 8,
+    "slug": "one-worker-rpc",
+    "title": "Delegate one fresh RPC worker asynchronously",
+    "blocked_by": [
+      4,
+      6
+    ],
+    "branch": "v8/08-one-worker-rpc",
+    "stacked_on": "v8/07-cap-assurance",
+    "file": "issues/08-one-worker-rpc.md",
+    "status": "ready-for-agent",
+    "smoke_command": "uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_orchestration.py::V8WorkerSmokeTests::test_v8_one_worker_receipt",
+    "smoke_proposed": true,
+    "shared_contracts": [
+      "S2",
+      "S4",
+      "S7"
+    ]
+  },
+  {
+    "number": 9,
+    "slug": "worker-followups",
+    "title": "Publish early results and resume the same hypothesis",
+    "blocked_by": [
+      8
+    ],
+    "branch": "v8/09-worker-followups",
+    "stacked_on": "v8/08-one-worker-rpc",
+    "file": "issues/09-worker-followups.md",
+    "status": "ready-for-agent",
+    "smoke_command": "uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_orchestration.py::V8WorkerSmokeTests::test_v8_early_result_followup",
+    "smoke_proposed": true,
+    "shared_contracts": [
+      "S4",
+      "S7"
+    ]
+  },
+  {
+    "number": 10,
+    "slug": "two-worker-cancel",
+    "title": "Admit two workers and cancel stale work cleanly",
+    "blocked_by": [
+      9
+    ],
+    "branch": "v8/10-two-worker-cancel",
+    "stacked_on": "v8/09-worker-followups",
+    "file": "issues/10-two-worker-cancel.md",
+    "status": "ready-for-agent",
+    "smoke_command": "uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_orchestration.py::V8WorkerSmokeTests::test_v8_cancel_releases_after_exit",
+    "smoke_proposed": true,
+    "shared_contracts": [
+      "S4",
+      "S7"
+    ]
+  },
+  {
+    "number": 11,
+    "slug": "event-waiting",
+    "title": "Wait without polling or no-event deadlocks",
+    "blocked_by": [
+      10
+    ],
+    "branch": "v8/11-event-waiting",
+    "stacked_on": "v8/10-two-worker-cancel",
+    "file": "issues/11-event-waiting.md",
+    "status": "ready-for-agent",
+    "smoke_command": "uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_orchestration.py::V8WorkerSmokeTests::test_v8_wait_registration_and_no_work",
+    "smoke_proposed": true,
+    "shared_contracts": [
+      "S6",
+      "S7"
+    ]
+  },
+  {
+    "number": 12,
+    "slug": "process-recovery",
+    "title": "Reconcile owned child processes after coordinator failure",
+    "blocked_by": [
+      10
+    ],
+    "branch": "v8/12-process-recovery",
+    "stacked_on": "v8/11-event-waiting",
+    "file": "issues/12-process-recovery.md",
+    "status": "ready-for-agent",
+    "smoke_command": "uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_orchestration.py::V8RecoverySmokeTests::test_v8_owned_child_reconciliation",
+    "smoke_proposed": true,
+    "shared_contracts": [
+      "S2",
+      "S4"
+    ]
+  },
+  {
+    "number": 13,
+    "slug": "settlement-recovery",
+    "title": "Recover charges, candidate receipts and delivery after crashes",
+    "blocked_by": [
+      12
+    ],
+    "branch": "v8/13-settlement-recovery",
+    "stacked_on": "v8/12-process-recovery",
+    "file": "issues/13-settlement-recovery.md",
+    "status": "ready-for-agent",
+    "smoke_command": "uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_orchestration.py::V8RecoverySmokeTests::test_v8_receipt_replay_after_crash",
+    "smoke_proposed": true,
+    "shared_contracts": [
+      "S1",
+      "S2",
+      "S4"
+    ]
+  },
+  {
+    "number": 14,
+    "slug": "scratch-evidence",
+    "title": "Retain and retrieve isolated scratch experiments",
+    "blocked_by": [
+      4
+    ],
+    "branch": "v8/14-scratch-evidence",
+    "stacked_on": "v8/13-settlement-recovery",
+    "file": "issues/14-scratch-evidence.md",
+    "status": "ready-for-agent",
+    "smoke_command": "uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_tools_read_goal_search.py::ScratchResultTests::test_v8_scratch_failure_is_retrievable",
+    "smoke_proposed": true,
+    "shared_contracts": [
+      "S1",
+      "S5"
+    ]
+  },
+  {
+    "number": 15,
+    "slug": "scratch-promotion",
+    "title": "Promote an anchored replacement inside scratch",
+    "blocked_by": [
+      14
+    ],
+    "branch": "v8/15-scratch-promotion",
+    "stacked_on": "v8/14-scratch-evidence",
+    "file": "issues/15-scratch-promotion.md",
+    "status": "ready-for-agent",
+    "smoke_command": "uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_tools_read_goal_search.py::ScratchResultTests::test_v8_scratch_promotes_exact_replacement",
+    "smoke_proposed": true,
+    "shared_contracts": [
+      "S1",
+      "S5",
+      "S7"
+    ]
+  },
+  {
+    "number": 16,
+    "slug": "stop-submission-races",
+    "title": "Order candidate submission against the shared stop",
+    "blocked_by": [
+      6,
+      15
+    ],
+    "branch": "v8/16-stop-submission-races",
+    "stacked_on": "v8/15-scratch-promotion",
+    "file": "issues/16-stop-submission-races.md",
+    "status": "ready-for-agent",
+    "smoke_command": "uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_orchestration.py::V8ControlSmokeTests::test_v8_stop_submission_order",
+    "smoke_proposed": true,
+    "shared_contracts": [
+      "S1",
+      "S2",
+      "S5"
+    ]
+  },
+  {
+    "number": 17,
+    "slug": "cold-outcomes",
+    "title": "Distinguish proof failures from inconclusive cold checks",
+    "blocked_by": [
+      16
+    ],
+    "branch": "v8/17-cold-outcomes",
+    "stacked_on": "v8/16-stop-submission-races",
+    "file": "issues/17-cold-outcomes.md",
+    "status": "ready-for-agent",
+    "smoke_command": "uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_campaign.py::ColdVerificationTests::test_v8_inconclusive_cold_uses_certified_fallback",
+    "smoke_proposed": true,
+    "shared_contracts": [
+      "S6"
+    ]
+  },
+  {
+    "number": 18,
+    "slug": "context-correctness",
+    "title": "Recover usable target goals and definitions",
+    "blocked_by": [],
+    "branch": "v8/18-context-correctness",
+    "stacked_on": "v8/17-cold-outcomes",
+    "file": "issues/18-context-correctness.md",
+    "status": "ready-for-agent",
+    "smoke_command": "uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_context.py::ParseTests::test_v8_context_retains_target_facts",
+    "smoke_proposed": true,
+    "shared_contracts": []
+  },
+  {
+    "number": 19,
+    "slug": "packet-cost-views",
+    "title": "Show readable packets and nested measured hotspots",
+    "blocked_by": [
+      4,
+      18
+    ],
+    "branch": "v8/19-packet-cost-views",
+    "stacked_on": "v8/18-context-correctness",
+    "file": "issues/19-packet-cost-views.md",
+    "status": "ready-for-agent",
+    "smoke_command": "uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_context.py::FixturePacketTests::test_v8_packet_nested_hotspot_and_retrieval",
+    "smoke_proposed": true,
+    "shared_contracts": [
+      "S6"
+    ]
+  },
+  {
+    "number": 20,
+    "slug": "tool-replies",
+    "title": "Make five-tool replies concise and complete",
+    "blocked_by": [
+      9,
+      15,
+      19
+    ],
+    "branch": "v8/20-tool-replies",
+    "stacked_on": "v8/19-packet-cost-views",
+    "file": "issues/20-tool-replies.md",
+    "status": "ready-for-agent",
+    "smoke_command": "uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_tools_read_goal_search.py::ToolReplyTextTests::test_v8_reply_preserves_actionable_evidence",
+    "smoke_proposed": true,
+    "shared_contracts": [
+      "S6",
+      "S7"
+    ]
+  },
+  {
+    "number": 21,
+    "slug": "schema-help",
+    "title": "Generate accurate actor-specific schema help",
+    "blocked_by": [
+      11,
+      15
+    ],
+    "branch": "v8/21-schema-help",
+    "stacked_on": "v8/20-tool-replies",
+    "file": "issues/21-schema-help.md",
+    "status": "ready-for-agent",
+    "smoke_command": "uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_text.py::TextRendererTests::test_v8_inspection_matches_actor_schema",
+    "smoke_proposed": true,
+    "shared_contracts": [
+      "S7"
+    ]
+  },
+  {
+    "number": 22,
+    "slug": "served-evidence",
+    "title": "Inspect every concurrent attempt and exact derivation",
+    "blocked_by": [
+      4,
+      9,
+      15
+    ],
+    "branch": "v8/22-served-evidence",
+    "stacked_on": "v8/21-schema-help",
+    "file": "issues/22-served-evidence.md",
+    "status": "ready-for-agent",
+    "smoke_command": "uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_viewer.py::NodeCallTests::test_v8_node_retains_alternate_actor_attempts",
+    "smoke_proposed": true,
+    "shared_contracts": [
+      "S1",
+      "S6"
+    ]
+  },
+  {
+    "number": 23,
+    "slug": "compaction-resume",
+    "title": "Recover strategic context and exact evidence after compaction",
+    "blocked_by": [
+      11,
+      22
+    ],
+    "branch": "v8/23-compaction-resume",
+    "stacked_on": "v8/22-served-evidence",
+    "file": "issues/23-compaction-resume.md",
+    "status": "ready-for-agent",
+    "smoke_command": "uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_memory.py::MemoryTests::test_v8_resume_recovers_references_not_work",
+    "smoke_proposed": true,
+    "shared_contracts": [
+      "S4",
+      "S6",
+      "S7"
+    ]
+  },
+  {
+    "number": 24,
+    "slug": "lean-priority-admission",
+    "title": "Demonstrate real Lean admission priorities",
+    "blocked_by": [
+      10,
+      17
+    ],
+    "branch": "v8/24-lean-priority-admission",
+    "stacked_on": "v8/23-compaction-resume",
+    "file": "issues/24-lean-priority-admission.md",
+    "status": "ready-for-agent",
+    "smoke_command": "uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_orchestration.py::V8AdmissionSmokeTests::test_v8_request_class_dispatch",
+    "smoke_proposed": true,
+    "shared_contracts": [
+      "S6"
+    ]
+  },
+  {
+    "number": 25,
+    "slug": "matched-pilot",
+    "title": "Prepare the owner-run matched-spend pilot",
+    "blocked_by": [
+      7,
+      13,
+      20,
+      21,
+      23,
+      24
+    ],
+    "branch": "v8/25-matched-pilot",
+    "stacked_on": "v8/24-lean-priority-admission",
+    "file": "issues/25-matched-pilot.md",
+    "status": "ready-for-agent",
+    "smoke_command": "uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_campaign.py::PlanTests::test_v8_pilot_manifest_is_matched_and_dry",
+    "smoke_proposed": true,
+    "shared_contracts": [
+      "S2"
+    ]
+  },
+  {
+    "number": 26,
+    "slug": "resource-efficiency-study",
+    "title": "Prepare a separate retention and concurrency experiment",
+    "blocked_by": [
+      24
+    ],
+    "branch": "v8/26-resource-efficiency-study",
+    "stacked_on": "v8/25-matched-pilot",
+    "file": "issues/26-resource-efficiency-study.md",
+    "status": "ready-for-agent",
+    "smoke_command": "uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_orchestration.py::V8ResourceSmokeTests::test_v8_resource_manifest_is_dry",
+    "smoke_proposed": true,
+    "shared_contracts": [
+      "S6"
+    ]
+  }
+]
