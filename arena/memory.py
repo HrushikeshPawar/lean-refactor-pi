@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 
+from arena.run_control import committed_operation_ids
 from arena.text import numbers, render
 
 
@@ -76,7 +77,9 @@ def memory(run_id: str, spent_usd: float | None = None, cap_usd: float | None = 
 
     directory = campaign.run_dir(run_id)
     history = campaign.events(directory)
-    graph = Graph.from_history(history, campaign._proof_reader(directory))
+    graph = Graph.from_history(
+        history, campaign._proof_reader(directory), committed_operations=committed_operation_ids(directory)
+    )
     graph_map = campaign.map_view(run_id)
     best_id = (graph_map.get("best") or {}).get("node")
     best_node = next((node for node in graph.nodes if node.id == best_id), None)

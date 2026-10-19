@@ -19,6 +19,7 @@ from functools import cache
 from arena import goalstate, text
 from arena.routes import proof_body
 from arena.routes import signature as route_signature
+from arena.run_control import committed_history
 from arena.salvage import fill_cost
 from arena.salvage import holes as find_holes
 from arena.steps import Step, hdr_index, split_steps, step_range
@@ -208,7 +209,15 @@ class Graph:
     stall_events: list[dict]
 
     @classmethod
-    def from_history(cls, history: list[dict], read_text: Callable[[str], str | None]) -> Graph:
+    def from_history(
+        cls,
+        history: list[dict],
+        read_text: Callable[[str], str | None],
+        *,
+        committed_operations: set[str] | frozenset[str] = frozenset(),
+    ) -> Graph:
+        """Project legacy history and only receipt-backed operation events."""
+        history = committed_history(history, committed_operations)
         total_versions = len((history[0].get("versions") if history else None) or [1])
         proof_ids: list[str] = []
         entries: dict[str, dict] = {}

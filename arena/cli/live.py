@@ -118,9 +118,12 @@ def _settled_usd(path: Path) -> float:
 def _nodes(path: Path) -> list[NodeRow]:
     from arena.campaign import _proof_reader, events
     from arena.graph import Graph
+    from arena.run_control import committed_operation_ids
 
     directory = path.parent
-    graph = Graph.from_history(events(directory), _proof_reader(directory))
+    graph = Graph.from_history(
+        events(directory), _proof_reader(directory), committed_operations=committed_operation_ids(directory)
+    )
     ids = {node.proof_id: node.id for node in graph.nodes}
     rows = []
     for node in graph.nodes:

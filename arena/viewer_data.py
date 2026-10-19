@@ -20,6 +20,7 @@ from pathlib import Path
 
 from arena.routes import progress as route_progress
 from arena.routes import route_table
+from arena.run_control import committed_operation_ids
 from arena.summary import (
     COMPACTION_SOURCES,
     _result_ok,
@@ -202,15 +203,33 @@ def hub_row(run_id: str, directory: Path, campaign: str | None = None, now: floa
             identifier = event.get("phase_id") or f"legacy:{event.get('phase')}"
             phase_state[identifier] = event if event.get("status") == "start" else None
         elif event.get("kind") == "job":
-            identifier = event.get("job_id") or f"legacy:{event.get('phase')}:{event.get('job')}:{event.get('candidate_id')}"
+            identifier = (
+                event.get("job_id") or f"legacy:{event.get('phase')}:{event.get('job')}:{event.get('candidate_id')}"
+            )
             active_jobs[identifier] = event if event.get("status") == "start" else None
-    active_phases = [e for e in lifecycle if e.get("kind") == "phase" and phase_state.get(e.get("phase_id") or f"legacy:{e.get('phase')}")]
+    active_phases = [
+        e
+        for e in lifecycle
+        if e.get("kind") == "phase" and phase_state.get(e.get("phase_id") or f"legacy:{e.get('phase')}")
+    ]
     primary_phases = {"model", "closing_drain", "cold_verify", "golf", "summary"}
-    active_phase_event = next((e for e in reversed(active_phases) if e.get("phase") in primary_phases), active_phases[-1] if active_phases else None)
+    active_phase_event = next(
+        (e for e in reversed(active_phases) if e.get("phase") in primary_phases),
+        active_phases[-1] if active_phases else None,
+    )
     active_phase = active_phase_event.get("phase") if active_phase_event else None
     active_checker = next((e for e in reversed(active_phases) if e.get("phase") == "autocheck"), None)
-    active_job = next((e for e in reversed(lifecycle) if e.get("kind") == "job" and active_jobs.get(e.get("job_id") or f"legacy:{e.get('phase')}:{e.get('job')}:{e.get('candidate_id')}")), None)
+    active_job = next(
+        (
+            e
+            for e in reversed(lifecycle)
+            if e.get("kind") == "job"
+            and active_jobs.get(e.get("job_id") or f"legacy:{e.get('phase')}:{e.get('job')}:{e.get('candidate_id')}")
+        ),
+        None,
+    )
     evaluations = [e for e in ledger if e.get("kind") == "evaluation"]
+
     def passed(event):
         compat = (event.get("result") or {}).get("compat") or {}
         return bool(compat) and all(item.get("passed") for item in compat.values() if isinstance(item, dict))
@@ -220,10 +239,18 @@ def hub_row(run_id: str, directory: Path, campaign: str | None = None, now: floa
     fast_age_s = now - fast_ts if fast_ts else None
     full_age_s = now - full_ts if full_ts else None
     run_age_s = now - start if start else None
-    fast_check_stale = not finished and (fast_age_s > 600 if fast_age_s is not None else bool(run_age_s and run_age_s > 600))
+    fast_check_stale = not finished and (
+        fast_age_s > 600 if fast_age_s is not None else bool(run_age_s and run_age_s > 600)
+    )
     recent_fast = fast_age_s is not None and 0 <= fast_age_s <= 600
     full_age = full_age_s if full_age_s is not None else run_age_s
-    full_check_stale = not finished and recent_fast and (full_ts is None or fast_ts > full_ts) and full_age is not None and full_age >= 600
+    full_check_stale = (
+        not finished
+        and recent_fast
+        and (full_ts is None or fast_ts > full_ts)
+        and full_age is not None
+        and full_age >= 600
+    )
     spent = requests = 0
     for event in read_jsonl(directory / "cost-ledger.jsonl"):
         if event.get("kind") == "settle" and event.get("usage_known") is not False:
@@ -449,8 +476,19 @@ def control_events(directory: Path, start: float | None) -> list[dict]:
             continue
         stamp = _seconds(event.get("ts"))
         details = {k: v for k, v in event.items() if k not in ("ts", "kind")}
-        label = f"{event.get('phase', 'run')} {event.get('status', '')}" if event.get("kind") == "phase" else f"{event.get('job')} {event.get('status')}"
-        rows.append({"t": round(stamp - start, 1) if start and stamp else None, "kind": event["kind"], "label": label.strip(), "detail": details})
+        label = (
+            f"{event.get('phase', 'run')} {event.get('status', '')}"
+            if event.get("kind") == "phase"
+            else f"{event.get('job')} {event.get('status')}"
+        )
+        rows.append(
+            {
+                "t": round(stamp - start, 1) if start and stamp else None,
+                "kind": event["kind"],
+                "label": label.strip(),
+                "detail": details,
+            }
+        )
     for event in read_jsonl(directory / "cost-ledger.jsonl"):
         kind = event.get("kind")
         stamp = _seconds(event.get("ts"))
@@ -793,7 +831,7 @@ def _served_lineage(directory: Path, node: str) -> dict:
         path = directory / "proofs" / f"{ident}.lean"
         return path.read_text() if path.is_file() else None
 
-    projection = Graph.from_history(history, read)
+    projection = Graph.from_history(history, read, committed_operations=committed_operation_ids(directory))
     found = next((item for item in projection.nodes if item.proof_id == proof_id), None)
     if found is None:
         return {}
@@ -1094,7 +1132,7 @@ def _step_origin(directory: Path, history: list[dict], proof_id: str) -> dict:
         path = directory / "proofs" / f"{ident}.lean"
         return path.read_text(encoding="utf-8") if path.is_file() else None
 
-    projection = Graph.from_history(history, read)
+    projection = Graph.from_history(history, read, committed_operations=committed_operation_ids(directory))
     node = next((item for item in projection.nodes if item.proof_id == proof_id), None)
     if node is None:
         return {}

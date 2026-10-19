@@ -242,22 +242,19 @@ def committed_operation_ids(directory: Path) -> set[str]:
     return {
         row["operation_id"]
         for row in _control_rows(directory)
-        if row.get("kind") == "operation_receipt"
-        and row.get("status") == "committed"
-        and row.get("operation_id")
+        if row.get("kind") == "operation_receipt" and row.get("status") == "committed" and row.get("operation_id")
     }
 
 
 def published_history(directory: Path, history: list[dict]) -> list[dict]:
-    """Drop v8 attempt/derivation rows whose operation has no committed receipt."""
-    allowed = committed_operation_ids(directory)
-    visible = []
-    for event in history:
-        operation_id = event.get("operation_id")
-        if event.get("kind") in ("attempt", "derivation") and operation_id and operation_id not in allowed:
-            continue
-        visible.append(event)
-    return visible
+    """Publish legacy rows and v8 rows backed by a committed receipt."""
+    return committed_history(history, committed_operation_ids(directory))
+
+
+def committed_history(history: list[dict], committed_operations: set[str] | frozenset[str]) -> list[dict]:
+    return [
+        event for event in history if not event.get("operation_id") or event["operation_id"] in committed_operations
+    ]
 
 
 def actor_ids(run_id: str) -> dict:

@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypedDict
 
+from arena.run_control import committed_operation_ids
 from arena.traces import expand_journal, post_hook_bytes
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -260,7 +261,9 @@ def _nodes_body(run: Run, turn: int) -> str:
 
     item = _turn(run, turn)
     history = _history_before(run, item)
-    graph = Graph.from_history(history, _proof_reader(run.directory))
+    graph = Graph.from_history(
+        history, _proof_reader(run.directory), committed_operations=committed_operation_ids(run.directory)
+    )
     ids = {node.proof_id: node.id for node in graph.nodes}
     evaluated = {event.get("candidate_id") for event in history if event.get("kind") == "evaluation"}
     lines = []

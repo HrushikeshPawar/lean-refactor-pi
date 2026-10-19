@@ -44,6 +44,13 @@ Expected: the named behavior check passes with no actual provider, Pi or Lean pr
 
 **Deferred to final E2E:** Real-Pi journal joins and the complete export/recovery matrix. See the shared [final E2E checklist](../final-e2e.md).
 
+## Review corrections
+
+- `Graph.from_history` accepts explicit `committed_operations` evidence and hides operation-tagged rows without it. Legacy rows retain their previous interpretation. All production graph callers supply the run's committed receipt IDs; served history uses the same filter.
+- Export/reload includes `control.jsonl` alongside exact ledger/proof bytes. The focused smoke covers aborted and receipt-less attempts as well as committed alternate derivations.
+- Construction relation selection is separate from durable receipt writing. Aborted derivations cannot suppress a later committed derivation.
+- Dispatch/spend entry points and candidate submission transitions remain assigned to their later tickets. This ticket provides the common receipt and construction-history boundary.
+
 ---
 
 <!-- Shared v8 implementation rules. Included in every numbered ticket with 03, v8/03-exact-history and v8/02-current-work resolved. This template is not an implementation ticket. -->

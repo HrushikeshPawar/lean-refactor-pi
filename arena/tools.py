@@ -9,6 +9,7 @@ import re
 from arena import campaign, engine, graph, reply, salvage, search, text
 from arena.forbidden import official_filter
 from arena.prices import rates, snippet_tokens
+from arena.run_control import committed_operation_ids
 from arena.steps import parse, split_steps, step_range
 
 TOOL_FORMS = {
@@ -30,7 +31,9 @@ def _nodes(run_id: str) -> tuple[list[dict], graph.Graph]:
     from arena.run_control import published_history
 
     history = published_history(directory, campaign.events(directory))
-    return history, graph.Graph.from_history(history, campaign._proof_reader(directory))
+    return history, graph.Graph.from_history(
+        history, campaign._proof_reader(directory), committed_operations=committed_operation_ids(directory)
+    )
 
 
 def _node(run_id: str, reference: str):
@@ -578,12 +581,17 @@ def compile_tool(theorem: str, run_id: str, request: dict) -> dict:
     if unknown:
         return _invalid("unknown_argument", unknown[0], valid, TOOL_FORMS["compile"])
     operations = [key for key in ("drafts", "splice", "fill", "merge") if key in request]
-    if len(operations) == 1 and operations[0] in ("splice", "merge") and request.get("base") and isinstance(
-        request[operations[0]], dict
+    if (
+        len(operations) == 1
+        and operations[0] in ("splice", "merge")
+        and request.get("base")
+        and isinstance(request[operations[0]], dict)
     ):
         inner = request[operations[0]]
         if inner.get("base") and inner["base"] != request["base"]:
-            return _invalid("base_conflict", f"{request['base']} / {inner['base']}", ["one base"], TOOL_FORMS["compile"])
+            return _invalid(
+                "base_conflict", f"{request['base']} / {inner['base']}", ["one base"], TOOL_FORMS["compile"]
+            )
         request = {**request, operations[0]: {**inner, "base": request["base"]}}
     if len(operations) != 1:
         return _invalid(

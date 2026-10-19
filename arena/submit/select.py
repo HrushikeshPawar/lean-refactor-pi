@@ -10,6 +10,7 @@ from pathlib import Path
 from arena.campaign import _graph_node_id, _update_id, node_label
 from arena.graph import Graph, Node
 from arena.package import RUNS, _json, _jsonl
+from arena.run_control import committed_operation_ids
 from arena.submit.gates import cold_gate, static_gate
 
 
@@ -157,7 +158,7 @@ def load_runs(run_ids: list[str], runs_root: Path) -> tuple[list[LoadedRun], lis
         # `verified` is the full evaluation that passed every toolchain. The graph's own
         # status is closed/sketch/broken, which is a later cut than "full".
         try:
-            graph = Graph.from_history(history, read_text)
+            graph = Graph.from_history(history, read_text, committed_operations=committed_operation_ids(directory))
         except Exception as error:
             reason = f"graph unreadable: {type(error).__name__}: {error}"
             run.reason = reason

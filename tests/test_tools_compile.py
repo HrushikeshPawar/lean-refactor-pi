@@ -222,7 +222,11 @@ class CompileToolTests(CascadeCase):
         self.assertIn(edge_line, reloaded)
         self.assertEqual(proof_path.read_bytes(), original_proof)
         history = campaign.events(directory)
-        projection = Graph.from_history(history, campaign._proof_reader(directory))
+        projection = Graph.from_history(
+            history,
+            campaign._proof_reader(directory),
+            committed_operations=run_control.committed_operation_ids(directory),
+        )
         canonical = [node for node in projection.nodes if node.proof_id == proof_id]
         self.assertEqual(len(canonical), 1)
         self.assertGreaterEqual(len(canonical[0].derivations), 2)
@@ -230,6 +234,36 @@ class CompileToolTests(CascadeCase):
         relations = {item["relation"] for item in canonical[0].derivations}
         self.assertIn("exact", relations)
         self.assertTrue(relations - {"exact"})
+
+        def interrupted(ctx):
+            for kind in ("attempt", "derivation"):
+                ctx.append_ledger({"kind": kind, "proof_id": proof_id, "data": {"marker": "aborted"}})
+            raise RuntimeError("interrupted before commit")
+
+        with self.assertRaisesRegex(RuntimeError, "interrupted before commit"):
+            run_control.apply_operation(directory, {**operation, "operation_id": "op-aborted"}, interrupted)
+        campaign._append(
+            directory,
+            {
+                "kind": "attempt",
+                "proof_id": proof_id,
+                "operation_id": "op-no-receipt",
+                "data": {},
+            },
+        )
+        raw_history = campaign.events(directory)
+        without_receipts = Graph.from_history(raw_history, campaign._proof_reader(directory))
+        hidden_node = next(node for node in without_receipts.nodes if node.proof_id == proof_id)
+        self.assertTrue(all(item["operation_id"] is None for item in hidden_node.attempts))
+        checked = Graph.from_history(
+            raw_history,
+            campaign._proof_reader(directory),
+            committed_operations=run_control.committed_operation_ids(directory),
+        )
+        checked_node = next(node for node in checked.nodes if node.proof_id == proof_id)
+        self.assertEqual(checked_node.attempts, canonical[0].attempts)
+        self.assertEqual(checked_node.derivations, canonical[0].derivations)
+        self.assertEqual(ledger_path.read_bytes()[: len(reloaded)], reloaded)
 
         served = next(node for node in graph_payload("logic")["nodes"] if node["id"] == proof_id)
         self.assertGreaterEqual(len(served["derivations"]), 2)
@@ -241,7 +275,11 @@ class CompileToolTests(CascadeCase):
             '{"kind":"request","id":"r1","turn":1,"ts":1}\n', encoding="utf-8"
         )
         loaded = load_run("logic", directory.parent)
-        replayed_graph = Graph.from_history(loaded.ledger, campaign._proof_reader(directory))
+        replayed_graph = Graph.from_history(
+            loaded.ledger,
+            campaign._proof_reader(directory),
+            committed_operations=run_control.committed_operation_ids(directory),
+        )
         replayed_node = next(node for node in replayed_graph.nodes if node.proof_id == proof_id)
         self.assertEqual(
             [item["relation"] for item in replayed_node.derivations],
@@ -250,12 +288,15 @@ class CompileToolTests(CascadeCase):
         self.assertEqual(len(replayed_node.attempts), len(canonical[0].attempts))
         copied = directory.parent / "reloaded"
         copied.mkdir()
-        (copied / "ledger.jsonl").write_bytes(reloaded)
+        (copied / "ledger.jsonl").write_bytes(ledger_path.read_bytes())
+        (copied / "control.jsonl").write_bytes((directory / "control.jsonl").read_bytes())
         proofs = copied / "proofs"
         proofs.mkdir()
         (proofs / proof_path.name).write_bytes(original_proof)
         reloaded_graph = Graph.from_history(
-            campaign.events(copied), lambda ident: (proofs / f"{ident}.lean").read_text() if ident == proof_id else None
+            campaign.events(copied),
+            lambda ident: (proofs / f"{ident}.lean").read_text() if ident == proof_id else None,
+            committed_operations=run_control.committed_operation_ids(copied),
         )
         self.assertEqual(len([node for node in reloaded_graph.nodes if node.proof_id == proof_id]), 1)
         self.assertGreaterEqual(
