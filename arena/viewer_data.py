@@ -193,6 +193,37 @@ def hub_row(run_id: str, directory: Path, campaign: str | None = None, now: floa
     cache = summary.get("cache") or {}
     tools = summary.get("tools") or {}
     start, last = _start_end(directory)
+    ledger = read_jsonl(directory / "ledger.jsonl")
+    lifecycle = [e for e in ledger if e.get("kind") in ("phase", "job")]
+    phase_state = {}
+    active_jobs = {}
+    for event in lifecycle:
+        if event.get("kind") == "phase":
+            identifier = event.get("phase_id") or f"legacy:{event.get('phase')}"
+            phase_state[identifier] = event if event.get("status") == "start" else None
+        elif event.get("kind") == "job":
+            identifier = event.get("job_id") or f"legacy:{event.get('phase')}:{event.get('job')}:{event.get('candidate_id')}"
+            active_jobs[identifier] = event if event.get("status") == "start" else None
+    active_phases = [e for e in lifecycle if e.get("kind") == "phase" and phase_state.get(e.get("phase_id") or f"legacy:{e.get('phase')}")]
+    primary_phases = {"model", "closing_drain", "cold_verify", "golf", "summary"}
+    active_phase_event = next((e for e in reversed(active_phases) if e.get("phase") in primary_phases), active_phases[-1] if active_phases else None)
+    active_phase = active_phase_event.get("phase") if active_phase_event else None
+    active_checker = next((e for e in reversed(active_phases) if e.get("phase") == "autocheck"), None)
+    active_job = next((e for e in reversed(lifecycle) if e.get("kind") == "job" and active_jobs.get(e.get("job_id") or f"legacy:{e.get('phase')}:{e.get('job')}:{e.get('candidate_id')}")), None)
+    evaluations = [e for e in ledger if e.get("kind") == "evaluation"]
+    def passed(event):
+        compat = (event.get("result") or {}).get("compat") or {}
+        return bool(compat) and all(item.get("passed") for item in compat.values() if isinstance(item, dict))
+
+    fast_ts = max((e.get("ts", 0) for e in evaluations if e.get("mode") == "fast" and passed(e)), default=None)
+    full_ts = max((e.get("ts", 0) for e in evaluations if e.get("mode") == "full" and passed(e)), default=None)
+    fast_age_s = now - fast_ts if fast_ts else None
+    full_age_s = now - full_ts if full_ts else None
+    run_age_s = now - start if start else None
+    fast_check_stale = not finished and (fast_age_s > 600 if fast_age_s is not None else bool(run_age_s and run_age_s > 600))
+    recent_fast = fast_age_s is not None and 0 <= fast_age_s <= 600
+    full_age = full_age_s if full_age_s is not None else run_age_s
+    full_check_stale = not finished and recent_fast and (full_ts is None or fast_ts > full_ts) and full_age is not None and full_age >= 600
     spent = requests = 0
     for event in read_jsonl(directory / "cost-ledger.jsonl"):
         if event.get("kind") == "settle" and event.get("usage_known") is not False:
@@ -244,6 +275,15 @@ def hub_row(run_id: str, directory: Path, campaign: str | None = None, now: floa
         "checking": state.get("checking", []),
         "finished": finished,
         "status": status,
+        "phase": active_phase,
+        "active_checker": active_checker,
+        "active_job": active_job,
+        "active_job_elapsed_s": round(max(0, now - active_job.get("ts", now)), 1) if active_job else None,
+        "runtime_events": lifecycle[-12:],
+        "fast_check_age_s": round(max(0, now - fast_ts), 1) if fast_ts else None,
+        "full_check_age_s": round(max(0, now - full_ts), 1) if full_ts else None,
+        "fast_check_stale": fast_check_stale,
+        "full_check_stale": full_check_stale,
         "stop_reason": summary.get("stop_reason") if finished else None,
         "submission": answer.get("candidate"),
         "submission_info": {
@@ -404,6 +444,13 @@ def tool_timeline(directory: Path, start: float | None) -> list[dict]:
 def control_events(directory: Path, start: float | None) -> list[dict]:
     rows = []
     limit_reached = False
+    for event in read_jsonl(directory / "ledger.jsonl"):
+        if event.get("kind") not in ("phase", "job"):
+            continue
+        stamp = _seconds(event.get("ts"))
+        details = {k: v for k, v in event.items() if k not in ("ts", "kind")}
+        label = f"{event.get('phase', 'run')} {event.get('status', '')}" if event.get("kind") == "phase" else f"{event.get('job')} {event.get('status')}"
+        rows.append({"t": round(stamp - start, 1) if start and stamp else None, "kind": event["kind"], "label": label.strip(), "detail": details})
     for event in read_jsonl(directory / "cost-ledger.jsonl"):
         kind = event.get("kind")
         stamp = _seconds(event.get("ts"))
@@ -500,6 +547,7 @@ def run_dashboard(run_id: str, directory: Path) -> dict:
         "routes": (route_rows := route_table(ledger)),
         "route_progress": route_progress(route_rows),
         "controls": control_events(directory, start),
+        "runtime_events": [e for e in ledger if e.get("kind") in ("phase", "job")][-100:],
         "lean": lean_mix(ledger),
         "packet": packet_text,
     }

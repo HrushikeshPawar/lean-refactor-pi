@@ -215,6 +215,40 @@ class DataTests(unittest.TestCase):
         self.assertEqual(live["tool_results"], 7)
         self.assertEqual(stalled["status"], "stalled")
 
+    def test_hub_row_runtime_phase_and_check_freshness(self):
+        directory = make_run(self.root, "runtime-run", finished=False)
+        ledger = directory / "ledger.jsonl"
+        with ledger.open("a") as handle:
+            handle.write(json.dumps({"kind": "phase", "phase": "model", "status": "start", "ts": T0 + 10}) + "\n")
+            handle.write(json.dumps({"kind": "evaluation", "mode": "fast", "ts": T0 + 20, "result": {"compat": {"v": {"passed": True}}}}) + "\n")
+            handle.write(json.dumps({"kind": "evaluation", "mode": "full", "ts": T0 + 15, "result": {"compat": {"v": {"passed": True}}}}) + "\n")
+            handle.write(json.dumps({"kind": "evaluation", "mode": "full", "ts": T0 + 29, "result": {"compat": {"v": {"passed": False}}}}) + "\n")
+            handle.write(json.dumps({"kind": "phase", "phase": "autocheck", "phase_id": "ac-1", "status": "start", "ts": T0 + 11}) + "\n")
+            handle.write(json.dumps({"kind": "phase", "phase": "autocheck", "phase_id": "ac-1", "status": "end", "ts": T0 + 12}) + "\n")
+            handle.write(json.dumps({"kind": "phase", "phase": "autocheck", "phase_id": "ac-2", "status": "start", "ts": T0 + 13}) + "\n")
+            handle.write(json.dumps({"kind": "job", "job_id": "j-1", "job": "full", "candidate_id": "x", "status": "start", "ts": T0 + 25}) + "\n")
+        row = hub_row("runtime-run", directory, None, now=T0 + 30)
+        self.assertEqual(row["phase"], "model")
+        self.assertEqual((row["fast_check_age_s"], row["full_check_age_s"]), (10, 15))
+        self.assertEqual(row["active_job_elapsed_s"], 5)
+        self.assertFalse(row["full_check_stale"])
+        self.assertEqual(row["active_checker"]["phase_id"], "ac-2")
+        self.assertEqual(row["runtime_events"][-1]["kind"], "job")
+
+    def test_stale_check_warning_requires_live_recent_fast_activity(self):
+        finished = make_run(self.root, "old-finished")
+        idle = make_run(self.root, "old-idle", finished=False)
+        active = make_run(self.root, "active-fast", finished=False)
+        with (active / "ledger.jsonl").open("a") as handle:
+            handle.write(json.dumps(evaluation(T0 + 3500, "c2", "fast", 60.0)) + "\n")
+        finished_row = hub_row("old-finished", finished, None, now=T0 + 3600)
+        idle_row = hub_row("old-idle", idle, None, now=T0 + 3600)
+        active_row = hub_row("active-fast", active, None, now=T0 + 3600)
+        self.assertFalse(finished_row["fast_check_stale"])
+        self.assertFalse(finished_row["full_check_stale"])
+        self.assertFalse(idle_row["full_check_stale"])
+        self.assertTrue(active_row["full_check_stale"])
+
     def test_hub_row_survives_empty_run_dir(self):
         directory = self.root / "runs" / "pi-budget" / "empty"
         directory.mkdir(parents=True)
