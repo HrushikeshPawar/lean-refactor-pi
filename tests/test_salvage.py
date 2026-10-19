@@ -35,6 +35,14 @@ def diagnostics(*lines):
 
 
 class SalvagePlanningTests(unittest.TestCase):
+    def test_deferred_salvage_resumes_at_the_next_compile(self):
+        proof = "theorem t : True := by\n  bad\n  exact True.intro"
+        compile, seen = scripted([diagnostics(2), {"clean": True, "error_lines": [], "unlocated": False, "result": {}}])
+        first = salvage.salvage("T", proof, compile, should_yield=lambda: "full_check_arrived" if seen else None)
+        self.assertEqual((first["status"], first["compiles"], len(seen)), ("deferred", 1, 1))
+        resumed = salvage.salvage("T", proof, compile, resume=first["continuation"])
+        self.assertEqual((resumed["status"], resumed["compiles"], len(seen)), ("salvaged", 2, 2))
+
     def test_nested_body_error_becomes_one_hole_with_s2(self):
         proof = "theorem t : True := by\n  have h : True := by\n    bad\n  exact h"
         compile, seen = scripted(
