@@ -303,6 +303,110 @@ class CompileToolTests(CascadeCase):
             len(next(node for node in reloaded_graph.nodes if node.proof_id == proof_id).derivations), 2
         )
 
+    def test_v8_actor_focus_delivery_eligibility(self):
+        import os
+
+        from arena import reply
+
+        run_id = "logic"
+        parent = tools.compile_tool("T", run_id, {"drafts": ["by\n  trivial"]})
+        parent_id = parent["items"][0]["node"]
+        parent_proof = tools._node(run_id, parent_id).proof_id
+        other = tools.compile_tool("T", run_id, {"drafts": ["by\n  sorry"]})
+        other_id = other["items"][0]["node"]
+        other_proof = tools._node(run_id, other_id).proof_id
+        self.assertEqual(parent["items"][0]["eligibility"], "eligible")
+        self.assertIn("verification", parent["items"][0])
+
+        with patch.dict(os.environ, {"ARENA_ACTOR_ID": "worker"}):
+            reply.set_actor_focus(run_id, parent_proof)
+        with patch.dict(os.environ, {"ARENA_ACTOR_ID": "sol"}):
+            reply.set_actor_focus(run_id, other_proof)
+        with patch.dict(os.environ, {"ARENA_ACTOR_ID": "worker"}):
+            moved = tools.compile_tool("T", run_id, {"splice": {"steps": "s1", "text": "exact"}})
+        self.assertTrue(moved["ok"])
+        moved_proof = tools._node(run_id, moved["items"][0]["node"]).proof_id
+        edge = next(
+            event
+            for event in campaign.events(self.directory)
+            if event.get("kind") == "edge" and event.get("proof_id") == moved_proof
+        )
+        self.assertIn(parent_proof, edge.get("from") or [])
+        self.assertNotIn(other_proof, edge.get("from") or [])
+
+        plain = tools.compile_tool("T", run_id, {"drafts": ["by\n  native_decide"]})
+        self.assertTrue(plain["ok"])
+        shared = tools.compile_tool("T", run_id, {"drafts": ["by\n  decide"], "note": "hyp:shared"})
+        again_note = tools.compile_tool("T", run_id, {"drafts": ["by\n  omega"], "note": "hyp:shared"})
+        self.assertTrue(shared["ok"] and again_note["ok"])
+        refs = [
+            event.get("hypothesis_ref")
+            for event in campaign.events(self.directory)
+            if event.get("kind") == "candidate" and event.get("hypothesis_ref")
+        ]
+        self.assertGreaterEqual(refs.count("hyp:shared"), 2)
+        self.assertTrue(campaign.write_strategy(run_id, "first")["ok"])
+        self.assertTrue(campaign.write_strategy(run_id, "second")["ok"])
+        self.assertEqual(campaign.current_strategy(campaign.events(self.directory)), "second")
+        with patch.dict(os.environ, {"ARENA_ACTOR_ID": "worker"}):
+            denied = campaign.write_strategy(run_id, "nope")
+            campaign.write_observation(run_id, "seen", hypothesis_ref="hyp:shared")
+            campaign.write_observation(run_id, "again", hypothesis_ref="hyp:shared")
+        self.assertEqual(denied["category"], "invalid_input")
+        observations = [event for event in campaign.events(self.directory) if event.get("kind") == "observation"]
+        self.assertEqual([event["actor_id"] for event in observations], ["worker", "worker"])
+        self.assertEqual(campaign.current_strategy(campaign.events(self.directory)), "second")
+
+        proof_id = parent_proof
+        campaign._append(
+            self.directory,
+            {
+                "kind": "evaluation",
+                "candidate_id": proof_id,
+                "mode": "fast",
+                "trigger": "auto",
+                "result": {
+                    "compat": {"v1": {"passed": True}, "v2": {"passed": True}},
+                    "metrics": {"proxy": 1},
+                },
+            },
+        )
+        with patch.dict(os.environ, {"ARENA_ACTOR_ID": "sol"}):
+            sol_reply = reply.attach_context(run_id, reply.reply())
+        with patch.dict(os.environ, {"ARENA_ACTOR_ID": "worker"}):
+            worker_reply = reply.attach_context(run_id, reply.reply())
+        self.assertTrue(sol_reply["facts"])
+        self.assertEqual(sol_reply["facts"], worker_reply["facts"])
+        with patch.dict(os.environ, {"ARENA_ACTOR_ID": "sol"}):
+            again = reply.attach_context(run_id, reply.reply())
+            repeated = reply.redeliver(run_id)
+        self.assertFalse(again["facts"])
+        self.assertTrue(repeated["event_ids"])
+        replies = [event for event in campaign.events(self.directory) if event.get("kind") == "delivered_reply"]
+        self.assertEqual(sum(1 for event in replies if event.get("actor_id") == "sol"), 1)
+
+        child_id = "harness-child"
+        (self.directory / "proofs" / f"{child_id}.lean").write_text("by\n  exact\n")
+        campaign._append(
+            self.directory,
+            {
+                "kind": "candidate",
+                "candidate_id": child_id,
+                "parents": [parent_proof],
+                "origin": "assembly",
+                "hypothesis": "",
+            },
+        )
+        campaign.select_proof(run_id, parent_proof)
+        self.assertEqual(campaign.proof_eligibility(campaign.events(self.directory), child_id), "ineligible")
+        self.assertEqual(campaign.proof_eligibility(campaign.events(self.directory), parent_proof), "eligible")
+        campaign.select_proof(run_id, child_id)
+        self.assertEqual(campaign.proof_eligibility(campaign.events(self.directory), child_id), "eligible")
+        detail = next(node for node in campaign.graph_state(run_id)["nodes"] if node["id"] == child_id)
+        self.assertEqual(detail["eligibility"], "eligible")
+        self.assertIn("verification", detail)
+        self.assertIn("cold", detail)
+
 
 class SessionPathProtocolTests(CascadeCase):
     """Real Lean results carry `compat[v]["lean"]`; the model view turns it into a string."""

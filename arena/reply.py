@@ -79,20 +79,69 @@ def map_text(run_id: str) -> str:
     return "\n".join([text.render("replies/tools.section_map"), *lines])
 
 
+def current_actor() -> str:
+    """Trusted invocation actor. Historical single-agent calls are Sol."""
+    return os.environ.get("ARENA_ACTOR_ID") or "sol"
+
+
+def _bucket(state: dict, actor: str) -> dict:
+    actors = state.setdefault("actors", {})
+    bucket = actors.setdefault(actor, {})
+    if actor == "sol":
+        for key in ("delivered_seq", "seen_nodes", "map_hash", "map_key"):
+            if key not in bucket and key in state:
+                bucket[key] = state[key]
+    return bucket
+
+
+def _write_actor(run_id: str, actor: str, bucket: dict, state: dict | None = None) -> dict:
+    state = _load(run_id) if state is None else state
+    state.setdefault("actors", {})[actor] = bucket
+    if actor == "sol":
+        for key in ("delivered_seq", "seen_nodes", "map_hash", "map_key"):
+            if key in bucket:
+                state[key] = bucket[key]
+    _save(run_id, state)
+    return state
+
+
+def actor_focus_proof(run_id: str, actor: str | None = None) -> str | None:
+    actor = actor or current_actor()
+    focus = _bucket(_load(run_id), actor).get("focus")
+    return focus if isinstance(focus, str) else None
+
+
+def set_actor_focus(run_id: str, proof_id: str, actor: str | None = None) -> None:
+    """Actor-local filing anchor. It does not move another actor's focus or the shared frontier."""
+    actor = actor or current_actor()
+    state = _load(run_id)
+    bucket = _bucket(state, actor)
+    bucket["focus"] = proof_id
+    _write_actor(run_id, actor, bucket, state)
+
+
 def mark_delivered(run_id: str, seq: int, shown: str) -> None:
     """Treat ledger rows up to `seq` as delivered and the nodes named in `shown` as seen."""
+    actor = current_actor()
     state = _load(run_id)
-    state["delivered_seq"] = seq
-    state["seen_nodes"] = sorted(set(state.get("seen_nodes", [])) | set(re.findall(r"\bn[1-9][0-9]*\b", shown)))
-    _save(run_id, state)
+    bucket = _bucket(state, actor)
+    bucket["delivered_seq"] = seq
+    bucket["seen_nodes"] = sorted(set(bucket.get("seen_nodes", [])) | set(re.findall(r"\bn[1-9][0-9]*\b", shown)))
+    _write_actor(run_id, actor, bucket, state)
 
 
 def reset_delivered(run_id: str) -> None:
+    actor = current_actor()
     state = _load(run_id)
-    state.pop("map_hash", None)
+    bucket = _bucket(state, actor)
+    bucket.pop("map_hash", None)
+    bucket.pop("map_key", None)
     state["goals"] = {}
     state["diagnostics"] = {}
-    _save(run_id, state)
+    if actor == "sol":
+        state.pop("map_hash", None)
+        state.pop("map_key", None)
+    _write_actor(run_id, actor, bucket, state)
 
 
 def first_time(run_id: str, key: str) -> bool:
@@ -499,6 +548,66 @@ def _map_key(data: dict) -> list:
     return [best, sorted([str(item.get("letter")), str(item.get("node"))] for item in data.get("archive", []))]
 
 
+def _commit_delivery(run_id: str, actor: str, fresh: list[dict]) -> dict:
+    """Commit this actor's cursor with the delivered identities. The same delivery retries once."""
+    from arena.run_control import actor_ids, apply_operation
+
+    seqs = [int(item.get("seq", -1)) for item in fresh]
+    identities = [str(item.get("event_id") or item.get("seq")) for item in fresh]
+    operation_id = hashlib.sha256(f"{actor}:{seqs}:{identities}".encode()).hexdigest()[:32]
+    identity = actor_ids(run_id)
+    directory = campaign.run_dir(run_id)
+
+    def mutate(ctx):
+        return [
+            ctx.append_ledger(
+                {
+                    "kind": "delivered_reply",
+                    "data": {"seqs": seqs, "event_ids": identities, "cursor": max(seqs)},
+                }
+            )
+        ]
+
+    receipt = apply_operation(
+        directory,
+        {
+            "operation_id": operation_id,
+            "kind": "delivered_reply",
+            "arguments": {"actor_id": actor, "seqs": seqs, "event_ids": identities},
+            "run_id": run_id,
+            "actor_id": identity["actor_id"] if identity["actor_id"] == actor else actor,
+            "session_id": identity["session_id"],
+        },
+        mutate,
+    )
+    return {**receipt, "event_ids": identities, "operation_id": operation_id}
+
+
+def redeliver(run_id: str, actor: str | None = None) -> dict:
+    """Repeat the last committed delivery for this actor. Does not append another reply."""
+    actor = actor or current_actor()
+    bucket = _bucket(_load(run_id), actor)
+    last = bucket.get("last_delivery")
+    if not isinstance(last, dict):
+        return {"ok": True, "event_ids": [], "repeated": False}
+    from arena.run_control import apply_operation
+
+    directory = campaign.run_dir(run_id)
+    receipt = apply_operation(
+        directory,
+        {
+            "operation_id": last["operation_id"],
+            "kind": "delivered_reply",
+            "arguments": last["arguments"],
+            "run_id": run_id,
+            "actor_id": actor,
+            "session_id": os.environ.get("ARENA_SESSION_ID") or run_id,
+        },
+        lambda ctx: [],
+    )
+    return {"ok": True, "event_ids": last.get("event_ids") or [], "repeated": True, "receipt": receipt}
+
+
 def attach_context(
     run_id: str,
     result: dict,
@@ -507,14 +616,16 @@ def attach_context(
     force_map: bool = False,
     holes: list[dict] | None = None,
 ) -> dict:
-    """Attach new state updates and a changed map, persisting delivery cursors.
+    """Attach new state updates and a changed map, persisting this actor's delivery cursor.
     `holes`, when given, replaces the map's open holes (the caller's current lineage only)."""
+    actor = current_actor()
     state = _load(run_id)
+    bucket = _bucket(state, actor)
     try:
         updates = campaign.state(run_id).get("updates", [])
     except (OSError, ValueError, KeyError):
         updates = []
-    delivered = int(state.get("delivered_seq", -1))
+    delivered = int(bucket.get("delivered_seq", -1))
     fresh = [item for item in updates if int(item.get("seq", -1)) > delivered]
     if include_map or force_map:
         data = campaign.map_view(run_id)
@@ -524,20 +635,27 @@ def attach_context(
         digest = hashlib.sha256("\n".join(lines).encode()).hexdigest()
         # The full map only when it matters: first one after a (re)start, a new best, or a new shape/route.
         key = _map_key(data)
-        matters = force_map or "map_hash" not in state or key != state.get("map_key")
-        if matters and (force_map or digest != state.get("map_hash") or key != state.get("map_key")):
+        matters = force_map or "map_hash" not in bucket or key != bucket.get("map_key")
+        if matters and (force_map or digest != bucket.get("map_hash") or key != bucket.get("map_key")):
             result["map"] = [text.render("replies/tools.section_map"), *lines] if lines else lines
-        elif digest != state.get("map_hash"):
+        elif digest != bucket.get("map_hash"):
             result["map"] = [text.render("replies/tools.map_unchanged")]
-        state["map_hash"], state["map_key"] = digest, key
+        bucket["map_hash"], bucket["map_key"] = digest, key
     # Node ids the model has been shown; an update never names a node outside them.
-    seen = set(state.get("seen_nodes", [])) | _node_ids(result)
+    seen = set(bucket.get("seen_nodes", [])) | _node_ids(result)
     facts = [_update_text(item, seen) for item in fresh if isinstance(item.get("text"), str)] + result.get("facts", [])
     tally = campaign.route_tally(run_id) if result.get("handles") else None
     if tally:
         facts.append(tally)
     if fresh:
-        state["delivered_seq"] = max(int(item.get("seq", -1)) for item in fresh)
+        receipt = _commit_delivery(run_id, actor, fresh)
+        bucket["delivered_seq"] = max(int(item.get("seq", -1)) for item in fresh)
+        bucket["last_delivery"] = {
+            "operation_id": receipt["operation_id"],
+            "event_ids": receipt["event_ids"],
+            "arguments": {"actor_id": actor, "seqs": [int(item.get("seq", -1)) for item in fresh], "event_ids": receipt["event_ids"]},
+        }
+        result["delivery"] = {"actor_id": actor, "event_ids": receipt["event_ids"], "cursor": bucket["delivered_seq"]}
     # Sections: updates from background checks, this call's result, then the search map.
     # A reply can pass through here more than once; each header is added once.
     updates_head, result_head = (
@@ -557,8 +675,8 @@ def attach_context(
     if first is not None:
         body = first["lines"][1:] if first["lines"][0] == result_head else first["lines"]
         first["lines"] = [result_head, *[line for line in mine if line not in body], *body]
-    state["seen_nodes"] = sorted(seen | _node_ids(result))
-    _save(run_id, state)
+    bucket["seen_nodes"] = sorted(seen | _node_ids(result))
+    _write_actor(run_id, actor, bucket, state)
     return result
 
 

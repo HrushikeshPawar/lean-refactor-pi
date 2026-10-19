@@ -4,7 +4,7 @@
 
 **Blocked by:** 03: Retain exact attempts and derivations
 
-**Status:** ready-for-agent
+**Status:** needs-review
 
 **Branch:** `v8/04-actor-state-ownership`
 
@@ -26,12 +26,12 @@
 
 ## What to build and acceptance
 
-- [ ] 1. Capture actor-local focus and immutable anchors at admission. An actor changing focus cannot redirect another actor's pending operation.
-- [ ] 2. Commit each actor's delivery cursor with its durable delivered reply. Retried delivery may repeat an event identity without losing evidence or charging twice.
-- [ ] 3. Make a delegated agent's compiled proof eligible without Sol ratification; keep a harness-transformed proof ineligible until an agent compiles or selects that exact proof.
-- [ ] 4. Reject inferred approval of descendants. Show eligibility separately from compatibility/cold status in normal tool and node evidence.
-- [ ] 5. Keep notes optional and hypothesis references reusable. Preserve Sol-owned whiteboard replacement and attributed worker observations.
-- [ ] 6. Verify via two-actor offline protocol histories and exact result retrieval; no Pi/Lean.
+- [x] 1. Capture actor-local focus and immutable anchors at admission. An actor changing focus cannot redirect another actor's pending operation.
+- [x] 2. Commit each actor's delivery cursor with its durable delivered reply. Retried delivery may repeat an event identity without losing evidence or charging twice.
+- [x] 3. Make a delegated agent's compiled proof eligible without Sol ratification; keep a harness-transformed proof ineligible until an agent compiles or selects that exact proof.
+- [x] 4. Reject inferred approval of descendants. Show eligibility separately from compatibility/cold status in normal tool and node evidence.
+- [x] 5. Keep notes optional and hypothesis references reusable. Preserve Sol-owned whiteboard replacement and attributed worker observations.
+- [x] 6. Verify via two-actor offline protocol histories and exact result retrieval; no Pi/Lean.
 
 ## Verify
 

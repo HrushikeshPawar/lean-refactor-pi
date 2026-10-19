@@ -1950,6 +1950,9 @@ def record_evaluation(
                 explicit.append(resolved)
         lineage = explicit or ([_current(history)] if candidate_id not in known and _current(history) else [])
         lineage = [parent for parent in lineage if parent != candidate_id]
+        hypothesis_ref = hypothesis if isinstance(hypothesis, str) and hypothesis.startswith("hyp:") else None
+        if hypothesis_ref:
+            hypothesis = ""
         _snapshot(directory, candidate_id, proof)
         if candidate_id not in known:
             _append(
@@ -1959,6 +1962,7 @@ def record_evaluation(
                     "candidate_id": candidate_id,
                     "parents": lineage,
                     "hypothesis": hypothesis,
+                    "hypothesis_ref": hypothesis_ref,
                     "origin": origin,
                     "merge": merge,
                     "source_versions": versions(row),
@@ -2406,8 +2410,13 @@ def probe_batch(
     if not isinstance(drafts, list) or not 1 <= len(drafts) <= MAX_DRAFTS:
         raise ValueError(text.render("messages/errors.draft_limit"))
     history = events(run_dir(run_id))
-    fixed_parent = resolve_parent_ref(history, parent) if parent else _current(history)
-    starting_focus = next((item["proof_id"] for item in reversed(history) if item.get("kind") == "focus"), None)
+    from arena.reply import actor_focus_proof
+
+    actor_focus = actor_focus_proof(run_id)
+    fixed_parent = resolve_parent_ref(history, parent) if parent else actor_focus or _current(history)
+    starting_focus = actor_focus or next(
+        (item["proof_id"] for item in reversed(history) if item.get("kind") == "focus"), None
+    )
     outcomes = []
     token = _PRECOMPILED.set(_compile_probes(name, run_dir(run_id), drafts) if len(drafts) > 1 else {})
     focus_token = _BATCH_FOCUS.set((True, starting_focus))
@@ -2921,6 +2930,10 @@ def graph_state(run_id: str) -> dict:
                 "children": [],
                 "decision": "pursue",
                 "route": None,
+                "eligibility": proof_eligibility(history, identifier),
+                "verification": "unevaluated",
+                "cold": None,
+                "hypothesis_ref": event.get("hypothesis_ref"),
             }
             order.append(identifier)
         elif kind == "derivation" and event["candidate_id"] in nodes:
@@ -2962,9 +2975,22 @@ def graph_state(run_id: str) -> dict:
             and all(version.get("passed") for version in compat.values())
             else ("primary" if next(iter(compat.values()), {}).get("passed") else "fail")
         )
+        node["verification"] = row["status"]
+        node["cold"] = None
         if row["status"] == "full" and row["local_proxy"] is not None and row["local_proxy"] > best_proxy:
             best_proxy = row["local_proxy"]
             milestones.append(row.copy())
+    for identifier, node in nodes.items():
+        node["eligibility"] = proof_eligibility(history, identifier)
+        cold = next(
+            (
+                event
+                for event in reversed(history)
+                if event.get("kind") == "cold_verification" and event.get("candidate_id") == identifier
+            ),
+            None,
+        )
+        node["cold"] = None if cold is None else bool(cold.get("confirmed"))
     fingerprints: dict[str, set[str]] = {}
     for identifier in order:
         node = nodes[identifier]
@@ -4212,6 +4238,82 @@ def cold_verify(run_id: str, row: dict) -> dict:
     return event
 
 
+_HARNESS_ORIGINS = frozenset({"auto_merge", "assembly", "golf", "harness", "salvage"})
+
+
+def proof_eligibility(history: list[dict], proof_id: str) -> str:
+    """Agent compilation or an exact selection. An approved ancestor does not approve a child."""
+    if any(
+        event.get("kind") == "proof_selection" and (event.get("proof_id") or event.get("candidate_id")) == proof_id
+        for event in history
+    ):
+        return "eligible"
+    origin = next(
+        (
+            event.get("origin", "model")
+            for event in history
+            if event.get("kind") == "candidate" and event.get("candidate_id") == proof_id
+        ),
+        "model",
+    )
+    if origin in _HARNESS_ORIGINS:
+        return "ineligible"
+    return "eligible"
+
+
+def select_proof(run_id: str, proof_id: str) -> dict:
+    """An agent selects one exact proof. The selection does not extend to descendants."""
+    from arena.run_control import actor_ids
+
+    directory = run_dir(run_id)
+    identity = actor_ids(directory.name)
+    _append(
+        directory,
+        {
+            "kind": "proof_selection",
+            "proof_id": proof_id,
+            "candidate_id": proof_id,
+            "actor_id": identity["actor_id"],
+            "session_id": identity["session_id"],
+        },
+    )
+    return {"ok": True, "proof_id": proof_id, "eligibility": "eligible", "actor_id": identity["actor_id"]}
+
+
+def write_strategy(run_id: str, body: str) -> dict:
+    """Sol replaces the shared strategic whiteboard. Workers cannot."""
+    from arena.run_control import actor_ids
+
+    directory = run_dir(run_id)
+    identity = actor_ids(directory.name)
+    if identity["actor_id"] != "sol":
+        return {"ok": False, "category": "invalid_input", "reason": "strategy_owner"}
+    _append(directory, {"kind": "strategy", "text": body, "actor_id": "sol", "session_id": identity["session_id"]})
+    return {"ok": True, "text": body}
+
+
+def write_observation(run_id: str, body: str, hypothesis_ref: str | None = None) -> dict:
+    """Append an attributed observation. It does not replace strategy or another actor's notes."""
+    from arena.run_control import actor_ids
+
+    directory = run_dir(run_id)
+    identity = actor_ids(directory.name)
+    event = {
+        "kind": "observation",
+        "text": body,
+        "actor_id": identity["actor_id"],
+        "session_id": identity["session_id"],
+        "hypothesis_ref": hypothesis_ref,
+    }
+    _append(directory, event)
+    return {"ok": True, **event}
+
+
+def current_strategy(history: list[dict]) -> str | None:
+    texts = [event.get("text") for event in history if event.get("kind") == "strategy" and event.get("actor_id") == "sol"]
+    return texts[-1] if texts else None
+
+
 def submission(run_id: str) -> dict:
     """The run's answer: the best candidate that passes every version. Written by the harness so
     nothing depends on the model remembering to submit.
@@ -4226,7 +4328,11 @@ def submission(run_id: str) -> dict:
         (
             r
             for r in rows
-            if r["verified"] and r["score"] is not None and r["status"] == "full" and r["origin"] != "reference"
+            if r["verified"]
+            and r["score"] is not None
+            and r["status"] == "full"
+            and r["origin"] != "reference"
+            and proof_eligibility(history, r["id"]) == "eligible"
         ),
         key=lambda r: (r["score"], -r["n"]),
         reverse=True,

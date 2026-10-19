@@ -262,7 +262,7 @@ def actor_ids(run_id: str) -> dict:
     from arena.traces import call_context
 
     context = call_context()
-    actor = os.environ.get("ARENA_ACTOR_ID") or "local"
+    actor = os.environ.get("ARENA_ACTOR_ID") or "sol"
     session = os.environ.get("ARENA_SESSION_ID") or run_id
     found = {"actor_id": actor, "session_id": session, "missing": []}
     if context.get("tool_call_id"):

@@ -42,7 +42,18 @@ def _node(run_id: str, reference: str):
     return next(item for item in projection.nodes if item.proof_id == proof_id)
 
 
+def _actor_focus_id(run_id: str):
+    proof_id = reply.actor_focus_proof(run_id)
+    if proof_id is None:
+        return None
+    _history_rows, projection = _nodes(run_id)
+    return next((item for item in projection.nodes if item.proof_id == proof_id), None)
+
+
 def _focus_ref(run_id: str) -> str:
+    actor_node = _actor_focus_id(run_id)
+    if actor_node is not None:
+        return actor_node.id
     _history_rows, projection = _nodes(run_id)
     node = next((item for item in projection.nodes if item.proof_id == projection.focus), None)
     if node is None:
@@ -466,12 +477,17 @@ def _compile_item(name: str, run_id: str, node_ref: str, result: dict, filing: s
             "repeat": repeat,
             "attempts": node.attempts,
             "derivations": node.derivations,
+            "eligibility": campaign.proof_eligibility(_history_rows, node.proof_id),
+            "verification": status,
         },
         "facts": facts,
     }
 
 
 def _focus_proof(run_id: str) -> tuple[str, str]:
+    actor_node = _actor_focus_id(run_id)
+    if actor_node is not None:
+        return actor_node.id, actor_node.proof_text
     projection = _nodes(run_id)[1]
     node = next((item for item in projection.nodes if item.proof_id == projection.focus), None)
     if node is None:
