@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -647,6 +648,12 @@ def _append(directory: Path, event: dict) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def _runtime_event(directory: Path, event: dict) -> None:
+    """Persist and immediately mirror operator-facing lifecycle events to the campaign log."""
+    _append(directory, event)
+    print(json.dumps({"run_id": directory.name, **event}, ensure_ascii=False, separators=(",", ":")), file=sys.stderr, flush=True)
 
 
 def _evaluate(name: str, proof: str, mode: str, known: dict | None = None, lane: str = "model") -> dict:
@@ -3024,6 +3031,55 @@ def _profile_jobs(history: list[dict], graph: Graph) -> list[Node]:
     ]
 
 
+def _mark_queued(directory: Path, history: list[dict], phase: str, kind: str, ids: list[str]) -> dict[str, dict]:
+    queued = {
+        (event.get("job"), event.get("candidate_id")): event
+        for event in history
+        if event.get("kind") == "job_queued"
+    }
+    result = {}
+    for identifier in ids:
+        event = queued.get((kind, identifier))
+        if event is None:
+            eligible = None
+            source = "observed"
+            if kind == "full":
+                eligible = next(
+                    (
+                        row.get("ts")
+                        for row in reversed(history)
+                        if row.get("kind") == "evaluation"
+                        and row.get("mode") == "fast"
+                        and row.get("candidate_id") == identifier
+                    ),
+                    None,
+                )
+                if eligible is not None:
+                    source = "fast_evaluation"
+            event = {
+                "ts": time.time(),
+                "eligible_ts": eligible if isinstance(eligible, (int, float)) else time.time(),
+                "eligibility_source": source,
+            }
+            _runtime_event(
+                directory,
+                {
+                    "kind": "job_queued",
+                    "job": kind,
+                    "candidate_id": identifier,
+                    "phase": phase,
+                    "eligible_ts": event["eligible_ts"],
+                    "eligibility_source": source,
+                },
+            )
+        result[identifier] = event
+    return result
+
+
+def _queue_age(event: dict, now: float | None = None) -> float:
+    return round(max(0, (time.time() if now is None else now) - event.get("eligible_ts", event["ts"])), 2)
+
+
 def profile_in_call(name: str, run_id: str, node_refs: list[str]) -> None:
     """Profile closed nodes inside the model's own tool call, on the model lane: the background lane and the
     autocheck lock can be held for tens of seconds by other jobs, and the reply must not read "pending"."""
@@ -3078,7 +3134,11 @@ def _run_profile_job(name: str, run_id: str, node: Node) -> None:
 
 def _salvage_jobs(history: list[dict], directory: Path, graph: Graph | None = None) -> list[Node]:
     """Broken, filed graph nodes with no terminal salvage event yet."""
-    done = {item.get("proof_id") for item in history if item.get("kind") == "salvage"}
+    done = {
+        item.get("proof_id")
+        for item in history
+        if item.get("kind") == "salvage" and item.get("status") != "deferred"
+    }
     graph = graph or Graph.from_history(history, _proof_reader(directory))
     # The pinned reference compiles by definition; it reads as broken only because it is never evaluated.
     return [
@@ -3119,13 +3179,38 @@ def _salvage_compile(name: str, text_value: str) -> dict:
     return {"clean": clean, "error_lines": lines, "unlocated": not clean and not lines, "result": result}
 
 
-def _run_salvage(name: str, run_id: str, node: Node) -> dict:
+SALVAGE_SOFT_CAP_SECONDS = 60
+
+
+def _run_salvage(name: str, run_id: str, node: Node, drain_deadline: float | None = None) -> dict:
     directory = run_dir(run_id)
     started = time.monotonic()
     proof = node.proof_text
+    history = events(directory)
+    prior = next(
+        (item for item in reversed(history) if item.get("kind") == "salvage" and item.get("proof_id") == node.proof_id and item.get("status") == "deferred"),
+        None,
+    )
+
+    def should_yield() -> str | None:
+        now = time.monotonic()
+        if drain_deadline is not None and now >= drain_deadline:
+            return "drain_budget_exhausted"
+        if now - started >= SALVAGE_SOFT_CAP_SECONDS:
+            return "salvage_soft_cap_exhausted"
+        if _autocheck_jobs(_summaries(events(directory)), closing=False):
+            return "full_check_arrived"
+        return None
+
     token = _SALVAGE_DIRECTORY.set(directory)
     try:
-        outcome = salvage_proof(name, proof, lambda candidate: _salvage_compile(name, candidate))
+        outcome = salvage_proof(
+            name,
+            proof,
+            lambda candidate: _salvage_compile(name, candidate),
+            should_yield=should_yield,
+            resume=(prior or {}).get("continuation"),
+        )
     except (ValueError, FileNotFoundError):
         outcome = {"status": "unavailable", "compiles": 0, "rounds": [], "text": None, "result": None, "kept": None}
     finally:
@@ -3152,9 +3237,7 @@ def _run_salvage(name: str, run_id: str, node: Node) -> dict:
                 sketch_text,
                 operation={"type": "salvaged_from", "from": [node.proof_id]},
             )
-    _append(
-        directory,
-        {
+    event = {
             "kind": "salvage",
             "proof_id": node.proof_id,
             "status": outcome["status"],
@@ -3163,8 +3246,10 @@ def _run_salvage(name: str, run_id: str, node: Node) -> dict:
             "kept": outcome["kept"],
             "sketch_id": sketch_id,
             "seconds": round(time.monotonic() - started, 2),
-        },
-    )
+        }
+    if outcome["status"] == "deferred":
+        event.update(reason=outcome["reason"], continuation=outcome["continuation"])
+    _append(directory, event)
     write_state(run_id)
     return outcome
 
@@ -3302,12 +3387,13 @@ def _run_step_goals(name: str, run_id: str, proof_id: str) -> None:
     write_state(run_id)
 
 
-def autocheck(
+def _autocheck_impl(
     name: str,
     run_id: str,
     max_seconds: float | None = None,
     closing: bool = False,
     kinds: tuple[str, ...] | None = None,
+    phase_id: str = "",
 ) -> dict:
     """Drain salvage, assembly, full checks and step goals in the background lane.
 
@@ -3320,7 +3406,10 @@ def autocheck(
     directory = run_dir(run_id)
     directory.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
+    drain_deadline = started + max_seconds if max_seconds is not None else None
     checked: list[str] = []
+    capped_salvage: set[str] = set()
+    phase = "closing_drain" if closing else "autocheck"
     with (directory / "autocheck.lock").open("a") as handle:
         while True:
             try:
@@ -3331,6 +3420,8 @@ def autocheck(
                 if kinds is None or max_seconds is None or time.monotonic() - started >= max_seconds:
                     return {"ok": True, "checked": [], "running_elsewhere": True}
                 time.sleep(0.2)
+        phase_started = time.monotonic()
+        _runtime_event(directory, {"kind": "phase", "phase": phase, "phase_id": phase_id, "status": "start", "lock_wait_seconds": round(phase_started - started, 2)})
         while max_seconds is None or time.monotonic() - started < max_seconds:
             if lean_health.tripped(directory):
                 break  # Lean is unhealthy: background checks pause with the model's work
@@ -3342,27 +3433,70 @@ def autocheck(
             order = ("full", "assembly") if closing else ("full", "salvage", "assembly", "step_goals", "profiles")
             if kinds is not None:
                 order = tuple(kind for kind in order if kind in kinds)
+            jobs_by_kind = {
+                "full": _autocheck_jobs(_summaries(history), closing=closing),
+                "salvage": _salvage_jobs(history, directory, projection),
+                "assembly": _assembly_jobs(history, directory, projection),
+                "step_goals": _step_goal_jobs(history, directory) if not closing else [],
+                "profiles": _profile_jobs(history, projection) if not closing else [],
+            }
+            queued_by_kind = {}
+            eligible_kinds = ("full", "assembly") if closing else tuple(jobs_by_kind)
+            for queued_kind in eligible_kinds:
+                jobs_for_kind = jobs_by_kind[queued_kind]
+                ids = [
+                    item["id"] if queued_kind == "full" else item.proof_id if queued_kind in ("salvage", "assembly", "profiles") else item
+                    for item in jobs_for_kind
+                ]
+                queued_by_kind[queued_kind] = _mark_queued(directory, history, phase, queued_kind, ids)
+            queues = {key: len(value) for key, value in jobs_by_kind.items()}
             for kind in order:
-                if kind == "salvage" and (salvage_jobs := _salvage_jobs(history, directory, projection)):
-                    _run_salvage(name, run_id, salvage_jobs[0])
-                    break
-                if kind == "assembly" and (assembly_jobs := _assembly_jobs(history, directory, projection)):
-                    _run_assembly(name, run_id, assembly_jobs[0])
-                    break
-                if kind == "full" and (jobs := _autocheck_jobs(_summaries(history), closing=closing)):
-                    checked.append(_run_full_check(name, run_id, jobs[0]))
-                    break
-                if kind == "step_goals" and (goal_jobs := _step_goal_jobs(history, directory)):
-                    _run_step_goals(name, run_id, goal_jobs[0])
-                    break
-                if kind == "profiles" and (profile_jobs := _profile_jobs(history, projection)):
-                    _run_profile_job(name, run_id, profile_jobs[0])
+                job = None
+                jobs = jobs_by_kind[kind]
+                if kind == "salvage" and jobs:
+                    selected = next((item for item in jobs if item.proof_id not in capped_salvage), None)
+                    if selected is not None:
+                        job = (selected.proof_id, lambda selected=selected: _run_salvage(name, run_id, selected, drain_deadline), queued_by_kind[kind][selected.proof_id])
+                elif kind == "assembly" and jobs:
+                    selected = jobs[0]
+                    job = (selected.proof_id, lambda selected=selected: _run_assembly(name, run_id, selected), queued_by_kind[kind][selected.proof_id])
+                elif kind == "full" and jobs:
+                    selected = jobs[0]
+                    job = (selected["id"], lambda selected=selected: checked.append(_run_full_check(name, run_id, selected)), queued_by_kind[kind][selected["id"]])
+                elif kind == "step_goals" and jobs:
+                    selected = jobs[0]
+                    job = (selected, lambda selected=selected: _run_step_goals(name, run_id, selected), queued_by_kind[kind][selected])
+                elif kind == "profiles" and jobs:
+                    selected = jobs[0]
+                    job = (selected.proof_id, lambda selected=selected: _run_profile_job(name, run_id, selected), queued_by_kind[kind][selected.proof_id])
+                if job:
+                    job_id, run_job, queued = job
+                    created = next((e.get("ts") for e in history if e.get("kind") == "candidate" and e.get("candidate_id") == job_id), None)
+                    job_id_event = f"{phase_id}:{kind}:{job_id}"
+                    _runtime_event(directory, {"kind": "job", "phase": phase, "phase_id": phase_id, "job_id": job_id_event, "job": kind, "candidate_id": job_id, "status": "start", "queue_depths": queues, "queue_age_s": _queue_age(queued), "candidate_age_s": round(max(0, time.time() - created), 2) if created else None})
+                    job_started = time.monotonic()
+                    status = "end"
+                    job_outcome = None
+                    try:
+                        job_outcome = run_job()
+                    except Exception as error:
+                        status = "error"
+                        _runtime_event(directory, {"kind": "job", "phase": phase, "phase_id": phase_id, "job_id": job_id_event, "job": kind, "candidate_id": job_id, "status": status, "error": str(error)[:300], "seconds": round(time.monotonic() - job_started, 2)})
+                        _runtime_event(directory, {"kind": "phase", "phase": phase, "phase_id": phase_id, "status": "error", "error": str(error)[:300], "seconds": round(time.monotonic() - phase_started, 2)})
+                        raise
+                    else:
+                        if kind == "salvage" and (job_outcome or {}).get("status") == "deferred":
+                            status = "deferred"
+                            if job_outcome.get("reason") != "full_check_arrived":
+                                capped_salvage.add(job_id)
+                        _runtime_event(directory, {"kind": "job", "phase": phase, "phase_id": phase_id, "job_id": job_id_event, "job": kind, "candidate_id": job_id, "status": status, "reason": (job_outcome or {}).get("reason"), "seconds": round(time.monotonic() - job_started, 2)})
                     break
             else:
                 break
     rows = _summaries(events(directory))
     remaining = [f"#{r['n']}" for r in _autocheck_jobs(rows, closing=closing)]
     outcome = {"ok": True, "checked": checked, "remaining": remaining}
+    _runtime_event(directory, {"kind": "phase", "phase": phase, "phase_id": phase_id, "status": "end", "seconds": round(time.monotonic() - phase_started, 2), "remaining": len(remaining)})
     if closing:
         kept = set(remaining) | set(checked)
         outcome["skipped"] = [f"#{r['n']}" for r in _unchecked(rows) if f"#{r['n']}" not in kept]
@@ -3380,6 +3514,27 @@ def autocheck(
             },
         )
     return outcome
+
+
+def autocheck(
+    name: str,
+    run_id: str,
+    max_seconds: float | None = None,
+    closing: bool = False,
+    kinds: tuple[str, ...] | None = None,
+) -> dict:
+    directory = run_dir(run_id)
+    phase = "closing_drain" if closing else "autocheck"
+    phase_id = f"{phase}:{os.getpid()}:{time.monotonic_ns()}"
+    try:
+        return _autocheck_impl(name, run_id, max_seconds, closing, kinds, phase_id)
+    except Exception as error:
+        history = events(directory)
+        started = any(e.get("kind") == "phase" and e.get("phase_id") == phase_id and e.get("status") == "start" for e in history)
+        ended = any(e.get("kind") == "phase" and e.get("phase_id") == phase_id and e.get("status") in ("end", "error") for e in history)
+        if started and not ended:
+            _runtime_event(directory, {"kind": "phase", "phase": phase, "phase_id": phase_id, "status": "error", "error": str(error)[:300]})
+        raise
 
 
 def _skeleton(history: list[dict], rows: list[dict], best: dict | None, run_id: str) -> dict:

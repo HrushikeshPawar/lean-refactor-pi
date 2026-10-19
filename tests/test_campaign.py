@@ -51,6 +51,50 @@ def write_run(root: Path, run_id: str, proxy_helper: bool):
     return directory
 
 
+class RuntimeQueueTests(unittest.TestCase):
+    def test_queue_age_advances_for_all_pending_jobs_before_selection(self):
+        from arena import campaign
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with mock.patch.object(campaign, "ROOT", root), contextlib.redirect_stderr(io.StringIO()):
+                directory = campaign.run_dir("queue-age")
+                with mock.patch.object(campaign.time, "time", return_value=100.0):
+                    campaign._mark_queued(directory, [], "autocheck", "full", ["first", "second"])
+                history = campaign.events(directory)
+                queued = campaign._mark_queued(directory, history, "autocheck", "full", ["first", "second"])
+                self.assertEqual(set(queued), {"first", "second"})
+                self.assertEqual(campaign._queue_age(queued["second"], now=105.0), 5.0)
+
+    def test_full_job_queue_age_uses_fast_result_even_if_checker_sees_it_later(self):
+        from arena import campaign
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with mock.patch.object(campaign, "ROOT", root), contextlib.redirect_stderr(io.StringIO()):
+                directory = campaign.run_dir("full-queue-age")
+                directory.mkdir(parents=True)
+                (directory / "ledger.jsonl").write_text(
+                    "\n".join(
+                        json.dumps(row)
+                        for row in (
+                            {"kind": "candidate", "candidate_id": "candidate-a", "ts": 100.0},
+                            {"kind": "evaluation", "candidate_id": "candidate-a", "mode": "fast", "ts": 120.0},
+                        )
+                    )
+                    + "\n"
+                )
+                with mock.patch.object(campaign.time, "time", return_value=150.0):
+                    queued = campaign._mark_queued(
+                        directory, campaign.events(directory), "autocheck", "full", ["candidate-a"]
+                    )["candidate-a"]
+                    self.assertEqual(campaign._queue_age(queued), 30.0)
+                logged = campaign.events(directory)[-1]
+                self.assertEqual(logged["ts"], 150.0)
+                self.assertEqual(logged["eligible_ts"], 120.0)
+                self.assertEqual(logged["eligibility_source"], "fast_evaluation")
+
+
 class PlanTests(unittest.TestCase):
     def test_dry_run_prints_plan_and_planned_spend_without_spending(self):
         out = io.StringIO()

@@ -160,6 +160,62 @@ class HoleTests(unittest.TestCase):
 
 
 class SalvageCampaignTests(FakeRunCase):
+    def test_full_candidate_arriving_during_salvage_runs_before_next_salvage_compile(self):
+        with (
+            patch.object(campaign.lean_health, "tripped", return_value=False),
+            patch.object(campaign, "problem", return_value={"name": "T", "statement": "theorem t : True"}),
+        ):
+            campaign.probe("T", "logic", "bad\nexact True.intro")
+            salvage_calls = []
+
+            def compile_salvage(_name, proof):
+                salvage_calls.append(proof)
+                if len(salvage_calls) == 1:
+                    campaign.probe("T", "logic", "exact True.intro")
+                    return diagnostics(2)
+                return {"clean": True, "error_lines": [], "unlocated": False, "result": {"compat": {"v1": {"passed": True}}}}
+
+            with patch.object(campaign, "_salvage_compile", side_effect=compile_salvage):
+                outcome = campaign.autocheck("T", "logic")
+            history = campaign.events(self.directory)
+            deferred = next(item for item in history if item.get("kind") == "salvage" and item.get("status") == "deferred")
+            full_seq = next(
+                seq for seq, item in enumerate(history)
+                if item.get("kind") == "evaluation" and item.get("mode") == "full" and item.get("trigger") == "auto"
+            )
+            deferred_seq = next(seq for seq, item in enumerate(history) if item is deferred)
+            self.assertEqual(deferred["reason"], "full_check_arrived")
+            self.assertEqual(deferred["compiles"], 1)
+            self.assertLess(deferred_seq, full_seq)
+            self.assertEqual(len(salvage_calls), 2)
+            self.assertTrue(outcome["ok"])
+
+    def test_salvage_soft_cap_finishes_active_compile_then_resumes_without_repeating_it(self):
+        with (
+            patch.object(campaign, "problem", return_value={"name": "T", "statement": "theorem t : True"}),
+        ):
+            campaign.probe("T", "logic", "bad\nexact True.intro")
+            node = campaign._salvage_jobs(campaign.events(self.directory), self.directory)[0]
+            with (
+                patch.object(campaign, "_salvage_compile", return_value=diagnostics(2)) as compile_salvage,
+                patch.object(campaign.time, "monotonic", side_effect=[10, 10, 71, 71]),
+            ):
+                deferred = campaign._run_salvage("T", "logic", node)
+            self.assertEqual((deferred["status"], deferred["reason"], deferred["compiles"]), ("deferred", "salvage_soft_cap_exhausted", 1))
+            self.assertEqual(compile_salvage.call_count, 1)
+            self.assertNotEqual(deferred["continuation"]["current"], node.proof_text)
+            self.assertEqual(len(campaign._salvage_jobs(campaign.events(self.directory), self.directory)), 1)
+
+            with patch.object(
+                campaign,
+                "_salvage_compile",
+                return_value={"clean": True, "error_lines": [], "unlocated": False, "result": {"compat": {"v1": {"passed": True}}}},
+            ) as resumed_compile:
+                resumed = campaign._run_salvage("T", "logic", node)
+            self.assertEqual((resumed["status"], resumed["compiles"]), ("salvaged", 2))
+            self.assertEqual(resumed_compile.call_count, 1)
+            self.assertEqual(resumed_compile.call_args.args[1], deferred["continuation"]["current"])
+
     def test_source_drafts_are_listed_compactly_in_one_line(self):
         self.assertEqual(campaign._compact_ids(["n2", "n3", "n4", "n5", "n9", "n11", "n12"]), "n2–n5, n9, n11–n12")
         self.assertEqual(campaign._compact_ids(["n7"]), "n7")
