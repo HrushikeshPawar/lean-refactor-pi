@@ -644,10 +644,17 @@ def _append(directory: Path, event: dict) -> None:
         fcntl.flock(fd, fcntl.LOCK_EX)
         row = {"ts": time.time(), **context, **event}
         data = (json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
+        start = os.lseek(fd, 0, os.SEEK_END)
         os.write(fd, data)
         os.fsync(fd)
     finally:
         os.close(fd)
+    return {
+        "byte_start": start,
+        "byte_end": start + len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "record": "ledger.jsonl",
+    }
 
 
 def _runtime_event(directory: Path, event: dict) -> None:
@@ -993,12 +1000,11 @@ def resolve_node_ref(history: list[dict], reference: str) -> str:
 
 
 def _named_parent_id(history: list[dict], reference: str | None) -> str | None:
-    if not reference:
+    """Resolve a named parent. Graph ids, candidate numbers and probe ids stay a named relation."""
+    if not reference or not isinstance(reference, str):
         return None
     try:
-        if re.fullmatch(r"\s*[pP][1-9][0-9]*\s*", reference):
-            return resolve_probe_ref(history, reference)
-        return resolve_candidate_ref(history, reference)
+        return resolve_node_ref(history, reference)
     except ValueError:
         return None
 
@@ -1013,6 +1019,122 @@ def _proof_reader(directory: Path) -> Callable[[str], str | None]:
     return read
 
 
+def _construction_payload(edge_type: str, sources: list, operation: dict | None, named_parent, exact: bool) -> dict:
+    return {
+        "type": edge_type,
+        "from": list(sources),
+        "operation": operation,
+        "named_parent": named_parent,
+        "exact": exact,
+    }
+
+
+def _record_construction(
+    directory: Path,
+    proof_id: str,
+    edge: dict,
+    operation: dict | None,
+    named_parent,
+    *,
+    alternate: bool,
+) -> None:
+    """Record an attempt. A different exact construction also records a derivation."""
+    import uuid
+
+    from arena.run_control import _apply_locked, actor_ids, construction_digest, input_roles
+
+    if alternate and operation is not None:
+        edge_type = operation["type"]
+        sources = list(operation.get("from") or [])
+        operation_data = (
+            {"hole": operation["hole"], "text": operation["text"]}
+            if edge_type == "filled_from"
+            else {key: value for key, value in operation.items() if key != "type"}
+        )
+        exact = True
+        relation = "exact"
+    elif alternate:
+        return
+    else:
+        edge_type = edge.get("type")
+        sources = list(edge.get("from") or [])
+        operation_data = edge.get("operation")
+        exact = bool(edge.get("exact"))
+        relation = "exact" if exact else edge_type
+        named_parent = edge.get("named_parent")
+    payload = _construction_payload(edge_type, sources, operation_data, named_parent, exact)
+    digest = construction_digest(payload)
+    if alternate:
+        prior = {construction_digest(_construction_payload(
+            edge.get("type"),
+            edge.get("from") or [],
+            edge.get("operation"),
+            edge.get("named_parent"),
+            bool(edge.get("exact")),
+        ))}
+        for event in events(directory):
+            if event.get("kind") == "derivation" and (event.get("proof_id") or event.get("candidate_id")) == proof_id:
+                data = event.get("data") or {}
+                if data.get("construction_digest"):
+                    prior.add(data["construction_digest"])
+        fresh_derivation = digest not in prior
+    else:
+        fresh_derivation = False
+    identity = actor_ids(directory.name)
+    artifact = directory / "proofs" / f"{proof_id}.lean"
+    artifact_ref = {
+        "path": f"proofs/{proof_id}.lean",
+        "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest() if artifact.is_file() else None,
+    }
+    if not artifact.is_file():
+        artifact_ref["missing"] = True
+    run_id = directory.name
+
+    def mutate(ctx):
+        data = {
+            "relation": relation,
+            "operation": operation_data,
+            "inputs": input_roles({"type": edge_type, "from": sources, **(operation_data or {})}),
+            "named_parent": named_parent,
+            "artifact": artifact_ref,
+            "construction_digest": digest,
+            "tool_call_id": identity.get("tool_call_id"),
+            "missing": identity["missing"],
+        }
+        ctx.append_ledger(
+            {
+                "kind": "attempt",
+                "proof_id": proof_id,
+                "candidate_id": proof_id,
+                "data": data,
+            }
+        )
+        if fresh_derivation:
+            ctx.append_ledger(
+                {
+                    "kind": "derivation",
+                    "proof_id": proof_id,
+                    "candidate_id": proof_id,
+                    "parents": sources,
+                    "data": data,
+                }
+            )
+        return ctx.evidence
+
+    _apply_locked(
+        directory,
+        {
+            "operation_id": uuid.uuid4().hex,
+            "kind": "attempt",
+            "arguments": payload,
+            "run_id": run_id,
+            "actor_id": identity["actor_id"],
+            "session_id": identity["session_id"],
+        },
+        mutate,
+    )
+
+
 def _file_node(
     directory: Path,
     history: list[dict],
@@ -1022,17 +1144,31 @@ def _file_node(
     operation: dict | None = None,
     projection_out: list[Graph] | None = None,
 ) -> tuple[dict, bool]:
-    """Append exactly one graph edge per proof id under the run's graph lock."""
+    """Append exactly one graph edge per proof id under the run's graph lock.
+
+    The control lock is held outside the graph lock. A second construction appends
+    an attempt and, when its inputs differ, a derivation. It does not rewrite the edge.
+    """
+    from arena.run_control import control_lock
+
     directory.mkdir(parents=True, exist_ok=True)
-    with (directory / "graph.lock").open("a") as handle:
+    with control_lock(directory), (directory / "graph.lock").open("a") as handle:
         fcntl.flock(handle, fcntl.LOCK_EX)
         history = events(directory)
         existing = next(
             (event for event in history if event.get("kind") == "edge" and event.get("proof_id") == proof_id), None
         )
         if existing:
+            _record_construction(
+                directory,
+                proof_id,
+                existing,
+                operation,
+                named_parent,
+                alternate=True,
+            )
             if projection_out is not None:
-                projection_out.append(Graph.from_history(history, _proof_reader(directory)))
+                projection_out.append(Graph.from_history(events(directory), _proof_reader(directory)))
             return existing, False
         read = _proof_reader(directory)
         graph = Graph.from_history(history, read)
@@ -1076,6 +1212,7 @@ def _file_node(
             "operation": operation_data,
         }
         _append(directory, event)
+        _record_construction(directory, proof_id, event, operation, named_parent, alternate=False)
         earlier: dict[str, list[dict]] = {}
         graph_nodes = {node.proof_id: node for node in graph.nodes}
         for node in graph.nodes:
@@ -1951,9 +2088,13 @@ def evaluate_request(
     mode: str = "fast",
     parents: list[str] | None = None,
     hypothesis: str = "",
+    operation: dict | None = None,
+    named_parent: str | object | None = _NAMED_PARENT_UNSET,
 ) -> dict:
     """Evaluate one complete proof and return its scored view."""
-    result = record_evaluation(name, run_id, proof, mode, parents, hypothesis)
+    result = record_evaluation(
+        name, run_id, proof, mode, parents, hypothesis, operation=operation, named_parent=named_parent
+    )
     return _model_view({**result, "full_check": _full_check_status(events(run_dir(run_id)), result["candidate_id"])})
 
 
@@ -2068,7 +2209,15 @@ def probe(
     parent_id = parent_id or _current(history)
     proof_id = hashlib.sha256((name + "\0" + proof).encode()).hexdigest()
     if proof_id in set(_candidate_ids(history)):
-        return evaluate_request(name, run_id, proof, mode, parents=[parent] if parent else None)
+        return evaluate_request(
+            name,
+            run_id,
+            proof,
+            mode,
+            parents=[parent] if parent else None,
+            operation=operation,
+            named_parent=named_parent,
+        )
     earlier = next(
         (item for item in reversed(history) if item.get("kind") == "probe" and item["proof_id"] == proof_id), None
     )
@@ -2655,7 +2804,9 @@ def _line_costs(proof: str, profile: dict | None) -> dict:
 
 def graph_state(run_id: str) -> dict:
     directory = run_dir(run_id)
-    history = events(directory)
+    from arena.run_control import published_history
+
+    history = published_history(directory, events(directory))
     if not history:
         return {
             "run_id": run_id,

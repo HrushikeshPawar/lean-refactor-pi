@@ -160,6 +160,108 @@ class CompileToolTests(CascadeCase):
         self.assertEqual(merge_edge["operation"]["take"][0]["step"], "s1")
         self.assertEqual(donor.id, base)
 
+    def test_v8_duplicate_attempt_roundtrip(self):
+        from arena import run_control
+        from arena.cli.serve import graph_payload
+        from arena.graph import Graph
+        from arena.replay import load_run
+        from arena.viewer_data import node_calls
+
+        directory = self.directory
+        calls = []
+
+        def once(ctx):
+            calls.append("mutate")
+            return [ctx.append_ledger({"kind": "attempt", "proof_id": "receipt-only", "data": {"marker": "once"}})]
+
+        operation = {
+            "operation_id": "op-same",
+            "kind": "compile",
+            "arguments": {"n": 1},
+            "run_id": "logic",
+            "actor_id": "sol",
+            "session_id": "session-1",
+        }
+        first = run_control.apply_operation(directory, operation, once)
+        replayed = run_control.apply_operation(directory, operation, once)
+        self.assertEqual(calls, ["mutate"])
+        self.assertEqual(replayed["operation_id"], first["operation_id"])
+        self.assertEqual(replayed["event_seq"], first["event_seq"])
+        self.assertEqual(replayed["evidence_refs"], first["evidence_refs"])
+        conflict = run_control.apply_operation(directory, {**operation, "arguments": {"n": 2}}, once)
+        self.assertEqual(conflict["status"], "operation_conflict")
+        self.assertEqual(calls, ["mutate"])
+
+        filed = tools.compile_tool("T", "logic", {"drafts": ["by\n  trivial"], "from": "n1"})
+        node_id = filed["items"][0]["node"]
+        proof_id = tools._node("logic", node_id).proof_id
+        ledger_path = directory / "ledger.jsonl"
+        proof_path = directory / "proofs" / f"{proof_id}.lean"
+        original_ledger = ledger_path.read_bytes()
+        edge_line = next(
+            line
+            for line in original_ledger.splitlines(keepends=True)
+            if b'"kind":"edge"' in line and proof_id.encode() in line
+        )
+        original_proof = proof_path.read_bytes()
+        edge = next(
+            event
+            for event in campaign.events(directory)
+            if event.get("kind") == "edge" and event.get("proof_id") == proof_id
+        )
+        self.assertNotEqual(edge["type"], "edited_from")
+        self.assertTrue(edge["named_parent"])
+
+        base = tools.compile_tool("T", "logic", {"drafts": ["by\n  sorry"]})["items"][0]["node"]
+        second = tools.compile_tool("T", "logic", {"base": base, "drafts": ["by\n  trivial"]})
+        self.assertEqual(second["items"][0]["node"], node_id)
+        self.assertGreaterEqual(len(second["items"][0]["derivations"]), 2)
+        self.assertGreaterEqual(len(second["items"][0]["attempts"]), 2)
+
+        reloaded = ledger_path.read_bytes()
+        self.assertIn(edge_line, reloaded)
+        self.assertEqual(proof_path.read_bytes(), original_proof)
+        history = campaign.events(directory)
+        projection = Graph.from_history(history, campaign._proof_reader(directory))
+        canonical = [node for node in projection.nodes if node.proof_id == proof_id]
+        self.assertEqual(len(canonical), 1)
+        self.assertGreaterEqual(len(canonical[0].derivations), 2)
+        self.assertGreaterEqual(len(canonical[0].attempts), 2)
+        relations = {item["relation"] for item in canonical[0].derivations}
+        self.assertIn("exact", relations)
+        self.assertTrue(relations - {"exact"})
+
+        served = next(node for node in graph_payload("logic")["nodes"] if node["id"] == proof_id)
+        self.assertGreaterEqual(len(served["derivations"]), 2)
+        detail = node_calls(directory, node_id)
+        self.assertGreaterEqual(len(detail["attempts"]), 2)
+        self.assertGreaterEqual(len(detail["derivations"]), 2)
+
+        (directory / "trace-journal.jsonl").write_text(
+            '{"kind":"request","id":"r1","turn":1,"ts":1}\n', encoding="utf-8"
+        )
+        loaded = load_run("logic", directory.parent)
+        replayed_graph = Graph.from_history(loaded.ledger, campaign._proof_reader(directory))
+        replayed_node = next(node for node in replayed_graph.nodes if node.proof_id == proof_id)
+        self.assertEqual(
+            [item["relation"] for item in replayed_node.derivations],
+            [item["relation"] for item in canonical[0].derivations],
+        )
+        self.assertEqual(len(replayed_node.attempts), len(canonical[0].attempts))
+        copied = directory.parent / "reloaded"
+        copied.mkdir()
+        (copied / "ledger.jsonl").write_bytes(reloaded)
+        proofs = copied / "proofs"
+        proofs.mkdir()
+        (proofs / proof_path.name).write_bytes(original_proof)
+        reloaded_graph = Graph.from_history(
+            campaign.events(copied), lambda ident: (proofs / f"{ident}.lean").read_text() if ident == proof_id else None
+        )
+        self.assertEqual(len([node for node in reloaded_graph.nodes if node.proof_id == proof_id]), 1)
+        self.assertGreaterEqual(
+            len(next(node for node in reloaded_graph.nodes if node.proof_id == proof_id).derivations), 2
+        )
+
 
 class SessionPathProtocolTests(CascadeCase):
     """Real Lean results carry `compat[v]["lean"]`; the model view turns it into a string."""

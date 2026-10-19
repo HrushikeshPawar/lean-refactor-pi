@@ -763,6 +763,44 @@ _CALL_KEYS = ("tool_call_id", "name", "args", "delivered", "untrimmed", "trimmed
 
 
 def node_calls(directory: Path, node: str) -> dict:
+    """Journal call for `node`, plus retained attempts and derivations when this run recorded them."""
+    found = _node_calls(directory, node)
+    extra = _served_lineage(directory, node)
+    if extra:
+        found.update(extra)
+    return found
+
+
+def _served_lineage(directory: Path, node: str) -> dict:
+    ledger = directory / "ledger.jsonl"
+    if not ledger.is_file():
+        return {}
+    from arena.run_control import published_history
+
+    history = published_history(directory, read_jsonl(ledger))
+    proof_id = _proof_of(history, node)
+    if proof_id is None:
+        return {}
+    if not any(
+        event.get("kind") in ("attempt", "derivation")
+        and (event.get("proof_id") or event.get("candidate_id")) == proof_id
+        for event in history
+    ):
+        return {}
+    from arena.graph import Graph
+
+    def read(ident: str) -> str | None:
+        path = directory / "proofs" / f"{ident}.lean"
+        return path.read_text() if path.is_file() else None
+
+    projection = Graph.from_history(history, read)
+    found = next((item for item in projection.nodes if item.proof_id == proof_id), None)
+    if found is None:
+        return {}
+    return {"attempts": found.attempts, "derivations": found.derivations}
+
+
+def _node_calls(directory: Path, node: str) -> dict:
     """The journal turn that created `node`: its call, as delivered and untrimmed, and its reasoning.
 
     v7 nodes join on `tool_call_id`. Older nodes join when one tool-call window encloses the

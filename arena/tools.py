@@ -26,8 +26,11 @@ def _history(run_id: str) -> list[dict]:
 
 
 def _nodes(run_id: str) -> tuple[list[dict], graph.Graph]:
-    history = _history(run_id)
-    return history, graph.Graph.from_history(history, campaign._proof_reader(campaign.run_dir(run_id)))
+    directory = campaign.run_dir(run_id)
+    from arena.run_control import published_history
+
+    history = published_history(directory, campaign.events(directory))
+    return history, graph.Graph.from_history(history, campaign._proof_reader(directory))
 
 
 def _node(run_id: str, reference: str):
@@ -458,6 +461,8 @@ def _compile_item(name: str, run_id: str, node_ref: str, result: dict, filing: s
             "holes": holes,
             "price": result.get("price_row"),
             "repeat": repeat,
+            "attempts": node.attempts,
+            "derivations": node.derivations,
         },
         "facts": facts,
     }

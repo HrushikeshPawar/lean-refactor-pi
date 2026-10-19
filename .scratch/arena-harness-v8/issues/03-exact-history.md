@@ -4,7 +4,7 @@
 
 **Blocked by:** None (no additional logical prerequisite).
 
-**Status:** ready-for-agent
+**Status:** needs-review
 
 **Branch:** `v8/03-exact-history`
 
@@ -26,11 +26,11 @@
 
 ## What to build and acceptance
 
-- [ ] 1. Introduce the common durable operation/event identities and versioned receipt used by subsequent tickets. A repeated operation with identical arguments returns its existing result; mismatched arguments are rejected.
-- [ ] 2. Preserve every construction input, input role, exact source artifact, actor/call reference and alternate derivation. Keep named/default/similarity relations distinct from exact construction.
-- [ ] 3. Demonstrate two derivations producing one canonical proof, with both attempts visible through the normal protocol and served node detail.
-- [ ] 4. Round-trip storage, projection, replay and export/reload while retaining the original serialized lineage and artifact bytes. Historical missing fields remain explicitly missing.
-- [ ] 5. Use the existing fake-Lean protocol and replay/viewer fixtures. Do not start Lean or Pi.
+- [x] 1. Introduce the common durable operation/event identities and versioned receipt used by subsequent tickets. A repeated operation with identical arguments returns its existing result; mismatched arguments are rejected.
+- [x] 2. Preserve every construction input, input role, exact source artifact, actor/call reference and alternate derivation. Keep named/default/similarity relations distinct from exact construction.
+- [x] 3. Demonstrate two derivations producing one canonical proof, with both attempts visible through the normal protocol and served node detail.
+- [x] 4. Round-trip storage, projection, replay and export/reload while retaining the original serialized lineage and artifact bytes. Historical missing fields remain explicitly missing.
+- [x] 5. Use the existing fake-Lean protocol and replay/viewer fixtures. Do not start Lean or Pi.
 
 ## Verify
 
