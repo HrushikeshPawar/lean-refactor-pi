@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from arena.campaign import _graph_node_id, _update_id, node_label
+from arena.campaign import _graph_node_id, _update_id, node_label, proof_eligibility
 from arena.graph import Graph, Node
 from arena.package import RUNS, _json, _jsonl
 from arena.run_control import committed_operation_ids
@@ -166,7 +166,11 @@ def load_runs(run_ids: list[str], runs_root: Path) -> tuple[list[LoadedRun], lis
             loaded.append(run)
             continue
         for node in graph.nodes:
-            if node.origin == "reference" or not node.verified:
+            if (
+                node.origin == "reference"
+                or not node.verified
+                or proof_eligibility(history, node.proof_id) != "eligible"
+            ):
                 continue
             proof = read_text(node.proof_id)
             event = events.get(node.proof_id)

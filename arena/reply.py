@@ -58,19 +58,51 @@ def _path(run_id: str) -> Path:
 
 
 def _load(run_id: str) -> dict:
+    from arena.run_control import committed_history, committed_operation_ids
+
     try:
         value = json.loads(_path(run_id).read_text())
     except (OSError, ValueError):
         value = {}
-    return value if isinstance(value, dict) else {}
+    state = value if isinstance(value, dict) else {}
+    directory = campaign.run_dir(run_id)
+    committed = committed_operation_ids(directory)
+    for event in committed_history(campaign.events(directory), committed):
+        if event.get("kind") != "delivered_reply" or not event.get("operation_id"):
+            continue
+        actor = event["actor_id"]
+        bucket = _bucket(state, actor)
+        data = event["data"]
+        if data["cursor"] < bucket.get("delivered_seq", -1):
+            continue
+        bucket["delivered_seq"] = data["cursor"]
+        bucket["last_delivery"] = {
+            "operation_id": event["operation_id"],
+            "event_ids": data["event_ids"],
+            "arguments": {"actor_id": actor, "seqs": data["seqs"], "event_ids": data["event_ids"]},
+        }
+    return state
 
 
-def _save(run_id: str, value: dict) -> None:
+def _save(run_id: str, value: dict, *, actor_update: tuple[str, dict] | None = None) -> None:
+    from arena.run_control import control_lock
+
     path = _path(run_id)
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(f".{os.getpid()}.tmp")
-    temporary.write_text(json.dumps(value, ensure_ascii=False, sort_keys=True) + "\n")
-    os.replace(temporary, path)
+    with control_lock(path.parent):
+        current = _load(run_id)
+        value = {**value, "actors": current.get("actors", {})}
+        if actor_update is not None:
+            actor, bucket = actor_update
+            value["actors"][actor] = bucket
+        for key in ("delivered_seq", "seen_nodes", "map_hash", "map_key"):
+            if key in value["actors"].get("sol", {}):
+                value[key] = value["actors"]["sol"][key]
+            else:
+                value.pop(key, None)
+        temporary = path.with_suffix(f".{os.getpid()}.tmp")
+        temporary.write_text(json.dumps(value, ensure_ascii=False, sort_keys=True) + "\n")
+        os.replace(temporary, path)
 
 
 def map_text(run_id: str) -> str:
@@ -101,7 +133,7 @@ def _write_actor(run_id: str, actor: str, bucket: dict, state: dict | None = Non
         for key in ("delivered_seq", "seen_nodes", "map_hash", "map_key"):
             if key in bucket:
                 state[key] = bucket[key]
-    _save(run_id, state)
+    _save(run_id, state, actor_update=(actor, bucket))
     return state
 
 
@@ -653,7 +685,11 @@ def attach_context(
         bucket["last_delivery"] = {
             "operation_id": receipt["operation_id"],
             "event_ids": receipt["event_ids"],
-            "arguments": {"actor_id": actor, "seqs": [int(item.get("seq", -1)) for item in fresh], "event_ids": receipt["event_ids"]},
+            "arguments": {
+                "actor_id": actor,
+                "seqs": [int(item.get("seq", -1)) for item in fresh],
+                "event_ids": receipt["event_ids"],
+            },
         }
         result["delivery"] = {"actor_id": actor, "event_ids": receipt["event_ids"], "cursor": bucket["delivered_seq"]}
     # Sections: updates from background checks, this call's result, then the search map.

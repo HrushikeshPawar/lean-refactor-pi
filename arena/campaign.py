@@ -1297,7 +1297,9 @@ def _file_node(
         return event, True
 
 
-def _settle_focus(directory: Path, proof_ids: list[str], graph: Graph | None = None) -> Graph:
+def _settle_focus(
+    directory: Path, proof_ids: list[str], graph: Graph | None = None, *, actor_local: bool = False
+) -> Graph:
     history = events(directory)
     graph = graph or Graph.from_history(
         history, _proof_reader(directory), committed_operations=committed_operation_ids(directory)
@@ -1314,6 +1316,10 @@ def _settle_focus(directory: Path, proof_ids: list[str], graph: Graph | None = N
         return (0, -len(re.findall(r"\bsorry\b", proof)))
 
     winner = max(eligible, key=rank)
+    if actor_local:
+        from arena.reply import set_actor_focus
+
+        set_actor_focus(directory.name, winner.proof_id)
     if winner.proof_id != graph.focus:
         _append(directory, {"kind": "focus", "proof_id": winner.proof_id, "reason": "batch_best"})
         graph.focus = winner.proof_id
@@ -2060,7 +2066,12 @@ def record_evaluation(
         None if in_batch else projection_out,
     )
     if not in_batch:
-        graph = _settle_focus(directory, [candidate_id], projection_out[0] if projection_out else None)
+        graph = _settle_focus(
+            directory,
+            [candidate_id],
+            projection_out[0] if projection_out else None,
+            actor_local=origin == "model" and trigger == "model",
+        )
         _check_stall(directory, graph, {candidate_id} if newly_filed else set())
     history = events(directory)
     rows = _summaries(history)
@@ -2364,7 +2375,7 @@ def probe(
             newly_filed.add(proof_id)
     in_batch, _ = _BATCH_FOCUS.get()
     if not in_batch:
-        graph = _settle_focus(directory, [proof_id], projection_out[0] if projection_out else None)
+        graph = _settle_focus(directory, [proof_id], projection_out[0] if projection_out else None, actor_local=True)
         _check_stall(directory, graph, newly_filed)
     location = materialize(name, run_id, proof) if result.get("tokens") is not None else {}
     label = _probe_numbers(events(directory))[proof_id]
@@ -2410,13 +2421,15 @@ def probe_batch(
     if not isinstance(drafts, list) or not 1 <= len(drafts) <= MAX_DRAFTS:
         raise ValueError(text.render("messages/errors.draft_limit"))
     history = events(run_dir(run_id))
-    from arena.reply import actor_focus_proof
+    from arena.reply import actor_focus_proof, set_actor_focus
 
     actor_focus = actor_focus_proof(run_id)
     fixed_parent = resolve_parent_ref(history, parent) if parent else actor_focus or _current(history)
     starting_focus = actor_focus or next(
         (item["proof_id"] for item in reversed(history) if item.get("kind") == "focus"), None
     )
+    if actor_focus is None and starting_focus is not None:
+        set_actor_focus(run_id, starting_focus)
     outcomes = []
     token = _PRECOMPILED.set(_compile_probes(name, run_dir(run_id), drafts) if len(drafts) > 1 else {})
     focus_token = _BATCH_FOCUS.set((True, starting_focus))
@@ -2443,7 +2456,7 @@ def probe_batch(
         proof_id = hashlib.sha256((name + "\0" + proof).encode()).hexdigest()
         if proof_id not in filed:
             filed.append(proof_id)
-    graph = _settle_focus(directory, filed)
+    graph = _settle_focus(directory, filed, actor_local=True)
     _check_stall(directory, graph, newly_filed)
     return {"ok": True, "drafts": outcomes}
 
@@ -4310,7 +4323,9 @@ def write_observation(run_id: str, body: str, hypothesis_ref: str | None = None)
 
 
 def current_strategy(history: list[dict]) -> str | None:
-    texts = [event.get("text") for event in history if event.get("kind") == "strategy" and event.get("actor_id") == "sol"]
+    texts = [
+        event.get("text") for event in history if event.get("kind") == "strategy" and event.get("actor_id") == "sol"
+    ]
     return texts[-1] if texts else None
 
 
@@ -4323,7 +4338,7 @@ def submission(run_id: str) -> dict:
     directory = run_dir(run_id)
     history = events(directory)
     rows = _summaries(history)
-    # A harness-combined candidate is eligible when it is the best verified candidate.
+    # Harness transformations need selection of this exact proof in addition to verification.
     pool = sorted(
         (
             r

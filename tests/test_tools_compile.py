@@ -312,6 +312,7 @@ class CompileToolTests(CascadeCase):
         parent = tools.compile_tool("T", run_id, {"drafts": ["by\n  trivial"]})
         parent_id = parent["items"][0]["node"]
         parent_proof = tools._node(run_id, parent_id).proof_id
+        self.assertEqual(reply.actor_focus_proof(run_id), parent_proof)
         other = tools.compile_tool("T", run_id, {"drafts": ["by\n  sorry"]})
         other_id = other["items"][0]["node"]
         other_proof = tools._node(run_id, other_id).proof_id
@@ -322,6 +323,10 @@ class CompileToolTests(CascadeCase):
             reply.set_actor_focus(run_id, parent_proof)
         with patch.dict(os.environ, {"ARENA_ACTOR_ID": "sol"}):
             reply.set_actor_focus(run_id, other_proof)
+        stale = reply._load(run_id)
+        reply.set_actor_focus(run_id, other_proof, actor="another-worker")
+        reply._write_actor(run_id, "worker", reply._bucket(stale, "worker"), stale)
+        self.assertEqual(reply.actor_focus_proof(run_id, "another-worker"), other_proof)
         with patch.dict(os.environ, {"ARENA_ACTOR_ID": "worker"}):
             moved = tools.compile_tool("T", run_id, {"splice": {"steps": "s1", "text": "exact"}})
         self.assertTrue(moved["ok"])
@@ -363,6 +368,7 @@ class CompileToolTests(CascadeCase):
             {
                 "kind": "evaluation",
                 "candidate_id": proof_id,
+                "key": "background-notification",
                 "mode": "fast",
                 "trigger": "auto",
                 "result": {
@@ -385,6 +391,17 @@ class CompileToolTests(CascadeCase):
         replies = [event for event in campaign.events(self.directory) if event.get("kind") == "delivered_reply"]
         self.assertEqual(sum(1 for event in replies if event.get("actor_id") == "sol"), 1)
 
+        with patch.dict(os.environ, {"ARENA_ACTOR_ID": "recovering-worker"}):
+            with (
+                patch.object(reply, "_save", side_effect=RuntimeError("cache write interrupted")),
+                self.assertRaisesRegex(RuntimeError, "cache write interrupted"),
+            ):
+                reply.attach_context(run_id, reply.reply())
+            recovered = reply.redeliver(run_id)
+            self.assertTrue(recovered["event_ids"])
+            self.assertEqual(recovered["receipt"]["status"], "committed")
+            self.assertFalse(reply.attach_context(run_id, reply.reply())["facts"])
+
         child_id = "harness-child"
         (self.directory / "proofs" / f"{child_id}.lean").write_text("by\n  exact\n")
         campaign._append(
@@ -406,6 +423,15 @@ class CompileToolTests(CascadeCase):
         self.assertEqual(detail["eligibility"], "eligible")
         self.assertIn("verification", detail)
         self.assertIn("cold", detail)
+
+        harness_proof = campaign.normalize_draft("T", "by\n  exact True.intro")
+        evaluated = campaign.record_evaluation("T", run_id, harness_proof, "fast", origin="assembly")
+        harness_id = evaluated["candidate_id"]
+        self.assertEqual(campaign.proof_eligibility(campaign.events(self.directory), harness_id), "ineligible")
+        with patch.dict(os.environ, {"ARENA_ACTOR_ID": "worker"}):
+            adopted = tools.compile_tool("T", run_id, {"drafts": [harness_proof]})
+        self.assertEqual(adopted["items"][0]["eligibility"], "eligible")
+        self.assertEqual(campaign.proof_eligibility(campaign.events(self.directory), harness_id), "eligible")
 
 
 class SessionPathProtocolTests(CascadeCase):

@@ -4,7 +4,7 @@
 
 **Blocked by:** 03: Retain exact attempts and derivations
 
-**Status:** needs-review
+**Status:** done
 
 **Branch:** `v8/04-actor-state-ownership`
 
@@ -44,6 +44,13 @@ uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_tools_compil
 Expected: the named behavior check passes with no actual provider, Pi or Lean process. Aim for seconds and at most 60 seconds. No per-ticket full suite or slow suite.
 
 **Deferred to final E2E:** Real sessions and concurrent socket delivery. See the shared [final E2E checklist](../final-e2e.md).
+
+## Review corrections
+
+- Normal foreground compilation now captures and advances actor-local focus. Background evaluation does not change an actor's anchor.
+- Shared delivery-cache writes merge actor buckets under the control lock, preserving another actor's newer state. Committed delivery events recover cursors and redelivery identities when the cache write is interrupted.
+- Agent compilation of an existing harness-generated proof records selection of that exact proof without changing its origin. Both run-local and cross-run submission selection enforce eligibility.
+- The existing focused smoke includes these boundaries. Two existing delivery/reset checks cover the cache compatibility change. Real session/socket concurrency and Pi/Lean remain deferred.
 
 ---
 

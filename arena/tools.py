@@ -44,9 +44,11 @@ def _node(run_id: str, reference: str):
 
 def _actor_focus_id(run_id: str):
     proof_id = reply.actor_focus_proof(run_id)
-    if proof_id is None:
-        return None
     _history_rows, projection = _nodes(run_id)
+    if proof_id is None:
+        proof_id = projection.focus
+        if proof_id is not None:
+            reply.set_actor_focus(run_id, proof_id)
     return next((item for item in projection.nodes if item.proof_id == proof_id), None)
 
 
@@ -669,6 +671,8 @@ def compile_tool(theorem: str, run_id: str, request: dict) -> dict:
                 outcome = {key: value for key, value in row.items() if key != "index"}
                 proof_id = hashlib.sha256((theorem + "\0" + proof).encode()).hexdigest()
                 node = next((item for item in projection.nodes if item.proof_id == proof_id), None)
+                if node is not None and campaign.proof_eligibility(_history(run_id), node.proof_id) != "eligible":
+                    campaign.select_proof(run_id, node.proof_id)
                 outcomes.append((f"d{original_index}", outcome, node.id if node else ""))
         items = list(item_errors)
         refs: dict[str, tuple[str, dict]] = {}
@@ -734,6 +738,8 @@ def compile_tool(theorem: str, run_id: str, request: dict) -> dict:
                     named_parent=request.get("from"),
                 )
                 node = _node(run_id, result["node"])
+                if campaign.proof_eligibility(_history(run_id), node.proof_id) != "eligible":
+                    campaign.select_proof(run_id, node.proof_id)
                 item_result = _compile_item(
                     theorem, run_id, node.id, result, _filing_line(node, _nodes(run_id)[1], result)
                 )
