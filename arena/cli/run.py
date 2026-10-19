@@ -25,7 +25,6 @@ from arena import models as model_config
 from arena.campaign import autocheck, init, packet, run_dir, submission, write_state
 from arena.cli import live
 from arena.engine import ROOT
-from arena.golf import golf_run, summary_line
 from arena.provenance import code_version
 from arena.seed import check_seed, prior_work, read_seed_proof, start_from_proof
 from arena.skill import skill_hash, skill_prompt
@@ -43,8 +42,6 @@ CONFIG = model_config.load()
 MODELS = model_config.models()
 # After Pi exits, pending background full checks get this long before the submission is chosen.
 DRAIN_S = 180  # wall-clock cap on the closing drain; candidates left unchecked are recorded in the summary
-# After the drain, one greedy golf pass (Lean only, one check at a time) over the best verified proof.
-GOLF_S = 600  # wall-clock cap on the golf pass's checks
 # How long Pi gets to finish an in-flight evaluation and write cost.json after a stop request.
 STOP_GRACE_S = 45
 THINKING_LEVELS = tuple(CONFIG["thinking"]["levels"])
@@ -443,7 +440,7 @@ class RunOptions:
     resume_run: bool = False
     seed_run: Path | None = None  # an ended run whose graph and history this run continues from
     seed_proof: Path | None = None  # a proof file this run starts from instead of the reference proof
-    no_golf: bool = False  # skip the golf pass that follows the closing drain
+    no_golf: bool = False  # compatibility flag; post-run golf is disabled for every run
     dry_run: bool = False
     plain: bool = False
 
@@ -907,11 +904,6 @@ def closing_drain(theorem: str, run_id: str) -> dict | None:
     )
 
 
-def closing_golf(theorem: str, run_id: str):
-    """One golf pass over the best verified proof, up to GOLF_S; a further stop request skips the rest (None)."""
-    return _until_stopped(lambda: golf_run(theorem, run_id, GOLF_S), "Golf pass skipped by a further stop request")
-
-
 def finish(
     args,
     directory: Path,
@@ -938,14 +930,6 @@ def finish(
                 f"Background checks after Pi exited: {drained['checked']}; skipped (cannot beat the best) {drained.get('skipped', [])}; still pending {drained.get('remaining', [])}{' (drain cap reached)' if drained.get('timed_out') else ''}",
                 flush=True,
             )
-        if not tripped and not args.no_golf:
-            try:
-                golfed = closing_golf(args.theorem, args.run_id)
-            except Exception as error:  # the pass only adds candidates; a failure must never cost the run its answer
-                golfed = None
-                print(f"Golf pass failed: {error}", file=sys.stderr)
-            if golfed is not None:
-                print(summary_line(golfed), flush=True)
         write_state(args.run_id)
         answer = submission(args.run_id)
         print(

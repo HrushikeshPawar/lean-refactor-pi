@@ -150,8 +150,7 @@ class GreedyTests(unittest.TestCase):
         outcome = golf.greedy(PROOF, START, needs_exact, 60, stop=lambda: "Lean gave no answer")
         self.assertEqual((outcome.tried, outcome.reason), (0, "Lean gave no answer"))
 
-    def test_the_cap_is_ten_minutes_next_to_the_drain_cap(self):
-        self.assertEqual(run_module.GOLF_S, 600)
+    def test_the_closing_drain_keeps_its_cap(self):
         self.assertEqual(run_module.DRAIN_S, 180)
 
 
@@ -244,9 +243,8 @@ class RunPassTests(FakeRunCase):
 
 
 class ClosingPathTests(unittest.TestCase):
-    def finish(self, tripped=False, no_golf=False, golf_side_effect=None):
+    def finish(self, tripped=False, no_golf=False):
         calls = []
-        outcome = golf.Outcome("p", 50.0, 55.0, tried=7, seconds=3.0)
         with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()) as out:
             directory = Path(tmp)
             with (
@@ -254,11 +252,7 @@ class ClosingPathTests(unittest.TestCase):
                 mock.patch.object(
                     run_module, "autocheck", side_effect=lambda *a, **k: calls.append("drain") or {"checked": []}
                 ),
-                mock.patch.object(
-                    run_module,
-                    "golf_run",
-                    side_effect=golf_side_effect or (lambda *a, **k: calls.append(("golf", a)) or outcome),
-                ),
+                mock.patch.object(golf, "golf_run", side_effect=AssertionError("post-run golf ran")) as golf_run,
                 mock.patch.object(
                     run_module, "submission", side_effect=lambda _run: calls.append("submission") or {"reason": "none"}
                 ),
@@ -275,28 +269,24 @@ class ClosingPathTests(unittest.TestCase):
                     None,
                     tripped=tripped,
                 )
-        return calls, out.getvalue()
+        return calls, out.getvalue(), golf_run
 
-    def test_the_pass_runs_after_the_drain_and_before_the_submission(self):
-        calls, out = self.finish()
-        self.assertEqual(calls, ["drain", ("golf", ("T", "run", run_module.GOLF_S)), "submission"])
-        self.assertIn("Golf pass: tried 7, accepted 0, 3s, proxy 50.00 -> 55.00", out)
-
-    def test_no_golf_skips_it(self):
-        calls, out = self.finish(no_golf=True)
+    def test_post_run_golf_is_disabled_after_the_verification_drain(self):
+        calls, out, golf_run = self.finish()
         self.assertEqual(calls, ["drain", "submission"])
+        golf_run.assert_not_called()
+        self.assertNotIn("Golf pass", out)
+
+    def test_legacy_no_golf_flag_remains_accepted(self):
+        calls, out, golf_run = self.finish(no_golf=True)
+        self.assertEqual(calls, ["drain", "submission"])
+        golf_run.assert_not_called()
         self.assertNotIn("Golf pass", out)
 
     def test_an_unhealthy_lean_skips_it(self):
-        calls, _ = self.finish(tripped=True)
+        calls, _, golf_run = self.finish(tripped=True)
         self.assertEqual(calls, ["submission"])
-
-    def test_a_failing_pass_never_costs_the_run_its_submission(self):
-        def broken(*_a, **_k):
-            raise RuntimeError("boom")
-
-        calls, _ = self.finish(golf_side_effect=broken)
-        self.assertEqual(calls, ["drain", "submission"])
+        golf_run.assert_not_called()
 
 
 class OfflineTests(unittest.TestCase):
