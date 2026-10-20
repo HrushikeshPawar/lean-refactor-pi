@@ -920,7 +920,11 @@ def finish(
     """Always leave cost.json and a run summary behind, even for a killed or crashed run."""
     report_path = directory / "cost.json"
     # On a resumed run, a cost.json left by an earlier segment is stale.
-    if not report_path.exists() or report_path.stat().st_mtime < segment_started:
+    if (directory / "control.jsonl").is_file():
+        from arena.run_control import read_state
+
+        read_state(directory)
+    elif not report_path.exists() or report_path.stat().st_mtime < segment_started:
         report_path.write_text(json.dumps(cost_report_from_ledger(directory), indent=2) + "\n")
         print("Pi wrote no cost report for this segment; reconstructed it from the cost journal", file=sys.stderr)
     summary_phase_ended = False
@@ -986,19 +990,20 @@ def finish(
     if report.get("error") or report.get("theorem") != args.theorem:
         print(f"Invalid cost report: {report.get('error', 'theorem mismatch')}", file=sys.stderr)
         return 1
-    if report.get("limit_usd") != args.limit_usd:
+    if float(report.get("limit_usd") or 0) != args.limit_usd:
         print("Arena limit configuration changed", file=sys.stderr)
         return 1
-    print(f"Spent ${report['spent_usd']:.6f} of the ${args.limit_usd:.2f} limit", flush=True)
+    spent_usd = float(report["spent_usd"])
+    print(f"Spent ${spent_usd:.6f} of the ${args.limit_usd:.2f} limit", flush=True)
     cache = report.get("cache_utilization", {})
     if cache.get("all", {}).get("reuse_pct") is not None:
         print(
             f"Cache hit rate: all={cache['all']['reuse_pct']:.1f}% recent-10={cache['recent_ten']['reuse_pct']:.1f}%",
             flush=True,
         )
-    if report["spent_usd"] > args.limit_usd:
+    if spent_usd > args.limit_usd:
         print(
-            f"Spend overshot the ${args.limit_usd:g} limit by ${report['spent_usd'] - args.limit_usd:.6f} on the last call",
+            f"Spend overshot the ${args.limit_usd:g} limit by ${spent_usd - args.limit_usd:.6f} on the last call",
             file=sys.stderr,
         )
     if attempt_has_model_error(event_log, event_offset, _stopped_on_purpose(directory)):

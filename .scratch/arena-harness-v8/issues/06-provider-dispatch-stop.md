@@ -4,7 +4,7 @@
 
 **Blocked by:** 05: Settle one shared actual-cost ledger
 
-**Status:** needs-review
+**Status:** done
 
 **Branch:** `v8/06-provider-dispatch-stop`
 
@@ -44,6 +44,16 @@ cd packages/arena-pi && node --test --test-name-pattern="v8_dispatch_stop" exten
 Expected: the named behavior check passes with no actual provider, Pi or Lean process. Aim for seconds and at most 60 seconds. No per-ticket full suite or slow suite.
 
 **Deferred to final E2E:** Actual Pi OAuth, summaries, auto-retry and transport callback ordering. See the shared [final E2E checklist](../final-e2e.md).
+
+## Review corrections
+
+- Live ordinary and compaction settlement hooks await the shared ledger and use its returned total. Failed compaction retains unknown usage. Valid reported zero remains known; empty failure-message usage is not treated as a reported zero.
+- Compaction coverage is captured between the actual before/after compaction hooks, including both summary requests. Historical journal settlements are imported idempotently on resume; new journal rows identify the shared charging authority.
+- Wrapper installation is scoped to one extension instance. Repeated session starts do not wrap again; a second extension does not inherit the first extension's directory or identity closure. Unavailable selected adapters fail explicitly.
+- Dispatch intent is durable before fetch invocation. Lost acknowledgement remains uncertain and fences new dispatch, including SDK retries with fresh request/attempt IDs, until recovery resolves it. `begin_dispatch` requires a transport callback; it cannot manufacture a start without invocation. The latest recovery state controls the fence.
+- Shared control state remains authoritative through shutdown, runner finalization and summary reconstruction. Decimal-string report fields are parsed at presentation boundaries. Legacy journals/session estimates remain diagnostic rather than overriding the total.
+- The assigned smoke now covers the live settlement helper, grouped usage, separate session installations, shared-stop retry rejection and uncertain-invocation fencing. Focused Python checks cover lost-ack replay and authoritative report reconstruction. Touched Python lint and TypeScript syntax parsing pass; real Pi/OAuth/retry-loop integration remains deferred.
+- Viewer cost-series reconciliation still uses its legacy journal calculation. Integrating that display with shared accounting belongs to the served-evidence pass; it is not a charging authority.
 
 ---
 

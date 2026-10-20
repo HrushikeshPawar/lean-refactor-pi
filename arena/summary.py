@@ -201,6 +201,25 @@ def ledger_spend(cost_events: list[dict], session_usd: float | None = None) -> d
 
 def cost_report_from_ledger(directory: Path) -> dict:
     """Reconstruct the cost report from the durable journal when Pi could not write it."""
+    if (directory / "control.jsonl").is_file():
+        from arena.run_control import ACTUAL_COST_THRESHOLD, read_state
+
+        state = read_state(directory)
+        config = _read_json(directory / "run-config.json")
+        return {
+            "theorem": config.get("theorem"),
+            "model": config.get("model"),
+            "spent_usd": state["total"],
+            "limit_usd": str(ACTUAL_COST_THRESHOLD),
+            "accounting": state["accounting"],
+            "accounting_failures": state["accounting_failures"],
+            "unknown_requests": state["unknown_requests"],
+            "by_actor": state["by_actor"],
+            "by_job": state["by_job"],
+            "stopped": state["stopped"],
+            "stop_reason": state["stop_reason"],
+            "projection_of": "control.jsonl",
+        }
     session = session_spend(directory)
     spend = ledger_spend(_jsonl(directory / "cost-ledger.jsonl"), session["usd"] if session else None)
     config = _read_json(directory / "run-config.json")
@@ -415,7 +434,12 @@ def build_summary(directory: Path) -> dict:
     cost_events = _jsonl(directory / "cost-ledger.jsonl")
     trace = trace_rows(directory / "trace-journal.jsonl")
     config = _read_json(directory / "run-config.json")
-    report = _read_json(directory / "cost.json") or cost_report_from_ledger(directory)
+    shared_accounting = (directory / "control.jsonl").is_file()
+    report = (
+        cost_report_from_ledger(directory)
+        if shared_accounting
+        else (_read_json(directory / "cost.json") or cost_report_from_ledger(directory))
+    )
     submission_result = _json(directory / "submission.json")
     settles = [e for e in cost_events if e.get("kind") == "settle"]
     turns = _turns(events, settles)
@@ -423,10 +447,13 @@ def build_summary(directory: Path) -> dict:
     retries = sum(event.get("retry_of") is not None for event in request_events)
     session = session_spend(directory)
     recon = ledger_spend(cost_events, session["usd"] if session else None)
-    # The one spend figure: never below the cost report, the ledger's settles or Pi's session total.
-    spent = max(float(report.get("spent_usd") or 0.0), recon["spent_usd"])
+    reported_spend = float(report.get("spent_usd") or 0.0)
+    spent = reported_spend if shared_accounting else max(reported_spend, recon["spent_usd"])
+    if shared_accounting:
+        recon["authority"] = "control.jsonl"
     recon["cost_report_usd"] = report.get("spent_usd")
-    cap = report.get("limit_usd") or configured_cap(config) or report.get("soft_cap_usd") or report.get("hard_cap_usd")
+    cap_value = report.get("limit_usd") or configured_cap(config) or report.get("soft_cap_usd") or report.get("hard_cap_usd")
+    cap = float(cap_value) if cap_value is not None else None
     remaining = max(0.0, float(cap or 0.0) - spent)
     by_kind: dict[str, dict] = {}
     for turn in turns:
@@ -520,7 +547,7 @@ def build_summary(directory: Path) -> dict:
             if spent
             else 0.0,
             "usd_per_evaluation": round(spent / len(evaluations), 6) if evaluations else None,
-            "report_source": report.get("written_by", "pi_session_shutdown"),
+            "report_source": report.get("projection_of") or report.get("written_by", "pi_session_shutdown"),
         },
         # reuse_pct is the cache hit rate (cache_read / (input + cache_read + cache_write)); the key
         # name is kept for stored summaries and the viewer.

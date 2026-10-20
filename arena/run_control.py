@@ -359,7 +359,12 @@ def _prepare_locked(directory: Path, rows: list[dict], request: dict) -> tuple[l
     if request.get("job_id"):
         event["job_id"] = request["job_id"]
     _append_control(directory, event)
-    return _control_rows(directory), {"ok": True, "status": "prepared", "request_id": request["request_id"], "reused": False}
+    return _control_rows(directory), {
+        "ok": True,
+        "status": "prepared",
+        "request_id": request["request_id"],
+        "reused": False,
+    }
 
 
 def _dispatch_identity(attempt: dict) -> dict:
@@ -381,10 +386,21 @@ def _fence_reason(rows: list[dict], attempt: dict) -> str | None:
     """A committed stop or recovery fence. Settled totals alone do not stop a dispatch."""
     if any(row.get("kind") == "run_stop" for row in rows):
         return "run_stopped"
-    if any(row.get("kind") == "run_state" and row.get("status") == "recovering" for row in rows):
+    state = next((row.get("status") for row in reversed(rows) if row.get("kind") == "run_state"), None)
+    if state == "recovering":
         return "recovering"
+    attempts = {}
+    for row in rows:
+        if row.get("kind") in ("dispatch_intent", "dispatch"):
+            attempts[row["attempt_id"]] = row.get("status")
+    if "dispatch_uncertain" in attempts.values():
+        return "recovery_required"
     generation = next(
-        (row.get("generation") for row in reversed(rows) if row.get("kind") == "run_generation" and row.get("generation")),
+        (
+            row.get("generation")
+            for row in reversed(rows)
+            if row.get("kind") == "run_generation" and row.get("generation")
+        ),
         None,
     )
     if generation is not None and attempt.get("generation") != generation:
@@ -392,17 +408,22 @@ def _fence_reason(rows: list[dict], attempt: dict) -> str | None:
     return None
 
 
-def begin_dispatch(directory: Path, attempt: dict) -> dict:
-    """Record a dispatch that the caller is sending inside this same locked section."""
-    return _dispatch_locked(directory, attempt, lambda: "invoked")
+def begin_dispatch(directory: Path, attempt: dict, invoke: Callable[[], object]) -> dict:
+    """Invoke transport inside the stop-ordering boundary, then record its start."""
+
+    def acknowledge():
+        invoke()
+        return "invoked"
+
+    return _dispatch_locked(directory, attempt, acknowledge)
 
 
 def serve_dispatch(directory: Path, attempt: dict, acknowledge) -> dict:
     """Check the stop, let the caller invoke transport, then record the receipt before unlocking.
 
     ``acknowledge`` runs while the control lock is held. It must return ``invoked`` only after
-    transport has been called, and it must not wait for the response. Any other return records
-    the attempt as unsent. A closed acknowledge (broken pipe, empty read) releases the lock.
+    transport has been called, and it must not wait for the response. A lost acknowledgement
+    leaves a durable uncertain attempt; it does not prove transport was never invoked.
     """
     return _dispatch_locked(directory, attempt, acknowledge)
 
@@ -419,7 +440,9 @@ def _dispatch_locked(directory: Path, attempt: dict, acknowledge) -> dict:
         rows = _ensure_accounting_failures(directory, _ensure_threshold_stop(directory, _control_rows(directory)))
         digest = argument_digest(_dispatch_identity(attempt))
         prior = [
-            row for row in rows if row.get("kind") == "dispatch" and row.get("attempt_id") == attempt["attempt_id"]
+            row
+            for row in rows
+            if row.get("kind") in ("dispatch", "dispatch_intent") and row.get("attempt_id") == attempt["attempt_id"]
         ]
         if prior:
             last = prior[-1]
@@ -437,11 +460,16 @@ def _dispatch_locked(directory: Path, attempt: dict, acknowledge) -> dict:
                 "reused": True,
                 "status": last.get("status"),
                 "sent": last.get("sent"),
+                "reason": "recovery_required" if last.get("sent") == "uncertain" else last.get("reason"),
                 "request_id": attempt["request_id"],
                 "attempt_id": attempt["attempt_id"],
             }
         existing = next(
-            (row for row in rows if row.get("kind") == "provider_request" and row.get("request_id") == attempt["request_id"]),
+            (
+                row
+                for row in rows
+                if row.get("kind") == "provider_request" and row.get("request_id") == attempt["request_id"]
+            ),
             None,
         )
         if existing and any(existing.get(key) != attempt.get(key) for key in ("run_id", "actor_id", "session_id")):
@@ -471,13 +499,25 @@ def _dispatch_locked(directory: Path, attempt: dict, acknowledge) -> dict:
                     "attempt_id": attempt["attempt_id"],
                 }
         reason = _fence_reason(rows, attempt)
-        if reason is None and acknowledge() != "invoked":
-            reason = "launch_failed"
-            status = "failed_before_start"
-            sent = "unsent"
-        else:
-            status = "rejected_before_dispatch" if reason else "dispatch_started"
-            sent = "unsent" if reason else "uncertain"
+        status = "rejected_before_dispatch" if reason else "dispatch_started"
+        sent = "unsent" if reason else "uncertain"
+        if reason is None:
+            _append_control(
+                directory,
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "kind": "dispatch_intent",
+                    "event_id": uuid.uuid4().hex,
+                    "operation_id": attempt["attempt_id"],
+                    **_dispatch_identity(attempt),
+                    "status": "dispatch_uncertain",
+                    "sent": "uncertain",
+                    "argument_digest": digest,
+                },
+            )
+            if acknowledge() != "invoked":
+                reason = "recovery_required"
+                status = "dispatch_uncertain"
         event = {
             "schema_version": SCHEMA_VERSION,
             "kind": "dispatch",
@@ -603,7 +643,13 @@ def _apply_coverage(rows: list[dict]) -> dict:
 
 
 def _projection(directory: Path, coverage: dict, stopped: bool, stop_reason: str | None) -> None:
+    try:
+        config = json.loads((directory / "run-config.json").read_text())
+    except (OSError, ValueError):
+        config = {}
     report = {
+        "theorem": config.get("theorem"),
+        "model": config.get("model"),
         "spent_usd": _money(coverage["total"]),
         "limit_usd": _money(ACTUAL_COST_THRESHOLD),
         "accounting": "unknown" if coverage["unknown"] else "known",

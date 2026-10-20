@@ -18,7 +18,7 @@ import { cacheAlarm, cacheHitPct, callCost, finishAllowed, limitReached, limitUs
 import { numbers as textNumbers, render as renderText } from "./text.ts";
 import { classifyFailure, nextWait } from "./outage.ts";
 import { applyToolTurnEffort, requestDetailedSummary } from "./thinking.ts";
-import { installDispatchGate, pythonDispatch } from "./provider_gate.ts";
+import { installDispatchGate, pythonDispatch, readSharedSpend, settleProviderUsage, type SharedSpend } from "./provider_gate.ts";
 import { renderReply } from "./reply.ts";
 
 const root = resolve(import.meta.dirname, "../../..");
@@ -72,6 +72,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
   let active: string | undefined;
   const runId = process.env.ARENA_RUN_ID;
   const runDirectory = runId ? resolve(root, "runs", "pi-budget", runId) : undefined;
+  const installedDispatchGates = new Set<string>();
   const costJournal = runDirectory ? resolve(runDirectory, "cost-ledger.jsonl") : undefined;
   const traceJournal = runDirectory ? resolve(runDirectory, "trace-journal.jsonl") : undefined;
   const blobs = runDirectory ? new BlobStore(resolve(runDirectory, "blobs")) : undefined;
@@ -85,6 +86,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
   let limitToolsLeft = 0;
   // The provider request currently open: opened in before_provider_request, closed by the call's settle row.
   let pendingRequest: string | undefined;
+  let compactionRequests: string[] | undefined;
   let openAttempt: string | undefined;
   let previousFailed: string | undefined;
   const rawArguments = new RawArguments();
@@ -219,15 +221,48 @@ export default async function arenaExtension(pi: ExtensionAPI) {
       ...(delta ? { post_hook_prefix: delta.prefix, post_hook_suffix: delta.suffix } : {}),
       post_hook: delta ? delta.middle : text.toString("utf8") };
   }
-  pi.on("session_start", (_event, ctx) => {
+  function sharedIdentity() {
+    if (!runId) throw new Error("Shared accounting needs a run identity");
+    return {
+      runId,
+      actorId: process.env.ARENA_ACTOR_ID || "sol",
+      sessionId: process.env.ARENA_SESSION_ID || runId,
+      ...(process.env.ARENA_JOB_ID ? { jobId: process.env.ARENA_JOB_ID } : {}),
+      ...(process.env.ARENA_GENERATION ? { generation: process.env.ARENA_GENERATION } : {}),
+    };
+  }
+
+  function knownUsage(usage: AssistantMessage["usage"] | undefined) {
+    return typeof usage?.cost?.total === "number" && Number.isFinite(usage.cost.total) && usage.cost.total >= 0;
+  }
+
+  pi.on("session_start", async (_event, ctx) => {
     active = undefined;
     // The run total is the sum of the ledger's settle rows, so a resumed run continues from its spend.
     const settled = costEvents().filter(item => item.kind === "settle" && item.usage_known !== false);
     spentUsd = settled.reduce((sum, item) => sum + Number(item.usd), 0);
     settledCalls = settled.length;
-    limitHit = limitReached(spentUsd, limit);
+    let sharedStopped = false;
+    if (runDirectory && runId) {
+      for (const item of costEvents().filter(item => item.kind === "settle" && item.shared_authority !== "control.jsonl")) {
+        if (typeof item.id !== "string") throw new Error("Historical settlement has no request identity");
+        const usage = item.usage_known !== false && typeof item.usd === "number" && Number.isFinite(item.usd) && item.usd >= 0
+          ? { cost: { total: item.usd }, legacy_journal: item } : { legacy_journal: item };
+        await settleProviderUsage(runDirectory, {
+          runId,
+          actorId: typeof item.actor_id === "string" ? item.actor_id : "sol",
+          sessionId: typeof item.session_id === "string" ? item.session_id : runId,
+          ...(typeof item.job_id === "string" ? { jobId: item.job_id } : {}),
+        }, [item.id], usage);
+      }
+      const shared = await readSharedSpend(runDirectory);
+      spentUsd = Number(shared.total);
+      sharedStopped = shared.stopped;
+    }
+    limitHit = sharedStopped || limitReached(spentUsd, limit);
     limitToolsLeft = 0;
     pendingRequest = undefined;
+    compactionRequests = undefined;
     previousFailed = undefined;
     const latest = costEvents().filter(item => item.kind === "control").at(-1);
     continuations = Number(latest?.continuations ?? 0);
@@ -257,24 +292,21 @@ export default async function arenaExtension(pi: ExtensionAPI) {
       }));
       if (ctx.model?.provider && ctx.model.api) providers.push({ name: ctx.model.provider, api: ctx.model.api });
       installDispatchGate({
+        installed: installedDispatchGates,
         register: (name, config) => pi.registerProvider(name, config as never),
         lookup: (name) => ctx.modelRegistry.getProvider(name),
         providers,
         open: pythonDispatch(runDirectory),
         identity: () => ({
-          runId,
-          actorId: process.env.ARENA_ACTOR_ID || "sol",
-          sessionId: process.env.ARENA_SESSION_ID || runId,
+          ...sharedIdentity(),
           requestId: pendingRequest,
-          ...(process.env.ARENA_JOB_ID ? { jobId: process.env.ARENA_JOB_ID } : {}),
-          ...(process.env.ARENA_GENERATION ? { generation: process.env.ARENA_GENERATION } : {}),
         }),
       });
     }
   });
 
   // Every provider request is journaled here. Pi runs extension hook errors to completion without failing
-  // the request, so nothing in these two hooks can block a call; the spend limit is enforced after the call.
+  // the request. The captured provider fetch enforces dispatch ordering instead.
   pi.on("before_provider_request", (event, ctx) => {
     if (!active || !runDirectory) return;
     let payload = event.payload;
@@ -292,6 +324,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     // (session_compact) carries the cost of both, under the id of the last.
     const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     pendingRequest = id;
+    compactionRequests?.push(id);
     openAttempt = id;
     turn += 1;
     requestId = id;
@@ -322,15 +355,25 @@ export default async function arenaExtension(pi: ExtensionAPI) {
   // Preserve earlier tool messages byte-for-byte. Rewriting them when a new
   // evaluation arrives invalidates the provider's cached prompt prefix.
 
-  // Add one call's actual cost to the run total and write its settle row. The one place spend changes.
-  // A call with no usage (a request that failed before the provider counted tokens) settles at zero.
+  // Await the charging authority before Pi can start another request. The old journal is supporting evidence.
   // `toolCalls` is the number of tool calls in the message being settled; they still run when the limit is crossed.
-  function settle(id: string, usage: AssistantMessage["usage"] | undefined, extra: Record<string, unknown>, ctx: ExtensionContext, toolCalls = 0) {
-    const known = Boolean(usage?.totalTokens);
+  async function settle(id: string, usage: AssistantMessage["usage"] | undefined, extra: Record<string, unknown>, ctx: ExtensionContext, toolCalls = 0, covered = [id]) {
+    const known = knownUsage(usage);
     const usd = known ? callCost(usage) : 0;
-    spentUsd += usd;
+    let shared: SharedSpend | undefined;
+    try {
+      shared = runDirectory ? await settleProviderUsage(runDirectory, sharedIdentity(), covered, usage) : undefined;
+    } catch (error) {
+      appendCost({ kind: "accounting_failure", id, usage: usage ?? null, covered_request_ids: covered });
+      ctx.abort();
+      throw error;
+    }
+    if (shared) spentUsd = Number(shared.total);
+    else spentUsd += usd;
     const cost = usage?.cost;
     appendCost({ kind: "settle", id, usd, usage_known: known, spent_usd: spentUsd, limit_usd: limit,
+      covered_request_ids: covered, actor_id: sharedIdentity().actorId, session_id: sharedIdentity().sessionId,
+      ...(process.env.ARENA_JOB_ID ? { job_id: process.env.ARENA_JOB_ID } : {}), shared_authority: "control.jsonl",
       tokens: { input: usage?.input ?? 0, output: usage?.output ?? 0,
         cache_read: usage?.cacheRead ?? 0, cache_write: usage?.cacheWrite ?? 0 },
       ledger_components_usd: { input: cost?.input ?? 0, output: cost?.output ?? 0,
@@ -349,7 +392,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     // Stop the agent: no further provider request. A message with tool calls keeps its batch, so the run aborts
     // when the last of those calls ends (tool_execution_end). The turn that follows is closed in agent_before_settle
     // with the limit as the stop reason.
-    if (limitReached(spentUsd, limit) && !limitHit) {
+    if ((shared?.stopped || limitReached(spentUsd, limit)) && !limitHit) {
       limitHit = true;
       // Recorded here because an aborted run may never reach agent_before_settle.
       appendCost({ kind: "control", continuations, plateau, no_work_turns: noWorkTurns,
@@ -368,7 +411,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
       rawArguments.start(update.contentIndex, (update.partial.content[update.contentIndex] as unknown as { partialJson?: string } | undefined)?.partialJson);
     } else if (update.type === "toolcall_delta") rawArguments.delta(update.contentIndex, update.delta);
   });
-  pi.on("message_end", (event, ctx) => {
+  pi.on("message_end", async (event, ctx) => {
     if (event.message.role !== "assistant") return;
     const repaired = repairMalformedToolArguments(event.message, rawArguments);
     const message = repaired ?? event.message;
@@ -380,8 +423,10 @@ export default async function arenaExtension(pi: ExtensionAPI) {
       text: blocks.filter(block => block.type === "text").map(block => String(block.text ?? "")).join(""),
       stop_reason: message.stopReason, response_id: message.responseId ?? null,
       response_model: message.responseModel ?? message.model, error_message: message.errorMessage ?? null };
-    const known = Boolean(message.usage?.totalTokens);
-    settle(id, message.usage, {}, ctx, blocks.filter(block => block.type === "toolCall").length);
+    const failedWithoutUsage = (message.stopReason === "error" || message.stopReason === "aborted") && !message.usage?.totalTokens;
+    const usage = failedWithoutUsage ? undefined : message.usage;
+    const known = knownUsage(usage);
+    await settle(id, usage, {}, ctx, blocks.filter(block => block.type === "toolCall").length);
     appendTrace({ ...delivered, settled_usd: known ? callCost(message.usage) : null,
       usage: { input: message.usage?.input ?? 0, output: message.usage?.output ?? 0,
         cache_read: message.usage?.cacheRead ?? 0, cache_write: message.usage?.cacheWrite ?? 0 } });
@@ -392,13 +437,20 @@ export default async function arenaExtension(pi: ExtensionAPI) {
   });
   // A compaction's summary requests have no message_end; Pi records their combined usage on the entry.
   pi.on("session_compact", async (event, ctx) => {
-    settle(pendingRequest ?? `${Date.now()}-compaction`, event.compactionEntry.usage, { source: "compaction" }, ctx);
+    const covered = compactionRequests ?? (pendingRequest ? [pendingRequest] : []);
+    const last = covered.at(-1);
+    if (last !== undefined) await settle(last, event.compactionEntry.usage, { source: "compaction" }, ctx, 0, covered);
+    compactionRequests = undefined;
     pendingRequest = undefined;
     if (active && runId) await campaign("reset_delivered");
     trimmer.forget();
     void injectMemory();
   });
-  pi.on("session_compact_failed", event => {
+  pi.on("session_compact_failed", async (event, ctx) => {
+    const covered = compactionRequests ?? [];
+    const last = covered.at(-1);
+    if (last !== undefined) await settle(last, undefined, { source: "compaction_failed" }, ctx, 0, covered);
+    compactionRequests = undefined;
     pendingRequest = undefined;
     // A cancelled compaction (the empty-history skip in session_before_compact, or an abort) is not a failure.
     if (event.aborted) return;
@@ -412,6 +464,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
       console.error("[arena-compaction-alarm] Compaction skipped: no messages to summarize."); // log: operator alarm. // not-model-facing
       return { cancel: true };
     }
+    compactionRequests = [];
     const fixed = objectToolArguments(event.preparation.messagesToSummarize) + objectToolArguments(event.preparation.turnPrefixMessages);
     if (fixed) appendTrace({ kind: "compaction_repair", null_tool_arguments: fixed });
   });
@@ -446,6 +499,14 @@ export default async function arenaExtension(pi: ExtensionAPI) {
   pi.on("session_shutdown", async (_event, ctx) => {
     const reportPath = process.env.ARENA_BUDGET_REPORT_PATH;
     if (!reportPath) return;
+    if (runDirectory) {
+      const shared = await readSharedSpend(runDirectory);
+      spentUsd = Number(shared.total);
+      appendTrace({ kind: "session_cost_metadata", session_id: ctx.sessionManager.getSessionId(),
+        theorem: active ?? null, model: ctx.model?.id ?? null, provider: ctx.model?.provider ?? null,
+        cache_utilization: cacheUtilization(ctx.sessionManager.getEntries()) });
+      return;
+    }
     const model = ctx.model;
     const report = { session_id: ctx.sessionManager.getSessionId(), theorem: active ?? null,
       limit_usd: limit, provider: model?.provider ?? null, model: model?.id ?? null,

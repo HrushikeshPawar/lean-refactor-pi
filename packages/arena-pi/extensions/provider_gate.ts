@@ -47,8 +47,6 @@ export type GateIdentity = {
   generation?: string;
 };
 
-const wrapped = new Map<string, Record<string, unknown>>();
-
 export type DispatchOpen = (
   attempt: DispatchAttempt,
   invoke: () => Promise<unknown>,
@@ -62,9 +60,6 @@ export function guardProvider(input: {
   open: DispatchOpen;
   identity: () => GateIdentity;
 }): Record<string, unknown> {
-  const key = `${input.providerId}/${input.api}`;
-  const existing = wrapped.get(key);
-  if (existing) return existing;
   const guarded: Record<string, unknown> = {
     ...input.config,
     api: input.api,
@@ -91,7 +86,6 @@ export function guardProvider(input: {
       return input.stream(model, context, { ...options, fetch });
     },
   };
-  wrapped.set(key, guarded);
   return guarded;
 }
 
@@ -101,13 +95,14 @@ export function installDispatchGate(input: {
   providers: Array<{ name: string; api?: string }>;
   open: DispatchOpen;
   identity: () => GateIdentity;
+  installed: Set<string>;
 }): void {
   for (const provider of input.providers) {
-    if (!provider.api) continue;
+    if (!provider.api) throw new Error(`Selected provider ${provider.name} has no API`);
     const key = `${provider.name}/${provider.api}`;
-    if (wrapped.has(key)) continue;
+    if (input.installed.has(key)) continue;
     const captured = input.lookup(provider.name);
-    if (!captured?.streamSimple) continue;
+    if (!captured?.streamSimple) throw new Error(`Selected provider ${provider.name} has no stream adapter`);
     input.register(provider.name, guardProvider({
       providerId: provider.name,
       api: provider.api,
@@ -116,18 +111,20 @@ export function installDispatchGate(input: {
       open: input.open,
       identity: input.identity,
     }));
+    input.installed.add(key);
   }
 }
 
-export function callRunControl(directory: string, fn: string, payload: Record<string, unknown>, cwd = root): Promise<DispatchDecision & Record<string, unknown>> {
+export function callRunControl(directory: string, fn: string, payload?: Record<string, unknown>, cwd = root): Promise<Record<string, unknown>> {
   const code = [
     "import json, sys",
     "from pathlib import Path",
     "from arena import run_control",
-    "print(json.dumps(getattr(run_control, sys.argv[1])(Path(sys.argv[2]), json.loads(sys.argv[3]))))",
+    "args = [Path(sys.argv[2])] + ([json.loads(sys.argv[3])] if len(sys.argv) > 3 else [])",
+    "print(json.dumps(getattr(run_control, sys.argv[1])(*args)))",
   ].join("\n");
   return new Promise((resolvePromise, reject) => {
-    const child = spawn("uv", ["run", "--no-sync", "python", "-c", code, fn, directory, JSON.stringify(payload)], { cwd });
+    const child = spawn("uv", ["run", "--no-sync", "python", "-c", code, fn, directory, ...(payload === undefined ? [] : [JSON.stringify(payload)])], { cwd });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => { stdout += chunk; });
@@ -138,9 +135,70 @@ export function callRunControl(directory: string, fn: string, payload: Record<st
         reject(new Error(stderr || stdout || `run_control ${fn} exited ${code}`));
         return;
       }
-      resolvePromise(JSON.parse(stdout) as DispatchDecision);
+      try {
+        const result: unknown = JSON.parse(stdout);
+        if (!isRecord(result)) throw new Error(`Invalid run_control ${fn} response`);
+        resolvePromise(result);
+      } catch (error) {
+        reject(error);
+      }
     });
   });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export type SharedSpend = {
+  total: string;
+  accounting: "known" | "unknown";
+  stopped: boolean;
+  stop_reason: string | null;
+};
+
+function sharedSpend(result: Record<string, unknown>): SharedSpend {
+  if (result.ok !== true) throw new Error(`Shared spend ${String(result.status ?? "failed")}`);
+  const { total, accounting, stopped, stop_reason } = result;
+  if (typeof total !== "string" || !/^\d+(?:\.\d+)?$/.test(total)
+    || (accounting !== "known" && accounting !== "unknown") || typeof stopped !== "boolean"
+    || (stop_reason !== null && typeof stop_reason !== "string")) {
+    throw new Error("Invalid shared spend response");
+  }
+  return { total, accounting, stopped, stop_reason };
+}
+
+export async function readSharedSpend(directory: string): Promise<SharedSpend> {
+  return sharedSpend(await callRunControl(directory, "read_state"));
+}
+
+export async function settleProviderUsage(
+  directory: string, identity: GateIdentity, coveredRequestIds: string[], usage: unknown,
+): Promise<SharedSpend> {
+  if (coveredRequestIds.length === 0 || coveredRequestIds.some((id) => !id)) {
+    throw new Error("Settlement needs covered request IDs");
+  }
+  const attribution = {
+    run_id: identity.runId,
+    actor_id: identity.actorId,
+    session_id: identity.sessionId,
+    ...(identity.jobId ? { job_id: identity.jobId } : {}),
+  };
+  for (const requestId of coveredRequestIds) {
+    const prepared = await callRunControl(directory, "prepare_request", { ...attribution, request_id: requestId });
+    if (prepared.ok !== true) throw new Error(`Prepare request ${String(prepared.status ?? "failed")}`);
+  }
+  const cost = isRecord(usage) && isRecord(usage.cost) ? usage.cost.total : undefined;
+  const amount = typeof cost === "number" && Number.isFinite(cost) && cost >= 0 ? String(cost)
+    : typeof cost === "string" && /^\d+(?:\.\d+)?$/.test(cost) ? cost : null;
+  return sharedSpend(await callRunControl(directory, "settle_usage", {
+    ...attribution,
+    settlement_id: `settle:${coveredRequestIds.at(-1)}`,
+    covered_request_ids: coveredRequestIds,
+    state: amount === null ? "unknown" : "known",
+    ...(amount === null ? {} : { amount }),
+    usage: usage ?? null,
+  }));
 }
 
 function attemptRecord(attempt: DispatchAttempt): Record<string, unknown> {
@@ -187,8 +245,9 @@ export function pythonDispatch(directory: string, cwd = root): DispatchOpen {
       finish(new Error("dispatch guard timed out"));
     }, 30_000);
     const take = (line: string) => {
-      const message = JSON.parse(line) as DispatchDecision & { ready?: boolean };
-      if (message.ready) {
+      const message: unknown = JSON.parse(line);
+      if (!isRecord(message)) throw new Error("Invalid dispatch guard response");
+      if (message.ready === true) {
         try {
           pending = Promise.resolve(invoke());
           pending.catch(() => undefined);
@@ -202,9 +261,16 @@ export function pythonDispatch(directory: string, cwd = root): DispatchOpen {
       }
       if (!message.admitted) {
         child.stdin.end();
-        finish(new DispatchDenied(message));
+        if (typeof message.status !== "string" || typeof message.ok !== "boolean" || typeof message.admitted !== "boolean") {
+          throw new Error("Invalid dispatch decision");
+        }
+        finish(new DispatchDenied({
+          ok: message.ok, admitted: message.admitted, status: message.status,
+          reason: typeof message.reason === "string" ? message.reason : null,
+        }));
         return;
       }
+      if (!pending) throw new Error("Dispatch receipt arrived before transport invocation");
       finish(undefined, pending);
     };
     child.stdout.on("data", (chunk) => {
@@ -213,11 +279,18 @@ export function pythonDispatch(directory: string, cwd = root): DispatchOpen {
       while (nl >= 0) {
         const line = buffer.slice(0, nl);
         buffer = buffer.slice(nl + 1);
-        if (line.trim()) take(line);
+        if (line.trim()) {
+          try { take(line); } catch (error) {
+            child.kill();
+            finish(error instanceof Error ? error : new Error(String(error)));
+            return;
+          }
+        }
         nl = buffer.indexOf("\n");
       }
     });
     child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.stdin.on("error", (error) => { child.kill(); finish(error); });
     child.on("error", (error) => finish(error));
     child.on("close", (code) => {
       if (!settled) finish(new Error(stderr || `dispatch guard exited ${code}`));

@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { callRunControl, DispatchDenied, guardProvider, pythonDispatch } from "./provider_gate.ts";
+import { DispatchDenied, guardProvider, installDispatchGate, pythonDispatch, readSharedSpend, settleProviderUsage, type SharedSpend } from "./provider_gate.ts";
 
 const identity = {
   runId: "run-1",
@@ -18,7 +18,7 @@ test("v8_dispatch_stop", async () => {
   const payloads: unknown[] = [];
   const auths: string[] = [];
   let requestId = "";
-  let crossing: { stopped?: boolean; total?: string; stop_reason?: string } = {};
+  let crossing: SharedSpend | undefined;
   const originalFetch = globalThis.fetch;
   globalThis.fetch = () => {
     throw new Error("global fetch must not run");
@@ -40,7 +40,7 @@ test("v8_dispatch_stop", async () => {
         return;
       }
       await fetch("retry-1");
-      crossing = await callRunControl(directory, "settle_usage", settlement(requestId, "0.10", 0.1));
+      crossing = await settleProviderUsage(directory, identity, [requestId], { cost: { total: 0.1 } });
       payloads.push(await (options.onPayload as (payload: unknown) => unknown)({ path: "retry-2" }));
       auths.push(oauth.getApiKey());
       await fetch("retry-2");
@@ -58,9 +58,27 @@ test("v8_dispatch_stop", async () => {
     assert.equal(guarded.models, models);
     assert.equal(guarded.oauth, oauth);
     assert.equal(guarded.headers, config.headers);
-    assert.equal(guardProvider({
+    assert.notEqual(guardProvider({
       providerId: "stub", api: "openai-completions", config, stream, open, identity: () => identity,
     }), guarded);
+    const registrations: Record<string, unknown>[] = [];
+    const installed = new Set<string>();
+    const install = (session: string, installed: Set<string>) => installDispatchGate({
+      register: (_name, config) => { registrations.push(config); },
+      lookup: () => ({ streamSimple: stream }),
+      providers: [{ name: "stub", api: "openai-completions" }],
+      open, installed, identity: () => ({ ...identity, sessionId: session }),
+    });
+    install("first-session", installed);
+    install("first-session", installed);
+    install("second-session", new Set());
+    assert.equal(registrations.length, 2);
+    assert.notEqual(registrations[0], registrations[1]);
+    assert.throws(() => installDispatchGate({
+      register: () => {}, lookup: () => undefined,
+      providers: [{ name: "missing", api: "missing" }],
+      open, installed, identity: () => identity,
+    }), /no stream adapter/);
 
     const run = async (path: string) => {
       requestId = path;
@@ -77,22 +95,41 @@ test("v8_dispatch_stop", async () => {
     };
 
     await run("ordinary");
-    await callRunControl(directory, "settle_usage", settlement("ordinary", "1.00", 1));
+    await settleProviderUsage(directory, identity, ["ordinary"], { cost: { total: 0.9 } });
     await run("context_recovery");
-    await callRunControl(directory, "settle_usage", settlement("context_recovery", "1.00", 1));
+    await settleProviderUsage(directory, identity, ["context_recovery"], { cost: { total: 1 } });
     await run("compaction");
-    await callRunControl(directory, "settle_usage", settlement("compaction", "0.40", 0.4));
-    const below = await callRunControl(directory, "begin_dispatch", {
-      request_id: "estimate-must-not-stop",
-      attempt_id: "estimate-must-not-stop#1",
-      run_id: identity.runId,
-      actor_id: identity.actorId,
-      session_id: identity.sessionId,
-      job_id: identity.jobId,
-      estimate_usd: "9.00",
-    });
-    assert.equal(below.admitted, true);
-    assert.equal(below.sent, "uncertain");
+    await settleProviderUsage(directory, identity, ["compaction"], { cost: { total: 0.4 } });
+    const below = await readSharedSpend(directory);
+    assert.equal(below.stopped, false);
+    assert.equal(below.total, "2.3");
+    const zero = await settleProviderUsage(directory, identity, ["known-zero"], { cost: { total: 0 } });
+    assert.equal(zero.accounting, "known");
+    const unknown = await settleProviderUsage(directory, identity, ["missing-usage"], {});
+    assert.equal(unknown.accounting, "unknown");
+    const grouped = await settleProviderUsage(directory, identity, ["group-first", "group-last"], { cost: { total: 0.1 } });
+    assert.equal(grouped.total, "2.4");
+    await assert.rejects(settleProviderUsage(directory, identity, ["group-last"], { cost: { total: 1 } }), /operation_conflict/);
+
+    let syncInvocations = 0;
+    const recoveryDirectory = mkdtempSync(join(tmpdir(), "v8-dispatch-recovery-"));
+    try {
+      const recovering = pythonDispatch(recoveryDirectory);
+      await assert.rejects(recovering({ ...identity, requestId: "lost-ack", attemptId: "lost-ack#1" }, () => {
+        syncInvocations += 1;
+        throw new Error("invocation acknowledgement failed");
+      }), /invocation acknowledgement failed/);
+      await assert.rejects(recovering({ ...identity, requestId: "retry-new-id", attemptId: "retry-new-id#1" }, async () => {
+        syncInvocations += 1;
+      }), (error: unknown) => {
+        assert.ok(error instanceof DispatchDenied);
+        assert.equal(error.category, "recovery_required");
+        return true;
+      });
+      assert.equal(syncInvocations, 1);
+    } finally {
+      rmSync(recoveryDirectory, { recursive: true, force: true });
+    }
 
     await assert.rejects(run("transport_error"), /socket reset/);
     await assert.rejects(run("retry"), (error: unknown) => {
@@ -113,25 +150,14 @@ test("v8_dispatch_stop", async () => {
     assert.equal(denied.status, "rejected_before_dispatch");
     assert.equal(denied.sent, "unsent");
     assert.equal(denied.reason, "run_stopped");
-    assert.equal(crossing.stopped, true);
-    assert.equal(crossing.stop_reason, "spend_threshold");
-    assert.equal(crossing.total, "2.50");
+    assert.equal(crossing?.stopped, true);
+    assert.equal(crossing?.stop_reason, "spend_threshold");
+    assert.equal(crossing?.total, "2.5");
+    const replayed = await settleProviderUsage(directory, identity, ["retry"], { cost: { total: 0.1 } });
+    assert.equal(replayed.total, "2.5");
+    assert.equal((await readSharedSpend(directory)).stopped, true);
   } finally {
     globalThis.fetch = originalFetch;
     rmSync(directory, { recursive: true, force: true });
   }
 });
-
-function settlement(requestId: string, amount: string, total: number) {
-  return {
-    settlement_id: `settle-${requestId}`,
-    run_id: identity.runId,
-    actor_id: identity.actorId,
-    session_id: identity.sessionId,
-    job_id: identity.jobId,
-    covered_request_ids: [requestId],
-    state: "known",
-    amount,
-    usage: { cost: { total } },
-  };
-}
