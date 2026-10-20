@@ -4,7 +4,7 @@
 
 **Blocked by:** 09: Publish early results and resume the same hypothesis
 
-**Status:** ready-for-agent
+**Status:** needs-review
 
 **Branch:** `v8/10-two-worker-cancel`
 
@@ -26,12 +26,12 @@
 
 ## What to build and acceptance
 
-- [ ] 1. Admit at most two active worker model sessions, with queueing separate from activation. Each worker retains independent tools/context and actor-local focus.
-- [ ] 2. Allow an exhausted/completed assignment to release a slot while Sol continues. Activate queued work only when capacity is truly available.
-- [ ] 3. Cancel idempotently, clearing queued prompts before abort. Retain cancelling state and slot ownership until child exit or confirmed absence.
-- [ ] 4. A cancellation acknowledgement preceding actual exit cannot admit a third live child. Late old results retain evidence without reactivating the assignment.
-- [ ] 5. Expose concurrent job, queue and cancellation states through normal management results.
-- [ ] 6. Use the one assigned fast smoke for this slice. Retain the stated behavior requirements; actual-Pi/real-Lean journeys and the broader race matrix are final E2E coverage, not this ticket's gate.
+- [x] 1. Admit at most two active worker model sessions, with queueing separate from activation. Each worker retains independent tools/context and actor-local focus.
+- [x] 2. Allow an exhausted/completed assignment to release a slot while Sol continues. Activate queued work only when capacity is truly available.
+- [x] 3. Cancel idempotently, clearing queued prompts before abort. Retain cancelling state and slot ownership until child exit or confirmed absence.
+- [x] 4. A cancellation acknowledgement preceding actual exit cannot admit a third live child. Late old results retain evidence without reactivating the assignment.
+- [x] 5. Expose concurrent job, queue and cancellation states through normal management results.
+- [x] 6. Use the one assigned fast smoke for this slice. Retain the stated behavior requirements; actual-Pi/real-Lean journeys and the broader race matrix are final E2E coverage, not this ticket's gate.
 
 ## Verify
 

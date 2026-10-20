@@ -810,3 +810,178 @@ class V8WorkerSmokeTests(unittest.TestCase):
             self.assertEqual(sessions[other["job_id"]], other["session_id"])
             children[2][1]._chunks.put(None)
             orchestration.join_activation(other["activation_id"])
+
+    def test_v8_cancel_releases_after_exit(self):
+        """Two live workers hold the slots. Cancel keeps its slot until that child exits."""
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _seed_parent(directory)
+            children = []
+
+            class _Owned(_HeldChild):
+                def __init__(self):
+                    super().__init__()
+                    self.shutdowns = 0
+
+                def write(self, data: bytes):
+                    if not self.order:
+                        raise RuntimeError("prompt before subscribe")
+                    if "write" not in self.order:
+                        self.order.append("write")
+                    self.written += data
+
+                def shutdown(self):
+                    self.shutdowns += 1
+
+            def open_child(launch):
+                child = _Owned()
+                children.append((launch, child))
+                return child
+
+            def delegate(operation_id, task):
+                return orchestration.delegate(
+                    directory,
+                    operation_id=operation_id,
+                    run_id="run-1",
+                    actor_id="sol",
+                    session_id="sol-session",
+                    task=task,
+                    scope="proof",
+                    anchor={"node": "n1"},
+                    open_child=open_child,
+                )
+
+            first = delegate("op-a", "hypothesis a")
+            second = delegate("op-b", "hypothesis b")
+            third = delegate("op-c", "hypothesis c")
+            self.assertEqual(len(children), 2)
+            self.assertEqual(first["state"], "launching")
+            self.assertEqual(second["state"], "launching")
+            self.assertEqual(third["state"], "queued")
+            view = orchestration.jobs(directory)
+            by_job = {job["job_id"]: job for job in view["jobs"]}
+            self.assertEqual(by_job[third["job_id"]]["state"], "queued")
+            self.assertEqual(
+                [job["job_id"] for job in view["jobs"] if job["state"] == "queued"],
+                [third["job_id"]],
+            )
+            self.assertTrue(by_job[first["job_id"]]["occupies_slot"])
+            self.assertFalse(by_job[third["job_id"]]["occupies_slot"])
+
+            command_id = by_job[first["job_id"]]["command_id"]
+            attempt_id, proof_id, evaluation_id = "attempt-late", "proof-late", "eval-late"
+            tool_call = "compile-late"
+            (directory / "proofs" / f"{proof_id}.lean").write_text(_PROOF)
+            launch = children[0][0]
+
+            def record(writer):
+                writer.append_ledger({
+                    "kind": "attempt", "event_id": attempt_id, "proof_id": proof_id,
+                    "tool_call_id": tool_call, "request_id": "req-late",
+                })
+                writer.append_ledger({
+                    "kind": "evaluation", "candidate_id": proof_id, "key": evaluation_id, "mode": "fast",
+                    "result": {"ok": True},
+                })
+
+            run_control.apply_operation(directory, {
+                "operation_id": "compile-late", "kind": "compile", "arguments": {"proof": proof_id},
+                "run_id": "run-1", "actor_id": launch["env"]["ARENA_ACTOR_ID"],
+                "session_id": launch["env"]["ARENA_SESSION_ID"],
+            }, record)
+            child = children[0][1]
+            receipt = orchestration.cancel(
+                directory,
+                operation_id="op-cancel",
+                run_id="run-1",
+                actor_id="sol",
+                session_id="sol-session",
+                job_id=first["job_id"],
+            )
+            self.assertTrue(receipt["ok"])
+            self.assertEqual(receipt["state"], "cancelling")
+            self.assertEqual(child.shutdowns, 1)
+            commands = [json.loads(line) for line in bytes(child.written).splitlines()]
+            self.assertEqual(
+                [row["type"] for row in commands if row["type"] == "abort"],
+                ["abort", "abort"],
+            )
+            self.assertTrue(commands[-2].get("queued"))
+            self.assertFalse(commands[-1].get("queued"))
+            again = orchestration.cancel(
+                directory,
+                operation_id="op-cancel-again",
+                run_id="run-1",
+                actor_id="sol",
+                session_id="sol-session",
+                job_id=first["job_id"],
+            )
+            self.assertTrue(again["reused"])
+            self.assertEqual(again["operation_id"], "op-cancel")
+            self.assertEqual(child.shutdowns, 1)
+            self.assertEqual(len(children), 2)
+            child._chunks.put(b"".join(
+                (json.dumps(row) + "\n").encode()
+                for row in (
+                    {"type": "response", "id": command_id, "command": "abort", "success": True},
+                    {
+                        "type": "tool_execution_end", "toolName": "compile", "toolCallId": tool_call,
+                        "isError": False,
+                        "result": {"details": {"ok": True, "items": [{
+                            "ok": True, "status": "closed", "attempts": [{"attempt_id": attempt_id}],
+                        }]}},
+                    },
+                    {"type": "agent_settled"},
+                )
+            ))
+
+            def still_held():
+                current = orchestration.jobs(directory)
+                jobs = {job["job_id"]: job for job in current["jobs"]}
+                held = jobs[first["job_id"]]
+                if held["state"] == "cancelling" and held["findings"] and len(children) == 2:
+                    return held
+                return None
+
+            held = None
+            for _ in range(20000):
+                held = still_held()
+                if held is not None:
+                    break
+            self.assertIsNotNone(held)
+            self.assertTrue(held["occupies_slot"])
+            self.assertEqual(held["findings"][0]["attempt_id"], attempt_id)
+            self.assertEqual(held["activation_id"], first["activation_id"])
+            self.assertEqual(orchestration.jobs(directory)["jobs"][2]["state"], "queued")
+
+            child._chunks.put(None)
+            orchestration.join_activation(first["activation_id"])
+
+            def admitted():
+                if len(children) != 3:
+                    return None
+                current = {job["job_id"]: job for job in orchestration.jobs(directory)["jobs"]}
+                if current[first["job_id"]]["state"] != "cancelled":
+                    return None
+                if current[third["job_id"]]["state"] != "launching":
+                    return None
+                return current
+
+            admitted_view = None
+            for _ in range(20000):
+                admitted_view = admitted()
+                if admitted_view is not None:
+                    break
+            self.assertIsNotNone(admitted_view)
+            self.assertEqual(len(children), 3)
+            self.assertEqual(children[2][0]["env"]["ARENA_JOB_ID"], third["job_id"])
+            self.assertFalse(admitted_view[first["job_id"]]["occupies_slot"])
+            self.assertTrue(admitted_view[second["job_id"]]["occupies_slot"])
+            self.assertTrue(admitted_view[third["job_id"]]["occupies_slot"])
+            self.assertEqual(admitted_view[first["job_id"]]["findings"][0]["proof_id"], proof_id)
+            self.assertEqual(admitted_view[first["job_id"]]["activation_id"], first["activation_id"])
+            self.assertEqual(len(admitted_view[first["job_id"]]["activations"]), 1)
+            children[1][1]._chunks.put(None)
+            children[2][1]._chunks.put(None)
+            orchestration.join_activation(second["activation_id"])
+            orchestration.join_activation(admitted_view[third["job_id"]]["activation_id"])

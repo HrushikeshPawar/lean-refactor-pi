@@ -34,6 +34,17 @@ class FrameReader:
         return records
 
 
+def cancel_lines(command_id: str) -> bytes:
+    """Drop queued prompts, then abort the live turn. Exit is a separate process event."""
+    records = (
+        {"type": "abort", "id": command_id, "queued": True},
+        {"type": "abort", "id": command_id},
+    )
+    return b"".join(
+        (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode() for record in records
+    )
+
+
 def prompt_line(command_id: str, task: str, anchor: dict) -> bytes:
     """Pi 1.3.0 prompt has no tools field. The allowlist is the process launch, not this record."""
     message = task + "\n\n" + json.dumps({"anchor": anchor}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
