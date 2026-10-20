@@ -4,7 +4,7 @@
 
 **Blocked by:** 04: Isolate actor state and enforce exact ownership
 
-**Status:** needs-review
+**Status:** done
 
 **Branch:** `v8/14-scratch-evidence`
 
@@ -44,6 +44,12 @@ uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_tools_read_g
 Expected: the named behavior check passes with no actual provider, Pi or Lean process. Aim for seconds and at most 60 seconds. No per-ticket full suite or slow suite.
 
 **Deferred to final E2E:** Actual Lean environment isolation and full diagnostic compatibility. See the shared [final E2E checklist](../final-e2e.md).
+
+## Review closure
+
+The review fixed concurrent experiment identity and replay, committed-only publication, original actor/activation/request ownership, historical retained-code retrieval, and Unicode JSONL framing. Raw Lean results are committed before rendering; construction, execution and presentation errors return retrievable experiment evidence. Nonzero exits are failures. Explicit helpers and their recorded dependencies are included in the isolated source, with diagnostic line origins explained. Cancellation reads durable assignment state before execution. Pi's registered schemas now expose experiment reads and helper references. Repeat counts include attempts rather than evidence phases.
+
+Verified: `UV_CACHE_DIR=/tmp/arena-uv-cache uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_experiments.py tests/test_tools_read_goal_search.py::ScratchResultTests` — **6 passed, 3 subtests passed in 0.17s**. Touched-file Ruff and `arena.ts` syntax passed. Independent review found no remaining ticket-14 blocker after the repeat-count correction. No live provider, Pi or Lean process was used. Promotion remains ticket 15; real isolation and the broader race matrix remain final E2E coverage.
 
 ---
 

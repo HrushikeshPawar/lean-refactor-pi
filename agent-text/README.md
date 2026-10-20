@@ -279,6 +279,9 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/tools.own_theorem` | 12 | Tool replies | when the matching tool result occurs |
 | `replies/tools.price` | 7 | Tool replies | when the matching tool result occurs |
 | `replies/tools.read_diff` | 4 | Tool replies | when the matching tool result occurs |
+| `replies/tools.read_experiment` | 5 | Tool replies | when the matching tool result occurs |
+| `replies/tools.read_experiment_ambiguous` | 3 | Tool replies | when the matching tool result occurs |
+| `replies/tools.read_experiment_missing` | 4 | Tool replies | when the matching tool result occurs |
 | `replies/tools.read_hole` | 5 | Tool replies | when the matching tool result occurs |
 | `replies/tools.read_node_source` | 10 | Tool replies | when the matching tool result occurs |
 | `replies/tools.read_outline_cols` | 15 | Tool replies | when the matching tool result occurs |
@@ -303,12 +306,18 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/tools.same_diagnostic` | 4 | Tool replies | when the matching tool result occurs |
 | `replies/tools.same_goal` | 4 | Tool replies | when the matching tool result occurs |
 | `replies/tools.scratch_also` | 3 | Tool replies | when the matching tool result occurs |
+| `replies/tools.scratch_cancelled` | 5 | Tool replies | when the matching tool result occurs |
 | `replies/tools.scratch_decl_cost` | 11 | Tool replies | when the matching tool result occurs |
+| `replies/tools.scratch_experiment` | 9 | Tool replies | when the matching tool result occurs |
 | `replies/tools.scratch_failed` | 1 | Tool replies | when the matching tool result occurs |
+| `replies/tools.scratch_general_only` | 8 | Tool replies | when the matching tool result occurs |
+| `replies/tools.scratch_helper_lines` | 15 | Tool replies | when the matching tool result occurs |
 | `replies/tools.scratch_info_cols` | 8 | Tool replies | when the matching tool result occurs |
 | `replies/tools.scratch_info_row` | 7 | Tool replies | when the matching tool result occurs |
 | `replies/tools.scratch_message` | 4 | Tool replies | when the matching tool result occurs |
+| `replies/tools.scratch_not_promoted` | 3 | Tool replies | when the matching tool result occurs |
 | `replies/tools.scratch_ok` | 1 | Tool replies | when the matching tool result occurs |
+| `replies/tools.scratch_process_failed` | 15 | Tool replies | when the matching tool result occurs |
 | `replies/tools.scratch_repeat` | 12 | Tool replies | when the matching tool result occurs |
 | `replies/tools.scratch_result` | 5 | Tool replies | when the matching tool result occurs |
 | `replies/tools.scratch_result_body` | 10 | Tool replies | when the matching tool result occurs |
@@ -367,15 +376,17 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `tools/goal.params.line` | 7 | Model tool definitions | every request |
 | `tools/goal.params.node` | 5 | Model tool definitions | every request |
 | `tools/goal.params.try` | 10 | Model tool definitions | every request |
-| `tools/read.description` | 13 | Model tool definitions | every request |
+| `tools/read.description` | 17 | Model tool definitions | every request |
 | `tools/read.params.against` | 6 | Model tool definitions | every request |
+| `tools/read.params.experiment` | 23 | Model tool definitions | every request |
 | `tools/read.params.handle` | 13 | Model tool definitions | every request |
 | `tools/read.params.hole` | 6 | Model tool definitions | every request |
 | `tools/read.params.node` | 5 | Model tool definitions | every request |
 | `tools/read.params.step` | 7 | Model tool definitions | every request |
 | `tools/read.params.view` | 14 | Model tool definitions | every request |
-| `tools/scratch.description` | 47 | Model tool definitions | every request |
-| `tools/scratch.params.code` | 15 | Model tool definitions | every request |
+| `tools/scratch.description` | 66 | Model tool definitions | every request |
+| `tools/scratch.params.code` | 22 | Model tool definitions | every request |
+| `tools/scratch.params.helpers` | 25 | Model tool definitions | every request |
 | `tools/search.description` | 12 | Model tool definitions | every request |
 | `tools/search.params.after` | 14 | Model tool definitions | every request |
 | `tools/search.params.kind` | 7 | Model tool definitions | every request |
