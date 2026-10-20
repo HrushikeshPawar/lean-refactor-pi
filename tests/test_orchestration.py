@@ -15,6 +15,7 @@ from unittest.mock import patch
 from arena import orchestration, pi_rpc, run_control
 from arena import reply as proof_reply
 from arena.steps import split_steps
+from tests.graph_support import FakeRunCase
 
 _PROOF = "theorem demo : True ∧ True := by\n  trivial\n  trivial\n"
 
@@ -1296,3 +1297,31 @@ class V8WorkerSmokeTests(unittest.TestCase):
             children[-1][1]._chunks.put(None)
             orchestration.join_activation(stopped_job["activation_id"])
             self.assertNotIn("dispatch_started", (directory / "control.jsonl").read_text())
+
+
+class V8VerificationSmokeTests(FakeRunCase):
+    def test_v8_verification_outcomes(self):
+        from arena import campaign, orchestration
+
+        proof = "theorem t : True := by\n  exact True.intro"
+        outcome = {"ok": True, "compat": {"v1": {"passed": False, "exit_code": 1}}, "tokens": 4}
+        with patch.dict("os.environ", {"ARENA_JOB_ID": "job-check"}), patch.object(
+            campaign, "_evaluate", return_value=outcome,
+        ):
+            campaign.record_evaluation("T", "logic", proof, "full", materialize_live=False)
+        history = campaign.events(self.directory)
+        completed = next(row for row in history if row.get("type") == "verification" and row["state"] != "running")
+        self.assertEqual(completed["state"], "proof_error")
+        evidence = next(row for row in history if row.get("kind") == "evaluation" and row["key"] == completed["evaluation_id"])
+        self.assertLess(history.index(evidence), history.index(completed))
+
+        other = "theorem t : True := by\n  exact (True.intro)"
+        with patch.dict("os.environ", {"ARENA_JOB_ID": "job-transport"}), patch.object(
+            campaign, "_evaluate", side_effect=RuntimeError("transport lost"),
+        ), self.assertRaisesRegex(RuntimeError, "transport lost"):
+            campaign.record_evaluation("T", "logic", other, "full", materialize_live=False)
+        states = [row["state"] for row in campaign.events(self.directory)
+                  if row.get("type") == "verification" and row.get("job_id") == "job-transport"]
+        self.assertEqual(states, ["running", "inconclusive"])
+        self.assertFalse(orchestration._open_checks(self.directory, ["job-transport"]))
+

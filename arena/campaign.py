@@ -1904,6 +1904,26 @@ def _compiled_versions(history: list[dict], candidate_id: str, row: dict) -> dic
     }
 
 
+def _verification_outcome(result: dict) -> str:
+    """Separate an evaluated proof from checks that could not establish an outcome."""
+    compat = result.get("compat") or {}
+    if result.get("lean_unavailable") or result.get("timeout") or not compat:
+        return "inconclusive"
+    if result.get("ok") is not False and all(info.get("passed") is True for info in compat.values()):
+        return "passed"
+    # A completed Lean failure is proof evidence; a timeout, signal, or absent
+    # measurement is not. Another version's inconclusive check cannot erase it.
+    if any(
+        info.get("passed") is False
+        and info.get("exit_code") == 1
+        and not info.get("lean_unavailable")
+        and not info.get("timeout")
+        for info in compat.values()
+    ):
+        return "proof_error"
+    return "inconclusive"
+
+
 def record_evaluation(
     name: str,
     run_id: str,
@@ -1999,71 +2019,73 @@ def record_evaluation(
         prior = next(
             (item for item in reversed(history) if item.get("kind") == "evaluation" and item["key"] == key), None
         )
-        if prior:
-            result = json.loads(json.dumps(prior["result"]))
-        elif precomputed is not None:
-            result = precomputed
-        else:
-            job_id = operation.get("job_id") if isinstance(operation, dict) else None
-            job_id = job_id or os.environ.get("ARENA_JOB_ID")
-            if job_id and precomputed is None:
-                from arena import orchestration
+        verification = None
+        try:
+            if prior:
+                result = json.loads(json.dumps(prior["result"]))
+            elif precomputed is not None:
+                result = precomputed
+            else:
+                job_id = operation.get("job_id") if isinstance(operation, dict) else None
+                job_id = job_id or os.environ.get("ARENA_JOB_ID")
+                if job_id:
+                    from arena import orchestration
 
-                orchestration.note_verification(
-                    directory, job_id=job_id, evaluation_id=key, state="running",
-                    run_id=run_id, actor_id=os.environ.get("ARENA_ACTOR_ID") or "sol",
-                    session_id=os.environ.get("ARENA_SESSION_ID") or run_id,
+                    verification = {
+                        "job_id": job_id,
+                        "evaluation_id": key,
+                        "run_id": run_id,
+                        "actor_id": os.environ.get("ARENA_ACTOR_ID") or "sol",
+                        "session_id": os.environ.get("ARENA_SESSION_ID") or run_id,
+                    }
+                    orchestration.note_verification(directory, **verification, state="running")
+                try:
+                    lean_lock_started = time.monotonic()
+                    with lean_lock(directory, lane):
+                        lean_lock_wait_seconds = round(time.monotonic() - lean_lock_started, 3)
+                        result = _evaluate(
+                            name,
+                            proof,
+                            mode,
+                            known=_compiled_versions(history, candidate_id, row) if mode == "full" else None,
+                            lane=lane,
+                        )
+                except (ValueError, FileNotFoundError) as error:
+                    result = {
+                        "ok": False,
+                        "name": name,
+                        "mode": mode,
+                        "error": str(error),
+                        "compat": {},
+                        "tokens": None,
+                        "heartbeat": None,
+                        "local_proxy": None,
+                    }
+                    if isinstance(error, FileNotFoundError):
+                        result["lean_unavailable"] = True  # Lean (or the workspace) could not run: counts for the breaker
+            if not prior:
+                result.setdefault("harness_timing", {})
+                result["harness_timing"].update(
+                    {"candidate_lock_wait_seconds": lock_wait_seconds, "lean_lock_wait_seconds": lean_lock_wait_seconds}
                 )
-            try:
-                lean_lock_started = time.monotonic()
-                with lean_lock(directory, lane):
-                    lean_lock_wait_seconds = round(time.monotonic() - lean_lock_started, 3)
-                    result = _evaluate(
-                        name,
-                        proof,
-                        mode,
-                        known=_compiled_versions(history, candidate_id, row) if mode == "full" else None,
-                        lane=lane,
-                    )
-            except (ValueError, FileNotFoundError) as error:
-                result = {
-                    "ok": False,
-                    "name": name,
-                    "mode": mode,
-                    "error": str(error),
-                    "compat": {},
-                    "tokens": None,
-                    "heartbeat": None,
-                    "local_proxy": None,
-                }
-                if isinstance(error, FileNotFoundError):
-                    result["lean_unavailable"] = True  # Lean (or the workspace) could not run: counts for the breaker
-            if job_id and precomputed is None:
-                from arena import orchestration
-
-                orchestration.note_verification(
-                    directory, job_id=job_id, evaluation_id=key,
-                    state="passed" if result.get("ok") else "proof_error",
-                    run_id=run_id, actor_id=os.environ.get("ARENA_ACTOR_ID") or "sol",
-                    session_id=os.environ.get("ARENA_SESSION_ID") or run_id,
+                _externalize_output(directory, candidate_id, result)
+                _append(
+                    directory,
+                    {
+                        "kind": "evaluation",
+                        "candidate_id": candidate_id,
+                        "key": key,
+                        "mode": mode,
+                        "trigger": trigger,
+                        "result": result,
+                    },
                 )
-        if not prior:
-            result.setdefault("harness_timing", {})
-            result["harness_timing"].update(
-                {"candidate_lock_wait_seconds": lock_wait_seconds, "lean_lock_wait_seconds": lean_lock_wait_seconds}
-            )
-            _externalize_output(directory, candidate_id, result)
-            _append(
-                directory,
-                {
-                    "kind": "evaluation",
-                    "candidate_id": candidate_id,
-                    "key": key,
-                    "mode": mode,
-                    "trigger": trigger,
-                    "result": result,
-                },
-            )
+        except BaseException:
+            if verification is not None:
+                orchestration.note_verification(directory, **verification, state="inconclusive")
+            raise
+        if verification is not None:
+            orchestration.note_verification(directory, **verification, state=_verification_outcome(result))
     if lane == "model" and trigger == "model" and not prior:
         _check_breaker(directory)
     location = materialize(name, run_id, proof) if materialize_live and result.get("tokens") is not None else {}
