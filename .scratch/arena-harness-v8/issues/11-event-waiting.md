@@ -4,7 +4,7 @@
 
 **Blocked by:** 10: Admit two workers and cancel stale work cleanly
 
-**Status:** needs-review
+**Status:** done
 
 **Branch:** `v8/11-event-waiting`
 
@@ -28,9 +28,9 @@
 
 - [x] 1. Implement await_results with actor-local cursor and optional job selection. Install the listener and recheck retained state without a lost-event window.
 - [x] 2. Return already-available evidence immediately; simultaneous worker findings reach every intended actor without one actor consuming another's updates.
-- [ ] 3. Wake on result, settlement, cancellation, failure and run stop. Waiting itself starts zero provider requests. A directory watch wakes the coordinator when another process commits a row.
-- [ ] 4. When no selected active/queued assignment or submitted check can produce a relevant event, return no_pending_work rather than wait forever. A running verification is a producer until its outcome is recorded.
-- [ ] 5. Handled prompts and exited/stale children cannot count as live producers. Sol gets an ordinary below-budget continuation, not a successful finish or automatic new hypothesis. `await_results` is a protocol action and returns `no_pending_work` as a normal tool result.
+- [x] 3. Wake on result, settlement, cancellation, failure and run stop. Waiting itself starts zero provider requests. A directory watch wakes the coordinator when another process commits a row.
+- [x] 4. When no selected active/queued assignment or submitted check can produce a relevant event, return no_pending_work rather than wait forever. A running verification is a producer until its outcome is recorded.
+- [x] 5. Handled prompts and exited/stale children cannot count as live producers. Sol gets an ordinary below-budget continuation, not a successful finish or automatic new hypothesis. `await_results` is a protocol action and returns `no_pending_work` as a normal tool result.
 - [x] 6. Use the one assigned fast smoke for this slice. Retain the stated behavior requirements; actual-Pi/real-Lean journeys and the broader race matrix are final E2E coverage, not this ticket's gate.
 
 ## Verify
@@ -59,15 +59,34 @@ Review of `yqs` found and corrected additional defects. Failed inotify setup now
 
 Verification after review: the four worker smokes plus one narrow verification-outcome smoke passed with **5 tests and 4 subtests in 0.59s**. Ruff passed on the touched Python files. The new outcome smoke first reproduced `passed != proof_error`, then verified correct classification, evidence ordering, and closure on an injected transport exception. The initially selected compile-test module could not collect because the existing environment lacks `cyclopts`; the check uses the existing fake campaign seam in `test_orchestration.py` instead, without installing dependencies. No provider, real Pi, or Lean process was started.
 
-Remaining implementation blockers, not deferred integration tests:
+Implementation blockers identified at review of `uru`, resolved by the closure below:
 
 - **Coordinator routing and caller integration.** The protocol directly executes `await_results` in its own process, but worker liveness belongs to the coordinator's `_owned`, `_readers` and `_openers`. An injected subprocess repro showed `Coordinator sees producer: True` while the separate process returned `no_pending_work/recovery_required`. Route management through the S3 run-scoped coordinator boundary and wire the Pi/runner caller. A successful in-process call to `protocol.run` does not test that boundary.
 - **Full-check attribution and retry lifecycle.** `_run_full_check` calls `record_evaluation` without the originating job; the normal Sol autocheck environment has no worker `ARENA_JOB_ID`. These checks remain invisible after their worker ends. In addition, verification operation identity currently uses only job/evaluation/state, so retrying an inconclusive check can reuse the old running receipt while the latest durable state remains terminal. Retain ownership and distinguish check executions without inventing proof lineage.
 - **Watch ownership and invalidation.** Successful directory watches retain their descriptor, daemon thread and registry key indefinitely. Directory removal/replacement or a watcher read/poll failure can invalidate the watch while its registry key still reports success. Add bounded run/wait ownership and explicit invalidation handling; silent notification loss must not restore an infinite wait.
 
-Status remains `needs-review`; acceptance 3–5 are unchecked until these paths are implemented. Ticket 12 is untouched.
+At that review, status remained `needs-review` and acceptance 3–5 were unchecked. Ticket 12 was untouched.
 
-Reporting handled/exhausted/completed as `settled` remains an accepted wake-reason mapping. Actual-Pi and real-Lean waiting stay on the final E2E pass. Status stays `needs-review`.
+Reporting handled/exhausted/completed as `settled` remains an accepted wake-reason mapping. Actual-Pi and real-Lean waiting stay on the final E2E pass.
+
+
+## Review closure
+
+All six acceptance items are complete for this ticket's offline implementation slice. Protocol subprocesses now use the runner-owned private Unix socket; they never infer live worker ownership from their own process-local tables. The runner owns the coordinator lifecycle, and Sol has an `await_results` tool whose normal `no_pending_work` response continues reasoning. Disconnect cancellation wakes the wait and releases the connection without acknowledging new evidence.
+
+Verification tracks each execution with a distinct `check_id`, separately from the reusable evaluation key. Committed exact-proof attempts identify every originating job. Eligible full checks are durably queued before the worker tool returns and stay scheduled after later score changes. Sol's background checker uses those saved owners, and an inconclusive check can execute again with a new identity. Evaluation evidence precedes terminal delivery.
+
+Filesystem notifications now use a per-wait lease. Return, cancellation and failure join the watcher and close its descriptors. Invalidated watches, queue overflow and read/poll errors wake with retryable `notification_unavailable`. Lock-file activity is ignored, avoiding a self-wake loop. There is no permanent watch registry or test-only global registration event.
+
+Verified with one focused combined run:
+
+```bash
+UV_CACHE_DIR=/tmp/arena-uv-cache uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_coordinator_wait.py tests/test_verification_wait.py tests/test_wait_watch.py tests/test_orchestration.py::V8WorkerSmokeTests tests/test_orchestration.py::V8VerificationSmokeTests
+```
+
+Result: **10 tests and 10 subtests passed in 0.94s**. The local Unix-socket checks required scoped access because the sandbox rejects socket binding with `EPERM`. Tests include a real `uv run` protocol subprocess against a coordinator-owned injected worker, disconnect cleanup, exact ownership across two jobs, an inconclusive verification retry, watch invalidation and descriptor cleanup. Scoped Ruff and TypeScript syntax passed. A final legacy-history replay check reproduced an older check remaining pending after its terminal row; both projections now normalize missing `check_id` to the same legacy identity as the writer. The extended verification smoke passed in 0.20s after that correction, with touched-file Ruff clean. Independent source review, including the final correction, found no remaining critical defects in these repairs.
+
+No provider, real Pi or Lean process was started. Actual Pi cancellation, two real streams and real Lean remain final E2E coverage. Coordinator crash/process reconciliation remains ticket 12, which was not changed. Reviewer marks ticket 11 **done**.
 
 ---
 
