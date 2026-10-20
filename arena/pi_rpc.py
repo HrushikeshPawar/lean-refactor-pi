@@ -37,8 +37,8 @@ class FrameReader:
 def cancel_lines(command_id: str) -> bytes:
     """Drop queued prompts, then abort the live turn. Exit is a separate process event."""
     records = (
-        {"type": "abort", "id": command_id, "queued": True},
-        {"type": "abort", "id": command_id},
+        {"type": "clear_queue", "id": f"{command_id}:clear-queue"},
+        {"type": "abort", "id": f"{command_id}:abort"},
     )
     return b"".join(
         (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode() for record in records

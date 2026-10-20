@@ -316,6 +316,8 @@ class _HeldChild:
         self.order = []
         self.written = bytearray()
         self._chunks = queue.Queue()
+        self.absent = False
+        self.exit_on_eof = True
 
     def subscribe(self):
         self.order.append("subscribe")
@@ -328,7 +330,15 @@ class _HeldChild:
 
     def read(self, _size: int) -> bytes:
         item = self._chunks.get()
+        if item is None and self.exit_on_eof:
+            self.absent = True
         return b"" if item is None else item
+
+    def shutdown(self):
+        self._chunks.put(None)
+
+    def confirmed_absent(self):
+        return self.absent
 
 
 class V8WorkerSmokeTests(unittest.TestCase):
@@ -502,8 +512,11 @@ class V8WorkerSmokeTests(unittest.TestCase):
                     child._chunks.put(b"".join((json.dumps(row) + "\n").encode() for row in records))
                     child._chunks.put(b"invalid late stdout\n")
                     child._chunks.put(None)
-                    activation = orchestration.jobs(directory)["jobs"][0]["activation_id"]
-                    orchestration.join_activation(activation)
+                    for _ in range(20000):
+                        if orchestration.jobs(directory)["jobs"][0]["state"] == expected:
+                            break
+                    else:
+                        self.fail("immediate response was not recorded")
 
                 child.write = immediate_write
                 result = orchestration.delegate(directory, **{
@@ -511,6 +524,7 @@ class V8WorkerSmokeTests(unittest.TestCase):
                     "anchor": {"node": "n1", "steps": [1, 2]},
                     "open_child": lambda _launch, child=child: child,
                 })
+                orchestration.join_activation(result["activation_id"])
                 self.assertEqual(result["state"], expected)
                 self.assertFalse(orchestration.awaits_settlement(directory, result["activation_id"]))
                 retry = orchestration.delegate(directory, **{
@@ -902,12 +916,9 @@ class V8WorkerSmokeTests(unittest.TestCase):
             self.assertEqual(receipt["state"], "cancelling")
             self.assertEqual(child.shutdowns, 1)
             commands = [json.loads(line) for line in bytes(child.written).splitlines()]
-            self.assertEqual(
-                [row["type"] for row in commands if row["type"] == "abort"],
-                ["abort", "abort"],
-            )
-            self.assertTrue(commands[-2].get("queued"))
-            self.assertFalse(commands[-1].get("queued"))
+            self.assertEqual([row["type"] for row in commands[-2:]], ["clear_queue", "abort"])
+            self.assertNotEqual(commands[-2]["id"], commands[-1]["id"])
+            self.assertNotEqual(commands[-1]["id"], command_id)
             again = orchestration.cancel(
                 directory,
                 operation_id="op-cancel-again",
@@ -918,6 +929,7 @@ class V8WorkerSmokeTests(unittest.TestCase):
             )
             self.assertTrue(again["reused"])
             self.assertEqual(again["operation_id"], "op-cancel")
+            self.assertEqual(again["evidence_refs"], receipt["evidence_refs"])
             self.assertEqual(child.shutdowns, 1)
             self.assertEqual(len(children), 2)
             child._chunks.put(b"".join(
@@ -954,8 +966,16 @@ class V8WorkerSmokeTests(unittest.TestCase):
             self.assertEqual(held["activation_id"], first["activation_id"])
             self.assertEqual(orchestration.jobs(directory)["jobs"][2]["state"], "queued")
 
+            child.exit_on_eof = False
             child._chunks.put(None)
             orchestration.join_activation(first["activation_id"])
+            pipe_closed = {job["job_id"]: job for job in orchestration.jobs(directory)["jobs"]}
+            self.assertEqual(pipe_closed[first["job_id"]]["state"], "cancelling")
+            self.assertTrue(pipe_closed[first["job_id"]]["occupies_slot"])
+            self.assertEqual(pipe_closed[third["job_id"]]["state"], "queued")
+            self.assertEqual(len(children), 2)
+            child.absent = True
+            orchestration.observe_exit(directory, first["activation_id"])
 
             def admitted():
                 if len(children) != 3:
@@ -981,7 +1001,49 @@ class V8WorkerSmokeTests(unittest.TestCase):
             self.assertEqual(admitted_view[first["job_id"]]["findings"][0]["proof_id"], proof_id)
             self.assertEqual(admitted_view[first["job_id"]]["activation_id"], first["activation_id"])
             self.assertEqual(len(admitted_view[first["job_id"]]["activations"]), 1)
-            children[1][1]._chunks.put(None)
-            children[2][1]._chunks.put(None)
+
+            resumed = orchestration.delegate(
+                directory, operation_id="op-resume-cancelled", run_id="run-1", actor_id="sol",
+                session_id="sol-session", job_id=first["job_id"], task="continue hypothesis a", open_child=open_child,
+            )
+            self.assertEqual(resumed["state"], "queued")
+            new_cancel = orchestration.cancel(
+                directory, operation_id="op-cancel-new", run_id="run-1", actor_id="sol",
+                session_id="sol-session", job_id=first["job_id"],
+            )
+            self.assertEqual(new_cancel["state"], "cancelled")
+            self.assertEqual(new_cancel["activation_id"], resumed["activation_id"])
+            self.assertEqual(new_cancel["operation_id"], "op-cancel-new")
+            replay = orchestration.cancel(
+                directory, operation_id="op-cancel", run_id="run-1", actor_id="sol",
+                session_id="sol-session", job_id=first["job_id"],
+            )
+            self.assertEqual(replay["activation_id"], first["activation_id"])
+            self.assertEqual(len(children), 3)
+
+            fourth = delegate("op-d", "hypothesis d")
+            self.assertEqual(fourth["state"], "queued")
+            second_child = children[1][1]
+            second_child.exit_on_eof = False
+            second_command = admitted_view[second["job_id"]]["command_id"]
+            second_child._chunks.put(b"".join((json.dumps(row) + "\n").encode() for row in (
+                {"type": "response", "id": second_command, "success": True, "data": {"disposition": "started"}},
+                {"type": "agent_settled"},
+            )))
+            second_child._chunks.put(None)
             orchestration.join_activation(second["activation_id"])
+            completed = {job["job_id"]: job for job in orchestration.jobs(directory)["jobs"]}
+            self.assertEqual(completed[second["job_id"]]["state"], "completed")
+            self.assertTrue(completed[second["job_id"]]["occupies_slot"])
+            self.assertEqual(completed[fourth["job_id"]]["state"], "queued")
+            self.assertEqual(len(children), 3)
+            second_child.absent = True
+            orchestration.observe_exit(directory, second["activation_id"])
+            self.assertEqual(len(children), 4)
+            self.assertEqual(children[3][0]["env"]["ARENA_JOB_ID"], fourth["job_id"])
+            orchestration.observe_exit(directory, second["activation_id"])
+            self.assertEqual(len(children), 4)
+            children[2][1]._chunks.put(None)
+            children[3][1]._chunks.put(None)
             orchestration.join_activation(admitted_view[third["job_id"]]["activation_id"])
+            orchestration.join_activation(fourth["activation_id"])

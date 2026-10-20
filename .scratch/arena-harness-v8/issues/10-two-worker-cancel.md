@@ -4,7 +4,7 @@
 
 **Blocked by:** 09: Publish early results and resume the same hypothesis
 
-**Status:** needs-review
+**Status:** done
 
 **Branch:** `v8/10-two-worker-cancel`
 
@@ -44,6 +44,20 @@ uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_orchestratio
 Expected: the named behavior check passes with no actual provider, Pi or Lean process. Aim for seconds and at most 60 seconds. No per-ticket full suite or slow suite.
 
 **Deferred to final E2E:** Actual Pi cancellation, output drain and descendant cleanup. See the shared [final E2E checklist](../final-e2e.md).
+
+## Review corrections
+
+The original worker smokes passed, but the injected cancellation protocol was wrong: Pi 1.3.0 clears pending messages with `clear_queue`, not an extra `queued` field on `abort`. Cancellation now writes `clear_queue` then `abort`, with separate command identities. The extended smoke reproduced both that mismatch and premature slot release when stdout closed while the injected process was still alive.
+
+Durable `occupies_slot` is now independent of terminal assignment state. Completion, exhaustion, cancellation, read/write failure and stdout EOF do not prove process absence. `observe_exit(directory, activation_id)` checks the transport's `confirmed_absent()`, records release and admits FIFO exactly once. Terminal workers request orderly shutdown through the same release path. Configuration failure before spawning can release capacity; an unknown outcome after invoking the child factory retains it for recovery. Process identity/restart recovery remains ticket 12.
+
+All admission and slot/state transitions use the run-control lock. New delegations cannot bypass an older queued assignment. Per-activation transport locks serialize prompt and cancellation writes; reader startup preserves an already committed cancellation. Factories are retained per accepted activation, so a retry or invalid call cannot replace a queued job's launcher.
+
+Cancellation commits its state and receipt together, targets the exact activation, and preserves canonical evidence references on replay. Cancelling a later follow-up uses its own cancellation identity. Failed shutdown I/O records evidence and remains retryable with the slot held.
+
+Verified: `uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_orchestration.py::V8WorkerSmokeTests` passed with 3 tests and 4 subtests in 0.20s. Ruff passed for `arena/orchestration.py`, `arena/pi_rpc.py` and `tests/test_orchestration.py`. The same smoke now distinguishes pipe EOF from process exit, checks cancellation replay across activations, and checks completed workers retaining capacity until confirmed absent. The earlier immediate-response fixture waits for durable terminal state before returning its write, then joins the reader outside that write, so serialized shutdown cannot deadlock the fixture.
+
+These are offline injected-process checks. Real Pi cancellation, transport draining, positive descendant absence and the broader concurrency matrix remain final E2E coverage. Lean admission is unchanged. Ticket 11 is not started by this review.
 
 ---
 

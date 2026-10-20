@@ -24,10 +24,10 @@ _owned: dict[str, object] = {}
 _live: dict[str, dict] = {}
 _openers: dict[str, object] = {}
 _stop_sent: set[str] = set()
+_io_locks: dict[str, threading.RLock] = {}
 _readers_guard = threading.Lock()
 _terminal_states = frozenset(("handled", "completed", "failed", "exhausted", "cancelled"))
 _active_states = frozenset(("launching", "queued", "active"))
-_slot_states = frozenset(("launching", "active", "cancelling"))
 
 
 def _reject(operation_id: str, reason: str, category: str = "invalid_input") -> dict:
@@ -114,11 +114,13 @@ def _job_rows(directory: Path, job_id: str) -> list[dict]:
 
 def _activation_view(directory: Path, delegation: dict) -> dict:
     state = delegation.get("state")
+    occupies_slot = state == "launching"
     command_id = None
     for row in _states(directory):
         if row.get("activation_id") != delegation.get("activation_id"):
             continue
         state = row.get("state", state)
+        occupies_slot = row.get("occupies_slot", occupies_slot)
         if row.get("command_id"):
             command_id = row["command_id"]
     return {
@@ -127,6 +129,7 @@ def _activation_view(directory: Path, delegation: dict) -> dict:
         "task": delegation["task"],
         "command_id": command_id,
         "resumed": bool(delegation.get("resumed")),
+        "occupies_slot": occupies_slot,
     }
 
 
@@ -162,7 +165,7 @@ def _job_snapshot(directory: Path, job_id: str) -> dict | None:
         "command_id": current["command_id"],
         "task": delegation["task"],
         "resumed": bool(delegation.get("resumed")),
-        "occupies_slot": current["state"] in _slot_states,
+        "occupies_slot": current["occupies_slot"],
         "activations": [_activation_view(directory, row) for row in rows],
         "findings": findings,
     }
@@ -200,7 +203,13 @@ def jobs(directory: Path, job_ids: list[str] | None = None) -> dict:
 
 
 def _slot_count(directory: Path) -> int:
-    return sum(1 for row in _delegations(directory) if _activation_view(directory, row)["state"] in _slot_states)
+    return sum(1 for row in _delegations(directory) if _activation_view(directory, row)["occupies_slot"])
+
+
+def _can_admit_directly(directory: Path) -> bool:
+    return _slot_count(directory) < _MODEL_SLOTS and not any(
+        _activation_view(directory, row)["state"] == "queued" for row in _delegations(directory)
+    )
 
 
 def _append_state(directory: Path, delegation: dict, state: str, **extra) -> None:
@@ -224,11 +233,8 @@ def _append_state(directory: Path, delegation: dict, state: str, **extra) -> Non
 
 def _fill_slots(directory: Path) -> None:
     """Open the oldest queued assignment only while a model slot is free."""
-    opener = _openers.get(str(directory))
-    if opener is None:
-        return
     while True:
-        with _readers_guard:
+        with run_control.control_lock(directory):
             if _slot_count(directory) >= _MODEL_SLOTS:
                 return
             queued = next(
@@ -237,20 +243,27 @@ def _fill_slots(directory: Path) -> None:
             )
             if queued is None:
                 return
+            opener = _openers.get(queued["activation_id"])
+            if opener is None:
+                return
             command_id = uuid.uuid4().hex
-            _append_state(directory, queued, "launching", command_id=command_id)
+            _append_state(directory, queued, "launching", command_id=command_id, occupies_slot=True)
         _open_activation(directory, queued, opener, command_id)
 
 
 def _record_state(directory: Path, delegation: dict, state: str, **extra) -> None:
-    with _readers_guard:
+    with run_control.control_lock(directory):
         snapshot = _activation_view(directory, delegation)
         if snapshot["state"] in _terminal_states:
             return
+        if snapshot["state"] == "cancelling" and state != "cancelled":
+            return
         _append_state(directory, delegation, state, **extra)
-        release = state in _terminal_states
-    if release:
-        _fill_slots(directory)
+        live = _live.get(delegation["activation_id"])
+        if live is not None:
+            live["state"] = state
+    if state in _terminal_states:
+        _stop_activation(directory, delegation)
 
 
 def _compile_findings(directory: Path, delegation: dict, record: dict) -> list[dict]:
@@ -355,44 +368,42 @@ def _apply_record(record: dict, command_id: str, current: dict) -> dict:
 
 def _take(directory: Path, delegation: dict, command_id: str, current: dict, records: list[dict]) -> None:
     for record in records:
-        if current["state"] not in _terminal_states and _observe_tool(directory, delegation, record):
-            continue
-        previous = current["state"]
-        _apply_record(record, command_id, current)
-        if current["state"] == previous:
-            continue
-        _record_state(
-            directory,
-            delegation,
-            current["state"],
-            command_id=command_id,
-            outcome=current.get("outcome"),
-            disposition=current.get("disposition"),
-            reason=current.get("reason"),
-        )
+        with run_control.control_lock(directory):
+            current["state"] = _activation_view(directory, delegation)["state"]
+            if current["state"] not in _terminal_states and _observe_tool(directory, delegation, record):
+                continue
+            previous = current["state"]
+            _apply_record(record, command_id, current)
+            changed = current["state"] != previous
+            if changed:
+                _append_state(
+                    directory, delegation, current["state"], command_id=command_id,
+                    outcome=current.get("outcome"), disposition=current.get("disposition"),
+                    reason=current.get("reason"),
+                )
+        if changed and current["state"] in _terminal_states:
+            _stop_activation(directory, delegation)
 
 
 def _read_child(directory: Path, delegation: dict, command_id: str, transport, ready: threading.Event) -> None:
     reader = FrameReader()
-    current = {"state": "launching"}
-    with _readers_guard:
-        _live[delegation["activation_id"]] = current
+    with run_control.control_lock(directory):
+        current = _live.setdefault(delegation["activation_id"], {})
+        current["state"] = _activation_view(directory, delegation)["state"]
     ready.set()
     try:
         while True:
             chunk = transport.read(4096)
             if not chunk:
-                if current["state"] == "cancelling":
-                    current["state"] = "cancelled"
-                    _record_state(directory, delegation, "cancelled", command_id=command_id, reason="process_exit")
-                elif current["state"] in ("launching", "queued", "active"):
-                    current["state"] = "failed"
-                    _record_state(directory, delegation, "failed", command_id=command_id, reason="process_exit")
+                if current["state"] in _active_states:
+                    _record_state(directory, delegation, "failed", command_id=command_id, reason="stdout_closed")
+                observe_exit(directory, delegation["activation_id"])
                 break
             _take(directory, delegation, command_id, current, reader.feed(chunk))
     except Exception as error:
-        if current["state"] not in _terminal_states:
+        if current["state"] not in _terminal_states and current["state"] != "cancelling":
             _record_state(directory, delegation, "failed", command_id=command_id, reason=type(error).__name__)
+        _stop_activation(directory, delegation)
 
 
 def _write_prompt(transport, payload: bytes) -> None:
@@ -455,57 +466,111 @@ def deliver(directory: Path, actor_id: str) -> dict:
     }
 
 
-def _request_stop(activation_id: str, command_id: str, transport) -> bool:
-    """Clear the child queue and ask it to exit. One activation is stopped once."""
+def _io_lock(activation_id: str):
     with _readers_guard:
-        if activation_id in _stop_sent:
-            return False
-        _stop_sent.add(activation_id)
-    _write_prompt(transport, cancel_lines(command_id or activation_id))
-    shutdown = getattr(transport, "shutdown", None)
-    if shutdown is not None:
-        shutdown()
+        return _io_locks.setdefault(activation_id, threading.RLock())
+
+
+def observe_exit(directory: Path, activation_id: str) -> bool:
+    """Observe injected process liveness; stdout EOF alone never releases a slot."""
+    transport = _owned.get(activation_id)
     absent = getattr(transport, "confirmed_absent", None)
-    return bool(absent is not None and absent())
+    if absent is None or not absent():
+        return False
+    with run_control.control_lock(directory):
+        delegation = next((row for row in _delegations(directory) if row["activation_id"] == activation_id), None)
+        if delegation is None:
+            return False
+        snapshot = _activation_view(directory, delegation)
+        if not snapshot["occupies_slot"]:
+            return True
+        state = snapshot["state"]
+        if state == "cancelling":
+            state = "cancelled"
+        elif state not in _terminal_states:
+            state = "failed"
+        _append_state(directory, delegation, state, occupies_slot=False, reason="confirmed_absent")
+        if activation_id in _live:
+            _live[activation_id]["state"] = state
+    _fill_slots(directory)
+    return True
+
+
+def _stop_activation(directory: Path, delegation: dict) -> None:
+    activation_id = delegation["activation_id"]
+    with _io_lock(activation_id):
+        transport = _owned.get(activation_id)
+        if transport is None:
+            return
+        if activation_id not in _stop_sent:
+            try:
+                snapshot = _activation_view(directory, delegation)
+                if snapshot["state"] == "cancelling":
+                    _write_prompt(transport, cancel_lines(snapshot["command_id"] or activation_id))
+                shutdown = getattr(transport, "shutdown", None)
+                if shutdown is not None:
+                    shutdown()
+                    _stop_sent.add(activation_id)
+            except Exception as error:
+                # An uncertain stop retains ownership and can be retried.
+                with run_control.control_lock(directory):
+                    snapshot = _activation_view(directory, delegation)
+                    _append_state(directory, delegation, snapshot["state"], stop_error=type(error).__name__)
+                return
+        observe_exit(directory, activation_id)
 
 
 def _open_activation(directory: Path, stored: dict, open_child, command_id: str) -> None:
-    try:
-        transport = open_child(
-            worker_launch(
-                directory,
-                run_id=stored["run_id"],
-                worker_actor_id=stored["worker_actor_id"],
-                worker_session_id=stored["worker_session_id"],
-                job_id=stored["job_id"],
-                activation_id=stored["activation_id"],
-                anchor=stored["anchor"],
+    activation_id = stored["activation_id"]
+    transport = None
+    spawn_attempted = False
+    with _io_lock(activation_id):
+        try:
+            with run_control.control_lock(directory):
+                state = _activation_view(directory, stored)["state"]
+                if state == "cancelling":
+                    _append_state(directory, stored, "cancelled", occupies_slot=False, reason="not_spawned")
+                elif state != "launching":
+                    return
+            if state == "cancelling":
+                _fill_slots(directory)
+                return
+            launch = worker_launch(
+                directory, run_id=stored["run_id"], worker_actor_id=stored["worker_actor_id"],
+                worker_session_id=stored["worker_session_id"], job_id=stored["job_id"],
+                activation_id=activation_id, anchor=stored["anchor"],
             )
-        )
-        transport.subscribe()
-        ready = threading.Event()
-        thread = threading.Thread(
-            target=_read_child,
-            args=(directory, stored, command_id, transport, ready),
-            daemon=True,
-        )
-        with _readers_guard:
-            _owned[stored["activation_id"]] = transport
-            _readers[stored["activation_id"]] = thread
-            stopping = _activation_view(directory, stored)["state"] == "cancelling"
-        thread.start()
-        if not ready.wait(5):
-            raise RuntimeError("reader did not start")
-        if stopping:
-            if _request_stop(stored["activation_id"], command_id, transport):
-                _record_state(directory, stored, "cancelled", command_id=command_id, reason="confirmed_absent")
-            return
-        _write_prompt(transport, prompt_line(command_id, stored["task"], stored["anchor"]))
-        if _activation_view(directory, stored)["state"] == "cancelling":
-            if _request_stop(stored["activation_id"], command_id, transport):
-                _record_state(directory, stored, "cancelled", command_id=command_id, reason="confirmed_absent")
-    except Exception as error:
-        _record_state(directory, stored, "failed", command_id=command_id, reason=type(error).__name__)
+            spawn_attempted = True
+            transport = open_child(launch)
+            _owned[activation_id] = transport
+            transport.subscribe()
+            ready = threading.Event()
+            thread = threading.Thread(
+                target=_read_child, args=(directory, stored, command_id, transport, ready), daemon=True,
+            )
+            with _readers_guard:
+                _readers[activation_id] = thread
+            thread.start()
+            if not ready.wait(5):
+                raise RuntimeError("reader did not start")
+            if _activation_view(directory, stored)["state"] == "launching":
+                _write_prompt(transport, prompt_line(command_id, stored["task"], stored["anchor"]))
+            if _activation_view(directory, stored)["state"] == "cancelling":
+                _stop_activation(directory, stored)
+        except Exception as error:
+            not_spawned = not spawn_attempted or bool(getattr(error, "not_spawned", False))
+            with run_control.control_lock(directory):
+                state = _activation_view(directory, stored)["state"]
+                if state not in _terminal_states and state != "cancelling":
+                    state = "failed"
+                if not_spawned and state == "cancelling":
+                    state = "cancelled"
+                _append_state(directory, stored, state, command_id=command_id,
+                              reason=type(error).__name__, occupies_slot=not not_spawned)
+            if not_spawned:
+                _fill_slots(directory)
+            elif transport is not None:
+                _stop_activation(directory, stored)
 
 
 def _same_anchor(directory: Path, stored: dict, scope: str | None, anchor: object) -> bool:
@@ -557,7 +622,7 @@ def _follow_up(
             }
             control_rows = run_control._abort_open_intents(directory, run_control._control_rows(directory))
             existing = run_control._receipt(control_rows, operation_id)
-            if existing is None and current["state"] in _active_states | {"cancelling"}:
+            if existing is None and (current["state"] in _active_states | {"cancelling"} or current["occupies_slot"]):
                 return _reject(operation_id, "active", "busy")
             delegation = {
                 "operation_id": operation_id,
@@ -573,7 +638,7 @@ def _follow_up(
                 "scope": source["scope"],
                 "anchor": source["anchor"],
                 "tools": list(source["tools"]),
-                "state": "launching" if _slot_count(directory) < _MODEL_SLOTS else "queued",
+                "state": "launching" if _can_admit_directly(directory) else "queued",
                 "resumed": True,
             }
             applied = run_control._apply_locked(
@@ -590,6 +655,8 @@ def _follow_up(
                 },
                 mutate,
             )
+            if applied.get("ok") and applied.get("status") == "committed" and existing is None:
+                _openers[activation_id] = open_child
     except OperationRejected as error:
         return _reject(operation_id, error.category)
     if not applied.get("ok"):
@@ -603,6 +670,7 @@ def _follow_up(
     if stored["activation_id"] != activation_id:
         return _receipt_body(directory, stored, {**applied, "reused": True}, spend)
     if stored["state"] == "queued":
+        _fill_slots(directory)
         return _receipt_body(directory, stored, applied, spend)
     command_id = uuid.uuid4().hex
     _record_state(directory, stored, "launching", command_id=command_id)
@@ -626,7 +694,6 @@ def delegate(
     """Accept one hypothesis, or resume its saved session, and return before the worker settles."""
     if not operation_id or not run_id or not actor_id or not session_id or not isinstance(task, str) or not task:
         return _reject(operation_id, "identity")
-    _openers[str(directory)] = open_child
     if job_id:
         return _follow_up(
             directory,
@@ -680,7 +747,7 @@ def delegate(
 
     try:
         with run_control.control_lock(directory):
-            if _slot_count(directory) < _MODEL_SLOTS:
+            if _can_admit_directly(directory):
                 delegation["state"] = "launching"
             applied = run_control._apply_locked(
                 directory,
@@ -696,6 +763,11 @@ def delegate(
                 },
                 mutate,
             )
+            if applied.get("ok") and applied.get("status") == "committed":
+                accepted = next((row for row in _delegations(directory)
+                                 if row.get("operation_id") == operation_id), None)
+                if accepted is not None and accepted["activation_id"] == activation_id:
+                    _openers[activation_id] = open_child
     except OperationRejected as error:
         return _reject(operation_id, error.category)
     if not applied.get("ok"):
@@ -710,18 +782,12 @@ def delegate(
         return _receipt_body(directory, stored, {**applied, "reused": True}, spend)
     # The receipt is already durable. A queued job waits until a slot is actually free.
     if stored["state"] == "queued":
+        _fill_slots(directory)
         return _receipt_body(directory, stored, applied, spend)
     command_id = uuid.uuid4().hex
     _record_state(directory, stored, "launching", command_id=command_id)
     _open_activation(directory, stored, open_child, command_id)
     return _receipt_body(directory, stored, applied, spend)
-
-
-def _cancel_operation(directory: Path, job_id: str) -> str | None:
-    for row in _states(directory):
-        if row.get("job_id") == job_id and row.get("cancel_operation_id"):
-            return row["cancel_operation_id"]
-    return None
 
 
 def cancel(
@@ -733,18 +799,10 @@ def cancel(
     session_id: str,
     job_id: str,
 ) -> dict:
-    """Cancel one job. The same outcome is reused, and the slot stays until exit."""
+    """Commit cancellation of one exact activation before touching its transport."""
     if not operation_id or not run_id or not actor_id or not session_id or not job_id:
         return _reject(operation_id, "identity")
     arguments = {"job_id": job_id, "run_id": run_id, "actor_id": actor_id, "session_id": session_id}
-
-    def mutate(writer) -> list:
-        del writer
-        return []
-
-    prior = None
-    current = None
-    applied = None
     try:
         with run_control.control_lock(directory):
             current = _job_snapshot(directory, job_id)
@@ -753,79 +811,52 @@ def cancel(
             source = _job_rows(directory, job_id)[0]
             if run_id != source["run_id"] or actor_id != source["actor_id"]:
                 return _reject(operation_id, "ownership")
-            prior = _cancel_operation(directory, job_id)
-            if prior is None:
-                applied = run_control._apply_locked(
-                    directory,
-                    {
-                        "operation_id": operation_id,
-                        "kind": "cancel",
-                        "arguments": arguments,
-                        "run_id": run_id,
-                        "actor_id": actor_id,
-                        "session_id": session_id,
-                        "job_id": job_id,
-                        "activation_id": current["activation_id"],
-                    },
-                    mutate,
-                )
+            previous = next((row for row in _states(directory)
+                             if row.get("operation_id") == operation_id and row.get("cancel_operation_id")), None)
+            activation_id = previous["activation_id"] if previous is not None else current["activation_id"]
+            stored = next(row for row in _delegations(directory) if row["activation_id"] == activation_id)
+            snapshot = _activation_view(directory, stored)
+            prior = next((row["cancel_operation_id"] for row in _states(directory)
+                          if row.get("activation_id") == activation_id and row.get("cancel_operation_id")), None)
+            canonical_id = prior or operation_id
+            state = snapshot["state"]
+            if state == "queued":
+                state = "cancelled"
+            elif state in ("launching", "active"):
+                state = "cancelling"
+
+            def mutate(writer) -> list:
+                writer.append_ledger({
+                    "type": "assignment_state", "state": state,
+                    "command_id": snapshot["command_id"], "cancel_operation_id": canonical_id,
+                    "occupies_slot": snapshot["occupies_slot"],
+                })
+                return []
+
+            applied = run_control._apply_locked(directory, {
+                "operation_id": operation_id, "kind": "cancel", "arguments": arguments,
+                "run_id": run_id, "actor_id": actor_id, "session_id": session_id,
+                "job_id": job_id, "activation_id": activation_id,
+            }, mutate)
+            if not applied.get("ok"):
+                return applied
+            if applied.get("status") == "aborted":
+                return {**applied, "ok": False, "category": "operation_aborted"}
+            if activation_id in _live:
+                _live[activation_id]["state"] = _activation_view(directory, stored)["state"]
+            canonical_receipt = run_control._receipt(run_control._control_rows(directory), canonical_id)
+            evidence_refs = (canonical_receipt or {}).get("evidence_refs") or []
     except OperationRejected as error:
         return _reject(operation_id, error.category)
-    if prior is not None:
-        spend = run_control.read_state(directory)
-        return {
-            "ok": True,
-            "operation_id": prior,
-            "job_id": job_id,
-            "activation_id": current["activation_id"],
-            "state": current["state"],
-            "reused": True,
-            "evidence_refs": [],
-            "accounting": spend["accounting"],
-            "total": spend["total"],
-        }
-    if not applied.get("ok"):
-        return applied
-    stored = next(row for row in _delegations(directory) if row.get("activation_id") == current["activation_id"])
-    state = current["state"]
-    if state == "queued":
-        _record_state(directory, stored, "cancelled", cancel_operation_id=operation_id, reason="queued")
-    elif state in ("launching", "active"):
-        _record_state(
-            directory,
-            stored,
-            "cancelling",
-            command_id=current["command_id"],
-            cancel_operation_id=operation_id,
-        )
-        with _readers_guard:
-            live = _live.get(current["activation_id"])
-            if live is not None and live["state"] not in _terminal_states:
-                live["state"] = "cancelling"
-        transport = _owned.get(current["activation_id"])
-        if transport is not None and _request_stop(current["activation_id"], current["command_id"], transport):
-            _record_state(
-                directory,
-                stored,
-                "cancelled",
-                command_id=current["command_id"],
-                cancel_operation_id=operation_id,
-                reason="confirmed_absent",
-            )
-    elif state != "cancelling":
-        _record_state(directory, stored, state, cancel_operation_id=operation_id)
+    _stop_activation(directory, stored)
     spend = run_control.read_state(directory)
-    snapshot = _job_snapshot(directory, job_id)
+    snapshot = _activation_view(directory, stored)
     return {
-        "ok": True,
-        "operation_id": operation_id,
-        "job_id": job_id,
-        "activation_id": snapshot["activation_id"],
-        "state": snapshot["state"],
-        "reused": False,
-        "evidence_refs": applied.get("evidence_refs") or [],
-        "accounting": spend["accounting"],
-        "total": spend["total"],
+        "ok": True, "operation_id": canonical_id, "job_id": job_id,
+        "activation_id": activation_id, "state": snapshot["state"],
+        "reused": previous is not None or prior is not None,
+        "evidence_refs": evidence_refs,
+        "accounting": spend["accounting"], "total": spend["total"],
     }
 
 
