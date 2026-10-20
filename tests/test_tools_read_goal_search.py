@@ -1,4 +1,5 @@
 import hashlib
+import os
 from unittest.mock import patch
 
 from arena import campaign, tools
@@ -57,9 +58,10 @@ class ScratchResultTests(ToolCase):
         with (
             patch.object(tools.engine, "versions", return_value=[("v", "c")]),
             patch.object(tools.engine, "candidate_file", side_effect=RuntimeError("fixture context unavailable")),
-            self.assertRaisesRegex(RuntimeError, "fixture context unavailable"),
         ):
-            tools.scratch_tool("T", "logic", {"code": code})
+            result = tools.scratch_tool("T", "logic", {"code": code})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["items"][0]["outcome"], "construction_error")
         saved = [row for row in campaign.events(self.directory) if row["kind"] == "scratch"][-1]
         self.assertEqual(saved["code"], code)
 
@@ -70,10 +72,11 @@ class ScratchResultTests(ToolCase):
             patch.object(tools.engine, "versions", return_value=[("v", "c")]),
             patch.object(tools.engine, "candidate_file", side_effect=RuntimeError("fixture context unavailable")),
             lean,
-            self.assertRaisesRegex(RuntimeError, "fixture context unavailable"),
         ):
-            tools.scratch_tool("T", "logic", {"code": code})
-        saved = [row for row in campaign.events(self.directory) if row.get("experiment_id")][0]
+            result = tools.scratch_tool("T", "logic", {"code": code})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["items"][0]["outcome"], "construction_error")
+        saved = next(row for row in campaign.events(self.directory) if row.get("experiment_id"))
         with lean:
             found = tools.read_tool("T", "logic", {"experiment": saved["experiment_id"]})
         item = found["items"][0]
@@ -88,6 +91,45 @@ class ScratchResultTests(ToolCase):
         self.assertIsNone(missing["items"][0]["code"])
         self.assertIn("missing code", "\n".join(missing["items"][0]["lines"]))
         self.assertFalse(legacy["ok"])
+        built = {"path": "p", "text": "", "head": 0, "start_line": 1}
+        with (
+            patch.object(tools.engine, "versions", return_value=[("v", "c")]),
+            patch.object(tools.engine, "candidate_file", return_value=built) as build,
+            patch.object(tools.engine, "run_lean", return_value=(1, "process failed without a Lean diagnostic")) as run,
+        ):
+            failed = tools.scratch_tool("T", "logic", {"code": "#check Nat"})["items"][0]
+            self.assertEqual(failed["outcome"], "failure")
+            repeated = tools.scratch_tool("T", "logic", {"code": "#check Nat"})
+            self.assertTrue(any("seen 2 times" in fact for fact in repeated["facts"]))
+            with patch.object(tools.engine, "run_lean", side_effect=OSError("transport unavailable")):
+                execution = tools.scratch_tool("T", "logic", {"code": "#check Bool"})["items"][0]
+            self.assertEqual(execution["outcome"], "execution_error")
+            with patch.object(tools, "_scratch_messages", side_effect=RuntimeError("renderer unavailable")):
+                processing = tools.scratch_tool("T", "logic", {"code": "#check Int"})["items"][0]
+            self.assertEqual(processing["outcome"], "processing_error")
+            self.assertEqual(processing["raw"], "process failed without a Lean diagnostic")
+            helper = tools.experiments.accept("logic", "def scratch_helper : Nat := 1", [])
+            tools.scratch_tool("T", "logic", {"code": "#check scratch_helper", "helpers": [helper["experiment_id"]]})
+            self.assertIn("def scratch_helper", build.call_args.args[1])
+            missing = tools.scratch_tool("T", "logic", {"code": "#check Nat", "helpers": ["missing"]})["items"][0]
+            self.assertEqual(missing["outcome"], "dependency_missing")
+            self.assertEqual(missing["validity"], "not_a_target_candidate")
+            self.assertIn("experiment_id", missing)
+            count = run.call_count
+            with (
+                patch.dict(os.environ, {"ARENA_JOB_ID": "j1", "ARENA_ACTIVATION_ID": "a1"}),
+                patch(
+                    "arena.orchestration.jobs",
+                    return_value={"jobs": [{"activations": [{"activation_id": "a1", "state": "cancelling"}]}]},
+                ),
+            ):
+                cancelled = tools.scratch_tool("T", "logic", {"code": "#check Unit"})["items"][0]
+            self.assertEqual(cancelled["outcome"], "cancelled")
+            self.assertEqual(run.call_count, count)
+            with patch.object(tools, "_scratch_cancelled", side_effect=[False, True]):
+                during_build = tools.scratch_tool("T", "logic", {"code": "#check String"})["items"][0]
+            self.assertEqual(during_build["outcome"], "cancelled")
+            self.assertEqual(run.call_count, count)
 
     def test_result_line_counts_messages_and_body_tokens_only_when_the_snippet_declares(self):
         check = self.scratch("#check Nat.add_comm\n")

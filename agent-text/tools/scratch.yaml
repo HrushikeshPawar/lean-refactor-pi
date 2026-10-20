@@ -1,4 +1,4 @@
 description: "Run isolated Lean commands in this theorem's environment, such as example ... := by trace_state; rfl, #check or #print. Nothing becomes a node or is scored. A local OK is not target validity, compatibility, or cold status. Replies name a stable experiment id. Read that id later to retrieve the exact input and outcome. Reuse an earlier snippet only by passing its experiment id in helpers."
 params:
   code: "Lean commands that take the target declaration's place; no import lines. sorry is allowed here. Unicode and line endings are kept exactly."
-  helpers: "Optional experiment ids whose recorded snippets this call depends on. Nothing from an earlier call is included unless listed."
+  helpers: "Optional experiment ids whose recorded snippets this call depends on. Only named helpers and their recorded dependencies are included. Diagnostic lines use that combined source."

@@ -760,6 +760,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
   });
 
   const readParams = Type.Object({
+    experiment: Type.Optional(Type.String({ description: await renderText("tools/read.params.experiment") })),
     handle: Type.Optional(Type.String({ description: await renderText("tools/read.params.handle") })),
     node: Type.Optional(Type.String({ description: await renderText("tools/read.params.node") })),
     hole: Type.Optional(Type.String({ description: await renderText("tools/read.params.hole") })),
@@ -777,6 +778,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
 
   const scratchParams = Type.Object({
     code: Type.String({ description: await renderText("tools/scratch.params.code") }),
+    helpers: Type.Optional(Type.Array(Type.String(), { description: await renderText("tools/scratch.params.helpers") })),
   });
   await registerTool({ name: "scratch", label: "Scratch Lean commands",
     description: await renderText("tools/scratch.description"), parameters: scratchParams,

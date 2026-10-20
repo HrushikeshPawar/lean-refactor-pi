@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import difflib
 import hashlib
-import re
-
 import os
+import re
 import time
 
 from arena import campaign, engine, experiments, graph, reply, salvage, search, text
@@ -1704,7 +1703,7 @@ def scratch_tool(theorem: str, run_id: str, request: dict) -> dict:
     unknown = sorted(set(request) - set(valid))
     if unknown:
         return _invalid("unknown_argument", unknown[0], valid, TOOL_FORMS["scratch"])
-    helpers = request.get("helpers") or []
+    helpers = request.get("helpers", [])
     if not isinstance(helpers, list) or any(not isinstance(item, str) or not item for item in helpers):
         return _invalid("bad_helpers", helpers, ["experiment ids"], TOOL_FORMS["scratch"])
     limit = int(text.numbers().get("scratch_max_chars", 4000))
@@ -1725,32 +1724,151 @@ def scratch_tool(theorem: str, run_id: str, request: dict) -> dict:
         for event in _history(run_id)
         if event.get("kind") == "scratch"
         and event.get("code_sha256") == digest
-        and event.get("phase") != "outcome"
+        and event.get("phase") in {None, "accepted"}
     )
     # Retain the exact input before context construction or Lean can fail; instrumentation is not the source.
     accepted = experiments.accept(run_id, code, helpers)
     experiment_id = accepted["experiment_id"]
+    if accepted.get("replayed"):
+        return _read_experiment(run_id, experiment_id)
     started = time.perf_counter()
-    missing = experiments.unresolved_helpers(run_id, helpers)
-    if missing:
+    execution = {"stage": "construction", "context": {"theorem_run": run_id}, "raw": None}
+    try:
+        return _scratch_check(theorem, run_id, code, helpers, accepted, earlier, started, execution)
+    except Exception as error:
+        outcome = (
+            "cancelled"
+            if _scratch_cancelled(run_id)
+            else {
+                "construction": "construction_error",
+                "execution": "execution_error",
+                "processing": "processing_error",
+            }[execution["stage"]]
+        )
         experiments.finish(
             run_id,
             experiment_id,
             code=code,
             digest=digest,
-            outcome="dependency_missing",
-            raw=None,
-            rendered=[],
+            outcome=outcome,
+            raw=execution["raw"],
+            rendered=[str(error)],
             elapsed_ms=experiments.elapsed_since(started),
             input_ref=accepted["input_ref"],
-            diagnostic="dependency_missing",
+            diagnostic=str(error),
+            context=execution["context"],
         )
+        evidence = experiments.retrieve(run_id, experiment_id)
         return reply.reply(
             ok=False,
-            error=reply.request_error("dependency_missing", ",".join(missing), [], TOOL_FORMS["scratch"]),
-            items=[{"ref": experiment_id, "ok": False, "lines": [], "error": None, "code": code}],
+            items=[{"ref": experiment_id, "ok": False, "lines": [str(error)], "error": None, **evidence}],
         )
-    if os.environ.get("ARENA_JOB_STATE") == "cancelling":
+
+
+def _scratch_cancelled(run_id: str) -> bool:
+    job_id = os.environ.get("ARENA_JOB_ID")
+    if not job_id:
+        return False
+    from arena.orchestration import jobs
+
+    snapshots = jobs(campaign.run_dir(run_id), [job_id])["jobs"]
+    activation_id = os.environ.get("ARENA_ACTIVATION_ID")
+    for job in snapshots:
+        activations = job["activations"] if activation_id else [job]
+        for activation in activations:
+            if activation_id and activation["activation_id"] != activation_id:
+                continue
+            if activation["state"] in {"cancelling", "cancelled"}:
+                return True
+    return False
+
+
+def _scratch_helpers(run_id: str, helpers: list[str]) -> tuple[str, list[str]]:
+    """Materialize only named dependencies, in dependency order, inside this one scratch file."""
+    code, missing = [], []
+    included, visiting = set(), set()
+
+    def include(reference):
+        if reference in visiting:
+            missing.append(reference)
+            return
+        if reference in included:
+            return
+        retained = experiments.retrieve(run_id, reference)
+        if retained is None or retained.get("code_status") != "retained":
+            missing.append(reference)
+            return
+        visiting.add(reference)
+        for dependency in retained.get("helpers", []):
+            include(dependency)
+        visiting.remove(reference)
+        included.add(reference)
+        value = retained["code"]
+        code.append(value + ("" if value.endswith("\n") else "\n"))
+
+    for reference in helpers:
+        include(reference)
+    return "".join(code), missing
+
+
+def _scratch_check(theorem, run_id, code, helpers, accepted, earlier, started, execution):
+    experiment_id = accepted["experiment_id"]
+    digest = accepted["code_sha256"]
+    helper_prefix, missing = _scratch_helpers(run_id, helpers)
+    if missing or _scratch_cancelled(run_id):
+        outcome = "dependency_missing" if missing else "cancelled"
+        lines = [] if missing else [_render("scratch_cancelled")]
+        experiments.finish(
+            run_id,
+            experiment_id,
+            code=code,
+            digest=digest,
+            outcome=outcome,
+            raw=None,
+            rendered=lines,
+            elapsed_ms=experiments.elapsed_since(started),
+            input_ref=accepted["input_ref"],
+            diagnostic=outcome if missing else None,
+        )
+        evidence = experiments.retrieve(run_id, experiment_id)
+        return reply.reply(
+            ok=not missing,
+            error=reply.request_error("dependency_missing", ",".join(missing), [], TOOL_FORMS["scratch"])
+            if missing
+            else None,
+            items=[{"ref": experiment_id, "ok": not missing, "lines": lines, "error": None, **evidence}],
+        )
+    checked_code = helper_prefix + code
+    row = campaign.problem(theorem)
+    version, commit = engine.versions(row)[0]
+    context = {
+        "theorem_run": run_id,
+        "version": version,
+        "commit": commit,
+        "helpers": helpers,
+        "helper_prefix_lines": helper_prefix.count("\n"),
+    }
+    execution["context"] = context
+    # The snippet takes the target declaration's place in the same file the compile tool checks.
+    measured_code, measured_starts = _measured_snippet(checked_code)
+    built = engine.candidate_file(row, measured_code, version, commit)
+    facts = [_render("scratch_repeat", count=earlier + 1)] if earlier else []
+    if helper_prefix:
+        facts.append(_render("scratch_helper_lines", line=helper_prefix.count("\n") + 1))
+    code_lines = checked_code.splitlines()
+    declarations = [number for number, line in enumerate(code_lines, 1) if _DECLARATION_START.match(line)]
+    # The prefix goes in front of the snippet as compile's measure does; its lines are mapped back below.
+    inserted = _SNIPPET_PREFIX + (_MEASURE_DEFINITION if measured_starts else "")
+    wrapper_start = built["text"][: built["head"]].count("\n") + 1
+    lean_text = built["text"][: built["head"]] + inserted + built["text"][built["head"] :]
+    context.update(
+        {
+            "project": str(built["path"]),
+            "source_sha256": hashlib.sha256(lean_text.encode()).hexdigest(),
+            "prefix_sha256": hashlib.sha256(lean_text[: built["head"]].encode()).hexdigest(),
+        }
+    )
+    if _scratch_cancelled(run_id):
         experiments.finish(
             run_id,
             experiment_id,
@@ -1761,53 +1879,14 @@ def scratch_tool(theorem: str, run_id: str, request: dict) -> dict:
             rendered=[_render("scratch_cancelled")],
             elapsed_ms=experiments.elapsed_since(started),
             input_ref=accepted["input_ref"],
-        )
-        return reply.reply(
-            items=[
-                {
-                    "ref": experiment_id,
-                    "ok": True,
-                    "lines": [_render("scratch_cancelled")],
-                    "error": None,
-                    "experiment_id": experiment_id,
-                    "outcome": "cancelled",
-                    "code": code,
-                    "promotion": {"state": "not_promoted", "reason": "promotion_not_in_slice"},
-                    "validity": "not_a_target_candidate",
-                }
-            ]
-        )
-    context = {"theorem_run": run_id}
-    try:
-        row = campaign.problem(theorem)
-        version, commit = engine.versions(row)[0]
-        context = {"theorem_run": run_id, "version": version, "commit": commit}
-        # The snippet takes the target declaration's place in the same file the compile tool checks.
-        measured_code, measured_starts = _measured_snippet(code)
-        built = engine.candidate_file(row, measured_code, version, commit)
-        facts = [_render("scratch_repeat", count=earlier + 1)] if earlier else []
-        code_lines = code.splitlines()
-        declarations = [number for number, line in enumerate(code_lines, 1) if _DECLARATION_START.match(line)]
-        # The prefix goes in front of the snippet as compile's measure does; its lines are mapped back below.
-        inserted = _SNIPPET_PREFIX + (_MEASURE_DEFINITION if measured_starts else "")
-        wrapper_start = built["text"][: built["head"]].count("\n") + 1
-        lean_text = built["text"][: built["head"]] + inserted + built["text"][built["head"] :]
-        output = engine.run_lean(row, built["path"], lean_text, prefix_end=built["head"])
-    except Exception as error:
-        experiments.finish(
-            run_id,
-            experiment_id,
-            code=code,
-            digest=digest,
-            outcome="construction_error",
-            raw=None,
-            rendered=[str(error)],
-            elapsed_ms=experiments.elapsed_since(started),
-            input_ref=accepted["input_ref"],
-            diagnostic=str(error),
             context=context,
         )
-        raise
+        return _read_experiment(run_id, experiment_id)
+    execution["stage"] = "execution"
+    output = engine.run_lean(row, built["path"], lean_text, prefix_end=built["head"])
+    execution["stage"] = "processing"
+    execution["raw"] = None if output is None else output[1]
+    experiments.record_raw(run_id, experiment_id, output, context=context)
     lines: list[str] = []
     heartbeats: dict[int, int] = {}
     errors = warnings = 0
@@ -1900,15 +1979,26 @@ def scratch_tool(theorem: str, run_id: str, request: dict) -> dict:
             tokens = _body_tokens("\n".join(code_lines[start - 1 : end]))
             points = tokens * price_rates["points_per_token"] + hb / 1000 * price_rates["points_per_1k_hb"]
             body.append(_render("scratch_decl_cost", line=start, tokens=tokens, heartbeats=hb, points=round(points, 1)))
+    if output is not None and output[0] != 0 and not errors:
+        errors = 1
+        body.append(_render("scratch_process_failed", returncode=output[0]))
     status = _render("scratch_ok" if output is not None and not errors else "scratch_failed")
     if declarations:
         lines.append(_render("scratch_result_body", status=status, errors=errors, warnings=warnings, tokens=body_total))
     else:
         lines.append(_render("scratch_result", status=status, errors=errors, warnings=warnings))
     lines.extend(body)
-    outcome = "timeout" if output is None else "failure" if errors else "success"
+    outcome = (
+        "cancelled"
+        if _scratch_cancelled(run_id)
+        else "timeout"
+        if output is None
+        else "failure"
+        if errors
+        else "success"
+    )
     lines.append(_render("scratch_experiment", experiment=experiment_id, outcome=outcome))
-    lines.append(_render("scratch_not_promoted", reason="promotion is a later step"))
+    lines.append(_render("scratch_not_promoted", reason=_render("scratch_general_only")))
     raw = None if output is None else output[1]
     experiments.finish(
         run_id,
