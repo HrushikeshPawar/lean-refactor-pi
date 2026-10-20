@@ -4,7 +4,7 @@
 
 **Blocked by:** 04: Isolate actor state and enforce exact ownership
 
-**Status:** ready-for-agent
+**Status:** needs-review
 
 **Branch:** `v8/14-scratch-evidence`
 
@@ -26,12 +26,12 @@
 
 ## What to build and acceptance
 
-- [ ] 1. Persist exact accepted code and experiment identity before context/Lean execution. Preserve Unicode, line endings and whitespace without reconstructed substitutes.
-- [ ] 2. Retain context, actor/call/job references, explicit dependencies, raw/rendered diagnostics, timing and outcome for success, failure, timeout and cancellation.
-- [ ] 3. Expose experiment identity and exact retrieval through normal scratch/read evidence. Historical hash-only records remain explicitly missing code.
-- [ ] 4. Preserve general check/print/example exploration and isolated environments. No hidden declarations survive into another call; reused helpers need explicit references.
-- [ ] 5. Report scratch success separately from target-candidate validity, compatibility and cold status. This slice does not implement promotion.
-- [ ] 6. Use the one assigned fast smoke for this slice. Retain the stated behavior requirements; actual-Pi/real-Lean journeys and the broader race matrix are final E2E coverage, not this ticket's gate.
+- [x] 1. Persist exact accepted code and experiment identity before context/Lean execution. Preserve Unicode, line endings and whitespace without reconstructed substitutes.
+- [x] 2. Retain context, actor/call/job references, explicit dependencies, raw/rendered diagnostics, timing and outcome for success, failure, timeout and cancellation.
+- [x] 3. Expose experiment identity and exact retrieval through normal scratch/read evidence. Historical hash-only records remain explicitly missing code.
+- [x] 4. Preserve general check/print/example exploration and isolated environments. No hidden declarations survive into another call; reused helpers need explicit references.
+- [x] 5. Report scratch success separately from target-candidate validity, compatibility and cold status. This slice does not implement promotion.
+- [x] 6. Use the one assigned fast smoke for this slice. Retain the stated behavior requirements; actual-Pi/real-Lean journeys and the broader race matrix are final E2E coverage, not this ticket's gate.
 
 ## Verify
 
