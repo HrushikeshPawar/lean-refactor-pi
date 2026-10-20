@@ -695,7 +695,7 @@ def events(directory: Path) -> list[dict]:
         fcntl.flock(handle, fcntl.LOCK_SH)
         data = handle.read().decode()
     rows = []
-    for line in data.splitlines():
+    for line in data.split("\n"):
         try:
             rows.append(json.loads(line))
         except json.JSONDecodeError:
