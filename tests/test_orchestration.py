@@ -1,12 +1,13 @@
 """Offline run-control journeys. No provider, Pi, or Lean process."""
 
 import json
+import queue
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from arena import run_control
+from arena import orchestration, pi_rpc, run_control
 
 
 def _request(directory: Path, request_id: str, actor_id: str, job_id: str) -> None:
@@ -295,3 +296,95 @@ class V8ControlSmokeTests(unittest.TestCase):
             self.assertEqual(failure["total"], "0")
             self.assertEqual(failure["accounting"], "unknown")
             self.assertEqual(len(failure["accounting_failures"]), 1)
+
+
+class _HeldChild:
+    def __init__(self):
+        self.order = []
+        self.written = bytearray()
+        self._chunks = queue.Queue()
+
+    def subscribe(self):
+        self.order.append("subscribe")
+
+    def write(self, data: bytes):
+        if self.order != ["subscribe"]:
+            raise RuntimeError("prompt before subscribe")
+        self.order.append("write")
+        self.written += data
+
+    def read(self, _size: int) -> bytes:
+        item = self._chunks.get()
+        return b"" if item is None else item
+
+
+class V8WorkerSmokeTests(unittest.TestCase):
+    def test_v8_one_worker_receipt(self):
+        reader = pi_rpc.FrameReader()
+        text = "line\u2028sep\u2029end"
+        raw = (json.dumps({"type": "response", "data": {"text": text}}, ensure_ascii=False) + "\n").encode()
+        split = raw.index("\u2028".encode()) + 1
+        self.assertEqual(reader.feed(raw[:split]), [])
+        self.assertEqual(reader.feed(raw[split:])[0]["data"]["text"], text)
+        crlf = (json.dumps({"type": "agent_settled", "id": "session-event"}) + "\r\n").encode()
+        self.assertEqual(reader.feed(crlf[:5]), [])
+        self.assertEqual(reader.feed(crlf[5:]), [{"type": "agent_settled", "id": "session-event"}])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            child = _HeldChild()
+            opened = {"count": 0, "receipt": False}
+
+            def open_child():
+                opened["count"] += 1
+                rows = (directory / "control.jsonl").read_text()
+                opened["receipt"] = '"kind":"operation_receipt"' in rows
+                return child
+
+            anchor = {"node": "proof-node", "steps": [1, 2]}
+            call = {
+                "operation_id": "op-fresh",
+                "run_id": "run-1",
+                "actor_id": "sol",
+                "session_id": "sol-session",
+                "task": "try the step",
+                "scope": "step",
+                "anchor": anchor,
+                "open_child": open_child,
+            }
+            receipt = orchestration.delegate(directory, **call)
+            self.assertTrue(opened["receipt"])
+            self.assertEqual(opened["count"], 1)
+            self.assertEqual(child.order, ["subscribe", "write"])
+            self.assertTrue(receipt["ok"])
+            self.assertEqual(receipt["state"], "launching")
+            self.assertEqual(receipt["anchor"], {"node": "proof-node", "steps": [1, 2]})
+            self.assertEqual(receipt["tools"], ["compile", "goal", "search", "read", "scratch"])
+            self.assertNotEqual(receipt["job_id"], receipt["activation_id"])
+            self.assertTrue(orchestration.awaits_settlement(directory, receipt["activation_id"]))
+            again = orchestration.delegate(directory, **call)
+            self.assertEqual(opened["count"], 1)
+            self.assertTrue(again["reused"])
+            self.assertEqual(again["job_id"], receipt["job_id"])
+            conflict = orchestration.delegate(directory, **{**call, "task": "other task"})
+            self.assertEqual(conflict["category"], "operation_conflict")
+            self.assertEqual(opened["count"], 1)
+            anchor["steps"][0] = 9
+            view = orchestration.jobs(directory, [receipt["job_id"]])
+            self.assertEqual(view["jobs"][0]["anchor"]["steps"], [1, 2])
+            self.assertNotEqual(view["jobs"][0]["command_id"], receipt["activation_id"])
+            self.assertIn(view["jobs"][0]["command_id"].encode(), child.written)
+
+            handled = {
+                "type": "response",
+                "id": view["jobs"][0]["command_id"],
+                "command": "prompt",
+                "success": True,
+                "data": {"disposition": "handled"},
+            }
+            child._chunks.put((json.dumps(handled) + "\n").encode())
+            child._chunks.put(None)
+            orchestration.join_activation(receipt["activation_id"])
+            settled = orchestration.jobs(directory, [receipt["job_id"]])["jobs"][0]
+            self.assertEqual(settled["state"], "handled")
+            self.assertFalse(orchestration.awaits_settlement(directory, receipt["activation_id"]))

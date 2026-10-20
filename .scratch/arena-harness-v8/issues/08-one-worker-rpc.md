@@ -4,7 +4,7 @@
 
 **Blocked by:** 04: Isolate actor state and enforce exact ownership; 06: Enforce the stop before every provider dispatch
 
-**Status:** ready-for-agent
+**Status:** needs-review
 
 **Branch:** `v8/08-one-worker-rpc`
 
@@ -26,12 +26,12 @@
 
 ## What to build and acceptance
 
-- [ ] 1. Support proof/step delegation with immutable resolved anchors, actor/job/activation identity, restricted five-tool worker interface and a normal jobs view.
-- [ ] 2. Persist the receipt before launching. Retrying the same operation returns it without spawning another child; mismatched arguments fail explicitly.
-- [ ] 3. Subscribe before dispatch. Distinguish command IDs, prompt dispositions and session events; handled/no-run cannot leave a nonexistent run awaited.
-- [ ] 4. Drain stdout continuously, honor stdin backpressure and keep stderr separate. LF-only framing preserves Unicode separators, chunked UTF-8 and CRLF.
-- [ ] 5. Demonstrate Sol progressing before a delayed worker result. This ticket supports one fresh assignment through settlement, not follow-up/release/recovery combinations.
-- [ ] 6. Use the one assigned fast smoke for this slice. Retain the stated behavior requirements; actual-Pi/real-Lean journeys and the broader race matrix are final E2E coverage, not this ticket's gate.
+- [x] 1. Support proof/step delegation with immutable resolved anchors, actor/job/activation identity, restricted five-tool worker interface and a normal jobs view.
+- [x] 2. Persist the receipt before launching. Retrying the same operation returns it without spawning another child; mismatched arguments fail explicitly.
+- [x] 3. Subscribe before dispatch. Distinguish command IDs, prompt dispositions and session events; handled/no-run cannot leave a nonexistent run awaited.
+- [x] 4. Drain stdout continuously, honor stdin backpressure and keep stderr separate. LF-only framing preserves Unicode separators, chunked UTF-8 and CRLF.
+- [x] 5. Demonstrate Sol progressing before a delayed worker result. This ticket supports one fresh assignment through settlement, not follow-up/release/recovery combinations.
+- [x] 6. Use the one assigned fast smoke for this slice. Retain the stated behavior requirements; actual-Pi/real-Lean journeys and the broader race matrix are final E2E coverage, not this ticket's gate.
 
 ## Verify
 
