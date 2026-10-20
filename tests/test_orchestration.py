@@ -580,6 +580,33 @@ class V8WorkerSmokeTests(unittest.TestCase):
                 children.append((launch, child))
                 return child
 
+            def compile_event(index, launch):
+                attempt_id, proof_id, evaluation_id = f"attempt-{index}", f"proof-{index}", f"eval-{index}"
+                tool_call = f"compile-{index}"
+                (directory / "proofs" / f"{proof_id}.lean").write_text(_PROOF)
+
+                def record(writer):
+                    writer.append_ledger({
+                        "kind": "attempt", "event_id": attempt_id, "proof_id": proof_id,
+                        "tool_call_id": tool_call, "request_id": f"req-{index}",
+                    })
+                    writer.append_ledger({
+                        "kind": "evaluation", "candidate_id": proof_id, "key": evaluation_id, "mode": "fast",
+                        "result": {"ok": True},
+                    })
+
+                run_control.apply_operation(directory, {
+                    "operation_id": f"compile-op-{index}", "kind": "compile", "arguments": {"proof": proof_id},
+                    "run_id": "run-1", "actor_id": launch["env"]["ARENA_ACTOR_ID"],
+                    "session_id": launch["env"]["ARENA_SESSION_ID"],
+                }, record)
+                return {
+                    "type": "tool_execution_end", "toolName": "compile", "toolCallId": tool_call, "isError": False,
+                    "result": {"details": {"ok": True, "items": [{
+                        "ok": True, "status": "closed", "attempts": [{"attempt_id": attempt_id}],
+                    }]}},
+                }
+
             call = {
                 "operation_id": "op-fresh",
                 "run_id": "run-1",
@@ -620,15 +647,7 @@ class V8WorkerSmokeTests(unittest.TestCase):
             self.assertEqual(len(children), 1)
 
             command_id = orchestration.jobs(directory, [fresh["job_id"]])["jobs"][0]["command_id"]
-            candidate = {
-                "type": "tool_result",
-                "name": "compile",
-                "passed": True,
-                "attempt_id": "attempt-1",
-                "proof_id": "proof-1",
-                "evaluation_id": "eval-1",
-                "request_id": "req-1",
-            }
+            candidate = compile_event(1, children[0][0])
             started = {
                 "type": "response",
                 "id": command_id,
@@ -684,6 +703,25 @@ class V8WorkerSmokeTests(unittest.TestCase):
             )
             self.assertTrue(follow["ok"])
             self.assertTrue(follow["resumed"])
+            retry = orchestration.delegate(
+                directory, operation_id="op-follow", run_id="run-1", actor_id="sol", session_id="sol-session",
+                task="narrow the same step", job_id=fresh["job_id"], open_child=open_child,
+            )
+            self.assertTrue(retry["ok"])
+            self.assertTrue(retry["reused"])
+            self.assertEqual(retry["activation_id"], follow["activation_id"])
+            self.assertEqual(len(children), 2)
+            conflicting = orchestration.delegate(
+                directory, operation_id="op-follow", run_id="run-1", actor_id="sol", session_id="sol-session",
+                task="changed retry", job_id=fresh["job_id"], open_child=open_child,
+            )
+            self.assertEqual(conflicting["category"], "operation_conflict")
+            unauthorized = orchestration.delegate(
+                directory, operation_id="op-takeover", run_id="run-1", actor_id="another-worker", session_id="other",
+                task="take over", job_id=fresh["job_id"], open_child=open_child,
+            )
+            self.assertEqual(unauthorized["category"], "invalid_input")
+            self.assertEqual(unauthorized["reason"], "ownership")
             self.assertEqual(follow["job_id"], fresh["job_id"])
             self.assertEqual(follow["session_id"], fresh["session_id"])
             self.assertNotEqual(follow["activation_id"], fresh["activation_id"])
@@ -692,6 +730,7 @@ class V8WorkerSmokeTests(unittest.TestCase):
             self.assertEqual(children[1][0]["env"]["ARENA_ACTIVATION_ID"], follow["activation_id"])
             self.assertEqual(children[1][0]["env"]["ARENA_SESSION_ID"], fresh["session_id"])
             resumed_view = orchestration.jobs(directory, [fresh["job_id"]])["jobs"][0]
+            self.assertTrue(resumed_view["resumed"])
             self.assertEqual(resumed_view["hypothesis"], "try the step")
             self.assertEqual(resumed_view["anchor"], fresh["anchor"])
             self.assertEqual(len(resumed_view["activations"]), 2)
@@ -709,14 +748,7 @@ class V8WorkerSmokeTests(unittest.TestCase):
             self.assertEqual(len(children), 2)
 
             follow_command = resumed_view["command_id"]
-            later = {
-                "type": "candidate",
-                "passed": True,
-                "attempt_id": "attempt-2",
-                "proof_id": "proof-2",
-                "evaluation_id": "eval-2",
-                "request_id": "req-2",
-            }
+            later = compile_event(2, children[1][0])
             follow_child = children[1][1]
             follow_child._chunks.put(
                 (
@@ -750,6 +782,13 @@ class V8WorkerSmokeTests(unittest.TestCase):
             self.assertEqual(exhausted["session_id"], fresh["session_id"])
             self.assertEqual(len(exhausted["findings"]), 2)
             self.assertFalse(run_control.read_state(directory)["stopped"])
+
+            # Replaying a fresh receipt while its follow-up is terminal must
+            # still describe the original completed activation.
+            replay = orchestration.delegate(directory, **call)
+            self.assertEqual(replay["activation_id"], fresh["activation_id"])
+            self.assertEqual(replay["state"], "completed")
+            self.assertFalse(replay["resumed"])
 
             other = orchestration.delegate(
                 directory,

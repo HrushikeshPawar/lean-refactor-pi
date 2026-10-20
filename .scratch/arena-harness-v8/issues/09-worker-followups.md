@@ -4,7 +4,7 @@
 
 **Blocked by:** 08: Delegate one fresh RPC worker asynchronously
 
-**Status:** needs-review
+**Status:** done
 
 **Branch:** `v8/09-worker-followups`
 
@@ -44,6 +44,16 @@ uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_orchestratio
 Expected: the named behavior check passes with no actual provider, Pi or Lean process. Aim for seconds and at most 60 seconds. No per-ticket full suite or slow suite.
 
 **Deferred to final E2E:** Actual Pi saved-session continuation. See the shared [final E2E checklist](../final-e2e.md).
+
+## Review corrections
+
+The original named smoke passed in 0.09s, but used invented `candidate`/`tool_result` stdout events. Publication now consumes Pi 1.3.0's native `tool_execution_end` envelope with `result.details.items`. It joins the current tool call and worker identity to a committed attempt, then links that proof to its passing evaluation. `evaluation_id` is the existing evaluation `key`, not a newly invented identity. Findings are deduplicated per activation/attempt/evaluation, appear in `jobs.events`, and cannot be published after the activation is terminal. The smoke uses that native envelope and durable fake attempt/evaluation records; no real Lean check is claimed.
+
+Follow-up receipt lookup now precedes the busy check under the control lock. Repeated accepted operations return their exact activation, changed arguments conflict, and another actor/run cannot take ownership. Terminal guards and receipt state are activation-specific, so replaying an earlier operation does not return the newer activation's state. A follow-up retains the worker session while recording the requesting Sol session accurately. Job and activation snapshots expose `resumed`.
+
+Verified: `uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_orchestration.py::V8WorkerSmokeTests` passed with 2 tests and 4 subtests in 0.15s; Ruff passed for the touched Python files. Actual Pi saved-session continuation, child-process lifecycle and the broader concurrency matrix remain final E2E coverage.
+
+Scope boundary: `deliver` is an actor-filtered snapshot of durable findings. Committed cursor acknowledgement and event-driven waiting belong to ticket 11. Passing proof publication is implemented here; general scratch evidence remains with the scratch tickets. Neither deferred feature is claimed by this smoke.
 
 ---
 

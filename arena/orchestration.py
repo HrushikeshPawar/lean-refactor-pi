@@ -20,7 +20,6 @@ _readers: dict[str, threading.Thread] = {}
 _readers_guard = threading.Lock()
 _terminal_states = frozenset(("handled", "completed", "failed", "exhausted"))
 _active_states = frozenset(("launching", "queued", "active"))
-_finding_ids = ("attempt_id", "proof_id", "evaluation_id")
 
 
 def _reject(operation_id: str, reason: str, category: str = "invalid_input") -> dict:
@@ -119,6 +118,7 @@ def _activation_view(directory: Path, delegation: dict) -> dict:
         "state": state,
         "task": delegation["task"],
         "command_id": command_id,
+        "resumed": bool(delegation.get("resumed")),
     }
 
 
@@ -153,6 +153,7 @@ def _job_snapshot(directory: Path, job_id: str) -> dict | None:
         "tools": list(original["tools"]),
         "command_id": current["command_id"],
         "task": delegation["task"],
+        "resumed": bool(delegation.get("resumed")),
         "activations": [_activation_view(directory, row) for row in rows],
         "findings": findings,
     }
@@ -175,7 +176,7 @@ def jobs(directory: Path, job_ids: list[str] | None = None) -> dict:
     applicable = [
         row
         for row in _history(directory)
-        if row.get("type") in ("delegation", "assignment_state") and row.get("job_id") in selected
+        if row.get("type") in ("delegation", "assignment_state", "worker_finding") and row.get("job_id") in selected
     ]
     spend = run_control.read_state(directory)
     return {
@@ -190,8 +191,8 @@ def jobs(directory: Path, job_ids: list[str] | None = None) -> dict:
 
 def _record_state(directory: Path, delegation: dict, state: str, **extra) -> None:
     with _readers_guard:
-        snapshot = _job_snapshot(directory, delegation["job_id"])
-        if snapshot is not None and snapshot["state"] in _terminal_states:
+        snapshot = _activation_view(directory, delegation)
+        if snapshot["state"] in _terminal_states:
             return
         _append(
             directory,
@@ -211,21 +212,57 @@ def _record_state(directory: Path, delegation: dict, state: str, **extra) -> Non
         )
 
 
-def _passing_candidate(record: dict) -> bool:
-    if record.get("type") not in ("candidate", "tool_result"):
-        return False
-    if record.get("type") == "tool_result" and record.get("name") not in (None, "compile"):
-        return False
-    return record.get("passed") is True and all(
-        isinstance(record.get(key), str) and record[key] for key in _finding_ids
-    )
+def _compile_findings(directory: Path, delegation: dict, record: dict) -> list[dict]:
+    if record.get("type") != "tool_execution_end" or record.get("toolName") != "compile" or record.get("isError"):
+        return []
+    result = record.get("result")
+    details = result.get("details") if isinstance(result, dict) else None
+    if not isinstance(details, dict) or details.get("ok") is False:
+        return []
+    history = _history(directory)
+    attempts = {row.get("event_id"): row for row in history if row.get("kind") == "attempt"}
+    findings = []
+    for item in details.get("items") or []:
+        if not isinstance(item, dict) or item.get("status") != "closed" or item.get("ok") is False:
+            continue
+        for reference in item.get("attempts") or []:
+            if not isinstance(reference, dict):
+                continue
+            attempt = attempts.get(reference.get("attempt_id"))
+            if attempt is None:
+                continue
+            tool_call = attempt.get("tool_call_id") or (attempt.get("data") or {}).get("tool_call_id")
+            if (
+                not record.get("toolCallId") or tool_call != record["toolCallId"]
+                or attempt.get("actor_id") != delegation["worker_actor_id"]
+                or attempt.get("session_id") != delegation["worker_session_id"]
+            ):
+                continue
+            proof_id = attempt.get("proof_id") or attempt.get("candidate_id")
+            evaluation = next((
+                row for row in reversed(history)
+                if row.get("kind") == "evaluation" and row.get("candidate_id") == proof_id
+                and row.get("key") and (row.get("result") or {}).get("ok") is True
+            ), None)
+            if evaluation is not None:
+                findings.append({
+                    "attempt_id": attempt["event_id"], "proof_id": proof_id,
+                    "evaluation_id": evaluation["key"], "request_id": attempt.get("request_id"),
+                })
+    return findings
 
 
 def _observe_tool(directory: Path, delegation: dict, record: dict) -> bool:
     """Publish a passing candidate at the tool boundary. This does not settle the assignment."""
-    if record.get("type") not in ("candidate", "tool_result"):
+    if record.get("type") != "tool_execution_end":
         return False
-    if _passing_candidate(record):
+    for finding in _compile_findings(directory, delegation, record):
+        if any(
+            row.get("type") == "worker_finding" and row.get("activation_id") == delegation["activation_id"]
+            and row.get("attempt_id") == finding["attempt_id"] and row.get("evaluation_id") == finding["evaluation_id"]
+            for row in _history(directory)
+        ):
+            continue
         _append(
             directory,
             {
@@ -238,10 +275,7 @@ def _observe_tool(directory: Path, delegation: dict, record: dict) -> bool:
                 "session_id": delegation["worker_session_id"],
                 "job_id": delegation["job_id"],
                 "activation_id": delegation["activation_id"],
-                "request_id": record.get("request_id"),
-                "attempt_id": record["attempt_id"],
-                "proof_id": record["proof_id"],
-                "evaluation_id": record["evaluation_id"],
+                **finding,
             },
         )
     return True
@@ -280,7 +314,7 @@ def _apply_record(record: dict, command_id: str, current: dict) -> dict:
 
 def _take(directory: Path, delegation: dict, command_id: str, current: dict, records: list[dict]) -> None:
     for record in records:
-        if _observe_tool(directory, delegation, record):
+        if current["state"] not in _terminal_states and _observe_tool(directory, delegation, record):
             continue
         previous = current["state"]
         _apply_record(record, command_id, current)
@@ -330,14 +364,14 @@ def _write_prompt(transport, payload: bytes) -> None:
 
 
 def _receipt_body(directory: Path, delegation: dict, applied: dict, spend: dict) -> dict:
-    snapshot = _job_snapshot(directory, delegation["job_id"])
+    snapshot = _activation_view(directory, delegation)
     return {
         "ok": True,
         "operation_id": delegation["operation_id"],
         "job_id": delegation["job_id"],
         "activation_id": delegation["activation_id"],
         "session_id": delegation["worker_session_id"],
-        "state": snapshot["state"] if snapshot else "launching",
+        "state": snapshot["state"],
         "scope": delegation["scope"],
         "anchor": delegation["anchor"],
         "tools": list(WORKER_TOOLS),
@@ -358,15 +392,12 @@ def deliver(directory: Path, actor_id: str) -> dict:
     owned = [job for job in view["jobs"] if job.get("actor_id") == actor_id]
     for job in owned:
         original = job["activations"][0]["activation_id"]
-        for finding in job["findings"]:
-            results.append(
-                {
-                    **finding,
-                    "job_id": job["job_id"],
-                    "session_id": job["session_id"],
-                    "resumed": finding.get("activation_id") != original,
-                }
-            )
+        results.extend({
+            **finding,
+            "job_id": job["job_id"],
+            "session_id": job["session_id"],
+            "resumed": finding.get("activation_id") != original,
+        } for finding in job["findings"])
     spend = run_control.read_state(directory)
     return {
         "ok": True,
@@ -430,13 +461,7 @@ def _follow_up(
     job_id: str,
     open_child,
 ) -> dict:
-    original = _job_snapshot(directory, job_id)
-    if original is None:
-        return _reject(operation_id, "job", "not_found")
-    if not _same_anchor(directory, original, scope, anchor):
-        return _reject(operation_id, "anchor")
     activation_id = uuid.uuid4().hex
-    arguments = {"job_id": job_id, "task": task, "actor_id": actor_id, "session_id": session_id}
 
     def mutate(writer) -> list:
         writer.append_ledger({"type": "delegation", **delegation})
@@ -447,14 +472,29 @@ def _follow_up(
             current = _job_snapshot(directory, job_id)
             if current is None:
                 return _reject(operation_id, "job", "not_found")
-            if current["state"] in _active_states:
-                return _reject(operation_id, "active", "busy")
             source = _job_rows(directory, job_id)[0]
+            if run_id != source["run_id"] or actor_id != source["actor_id"]:
+                return _reject(operation_id, "ownership")
+            if not _same_anchor(directory, current, scope, anchor):
+                return _reject(operation_id, "anchor")
+            arguments = {
+                "job_id": job_id,
+                "task": task,
+                "run_id": run_id,
+                "actor_id": actor_id,
+                "session_id": session_id,
+                "scope": source["scope"],
+                "anchor": source["anchor"],
+            }
+            control_rows = run_control._abort_open_intents(directory, run_control._control_rows(directory))
+            existing = run_control._receipt(control_rows, operation_id)
+            if existing is None and current["state"] in _active_states:
+                return _reject(operation_id, "active", "busy")
             delegation = {
                 "operation_id": operation_id,
                 "run_id": source["run_id"],
                 "actor_id": source["actor_id"],
-                "session_id": source["session_id"],
+                "session_id": session_id,
                 "job_id": job_id,
                 "activation_id": activation_id,
                 "worker_session_id": source["worker_session_id"],
@@ -485,6 +525,8 @@ def _follow_up(
         return _reject(operation_id, error.category)
     if not applied.get("ok"):
         return applied
+    if applied.get("status") == "aborted":
+        return {**applied, "ok": False, "category": "operation_aborted"}
     stored = next((row for row in _delegations(directory) if row.get("operation_id") == operation_id), None)
     if stored is None:
         return {**applied, "ok": False, "category": "missing_delegation"}
