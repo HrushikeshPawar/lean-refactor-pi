@@ -13,6 +13,7 @@ from arena.run_control import OperationRejected
 
 _readers: dict[str, threading.Thread] = {}
 _readers_guard = threading.Lock()
+_terminal_states = frozenset(("handled", "completed", "failed"))
 
 
 def _reject(operation_id: str, reason: str) -> dict:
@@ -47,11 +48,15 @@ def _anchor(scope: str, anchor: object) -> dict | str:
 
 
 def _delegations(directory: Path) -> list[dict]:
-    return [row for row in events(directory) if row.get("type") == "delegation"]
+    return [row for row in _history(directory) if row.get("type") == "delegation"]
+
+
+def _history(directory: Path) -> list[dict]:
+    return run_control.published_history(directory, events(directory))
 
 
 def _states(directory: Path) -> list[dict]:
-    return [row for row in events(directory) if row.get("type") == "assignment_state"]
+    return [row for row in _history(directory) if row.get("type") == "assignment_state"]
 
 
 def _job_snapshot(directory: Path, job_id: str) -> dict | None:
@@ -92,7 +97,7 @@ def jobs(directory: Path, job_ids: list[str] | None = None) -> dict:
     selected = {row["job_id"] for row in found}
     applicable = [
         row
-        for row in events(directory)
+        for row in _history(directory)
         if row.get("type") in ("delegation", "assignment_state") and row.get("job_id") in selected
     ]
     spend = run_control.read_state(directory)
@@ -107,35 +112,47 @@ def jobs(directory: Path, job_ids: list[str] | None = None) -> dict:
 
 
 def _record_state(directory: Path, delegation: dict, state: str, **extra) -> None:
-    _append(
-        directory,
-        {
-            "schema_version": run_control.SCHEMA_VERSION,
-            "event_id": uuid.uuid4().hex,
-            "type": "assignment_state",
-            "operation_id": delegation["operation_id"],
-            "run_id": delegation["run_id"],
-            "actor_id": delegation["actor_id"],
-            "session_id": delegation["session_id"],
-            "job_id": delegation["job_id"],
-            "activation_id": delegation["activation_id"],
-            "state": state,
-            **extra,
-        },
-    )
+    with _readers_guard:
+        snapshot = _job_snapshot(directory, delegation["job_id"])
+        if snapshot is not None and snapshot["state"] in _terminal_states:
+            return
+        _append(
+            directory,
+            {
+                "schema_version": run_control.SCHEMA_VERSION,
+                "event_id": uuid.uuid4().hex,
+                "type": "assignment_state",
+                "operation_id": delegation["operation_id"],
+                "run_id": delegation["run_id"],
+                "actor_id": delegation["actor_id"],
+                "session_id": delegation["session_id"],
+                "job_id": delegation["job_id"],
+                "activation_id": delegation["activation_id"],
+                "state": state,
+                **extra,
+            },
+        )
 
 
 def _apply_record(record: dict, command_id: str, current: dict) -> dict:
+    if current["state"] in _terminal_states:
+        return current
     kind = record.get("type")
     if kind == "response" and record.get("id") == command_id:
         data = record.get("data") if isinstance(record.get("data"), dict) else {}
         disposition = data.get("disposition")
-        if disposition == "handled":
+        if record.get("success") is not True:
+            current["state"] = "failed"
+            current["reason"] = "prompt_rejected"
+        elif disposition == "handled":
             current["state"] = "handled"
             current["outcome"] = "no_run"
-        elif disposition in ("started", "queued") and current["state"] not in ("handled", "completed"):
+        elif disposition in ("started", "queued"):
             current["disposition"] = disposition
             current["state"] = "completed" if current.get("saw_settlement") else "active"
+        else:
+            current["state"] = "failed"
+            current["reason"] = "invalid_prompt_disposition"
         return current
     if kind == "agent_settled" and current.get("state") != "handled":
         if current.get("state") == "active":
@@ -158,6 +175,7 @@ def _take(directory: Path, delegation: dict, command_id: str, current: dict, rec
             command_id=command_id,
             outcome=current.get("outcome"),
             disposition=current.get("disposition"),
+            reason=current.get("reason"),
         )
 
 
@@ -175,7 +193,22 @@ def _read_child(directory: Path, delegation: dict, command_id: str, transport, r
                 break
             _take(directory, delegation, command_id, current, reader.feed(chunk))
     except Exception as error:
-        _record_state(directory, delegation, "failed", command_id=command_id, reason=type(error).__name__)
+        if current["state"] not in _terminal_states:
+            _record_state(directory, delegation, "failed", command_id=command_id, reason=type(error).__name__)
+
+
+def _write_prompt(transport, payload: bytes) -> None:
+    offset = 0
+    while offset < len(payload):
+        written = transport.write(payload[offset:])
+        if written is None:
+            break
+        if type(written) is not int or written <= 0 or written > len(payload) - offset:
+            raise OSError("invalid prompt write count")
+        offset += written
+    flush = getattr(transport, "flush", None)
+    if flush is not None:
+        flush()
 
 
 def _receipt_body(directory: Path, delegation: dict, applied: dict, spend: dict) -> dict:
@@ -264,27 +297,34 @@ def delegate(
         return _reject(operation_id, error.category)
     if not applied.get("ok"):
         return applied
-    stored = next(row for row in _delegations(directory) if row.get("operation_id") == operation_id)
+    if applied.get("status") == "aborted":
+        return {**applied, "ok": False, "category": "operation_aborted"}
+    stored = next((row for row in _delegations(directory) if row.get("operation_id") == operation_id), None)
+    if stored is None:
+        return {**applied, "ok": False, "category": "missing_delegation"}
     spend = run_control.read_state(directory)
     if stored["job_id"] != job_id:
         return _receipt_body(directory, stored, {**applied, "reused": True}, spend)
     # The receipt is already durable. Open the reader, then write the prompt.
     command_id = uuid.uuid4().hex
-    transport = open_child()
-    transport.subscribe()
-    ready = threading.Event()
-    thread = threading.Thread(
-        target=_read_child,
-        args=(directory, stored, command_id, transport, ready),
-        daemon=True,
-    )
-    with _readers_guard:
-        _readers[stored["activation_id"]] = thread
-    thread.start()
-    if not ready.wait(5):
-        raise RuntimeError("reader did not start")
-    transport.write(prompt_line(command_id, task))
     _record_state(directory, stored, "launching", command_id=command_id)
+    try:
+        transport = open_child()
+        transport.subscribe()
+        ready = threading.Event()
+        thread = threading.Thread(
+            target=_read_child,
+            args=(directory, stored, command_id, transport, ready),
+            daemon=True,
+        )
+        with _readers_guard:
+            _readers[stored["activation_id"]] = thread
+        thread.start()
+        if not ready.wait(5):
+            raise RuntimeError("reader did not start")
+        _write_prompt(transport, prompt_line(command_id, task))
+    except Exception as error:
+        _record_state(directory, stored, "failed", command_id=command_id, reason=type(error).__name__)
     return _receipt_body(directory, stored, applied, spend)
 
 

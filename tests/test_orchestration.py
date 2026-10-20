@@ -388,3 +388,88 @@ class V8WorkerSmokeTests(unittest.TestCase):
             settled = orchestration.jobs(directory, [receipt["job_id"]])["jobs"][0]
             self.assertEqual(settled["state"], "handled")
             self.assertFalse(orchestration.awaits_settlement(directory, receipt["activation_id"]))
+
+        # A child may answer before write returns. Exercise both event orders,
+        # including a rejected prompt that never has an agent_settled event.
+        scenarios = (
+            ("started", False, "completed"),
+            ("queued", True, "completed"),
+            ("handled", False, "handled"),
+            ("rejected", False, "failed"),
+        )
+        for disposition, settle_first, expected in scenarios:
+            with self.subTest(disposition=disposition), tempfile.TemporaryDirectory() as tmp:
+                directory = Path(tmp)
+                child = _HeldChild()
+
+                def immediate_write(data):
+                    child.written.extend(data)
+                    command = json.loads(data)
+                    response = {
+                        "type": "response", "id": command["id"], "command": "prompt",
+                        "success": disposition != "rejected",
+                        "data": {"disposition": disposition},
+                    }
+                    records = [response]
+                    if expected == "completed":
+                        records.insert(0 if settle_first else 1, {"type": "agent_settled"})
+                    records.append({
+                        "type": "response", "id": command["id"], "success": True,
+                        "data": {"disposition": "started"},
+                    })
+                    child._chunks.put(b"".join((json.dumps(row) + "\n").encode() for row in records))
+                    child._chunks.put(b"invalid late stdout\n")
+                    child._chunks.put(None)
+                    activation = orchestration.jobs(directory)["jobs"][0]["activation_id"]
+                    orchestration.join_activation(activation)
+
+                child.write = immediate_write
+                result = orchestration.delegate(directory, **{
+                    **call, "anchor": {"node": "proof-node", "steps": [1, 2]}, "open_child": lambda: child,
+                })
+                self.assertEqual(result["state"], expected)
+                self.assertFalse(orchestration.awaits_settlement(directory, result["activation_id"]))
+                retry = orchestration.delegate(directory, **{
+                    **call, "anchor": {"node": "proof-node", "steps": [1, 2]}, "open_child": lambda: self.fail("respawn"),
+                })
+                self.assertEqual(retry["state"], expected)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+
+            def broken_child():
+                raise OSError("cannot open child")
+
+            result = orchestration.delegate(directory, **{
+                **call, "anchor": {"node": "proof-node", "steps": [1, 2]}, "open_child": broken_child,
+            })
+            self.assertEqual(result["state"], "failed")
+            self.assertFalse(orchestration.awaits_settlement(directory, result["activation_id"]))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            child = _HeldChild()
+            flushed = []
+
+            def partial_write(data):
+                size = min(7, len(data))
+                child.written.extend(data[:size])
+                return size
+
+            child.write = partial_write
+            child.flush = lambda: flushed.append(True)
+            result = orchestration.delegate(directory, **{
+                **call, "anchor": {"node": "proof-node", "steps": [1, 2]}, "open_child": lambda: child,
+            })
+            self.assertEqual(json.loads(child.written)["message"], "try the step")
+            self.assertEqual(flushed, [True])
+            child._chunks.put(None)
+            orchestration.join_activation(result["activation_id"])
+            self.assertEqual(orchestration.jobs(directory)["jobs"][0]["state"], "failed")
+
+            # Interrupted ledger writes are not published without their receipt.
+            with (directory / "ledger.jsonl").open("a") as ledger:
+                ledger.write(json.dumps({
+                    "type": "delegation", "operation_id": "uncommitted", "job_id": "phantom",
+                }) + "\n")
+            self.assertEqual(len(orchestration.jobs(directory)["jobs"]), 1)
