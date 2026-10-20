@@ -4,7 +4,7 @@
 
 **Blocked by:** 10: Admit two workers and cancel stale work cleanly
 
-**Status:** needs-review
+**Status:** done
 
 **Branch:** `v8/12-process-recovery`
 
@@ -44,6 +44,27 @@ uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_orchestratio
 Expected: the named behavior check passes with no actual provider, Pi or Lean process. Aim for seconds and at most 60 seconds. No per-ticket full suite or slow suite.
 
 **Deferred to final E2E:** Actual coordinator death and OS process-group cleanup. See the shared [final E2E checklist](../final-e2e.md).
+
+
+## Review corrections and closure
+
+The original named smoke passed in 0.11s, but source review and an injected post-spawn crash reproduced two children with recovery incorrectly reporting `running`. Review also found missing production startup/transport wiring, historical settled dispatches remaining uncertain, absent generation propagation, skipped terminal slots, lost queued launchers, old-reader mutation races, and unchecked late-evidence attribution. These were implementation defects, rather than deferred real-Pi coverage.
+
+Recovery is now serialized against launch and other reconciliation calls. An intent without a spawned identity or explicit never-spawned evidence remains fenced. Every occupied activation, including terminal ones, is reconciled; queued jobs regain their launch adapter. Confirmed group absence and known request coverage are required before replacement. Unknown usage keeps the fence; known settlement closes the uncertainty without adding estimates or changing spend. The current generation is committed before replacement prompts, and old readers cannot change state or release ownership across transport/generation boundaries. Committed stops suppress replacement.
+
+The runner-owned coordinator invokes reconciliation before exposing management or launching Sol. Production adapters implement RPC pipes and injected process inspection/signalling. Creation identity includes boot identity and start ticks, plus process group, run, generation and session validation. A reused PID is not signalled. A missing leader does not prove group absence, and a still-live identified leader that left its old group remains unknown. Both Sol and worker launches receive the admitted generation. A startup with unresolved ownership or requests refuses with `recovery_required`.
+
+Late findings require a committed passing evaluation and an exact attempt with matching actor, session, activation and generation. Construction records now retain these available worker identities without changing proof/derivation content or its digest. Invalid or foreign evidence cannot be published against an old activation. The previous verification smoke class was also restored after `vpx` accidentally nested its test under the recovery fixture.
+
+Verified with one focused combined check:
+
+```bash
+UV_CACHE_DIR=/tmp/arena-uv-cache uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_orchestration.py::V8RecoverySmokeTests tests/test_orchestration.py::V8VerificationSmokeTests tests/test_orchestration.py::V8WorkerSmokeTests tests/test_recovery_runtime.py tests/test_coordinator_wait.py tests/test_verification_wait.py
+```
+
+Result: **12 tests and 4 subtests passed in 1.05s**. Scoped access was required only for local Unix socket binding blocked by the sandbox. A subsequent narrow pipe-cleanup correction preserves buffered stdout until reader EOF while closing stdin after confirmed process absence; the four runtime tests passed in 0.11s, including retained late bytes. Scoped Ruff passed. Independent review confirmed the queued-launcher, stale-reader, attribution and pipe-drain fixes and found no remaining blocker.
+
+All process inspection, signalling and spawn outcomes were injected. No live `/proc`, real Pi, Lean, or provider process was used in the tests. Actual coordinator death, OS group cleanup, real Pi session resumption and the broader crash/race matrix remain final E2E coverage. Ticket 13 was not changed. Reviewer marks ticket 12 **done**.
 
 ---
 
