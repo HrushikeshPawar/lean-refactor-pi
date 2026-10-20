@@ -4,7 +4,7 @@
 
 **Blocked by:** None (no additional logical prerequisite).
 
-**Status:** needs-review
+**Status:** done
 
 **Branch:** `v8/07-cap-assurance`
 
@@ -44,6 +44,15 @@ uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_models.py::M
 Expected: the named behavior check passes with no actual provider, Pi or Lean process. Aim for seconds and at most 60 seconds. No per-ticket full suite or slow suite.
 
 **Deferred to final E2E:** Live provider catalog confirmation and owner production go/no-go. See the shared [final E2E checklist](../final-e2e.md).
+
+## Review corrections
+
+- Exposure requires a witness that fits configured output/context limits. One valid witness remains sufficient when another model's limit is missing; an infeasible 100K-input illustration cannot establish exposure.
+- Decimal values stay unrounded through classification. Display illustrations retain four places, and `exposure_witness` retains the exact amount used for the decision.
+- Local catalog comparison runs with the default home as well as explicit fixture homes. Per-model evidence distinguishes missing catalogs/models and configured registrations; partial coverage never becomes a global price match.
+- Configuration identity covers the complete supplied configuration, including provider defaults and optional tiers. Catalog evidence has a separate identity; configured concurrency remains explicitly an assumption.
+- `assured` is reserved for a complete audited bound and is not a promised result of this implementation. Current results remain `exposed` or `not_established`, with owner go/no-go required and no runtime policy changes.
+- The assigned offline smoke covers these boundaries. Catalog, output-cost and context checks are separate helpers; no paid calls, Pi, Lean or broad tests were run.
 
 ---
 

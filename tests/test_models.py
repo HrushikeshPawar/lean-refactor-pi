@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from arena import models
 
@@ -75,6 +76,25 @@ class ModelConfigTests(unittest.TestCase):
             missing = copy.deepcopy(GOOD)
             del missing["models"]["gpt-6.1-sol"]["request_output_tokens"]
             gap = models.cap_exposure_report(missing, home=home)
+            too_small = copy.deepcopy(GOOD)
+            too_small["models"]["gpt-6.1-sol"]["context_window"] = 100_000
+            infeasible = models.cap_exposure_report(too_small, home=home)
+            self.assertEqual(infeasible["status"], "not_established")
+            precise = copy.deepcopy(GOOD)
+            precise["models"]["gpt-6.1-sol"]["price"]["input"] = 1.8001
+            precise_report = models.cap_exposure_report(precise, home=home)
+            self.assertEqual(precise_report["status"], "exposed")
+            self.assertEqual(precise_report["exposure_witness"]["usd"], "0.50001")
+            missing_worker = copy.deepcopy(GOOD)
+            del missing_worker["models"]["deepseek-v4.1-flash"]["request_output_tokens"]
+            self.assertEqual(models.cap_exposure_report(missing_worker, home=home)["status"], "exposed")
+            sol = GOOD["models"]["gpt-6.1-sol"]
+            catalog = {sol.get("id", "gpt-6.1-sol"): {"cost": models._camelize(sol["price"])}}
+            with patch.object(
+                models, "pi_catalog", side_effect=lambda provider, _home: catalog if provider == "openai" else {}
+            ):
+                partial = models.cap_exposure_report(GOOD, home=home)
+            self.assertEqual(partial["catalog_parity"], "not_compared")
         self.assertEqual(report["status"], "exposed")
         self.assertTrue(report["owner_go_nogo_required"])
         self.assertIsNone(report["worst_case_bound_usd"])
