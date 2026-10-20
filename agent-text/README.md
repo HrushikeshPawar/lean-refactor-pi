@@ -340,6 +340,9 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/tools.try_timeout` | 2 | Tool replies | when the matching tool result occurs |
 | `skill/SKILL` | 155 | Agent skill instructions | once per run |
 | `skill/lean-facts` | 137 | Agent skill instructions | once per run |
+| `tools/await_results.description` | 26 | Model tool definitions | every request |
+| `tools/await_results.params.cursor` | 11 | Model tool definitions | every request |
+| `tools/await_results.params.job_ids` | 12 | Model tool definitions | every request |
 | `tools/compile.description` | 29 | Model tool definitions | every request |
 | `tools/compile.params.base` | 6 | Model tool definitions | every request |
 | `tools/compile.params.check` | 11 | Model tool definitions | every request |

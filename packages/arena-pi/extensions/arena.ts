@@ -111,7 +111,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
   // Model-facing trimming of tool results; its record of what the model has seen resets on compaction.
   const trimmer = new ResultTrimmer();
 
-  async function campaign(action: string, args: string[] = []): Promise<Record<string, any>> {
+  async function campaign(action: string, args: string[] = [], signal?: AbortSignal): Promise<Record<string, any>> {
     if (!active || !runId) throw new Error("Arena run is not selected"); // not-model-facing: internal extension state invariant.
     const commandFailed = await renderText("messages/errors.command_failed");
     const command = ["run", "--no-sync", "arena", "protocol", action,
@@ -127,7 +127,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
         if (store.requestId !== undefined) env.ARENA_REQUEST_ID = store.requestId;
         env.ARENA_TURN = String(store.turn);
       }
-      const child = spawn("uv", command, { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] });
+      const child = spawn("uv", command, { cwd: root, env, signal, stdio: ["ignore", "pipe", "pipe"] });
       const chunks: Buffer[] = [];
       const errors: Buffer[] = [];
       child.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
@@ -776,6 +776,28 @@ export default async function arenaExtension(pi: ExtensionAPI) {
       return invokeTool("scratch", params, Object.keys(scratchParams.properties));
     },
   });
+
+  if (!workerTheorem) {
+    const waitParams = Type.Object({
+      cursor: Type.Optional(Type.String({ description: await renderText("tools/await_results.params.cursor") })),
+      job_ids: Type.Optional(Type.Array(Type.String(), {
+        description: await renderText("tools/await_results.params.job_ids") })),
+    });
+    await registerTool({ name: "await_results", label: "await_results",
+      description: await renderText("tools/await_results.description"), parameters: waitParams,
+      async execute(_id: string, params: Record<string, unknown>, signal?: AbortSignal) {
+        const directory = await mkdtemp(resolve(tmpdir(), "arena-wait-"));
+        try {
+          const file = resolve(directory, "request.json");
+          await writeFile(file, JSON.stringify(params), "utf8");
+          const result = await campaign("await_results", ["--request-file", file], signal);
+          return { isError: result.ok === false, content: [{ type: "text", text: JSON.stringify(result) }], details: result };
+        } finally {
+          await rm(directory, { recursive: true, force: true });
+        }
+      },
+    });
+  }
 
   pi.on("agent_before_settle", async event => {
     if (process.env.ARENA_AUTOCONTINUE !== "1" || !active || !runId) return;

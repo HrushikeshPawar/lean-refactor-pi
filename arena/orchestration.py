@@ -31,7 +31,6 @@ _active_states = frozenset(("launching", "queued", "active"))
 _live_states = frozenset(("queued", "launching", "active", "cancelling"))
 _interest = threading.Condition()
 _epoch = 0
-_registered = threading.Event()
 _terminal_checks = frozenset(("passed", "proof_error", "inconclusive"))
 
 
@@ -924,8 +923,9 @@ def _open_checks(directory: Path, job_ids: list[str] | None) -> bool:
         evaluation_id = row.get("evaluation_id")
         if not job_id or not evaluation_id or (job_ids is not None and job_id not in job_ids):
             continue
-        latest[(job_id, evaluation_id)] = row.get("state") or ""
-    return any(state == "running" for state in latest.values())
+        execution = row.get("check_id") or f"legacy:{job_id}:{evaluation_id}"
+        latest[(job_id, execution)] = row.get("state") or ""
+    return any(state in {"queued", "running"} for state in latest.values())
 
 
 def _reader_can_emit(activation_id: str) -> bool:
@@ -963,7 +963,7 @@ def _public_event(row: dict) -> dict:
         for key in (
             "event_id", "job_id", "activation_id", "state", "attempt_id", "proof_id",
             "evaluation_id", "request_id", "run_id", "actor_id", "session_id",
-            "operation_id", "reason", "outcome",
+            "operation_id", "reason", "outcome", "check_id", "attempt_ids",
         )
         if row.get(key) is not None
     }
@@ -1063,35 +1063,36 @@ def note_verification(
     run_id: str,
     actor_id: str,
     session_id: str,
+    check_id: str | None = None,
+    proof_id: str | None = None,
+    attempt_ids: list[str] | None = None,
 ) -> dict:
-    """Record a submitted check. `running` keeps the job able to wake a waiter."""
-    if state not in {"running", *_terminal_checks}:
+    """Publish one execution's lifecycle, separately from its reusable evaluation key."""
+    if state not in {"queued", "running", *_terminal_checks}:
         return _reject("", "verification_state")
     if not job_id or not evaluation_id or not run_id or not actor_id or not session_id:
         return _reject("", "identity")
-    arguments = {"job_id": job_id, "evaluation_id": evaluation_id, "state": state}
+    check_id = check_id or f"legacy:{job_id}:{evaluation_id}"
+    arguments = {"job_id": job_id, "evaluation_id": evaluation_id, "check_id": check_id,
+                 "state": state, "proof_id": proof_id, "attempt_ids": sorted(attempt_ids or [])}
     operation_id = run_control.argument_digest(arguments)[:32]
 
     def mutate(ctx):
-        return [ctx.append_ledger({
-            "type": "verification", "job_id": job_id, "evaluation_id": evaluation_id, "state": state,
-        })]
+        return [ctx.append_ledger({"type": "verification", **arguments})]
 
     applied = run_control.apply_operation(
         directory,
-        {
-            "operation_id": operation_id,
-            "kind": "verification",
-            "arguments": arguments,
-            "run_id": run_id,
-            "actor_id": actor_id,
-            "session_id": session_id,
-            "job_id": job_id,
-        },
+        {"operation_id": operation_id, "kind": "verification", "arguments": arguments,
+         "run_id": run_id, "actor_id": actor_id, "session_id": session_id, "job_id": job_id},
         mutate,
     )
     _wake()
     return applied
+
+
+def wake_waiters() -> None:
+    """Wake waiters after their cancellation events have been set."""
+    _wake()
 
 
 def await_results(
@@ -1100,6 +1101,7 @@ def await_results(
     actor_id: str,
     cursor: str | None = None,
     job_ids: list[str] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> dict:
     """Return retained evidence or no_pending_work. Waiting performs no provider request."""
     if not actor_id:
@@ -1108,36 +1110,39 @@ def await_results(
         not isinstance(job_ids, list) or not all(isinstance(item, str) and item for item in job_ids)
     ):
         return _reject("", "job_ids")
-    notifications_available = run_control.ensure_directory_watch(directory)
-    _registered.clear()
-    while True:
-        with run_control.control_lock(directory):
-            acked = _acked(directory, actor_id, cursor)
-            if acked is None:
-                return _reject("", "cursor")
-            fresh = [
-                row for row in _wait_rows(directory)
-                if row.get("event_id") and row["event_id"] not in acked and _selectable(row, job_ids)
-            ]
-            if fresh:
-                return _commit_delivery(directory, actor_id, fresh, acked, job_ids=job_ids,
-                                        wake_reason="run_stopped" if _spend(directory)["stopped"] else None)
-            if _spend(directory)["stopped"]:
-                return _commit_delivery(directory, actor_id, [], acked,
-                                        wake_reason="run_stopped", job_ids=job_ids)
-            if not _has_producer(directory, job_ids):
-                stale = any(job["state"] in _live_states for job in _selected_jobs(directory, job_ids))
-                return _commit_delivery(directory, actor_id, [], acked, wake_reason="no_pending_work",
-                                        job_ids=job_ids, reason="recovery_required" if stale else None)
-            if not notifications_available:
-                return {**_reject("", "notification_unavailable", "notification_unavailable"), "retryable": True}
+    with run_control.watch_directory(directory) as watch:
+        while True:
+            with run_control.control_lock(directory):
+                if cancel_event is not None and cancel_event.is_set():
+                    return {**_reject("", "wait_cancelled", "cancelled"), "retryable": True}
+                acked = _acked(directory, actor_id, cursor)
+                if acked is None:
+                    return _reject("", "cursor")
+                fresh = [
+                    row for row in _wait_rows(directory)
+                    if row.get("event_id") and row["event_id"] not in acked and _selectable(row, job_ids)
+                ]
+                if fresh:
+                    return _commit_delivery(directory, actor_id, fresh, acked, job_ids=job_ids,
+                                            wake_reason="run_stopped" if _spend(directory)["stopped"] else None)
+                if _spend(directory)["stopped"]:
+                    return _commit_delivery(directory, actor_id, [], acked,
+                                            wake_reason="run_stopped", job_ids=job_ids)
+                if not _has_producer(directory, job_ids):
+                    stale = any(job["state"] in _live_states for job in _selected_jobs(directory, job_ids))
+                    return _commit_delivery(directory, actor_id, [], acked, wake_reason="no_pending_work",
+                                            job_ids=job_ids, reason="recovery_required" if stale else None)
+                with _interest:
+                    if not watch.available:
+                        return {**_reject("", "notification_unavailable", "notification_unavailable"),
+                                "retryable": True}
+                    if cancel_event is not None and cancel_event.is_set():
+                        return {**_reject("", "wait_cancelled", "cancelled"), "retryable": True}
+                    seen = _epoch
             with _interest:
-                seen = _epoch
-        with _interest:
-            if _epoch != seen:
-                continue
-            _registered.set()
-            _interest.wait()
+                if _epoch != seen:
+                    continue
+                _interest.wait()
 
 
 def awaits_settlement(directory: Path, activation_id: str) -> bool:

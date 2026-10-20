@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -1924,6 +1925,53 @@ def _verification_outcome(result: dict) -> str:
     return "inconclusive"
 
 
+def _verification_owners(directory: Path, proof_id: str) -> list[dict]:
+    """Join exact proof attempts to their durable worker assignment, never their parents."""
+    from arena.run_control import published_history
+
+    history = published_history(directory, events(directory))
+    assignments = [item for item in history if item.get("type") == "delegation"]
+    owners = {}
+    for attempt in history:
+        if attempt.get("kind") != "attempt" or (attempt.get("proof_id") or attempt.get("candidate_id")) != proof_id:
+            continue
+        for assignment in assignments:
+            if (attempt.get("actor_id"), attempt.get("session_id")) != (
+                assignment.get("worker_actor_id"), assignment.get("worker_session_id"),
+            ):
+                continue
+            job_id = assignment["job_id"]
+            owner = owners.setdefault(job_id, {
+                "job_id": job_id, "actor_id": attempt["actor_id"], "session_id": attempt["session_id"],
+                "run_id": assignment["run_id"], "proof_id": proof_id, "attempt_ids": [],
+            })
+            if attempt.get("event_id") and attempt["event_id"] not in owner["attempt_ids"]:
+                owner["attempt_ids"].append(attempt["event_id"])
+    return list(owners.values())
+
+
+def _queue_full_check(directory: Path, run_id: str, proof_id: str) -> list[dict]:
+    from arena import orchestration
+
+    with _candidate_lock(directory, proof_id):
+        key = _evaluation_key(proof_id, "full", problem(events(directory)[0]["theorem"]))
+        rows = [item for item in orchestration._history(directory)
+                if item.get("type") == "verification" and item.get("proof_id") == proof_id
+                and item.get("evaluation_id") == key]
+        latest = {}
+        for item in rows:
+            execution = item.get("check_id") or f"legacy:{item['job_id']}:{key}"
+            latest[(item["job_id"], execution)] = {**item, "check_id": execution}
+        pending = [item for item in latest.values() if item["state"] in {"queued", "running"}]
+        check_id = pending[0]["check_id"] if pending else uuid.uuid4().hex
+        checks = [{**owner, "check_id": check_id, "evaluation_id": key}
+                  for owner in _verification_owners(directory, proof_id) if owner["run_id"] == run_id]
+        for check in checks:
+            if not any(item["job_id"] == check["job_id"] for item in pending):
+                orchestration.note_verification(directory, **check, state="queued")
+        return checks
+
+
 def record_evaluation(
     name: str,
     run_id: str,
@@ -1939,6 +1987,7 @@ def record_evaluation(
     precomputed: dict | None = None,
     operation: dict | None = None,
     named_parent: str | object | None = _NAMED_PARENT_UNSET,
+    verification_checks: list[dict] | None = None,
 ) -> dict:
     """Record a candidate and its evaluation. `precomputed` is a result the caller already
     compiled for this exact proof and mode; `trigger` says whether the model or the
@@ -2019,26 +2068,28 @@ def record_evaluation(
         prior = next(
             (item for item in reversed(history) if item.get("kind") == "evaluation" and item["key"] == key), None
         )
-        verification = None
+        if prior and _verification_outcome(prior["result"]) == "inconclusive":
+            prior = None
+        checks = list(verification_checks or [])
+        if not prior and not checks:
+            job_id = operation.get("job_id") if isinstance(operation, dict) else None
+            job_id = job_id or os.environ.get("ARENA_JOB_ID")
+            if job_id:
+                checks = [{"job_id": job_id, "check_id": uuid.uuid4().hex, "evaluation_id": key,
+                           "proof_id": candidate_id, "run_id": run_id,
+                           "actor_id": os.environ.get("ARENA_ACTOR_ID") or "sol",
+                           "session_id": os.environ.get("ARENA_SESSION_ID") or run_id}]
+        if checks:
+            from arena import orchestration
+
+            for check in checks:
+                orchestration.note_verification(directory, **check, state="running")
         try:
             if prior:
                 result = json.loads(json.dumps(prior["result"]))
             elif precomputed is not None:
                 result = precomputed
             else:
-                job_id = operation.get("job_id") if isinstance(operation, dict) else None
-                job_id = job_id or os.environ.get("ARENA_JOB_ID")
-                if job_id:
-                    from arena import orchestration
-
-                    verification = {
-                        "job_id": job_id,
-                        "evaluation_id": key,
-                        "run_id": run_id,
-                        "actor_id": os.environ.get("ARENA_ACTOR_ID") or "sol",
-                        "session_id": os.environ.get("ARENA_SESSION_ID") or run_id,
-                    }
-                    orchestration.note_verification(directory, **verification, state="running")
                 try:
                     lean_lock_started = time.monotonic()
                     with lean_lock(directory, lane):
@@ -2081,11 +2132,11 @@ def record_evaluation(
                     },
                 )
         except BaseException:
-            if verification is not None:
-                orchestration.note_verification(directory, **verification, state="inconclusive")
+            for check in checks:
+                orchestration.note_verification(directory, **check, state="inconclusive")
             raise
-        if verification is not None:
-            orchestration.note_verification(directory, **verification, state=_verification_outcome(result))
+        for check in checks:
+            orchestration.note_verification(directory, **check, state=_verification_outcome(result))
     if lane == "model" and trigger == "model" and not prior:
         _check_breaker(directory)
     location = materialize(name, run_id, proof) if materialize_live and result.get("tokens") is not None else {}
@@ -2195,6 +2246,9 @@ def record_evaluation(
                 "filed": newly_filed,
             },
         )
+    if (mode == "fast" and origin != "reference" and _verification_outcome(result) == "passed"
+            and any(job["id"] == candidate_id for job in _autocheck_jobs(_summaries(events(directory))))):
+        _queue_full_check(directory, run_id, candidate_id)
     return reply
 
 
@@ -3291,6 +3345,20 @@ def _autocheck_jobs(rows: list[dict], closing: bool = False) -> list[dict]:
     return sorted(jobs, key=lambda r: (r["score"] if r["score"] is not None else float("-inf"), r["n"]), reverse=True)
 
 
+def _submitted_full_jobs(directory: Path, history: list[dict], rows: list[dict], closing: bool) -> list[dict]:
+    from arena.run_control import published_history
+
+    latest = {}
+    for event in published_history(directory, history):
+        if event.get("type") == "verification" and event.get("proof_id"):
+            execution = event.get("check_id") or f"legacy:{event['job_id']}:{event['evaluation_id']}"
+            latest[(event["job_id"], execution)] = event
+    pending = {event["proof_id"] for event in latest.values() if event["state"] == "queued"}
+    selected = _autocheck_jobs(rows, closing=closing)
+    ids = {row["id"] for row in selected}
+    return selected + [row for row in rows if row["id"] in pending and row["id"] not in ids]
+
+
 def _step_goal_jobs(history: list[dict], directory: Path) -> list[str]:
     """Proof ids whose closed or sketch states have no terminal step-goal event."""
     done = {
@@ -3644,9 +3712,11 @@ def _run_assembly(name: str, run_id: str, sketch: Node) -> None:
 
 def _run_full_check(name: str, run_id: str, job: dict) -> str:
     directory = run_dir(run_id)
+    checks = _queue_full_check(directory, run_id, job["id"])
     try:
         proof = (directory / "proofs" / f"{job['id']}.lean").read_text()
-        record_evaluation(name, run_id, proof, "full", materialize_live=False, lane="batch", trigger="auto")
+        record_evaluation(name, run_id, proof, "full", materialize_live=False, lane="batch", trigger="auto",
+                          verification_checks=checks)
     except Exception as error:  # record the failure so the queue moves on
         _append(
             directory,
@@ -3659,6 +3729,10 @@ def _run_full_check(name: str, run_id: str, job: dict) -> str:
                 "result": {"ok": False, "mode": "full", "error": str(error)[:300], "compat": {}},
             },
         )
+        from arena import orchestration
+
+        for check in checks:
+            orchestration.note_verification(directory, **check, state="inconclusive")
     write_state(run_id)
     return f"#{job['n']}"
 
@@ -3767,7 +3841,7 @@ def _autocheck_impl(
             if kinds is not None:
                 order = tuple(kind for kind in order if kind in kinds)
             jobs_by_kind = {
-                "full": _autocheck_jobs(_summaries(history), closing=closing),
+                "full": _submitted_full_jobs(directory, history, _summaries(history), closing=closing),
                 "salvage": _salvage_jobs(history, directory, projection),
                 "assembly": _assembly_jobs(history, directory, projection),
                 "step_goals": _step_goal_jobs(history, directory) if not closing else [],

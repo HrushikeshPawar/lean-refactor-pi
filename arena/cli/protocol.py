@@ -13,7 +13,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
-from arena import orchestration
+from arena import coordinator
 from arena import reply as tool_reply
 from arena import tools as v7_tools
 from arena.campaign import (
@@ -104,7 +104,7 @@ def run(args: SimpleNamespace) -> dict:
             if not isinstance(request, dict):
                 raise ValueError("request-file must contain an object")
         # A normal tool result. no_pending_work continues the turn; it does not finish or delegate.
-        return orchestration.await_results(
+        return coordinator.await_results(
             run_dir(args.run_id),
             actor_id=os.environ.get("ARENA_ACTOR_ID") or request.get("actor_id") or "sol",
             cursor=request.get("cursor"),

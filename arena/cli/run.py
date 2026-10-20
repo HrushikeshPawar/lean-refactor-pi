@@ -24,6 +24,7 @@ from arena import lean_health, lean_session, text
 from arena import models as model_config
 from arena.campaign import _runtime_event, autocheck, init, packet, run_dir, submission, write_state
 from arena.cli import live
+from arena.coordinator import Coordinator
 from arena.engine import ROOT
 from arena.provenance import code_version
 from arena.seed import check_seed, prior_work, read_seed_proof, start_from_proof
@@ -781,7 +782,7 @@ def run(options: RunOptions) -> int:
 
     for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(number, interrupt)
-    with event_log.open("a") as output, live_view(args, directory, health, worker):
+    with Coordinator(directory), event_log.open("a") as output, live_view(args, directory, health, worker):
         model_phase_id = f"model:{os.getpid()}:{time.monotonic_ns()}"
         process = subprocess.Popen(
             command,

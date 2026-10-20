@@ -1,5 +1,6 @@
 """Offline run-control journeys. No provider, Pi, or Lean process."""
 
+import contextlib
 import hashlib
 import importlib.util
 import json
@@ -1127,7 +1128,7 @@ class V8WorkerSmokeTests(unittest.TestCase):
                     directory, actor_id=actor_id, cursor=cursor, job_ids=[fresh["job_id"]],
                 )
 
-            with patch.object(run_control, "ensure_directory_watch", return_value=False):
+            with patch.object(run_control, "watch_directory", return_value=contextlib.nullcontext(SimpleNamespace(available=False))):
                 sol = await_actor("sol")
             first_cursor = sol["next_cursor"]
             other = await_actor("planner")
@@ -1136,7 +1137,7 @@ class V8WorkerSmokeTests(unittest.TestCase):
             self.assertEqual(sol["events"][0]["request_id"], "req-wait")
             self.assertEqual([event["event_id"] for event in other["events"]], [finding_id])
             self.assertNotEqual(sol["next_cursor"], other["next_cursor"])
-            with patch.object(run_control, "ensure_directory_watch", return_value=False):
+            with patch.object(run_control, "watch_directory", return_value=contextlib.nullcontext(SimpleNamespace(available=False))):
                 unavailable = await_actor("sol", sol["next_cursor"])
             self.assertFalse(unavailable["ok"])
             self.assertEqual(unavailable["category"], "notification_unavailable")
@@ -1200,7 +1201,7 @@ class V8WorkerSmokeTests(unittest.TestCase):
                 finished = await_actor("sol", finished["next_cursor"])
             self.assertEqual(finished["wake_reason"], "no_pending_work")
             self.assertEqual(finished["events"], [])
-            with patch.object(run_control, "ensure_directory_watch", return_value=False):
+            with patch.object(run_control, "watch_directory", return_value=contextlib.nullcontext(SimpleNamespace(available=False))):
                 self.assertEqual(await_actor("sol")["wake_reason"], "no_pending_work")
             self.assertEqual(len(orchestration.jobs(directory)["jobs"]), 1)
             self.assertFalse(run_control.read_state(directory)["stopped"])
@@ -1209,7 +1210,9 @@ class V8WorkerSmokeTests(unittest.TestCase):
             spec = importlib.util.spec_from_file_location("await_protocol", protocol_path)
             await_protocol = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(await_protocol)
-            with patch.object(await_protocol, "run_dir", return_value=directory):
+            from arena.coordinator import Coordinator
+
+            with Coordinator(directory), patch.object(await_protocol, "run_dir", return_value=directory):
                 continued = await_protocol.run(SimpleNamespace(
                     action="await_results", theorem="demo", run_id="run-1", request_file=None,
                     max_seconds=None, spent_usd=None, cap_usd=None,
@@ -1222,14 +1225,19 @@ class V8WorkerSmokeTests(unittest.TestCase):
                 directory, job_id=fresh["job_id"], evaluation_id="check-wait", state="running",
                 run_id="run-1", actor_id="sol", session_id="sol-session",
             )
-            orchestration._registered.clear()
+            check_registered = threading.Event()
             check_replies = []
             check_waiter = threading.Thread(
                 target=lambda: check_replies.append(await_actor("sol", finished["next_cursor"])),
                 daemon=True,
             )
-            check_waiter.start()
-            self.assertTrue(orchestration._registered.wait(2))
+            def on_check_wait():
+                check_registered.set()
+                return real_wait()
+
+            with patch.object(orchestration._interest, "wait", side_effect=on_check_wait):
+                check_waiter.start()
+                self.assertTrue(check_registered.wait(2))
             subprocess.run(
                 [
                     "uv", "run", "--no-sync", "python", "-c",

@@ -14,10 +14,11 @@ import json
 import math
 import os
 import select
+import struct
 import threading
 import uuid
 from collections.abc import Callable
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -48,25 +49,25 @@ def _notify_waiters() -> None:
         listener()
 
 
-_watches: set[str] = set()
-_watches_guard = threading.Lock()
 _IN_CLOSE_WRITE = 0x00000008
 _IN_CREATE = 0x00000100
 _IN_MODIFY = 0x00000002
+_IN_MOVED_TO = 0x00000080
+_IN_DELETE = 0x00000200
+_IN_INVALID = 0x00000400 | 0x00000800 | 0x00002000 | 0x00004000 | 0x00008000
+_IN_EVENT = struct.Struct("iIII")
 
 
-def ensure_directory_watch(directory: Path) -> bool:
-    """Wake in-process waiters when another process writes this run directory."""
-    try:
-        directory.mkdir(parents=True, exist_ok=True)
-        key = str(directory.resolve())
-    except OSError:
-        return False
-    with _watches_guard:
-        if key in _watches:
-            return True
-        fd = -1
+class DirectoryWatch:
+    """One wait owns the notification thread and all of its descriptors."""
+
+    def __init__(self, directory: Path):
+        self.available = False
+        self._fds: list[int] = []
+        self._thread: threading.Thread | None = None
+        self._stop_write: int | None = None
         try:
+            directory.mkdir(parents=True, exist_ok=True)
             libc = ctypes.CDLL(None, use_errno=True)
             libc.inotify_init1.argtypes = [ctypes.c_int]
             libc.inotify_init1.restype = ctypes.c_int
@@ -74,29 +75,80 @@ def ensure_directory_watch(directory: Path) -> bool:
             libc.inotify_add_watch.restype = ctypes.c_int
             fd = libc.inotify_init1(os.O_NONBLOCK | os.O_CLOEXEC)
             if fd < 0:
-                return False
-            if libc.inotify_add_watch(fd, os.fsencode(key), _IN_MODIFY | _IN_CREATE | _IN_CLOSE_WRITE) < 0:
-                os.close(fd)
-                return False
-        except (AttributeError, OSError):
-            if fd >= 0:
-                os.close(fd)
-            return False
-        _watches.add(key)
+                return
+            self._fds.append(fd)
+            mask = _IN_MODIFY | _IN_CREATE | _IN_CLOSE_WRITE | _IN_MOVED_TO | _IN_DELETE | _IN_INVALID
+            if libc.inotify_add_watch(fd, os.fsencode(directory.resolve()), mask) < 0:
+                self.close()
+                return
+            stop_read, self._stop_write = os.pipe2(os.O_NONBLOCK | os.O_CLOEXEC)
+            self._fds.extend((stop_read, self._stop_write))
+            self.available = True
+            self._thread = threading.Thread(
+                target=self._read, args=(fd, stop_read), name=f"wait-{directory.name}", daemon=True,
+            )
+            self._thread.start()
+        except (AttributeError, OSError, RuntimeError):
+            self.close()
 
-    def watch() -> None:
-        poller = select.poll()
-        poller.register(fd, select.POLLIN)
-        while True:
-            poller.poll()
-            try:
-                os.read(fd, 4096)
-            except BlockingIOError:
-                continue
+    def _read(self, fd: int, stop_read: int) -> None:
+        try:
+            poller = select.poll()
+            poller.register(fd, select.POLLIN)
+            poller.register(stop_read, select.POLLIN)
+            while True:
+                ready = poller.poll()
+                if any(item == stop_read for item, _ in ready):
+                    return
+                if any(flags & (select.POLLERR | select.POLLHUP | select.POLLNVAL) for _, flags in ready):
+                    return
+                try:
+                    chunk = os.read(fd, 65536)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    return
+                offset = 0
+                changed = False
+                while offset < len(chunk):
+                    if len(chunk) - offset < _IN_EVENT.size:
+                        return
+                    _, mask, _, name_size = _IN_EVENT.unpack_from(chunk, offset)
+                    name_start = offset + _IN_EVENT.size
+                    offset += _IN_EVENT.size + name_size
+                    if offset > len(chunk) or mask & _IN_INVALID:
+                        return
+                    name = chunk[name_start:offset].split(b"\0", 1)[0]
+                    changed = changed or name in (b"control.jsonl", b"ledger.jsonl")
+                if changed:
+                    _notify_waiters()
+        except OSError:
+            return
+        finally:
+            self.available = False
             _notify_waiters()
 
-    threading.Thread(target=watch, name=f"wait-{directory.name}", daemon=True).start()
-    return True
+    def close(self) -> None:
+        if self._stop_write is not None:
+            with suppress(OSError):
+                os.write(self._stop_write, b"x")
+        if self._thread is not None and self._thread.ident is not None:
+            self._thread.join()
+        self.available = False
+        self._stop_write = None
+        for fd in self._fds:
+            os.close(fd)
+        self._fds.clear()
+
+
+@contextmanager
+def watch_directory(directory: Path):
+    """Lease filesystem notifications for one blocked await_results call."""
+    watch = DirectoryWatch(directory)
+    try:
+        yield watch
+    finally:
+        watch.close()
 
 
 def argument_digest(arguments: object) -> str:
