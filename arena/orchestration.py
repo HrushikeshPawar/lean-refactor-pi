@@ -318,7 +318,7 @@ def _compile_findings(directory: Path, delegation: dict, record: dict) -> list[d
 
 
 def _observe_tool(directory: Path, delegation: dict, record: dict) -> bool:
-    """Publish a passing candidate at the tool boundary. This does not settle the assignment."""
+    """Publish a passing candidate while the caller holds the run-control lock."""
     if record.get("type") != "tool_execution_end":
         return False
     for finding in _compile_findings(directory, delegation, record):
@@ -876,14 +876,15 @@ def _delivery_rows(directory: Path, actor_id: str) -> list[dict]:
     return [
         row for row in _history(directory)
         if row.get("kind") == "delivered_reply" and row.get("actor_id") == actor_id
+        and ((row.get("data") or {}).get("channel") == "worker_inbox"
+             or "acked" in (row.get("data") or {}))
     ]
 
 
 def _acked(directory: Path, actor_id: str, cursor: str | None) -> set[str] | None:
     rows = _delivery_rows(directory, actor_id)
     if cursor is None:
-        data = (rows[-1].get("data") if rows else None) or {}
-        return set(data.get("acked") or [])
+        return {identity for row in rows for identity in (row.get("data") or {}).get("acked", [])}
     match = next((row for row in rows if row.get("event_id") == cursor), None)
     if match is None:
         return None
@@ -910,30 +911,29 @@ def _selectable(row: dict, job_ids: list[str] | None) -> bool:
     return kind == "assignment_state" and row.get("state") in _terminal_states
 
 
-def _reconcile_absent(directory: Path, job_ids: list[str] | None) -> None:
-    """An exited child is a failure event, not a producer that can still reply."""
-    for row in _delegations(directory):
-        if job_ids is not None and row.get("job_id") not in job_ids:
-            continue
-        if _activation_view(directory, row)["state"] not in _live_states:
-            continue
-        transport = _owned.get(row["activation_id"])
-        absent = getattr(transport, "confirmed_absent", None)
-        if absent is not None and absent():
-            observe_exit(directory, row["activation_id"])
+def _reader_can_emit(activation_id: str) -> bool:
+    transport = _owned.get(activation_id)
+    reader = _readers.get(activation_id)
+    absent = getattr(transport, "confirmed_absent", None)
+    return bool(transport is not None and reader is not None and reader.is_alive()
+                and not (absent is not None and absent()))
 
 
 def _has_producer(directory: Path, job_ids: list[str] | None) -> bool:
-    seen: set[str] = set()
-    for row in _delegations(directory):
-        job_id = row.get("job_id")
-        if not job_id or job_id in seen:
+    for snapshot in _selected_jobs(directory, job_ids):
+        activation_id = snapshot["activation_id"]
+        if snapshot["state"] not in _live_states:
             continue
-        if job_ids is not None and job_id not in job_ids:
-            continue
-        seen.add(job_id)
-        snapshot = _job_snapshot(directory, job_id)
-        if snapshot is not None and snapshot["state"] in _live_states:
+        if _reader_can_emit(activation_id):
+            return True
+        # A launch already owned by delegate may still be opening its transport.
+        if snapshot["state"] == "launching" and activation_id in _openers and activation_id not in _readers:
+            return True
+        # Queued work can progress only if a locally owned child can release its slot.
+        if snapshot["state"] == "queued" and activation_id in _openers and any(
+            _activation_view(directory, row)["occupies_slot"] and _reader_can_emit(row["activation_id"])
+            for row in _delegations(directory)
+        ):
             return True
     return False
 
@@ -943,7 +943,8 @@ def _public_event(row: dict) -> dict:
         key: row[key]
         for key in (
             "event_id", "job_id", "activation_id", "state", "attempt_id", "proof_id",
-            "evaluation_id", "reason", "outcome",
+            "evaluation_id", "request_id", "run_id", "actor_id", "session_id",
+            "operation_id", "reason", "outcome",
         )
         if row.get(key) is not None
     }
@@ -952,11 +953,11 @@ def _public_event(row: dict) -> dict:
 
 
 def _wake_reason(events: list[dict]) -> str:
+    if any(event["type"] == "run_stop" for event in events):
+        return "run_stopped"
     if any(event["type"] == "worker_finding" for event in events):
         return "result"
     last = events[-1]
-    if last["type"] == "run_stop":
-        return "run_stopped"
     if last.get("state") == "cancelled":
         return "cancelled"
     if last.get("state") == "failed":
@@ -982,16 +983,26 @@ def _spend(directory: Path) -> dict:
     return run_control._spend_view(run_control._control_rows(directory))
 
 
-def _commit_delivery(directory: Path, actor_id: str, fresh: list[dict], acked: set[str]) -> dict:
+def _commit_delivery(
+    directory: Path, actor_id: str, fresh: list[dict], acked: set[str], *,
+    wake_reason: str | None = None, job_ids: list[str] | None = None, reason: str | None = None,
+) -> dict:
     identities = [row["event_id"] for row in fresh]
-    merged = [item for item in acked if item not in identities]
-    merged.extend(identities)
-    operation_id = hashlib.sha256(f"{actor_id}:{identities}".encode()).hexdigest()[:32]
+    merged = sorted((_acked(directory, actor_id, None) or set()) | acked | set(identities))
+    selected = _selected_jobs(directory, job_ids)
+    wake_reason = wake_reason or _wake_reason([_public_event(row) for row in fresh])
+    arguments = {"channel": "worker_inbox", "actor_id": actor_id, "event_ids": identities,
+                 "acked": merged, "job_ids": sorted(job_ids) if job_ids is not None else None,
+                 "wake_reason": wake_reason, "reason": reason,
+                 "assignments": [[job["activation_id"], job["state"]] for job in selected]}
+    operation_id = run_control.argument_digest(arguments)[:32]
+    source = fresh[0] if fresh else next(iter(_delegations(directory)), {})
 
     def mutate(ctx):
         return [ctx.append_ledger({
             "kind": "delivered_reply",
-            "data": {"event_ids": identities, "acked": merged},
+            "data": {"channel": "worker_inbox", "event_ids": identities, "acked": merged,
+                     "wake_reason": wake_reason, "reason": reason},
         })]
 
     applied = run_control._apply_locked(
@@ -999,8 +1010,8 @@ def _commit_delivery(directory: Path, actor_id: str, fresh: list[dict], acked: s
         {
             "operation_id": operation_id,
             "kind": "delivered_reply",
-            "arguments": {"actor_id": actor_id, "event_ids": identities},
-            "run_id": fresh[0].get("run_id") or "run",
+            "arguments": arguments,
+            "run_id": source.get("run_id") or "run",
             "actor_id": actor_id,
             "session_id": f"{actor_id}-delivery",
         },
@@ -1013,9 +1024,10 @@ def _commit_delivery(directory: Path, actor_id: str, fresh: list[dict], acked: s
     return {
         "ok": True,
         "operation_id": operation_id,
-        "wake_reason": _wake_reason([_public_event(row) for row in fresh]),
+        "wake_reason": wake_reason,
+        **({"reason": reason} if reason else {}),
         "events": [_public_event(row) for row in fresh],
-        "jobs": _selected_jobs(directory, None),
+        "jobs": selected,
         "evidence_refs": applied.get("evidence_refs") or [],
         "next_cursor": token,
         "accounting": spend["accounting"],
@@ -1038,7 +1050,6 @@ def await_results(
     ):
         return _reject("", "job_ids")
     while True:
-        _reconcile_absent(directory, job_ids)
         with run_control.control_lock(directory):
             acked = _acked(directory, actor_id, cursor)
             if acked is None:
@@ -1048,24 +1059,15 @@ def await_results(
                 if row.get("event_id") and row["event_id"] not in acked and _selectable(row, job_ids)
             ]
             if fresh:
-                delivered = _commit_delivery(directory, actor_id, fresh, acked)
-                if job_ids is not None and delivered.get("ok"):
-                    delivered["jobs"] = _selected_jobs(directory, job_ids)
-                return delivered
+                return _commit_delivery(directory, actor_id, fresh, acked, job_ids=job_ids,
+                                        wake_reason="run_stopped" if _spend(directory)["stopped"] else None)
+            if _spend(directory)["stopped"]:
+                return _commit_delivery(directory, actor_id, [], acked,
+                                        wake_reason="run_stopped", job_ids=job_ids)
             if not _has_producer(directory, job_ids):
-                rows = _delivery_rows(directory, actor_id)
-                spend = _spend(directory)
-                return {
-                    "ok": True,
-                    "operation_id": uuid.uuid4().hex,
-                    "wake_reason": "no_pending_work",
-                    "events": [],
-                    "jobs": _selected_jobs(directory, job_ids),
-                    "evidence_refs": [],
-                    "next_cursor": cursor if cursor is not None else (rows[-1]["event_id"] if rows else None),
-                    "accounting": spend["accounting"],
-                    "total": spend["total"],
-                }
+                stale = any(job["state"] in _live_states for job in _selected_jobs(directory, job_ids))
+                return _commit_delivery(directory, actor_id, [], acked, wake_reason="no_pending_work",
+                                        job_ids=job_ids, reason="recovery_required" if stale else None)
             with _interest:
                 seen = _epoch
         with _interest:

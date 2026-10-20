@@ -41,7 +41,7 @@ def listen_for_wait(listener) -> None:
 
 
 def _notify_waiters() -> None:
-    for listener in list(_wait_listeners):
+    for listener in tuple(_wait_listeners):
         listener()
 
 

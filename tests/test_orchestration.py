@@ -4,11 +4,13 @@ import hashlib
 import json
 import queue
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from arena import orchestration, pi_rpc, run_control
+from arena import reply as proof_reply
 from arena.steps import split_steps
 
 _PROOF = "theorem demo : True ∧ True := by\n  trivial\n  trivial\n"
@@ -1122,9 +1124,11 @@ class V8WorkerSmokeTests(unittest.TestCase):
                 )
 
             sol = await_actor("sol")
+            first_cursor = sol["next_cursor"]
             other = await_actor("planner")
             self.assertEqual(sol["wake_reason"], "result")
             self.assertEqual([event["event_id"] for event in sol["events"]], [finding_id])
+            self.assertEqual(sol["events"][0]["request_id"], "req-wait")
             self.assertEqual([event["event_id"] for event in other["events"]], [finding_id])
             self.assertNotEqual(sol["next_cursor"], other["next_cursor"])
             self.assertEqual(len(orchestration.jobs(directory)["jobs"]), 1)
@@ -1133,6 +1137,48 @@ class V8WorkerSmokeTests(unittest.TestCase):
                 (directory / "control.jsonl").read_text().count('"kind":"settlement"'),
                 before.count('"kind":"settlement"'),
             )
+
+            with patch("arena.campaign.run_dir", return_value=directory):
+                proof_reply._load("run-1")
+
+            # A new compile finishes exactly after the waiter registers.
+            attempt_id, proof_id, evaluation_id = "attempt-registration", "proof-registration", "eval-registration"
+            tool_call = "compile-registration"
+            (directory / "proofs" / f"{proof_id}.lean").write_text(_PROOF)
+            run_control.apply_operation(directory, {
+                "operation_id": "compile-op-registration", "kind": "compile", "arguments": {"proof": proof_id},
+                "run_id": "run-1", "actor_id": launch["env"]["ARENA_ACTOR_ID"],
+                "session_id": launch["env"]["ARENA_SESSION_ID"],
+            }, record)
+            registered = threading.Event()
+            replies = []
+            real_wait = orchestration._interest.wait
+
+            def on_wait():
+                registered.set()
+                return real_wait()
+
+            with patch.object(orchestration._interest, "wait", side_effect=on_wait):
+                waiter = threading.Thread(target=lambda: replies.append(await_actor("sol", sol["next_cursor"])), daemon=True)
+                waiter.start()
+                try:
+                    self.assertTrue(registered.wait(1))
+                    child._chunks.put((json.dumps({
+                        "type": "tool_execution_end", "toolName": "compile", "toolCallId": tool_call,
+                        "isError": False, "result": {"details": {"ok": True, "items": [{
+                            "ok": True, "status": "closed", "attempts": [{"attempt_id": attempt_id}],
+                        }]}},
+                    }) + "\n").encode())
+                    waiter.join(1)
+                    self.assertFalse(waiter.is_alive())
+                    self.assertEqual(replies[0]["wake_reason"], "result")
+                    self.assertEqual(replies[0]["events"][0]["attempt_id"], attempt_id)
+                    sol = replies[0]
+                finally:
+                    if waiter.is_alive():
+                        child._chunks.put(None)
+                        orchestration._wake()
+                        waiter.join(1)
 
             child._chunks.put((json.dumps({"type": "assignment_exhausted"}) + "\n").encode())
             child._chunks.put(None)
@@ -1146,4 +1192,55 @@ class V8WorkerSmokeTests(unittest.TestCase):
             self.assertEqual(finished["events"], [])
             self.assertEqual(len(orchestration.jobs(directory)["jobs"]), 1)
             self.assertFalse(run_control.read_state(directory)["stopped"])
+            self.assertNotIn("dispatch_started", (directory / "control.jsonl").read_text())
+
+            def start_job(operation_id):
+                return orchestration.delegate(
+                    directory, operation_id=operation_id, run_id="run-1", actor_id="sol", session_id="sol-session",
+                    task="another hypothesis", scope="proof", anchor={"node": "n1"}, open_child=open_child,
+                )
+
+            second = start_job("op-wait-second")
+            second_child = children[-1][1]
+            second_child.exit_on_eof = False
+            second_child._chunks.put(None)
+            orchestration.join_activation(second["activation_id"])
+            failed = orchestration.await_results(directory, actor_id="sol", job_ids=[second["job_id"]])
+            self.assertEqual(failed["wake_reason"], "failed")
+            second_child.absent = True
+            orchestration.observe_exit(directory, second["activation_id"])
+            older = orchestration.await_results(
+                directory, actor_id="sol", cursor=first_cursor, job_ids=[second["job_id"]],
+            )
+            self.assertEqual(older["wake_reason"], "failed")
+            self.assertEqual(await_actor("sol")["wake_reason"], "no_pending_work")
+
+            def ordinary_reply(writer):
+                writer.append_ledger({
+                    "kind": "delivered_reply", "data": {"cursor": 1, "seqs": [1], "event_ids": ["proof-context"]},
+                })
+
+            run_control.apply_operation(directory, {
+                "operation_id": "ordinary-proof-reply", "kind": "delivered_reply", "arguments": {"seqs": [1]},
+                "run_id": "run-1", "actor_id": "sol", "session_id": "sol-session",
+            }, ordinary_reply)
+            with patch("arena.campaign.run_dir", return_value=directory):
+                self.assertEqual(proof_reply._load("run-1")["actors"]["sol"]["delivered_seq"], 1)
+            self.assertEqual(await_actor("sol")["wake_reason"], "no_pending_work")
+
+            stopped_job = start_job("op-wait-stop")
+            _request(directory, "stop-fixture-request", "sol", stopped_job["job_id"])
+            run_control.settle_usage(directory, {
+                "settlement_id": "stop-fixture-settlement", "run_id": "run-1", "actor_id": "sol",
+                "session_id": "sol-session", "job_id": stopped_job["job_id"],
+                "covered_request_ids": ["stop-fixture-request"], "state": "known", "amount": "2.50",
+                "usage": {"cost": {"total": 2.5}},
+            })
+            stopped = orchestration.await_results(directory, actor_id="sol")
+            self.assertEqual(stopped["wake_reason"], "run_stopped")
+            repeated = orchestration.await_results(directory, actor_id="sol", cursor=stopped["next_cursor"])
+            self.assertEqual(repeated["wake_reason"], "run_stopped")
+            self.assertTrue(repeated["evidence_refs"])
+            children[-1][1]._chunks.put(None)
+            orchestration.join_activation(stopped_job["activation_id"])
             self.assertNotIn("dispatch_started", (directory / "control.jsonl").read_text())

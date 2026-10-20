@@ -28,9 +28,9 @@
 
 - [x] 1. Implement await_results with actor-local cursor and optional job selection. Install the listener and recheck retained state without a lost-event window.
 - [x] 2. Return already-available evidence immediately; simultaneous worker findings reach every intended actor without one actor consuming another's updates.
-- [x] 3. Wake on result, settlement, cancellation, failure and run stop. Waiting itself starts zero provider requests.
-- [x] 4. When no selected active/queued assignment or submitted check can produce a relevant event, return no_pending_work rather than wait forever.
-- [x] 5. Handled prompts and exited/stale children cannot count as live producers. Sol gets an ordinary below-budget continuation, not a successful finish or automatic new hypothesis.
+- [ ] 3. Wake on result, settlement, cancellation, failure and run stop. Waiting itself starts zero provider requests. **Local wake works; provider settlement in another process still needs a wake path.**
+- [ ] 4. When no selected active/queued assignment or submitted check can produce a relevant event, return no_pending_work rather than wait forever. **Submitted-check producers are not registered yet.**
+- [ ] 5. Handled prompts and exited/stale children cannot count as live producers. Sol gets an ordinary below-budget continuation, not a successful finish or automatic new hypothesis. **The protocol/runner does not consume the wake reason yet.**
 - [x] 6. Use the one assigned fast smoke for this slice. Retain the stated behavior requirements; actual-Pi/real-Lean journeys and the broader race matrix are final E2E coverage, not this ticket's gate.
 
 ## Verify
@@ -44,6 +44,22 @@ uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_orchestratio
 Expected: the named behavior check passes with no actual provider, Pi or Lean process. Aim for seconds and at most 60 seconds. No per-ticket full suite or slow suite.
 
 **Deferred to final E2E:** Long-running actual-Pi waiting and two real streams. See the shared [final E2E checklist](../final-e2e.md).
+
+## Review corrections and remaining implementation gaps
+
+The original named smoke passed in 0.07s. Review fixes isolate worker inbox receipts from ordinary proof replies using an explicit inbox channel, and keep acknowledgements monotonic across older filtered cursors. Proof reply recovery skips inbox receipts instead of expecting their data to contain the proof cursor/sequence fields. Public wait events retain request, actor, session, run and operation identities. A stop takes precedence over results, and remains an immediate `run_stopped` outcome after its event has already been acknowledged. Empty replies now have durable, idempotent receipts instead of unrecorded operation IDs.
+
+Waiter registration and finding publication already share the control lock through `_take`; a proposed nested acquisition was rejected and removed after a diagnostic reproduced the non-reentrant deadlock. The extended smoke exercises a real waiting thread with a registration barrier, plus mixed delivery records, old filtered cursors and repeated stop waits. Waiting no longer calls `observe_exit` and cannot admit queued work as a read side effect. Orphaned assignments without a local producer return `no_pending_work` with `recovery_required`; this does not certify process absence or release their slots.
+
+Verified: `uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_orchestration.py::V8WorkerSmokeTests` passed with 4 tests and 4 subtests in 0.25s. Ruff passed for orchestration, run control, reply recovery and the touched test file. All process/model outcomes are injected; no provider, real Pi or Lean process was started.
+
+Keep this ticket `needs-review` until these implementation gaps close:
+
+1. `listen_for_wait` and the condition/epoch are process-local. The current provider settlement bridge runs Python in separate processes, so its stop callback cannot notify a coordinator waiting in another process. Add a real coordinator notification/IPC boundary and a bounded injected or offline process check. A durable stop row alone cannot wake an already blocked condition.
+2. Submitted verification is not a registered producer. The wait can currently report no pending work after an assignment ends while a relevant check can still emit evidence. Add producer registration/completion at that boundary, without inventing a new strategic job or changing stop/submission eligibility.
+3. The protocol, Pi management surface and Sol continuation do not call/consume `await_results`. Wire the returned `no_pending_work` into the ordinary below-budget continuation path. Actual-Pi validation can remain final E2E, but the caller implementation must exist before this item is complete.
+
+Reporting handled/exhausted/completed as `settled` is an accepted wake-reason mapping. Full live stream and recovery races remain final E2E; the three missing implementations above do not become complete merely by deferring their tests.
 
 ---
 

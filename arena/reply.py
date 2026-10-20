@@ -70,9 +70,11 @@ def _load(run_id: str) -> dict:
     for event in committed_history(campaign.events(directory), committed):
         if event.get("kind") != "delivered_reply" or not event.get("operation_id"):
             continue
+        data = event.get("data") or {}
+        if data.get("channel") == "worker_inbox" or "acked" in data:
+            continue
         actor = event["actor_id"]
         bucket = _bucket(state, actor)
-        data = event["data"]
         if data["cursor"] < bucket.get("delivered_seq", -1):
             continue
         bucket["delivered_seq"] = data["cursor"]
