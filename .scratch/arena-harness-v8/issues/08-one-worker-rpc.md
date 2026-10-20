@@ -26,7 +26,7 @@
 
 ## What to build and acceptance
 
-- [ ] 1. Support proof/step delegation with immutable resolved anchors, actor/job/activation identity, restricted five-tool worker interface and a normal jobs view. **Review: incomplete anchor resolution and configured child launch; see below.**
+- [x] 1. Support proof/step delegation with immutable resolved anchors, actor/job/activation identity, restricted five-tool worker interface and a normal jobs view.
 - [x] 2. Persist the receipt before launching. Retrying the same operation returns it without spawning another child; mismatched arguments fail explicitly.
 - [x] 3. Subscribe before dispatch. Distinguish command IDs, prompt dispositions and session events; handled/no-run cannot leave a nonexistent run awaited.
 - [x] 4. Drain stdout continuously, honor stdin backpressure and keep stderr separate. LF-only framing preserves Unicode separators, chunked UTF-8 and CRLF.
@@ -51,12 +51,9 @@ The original named smoke passed in 0.07s. Extending it with a child that settles
 
 Corrections: command identity is durable before prompt dispatch; terminal activations cannot be reopened by late replies or reader failures; rejected prompts and launch/write failures close the activation; partial writes are completed and buffered transports flushed. Assignment projections now use committed history, and an aborted operation cannot spawn a child.
 
-Acceptance item 1 remains incomplete:
+The two acceptance gaps above are now implemented in the same smoke. Dispatch resolves the saved proof file: a missing node or an out-of-range step is `invalid_input` and does not spawn. The stored anchor keeps the graph node, proof id, file sha256, and the parsed step or hole source range. Caller-supplied hashes are not copied. `open_child` receives the launch: DeepSeek model and provider, session path, worker actor id, run-control environment, and `--tools compile,goal,search,read,scratch` with `--no-builtin-tools`. The prompt record has no `tools` field; the anchor is in the prompt message and `ARENA_ANCHOR`. Actually starting Pi remains final E2E.
 
-- `_anchor` accepts a nonexistent node and copies caller-supplied hashes/source fields without resolving or checking the proof snapshot, step range or hole. Supply a harness boundary that resolves and validates immutable anchors before committing dispatch; preserve the resolved anchor on retries.
-- `open_child()` receives no launch configuration. Worker model/provider, session path, worker actor identity, shared run-control environment and tool restrictions are not wired to a child. Pi 1.3.0's `prompt` command has no `tools` field; `prompt_line`'s extra field does not enforce an allowlist. Supply a configured launch boundary and carry the assigned anchor/context into the worker. The actual-process E2E remains deferred, but the launch implementation and its injected smoke assertions must exist before this item is done.
-
-Keep this ticket `needs-review`; do not treat the focused lifecycle smoke as completion of these two missing contracts. Follow-ups, two-worker admission and crash recovery remain with their existing tickets.
+Keep this ticket `needs-review`. Follow-ups, two-worker admission and crash recovery remain with their existing tickets.
 
 ---
 

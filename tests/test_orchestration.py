@@ -1,5 +1,6 @@
 """Offline run-control journeys. No provider, Pi, or Lean process."""
 
+import hashlib
 import json
 import queue
 import tempfile
@@ -8,6 +9,17 @@ from pathlib import Path
 from unittest.mock import patch
 
 from arena import orchestration, pi_rpc, run_control
+from arena.steps import split_steps
+
+_PROOF = "theorem demo : True ∧ True := by\n  trivial\n  trivial\n"
+
+
+def _seed_parent(directory: Path) -> None:
+    (directory / "proofs").mkdir(parents=True)
+    (directory / "proofs" / "parent.lean").write_text(_PROOF)
+    (directory / "ledger.jsonl").write_text(
+        json.dumps({"kind": "candidate", "candidate_id": "parent", "origin": "model"}) + "\n"
+    )
 
 
 def _request(directory: Path, request_id: str, actor_id: str, job_id: str) -> None:
@@ -332,16 +344,44 @@ class V8WorkerSmokeTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
+            _seed_parent(directory)
             child = _HeldChild()
-            opened = {"count": 0, "receipt": False}
+            opened = {"count": 0, "receipt": False, "launch": None}
 
-            def open_child():
+            def open_child(launch):
                 opened["count"] += 1
+                opened["launch"] = launch
                 rows = (directory / "control.jsonl").read_text()
                 opened["receipt"] = '"kind":"operation_receipt"' in rows
                 return child
 
-            anchor = {"node": "proof-node", "steps": [1, 2]}
+            anchor = {"node": "n1", "steps": [1, 2], "proof_hash": "not-the-file"}
+            missing = orchestration.delegate(
+                directory,
+                operation_id="op-missing",
+                run_id="run-1",
+                actor_id="sol",
+                session_id="sol-session",
+                task="try the step",
+                scope="step",
+                anchor={"node": "missing", "steps": [1, 2]},
+                open_child=open_child,
+            )
+            self.assertEqual(missing["category"], "invalid_input")
+            self.assertEqual(opened["count"], 0)
+            out_of_range = orchestration.delegate(
+                directory,
+                operation_id="op-range",
+                run_id="run-1",
+                actor_id="sol",
+                session_id="sol-session",
+                task="try the step",
+                scope="step",
+                anchor={"node": "n1", "steps": [1, 9]},
+                open_child=open_child,
+            )
+            self.assertEqual(out_of_range["reason"], "steps")
+            self.assertEqual(opened["count"], 0)
             call = {
                 "operation_id": "op-fresh",
                 "run_id": "run-1",
@@ -358,7 +398,33 @@ class V8WorkerSmokeTests(unittest.TestCase):
             self.assertEqual(child.order, ["subscribe", "write"])
             self.assertTrue(receipt["ok"])
             self.assertEqual(receipt["state"], "launching")
-            self.assertEqual(receipt["anchor"], {"node": "proof-node", "steps": [1, 2]})
+            parsed = split_steps(_PROOF)
+            self.assertEqual(receipt["anchor"]["node"], "n1")
+            self.assertEqual(receipt["anchor"]["proof_id"], "parent")
+            self.assertEqual(receipt["anchor"]["steps"], [1, 2])
+            self.assertEqual(receipt["anchor"]["proof_sha256"], hashlib.sha256(_PROOF.encode()).hexdigest())
+            self.assertNotIn("not-the-file", json.dumps(receipt["anchor"]))
+            self.assertEqual(receipt["anchor"]["source"]["first_line"], parsed[0].first_line)
+            self.assertEqual(receipt["anchor"]["source"]["last_line"], parsed[1].last_line)
+            self.assertEqual(receipt["anchor"]["step_hashes"], [parsed[0].hash, parsed[1].hash])
+            launch = opened["launch"]
+            self.assertEqual(launch["model"], "deepseek-v4.1-flash")
+            self.assertEqual(launch["provider"], "opencode-go")
+            self.assertEqual(launch["tools"], ["compile", "goal", "search", "read", "scratch"])
+            self.assertEqual(launch["argv"][launch["argv"].index("--mode") + 1], "rpc")
+            self.assertIn("--no-builtin-tools", launch["argv"])
+            self.assertEqual(
+                launch["argv"][launch["argv"].index("--tools") + 1],
+                "compile,goal,search,read,scratch",
+            )
+            self.assertTrue(launch["session_dir"].endswith(receipt["session_id"]))
+            self.assertEqual(launch["env"]["ARENA_RUN_ID"], "run-1")
+            self.assertEqual(launch["env"]["ARENA_RUN_DIR"], str(directory))
+            self.assertNotEqual(launch["env"]["ARENA_ACTOR_ID"], "sol")
+            self.assertEqual(launch["actor_id"], launch["env"]["ARENA_ACTOR_ID"])
+            prompt = json.loads(child.written)
+            self.assertNotIn("tools", prompt)
+            self.assertIn(receipt["anchor"]["proof_sha256"], prompt["message"])
             self.assertEqual(receipt["tools"], ["compile", "goal", "search", "read", "scratch"])
             self.assertNotEqual(receipt["job_id"], receipt["activation_id"])
             self.assertTrue(orchestration.awaits_settlement(directory, receipt["activation_id"]))
@@ -371,7 +437,7 @@ class V8WorkerSmokeTests(unittest.TestCase):
             self.assertEqual(opened["count"], 1)
             anchor["steps"][0] = 9
             view = orchestration.jobs(directory, [receipt["job_id"]])
-            self.assertEqual(view["jobs"][0]["anchor"]["steps"], [1, 2])
+            self.assertEqual(view["jobs"][0]["anchor"]["proof_sha256"], receipt["anchor"]["proof_sha256"])
             self.assertNotEqual(view["jobs"][0]["command_id"], receipt["activation_id"])
             self.assertIn(view["jobs"][0]["command_id"].encode(), child.written)
 
@@ -400,6 +466,7 @@ class V8WorkerSmokeTests(unittest.TestCase):
         for disposition, settle_first, expected in scenarios:
             with self.subTest(disposition=disposition), tempfile.TemporaryDirectory() as tmp:
                 directory = Path(tmp)
+                _seed_parent(directory)
                 child = _HeldChild()
 
                 def immediate_write(data):
@@ -425,29 +492,38 @@ class V8WorkerSmokeTests(unittest.TestCase):
 
                 child.write = immediate_write
                 result = orchestration.delegate(directory, **{
-                    **call, "anchor": {"node": "proof-node", "steps": [1, 2]}, "open_child": lambda: child,
+                    **call,
+                    "anchor": {"node": "n1", "steps": [1, 2]},
+                    "open_child": lambda _launch: child,
                 })
                 self.assertEqual(result["state"], expected)
                 self.assertFalse(orchestration.awaits_settlement(directory, result["activation_id"]))
                 retry = orchestration.delegate(directory, **{
-                    **call, "anchor": {"node": "proof-node", "steps": [1, 2]}, "open_child": lambda: self.fail("respawn"),
+                    **call,
+                    "anchor": {"node": "n1", "steps": [1, 2]},
+                    "open_child": lambda _launch: self.fail("respawn"),
                 })
                 self.assertEqual(retry["state"], expected)
 
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
+            _seed_parent(directory)
 
-            def broken_child():
+            def broken_child(_launch):
                 raise OSError("cannot open child")
 
             result = orchestration.delegate(directory, **{
-                **call, "anchor": {"node": "proof-node", "steps": [1, 2]}, "open_child": broken_child,
+                **call,
+                "operation_id": "op-broken",
+                "anchor": {"node": "n1", "steps": [1, 2]},
+                "open_child": broken_child,
             })
             self.assertEqual(result["state"], "failed")
             self.assertFalse(orchestration.awaits_settlement(directory, result["activation_id"]))
 
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
+            _seed_parent(directory)
             child = _HeldChild()
             flushed = []
 
@@ -459,9 +535,12 @@ class V8WorkerSmokeTests(unittest.TestCase):
             child.write = partial_write
             child.flush = lambda: flushed.append(True)
             result = orchestration.delegate(directory, **{
-                **call, "anchor": {"node": "proof-node", "steps": [1, 2]}, "open_child": lambda: child,
+                **call,
+                "operation_id": "op-partial",
+                "anchor": {"node": "n1", "steps": [1, 2]},
+                "open_child": lambda _launch: child,
             })
-            self.assertEqual(json.loads(child.written)["message"], "try the step")
+            self.assertTrue(json.loads(child.written)["message"].startswith("try the step\n"))
             self.assertEqual(flushed, [True])
             child._chunks.put(None)
             orchestration.join_activation(result["activation_id"])

@@ -33,6 +33,55 @@ class FrameReader:
         return records
 
 
-def prompt_line(command_id: str, task: str) -> bytes:
-    record = {"type": "prompt", "id": command_id, "message": task, "tools": list(WORKER_TOOLS)}
+def prompt_line(command_id: str, task: str, anchor: dict) -> bytes:
+    """Pi 1.3.0 prompt has no tools field. The allowlist is the process launch, not this record."""
+    message = task + "\n\n" + json.dumps({"anchor": anchor}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    record = {"type": "prompt", "id": command_id, "message": message}
     return (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
+
+
+def worker_launch(
+    directory,
+    *,
+    run_id: str,
+    worker_actor_id: str,
+    worker_session_id: str,
+    anchor: dict,
+    model: str = "deepseek-v4.1-flash",
+) -> dict:
+    """Arguments for one fresh RPC child. Tool restriction is `--tools`, with builtins off."""
+    from arena.models import pi_model, provider
+
+    session_dir = directory / "sessions" / worker_session_id
+    tools = ",".join(WORKER_TOOLS)
+    return {
+        "argv": [
+            "pi",
+            "--mode",
+            "rpc",
+            "--offline",
+            "--approve",
+            "--no-builtin-tools",
+            "--tools",
+            tools,
+            "--model",
+            pi_model(model),
+            "--session-dir",
+            str(session_dir),
+            "--session-id",
+            worker_session_id,
+        ],
+        "env": {
+            "ARENA_RUN_ID": run_id,
+            "ARENA_ACTOR_ID": worker_actor_id,
+            "ARENA_SESSION_ID": worker_session_id,
+            "ARENA_RUN_DIR": str(directory),
+            "ARENA_BUDGET_REPORT_PATH": str(directory / "cost.json"),
+            "ARENA_ANCHOR": json.dumps(anchor, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        },
+        "model": model,
+        "provider": provider(model),
+        "session_dir": str(session_dir),
+        "actor_id": worker_actor_id,
+        "tools": list(WORKER_TOOLS),
+    }

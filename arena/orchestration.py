@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import threading
 import uuid
 from pathlib import Path
 
 from arena import run_control
 from arena.campaign import _append, events
-from arena.pi_rpc import WORKER_TOOLS, FrameReader, prompt_line
+from arena.pi_rpc import WORKER_TOOLS, FrameReader, prompt_line, worker_launch
 from arena.run_control import OperationRejected
 
 _readers: dict[str, threading.Thread] = {}
@@ -20,31 +21,66 @@ def _reject(operation_id: str, reason: str) -> dict:
     return {"ok": False, "category": "invalid_input", "reason": reason, "operation_id": operation_id}
 
 
-def _anchor(scope: str, anchor: object) -> dict | str:
+def _resolve_anchor(directory: Path, scope: str, anchor: object) -> dict | str:
+    """Resolve a caller reference against the saved proof. Caller hashes are not copied."""
     if scope not in ("proof", "step") or not isinstance(anchor, dict):
         return "scope"
-    node = anchor.get("node")
-    if not isinstance(node, str) or not node:
+    ref = anchor.get("node")
+    if not isinstance(ref, str) or not ref:
         return "node"
     if scope == "proof" and ("steps" in anchor or "hole" in anchor):
         return "anchor"
-    has_steps = "steps" in anchor
-    has_hole = "hole" in anchor
-    if scope == "step" and has_steps == has_hole:
+    if scope == "step" and ("steps" in anchor) == ("hole" in anchor):
         return "anchor"
-    stored = {key: value for key, value in anchor.items() if key != "steps"}
-    if has_hole and (not isinstance(anchor.get("hole"), str) or not anchor.get("hole")):
-        return "hole"
-    if has_steps:
-        steps = anchor.get("steps")
-        if (
-            not isinstance(steps, list)
-            or len(steps) != 2
-            or not all(isinstance(item, int) for item in steps)
-        ):
-            return "steps"
-        stored["steps"] = [steps[0], steps[1]]
-    return stored
+    from arena.campaign import _proof_reader
+    from arena.graph import Graph
+
+    graph = Graph.from_history(
+        events(directory),
+        _proof_reader(directory),
+        committed_operations=run_control.committed_operation_ids(directory),
+    )
+    node = next((item for item in graph.nodes if item.id == ref or item.proof_id == ref), None)
+    path = None if node is None else directory / "proofs" / f"{node.proof_id}.lean"
+    if node is None or path is None or not path.is_file():
+        return "node"
+    resolved = {
+        "node": node.id,
+        "proof_id": node.proof_id,
+        "proof_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "path": f"proofs/{node.proof_id}.lean",
+    }
+    if scope == "proof":
+        return resolved
+    if "hole" in anchor:
+        hole_ref = anchor.get("hole")
+        if not isinstance(hole_ref, str) or not hole_ref:
+            return "hole"
+        match = next(
+            (
+                hole
+                for hole in node.holes
+                if hole_ref in {str(hole["index"]), f"h{hole['index']}", hole.get("id"), f"{node.id}.h{hole['index']}"}
+            ),
+            None,
+        )
+        if match is None:
+            return "hole"
+        resolved["hole"] = f"{node.id}.h{match['index']}"
+        resolved["source"] = {"line": match["line"], "column": match["column"]}
+        return resolved
+    steps = anchor.get("steps")
+    if not isinstance(steps, list) or len(steps) != 2 or not all(isinstance(item, int) for item in steps):
+        return "steps"
+    start, end = steps
+    if start < 1 or end > len(node.steps) or start > end:
+        return "steps"
+    chosen = node.steps[start - 1 : end]
+    resolved["steps"] = [start, end]
+    resolved["step_ids"] = [step.id for step in chosen]
+    resolved["step_hashes"] = [step.hash for step in chosen]
+    resolved["source"] = {"first_line": chosen[0].first_line, "last_line": chosen[-1].last_line}
+    return resolved
 
 
 def _delegations(directory: Path) -> list[dict]:
@@ -246,12 +282,13 @@ def delegate(
     """Accept one fresh hypothesis and return before the worker settles."""
     if not operation_id or not run_id or not actor_id or not session_id or not isinstance(task, str) or not task:
         return _reject(operation_id, "identity")
-    resolved = _anchor(scope, anchor)
+    resolved = _resolve_anchor(directory, scope, anchor)
     if isinstance(resolved, str):
         return _reject(operation_id, resolved)
     job_id = uuid.uuid4().hex
     activation_id = uuid.uuid4().hex
     worker_session_id = uuid.uuid4().hex
+    worker_actor_id = uuid.uuid4().hex
     arguments = {
         "task": task,
         "scope": scope,
@@ -267,6 +304,7 @@ def delegate(
         "job_id": job_id,
         "activation_id": activation_id,
         "worker_session_id": worker_session_id,
+        "worker_actor_id": worker_actor_id,
         "task": task,
         "scope": scope,
         "anchor": resolved,
@@ -309,7 +347,15 @@ def delegate(
     command_id = uuid.uuid4().hex
     _record_state(directory, stored, "launching", command_id=command_id)
     try:
-        transport = open_child()
+        transport = open_child(
+            worker_launch(
+                directory,
+                run_id=run_id,
+                worker_actor_id=stored["worker_actor_id"],
+                worker_session_id=stored["worker_session_id"],
+                anchor=stored["anchor"],
+            )
+        )
         transport.subscribe()
         ready = threading.Event()
         thread = threading.Thread(
@@ -322,7 +368,7 @@ def delegate(
         thread.start()
         if not ready.wait(5):
             raise RuntimeError("reader did not start")
-        _write_prompt(transport, prompt_line(command_id, task))
+        _write_prompt(transport, prompt_line(command_id, task, stored["anchor"]))
     except Exception as error:
         _record_state(directory, stored, "failed", command_id=command_id, reason=type(error).__name__)
     return _receipt_body(directory, stored, applied, spend)
