@@ -18,6 +18,7 @@ import { cacheAlarm, cacheHitPct, callCost, finishAllowed, limitReached, limitUs
 import { numbers as textNumbers, render as renderText } from "./text.ts";
 import { classifyFailure, nextWait } from "./outage.ts";
 import { applyToolTurnEffort, requestDetailedSummary } from "./thinking.ts";
+import { installDispatchGate, pythonDispatch } from "./provider_gate.ts";
 import { renderReply } from "./reply.ts";
 
 const root = resolve(import.meta.dirname, "../../..");
@@ -249,6 +250,26 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     turn = traceEvents().filter(item => item.kind === "request").length;
     for (const item of costEvents()) if (item.kind === "discovery" && typeof item.signature === "string") {
       discoveries.add(item.signature);
+    }
+    if (runDirectory && runId) {
+      const providers = Object.entries(configuredModels.providers ?? {}).map(([name, config]) => ({
+        name, api: (config as { api?: string }).api,
+      }));
+      if (ctx.model?.provider && ctx.model.api) providers.push({ name: ctx.model.provider, api: ctx.model.api });
+      installDispatchGate({
+        register: (name, config) => pi.registerProvider(name, config as never),
+        lookup: (name) => ctx.modelRegistry.getProvider(name),
+        providers,
+        open: pythonDispatch(runDirectory),
+        identity: () => ({
+          runId,
+          actorId: process.env.ARENA_ACTOR_ID || "sol",
+          sessionId: process.env.ARENA_SESSION_ID || runId,
+          requestId: pendingRequest,
+          ...(process.env.ARENA_JOB_ID ? { jobId: process.env.ARENA_JOB_ID } : {}),
+          ...(process.env.ARENA_GENERATION ? { generation: process.env.ARENA_GENERATION } : {}),
+        }),
+      });
     }
   });
 

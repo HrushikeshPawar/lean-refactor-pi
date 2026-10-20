@@ -326,33 +326,189 @@ def _money(value: Decimal) -> str:
 
 def prepare_request(directory: Path, request: dict) -> dict:
     """Record a provider request before dispatch. Repeating the same id is a no-op."""
-    required = ("request_id", "run_id", "actor_id", "session_id")
-    if any(not request.get(key) for key in required):
+    if _missing_request(request):
         raise OperationRejected("invalid_input", str(request.get("request_id") or ""))
     with control_lock(directory):
-        rows = _control_rows(directory)
-        digest = argument_digest(request)
-        for row in rows:
-            if row.get("kind") == "provider_request" and row.get("request_id") == request["request_id"]:
-                if row.get("argument_digest") != digest:
-                    return {"ok": False, "status": "operation_conflict", "request_id": request["request_id"]}
-                return {"ok": True, "status": "prepared", "request_id": request["request_id"], "reused": True}
+        _rows, result = _prepare_locked(directory, _control_rows(directory), request)
+        return result
+
+
+def _missing_request(request: dict) -> bool:
+    return any(not request.get(key) for key in ("request_id", "run_id", "actor_id", "session_id"))
+
+
+def _prepare_locked(directory: Path, rows: list[dict], request: dict) -> tuple[list[dict], dict]:
+    digest = argument_digest(request)
+    for row in rows:
+        if row.get("kind") == "provider_request" and row.get("request_id") == request["request_id"]:
+            if row.get("argument_digest") != digest:
+                return rows, {"ok": False, "status": "operation_conflict", "request_id": request["request_id"]}
+            return rows, {"ok": True, "status": "prepared", "request_id": request["request_id"], "reused": True}
+    event = {
+        "schema_version": SCHEMA_VERSION,
+        "kind": "provider_request",
+        "event_id": uuid.uuid4().hex,
+        "operation_id": request["request_id"],
+        "request_id": request["request_id"],
+        "run_id": request["run_id"],
+        "actor_id": request["actor_id"],
+        "session_id": request["session_id"],
+        "status": "prepared",
+        "argument_digest": digest,
+    }
+    if request.get("job_id"):
+        event["job_id"] = request["job_id"]
+    _append_control(directory, event)
+    return _control_rows(directory), {"ok": True, "status": "prepared", "request_id": request["request_id"], "reused": False}
+
+
+def _dispatch_identity(attempt: dict) -> dict:
+    identity = {
+        "request_id": attempt.get("request_id"),
+        "attempt_id": attempt.get("attempt_id"),
+        "run_id": attempt.get("run_id"),
+        "actor_id": attempt.get("actor_id"),
+        "session_id": attempt.get("session_id"),
+    }
+    if attempt.get("job_id"):
+        identity["job_id"] = attempt["job_id"]
+    if attempt.get("generation"):
+        identity["generation"] = attempt["generation"]
+    return identity
+
+
+def _fence_reason(rows: list[dict], attempt: dict) -> str | None:
+    """A committed stop or recovery fence. Settled totals alone do not stop a dispatch."""
+    if any(row.get("kind") == "run_stop" for row in rows):
+        return "run_stopped"
+    if any(row.get("kind") == "run_state" and row.get("status") == "recovering" for row in rows):
+        return "recovering"
+    generation = next(
+        (row.get("generation") for row in reversed(rows) if row.get("kind") == "run_generation" and row.get("generation")),
+        None,
+    )
+    if generation is not None and attempt.get("generation") != generation:
+        return "stale_generation"
+    return None
+
+
+def begin_dispatch(directory: Path, attempt: dict) -> dict:
+    """Record a dispatch that the caller is sending inside this same locked section."""
+    return _dispatch_locked(directory, attempt, lambda: "invoked")
+
+
+def serve_dispatch(directory: Path, attempt: dict, acknowledge) -> dict:
+    """Check the stop, let the caller invoke transport, then record the receipt before unlocking.
+
+    ``acknowledge`` runs while the control lock is held. It must return ``invoked`` only after
+    transport has been called, and it must not wait for the response. Any other return records
+    the attempt as unsent. A closed acknowledge (broken pipe, empty read) releases the lock.
+    """
+    return _dispatch_locked(directory, attempt, acknowledge)
+
+
+def _dispatch_locked(directory: Path, attempt: dict, acknowledge) -> dict:
+    """Admit one transport attempt, or record that it was not sent.
+
+    Replaying an attempt does not authorize a second send. A transport error after invocation
+    stays uncertain: it is not proof of no charge.
+    """
+    if _missing_request(attempt) or not attempt.get("attempt_id"):
+        raise OperationRejected("invalid_input", str(attempt.get("attempt_id") or attempt.get("request_id") or ""))
+    with control_lock(directory):
+        rows = _ensure_accounting_failures(directory, _ensure_threshold_stop(directory, _control_rows(directory)))
+        digest = argument_digest(_dispatch_identity(attempt))
+        prior = [
+            row for row in rows if row.get("kind") == "dispatch" and row.get("attempt_id") == attempt["attempt_id"]
+        ]
+        if prior:
+            last = prior[-1]
+            if last.get("argument_digest") != digest:
+                return {
+                    "ok": False,
+                    "admitted": False,
+                    "status": "operation_conflict",
+                    "request_id": attempt["request_id"],
+                    "attempt_id": attempt["attempt_id"],
+                }
+            return {
+                "ok": True,
+                "admitted": False,
+                "reused": True,
+                "status": last.get("status"),
+                "sent": last.get("sent"),
+                "request_id": attempt["request_id"],
+                "attempt_id": attempt["attempt_id"],
+            }
+        existing = next(
+            (row for row in rows if row.get("kind") == "provider_request" and row.get("request_id") == attempt["request_id"]),
+            None,
+        )
+        if existing and any(existing.get(key) != attempt.get(key) for key in ("run_id", "actor_id", "session_id")):
+            return {
+                "ok": False,
+                "admitted": False,
+                "status": "operation_conflict",
+                "request_id": attempt["request_id"],
+                "attempt_id": attempt["attempt_id"],
+            }
+        if existing is None:
+            request = {
+                "request_id": attempt["request_id"],
+                "run_id": attempt["run_id"],
+                "actor_id": attempt["actor_id"],
+                "session_id": attempt["session_id"],
+            }
+            if attempt.get("job_id"):
+                request["job_id"] = attempt["job_id"]
+            rows, prepared = _prepare_locked(directory, rows, request)
+            if not prepared["ok"]:
+                return {
+                    "ok": False,
+                    "admitted": False,
+                    "status": "operation_conflict",
+                    "request_id": attempt["request_id"],
+                    "attempt_id": attempt["attempt_id"],
+                }
+        reason = _fence_reason(rows, attempt)
+        if reason is None and acknowledge() != "invoked":
+            reason = "launch_failed"
+            status = "failed_before_start"
+            sent = "unsent"
+        else:
+            status = "rejected_before_dispatch" if reason else "dispatch_started"
+            sent = "unsent" if reason else "uncertain"
         event = {
             "schema_version": SCHEMA_VERSION,
-            "kind": "provider_request",
+            "kind": "dispatch",
             "event_id": uuid.uuid4().hex,
-            "operation_id": request["request_id"],
-            "request_id": request["request_id"],
-            "run_id": request["run_id"],
-            "actor_id": request["actor_id"],
-            "session_id": request["session_id"],
-            "status": "prepared",
+            "operation_id": attempt["attempt_id"],
+            "request_id": attempt["request_id"],
+            "attempt_id": attempt["attempt_id"],
+            "run_id": attempt["run_id"],
+            "actor_id": attempt["actor_id"],
+            "session_id": attempt["session_id"],
+            "status": status,
+            "sent": sent,
             "argument_digest": digest,
         }
-        if request.get("job_id"):
-            event["job_id"] = request["job_id"]
+        if reason:
+            event["reason"] = reason
+        if attempt.get("job_id"):
+            event["job_id"] = attempt["job_id"]
+        if attempt.get("generation"):
+            event["generation"] = attempt["generation"]
         _append_control(directory, event)
-        return {"ok": True, "status": "prepared", "request_id": request["request_id"], "reused": False}
+        return {
+            "ok": True,
+            "admitted": reason is None,
+            "status": status,
+            "sent": sent,
+            "reason": reason,
+            "request_id": attempt["request_id"],
+            "attempt_id": attempt["attempt_id"],
+            "reused": False,
+        }
 
 
 def _prepared(rows: list[dict]) -> dict[str, dict]:

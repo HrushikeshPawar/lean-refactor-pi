@@ -4,7 +4,7 @@
 
 **Blocked by:** 05: Settle one shared actual-cost ledger
 
-**Status:** ready-for-agent
+**Status:** needs-review
 
 **Branch:** `v8/06-provider-dispatch-stop`
 
@@ -26,12 +26,12 @@
 
 ## What to build and acceptance
 
-- [ ] 1. Implement a supported provider dispatch boundary that can actually refuse a call. Throwing from the present non-veto notification hook does not enforce the stop.
-- [ ] 2. Serialize last-moment dispatch authorization with latest settlements and run stopping; begin transport within that ordering boundary without holding a lock for the whole response.
-- [ ] 3. Exercise ordinary turns, automatic retries, context recovery and compaction, including a threshold crossing immediately before dispatch.
-- [ ] 4. Persist dispatch receipts so later recovery can distinguish definitely unsent from begun/uncertain requests. Never treat transport errors as proof of no charge.
-- [ ] 5. Preserve Sol continuation below budget and the existing $0.50 headroom outside agent availability. Do not add estimated-cost stops.
-- [ ] 6. Use the one assigned fast smoke for this slice. Retain the stated behavior requirements; actual-Pi/real-Lean journeys and the broader race matrix are final E2E coverage, not this ticket's gate.
+- [x] 1. Implement a supported provider dispatch boundary that can actually refuse a call. Throwing from the present non-veto notification hook does not enforce the stop.
+- [x] 2. Serialize last-moment dispatch authorization with latest settlements and run stopping; begin transport within that ordering boundary without holding a lock for the whole response.
+- [x] 3. Exercise ordinary turns, automatic retries, context recovery and compaction, including a threshold crossing immediately before dispatch.
+- [x] 4. Persist dispatch receipts so later recovery can distinguish definitely unsent from begun/uncertain requests. Never treat transport errors as proof of no charge.
+- [x] 5. Preserve Sol continuation below budget and the existing $0.50 headroom outside agent availability. Do not add estimated-cost stops.
+- [x] 6. Use the one assigned fast smoke for this slice. Retain the stated behavior requirements; actual-Pi/real-Lean journeys and the broader race matrix are final E2E coverage, not this ticket's gate.
 
 ## Verify
 
