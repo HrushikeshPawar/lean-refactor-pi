@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import test from "node:test";
-import { applyDelta, BlobStore, DeltaChain, deltaBytes, KEYFRAME_EVERY, splitRequest, stampRecord } from "./journal.ts";
+import { applyDelta, BlobStore, DeltaChain, deltaBytes, KEYFRAME_EVERY, settleWithUsageEvidence, splitRequest, stampRecord } from "./journal.ts";
 
 const fixtureDir = resolve(import.meta.dirname, "../../../tests/fixtures/replay");
 
@@ -55,6 +55,36 @@ test("stampRecord adds the turn and request id without overriding existing keys"
   assert.deepEqual(stampRecord({ kind: "request", id: "r" }, 2, "r"),
     { kind: "request", id: "r", turn: 2, request_id: "r" });
   assert.deepEqual(stampRecord({ turn: 4, request_id: "kept" }, 9, "other"), { turn: 4, request_id: "kept" });
+});
+
+test("usage evidence survives interruption before shared settlement, including grouped and unknown usage", async () => {
+  const directory = mkdtempSync(resolve(tmpdir(), "arena-usage-"));
+  const journal = resolve(directory, "cost-ledger.jsonl");
+  try {
+    for (const evidence of [
+      { request_id: "r1", covered_request_ids: ["r1"], usage: { cost: { total: 0 } }, response_id: "resp1" },
+      { request_id: "r3", covered_request_ids: ["r2", "r3"], usage: { cost: { total: 0.02 } }, session_entry_id: "summary" },
+      { request_id: "r4", covered_request_ids: ["r4"], usage: null },
+    ]) {
+      await assert.rejects(settleWithUsageEvidence(
+        row => appendFileSync(journal, `${JSON.stringify(row)}\n`, { flush: true }),
+        { run_id: "run", actor_id: "worker", session_id: "session", job_id: "job", generation: "g1", ...evidence },
+        async () => {
+          const rows = readFileSync(journal, "utf8").trim().split("\n").map(line => JSON.parse(line));
+          assert.deepEqual(rows.at(-1), { kind: "usage_evidence", run_id: "run", actor_id: "worker",
+            session_id: "session", job_id: "job", generation: "g1", ...evidence });
+          throw new Error("settlement interrupted");
+        },
+      ), /settlement interrupted/);
+    }
+    let called = false;
+    await assert.rejects(settleWithUsageEvidence(() => { throw new Error("journal unavailable"); }, {}, async () => {
+      called = true;
+    }), /journal unavailable/);
+    assert.equal(called, false);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("BlobStore.put returns the sha256 and does not rewrite an existing blob", () => {

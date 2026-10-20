@@ -3357,6 +3357,13 @@ def _submitted_full_jobs(directory: Path, history: list[dict], rows: list[dict],
             execution = event.get("check_id") or f"legacy:{event['job_id']}:{event['evaluation_id']}"
             latest[(event["job_id"], execution)] = event
     pending = {event["proof_id"] for event in latest.values() if event["state"] == "queued"}
+    # A saved candidate can precede any attributed check intent. Recovery uses
+    # the existing full queue rather than inventing an author or an evaluation.
+    evaluated_full = {event.get("candidate_id") for event in history
+                      if event.get("kind") == "evaluation" and event.get("mode") == "full"}
+    pending.update(event["candidate_id"] for event in history
+                   if event.get("kind") == "job_queued" and event.get("job") == "full"
+                   and event.get("phase") == "recovery" and event.get("candidate_id") not in evaluated_full)
     selected = _autocheck_jobs(rows, closing=closing)
     ids = {row["id"] for row in selected}
     return selected + [row for row in rows if row["id"] in pending and row["id"] not in ids]
@@ -3715,10 +3722,25 @@ def _run_assembly(name: str, run_id: str, sketch: Node) -> None:
 
 def _run_full_check(name: str, run_id: str, job: dict) -> str:
     directory = run_dir(run_id)
-    checks = _queue_full_check(directory, run_id, job["id"])
+    from arena import orchestration
+    from arena.recovery_proofs import _check_arguments, check_mode
+
+    latest = {}
+    for event in orchestration._history(directory):
+        if event.get("type") == "verification" and event.get("proof_id") == job["id"]:
+            identity = (event["job_id"], event.get("check_id") or f"legacy:{event['job_id']}:{event['evaluation_id']}")
+            latest[identity] = event
+    pending = [event for event in latest.values() if event["state"] == "queued"]
+    mode = check_mode(job["id"], pending[0]["evaluation_id"], problem(name)) if pending else "full"
+    if mode is None:
+        raise ValueError("queued evaluation context changed")
+    checks = [_check_arguments(event) for event in pending
+              if event["evaluation_id"] == pending[0]["evaluation_id"]] if pending else _queue_full_check(
+                  directory, run_id, job["id"],
+              )
     try:
         proof = (directory / "proofs" / f"{job['id']}.lean").read_text()
-        record_evaluation(name, run_id, proof, "full", materialize_live=False, lane="batch", trigger="auto",
+        record_evaluation(name, run_id, proof, mode, materialize_live=False, lane="batch", trigger="auto",
                           verification_checks=checks)
     except Exception as error:  # record the failure so the queue moves on
         _append(
@@ -3726,10 +3748,10 @@ def _run_full_check(name: str, run_id: str, job: dict) -> str:
             {
                 "kind": "evaluation",
                 "candidate_id": job["id"],
-                "key": f"auto-error-{job['id']}",
-                "mode": "full",
+                "key": _evaluation_key(job["id"], mode, problem(name)),
+                "mode": mode,
                 "trigger": "auto",
-                "result": {"ok": False, "mode": "full", "error": str(error)[:300], "compat": {}},
+                "result": {"ok": False, "mode": mode, "error": str(error)[:300], "compat": {}},
             },
         )
         from arena import orchestration

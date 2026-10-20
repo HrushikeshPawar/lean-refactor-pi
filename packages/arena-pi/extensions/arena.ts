@@ -10,7 +10,7 @@ import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { RawArguments, repairMalformedToolArguments } from "./rawargs.ts";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { nearestToolName, normalizeToolArguments, requireToolArguments } from "./toolnames.ts";
-import { BlobStore, DeltaChain, splitRequest, stampRecord } from "./journal.ts";
+import { BlobStore, DeltaChain, settleWithUsageEvidence, splitRequest, stampRecord } from "./journal.ts";
 import { nothingToSummarize, objectToolArguments, ResultTrimmer } from "./trim.ts";
 import { stopDecision } from "./control.ts";
 import { continuationFacts, continuationPush } from "./rules.ts";
@@ -366,7 +366,13 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     const usd = known ? callCost(usage) : 0;
     let shared: SharedSpend | undefined;
     try {
-      shared = runDirectory ? await settleProviderUsage(runDirectory, sharedIdentity(), covered, usage) : undefined;
+      const identity = sharedIdentity();
+      shared = await settleWithUsageEvidence(appendCost, {
+        id, request_id: id, covered_request_ids: covered, usage: usage ?? null,
+        usage_known: known, run_id: identity.runId, actor_id: identity.actorId,
+        session_id: identity.sessionId, job_id: identity.jobId ?? null,
+        generation: identity.generation ?? null, source: "message_end", ...extra,
+      }, async () => runDirectory ? settleProviderUsage(runDirectory, identity, covered, usage) : undefined);
     } catch (error) {
       appendCost({ kind: "accounting_failure", id, usage: usage ?? null, covered_request_ids: covered });
       ctx.abort();
@@ -427,10 +433,11 @@ export default async function arenaExtension(pi: ExtensionAPI) {
       text: blocks.filter(block => block.type === "text").map(block => String(block.text ?? "")).join(""),
       stop_reason: message.stopReason, response_id: message.responseId ?? null,
       response_model: message.responseModel ?? message.model, error_message: message.errorMessage ?? null };
-    const failedWithoutUsage = (message.stopReason === "error" || message.stopReason === "aborted") && !message.usage?.totalTokens;
+    const failedWithoutUsage = (message.stopReason === "error" || message.stopReason === "aborted")
+      && !message.usage?.totalTokens;
     const usage = failedWithoutUsage ? undefined : message.usage;
     const known = knownUsage(usage);
-    await settle(id, usage, {}, ctx, blocks.filter(block => block.type === "toolCall").length);
+    await settle(id, usage, { response_id: message.responseId ?? null }, ctx, blocks.filter(block => block.type === "toolCall").length);
     appendTrace({ ...delivered, settled_usd: known ? callCost(message.usage) : null,
       usage: { input: message.usage?.input ?? 0, output: message.usage?.output ?? 0,
         cache_read: message.usage?.cacheRead ?? 0, cache_write: message.usage?.cacheWrite ?? 0 } });
@@ -443,7 +450,8 @@ export default async function arenaExtension(pi: ExtensionAPI) {
   pi.on("session_compact", async (event, ctx) => {
     const covered = compactionRequests ?? (pendingRequest ? [pendingRequest] : []);
     const last = covered.at(-1);
-    if (last !== undefined) await settle(last, event.compactionEntry.usage, { source: "compaction" }, ctx, 0, covered);
+    if (last !== undefined) await settle(last, event.compactionEntry.usage,
+      { source: "compaction", session_entry_id: event.compactionEntry.id }, ctx, 0, covered);
     compactionRequests = undefined;
     pendingRequest = undefined;
     if (active && runId) await campaign("reset_delivered");

@@ -95,6 +95,16 @@ export function stampRecord(row: Record<string, unknown>, turn: number, requestI
   return stamped;
 }
 
+/** The append must be durable before the charging authority is called. */
+export async function settleWithUsageEvidence<T>(
+  append: (row: Record<string, unknown>) => void,
+  evidence: Record<string, unknown>,
+  settle: () => Promise<T>,
+): Promise<T> {
+  append({ ...evidence, kind: "usage_evidence" });
+  return settle();
+}
+
 /** Content-addressed text files. `put` writes `<directory>/<sha256>` only when that file is absent. */
 export class BlobStore {
   private directory: string;

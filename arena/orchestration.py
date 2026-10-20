@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
-import json
 import threading
 import uuid
 from contextlib import contextmanager
@@ -727,7 +726,8 @@ def reconcile(directory: Path, *, inspect, signal, open_child) -> dict:
         journals, sessions = _retained_evidence(directory)
         receipts = recover_receipts(directory, journals=journals, sessions=sessions, open_sessions=open_sessions)
         with run_control.control_lock(directory):
-            held = blocked or _request_uncertain(directory)
+            held = (blocked or _request_uncertain(directory) or bool(receipts.get("usage_recovery_issues"))
+                    or bool(receipts.get("proof_recovery_issues")))
         replacements = 0
         if not held:
             # The new generation may dispatch only after all old owners and request journals reconcile.
@@ -1337,7 +1337,7 @@ def _public_event(row: dict) -> dict:
         for key in (
             "event_id", "job_id", "activation_id", "state", "attempt_id", "proof_id",
             "evaluation_id", "request_id", "run_id", "actor_id", "session_id",
-            "operation_id", "reason", "outcome", "check_id", "attempt_ids",
+            "operation_id", "reason", "outcome", "check_id", "attempt_ids", "recovery_of",
         )
         if row.get(key) is not None
     }
@@ -1440,6 +1440,7 @@ def note_verification(
     check_id: str | None = None,
     proof_id: str | None = None,
     attempt_ids: list[str] | None = None,
+    recovery_of: str | None = None,
 ) -> dict:
     """Publish one execution's lifecycle, separately from its reusable evaluation key."""
     if state not in {"queued", "running", *_terminal_checks}:
@@ -1449,6 +1450,8 @@ def note_verification(
     check_id = check_id or f"legacy:{job_id}:{evaluation_id}"
     arguments = {"job_id": job_id, "evaluation_id": evaluation_id, "check_id": check_id,
                  "state": state, "proof_id": proof_id, "attempt_ids": sorted(attempt_ids or [])}
+    if recovery_of:
+        arguments["recovery_of"] = recovery_of
     operation_id = run_control.argument_digest(arguments)[:32]
 
     def mutate(ctx):
@@ -1520,48 +1523,18 @@ def await_results(
 
 
 def _journal_charges(journals: list[dict], sessions: list[dict]) -> list[dict]:
-    charges = []
-    for row in list(journals) + [
-        item for item in sessions if item.get("phase") == "response" and item.get("request_id")
-    ]:
-        if row.get("estimate"):
-            continue
-        covered = list(row.get("covered_request_ids") or [])
-        if not covered and row.get("request_id"):
-            covered = [row["request_id"]]
-        if not covered or row.get("usage") is None:
-            continue
-        charges.append({**row, "covered_request_ids": covered})
-    unique = []
-    seen: set[tuple[str, ...]] = set()
-    for charge in charges:
-        key = tuple(sorted(charge["covered_request_ids"]))
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(charge)
-    return unique
+    from arena.recovery_usage import journal_charges
+    return journal_charges(journals, sessions)
 
 
 def _jsonl_rows(path: Path) -> list[dict]:
-    if not path.is_file():
-        return []
-    rows = []
-    for line in path.read_text().splitlines():
-        if not line.strip():
-            continue
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(row, dict):
-            rows.append(row)
-    return rows
+    from arena.recovery_usage import jsonl_rows
+    return jsonl_rows(path)
 
 
 def _retained_evidence(directory: Path) -> tuple[list[dict], list[dict]]:
-    """Child cost journals and retained session evidence left on disk across a restart."""
-    return _jsonl_rows(directory / "cost-journal.jsonl"), _jsonl_rows(directory / "session-evidence.jsonl")
+    from arena.recovery_usage import retained_evidence
+    return retained_evidence(directory)
 
 
 def recover_receipts(
@@ -1578,149 +1551,18 @@ def recover_receipts(
     preparation. This does not send a provider request or change the stop or deadline origin.
     """
     directory = Path(directory)
-    prepared = {
-        row["request_id"]: row
-        for row in run_control._control_rows(directory)
-        if row.get("kind") == "provider_request" and row.get("request_id")
-    }
-    prior = run_control._apply_coverage(run_control._control_rows(directory))
-    already = set(prior["covered"]) - set(prior["unknown"])
-    for charge in _journal_charges(journals, sessions):
-        covered = charge["covered_request_ids"]
-        if any(request_id in already for request_id in covered):
-            continue
-        owner = prepared.get(covered[0], {})
-        amount = charge.get("amount")
-        if not isinstance(amount, str):
-            parsed = run_control._usage_amount(charge.get("usage"))
-            amount = format(parsed, "f") if parsed is not None else None
-        settlement_id = "recovered:" + run_control.argument_digest(sorted(covered))[:32]
-        payload = {
-            "settlement_id": settlement_id,
-            "run_id": charge.get("run_id") or owner.get("run_id"),
-            "actor_id": charge.get("actor_id") or owner.get("actor_id"),
-            "session_id": charge.get("session_id") or owner.get("session_id"),
-            "covered_request_ids": covered,
-            "state": "known" if isinstance(amount, str) else "unknown",
-            "usage": charge.get("usage"),
-            "irreconcilable": not isinstance(amount, str),
-        }
-        if charge.get("job_id") or owner.get("job_id"):
-            payload["job_id"] = charge.get("job_id") or owner.get("job_id")
-        if isinstance(amount, str):
-            payload["amount"] = amount
-        try:
-            settled = run_control.settle_usage(directory, payload)
-        except run_control.OperationRejected:
-            continue
-        if settled.get("ok") and settled.get("state") == "known":
-            already.update(covered)
-    rows = run_control._control_rows(directory)
-    coverage = run_control._apply_coverage(rows)
-    known = coverage["covered"] - set(coverage["unknown"])
-    latest: dict[str, dict] = {}
-    for row in rows:
-        if row.get("kind") in ("dispatch_intent", "dispatch") and row.get("attempt_id"):
-            latest[row["attempt_id"]] = row
-    for row in latest.values():
-        request_id = row.get("request_id")
-        if (
-            not request_id
-            or request_id in known
-            or request_id in coverage["unknown"]
-            or row.get("sent") == "unsent"
-            or row.get("status") in ("rejected_before_dispatch", "failed_before_start")
-            or (open_sessions and row.get("session_id") in open_sessions)
-        ):
-            continue
-        owner = prepared.get(request_id, row)
-        try:
-            run_control.settle_usage(directory, {
-                "settlement_id": "unknown:" + request_id,
-                "run_id": owner.get("run_id"),
-                "actor_id": owner.get("actor_id"),
-                "session_id": owner.get("session_id"),
-                "job_id": owner.get("job_id"),
-                "covered_request_ids": [request_id],
-                "state": "unknown",
-                "irreconcilable": True,
-            })
-        except run_control.OperationRejected:
-            continue
-    history = _history(directory)
-    resulted = {
-        row.get("candidate_id") or row.get("proof_id")
-        for row in history
-        if row.get("kind") == "evaluation" or (row.get("type") == "verification" and row.get("state") in _terminal_checks)
-    }
-    evaluations = []
-    for row in history:
-        if row.get("kind") != "attempt":
-            continue
-        candidate_id = row.get("candidate_id") or row.get("proof_id")
-        evaluation_id = row.get("evaluation_id") or (
-            hashlib.sha256(str(candidate_id).encode()).hexdigest()[:16] if candidate_id else None
-        )
-        if not evaluation_id or candidate_id in resulted or evaluation_id in evaluations:
-            continue
-        if any(item.get("evaluation_id") == evaluation_id and item.get("type") == "verification" for item in history):
-            evaluations.append(evaluation_id)
-            continue
-        applied = note_verification(
-            directory,
-            job_id=row.get("job_id") or "unassigned",
-            evaluation_id=evaluation_id,
-            state="queued",
-            run_id=row.get("run_id") or directory.name,
-            actor_id=row.get("actor_id") or "sol",
-            session_id=row.get("session_id") or "sol-session",
-            check_id=f"recover:{evaluation_id}",
-            proof_id=candidate_id,
-            attempt_ids=[row["event_id"]] if row.get("event_id") else None,
-        )
-        if applied.get("ok"):
-            evaluations.append(evaluation_id)
-    history = _history(directory)
-    delivery_ids = [
-        row["event_id"]
-        for row in history
-        if row.get("event_id") and (
-            row.get("kind") == "evaluation"
-            or (row.get("type") == "verification" and row.get("state") in _terminal_checks)
-        )
-    ]
-    if delivery_ids:
-        source = next(row for row in history if row.get("event_id") == delivery_ids[0])
+    from arena.recovery_usage import reconcile_usage
 
-        def mutate(ctx):
-            return [ctx.append_ledger({
-                "kind": "delivered_reply",
-                "data": {
-                    "channel": "worker_inbox",
-                    "event_ids": delivery_ids,
-                    "acked": delivery_ids,
-                    "replay": True,
-                },
-            })]
+    usage_recovery = reconcile_usage(directory, journals, sessions, open_sessions)
+    usage_recovery_issues = usage_recovery["issues"]
+    from arena.recovery_proofs import recover as recover_proofs
 
-        run_control.apply_operation(directory, {
-            "operation_id": run_control.argument_digest(delivery_ids)[:32],
-            "kind": "delivered_reply",
-            "arguments": {"event_ids": delivery_ids, "acked": delivery_ids, "replay": True},
-            "run_id": source.get("run_id") or directory.name,
-            "actor_id": source.get("actor_id") or "sol",
-            "session_id": source.get("session_id") or "recovery",
-        }, mutate)
+    recovered_proofs = recover_proofs(directory, _history(directory), open_sessions=open_sessions or set())
     view = run_control.read_state(directory)
     rows = run_control._control_rows(directory)
     origin = next((row.get("origin") for row in rows if row.get("kind") == "track_deadline" and row.get("origin")), None)
-    unsent = sorted({
-        row["request_id"]
-        for row in latest.values()
-        if row.get("request_id") and (
-            row.get("sent") == "unsent" or row.get("status") in ("rejected_before_dispatch", "failed_before_start")
-        )
-    })
+    unsent = sorted(request_id for request_id in run_control._prepared(rows)
+                    if run_control._definitely_unsent(rows, request_id))
     return {
         "ok": True,
         "total": view["total"],
@@ -1729,8 +1571,8 @@ def recover_receipts(
         "accounting_failures": view["accounting_failures"],
         "stop_reason": view["stop_reason"],
         "deadline_origin": origin,
-        "evaluations": evaluations,
-        "delivery_ids": delivery_ids,
+        **recovered_proofs,
+        "usage_recovery_issues": usage_recovery_issues,
         "unsent": unsent,
         "resent": False,
     }

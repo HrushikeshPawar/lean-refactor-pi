@@ -26,7 +26,7 @@ def _seed_parent(directory: Path) -> None:
     (directory / "proofs").mkdir(parents=True)
     (directory / "proofs" / "parent.lean").write_text(_PROOF)
     (directory / "ledger.jsonl").write_text(
-        json.dumps({"kind": "candidate", "candidate_id": "parent", "origin": "model"}) + "\n"
+        json.dumps({"kind": "candidate", "candidate_id": "parent", "origin": "reference"}) + "\n"
     )
 
 
@@ -1639,6 +1639,30 @@ class V8RecoverySmokeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
             _seed_parent(directory)
+            from arena import campaign
+
+            theorem = {"name": "demo"}
+            pins = [["v1", "pin1"], ["v2", "pin2"]]
+            for seam in (patch.object(campaign, "problem", return_value=theorem),
+                         patch.object(campaign, "versions", return_value=pins),
+                         patch.object(campaign, "_evaluator_sha", return_value="evaluator"),
+                         patch.object(campaign, "run_dir", return_value=directory)):
+                seam.start()
+                self.addCleanup(seam.stop)
+            ledger = directory / "ledger.jsonl"
+            ledger.write_text(json.dumps({"kind": "init", "theorem": "demo", "versions": pins}) + "\n" + ledger.read_text())
+
+            def save_candidate(proof):
+                candidate_id = hashlib.sha256(("demo\0" + proof).encode()).hexdigest()
+                (directory / "proofs" / f"{candidate_id}.lean").write_text(proof)
+                campaign._append(directory, {"kind": "candidate", "candidate_id": candidate_id,
+                    "origin": "model", "source_versions": pins, "evaluator_sha256": "evaluator"})
+                return candidate_id
+
+            pending_candidate = save_candidate("by trivial")
+            done_candidate = save_candidate("by exact True.intro")
+            pending_key = campaign._evaluation_key(pending_candidate, "fast", theorem)
+            done_key = campaign._evaluation_key(done_candidate, "full", theorem)
             identity = {"run_id": "run-1", "actor_id": "sol", "session_id": "sol-session", "job_id": "job-1"}
             generation = "gen-settled"
 
@@ -1675,23 +1699,28 @@ class V8RecoverySmokeTests(unittest.TestCase):
 
             def record_attempt(writer):
                 writer.append_ledger({
-                    "kind": "attempt", "candidate_id": "cand-pending", "proof_id": "cand-pending",
-                    "evaluation_id": "eval-pending",
+                    "kind": "attempt", "candidate_id": pending_candidate, "proof_id": pending_candidate,
+                    "evaluation_id": pending_key,
                 })
 
             run_control.apply_operation(directory, {
-                "operation_id": "attempt-pending", "kind": "attempt", "arguments": {"candidate_id": "cand-pending"},
+                "operation_id": "attempt-pending", "kind": "attempt", "arguments": {"candidate_id": pending_candidate},
                 **identity,
             }, record_attempt)
 
+            orchestration.note_verification(directory, **identity, check_id="pending-check",
+                evaluation_id=pending_key, proof_id=pending_candidate, state="running")
+            orchestration.note_verification(directory, **identity, check_id="done-check",
+                evaluation_id=done_key, proof_id=done_candidate, state="running")
+
             def record_result(writer):
                 writer.append_ledger({
-                    "kind": "evaluation", "candidate_id": "cand-done", "key": "eval-done",
-                    "result": {"ok": True},
+                    "kind": "evaluation", "candidate_id": done_candidate, "key": done_key,
+                    "mode": "full", "result": {"ok": True, "compat": {"v1": {"passed": True}, "v2": {"passed": True}}},
                 })
 
             recorded = run_control.apply_operation(directory, {
-                "operation_id": "result-done", "kind": "evaluation", "arguments": {"candidate_id": "cand-done"},
+                "operation_id": "result-done", "kind": "evaluation", "arguments": {"candidate_id": done_candidate},
                 **identity,
             }, record_result)
             done_event = recorded["evidence_refs"][0]["event_id"]
@@ -1725,17 +1754,20 @@ class V8RecoverySmokeTests(unittest.TestCase):
             self.assertEqual(second["accounting"], "unknown")
             self.assertIn("req-lost", second["unknown_requests"])
             self.assertTrue(second["accounting_failures"])
-            self.assertEqual(second["evaluations"], ["eval-pending"])
-            self.assertEqual(second["delivery_ids"], [done_event])
+            self.assertEqual(second["evaluations"], [pending_key])
+            self.assertTrue(second["delivery_ids"])
+            self.assertTrue(any(row.get("event_id") == done_event for row in orchestration._history(directory)))
+            self.assertEqual(orchestration._delivery_rows(directory, "sol"), [])
             self.assertEqual(first["delivery_ids"], second["delivery_ids"])
             self.assertEqual(
-                sum(1 for row in orchestration._history(directory) if row.get("key") == "eval-done"),
+                sum(1 for row in orchestration._history(directory) if row.get("key") == done_key),
                 1,
             )
             self.assertEqual(
                 sum(
                     1 for row in orchestration._history(directory)
-                    if row.get("type") == "verification" and row.get("evaluation_id") == "eval-pending"
+                    if row.get("type") == "verification" and row.get("evaluation_id") == pending_key
+                    and row.get("state") == "queued"
                 ),
                 1,
             )
