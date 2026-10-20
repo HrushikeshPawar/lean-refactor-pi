@@ -4,7 +4,7 @@
 
 **Blocked by:** 08: Delegate one fresh RPC worker asynchronously
 
-**Status:** ready-for-agent
+**Status:** needs-review
 
 **Branch:** `v8/09-worker-followups`
 
@@ -26,12 +26,12 @@
 
 ## What to build and acceptance
 
-- [ ] 1. Publish durable candidates/evidence immediately at tool boundaries, independent of the worker final answer or assignment settlement.
-- [ ] 2. A follow-up retains the original job, hypothesis, session and immutable anchor while creating a new activation. Distinct hypotheses start fresh sessions.
-- [ ] 3. Serialize or reject a conflicting follow-up while active; do not silently start overlapping prompts in one session.
-- [ ] 4. Allow assignment completion/exhaustion before the global stop and retain its result/session references after process release.
-- [ ] 5. Show fresh-versus-resumed behavior in jobs and normal actor result delivery, with exact request/activation/candidate links.
-- [ ] 6. Use the one assigned fast smoke for this slice. Retain the stated behavior requirements; actual-Pi/real-Lean journeys and the broader race matrix are final E2E coverage, not this ticket's gate.
+- [x] 1. Publish durable candidates/evidence immediately at tool boundaries, independent of the worker final answer or assignment settlement.
+- [x] 2. A follow-up retains the original job, hypothesis, session and immutable anchor while creating a new activation. Distinct hypotheses start fresh sessions.
+- [x] 3. Serialize or reject a conflicting follow-up while active; do not silently start overlapping prompts in one session.
+- [x] 4. Allow assignment completion/exhaustion before the global stop and retain its result/session references after process release.
+- [x] 5. Show fresh-versus-resumed behavior in jobs and normal actor result delivery, with exact request/activation/candidate links.
+- [x] 6. Use the one assigned fast smoke for this slice. Retain the stated behavior requirements; actual-Pi/real-Lean journeys and the broader race matrix are final E2E coverage, not this ticket's gate.
 
 ## Verify
 

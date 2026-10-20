@@ -1,4 +1,8 @@
-"""One fresh worker assignment. The receipt is durable before the child is opened."""
+"""Worker assignments. A receipt is durable before the child is opened.
+
+A passing tool result is published while the activation is still active.
+A follow-up reuses the hypothesis session; a second prompt to an active job is busy.
+"""
 
 from __future__ import annotations
 
@@ -14,11 +18,13 @@ from arena.run_control import OperationRejected
 
 _readers: dict[str, threading.Thread] = {}
 _readers_guard = threading.Lock()
-_terminal_states = frozenset(("handled", "completed", "failed"))
+_terminal_states = frozenset(("handled", "completed", "failed", "exhausted"))
+_active_states = frozenset(("launching", "queued", "active"))
+_finding_ids = ("attempt_id", "proof_id", "evaluation_id")
 
 
-def _reject(operation_id: str, reason: str) -> dict:
-    return {"ok": False, "category": "invalid_input", "reason": reason, "operation_id": operation_id}
+def _reject(operation_id: str, reason: str, category: str = "invalid_input") -> dict:
+    return {"ok": False, "category": category, "reason": reason, "operation_id": operation_id}
 
 
 def _resolve_anchor(directory: Path, scope: str, anchor: object) -> dict | str:
@@ -95,10 +101,11 @@ def _states(directory: Path) -> list[dict]:
     return [row for row in _history(directory) if row.get("type") == "assignment_state"]
 
 
-def _job_snapshot(directory: Path, job_id: str) -> dict | None:
-    delegation = next((row for row in _delegations(directory) if row.get("job_id") == job_id), None)
-    if delegation is None:
-        return None
+def _job_rows(directory: Path, job_id: str) -> list[dict]:
+    return [row for row in _delegations(directory) if row.get("job_id") == job_id]
+
+
+def _activation_view(directory: Path, delegation: dict) -> dict:
     state = delegation.get("state")
     command_id = None
     for row in _states(directory):
@@ -108,25 +115,59 @@ def _job_snapshot(directory: Path, job_id: str) -> dict | None:
         if row.get("command_id"):
             command_id = row["command_id"]
     return {
+        "activation_id": delegation["activation_id"],
+        "state": state,
+        "task": delegation["task"],
+        "command_id": command_id,
+    }
+
+
+def _job_snapshot(directory: Path, job_id: str) -> dict | None:
+    rows = _job_rows(directory, job_id)
+    if not rows:
+        return None
+    original = rows[0]
+    delegation = rows[-1]
+    current = _activation_view(directory, delegation)
+    findings = [
+        {
+            "event_id": row.get("event_id"),
+            "activation_id": row.get("activation_id"),
+            "request_id": row.get("request_id"),
+            "attempt_id": row.get("attempt_id"),
+            "proof_id": row.get("proof_id"),
+            "evaluation_id": row.get("evaluation_id"),
+        }
+        for row in _history(directory)
+        if row.get("type") == "worker_finding" and row.get("job_id") == job_id
+    ]
+    return {
         "job_id": job_id,
         "activation_id": delegation["activation_id"],
-        "session_id": delegation["worker_session_id"],
-        "actor_id": delegation["actor_id"],
-        "state": state,
-        "scope": delegation["scope"],
-        "anchor": delegation["anchor"],
-        "tools": list(delegation["tools"]),
-        "command_id": command_id,
+        "session_id": original["worker_session_id"],
+        "actor_id": original["actor_id"],
+        "state": current["state"],
+        "scope": original["scope"],
+        "anchor": original["anchor"],
+        "hypothesis": original.get("hypothesis", original["task"]),
+        "tools": list(original["tools"]),
+        "command_id": current["command_id"],
         "task": delegation["task"],
+        "activations": [_activation_view(directory, row) for row in rows],
+        "findings": findings,
     }
 
 
 def jobs(directory: Path, job_ids: list[str] | None = None) -> dict:
     """Read-only assignment snapshots. This does not start a provider request."""
     found = []
+    seen: set[str] = set()
     for row in _delegations(directory):
+        if row.get("job_id") in seen:
+            continue
         if job_ids is not None and row.get("job_id") not in job_ids:
             continue
+        seen.add(row["job_id"])
         snapshot = _job_snapshot(directory, row["job_id"])
         if snapshot is not None:
             found.append(snapshot)
@@ -170,6 +211,42 @@ def _record_state(directory: Path, delegation: dict, state: str, **extra) -> Non
         )
 
 
+def _passing_candidate(record: dict) -> bool:
+    if record.get("type") not in ("candidate", "tool_result"):
+        return False
+    if record.get("type") == "tool_result" and record.get("name") not in (None, "compile"):
+        return False
+    return record.get("passed") is True and all(
+        isinstance(record.get(key), str) and record[key] for key in _finding_ids
+    )
+
+
+def _observe_tool(directory: Path, delegation: dict, record: dict) -> bool:
+    """Publish a passing candidate at the tool boundary. This does not settle the assignment."""
+    if record.get("type") not in ("candidate", "tool_result"):
+        return False
+    if _passing_candidate(record):
+        _append(
+            directory,
+            {
+                "schema_version": run_control.SCHEMA_VERSION,
+                "event_id": uuid.uuid4().hex,
+                "type": "worker_finding",
+                "operation_id": delegation["operation_id"],
+                "run_id": delegation["run_id"],
+                "actor_id": delegation["worker_actor_id"],
+                "session_id": delegation["worker_session_id"],
+                "job_id": delegation["job_id"],
+                "activation_id": delegation["activation_id"],
+                "request_id": record.get("request_id"),
+                "attempt_id": record["attempt_id"],
+                "proof_id": record["proof_id"],
+                "evaluation_id": record["evaluation_id"],
+            },
+        )
+    return True
+
+
 def _apply_record(record: dict, command_id: str, current: dict) -> dict:
     if current["state"] in _terminal_states:
         return current
@@ -190,6 +267,9 @@ def _apply_record(record: dict, command_id: str, current: dict) -> dict:
             current["state"] = "failed"
             current["reason"] = "invalid_prompt_disposition"
         return current
+    if kind == "assignment_exhausted" and current.get("state") == "active":
+        current["state"] = "exhausted"
+        return current
     if kind == "agent_settled" and current.get("state") != "handled":
         if current.get("state") == "active":
             current["state"] = "completed"
@@ -200,6 +280,8 @@ def _apply_record(record: dict, command_id: str, current: dict) -> dict:
 
 def _take(directory: Path, delegation: dict, command_id: str, current: dict, records: list[dict]) -> None:
     for record in records:
+        if _observe_tool(directory, delegation, record):
+            continue
         previous = current["state"]
         _apply_record(record, command_id, current)
         if current["state"] == previous:
@@ -259,12 +341,160 @@ def _receipt_body(directory: Path, delegation: dict, applied: dict, spend: dict)
         "scope": delegation["scope"],
         "anchor": delegation["anchor"],
         "tools": list(WORKER_TOOLS),
+        "hypothesis": delegation.get("hypothesis", delegation["task"]),
         "evidence_refs": applied.get("evidence_refs") or [],
         "next_cursor": applied.get("event_seq") or [],
         "accounting": spend["accounting"],
         "total": spend["total"],
         "reused": bool(applied.get("reused")),
+        "resumed": bool(delegation.get("resumed")),
     }
+
+
+def deliver(directory: Path, actor_id: str) -> dict:
+    """Findings already published for this actor, including those from an active assignment."""
+    view = jobs(directory)
+    results = []
+    owned = [job for job in view["jobs"] if job.get("actor_id") == actor_id]
+    for job in owned:
+        original = job["activations"][0]["activation_id"]
+        for finding in job["findings"]:
+            results.append(
+                {
+                    **finding,
+                    "job_id": job["job_id"],
+                    "session_id": job["session_id"],
+                    "resumed": finding.get("activation_id") != original,
+                }
+            )
+    spend = run_control.read_state(directory)
+    return {
+        "ok": True,
+        "results": results,
+        "jobs": owned,
+        "accounting": view["accounting"],
+        "total": view["total"],
+        "stopped": spend["stopped"],
+    }
+
+
+def _open_activation(directory: Path, stored: dict, open_child, command_id: str) -> None:
+    try:
+        transport = open_child(
+            worker_launch(
+                directory,
+                run_id=stored["run_id"],
+                worker_actor_id=stored["worker_actor_id"],
+                worker_session_id=stored["worker_session_id"],
+                job_id=stored["job_id"],
+                activation_id=stored["activation_id"],
+                anchor=stored["anchor"],
+            )
+        )
+        transport.subscribe()
+        ready = threading.Event()
+        thread = threading.Thread(
+            target=_read_child,
+            args=(directory, stored, command_id, transport, ready),
+            daemon=True,
+        )
+        with _readers_guard:
+            _readers[stored["activation_id"]] = thread
+        thread.start()
+        if not ready.wait(5):
+            raise RuntimeError("reader did not start")
+        _write_prompt(transport, prompt_line(command_id, stored["task"], stored["anchor"]))
+    except Exception as error:
+        _record_state(directory, stored, "failed", command_id=command_id, reason=type(error).__name__)
+
+
+def _same_anchor(directory: Path, stored: dict, scope: str | None, anchor: object) -> bool:
+    if scope is None and anchor is None:
+        return True
+    if scope != stored["scope"]:
+        return False
+    resolved = _resolve_anchor(directory, scope or "", anchor)
+    return False if isinstance(resolved, str) else resolved == stored["anchor"]
+
+
+def _follow_up(
+    directory: Path,
+    *,
+    operation_id: str,
+    run_id: str,
+    actor_id: str,
+    session_id: str,
+    task: str,
+    scope: str | None,
+    anchor: object,
+    job_id: str,
+    open_child,
+) -> dict:
+    original = _job_snapshot(directory, job_id)
+    if original is None:
+        return _reject(operation_id, "job", "not_found")
+    if not _same_anchor(directory, original, scope, anchor):
+        return _reject(operation_id, "anchor")
+    activation_id = uuid.uuid4().hex
+    arguments = {"job_id": job_id, "task": task, "actor_id": actor_id, "session_id": session_id}
+
+    def mutate(writer) -> list:
+        writer.append_ledger({"type": "delegation", **delegation})
+        return []
+
+    try:
+        with run_control.control_lock(directory):
+            current = _job_snapshot(directory, job_id)
+            if current is None:
+                return _reject(operation_id, "job", "not_found")
+            if current["state"] in _active_states:
+                return _reject(operation_id, "active", "busy")
+            source = _job_rows(directory, job_id)[0]
+            delegation = {
+                "operation_id": operation_id,
+                "run_id": source["run_id"],
+                "actor_id": source["actor_id"],
+                "session_id": source["session_id"],
+                "job_id": job_id,
+                "activation_id": activation_id,
+                "worker_session_id": source["worker_session_id"],
+                "worker_actor_id": source["worker_actor_id"],
+                "task": task,
+                "hypothesis": source.get("hypothesis", source["task"]),
+                "scope": source["scope"],
+                "anchor": source["anchor"],
+                "tools": list(source["tools"]),
+                "state": "launching",
+                "resumed": True,
+            }
+            applied = run_control._apply_locked(
+                directory,
+                {
+                    "operation_id": operation_id,
+                    "kind": "delegate",
+                    "arguments": arguments,
+                    "run_id": run_id,
+                    "actor_id": actor_id,
+                    "session_id": session_id,
+                    "job_id": job_id,
+                    "activation_id": activation_id,
+                },
+                mutate,
+            )
+    except OperationRejected as error:
+        return _reject(operation_id, error.category)
+    if not applied.get("ok"):
+        return applied
+    stored = next((row for row in _delegations(directory) if row.get("operation_id") == operation_id), None)
+    if stored is None:
+        return {**applied, "ok": False, "category": "missing_delegation"}
+    spend = run_control.read_state(directory)
+    if stored["activation_id"] != activation_id:
+        return _receipt_body(directory, stored, {**applied, "reused": True}, spend)
+    command_id = uuid.uuid4().hex
+    _record_state(directory, stored, "launching", command_id=command_id)
+    _open_activation(directory, stored, open_child, command_id)
+    return _receipt_body(directory, stored, applied, spend)
 
 
 def delegate(
@@ -275,13 +505,29 @@ def delegate(
     actor_id: str,
     session_id: str,
     task: str,
-    scope: str,
-    anchor: object,
     open_child,
+    scope: str | None = None,
+    anchor: object = None,
+    job_id: str | None = None,
 ) -> dict:
-    """Accept one fresh hypothesis and return before the worker settles."""
+    """Accept one hypothesis, or resume its saved session, and return before the worker settles."""
     if not operation_id or not run_id or not actor_id or not session_id or not isinstance(task, str) or not task:
         return _reject(operation_id, "identity")
+    if job_id:
+        return _follow_up(
+            directory,
+            operation_id=operation_id,
+            run_id=run_id,
+            actor_id=actor_id,
+            session_id=session_id,
+            task=task,
+            scope=scope,
+            anchor=anchor,
+            job_id=job_id,
+            open_child=open_child,
+        )
+    if scope is None or anchor is None:
+        return _reject(operation_id, "scope")
     resolved = _resolve_anchor(directory, scope, anchor)
     if isinstance(resolved, str):
         return _reject(operation_id, resolved)
@@ -306,10 +552,12 @@ def delegate(
         "worker_session_id": worker_session_id,
         "worker_actor_id": worker_actor_id,
         "task": task,
+        "hypothesis": task,
         "scope": scope,
         "anchor": resolved,
         "tools": list(WORKER_TOOLS),
         "state": "launching",
+        "resumed": False,
     }
 
     def mutate(writer) -> list:
@@ -346,43 +594,16 @@ def delegate(
     # The receipt is already durable. Open the reader, then write the prompt.
     command_id = uuid.uuid4().hex
     _record_state(directory, stored, "launching", command_id=command_id)
-    try:
-        transport = open_child(
-            worker_launch(
-                directory,
-                run_id=run_id,
-                worker_actor_id=stored["worker_actor_id"],
-                worker_session_id=stored["worker_session_id"],
-                job_id=stored["job_id"],
-                activation_id=stored["activation_id"],
-                anchor=stored["anchor"],
-            )
-        )
-        transport.subscribe()
-        ready = threading.Event()
-        thread = threading.Thread(
-            target=_read_child,
-            args=(directory, stored, command_id, transport, ready),
-            daemon=True,
-        )
-        with _readers_guard:
-            _readers[stored["activation_id"]] = thread
-        thread.start()
-        if not ready.wait(5):
-            raise RuntimeError("reader did not start")
-        _write_prompt(transport, prompt_line(command_id, task, stored["anchor"]))
-    except Exception as error:
-        _record_state(directory, stored, "failed", command_id=command_id, reason=type(error).__name__)
+    _open_activation(directory, stored, open_child, command_id)
     return _receipt_body(directory, stored, applied, spend)
 
 
 def awaits_settlement(directory: Path, activation_id: str) -> bool:
-    """True only while a real run can still settle. A handled prompt is not a run."""
+    """True only while this activation can still settle. A handled prompt is not a run."""
     for row in _delegations(directory):
         if row.get("activation_id") != activation_id:
             continue
-        snapshot = _job_snapshot(directory, row["job_id"])
-        return snapshot is not None and snapshot["state"] in ("queued", "launching", "active")
+        return _activation_view(directory, row)["state"] in _active_states
     return False
 
 

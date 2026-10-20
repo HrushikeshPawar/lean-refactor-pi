@@ -567,3 +567,207 @@ class V8WorkerSmokeTests(unittest.TestCase):
                     "type": "delegation", "operation_id": "uncommitted", "job_id": "phantom",
                 }) + "\n")
             self.assertEqual(len(orchestration.jobs(directory)["jobs"]), 1)
+
+    def test_v8_early_result_followup(self):
+        """A passing compile is visible before settlement, then the same session resumes."""
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _seed_parent(directory)
+            children = []
+
+            def open_child(launch):
+                child = _HeldChild()
+                children.append((launch, child))
+                return child
+
+            call = {
+                "operation_id": "op-fresh",
+                "run_id": "run-1",
+                "actor_id": "sol",
+                "session_id": "sol-session",
+                "task": "try the step",
+                "scope": "step",
+                "anchor": {"node": "n1", "steps": [1, 2]},
+                "open_child": open_child,
+            }
+            fresh = orchestration.delegate(directory, **call)
+            self.assertEqual(len(children), 1)
+            busy = orchestration.delegate(
+                directory,
+                operation_id="op-busy",
+                run_id="run-1",
+                actor_id="sol",
+                session_id="sol-session",
+                task="keep going",
+                job_id=fresh["job_id"],
+                open_child=open_child,
+            )
+            self.assertEqual(busy["category"], "busy")
+            self.assertEqual(len(children), 1)
+            changed = orchestration.delegate(
+                directory,
+                operation_id="op-anchor",
+                run_id="run-1",
+                actor_id="sol",
+                session_id="sol-session",
+                task="replace the anchor",
+                job_id=fresh["job_id"],
+                scope="step",
+                anchor={"node": "n1", "steps": [2, 2]},
+                open_child=open_child,
+            )
+            self.assertEqual(changed["category"], "invalid_input")
+            self.assertEqual(len(children), 1)
+
+            command_id = orchestration.jobs(directory, [fresh["job_id"]])["jobs"][0]["command_id"]
+            candidate = {
+                "type": "tool_result",
+                "name": "compile",
+                "passed": True,
+                "attempt_id": "attempt-1",
+                "proof_id": "proof-1",
+                "evaluation_id": "eval-1",
+                "request_id": "req-1",
+            }
+            started = {
+                "type": "response",
+                "id": command_id,
+                "success": True,
+                "data": {"disposition": "started"},
+            }
+            child = children[0][1]
+            child._chunks.put((json.dumps(started) + "\n" + json.dumps(candidate) + "\n").encode())
+
+            def published():
+                view = orchestration.jobs(directory, [fresh["job_id"]])["jobs"][0]
+                if view["state"] == "active" and view["findings"]:
+                    return view
+                return None
+
+            active = None
+            for _ in range(20000):
+                active = published()
+                if active is not None:
+                    break
+            self.assertIsNotNone(active)
+            finding = active["findings"][0]
+            self.assertEqual(finding["activation_id"], fresh["activation_id"])
+            self.assertEqual(finding["request_id"], "req-1")
+            self.assertEqual(finding["attempt_id"], "attempt-1")
+            self.assertEqual(finding["proof_id"], "proof-1")
+            self.assertEqual(finding["evaluation_id"], "eval-1")
+            delivered = orchestration.deliver(directory, "sol")
+            self.assertEqual(delivered["results"][0]["proof_id"], "proof-1")
+            self.assertFalse(delivered["results"][0]["resumed"])
+            self.assertEqual(delivered["results"][0]["session_id"], fresh["session_id"])
+            self.assertFalse(delivered["stopped"])
+
+            child._chunks.put((json.dumps({"type": "agent_settled"}) + "\n").encode())
+            child._chunks.put(None)
+            orchestration.join_activation(fresh["activation_id"])
+            released = orchestration.jobs(directory, [fresh["job_id"]])["jobs"][0]
+            self.assertEqual(released["state"], "completed")
+            self.assertEqual(released["session_id"], fresh["session_id"])
+            self.assertEqual(released["findings"][0]["attempt_id"], "attempt-1")
+            self.assertFalse(orchestration.awaits_settlement(directory, fresh["activation_id"]))
+            self.assertFalse(run_control.read_state(directory)["stopped"])
+
+            follow = orchestration.delegate(
+                directory,
+                operation_id="op-follow",
+                run_id="run-1",
+                actor_id="sol",
+                session_id="sol-session",
+                task="narrow the same step",
+                job_id=fresh["job_id"],
+                open_child=open_child,
+            )
+            self.assertTrue(follow["ok"])
+            self.assertTrue(follow["resumed"])
+            self.assertEqual(follow["job_id"], fresh["job_id"])
+            self.assertEqual(follow["session_id"], fresh["session_id"])
+            self.assertNotEqual(follow["activation_id"], fresh["activation_id"])
+            self.assertEqual(follow["anchor"], fresh["anchor"])
+            self.assertEqual(children[1][0]["session_dir"], children[0][0]["session_dir"])
+            self.assertEqual(children[1][0]["env"]["ARENA_ACTIVATION_ID"], follow["activation_id"])
+            self.assertEqual(children[1][0]["env"]["ARENA_SESSION_ID"], fresh["session_id"])
+            resumed_view = orchestration.jobs(directory, [fresh["job_id"]])["jobs"][0]
+            self.assertEqual(resumed_view["hypothesis"], "try the step")
+            self.assertEqual(resumed_view["anchor"], fresh["anchor"])
+            self.assertEqual(len(resumed_view["activations"]), 2)
+            overlap = orchestration.delegate(
+                directory,
+                operation_id="op-overlap",
+                run_id="run-1",
+                actor_id="sol",
+                session_id="sol-session",
+                task="second prompt",
+                job_id=fresh["job_id"],
+                open_child=open_child,
+            )
+            self.assertEqual(overlap["category"], "busy")
+            self.assertEqual(len(children), 2)
+
+            follow_command = resumed_view["command_id"]
+            later = {
+                "type": "candidate",
+                "passed": True,
+                "attempt_id": "attempt-2",
+                "proof_id": "proof-2",
+                "evaluation_id": "eval-2",
+                "request_id": "req-2",
+            }
+            follow_child = children[1][1]
+            follow_child._chunks.put(
+                (
+                    json.dumps({
+                        "type": "response",
+                        "id": follow_command,
+                        "success": True,
+                        "data": {"disposition": "started"},
+                    })
+                    + "\n"
+                    + json.dumps(later)
+                    + "\n"
+                ).encode()
+            )
+            resumed_finding = None
+            for _ in range(20000):
+                delivered = orchestration.deliver(directory, "sol")
+                match = [item for item in delivered["results"] if item["attempt_id"] == "attempt-2"]
+                if match and match[0]["resumed"]:
+                    resumed_finding = match[0]
+                    break
+            self.assertIsNotNone(resumed_finding)
+            self.assertEqual(resumed_finding["activation_id"], follow["activation_id"])
+            self.assertEqual(resumed_finding["session_id"], fresh["session_id"])
+            self.assertEqual(resumed_finding["request_id"], "req-2")
+            follow_child._chunks.put((json.dumps({"type": "assignment_exhausted"}) + "\n").encode())
+            follow_child._chunks.put(None)
+            orchestration.join_activation(follow["activation_id"])
+            exhausted = orchestration.jobs(directory, [fresh["job_id"]])["jobs"][0]
+            self.assertEqual(exhausted["state"], "exhausted")
+            self.assertEqual(exhausted["session_id"], fresh["session_id"])
+            self.assertEqual(len(exhausted["findings"]), 2)
+            self.assertFalse(run_control.read_state(directory)["stopped"])
+
+            other = orchestration.delegate(
+                directory,
+                operation_id="op-other",
+                run_id="run-1",
+                actor_id="sol",
+                session_id="sol-session",
+                task="a different hypothesis",
+                scope="proof",
+                anchor={"node": "n1"},
+                open_child=open_child,
+            )
+            self.assertNotEqual(other["job_id"], fresh["job_id"])
+            self.assertNotEqual(other["session_id"], fresh["session_id"])
+            self.assertNotEqual(children[2][0]["session_dir"], children[0][0]["session_dir"])
+            both = orchestration.jobs(directory)
+            sessions = {job["job_id"]: job["session_id"] for job in both["jobs"]}
+            self.assertEqual(sessions[fresh["job_id"]], fresh["session_id"])
+            self.assertEqual(sessions[other["job_id"]], other["session_id"])
+            children[2][1]._chunks.put(None)
+            orchestration.join_activation(other["activation_id"])
