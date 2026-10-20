@@ -20,6 +20,7 @@ from pathlib import Path
 
 SCHEMA_VERSION = 1
 ACTUAL_COST_THRESHOLD = Decimal("2.50")
+_wait_listeners: list = []
 
 _MISSING = ("actor_id", "session_id", "tool_call_id", "operation_id")
 
@@ -31,6 +32,17 @@ class OperationRejected(ValueError):
         super().__init__(category)
         self.category = category
         self.operation_id = operation_id
+
+
+def listen_for_wait(listener) -> None:
+    """Wake an orchestration waiter after a durable run stop. The listener must not take the control lock."""
+    if listener not in _wait_listeners:
+        _wait_listeners.append(listener)
+
+
+def _notify_waiters() -> None:
+    for listener in list(_wait_listeners):
+        listener()
 
 
 def argument_digest(arguments: object) -> str:
@@ -712,6 +724,7 @@ def _ensure_threshold_stop(directory: Path, rows: list[dict]) -> list[dict]:
     rows = _control_rows(directory)
     coverage = _apply_coverage(rows)
     _projection(directory, coverage, True, "spend_threshold")
+    _notify_waiters()
     return rows
 
 

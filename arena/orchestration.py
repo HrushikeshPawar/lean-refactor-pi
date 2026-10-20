@@ -28,6 +28,16 @@ _io_locks: dict[str, threading.RLock] = {}
 _readers_guard = threading.Lock()
 _terminal_states = frozenset(("handled", "completed", "failed", "exhausted", "cancelled"))
 _active_states = frozenset(("launching", "queued", "active"))
+_live_states = frozenset(("queued", "launching", "active", "cancelling"))
+_interest = threading.Condition()
+_epoch = 0
+
+
+def _wake() -> None:
+    global _epoch
+    with _interest:
+        _epoch += 1
+        _interest.notify_all()
 
 
 def _reject(operation_id: str, reason: str, category: str = "invalid_input") -> dict:
@@ -229,6 +239,7 @@ def _append_state(directory: Path, delegation: dict, state: str, **extra) -> Non
             **extra,
         },
     )
+    _wake()
 
 
 def _fill_slots(directory: Path) -> None:
@@ -332,6 +343,7 @@ def _observe_tool(directory: Path, delegation: dict, record: dict) -> bool:
                 **finding,
             },
         )
+        _wake()
     return True
 
 
@@ -860,6 +872,207 @@ def cancel(
     }
 
 
+def _delivery_rows(directory: Path, actor_id: str) -> list[dict]:
+    return [
+        row for row in _history(directory)
+        if row.get("kind") == "delivered_reply" and row.get("actor_id") == actor_id
+    ]
+
+
+def _acked(directory: Path, actor_id: str, cursor: str | None) -> set[str] | None:
+    rows = _delivery_rows(directory, actor_id)
+    if cursor is None:
+        data = (rows[-1].get("data") if rows else None) or {}
+        return set(data.get("acked") or [])
+    match = next((row for row in rows if row.get("event_id") == cursor), None)
+    if match is None:
+        return None
+    return set((match.get("data") or {}).get("acked") or [])
+
+
+def _wait_rows(directory: Path) -> list[dict]:
+    rows = list(_history(directory))
+    rows.extend(
+        row for row in run_control._control_rows(directory)
+        if row.get("kind") == "run_stop" and row.get("event_id")
+    )
+    return rows
+
+
+def _selectable(row: dict, job_ids: list[str] | None) -> bool:
+    kind = row.get("type") or row.get("kind")
+    if kind == "run_stop":
+        return True
+    if job_ids is not None and row.get("job_id") not in job_ids:
+        return False
+    if kind == "worker_finding":
+        return True
+    return kind == "assignment_state" and row.get("state") in _terminal_states
+
+
+def _reconcile_absent(directory: Path, job_ids: list[str] | None) -> None:
+    """An exited child is a failure event, not a producer that can still reply."""
+    for row in _delegations(directory):
+        if job_ids is not None and row.get("job_id") not in job_ids:
+            continue
+        if _activation_view(directory, row)["state"] not in _live_states:
+            continue
+        transport = _owned.get(row["activation_id"])
+        absent = getattr(transport, "confirmed_absent", None)
+        if absent is not None and absent():
+            observe_exit(directory, row["activation_id"])
+
+
+def _has_producer(directory: Path, job_ids: list[str] | None) -> bool:
+    seen: set[str] = set()
+    for row in _delegations(directory):
+        job_id = row.get("job_id")
+        if not job_id or job_id in seen:
+            continue
+        if job_ids is not None and job_id not in job_ids:
+            continue
+        seen.add(job_id)
+        snapshot = _job_snapshot(directory, job_id)
+        if snapshot is not None and snapshot["state"] in _live_states:
+            return True
+    return False
+
+
+def _public_event(row: dict) -> dict:
+    event = {
+        key: row[key]
+        for key in (
+            "event_id", "job_id", "activation_id", "state", "attempt_id", "proof_id",
+            "evaluation_id", "reason", "outcome",
+        )
+        if row.get(key) is not None
+    }
+    event["type"] = row.get("type") or row.get("kind")
+    return event
+
+
+def _wake_reason(events: list[dict]) -> str:
+    if any(event["type"] == "worker_finding" for event in events):
+        return "result"
+    last = events[-1]
+    if last["type"] == "run_stop":
+        return "run_stopped"
+    if last.get("state") == "cancelled":
+        return "cancelled"
+    if last.get("state") == "failed":
+        return "failed"
+    return "settled"
+
+
+def _selected_jobs(directory: Path, job_ids: list[str] | None) -> list[dict]:
+    found = []
+    seen: set[str] = set()
+    for row in _delegations(directory):
+        job_id = row.get("job_id")
+        if not job_id or job_id in seen or (job_ids is not None and job_id not in job_ids):
+            continue
+        seen.add(job_id)
+        snapshot = _job_snapshot(directory, job_id)
+        if snapshot is not None:
+            found.append(snapshot)
+    return found
+
+
+def _spend(directory: Path) -> dict:
+    return run_control._spend_view(run_control._control_rows(directory))
+
+
+def _commit_delivery(directory: Path, actor_id: str, fresh: list[dict], acked: set[str]) -> dict:
+    identities = [row["event_id"] for row in fresh]
+    merged = [item for item in acked if item not in identities]
+    merged.extend(identities)
+    operation_id = hashlib.sha256(f"{actor_id}:{identities}".encode()).hexdigest()[:32]
+
+    def mutate(ctx):
+        return [ctx.append_ledger({
+            "kind": "delivered_reply",
+            "data": {"event_ids": identities, "acked": merged},
+        })]
+
+    applied = run_control._apply_locked(
+        directory,
+        {
+            "operation_id": operation_id,
+            "kind": "delivered_reply",
+            "arguments": {"actor_id": actor_id, "event_ids": identities},
+            "run_id": fresh[0].get("run_id") or "run",
+            "actor_id": actor_id,
+            "session_id": f"{actor_id}-delivery",
+        },
+        mutate,
+    )
+    if not applied.get("ok"):
+        return applied
+    token = applied["evidence_refs"][-1]["event_id"]
+    spend = _spend(directory)
+    return {
+        "ok": True,
+        "operation_id": operation_id,
+        "wake_reason": _wake_reason([_public_event(row) for row in fresh]),
+        "events": [_public_event(row) for row in fresh],
+        "jobs": _selected_jobs(directory, None),
+        "evidence_refs": applied.get("evidence_refs") or [],
+        "next_cursor": token,
+        "accounting": spend["accounting"],
+        "total": spend["total"],
+    }
+
+
+def await_results(
+    directory: Path,
+    *,
+    actor_id: str,
+    cursor: str | None = None,
+    job_ids: list[str] | None = None,
+) -> dict:
+    """Return retained evidence or no_pending_work. Waiting performs no provider request."""
+    if not actor_id:
+        return _reject("", "identity")
+    if job_ids is not None and (
+        not isinstance(job_ids, list) or not all(isinstance(item, str) and item for item in job_ids)
+    ):
+        return _reject("", "job_ids")
+    while True:
+        _reconcile_absent(directory, job_ids)
+        with run_control.control_lock(directory):
+            acked = _acked(directory, actor_id, cursor)
+            if acked is None:
+                return _reject("", "cursor")
+            fresh = [
+                row for row in _wait_rows(directory)
+                if row.get("event_id") and row["event_id"] not in acked and _selectable(row, job_ids)
+            ]
+            if fresh:
+                delivered = _commit_delivery(directory, actor_id, fresh, acked)
+                if job_ids is not None and delivered.get("ok"):
+                    delivered["jobs"] = _selected_jobs(directory, job_ids)
+                return delivered
+            if not _has_producer(directory, job_ids):
+                rows = _delivery_rows(directory, actor_id)
+                spend = _spend(directory)
+                return {
+                    "ok": True,
+                    "operation_id": uuid.uuid4().hex,
+                    "wake_reason": "no_pending_work",
+                    "events": [],
+                    "jobs": _selected_jobs(directory, job_ids),
+                    "evidence_refs": [],
+                    "next_cursor": cursor if cursor is not None else (rows[-1]["event_id"] if rows else None),
+                    "accounting": spend["accounting"],
+                    "total": spend["total"],
+                }
+            with _interest:
+                seen = _epoch
+        with _interest:
+            if _epoch == seen:
+                _interest.wait()
+
+
 def awaits_settlement(directory: Path, activation_id: str) -> bool:
     """True only while this activation can still settle. A handled prompt is not a run."""
     for row in _delegations(directory):
@@ -874,3 +1087,6 @@ def join_activation(activation_id: str, timeout: float = 5) -> None:
         thread = _readers.get(activation_id)
     if thread is not None:
         thread.join(timeout)
+
+
+run_control.listen_for_wait(_wake)

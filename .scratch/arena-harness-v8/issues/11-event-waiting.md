@@ -4,7 +4,7 @@
 
 **Blocked by:** 10: Admit two workers and cancel stale work cleanly
 
-**Status:** ready-for-agent
+**Status:** needs-review
 
 **Branch:** `v8/11-event-waiting`
 
@@ -26,12 +26,12 @@
 
 ## What to build and acceptance
 
-- [ ] 1. Implement await_results with actor-local cursor and optional job selection. Install the listener and recheck retained state without a lost-event window.
-- [ ] 2. Return already-available evidence immediately; simultaneous worker findings reach every intended actor without one actor consuming another's updates.
-- [ ] 3. Wake on result, settlement, cancellation, failure and run stop. Waiting itself starts zero provider requests.
-- [ ] 4. When no selected active/queued assignment or submitted check can produce a relevant event, return no_pending_work rather than wait forever.
-- [ ] 5. Handled prompts and exited/stale children cannot count as live producers. Sol gets an ordinary below-budget continuation, not a successful finish or automatic new hypothesis.
-- [ ] 6. Use the one assigned fast smoke for this slice. Retain the stated behavior requirements; actual-Pi/real-Lean journeys and the broader race matrix are final E2E coverage, not this ticket's gate.
+- [x] 1. Implement await_results with actor-local cursor and optional job selection. Install the listener and recheck retained state without a lost-event window.
+- [x] 2. Return already-available evidence immediately; simultaneous worker findings reach every intended actor without one actor consuming another's updates.
+- [x] 3. Wake on result, settlement, cancellation, failure and run stop. Waiting itself starts zero provider requests.
+- [x] 4. When no selected active/queued assignment or submitted check can produce a relevant event, return no_pending_work rather than wait forever.
+- [x] 5. Handled prompts and exited/stale children cannot count as live producers. Sol gets an ordinary below-budget continuation, not a successful finish or automatic new hypothesis.
+- [x] 6. Use the one assigned fast smoke for this slice. Retain the stated behavior requirements; actual-Pi/real-Lean journeys and the broader race matrix are final E2E coverage, not this ticket's gate.
 
 ## Verify
 

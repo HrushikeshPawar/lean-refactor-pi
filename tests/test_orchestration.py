@@ -1047,3 +1047,103 @@ class V8WorkerSmokeTests(unittest.TestCase):
             children[3][1]._chunks.put(None)
             orchestration.join_activation(admitted_view[third["job_id"]]["activation_id"])
             orchestration.join_activation(fourth["activation_id"])
+
+    def test_v8_wait_registration_and_no_work(self):
+        """A retained finding is delivered once to each actor. A finished producer yields no_pending_work."""
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _seed_parent(directory)
+            children = []
+
+            def open_child(launch):
+                child = _HeldChild()
+                children.append((launch, child))
+                return child
+
+            fresh = orchestration.delegate(
+                directory,
+                operation_id="op-wait",
+                run_id="run-1",
+                actor_id="sol",
+                session_id="sol-session",
+                task="try the step",
+                scope="step",
+                anchor={"node": "n1", "steps": [1, 2]},
+                open_child=open_child,
+            )
+            launch = children[0][0]
+            attempt_id, proof_id, evaluation_id = "attempt-wait", "proof-wait", "eval-wait"
+            tool_call = "compile-wait"
+            (directory / "proofs" / f"{proof_id}.lean").write_text(_PROOF)
+
+            def record(writer):
+                writer.append_ledger({
+                    "kind": "attempt", "event_id": attempt_id, "proof_id": proof_id,
+                    "tool_call_id": tool_call, "request_id": "req-wait",
+                })
+                writer.append_ledger({
+                    "kind": "evaluation", "candidate_id": proof_id, "key": evaluation_id, "mode": "fast",
+                    "result": {"ok": True},
+                })
+
+            run_control.apply_operation(directory, {
+                "operation_id": "compile-op-wait", "kind": "compile", "arguments": {"proof": proof_id},
+                "run_id": "run-1", "actor_id": launch["env"]["ARENA_ACTOR_ID"],
+                "session_id": launch["env"]["ARENA_SESSION_ID"],
+            }, record)
+            child = children[0][1]
+            command_id = orchestration.jobs(directory, [fresh["job_id"]])["jobs"][0]["command_id"]
+            child._chunks.put((
+                json.dumps({
+                    "type": "response", "id": command_id, "success": True,
+                    "data": {"disposition": "started"},
+                }) + "\n" + json.dumps({
+                    "type": "tool_execution_end", "toolName": "compile", "toolCallId": tool_call,
+                    "isError": False, "result": {"details": {"ok": True, "items": [{
+                        "ok": True, "status": "closed", "attempts": [{"attempt_id": attempt_id}],
+                    }]}},
+                }) + "\n"
+            ).encode())
+            finding_id = None
+            for _ in range(20000):
+                match = [
+                    item for item in orchestration.deliver(directory, "sol")["results"]
+                    if item["attempt_id"] == attempt_id
+                ]
+                if match:
+                    finding_id = match[0]["event_id"]
+                    break
+            self.assertIsNotNone(finding_id)
+            before = (directory / "control.jsonl").read_text()
+
+            def await_actor(actor_id, cursor=None):
+                return orchestration.await_results(
+                    directory, actor_id=actor_id, cursor=cursor, job_ids=[fresh["job_id"]],
+                )
+
+            sol = await_actor("sol")
+            other = await_actor("planner")
+            self.assertEqual(sol["wake_reason"], "result")
+            self.assertEqual([event["event_id"] for event in sol["events"]], [finding_id])
+            self.assertEqual([event["event_id"] for event in other["events"]], [finding_id])
+            self.assertNotEqual(sol["next_cursor"], other["next_cursor"])
+            self.assertEqual(len(orchestration.jobs(directory)["jobs"]), 1)
+            self.assertNotIn("dispatch_started", (directory / "control.jsonl").read_text())
+            self.assertEqual(
+                (directory / "control.jsonl").read_text().count('"kind":"settlement"'),
+                before.count('"kind":"settlement"'),
+            )
+
+            child._chunks.put((json.dumps({"type": "assignment_exhausted"}) + "\n").encode())
+            child._chunks.put(None)
+            orchestration.join_activation(fresh["activation_id"])
+            finished = await_actor("sol", sol["next_cursor"])
+            if finished["wake_reason"] != "no_pending_work":
+                self.assertEqual(finished["wake_reason"], "settled")
+                self.assertNotIn(finding_id, [event["event_id"] for event in finished["events"]])
+                finished = await_actor("sol", finished["next_cursor"])
+            self.assertEqual(finished["wake_reason"], "no_pending_work")
+            self.assertEqual(finished["events"], [])
+            self.assertEqual(len(orchestration.jobs(directory)["jobs"]), 1)
+            self.assertFalse(run_control.read_state(directory)["stopped"])
+            self.assertNotIn("dispatch_started", (directory / "control.jsonl").read_text())
