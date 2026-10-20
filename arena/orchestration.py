@@ -353,6 +353,8 @@ def delegate(
                 run_id=run_id,
                 worker_actor_id=stored["worker_actor_id"],
                 worker_session_id=stored["worker_session_id"],
+                job_id=stored["job_id"],
+                activation_id=stored["activation_id"],
                 anchor=stored["anchor"],
             )
         )

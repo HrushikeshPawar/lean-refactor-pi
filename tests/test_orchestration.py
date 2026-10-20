@@ -15,6 +15,7 @@ _PROOF = "theorem demo : True ∧ True := by\n  trivial\n  trivial\n"
 
 
 def _seed_parent(directory: Path) -> None:
+    (directory / "run-config.json").write_text(json.dumps({"theorem": "demo", "model": "gpt-6-sol"}))
     (directory / "proofs").mkdir(parents=True)
     (directory / "proofs" / "parent.lean").write_text(_PROOF)
     (directory / "ledger.jsonl").write_text(
@@ -413,6 +414,10 @@ class V8WorkerSmokeTests(unittest.TestCase):
             self.assertEqual(launch["tools"], ["compile", "goal", "search", "read", "scratch"])
             self.assertEqual(launch["argv"][launch["argv"].index("--mode") + 1], "rpc")
             self.assertIn("--no-builtin-tools", launch["argv"])
+            extension = Path(launch["argv"][launch["argv"].index("--extension") + 1])
+            self.assertEqual(extension.name, "arena.ts")
+            self.assertTrue(extension.is_file())
+            self.assertIn("--no-extensions", launch["argv"])
             self.assertEqual(
                 launch["argv"][launch["argv"].index("--tools") + 1],
                 "compile,goal,search,read,scratch",
@@ -420,6 +425,13 @@ class V8WorkerSmokeTests(unittest.TestCase):
             self.assertTrue(launch["session_dir"].endswith(receipt["session_id"]))
             self.assertEqual(launch["env"]["ARENA_RUN_ID"], "run-1")
             self.assertEqual(launch["env"]["ARENA_RUN_DIR"], str(directory))
+            self.assertEqual(launch["env"]["ARENA_MODEL"], "deepseek-v4.1-flash")
+            self.assertEqual(launch["env"]["ARENA_PI_MODEL_ID"], "deepseek-v4.1-flash")
+            self.assertEqual(launch["env"]["ARENA_BUDGET_REQUIRED"], "1")
+            self.assertEqual(launch["env"]["ARENA_AUTOCONTINUE"], "0")
+            self.assertEqual(launch["env"]["ARENA_WORKER_THEOREM"], "demo")
+            self.assertEqual(launch["env"]["ARENA_JOB_ID"], receipt["job_id"])
+            self.assertEqual(launch["env"]["ARENA_ACTIVATION_ID"], receipt["activation_id"])
             self.assertNotEqual(launch["env"]["ARENA_ACTOR_ID"], "sol")
             self.assertEqual(launch["actor_id"], launch["env"]["ARENA_ACTOR_ID"])
             prompt = json.loads(child.written)
@@ -469,7 +481,10 @@ class V8WorkerSmokeTests(unittest.TestCase):
                 _seed_parent(directory)
                 child = _HeldChild()
 
-                def immediate_write(data):
+                def immediate_write(
+                    data, child=child, disposition=disposition, expected=expected,
+                    settle_first=settle_first, directory=directory,
+                ):
                     child.written.extend(data)
                     command = json.loads(data)
                     response = {
@@ -494,7 +509,7 @@ class V8WorkerSmokeTests(unittest.TestCase):
                 result = orchestration.delegate(directory, **{
                     **call,
                     "anchor": {"node": "n1", "steps": [1, 2]},
-                    "open_child": lambda _launch: child,
+                    "open_child": lambda _launch, child=child: child,
                 })
                 self.assertEqual(result["state"], expected)
                 self.assertFalse(orchestration.awaits_settlement(directory, result["activation_id"]))

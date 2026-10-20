@@ -4,7 +4,7 @@
 
 **Blocked by:** 04: Isolate actor state and enforce exact ownership; 06: Enforce the stop before every provider dispatch
 
-**Status:** needs-review
+**Status:** done
 
 **Branch:** `v8/08-one-worker-rpc`
 
@@ -53,7 +53,9 @@ Corrections: command identity is durable before prompt dispatch; terminal activa
 
 The two acceptance gaps above are now implemented in the same smoke. Dispatch resolves the saved proof file: a missing node or an out-of-range step is `invalid_input` and does not spawn. The stored anchor keeps the graph node, proof id, file sha256, and the parsed step or hole source range. Caller-supplied hashes are not copied. `open_child` receives the launch: DeepSeek model and provider, session path, worker actor id, run-control environment, and `--tools compile,goal,search,read,scratch` with `--no-builtin-tools`. The prompt record has no `tools` field; the anchor is in the prompt message and `ARENA_ANCHOR`. Actually starting Pi remains final E2E.
 
-Keep this ticket `needs-review`. Follow-ups, two-worker admission and crash recovery remain with their existing tickets.
+Final review found that launch argv did not load Arena's extension and could inherit Sol's model environment. The launch now explicitly loads Arena, disables ambient extensions/context/skills/templates, and supplies the worker's DeepSeek configuration, output ceiling, budget guard, saved theorem, job and activation identities. Worker session startup uses that theorem without invoking the slash-command background launcher; the extension honors the supplied shared run directory. The process adapter merges environment overrides over the inherited environment to retain provider authentication.
+
+Verified after review corrections: the named smoke passed with 1 test and 4 subtests in 0.08s; Ruff passed for the three touched Python files; stripped TypeScript syntax passed for `arena.ts`. These are offline checks, with no actual provider, Pi or Lean process. Ticket 08 is reviewed and done for this slice. Follow-ups, two-worker admission and crash recovery remain with their existing tickets; actual child execution stays in final E2E.
 
 ---
 

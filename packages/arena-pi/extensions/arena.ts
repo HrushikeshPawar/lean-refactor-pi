@@ -71,7 +71,11 @@ export default async function arenaExtension(pi: ExtensionAPI) {
   // A factory invocation owns one Pi session. No active theorem is module-global.
   let active: string | undefined;
   const runId = process.env.ARENA_RUN_ID;
-  const runDirectory = runId ? resolve(root, "runs", "pi-budget", runId) : undefined;
+  const runDirectory = process.env.ARENA_RUN_DIR
+    ? resolve(process.env.ARENA_RUN_DIR)
+    : runId ? resolve(root, "runs", "pi-budget", runId) : undefined;
+  const workerTheorem = process.env.ARENA_ACTOR_ID && process.env.ARENA_ACTOR_ID !== "sol" && process.env.ARENA_JOB_ID
+    ? process.env.ARENA_WORKER_THEOREM : undefined;
   const installedDispatchGates = new Set<string>();
   const costJournal = runDirectory ? resolve(runDirectory, "cost-ledger.jsonl") : undefined;
   const traceJournal = runDirectory ? resolve(runDirectory, "trace-journal.jsonl") : undefined;
@@ -237,7 +241,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
   }
 
   pi.on("session_start", async (_event, ctx) => {
-    active = undefined;
+    active = workerTheorem;
     // The run total is the sum of the ledger's settle rows, so a resumed run continues from its spend.
     const settled = costEvents().filter(item => item.kind === "settle" && item.usage_known !== false);
     spentUsd = settled.reduce((sum, item) => sum + Number(item.usd), 0);

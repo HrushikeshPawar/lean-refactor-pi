@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from codecs import getincrementaldecoder
+from pathlib import Path
 
 WORKER_TOOLS = ("compile", "goal", "search", "read", "scratch")
 
@@ -46,12 +47,21 @@ def worker_launch(
     run_id: str,
     worker_actor_id: str,
     worker_session_id: str,
+    job_id: str,
+    activation_id: str,
     anchor: dict,
     model: str = "deepseek-v4.1-flash",
 ) -> dict:
-    """Arguments for one fresh RPC child. Tool restriction is `--tools`, with builtins off."""
-    from arena.models import pi_model, provider
+    """Fresh RPC launch. The adapter merges env overrides over os.environ to retain provider auth."""
+    from arena.models import load, pi_json, pi_model, provider
 
+    config = load()
+    model_config = config["models"][model]
+    run_config = json.loads((directory / "run-config.json").read_text())
+    theorem = run_config.get("theorem")
+    if not isinstance(theorem, str) or not theorem.strip():
+        raise ValueError("worker launch requires a saved theorem")
+    root = Path(__file__).resolve().parents[1]
     session_dir = directory / "sessions" / worker_session_id
     tools = ",".join(WORKER_TOOLS)
     return {
@@ -62,10 +72,16 @@ def worker_launch(
             "--offline",
             "--approve",
             "--no-builtin-tools",
+            "--no-context-files",
+            "--no-extensions",
+            "--no-skills",
+            "--no-prompt-templates",
+            "--extension",
+            str(root / "packages/arena-pi/extensions/arena.ts"),
             "--tools",
             tools,
             "--model",
-            pi_model(model),
+            pi_model(model, config),
             "--session-dir",
             str(session_dir),
             "--session-id",
@@ -75,12 +91,21 @@ def worker_launch(
             "ARENA_RUN_ID": run_id,
             "ARENA_ACTOR_ID": worker_actor_id,
             "ARENA_SESSION_ID": worker_session_id,
+            "ARENA_JOB_ID": job_id,
+            "ARENA_ACTIVATION_ID": activation_id,
             "ARENA_RUN_DIR": str(directory),
+            "ARENA_WORKER_THEOREM": theorem,
+            "ARENA_MODEL": model,
+            "ARENA_PI_MODEL_ID": model_config.get("id", model),
+            "ARENA_MODELS_JSON": pi_json(config),
+            "ARENA_REQUEST_OUTPUT_TOKENS": str(model_config["request_output_tokens"]),
+            "ARENA_BUDGET_REQUIRED": "1",
+            "ARENA_AUTOCONTINUE": "0",
             "ARENA_BUDGET_REPORT_PATH": str(directory / "cost.json"),
             "ARENA_ANCHOR": json.dumps(anchor, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
         },
         "model": model,
-        "provider": provider(model),
+        "provider": provider(model, config),
         "session_dir": str(session_dir),
         "actor_id": worker_actor_id,
         "tools": list(WORKER_TOOLS),
