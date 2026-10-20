@@ -1126,7 +1126,8 @@ class V8WorkerSmokeTests(unittest.TestCase):
                     directory, actor_id=actor_id, cursor=cursor, job_ids=[fresh["job_id"]],
                 )
 
-            sol = await_actor("sol")
+            with patch.object(run_control, "ensure_directory_watch", return_value=False):
+                sol = await_actor("sol")
             first_cursor = sol["next_cursor"]
             other = await_actor("planner")
             self.assertEqual(sol["wake_reason"], "result")
@@ -1134,6 +1135,11 @@ class V8WorkerSmokeTests(unittest.TestCase):
             self.assertEqual(sol["events"][0]["request_id"], "req-wait")
             self.assertEqual([event["event_id"] for event in other["events"]], [finding_id])
             self.assertNotEqual(sol["next_cursor"], other["next_cursor"])
+            with patch.object(run_control, "ensure_directory_watch", return_value=False):
+                unavailable = await_actor("sol", sol["next_cursor"])
+            self.assertFalse(unavailable["ok"])
+            self.assertEqual(unavailable["category"], "notification_unavailable")
+            self.assertTrue(unavailable["retryable"])
             self.assertEqual(len(orchestration.jobs(directory)["jobs"]), 1)
             self.assertNotIn("dispatch_started", (directory / "control.jsonl").read_text())
             self.assertEqual(
@@ -1193,6 +1199,8 @@ class V8WorkerSmokeTests(unittest.TestCase):
                 finished = await_actor("sol", finished["next_cursor"])
             self.assertEqual(finished["wake_reason"], "no_pending_work")
             self.assertEqual(finished["events"], [])
+            with patch.object(run_control, "ensure_directory_watch", return_value=False):
+                self.assertEqual(await_actor("sol")["wake_reason"], "no_pending_work")
             self.assertEqual(len(orchestration.jobs(directory)["jobs"]), 1)
             self.assertFalse(run_control.read_state(directory)["stopped"])
             self.assertNotIn("dispatch_started", (directory / "control.jsonl").read_text())

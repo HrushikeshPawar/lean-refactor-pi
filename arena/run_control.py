@@ -53,27 +53,35 @@ _watches_guard = threading.Lock()
 _IN_CLOSE_WRITE = 0x00000008
 _IN_CREATE = 0x00000100
 _IN_MODIFY = 0x00000002
-_IN_NONBLOCK = 0x00000800
 
 
-def ensure_directory_watch(directory: Path) -> None:
+def ensure_directory_watch(directory: Path) -> bool:
     """Wake in-process waiters when another process writes this run directory."""
-    directory.mkdir(parents=True, exist_ok=True)
-    key = str(directory.resolve())
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        key = str(directory.resolve())
+    except OSError:
+        return False
     with _watches_guard:
         if key in _watches:
-            return
-        libc = ctypes.CDLL(None, use_errno=True)
-        libc.inotify_init1.argtypes = [ctypes.c_int]
-        libc.inotify_init1.restype = ctypes.c_int
-        libc.inotify_add_watch.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
-        libc.inotify_add_watch.restype = ctypes.c_int
-        fd = libc.inotify_init1(_IN_NONBLOCK)
-        if fd < 0:
-            return
-        if libc.inotify_add_watch(fd, os.fsencode(key), _IN_MODIFY | _IN_CREATE | _IN_CLOSE_WRITE) < 0:
-            os.close(fd)
-            return
+            return True
+        fd = -1
+        try:
+            libc = ctypes.CDLL(None, use_errno=True)
+            libc.inotify_init1.argtypes = [ctypes.c_int]
+            libc.inotify_init1.restype = ctypes.c_int
+            libc.inotify_add_watch.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
+            libc.inotify_add_watch.restype = ctypes.c_int
+            fd = libc.inotify_init1(os.O_NONBLOCK | os.O_CLOEXEC)
+            if fd < 0:
+                return False
+            if libc.inotify_add_watch(fd, os.fsencode(key), _IN_MODIFY | _IN_CREATE | _IN_CLOSE_WRITE) < 0:
+                os.close(fd)
+                return False
+        except (AttributeError, OSError):
+            if fd >= 0:
+                os.close(fd)
+            return False
         _watches.add(key)
 
     def watch() -> None:
@@ -88,6 +96,7 @@ def ensure_directory_watch(directory: Path) -> None:
             _notify_waiters()
 
     threading.Thread(target=watch, name=f"wait-{directory.name}", daemon=True).start()
+    return True
 
 
 def argument_digest(arguments: object) -> str:

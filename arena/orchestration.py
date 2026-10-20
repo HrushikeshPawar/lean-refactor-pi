@@ -1108,7 +1108,7 @@ def await_results(
         not isinstance(job_ids, list) or not all(isinstance(item, str) and item for item in job_ids)
     ):
         return _reject("", "job_ids")
-    run_control.ensure_directory_watch(directory)
+    notifications_available = run_control.ensure_directory_watch(directory)
     _registered.clear()
     while True:
         with run_control.control_lock(directory):
@@ -1129,6 +1129,8 @@ def await_results(
                 stale = any(job["state"] in _live_states for job in _selected_jobs(directory, job_ids))
                 return _commit_delivery(directory, actor_id, [], acked, wake_reason="no_pending_work",
                                         job_ids=job_ids, reason="recovery_required" if stale else None)
+            if not notifications_available:
+                return {**_reject("", "notification_unavailable", "notification_unavailable"), "retryable": True}
             with _interest:
                 seen = _epoch
         with _interest:
