@@ -243,11 +243,97 @@ def _append_state(directory: Path, delegation: dict, state: str, **extra) -> Non
     _wake()
 
 
+def _control_generation(directory: Path) -> str | None:
+    return next(
+        (
+            row.get("generation")
+            for row in reversed(run_control._control_rows(directory))
+            if row.get("kind") == "run_generation" and row.get("generation")
+        ),
+        None,
+    )
+
+
+def _run_status(directory: Path) -> str | None:
+    return next(
+        (
+            row.get("status")
+            for row in reversed(run_control._control_rows(directory))
+            if row.get("kind") == "run_state"
+        ),
+        None,
+    )
+
+
+def _recovering(directory: Path) -> bool:
+    return _run_status(directory) == "recovering"
+
+
+def _ownership_rows(directory: Path, activation_id: str) -> list[dict]:
+    return [
+        row for row in _history(directory)
+        if row.get("type") == "process_ownership" and row.get("activation_id") == activation_id
+    ]
+
+
+def _append_ownership(directory: Path, delegation: dict, **fields) -> None:
+    _append(
+        directory,
+        {
+            "schema_version": run_control.SCHEMA_VERSION,
+            "event_id": uuid.uuid4().hex,
+            "type": "process_ownership",
+            "operation_id": delegation["operation_id"],
+            "run_id": delegation["run_id"],
+            "actor_id": delegation["actor_id"],
+            "session_id": delegation.get("worker_session_id"),
+            "job_id": delegation["job_id"],
+            "activation_id": delegation["activation_id"],
+            **fields,
+        },
+    )
+
+
+def _request_uncertain(directory: Path, session_id: str | None = None) -> bool:
+    latest: dict[str, dict] = {}
+    for row in run_control._control_rows(directory):
+        if row.get("kind") not in ("dispatch_intent", "dispatch") or not row.get("attempt_id"):
+            continue
+        if session_id is not None and row.get("session_id") != session_id:
+            continue
+        latest[row["attempt_id"]] = row
+    return any(row.get("status") == "dispatch_uncertain" or row.get("sent") == "uncertain" for row in latest.values())
+
+
+def _set_run(directory: Path, status: str, generation: str | None = None) -> None:
+    with run_control.control_lock(directory):
+        run_control._append_control(
+            directory,
+            {
+                "schema_version": run_control.SCHEMA_VERSION,
+                "kind": "run_state",
+                "event_id": uuid.uuid4().hex,
+                "status": status,
+            },
+        )
+        if generation is not None:
+            run_control._append_control(
+                directory,
+                {
+                    "schema_version": run_control.SCHEMA_VERSION,
+                    "kind": "run_generation",
+                    "event_id": uuid.uuid4().hex,
+                    "generation": generation,
+                    "status": status,
+                },
+            )
+
+
 def _fill_slots(directory: Path) -> None:
     """Open the oldest queued assignment only while a model slot is free."""
     while True:
         with run_control.control_lock(directory):
-            if _slot_count(directory) >= _MODEL_SLOTS:
+            if _recovering(directory) or _slot_count(directory) >= _MODEL_SLOTS:
                 return
             queued = next(
                 (row for row in _delegations(directory) if _activation_view(directory, row)["state"] == "queued"),
@@ -455,6 +541,130 @@ def _receipt_body(directory: Path, delegation: dict, applied: dict, spend: dict)
     }
 
 
+def _live_ownership(rows: list[dict]) -> dict | None:
+    spawned = None
+    for row in rows:
+        if row.get("phase") == "spawned":
+            spawned = row
+        elif row.get("phase") == "exited" and spawned is not None and spawned.get("pid") == row.get("pid"):
+            spawned = None
+    return spawned
+
+
+def _identified(stored: dict, reading: dict | None) -> bool:
+    if not reading or not reading.get("alive"):
+        return False
+    if reading.get("start_id") != stored.get("start_id") or stored.get("start_id") is None:
+        return False
+    observed_run = reading.get("run_id")
+    return observed_run is None or observed_run == stored.get("run_id")
+
+
+def note_worker_event(directory: Path, *, activation_id: str, generation: str, evidence: dict | None = None) -> dict:
+    """Old-generation input may add evidence. It cannot reopen a cancelled activation or free another slot."""
+    with run_control.control_lock(directory):
+        delegation = next((row for row in _delegations(directory) if row["activation_id"] == activation_id), None)
+        if delegation is None:
+            return {"ok": False, "category": "not_found", "evidence": False, "state_changed": False}
+        snapshot = _activation_view(directory, delegation)
+        owned_generation = next(
+            (row.get("generation") for row in reversed(_ownership_rows(directory, activation_id)) if row.get("generation")),
+            None,
+        )
+        stale = generation != owned_generation or snapshot["state"] in ("cancelled", "cancelling")
+        if stale and evidence:
+            _append(
+                directory,
+                {
+                    "schema_version": run_control.SCHEMA_VERSION,
+                    "event_id": uuid.uuid4().hex,
+                    "type": "worker_finding",
+                    "operation_id": delegation["operation_id"],
+                    "run_id": delegation["run_id"],
+                    "actor_id": delegation["worker_actor_id"],
+                    "session_id": delegation["worker_session_id"],
+                    "job_id": delegation["job_id"],
+                    "activation_id": activation_id,
+                    "generation": generation,
+                    "attempt_id": evidence.get("attempt_id"),
+                    "proof_id": evidence.get("proof_id"),
+                    "evaluation_id": evidence.get("evaluation_id"),
+                    "late": True,
+                },
+            )
+            _wake()
+        return {"ok": True, "evidence": bool(stale and evidence), "state_changed": False}
+
+
+def reconcile(directory: Path, *, inspect, signal, open_child) -> dict:
+    """Fence dispatch, stop a positively identified child, and replace it only after that child is gone.
+
+    A reused PID or another run is never signalled. Abandoned pipes are not reattached.
+    """
+    generation = uuid.uuid4().hex
+    _set_run(directory, "recovering", generation)
+    blocked = False
+    for delegation in _delegations(directory):
+        snapshot = _activation_view(directory, delegation)
+        if snapshot["state"] in _terminal_states or not snapshot["occupies_slot"] and snapshot["state"] != "launching":
+            continue
+        if snapshot["state"] not in _live_states and snapshot["state"] != "recovering":
+            continue
+        owned = _live_ownership(_ownership_rows(directory, delegation["activation_id"]))
+        if owned is None:
+            continue
+        reading = inspect(owned["pid"])
+        if _identified(owned, reading):
+            signal(owned.get("pgid", owned["pid"]))
+            if _identified(owned, inspect(owned["pid"])):
+                blocked = True
+                continue
+        elif reading and reading.get("alive"):
+            pass
+        _append_ownership(
+            directory, delegation, phase="exited", generation=owned.get("generation"),
+            session_path=owned.get("session_path"), pid=owned.get("pid"),
+            pgid=owned.get("pgid"), start_id=owned.get("start_id"),
+            reason="not_owned" if reading and reading.get("alive") else "confirmed_absent",
+        )
+        if snapshot["state"] == "cancelling":
+            _append_state(directory, delegation, "cancelled", occupies_slot=False, reason="confirmed_absent")
+        elif snapshot["state"] not in _terminal_states and _request_uncertain(
+            directory, delegation.get("worker_session_id"),
+        ):
+            _append_state(directory, delegation, "recovering", occupies_slot=True, reason="recovery_required")
+        elif snapshot["state"] in ("launching", "active"):
+            _append_state(directory, delegation, "launching", occupies_slot=True, reason="child_absent")
+
+    replacements = 0
+    if not blocked and not _request_uncertain(directory):
+        for delegation in _delegations(directory):
+            snapshot = _activation_view(directory, delegation)
+            if snapshot["state"] != "launching" or not snapshot["occupies_slot"]:
+                continue
+            if _live_ownership(_ownership_rows(directory, delegation["activation_id"])) is not None:
+                continue
+            if _request_uncertain(directory, delegation.get("worker_session_id")):
+                _append_state(directory, delegation, "recovering", occupies_slot=True, reason="recovery_required")
+                continue
+            _open_activation(directory, delegation, open_child, snapshot["command_id"] or uuid.uuid4().hex)
+            if _live_ownership(_ownership_rows(directory, delegation["activation_id"])) is not None:
+                replacements += 1
+    held = blocked or _request_uncertain(directory) or any(
+        _activation_view(directory, row)["state"] == "recovering" for row in _delegations(directory)
+    )
+    status = "recovering" if held else "running"
+    if status == "running":
+        _set_run(directory, "running")
+    return {
+        "ok": True,
+        "status": status,
+        "generation": _control_generation(directory),
+        "replacements": replacements,
+        "blocked": blocked,
+    }
+
+
 def deliver(directory: Path, actor_id: str) -> dict:
     """Findings already published for this actor, including those from an active assignment."""
     view = jobs(directory)
@@ -553,8 +763,22 @@ def _open_activation(directory: Path, stored: dict, open_child, command_id: str)
                 worker_session_id=stored["worker_session_id"], job_id=stored["job_id"],
                 activation_id=activation_id, anchor=stored["anchor"],
             )
+            generation = _control_generation(directory) or uuid.uuid4().hex
+            _append_ownership(
+                directory, stored, phase="intent", generation=generation,
+                session_path=launch["session_dir"],
+            )
             spawn_attempted = True
             transport = open_child(launch)
+            identity = getattr(transport, "process_identity", None)
+            described = identity() if identity is not None else None
+            if isinstance(described, dict) and described.get("pid") is not None:
+                _append_ownership(
+                    directory, stored, phase="spawned", generation=generation,
+                    session_path=launch["session_dir"], pid=described["pid"],
+                    pgid=described.get("pgid", described["pid"]),
+                    start_id=described.get("start_id"),
+                )
             _owned[activation_id] = transport
             transport.subscribe()
             ready = threading.Event()
@@ -635,6 +859,8 @@ def _follow_up(
             }
             control_rows = run_control._abort_open_intents(directory, run_control._control_rows(directory))
             existing = run_control._receipt(control_rows, operation_id)
+            if existing is None and _recovering(directory):
+                return _reject(operation_id, "recovering", "recovery_required")
             if existing is None and (current["state"] in _active_states | {"cancelling"} or current["occupies_slot"]):
                 return _reject(operation_id, "active", "busy")
             delegation = {
@@ -760,6 +986,8 @@ def delegate(
 
     try:
         with run_control.control_lock(directory):
+            if run_control._receipt(run_control._control_rows(directory), operation_id) is None and _recovering(directory):
+                return _reject(operation_id, "recovering", "recovery_required")
             if _can_admit_directly(directory):
                 delegation["state"] = "launching"
             applied = run_control._apply_locked(

@@ -1307,7 +1307,205 @@ class V8WorkerSmokeTests(unittest.TestCase):
             self.assertNotIn("dispatch_started", (directory / "control.jsonl").read_text())
 
 
-class V8VerificationSmokeTests(FakeRunCase):
+class _OwnedChild:
+    """Injected process identity. No live process and no pipe the coordinator can reattach."""
+
+    def __init__(self, identity: dict):
+        self.identity = identity
+        self.order = []
+        self.written = bytearray()
+        self._chunks = queue.Queue()
+
+    def process_identity(self):
+        return dict(self.identity)
+
+    def subscribe(self):
+        self.order.append("subscribe")
+
+    def write(self, data: bytes):
+        self.order.append("write")
+        self.written += data
+
+    def read(self, _size: int) -> bytes:
+        item = self._chunks.get()
+        return b"" if item is None else item
+
+
+class V8RecoverySmokeTests(unittest.TestCase):
+    def test_v8_owned_child_reconciliation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _seed_parent(directory)
+            launches = []
+            crash_before_spawn = {"armed": True}
+
+            def open_child(launch):
+                ledger = (directory / "ledger.jsonl").read_text()
+                self.assertIn('"phase":"intent"', ledger)
+                self.assertIn(launch["session_dir"], ledger)
+                if crash_before_spawn["armed"]:
+                    crash_before_spawn["armed"] = False
+                    raise KeyboardInterrupt("coordinator died before spawn")
+                self.assertIn('"phase":"intent"', ledger)
+                child = _OwnedChild({
+                    "pid": 4100 + len(launches),
+                    "pgid": 5100 + len(launches),
+                    "start_id": f"start-{len(launches)}",
+                    "run_id": "run-1",
+                })
+
+                def write(data: bytes):
+                    ledger_now = (directory / "ledger.jsonl").read_text()
+                    self.assertLess(
+                        ledger_now.index(f'"pid":{child.identity["pid"]}'),
+                        len(ledger_now),
+                    )
+                    self.assertIn('"phase":"spawned"', ledger_now)
+                    _OwnedChild.write(child, data)
+
+                child.write = write
+                launches.append((launch, child))
+                return child
+
+            anchor = {"node": "n1", "steps": [1, 2]}
+            with self.assertRaises(KeyboardInterrupt):
+                orchestration.delegate(
+                    directory, operation_id="op-a", run_id="run-1", actor_id="sol",
+                    session_id="sol-session", task="hypothesis a", scope="step", anchor=anchor,
+                    open_child=open_child,
+                )
+            self.assertEqual(launches, [])
+            self.assertIn('"phase":"intent"', (directory / "ledger.jsonl").read_text())
+            orchestration._owned.clear()
+            orchestration._openers.clear()
+            orchestration._live.clear()
+            orchestration._readers.clear()
+            orchestration._stop_sent.clear()
+
+            probed = {}
+
+            def inspect(pid: int):
+                return probed.get(pid)
+
+            signalled = []
+
+            def signal(pgid: int):
+                signalled.append(pgid)
+
+            recovered = orchestration.reconcile(directory, inspect=inspect, signal=signal, open_child=open_child)
+            self.assertEqual(signalled, [])
+            self.assertEqual(recovered["replacements"], 1)
+            self.assertEqual(recovered["status"], "running")
+            self.assertEqual(len(launches), 1)
+            owned = launches[0][1]
+            self.assertEqual(owned.order[0], "subscribe")
+            self.assertIn(f'"pid":{owned.identity["pid"]}', (directory / "ledger.jsonl").read_text())
+            self.assertIn(owned.identity["start_id"], (directory / "ledger.jsonl").read_text())
+            rows = run_control._control_rows(directory)
+            generation = next(row["generation"] for row in reversed(rows) if row.get("kind") == "run_generation")
+
+            second = orchestration.delegate(
+                directory, operation_id="op-b", run_id="run-1", actor_id="sol",
+                session_id="sol-session", task="hypothesis b", scope="proof",
+                anchor={"node": "n1"}, open_child=open_child,
+            )
+            self.assertTrue(second["ok"])
+            self.assertEqual(len(launches), 2)
+            first_id = launches[0][1].identity
+            second_id = launches[1][1].identity
+            self.assertIn('"phase":"spawned"', (directory / "ledger.jsonl").read_text())
+            # Prompt bytes exist only after the spawned ownership line for that child.
+            self.assertTrue(launches[1][1].written)
+
+            view = orchestration.jobs(directory)
+            activation_a = view["jobs"][0]["activation_id"]
+            activation_b = second["activation_id"]
+            worker_b = launches[1][0]["env"]["ARENA_ACTOR_ID"]
+            session_b = launches[1][0]["env"]["ARENA_SESSION_ID"]
+            uncertain = run_control.begin_dispatch(
+                directory,
+                {
+                    "request_id": "req-b",
+                    "attempt_id": "attempt-b",
+                    "run_id": "run-1",
+                    "actor_id": worker_b,
+                    "session_id": session_b,
+                    "job_id": second["job_id"],
+                    "generation": generation,
+                },
+                lambda: None,
+            )
+            self.assertEqual(uncertain["sent"], "uncertain")
+
+            cancelled = orchestration.cancel(
+                directory, operation_id="op-cancel-a", run_id="run-1", actor_id="sol",
+                session_id="sol-session", job_id=view["jobs"][0]["job_id"],
+            )
+            self.assertEqual(cancelled["state"], "cancelling")
+
+            for bucket in (
+                orchestration._owned, orchestration._openers, orchestration._live, orchestration._readers,
+            ):
+                bucket.clear()
+            orchestration._stop_sent.clear()
+
+            probed[first_id["pid"]] = {"alive": True, "start_id": "reused-pid", "run_id": "other-run"}
+            probed[second_id["pid"]] = {"alive": True, "start_id": second_id["start_id"], "run_id": "run-1"}
+            held = orchestration.reconcile(directory, inspect=inspect, signal=signal, open_child=open_child)
+            self.assertNotIn(first_id["pid"], signalled)
+            self.assertNotIn(first_id["pgid"], signalled)
+            self.assertEqual(signalled, [second_id["pgid"]])
+            self.assertEqual(held["replacements"], 0)
+            self.assertEqual(len(launches), 2)
+            self.assertEqual(held["status"], "recovering")
+            fenced = run_control.begin_dispatch(
+                directory,
+                {
+                    "request_id": "req-during",
+                    "attempt_id": "attempt-during",
+                    "run_id": "run-1",
+                    "actor_id": "sol",
+                    "session_id": "sol-session",
+                    "generation": "old-generation",
+                },
+                lambda: (_ for _ in ()).throw(AssertionError("transport")),
+            )
+            self.assertFalse(fenced["admitted"])
+            self.assertEqual(fenced["reason"], "recovering")
+
+            late = orchestration.note_worker_event(
+                directory,
+                activation_id=activation_a,
+                generation="stale-generation",
+                evidence={"attempt_id": "late-attempt", "proof_id": "late-proof", "evaluation_id": "late-eval"},
+            )
+            self.assertTrue(late["evidence"])
+            self.assertFalse(late["state_changed"])
+            after_late = orchestration.jobs(directory)
+            cancelled_row = next(
+                item for job in after_late["jobs"] for item in job["activations"] if item["activation_id"] == activation_a
+            )
+            other_row = next(
+                item for job in after_late["jobs"] for item in job["activations"] if item["activation_id"] == activation_b
+            )
+            self.assertEqual(cancelled_row["state"], "cancelled")
+            self.assertFalse(cancelled_row["occupies_slot"])
+            self.assertTrue(other_row["occupies_slot"])
+            self.assertTrue(any(item["attempt_id"] == "late-attempt" for job in after_late["jobs"] for item in job["findings"]))
+
+            probed[second_id["pid"]] = {"alive": False, "start_id": second_id["start_id"], "run_id": "run-1"}
+            finished = orchestration.reconcile(directory, inspect=inspect, signal=signal, open_child=open_child)
+            self.assertEqual(signalled, [second_id["pgid"]])
+            self.assertEqual(finished["replacements"], 0)
+            self.assertEqual(len(launches), 2)
+            self.assertEqual(finished["status"], "recovering")
+            released = orchestration.jobs(directory)
+            gone = next(
+                item for job in released["jobs"] for item in job["activations"] if item["activation_id"] == activation_b
+            )
+            self.assertIn(gone["state"], ("recovering", "failed"))
+            self.assertNotEqual(gone["state"], "completed")
+            self.assertTrue(gone["occupies_slot"])
     def test_v8_verification_outcomes(self):
         from arena import campaign, orchestration
 

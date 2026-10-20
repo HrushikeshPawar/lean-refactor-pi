@@ -4,7 +4,7 @@
 
 **Blocked by:** 10: Admit two workers and cancel stale work cleanly
 
-**Status:** ready-for-agent
+**Status:** needs-review
 
 **Branch:** `v8/12-process-recovery`
 
@@ -26,12 +26,12 @@
 
 ## What to build and acceptance
 
-- [ ] 1. Persist launch intent and activation before spawning; identify owned processes by creation identity and coordinator generation, not PID alone.
-- [ ] 2. Fence new activation/dispatch during reconciliation. Attach/reconcile or stop the old owned child before launching its replacement.
-- [ ] 3. Crash immediately before/after launch and after child exit but before completion recording; recover slot/session ownership from durable evidence.
-- [ ] 4. Do not touch other runs or reinterpret a reused PID as a child. Machine/process identity is injected in deterministic tests.
-- [ ] 5. Late old-generation events can add evidence but cannot reopen cancelled activations or release another activation's slot.
-- [ ] 6. Use the one assigned fast smoke for this slice. Retain the stated behavior requirements; actual-Pi/real-Lean journeys and the broader race matrix are final E2E coverage, not this ticket's gate.
+- [x] 1. Persist launch intent and activation before spawning; identify owned processes by creation identity and coordinator generation, not PID alone.
+- [x] 2. Fence new activation/dispatch during reconciliation. Attach/reconcile or stop the old owned child before launching its replacement.
+- [x] 3. Crash immediately before/after launch and after child exit but before completion recording; recover slot/session ownership from durable evidence.
+- [x] 4. Do not touch other runs or reinterpret a reused PID as a child. Machine/process identity is injected in deterministic tests.
+- [x] 5. Late old-generation events can add evidence but cannot reopen cancelled activations or release another activation's slot.
+- [x] 6. Use the one assigned fast smoke for this slice. Retain the stated behavior requirements; actual-Pi/real-Lean journeys and the broader race matrix are final E2E coverage, not this ticket's gate.
 
 ## Verify
 
