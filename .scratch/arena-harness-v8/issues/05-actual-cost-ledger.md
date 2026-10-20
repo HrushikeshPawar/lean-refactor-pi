@@ -4,7 +4,7 @@
 
 **Blocked by:** 03: Retain exact attempts and derivations
 
-**Status:** ready-for-agent
+**Status:** needs-review
 
 **Branch:** `v8/05-actual-cost-ledger`
 
@@ -26,12 +26,12 @@
 
 ## What to build and acceptance
 
-- [ ] 1. Record durable provider-request and settlement identities, including covered-request identities for grouped compaction usage. Replaying a receipt cannot add a charge twice.
-- [ ] 2. Use the same $2.50 actual-cost threshold for every actor; no reservations, per-model/job pools, final reserve or estimates in the total.
-- [ ] 3. Treat valid zero as known zero. Missing, invalid or incomplete provider usage remains unknown with reconciliation evidence and explicit infrastructure/accounting failure when irreconcilable.
-- [ ] 4. Retain costs arriving after threshold crossing, retries and cancelled transport. Attribute request costs once rather than copying them onto every candidate.
-- [ ] 5. Show one run total with actor/job attribution and accounting completeness through normal run evidence.
-- [ ] 6. Use the existing scripted-provider/accounting boundary and offline restart fixtures. Implement ledger behavior here; the next ticket establishes a reliable transport veto.
+- [x] 1. Record durable provider-request and settlement identities, including covered-request identities for grouped compaction usage. Replaying a receipt cannot add a charge twice.
+- [x] 2. Use the same $2.50 actual-cost threshold for every actor; no reservations, per-model/job pools, final reserve or estimates in the total.
+- [x] 3. Treat valid zero as known zero. Missing, invalid or incomplete provider usage remains unknown with reconciliation evidence and explicit infrastructure/accounting failure when irreconcilable.
+- [x] 4. Retain costs arriving after threshold crossing, retries and cancelled transport. Attribute request costs once rather than copying them onto every candidate.
+- [x] 5. Show one run total with actor/job attribution and accounting completeness through normal run evidence.
+- [x] 6. Use the existing scripted-provider/accounting boundary and offline restart fixtures. Implement ledger behavior here; the next ticket establishes a reliable transport veto.
 
 ## Verify
 

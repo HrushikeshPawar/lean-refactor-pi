@@ -10,13 +10,16 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import math
 import os
 import uuid
 from collections.abc import Callable
 from contextlib import contextmanager
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 SCHEMA_VERSION = 1
+ACTUAL_COST_THRESHOLD = Decimal("2.50")
 
 _MISSING = ("actor_id", "session_id", "tool_call_id", "operation_id")
 
@@ -274,6 +277,332 @@ def actor_ids(run_id: str) -> dict:
 
 def construction_digest(payload: dict) -> str:
     return argument_digest(payload)
+
+
+def _usage_amount(usage: object) -> Decimal | None:
+    """The provider total, when the usage object is complete. Incomplete usage is not zero."""
+    if not isinstance(usage, dict):
+        return None
+    cost = usage.get("cost")
+    if not isinstance(cost, dict) or "total" not in cost:
+        return None
+    total = cost.get("total")
+    if isinstance(total, bool):
+        return None
+    if isinstance(total, float):
+        if not math.isfinite(total) or total < 0:
+            return None
+        return Decimal(str(total))
+    if isinstance(total, int):
+        if total < 0:
+            return None
+        return Decimal(total)
+    return _decimal_amount(total)
+
+
+def _decimal_amount(amount: object) -> Decimal | None:
+    """Accept a non-negative decimal string. Floats and invalid text are not money."""
+    if not isinstance(amount, str):
+        return None
+    try:
+        value = Decimal(amount)
+    except InvalidOperation:
+        return None
+    if not value.is_finite() or value < 0:
+        return None
+    return value
+
+
+def _money(value: Decimal) -> str:
+    return format(value, "f")
+
+
+def prepare_request(directory: Path, request: dict) -> dict:
+    """Record a provider request before dispatch. Repeating the same id is a no-op."""
+    required = ("request_id", "run_id", "actor_id", "session_id")
+    if any(not request.get(key) for key in required):
+        raise OperationRejected("invalid_input", str(request.get("request_id") or ""))
+    with control_lock(directory):
+        rows = _control_rows(directory)
+        digest = argument_digest(
+            {key: request.get(key) for key in ("request_id", "run_id", "actor_id", "session_id", "job_id")}
+        )
+        for row in rows:
+            if row.get("kind") == "provider_request" and row.get("request_id") == request["request_id"]:
+                if row.get("argument_digest") != digest:
+                    return {"ok": False, "status": "operation_conflict", "request_id": request["request_id"]}
+                return {"ok": True, "status": "prepared", "request_id": request["request_id"], "reused": True}
+        event = {
+            "schema_version": SCHEMA_VERSION,
+            "kind": "provider_request",
+            "event_id": uuid.uuid4().hex,
+            "operation_id": request["request_id"],
+            "request_id": request["request_id"],
+            "run_id": request["run_id"],
+            "actor_id": request["actor_id"],
+            "session_id": request["session_id"],
+            "status": "prepared",
+            "argument_digest": digest,
+        }
+        if request.get("job_id"):
+            event["job_id"] = request["job_id"]
+        _append_control(directory, event)
+        return {"ok": True, "status": "prepared", "request_id": request["request_id"], "reused": False}
+
+
+def _prepared(rows: list[dict]) -> dict[str, dict]:
+    return {row["request_id"]: row for row in rows if row.get("kind") == "provider_request" and row.get("request_id")}
+
+
+def _settlement_rows(rows: list[dict]) -> list[dict]:
+    return [row for row in rows if row.get("kind") == "settlement"]
+
+
+def _canonical_settlement(settlement: dict) -> dict:
+    covered = list(settlement.get("covered_request_ids") or [])
+    return {
+        "settlement_id": settlement.get("settlement_id"),
+        "reconciles": settlement.get("reconciles"),
+        "covered_request_ids": covered,
+        "state": settlement.get("state"),
+        "amount": settlement.get("amount"),
+        "usage": settlement.get("usage"),
+        "actor_id": settlement.get("actor_id"),
+        "session_id": settlement.get("session_id"),
+        "job_id": settlement.get("job_id"),
+        "run_id": settlement.get("run_id"),
+        "transport": settlement.get("transport"),
+        "irreconcilable": bool(settlement.get("irreconcilable")),
+    }
+
+
+def _apply_coverage(rows: list[dict]) -> dict:
+    """One charge per covered request. A later reconciliation replaces an unknown amount."""
+    charges: dict[str, dict] = {}
+    unknown: set[str] = set()
+    originals: dict[str, dict] = {}
+    for row in _settlement_rows(rows):
+        if row.get("reconciles"):
+            continue
+        originals[row["settlement_id"]] = row
+        amount = _decimal_amount(row.get("counted_amount")) if row.get("state") == "known" else None
+        for request_id in row.get("covered_request_ids") or []:
+            if amount is None:
+                unknown.add(request_id)
+                charges.pop(request_id, None)
+            else:
+                unknown.discard(request_id)
+                charges[request_id] = {
+                    "amount": amount,
+                    "actor_id": row.get("actor_id"),
+                    "job_id": row.get("job_id"),
+                    "settlement_id": row["settlement_id"],
+                }
+    for row in _settlement_rows(rows):
+        if not row.get("reconciles"):
+            continue
+        amount = _decimal_amount(row.get("counted_amount"))
+        if amount is None:
+            continue
+        for request_id in row.get("covered_request_ids") or []:
+            unknown.discard(request_id)
+            charges[request_id] = {
+                "amount": amount,
+                "actor_id": row.get("actor_id"),
+                "job_id": row.get("job_id"),
+                "settlement_id": row["settlement_id"],
+            }
+    # Grouped coverage stores the whole amount on every covered id. Count each settlement once.
+    seen: set[str] = set()
+    total = Decimal("0")
+    by_actor: dict[str, Decimal] = {}
+    by_job: dict[str, Decimal] = {}
+    for charge in charges.values():
+        if charge["settlement_id"] in seen:
+            continue
+        seen.add(charge["settlement_id"])
+        total += charge["amount"]
+        if charge.get("actor_id"):
+            by_actor[charge["actor_id"]] = by_actor.get(charge["actor_id"], Decimal("0")) + charge["amount"]
+        if charge.get("job_id"):
+            by_job[charge["job_id"]] = by_job.get(charge["job_id"], Decimal("0")) + charge["amount"]
+    return {
+        "total": total,
+        "by_actor": by_actor,
+        "by_job": by_job,
+        "unknown": sorted(unknown),
+        "originals": originals,
+        "covered": {request_id for row in originals.values() for request_id in row.get("covered_request_ids") or []},
+    }
+
+
+def _projection(directory: Path, picture: dict, stopped: bool, stop_reason: str | None) -> None:
+    report = {
+        "spent_usd": _money(picture["total"]),
+        "limit_usd": _money(ACTUAL_COST_THRESHOLD),
+        "accounting": "unknown" if picture["unknown"] else "known",
+        "unknown_requests": picture["unknown"],
+        "stopped": stopped,
+        "stop_reason": stop_reason,
+        "by_actor": {key: _money(value) for key, value in sorted(picture["by_actor"].items())},
+        "by_job": {key: _money(value) for key, value in sorted(picture["by_job"].items())},
+        "projection_of": "control.jsonl",
+    }
+    path = directory / "cost.json"
+    path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+
+
+def _spend_view(rows: list[dict], *, reused: bool = False, stop_transition: bool = False) -> dict:
+    picture = _apply_coverage(rows)
+    stops = [row.get("reason") for row in rows if row.get("kind") == "run_stop"]
+    settlements = {
+        row["settlement_id"]: {"state": row.get("state"), "reconciles": row.get("reconciles")}
+        for row in _settlement_rows(rows)
+        if row.get("settlement_id")
+    }
+    return {
+        "ok": True,
+        "total": _money(picture["total"]),
+        "accounting": "unknown" if picture["unknown"] else "known",
+        "unknown_requests": picture["unknown"],
+        "by_actor": {key: _money(value) for key, value in picture["by_actor"].items()},
+        "by_job": {key: _money(value) for key, value in picture["by_job"].items()},
+        "stopped": bool(stops),
+        "stop_reason": stops[-1] if stops else None,
+        "stop_transition": stop_transition,
+        "stops": [reason for reason in stops if reason],
+        "settlements": settlements,
+        "reused": reused,
+        "status": "committed",
+    }
+
+
+def _ensure_threshold_stop(directory: Path, rows: list[dict]) -> list[dict]:
+    """A crash between the settlement line and the stop line is repaired under the same lock."""
+    picture = _apply_coverage(rows)
+    if picture["total"] < ACTUAL_COST_THRESHOLD:
+        return rows
+    if any(row.get("kind") == "run_stop" and row.get("reason") == "spend_threshold" for row in rows):
+        return rows
+    _append_control(
+        directory,
+        {
+            "schema_version": SCHEMA_VERSION,
+            "kind": "run_stop",
+            "event_id": uuid.uuid4().hex,
+            "reason": "spend_threshold",
+            "total": _money(picture["total"]),
+            "threshold": _money(ACTUAL_COST_THRESHOLD),
+        },
+    )
+    rows = _control_rows(directory)
+    picture = _apply_coverage(rows)
+    _projection(directory, picture, True, "spend_threshold")
+    return rows
+
+
+def read_state(directory: Path) -> dict:
+    """The shared actual-cost view. Repairs a missing threshold stop, then refreshes cost.json."""
+    with control_lock(directory):
+        rows = _ensure_threshold_stop(directory, _control_rows(directory))
+        picture = _apply_coverage(rows)
+        reason = next((row.get("reason") for row in reversed(rows) if row.get("kind") == "run_stop"), None)
+        _projection(directory, picture, reason is not None, reason)
+        return _spend_view(rows)
+
+
+def settle_usage(directory: Path, settlement: dict) -> dict:
+    """Settle one provider charge, or reconcile an earlier unknown report without charging it twice."""
+    settlement_id = str(settlement.get("settlement_id") or "")
+    covered = list(settlement.get("covered_request_ids") or [])
+    if not settlement_id or not covered or settlement.get("state") not in ("known", "unknown"):
+        raise OperationRejected("invalid_input", settlement_id)
+    if any(not isinstance(request_id, str) or not request_id for request_id in covered):
+        raise OperationRejected("invalid_input", settlement_id)
+    with control_lock(directory):
+        rows = _control_rows(directory)
+        digest = argument_digest(_canonical_settlement(settlement))
+        for row in _settlement_rows(rows):
+            if row.get("settlement_id") != settlement_id:
+                continue
+            if row.get("argument_digest") != digest:
+                return {"ok": False, "status": "operation_conflict", "settlement_id": settlement_id, "total": _spend_view(rows)["total"]}
+            return _spend_view(rows, reused=True)
+        prepared = _prepared(rows)
+        missing = [request_id for request_id in covered if request_id not in prepared]
+        if missing:
+            raise OperationRejected("not_found", settlement_id)
+        picture = _apply_coverage(rows)
+        reconciles = settlement.get("reconciles")
+        if reconciles:
+            original = picture["originals"].get(reconciles)
+            if original is None or original.get("state") != "unknown":
+                return {"ok": False, "status": "operation_conflict", "settlement_id": settlement_id}
+            if list(original.get("covered_request_ids") or []) != covered:
+                return {"ok": False, "status": "operation_conflict", "settlement_id": settlement_id}
+            if any(row.get("reconciles") == reconciles for row in _settlement_rows(rows)):
+                return {"ok": False, "status": "operation_conflict", "settlement_id": settlement_id}
+        elif any(request_id in picture["covered"] for request_id in covered):
+            return {"ok": False, "status": "operation_conflict", "settlement_id": settlement_id}
+        amount = _decimal_amount(settlement.get("amount")) if settlement["state"] == "known" else None
+        reported = _usage_amount(settlement.get("usage"))
+        if amount is None or reported is None or amount != reported:
+            amount = None
+        state = "known" if amount is not None else "unknown"
+        before = picture["total"]
+        already_stopped = any(row.get("kind") == "run_stop" and row.get("reason") == "spend_threshold" for row in rows)
+        event = {
+            "schema_version": SCHEMA_VERSION,
+            "kind": "settlement",
+            "event_id": uuid.uuid4().hex,
+            "operation_id": settlement_id,
+            "settlement_id": settlement_id,
+            "run_id": settlement.get("run_id"),
+            "actor_id": settlement.get("actor_id"),
+            "session_id": settlement.get("session_id"),
+            "covered_request_ids": covered,
+            "state": state,
+            "counted_amount": _money(amount) if amount is not None else None,
+            "reported_amount": settlement.get("amount") if isinstance(settlement.get("amount"), str) else None,
+            "usage": settlement.get("usage"),
+            "argument_digest": digest,
+        }
+        if settlement.get("job_id"):
+            event["job_id"] = settlement["job_id"]
+        if reconciles:
+            event["reconciles"] = reconciles
+        if settlement.get("transport"):
+            event["transport"] = settlement["transport"]
+        if settlement.get("candidate_ids"):
+            event["candidate_ids"] = list(settlement["candidate_ids"])
+        _append_control(directory, event)
+        rows = _control_rows(directory)
+        picture = _apply_coverage(rows)
+        stop_transition = False
+        if state == "known" and not already_stopped and picture["total"] >= ACTUAL_COST_THRESHOLD and before < ACTUAL_COST_THRESHOLD:
+            rows = _ensure_threshold_stop(directory, rows)
+            stop_transition = True
+        if settlement.get("irreconcilable") and state == "unknown":
+            _append_control(
+                directory,
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "kind": "accounting_failure",
+                    "event_id": uuid.uuid4().hex,
+                    "category": "accounting_unknown",
+                    "settlement_id": settlement_id,
+                    "covered_request_ids": covered,
+                },
+            )
+            rows = _control_rows(directory)
+        picture = _apply_coverage(rows)
+        stops = [row for row in rows if row.get("kind") == "run_stop"]
+        reason = stops[-1].get("reason") if stops else None
+        _projection(directory, picture, bool(stops), reason)
+        view = _spend_view(rows, stop_transition=stop_transition)
+        view["settlement_id"] = settlement_id
+        view["state"] = state
+        return view
 
 
 def input_roles(operation: dict | None) -> list[dict]:
