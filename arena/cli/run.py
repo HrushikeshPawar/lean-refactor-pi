@@ -782,7 +782,8 @@ def run(options: RunOptions) -> int:
 
     for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(number, interrupt)
-    with Coordinator(directory), event_log.open("a") as output, live_view(args, directory, health, worker):
+    with Coordinator(directory) as coordinator, event_log.open("a") as output, live_view(args, directory, health, worker):
+        env["ARENA_GENERATION"] = coordinator.generation
         model_phase_id = f"model:{os.getpid()}:{time.monotonic_ns()}"
         process = subprocess.Popen(
             command,

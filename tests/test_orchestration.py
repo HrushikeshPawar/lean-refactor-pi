@@ -347,6 +347,9 @@ class _HeldChild:
     def confirmed_absent(self):
         return self.absent
 
+    def process_identity(self):
+        return {"pid": id(self), "pgid": id(self), "start_id": f"fixture-{id(self)}"}
+
 
 class V8WorkerSmokeTests(unittest.TestCase):
     def test_v8_one_worker_receipt(self):
@@ -1212,7 +1215,7 @@ class V8WorkerSmokeTests(unittest.TestCase):
             spec.loader.exec_module(await_protocol)
             from arena.coordinator import Coordinator
 
-            with Coordinator(directory), patch.object(await_protocol, "run_dir", return_value=directory):
+            with patch.object(orchestration, "reconcile", return_value={"status": "running", "generation": "fixture"}), Coordinator(directory), patch.object(await_protocol, "run_dir", return_value=directory):
                 continued = await_protocol.run(SimpleNamespace(
                     action="await_results", theorem="demo", run_id="run-1", request_file=None,
                     max_seconds=None, spent_usd=None, cap_usd=None,
@@ -1334,6 +1337,27 @@ class _OwnedChild:
 class V8RecoverySmokeTests(unittest.TestCase):
     def test_v8_owned_child_reconciliation(self):
         with tempfile.TemporaryDirectory() as tmp:
+            ambiguous = Path(tmp)
+            _seed_parent(ambiguous)
+
+            def lost_spawn(_launch):
+                raise KeyboardInterrupt("child may have spawned before receipt")
+
+            with self.assertRaises(KeyboardInterrupt):
+                orchestration.delegate(
+                    ambiguous, operation_id="ambiguous", run_id="run-1", actor_id="sol",
+                    session_id="sol-session", task="unacknowledged spawn", scope="proof",
+                    anchor={"node": "n1"}, open_child=lost_spawn,
+                )
+            retained = orchestration.reconcile(
+                ambiguous, inspect=lambda _pid: {"alive": False, "group_alive": False},
+                signal=lambda _pgid: self.fail("unknown child must not be signalled"),
+                open_child=lambda _launch: self.fail("ambiguous spawn must not be replaced"),
+            )
+            self.assertEqual(retained["status"], "recovering")
+            self.assertEqual(retained["replacements"], 0)
+
+        with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
             _seed_parent(directory)
             launches = []
@@ -1345,7 +1369,9 @@ class V8RecoverySmokeTests(unittest.TestCase):
                 self.assertIn(launch["session_dir"], ledger)
                 if crash_before_spawn["armed"]:
                     crash_before_spawn["armed"] = False
-                    raise KeyboardInterrupt("coordinator died before spawn")
+                    error = KeyboardInterrupt("adapter proved no child was spawned")
+                    error.not_spawned = True
+                    raise error
                 self.assertIn('"phase":"intent"', ledger)
                 child = _OwnedChild({
                     "pid": 4100 + len(launches),
@@ -1361,6 +1387,8 @@ class V8RecoverySmokeTests(unittest.TestCase):
                         len(ledger_now),
                     )
                     self.assertIn('"phase":"spawned"', ledger_now)
+                    self.assertEqual(orchestration._run_status(directory), "running")
+                    self.assertEqual(launch["env"]["ARENA_GENERATION"], orchestration._control_generation(directory))
                     _OwnedChild.write(child, data)
 
                 child.write = write
@@ -1385,7 +1413,7 @@ class V8RecoverySmokeTests(unittest.TestCase):
             probed = {}
 
             def inspect(pid: int):
-                return probed.get(pid)
+                return probed.get(pid, {"alive": False, "group_alive": False})
 
             signalled = []
 
@@ -1449,8 +1477,12 @@ class V8RecoverySmokeTests(unittest.TestCase):
                 bucket.clear()
             orchestration._stop_sent.clear()
 
-            probed[first_id["pid"]] = {"alive": True, "start_id": "reused-pid", "run_id": "other-run"}
-            probed[second_id["pid"]] = {"alive": True, "start_id": second_id["start_id"], "run_id": "run-1"}
+            probed[first_id["pid"]] = {
+                "alive": True, "group_alive": False, "start_id": "reused-pid", "run_id": "other-run",
+            }
+            probed[second_id["pid"]] = {
+                "alive": True, "group_alive": True, "start_id": second_id["start_id"], "run_id": "run-1",
+            }
             held = orchestration.reconcile(directory, inspect=inspect, signal=signal, open_child=open_child)
             self.assertNotIn(first_id["pid"], signalled)
             self.assertNotIn(first_id["pgid"], signalled)
@@ -1473,13 +1505,37 @@ class V8RecoverySmokeTests(unittest.TestCase):
             self.assertFalse(fenced["admitted"])
             self.assertEqual(fenced["reason"], "recovering")
 
-            late = orchestration.note_worker_event(
+            unknown = orchestration.note_worker_event(
                 directory,
                 activation_id=activation_a,
                 generation="stale-generation",
                 evidence={"attempt_id": "late-attempt", "proof_id": "late-proof", "evaluation_id": "late-eval"},
             )
+            self.assertFalse(unknown["evidence"])
+
+            def record_late(writer):
+                writer.append_ledger({"kind": "attempt", "event_id": "late-attempt", "proof_id": "late-proof",
+                                      "generation": generation})
+                writer.append_ledger({
+                    "kind": "evaluation", "candidate_id": "late-proof", "key": "late-eval",
+                    "result": {"ok": True, "compat": {"v1": {"passed": True}}},
+                })
+
+            run_control.apply_operation(directory, {
+                "operation_id": "late-compile", "kind": "compile", "arguments": {"proof": "late-proof"},
+                "run_id": "run-1", "actor_id": launches[0][0]["env"]["ARENA_ACTOR_ID"],
+                "session_id": launches[0][0]["env"]["ARENA_SESSION_ID"],
+                "activation_id": activation_a,
+            }, record_late)
+            late = orchestration.note_worker_event(
+                directory, activation_id=activation_a, generation=generation,
+                evidence={"attempt_id": "late-attempt", "proof_id": "late-proof", "evaluation_id": "late-eval"},
+            )
             self.assertTrue(late["evidence"])
+            self.assertFalse(orchestration.note_worker_event(
+                directory, activation_id=activation_a, generation="another-generation",
+                evidence={"attempt_id": "late-attempt", "proof_id": "late-proof", "evaluation_id": "late-eval"},
+            )["evidence"])
             self.assertFalse(late["state_changed"])
             after_late = orchestration.jobs(directory)
             cancelled_row = next(
@@ -1493,7 +1549,9 @@ class V8RecoverySmokeTests(unittest.TestCase):
             self.assertTrue(other_row["occupies_slot"])
             self.assertTrue(any(item["attempt_id"] == "late-attempt" for job in after_late["jobs"] for item in job["findings"]))
 
-            probed[second_id["pid"]] = {"alive": False, "start_id": second_id["start_id"], "run_id": "run-1"}
+            probed[second_id["pid"]] = {
+                "alive": False, "group_alive": False, "start_id": second_id["start_id"], "run_id": "run-1",
+            }
             finished = orchestration.reconcile(directory, inspect=inspect, signal=signal, open_child=open_child)
             self.assertEqual(signalled, [second_id["pgid"]])
             self.assertEqual(finished["replacements"], 0)
@@ -1506,6 +1564,82 @@ class V8RecoverySmokeTests(unittest.TestCase):
             self.assertIn(gone["state"], ("recovering", "failed"))
             self.assertNotEqual(gone["state"], "completed")
             self.assertTrue(gone["occupies_slot"])
+
+            run_control.settle_usage(directory, {
+                "settlement_id": "unknown-b", "run_id": "run-1", "actor_id": worker_b,
+                "session_id": session_b, "covered_request_ids": ["req-b"], "state": "unknown",
+            })
+            self.assertTrue(orchestration._request_uncertain(directory, session_b))
+            run_control.settle_usage(directory, {
+                "settlement_id": "known-b", "reconciles": "unknown-b", "run_id": "run-1",
+                "actor_id": worker_b, "session_id": session_b, "covered_request_ids": ["req-b"],
+                "state": "known", "amount": "0.01", "usage": {"cost": {"total": "0.01"}},
+            })
+            resumed = orchestration.reconcile(directory, inspect=inspect, signal=signal, open_child=open_child)
+            self.assertEqual(resumed["status"], "running")
+            self.assertEqual(resumed["replacements"], 1)
+            self.assertEqual(len(launches), 3)
+            self.assertIsNone(run_control._fence_reason(
+                run_control._control_rows(directory), {"generation": resumed["generation"]},
+            ))
+            before = orchestration.jobs(directory)
+            stale = {"state": "active", "generation": generation, "transport": launches[1][1]}
+            delegation_b = next(row for row in orchestration._delegations(directory)
+                                if row["activation_id"] == activation_b)
+            orchestration._take(directory, delegation_b, "old-command", stale, [{"type": "agent_settled"}])
+            self.assertEqual(orchestration.jobs(directory)["jobs"], before["jobs"])
+            with patch.dict(orchestration._owned, {activation_b: launches[1][1]}):
+                orchestration._record_state(
+                    directory, delegation_b, "failed", expected_transport=launches[1][1],
+                    expected_generation=generation, reason="old-reader-eof",
+                )
+                self.assertEqual(orchestration.jobs(directory)["jobs"], before["jobs"])
+            launches[1][1].confirmed_absent = lambda: True
+            self.assertFalse(orchestration.observe_exit(directory, activation_b, expected_transport=launches[1][1]))
+
+            with run_control.control_lock(directory):
+                orchestration._append_state(directory, delegation_b, "completed", occupies_slot=True)
+            terminal = orchestration.reconcile(directory, inspect=inspect, signal=signal, open_child=open_child)
+            self.assertEqual(terminal["replacements"], 0)
+            self.assertEqual(terminal["status"], "running")
+            completed = orchestration._activation_view(directory, delegation_b)
+            self.assertEqual(completed["state"], "completed")
+            self.assertFalse(completed["occupies_slot"])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            queued_run = Path(tmp)
+            _seed_parent(queued_run)
+            children = []
+
+            def queued_child(_launch):
+                child = _OwnedChild({"pid": 8000 + len(children), "pgid": 9000 + len(children),
+                                     "start_id": f"queued-{len(children)}", "run_id": "run-1"})
+                children.append(child)
+                return child
+
+            assignments = [orchestration.delegate(
+                queued_run, operation_id=f"queued-{index}", run_id="run-1", actor_id="sol",
+                session_id="sol-session", task=f"route {index}", scope="proof",
+                anchor={"node": "n1"}, open_child=queued_child,
+            ) for index in range(3)]
+            self.assertEqual(assignments[-1]["state"], "queued")
+            first = orchestration._delegations(queued_run)[0]
+            with run_control.control_lock(queued_run):
+                orchestration._append_state(queued_run, first, "completed", occupies_slot=True)
+            for assignment in assignments:
+                orchestration._openers.pop(assignment["activation_id"], None)
+            queued_recovery = orchestration.reconcile(
+                queued_run, inspect=lambda _pid: {"alive": False, "group_alive": False},
+                signal=lambda _pgid: self.fail("absent group must not be signalled"), open_child=queued_child,
+            )
+            self.assertEqual(queued_recovery["status"], "running")
+            self.assertEqual(len(children), 4)
+            queued_job = orchestration.jobs(queued_run, [assignments[-1]["job_id"]])["jobs"][0]
+            self.assertEqual(queued_job["state"], "launching")
+            self.assertTrue(queued_job["occupies_slot"])
+
+
+class V8VerificationSmokeTests(FakeRunCase):
     def test_v8_verification_outcomes(self):
         from arena import campaign, orchestration
 

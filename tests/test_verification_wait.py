@@ -24,12 +24,16 @@ class VerificationWaitTests(FakeRunCase):
         proof = "theorem t : True := by\n  exact True.intro"
         for job in ("a", "b"):
             with patch.dict(os.environ, {"ARENA_ACTOR_ID": f"worker-{job}",
-                                         "ARENA_SESSION_ID": f"session-{job}", "ARENA_JOB_ID": job}):
+                                         "ARENA_SESSION_ID": f"session-{job}", "ARENA_JOB_ID": job,
+                                         "ARENA_ACTIVATION_ID": f"activation-{job}", "ARENA_GENERATION": "g"}):
                 result = campaign.record_evaluation(
                     "T", "logic", proof, "fast", materialize_live=False,
                     operation={"type": "rewritten_from", "from": []},
                 )
             self.assertTrue(orchestration._open_checks(self.directory, [job]))
+            attempt = next(row for row in reversed(orchestration._history(self.directory))
+                           if row.get("kind") == "attempt" and row.get("actor_id") == f"worker-{job}")
+            self.assertEqual((attempt["activation_id"], attempt["generation"]), (f"activation-{job}", "g"))
 
         queued = [row for row in orchestration._history(self.directory)
                   if row.get("type") == "verification" and row["state"] == "queued"]

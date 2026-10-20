@@ -393,6 +393,10 @@ def actor_ids(run_id: str) -> dict:
     actor = os.environ.get("ARENA_ACTOR_ID") or "sol"
     session = os.environ.get("ARENA_SESSION_ID") or run_id
     found = {"actor_id": actor, "session_id": session, "missing": []}
+    for field in ("job_id", "activation_id", "generation"):
+        value = os.environ.get(f"ARENA_{field.upper()}")
+        if value:
+            found[field] = value
     if context.get("tool_call_id"):
         found["tool_call_id"] = context["tool_call_id"]
     else:
@@ -510,8 +514,11 @@ def _fence_reason(rows: list[dict], attempt: dict) -> str | None:
     attempts = {}
     for row in rows:
         if row.get("kind") in ("dispatch_intent", "dispatch"):
-            attempts[row["attempt_id"]] = row.get("status")
-    if "dispatch_uncertain" in attempts.values():
+            attempts[row["attempt_id"]] = row
+    coverage = _apply_coverage(rows)
+    known = coverage["covered"] - set(coverage["unknown"])
+    if any(row.get("status") == "dispatch_uncertain" and row.get("request_id") not in known
+           for row in attempts.values()):
         return "recovery_required"
     generation = next(
         (

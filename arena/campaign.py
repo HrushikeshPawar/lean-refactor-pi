@@ -1131,6 +1131,7 @@ def _record_construction(
                 "proof_id": proof_id,
                 "candidate_id": proof_id,
                 "data": data,
+                **({"generation": identity["generation"]} if identity.get("generation") else {}),
             }
         )
         if fresh_derivation:
@@ -1141,6 +1142,7 @@ def _record_construction(
                     "candidate_id": proof_id,
                     "parents": sources,
                     "data": data,
+                    **({"generation": identity["generation"]} if identity.get("generation") else {}),
                 }
             )
         return ctx.evidence
@@ -1154,6 +1156,7 @@ def _record_construction(
             "run_id": run_id,
             "actor_id": identity["actor_id"],
             "session_id": identity["session_id"],
+            **{key: identity[key] for key in ("job_id", "activation_id") if identity.get(key)},
         },
         mutate,
     )

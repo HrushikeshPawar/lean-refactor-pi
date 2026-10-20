@@ -25,7 +25,7 @@ def test_protocol_process_waits_for_owned_worker():
         )
         activation = receipt["activation_id"]
         try:
-            with coordinator.Coordinator(directory) as owner:
+            with patch.object(orchestration, "reconcile", return_value={"status": "running", "generation": "fixture"}), coordinator.Coordinator(directory) as owner:
                 registered = threading.Event()
                 original_wait = orchestration._interest.wait
 

@@ -26,8 +26,14 @@ def _failure(reason: str) -> dict:
 class Coordinator:
     """Host waits beside the runner's orchestration state, never in a tool process."""
 
-    def __init__(self, directory: Path):
+    def __init__(self, directory: Path, *, inspect=None, signal=None, open_child=None):
+        from arena.worker_process import ProcessInspector
+        from arena.worker_process import open_child as spawn_child
+
         self.directory = directory.resolve()
+        self._inspect = inspect if inspect is not None else ProcessInspector()
+        self._signal = signal if signal is not None else self._inspect.signal
+        self._open_child = open_child if open_child is not None else spawn_child
         self._guard = threading.Lock()
         self._clients: dict[socket.socket, tuple[threading.Event, threading.Thread]] = {}
         self._closed = threading.Event()
@@ -37,11 +43,21 @@ class Coordinator:
         self._temporary = None
         self._thread = None
 
+    @property
+    def generation(self) -> str:
+        return self._generation
+
     def start(self) -> Coordinator:
         self.directory.mkdir(parents=True, exist_ok=True)
         self._owner = (self.directory / "coordinator.lock").open("a")
         try:
             fcntl.flock(self._owner.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            recovered = orchestration.reconcile(
+                self.directory, inspect=self._inspect, signal=self._signal, open_child=self._open_child,
+            )
+            if recovered.get("status") != "running" or not recovered.get("generation"):
+                raise RuntimeError("recovery_required: owned workers or requests remain unreconciled")
+            self._generation = recovered["generation"]
             self._temporary = Path(tempfile.mkdtemp(prefix="arena-control-"))
             address = str(self._temporary / "control.sock")
             self._socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

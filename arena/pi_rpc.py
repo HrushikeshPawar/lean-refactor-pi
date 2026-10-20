@@ -62,6 +62,7 @@ def worker_launch(
     activation_id: str,
     anchor: dict,
     model: str = "deepseek-v4.1-flash",
+    generation: str | None = None,
 ) -> dict:
     """Fresh RPC launch. The adapter merges env overrides over os.environ to retain provider auth."""
     from arena.models import load, pi_json, pi_model, provider
@@ -99,6 +100,7 @@ def worker_launch(
             worker_session_id,
         ],
         "env": {
+            **({"ARENA_GENERATION": generation} if generation is not None else {}),
             "ARENA_RUN_ID": run_id,
             "ARENA_ACTOR_ID": worker_actor_id,
             "ARENA_SESSION_ID": worker_session_id,

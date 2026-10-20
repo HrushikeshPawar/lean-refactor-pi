@@ -8,9 +8,11 @@ A follow-up reuses the hypothesis session; a second prompt to an active job is b
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import threading
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 from arena import run_control
@@ -25,6 +27,7 @@ _live: dict[str, dict] = {}
 _openers: dict[str, object] = {}
 _stop_sent: set[str] = set()
 _io_locks: dict[str, threading.RLock] = {}
+_launch_gates = threading.local()
 _readers_guard = threading.Lock()
 _terminal_states = frozenset(("handled", "completed", "failed", "exhausted", "cancelled"))
 _active_states = frozenset(("launching", "queued", "active"))
@@ -127,6 +130,7 @@ def _activation_view(directory: Path, delegation: dict) -> dict:
     state = delegation.get("state")
     occupies_slot = state == "launching"
     command_id = None
+    recovery_state = None
     for row in _states(directory):
         if row.get("activation_id") != delegation.get("activation_id"):
             continue
@@ -134,6 +138,8 @@ def _activation_view(directory: Path, delegation: dict) -> dict:
         occupies_slot = row.get("occupies_slot", occupies_slot)
         if row.get("command_id"):
             command_id = row["command_id"]
+        if row.get("recovery_state"):
+            recovery_state = row["recovery_state"]
     return {
         "activation_id": delegation["activation_id"],
         "state": state,
@@ -141,6 +147,7 @@ def _activation_view(directory: Path, delegation: dict) -> dict:
         "command_id": command_id,
         "resumed": bool(delegation.get("resumed")),
         "occupies_slot": occupies_slot,
+        "recovery_state": recovery_state,
     }
 
 
@@ -295,14 +302,29 @@ def _append_ownership(directory: Path, delegation: dict, **fields) -> None:
 
 
 def _request_uncertain(directory: Path, session_id: str | None = None) -> bool:
+    rows = run_control._control_rows(directory)
+    coverage = run_control._apply_coverage(rows)
+    known = coverage["covered"] - set(coverage["unknown"])
+    if any(
+        row.get("kind") == "settlement"
+        and (session_id is None or row.get("session_id") == session_id)
+        and set(row.get("covered_request_ids") or []).intersection(coverage["unknown"])
+        for row in rows
+    ):
+        return True
     latest: dict[str, dict] = {}
-    for row in run_control._control_rows(directory):
+    for row in rows:
         if row.get("kind") not in ("dispatch_intent", "dispatch") or not row.get("attempt_id"):
             continue
         if session_id is not None and row.get("session_id") != session_id:
             continue
         latest[row["attempt_id"]] = row
-    return any(row.get("status") == "dispatch_uncertain" or row.get("sent") == "uncertain" for row in latest.values())
+    return any(
+        row.get("request_id") not in known
+        and row.get("status") not in ("rejected_before_dispatch", "failed_before_start")
+        and row.get("sent") is not False
+        for row in latest.values()
+    )
 
 
 def _set_run(directory: Path, status: str, generation: str | None = None) -> None:
@@ -349,8 +371,14 @@ def _fill_slots(directory: Path) -> None:
         _open_activation(directory, queued, opener, command_id)
 
 
-def _record_state(directory: Path, delegation: dict, state: str, **extra) -> None:
+def _record_state(directory: Path, delegation: dict, state: str, *, expected_transport=None,
+                  expected_generation=None, **extra) -> None:
     with run_control.control_lock(directory):
+        if expected_transport is not None and (
+            _owned.get(delegation["activation_id"]) is not expected_transport or _recovering(directory)
+            or expected_generation != _control_generation(directory)
+        ):
+            return
         snapshot = _activation_view(directory, delegation)
         if snapshot["state"] in _terminal_states:
             return
@@ -361,7 +389,8 @@ def _record_state(directory: Path, delegation: dict, state: str, **extra) -> Non
         if live is not None:
             live["state"] = state
     if state in _terminal_states:
-        _stop_activation(directory, delegation)
+        _stop_activation(directory, delegation, expected_transport=expected_transport,
+                         expected_generation=expected_generation)
 
 
 def _compile_findings(directory: Path, delegation: dict, record: dict) -> list[dict]:
@@ -468,6 +497,12 @@ def _apply_record(record: dict, command_id: str, current: dict) -> dict:
 def _take(directory: Path, delegation: dict, command_id: str, current: dict, records: list[dict]) -> None:
     for record in records:
         with run_control.control_lock(directory):
+            if (
+                _recovering(directory)
+                or current.get("generation") != _control_generation(directory)
+                or _owned.get(delegation["activation_id"]) is not current.get("transport")
+            ):
+                continue
             current["state"] = _activation_view(directory, delegation)["state"]
             if current["state"] not in _terminal_states and _observe_tool(directory, delegation, record):
                 continue
@@ -481,28 +516,35 @@ def _take(directory: Path, delegation: dict, command_id: str, current: dict, rec
                     reason=current.get("reason"),
                 )
         if changed and current["state"] in _terminal_states:
-            _stop_activation(directory, delegation)
+            _stop_activation(directory, delegation, expected_transport=current["transport"],
+                             expected_generation=current["generation"])
 
 
-def _read_child(directory: Path, delegation: dict, command_id: str, transport, ready: threading.Event) -> None:
+def _read_child(directory: Path, delegation: dict, command_id: str, transport, ready: threading.Event,
+                generation: str) -> None:
     reader = FrameReader()
     with run_control.control_lock(directory):
-        current = _live.setdefault(delegation["activation_id"], {})
-        current["state"] = _activation_view(directory, delegation)["state"]
+        current = {"state": _activation_view(directory, delegation)["state"],
+                   "generation": generation, "transport": transport}
+        _live[delegation["activation_id"]] = current
     ready.set()
     try:
         while True:
             chunk = transport.read(4096)
             if not chunk:
                 if current["state"] in _active_states:
-                    _record_state(directory, delegation, "failed", command_id=command_id, reason="stdout_closed")
-                observe_exit(directory, delegation["activation_id"])
+                    _record_state(directory, delegation, "failed", expected_transport=transport,
+                                  expected_generation=generation, command_id=command_id, reason="stdout_closed")
+                observe_exit(directory, delegation["activation_id"], expected_transport=transport,
+                             expected_generation=generation)
                 break
             _take(directory, delegation, command_id, current, reader.feed(chunk))
     except Exception as error:
         if current["state"] not in _terminal_states and current["state"] != "cancelling":
-            _record_state(directory, delegation, "failed", command_id=command_id, reason=type(error).__name__)
-        _stop_activation(directory, delegation)
+            _record_state(directory, delegation, "failed", expected_transport=transport,
+                          expected_generation=generation, command_id=command_id, reason=type(error).__name__)
+        if _owned.get(delegation["activation_id"]) is transport and not _recovering(directory):
+            _stop_activation(directory, delegation, expected_transport=transport, expected_generation=generation)
 
 
 def _write_prompt(transport, payload: bytes) -> None:
@@ -544,24 +586,28 @@ def _receipt_body(directory: Path, delegation: dict, applied: dict, spend: dict)
 def _live_ownership(rows: list[dict]) -> dict | None:
     spawned = None
     for row in rows:
-        if row.get("phase") == "spawned":
+        if row.get("phase") == "intent":
+            spawned = None
+        elif row.get("phase") == "spawned":
             spawned = row
-        elif row.get("phase") == "exited" and spawned is not None and spawned.get("pid") == row.get("pid"):
+        elif row.get("phase") in ("exited", "not_spawned"):
             spawned = None
     return spawned
 
 
 def _identified(stored: dict, reading: dict | None) -> bool:
-    if not reading or not reading.get("alive"):
-        return False
-    if reading.get("start_id") != stored.get("start_id") or stored.get("start_id") is None:
-        return False
-    observed_run = reading.get("run_id")
-    return observed_run is None or observed_run == stored.get("run_id")
+    return bool(
+        reading and reading.get("alive") is True
+        and stored.get("start_id") and reading.get("start_id") == stored["start_id"]
+        and reading.get("run_id") == stored.get("run_id")
+        and (reading.get("generation") is None or reading["generation"] == stored.get("generation"))
+    )
 
 
 def note_worker_event(directory: Path, *, activation_id: str, generation: str, evidence: dict | None = None) -> dict:
-    """Old-generation input may add evidence. It cannot reopen a cancelled activation or free another slot."""
+    """Retain validated late evidence without changing process or activation ownership."""
+    from arena.campaign import _verification_outcome
+
     with run_control.control_lock(directory):
         delegation = next((row for row in _delegations(directory) if row["activation_id"] == activation_id), None)
         if delegation is None:
@@ -571,98 +617,129 @@ def note_worker_event(directory: Path, *, activation_id: str, generation: str, e
             (row.get("generation") for row in reversed(_ownership_rows(directory, activation_id)) if row.get("generation")),
             None,
         )
-        stale = generation != owned_generation or snapshot["state"] in ("cancelled", "cancelling")
-        if stale and evidence:
-            _append(
-                directory,
-                {
-                    "schema_version": run_control.SCHEMA_VERSION,
-                    "event_id": uuid.uuid4().hex,
-                    "type": "worker_finding",
-                    "operation_id": delegation["operation_id"],
-                    "run_id": delegation["run_id"],
-                    "actor_id": delegation["worker_actor_id"],
-                    "session_id": delegation["worker_session_id"],
-                    "job_id": delegation["job_id"],
-                    "activation_id": activation_id,
-                    "generation": generation,
-                    "attempt_id": evidence.get("attempt_id"),
-                    "proof_id": evidence.get("proof_id"),
-                    "evaluation_id": evidence.get("evaluation_id"),
-                    "late": True,
-                },
-            )
+        stale = (
+            generation != owned_generation or generation != _control_generation(directory)
+            or snapshot["state"] in ("cancelled", "cancelling", "recovering")
+        )
+        history = _history(directory)
+        attempt = next((row for row in history if row.get("kind") == "attempt"
+                        and row.get("event_id") == (evidence or {}).get("attempt_id")
+                        and row.get("actor_id") == delegation["worker_actor_id"]
+                        and row.get("session_id") == delegation["worker_session_id"]
+                        and row.get("activation_id") == activation_id
+                        and row.get("generation") == generation), None)
+        proof_id = None if attempt is None else attempt.get("proof_id") or attempt.get("candidate_id")
+        passing = proof_id and proof_id == (evidence or {}).get("proof_id") and any(
+            row.get("kind") == "evaluation" and row.get("candidate_id") == proof_id
+            and row.get("key") == (evidence or {}).get("evaluation_id")
+            and _verification_outcome(row.get("result") or {}) == "passed" for row in history
+        )
+        valid = bool(stale and passing)
+        duplicate = any(row.get("type") == "worker_finding" and row.get("activation_id") == activation_id
+                        and row.get("attempt_id") == (evidence or {}).get("attempt_id")
+                        and row.get("evaluation_id") == (evidence or {}).get("evaluation_id") for row in history)
+        if valid and not duplicate:
+            _append(directory, {
+                "schema_version": run_control.SCHEMA_VERSION, "event_id": uuid.uuid4().hex,
+                "type": "worker_finding", "operation_id": delegation["operation_id"],
+                "run_id": delegation["run_id"], "actor_id": delegation["worker_actor_id"],
+                "session_id": delegation["worker_session_id"], "job_id": delegation["job_id"],
+                "activation_id": activation_id, "generation": generation,
+                "attempt_id": attempt["event_id"], "proof_id": proof_id,
+                "evaluation_id": evidence["evaluation_id"], "request_id": attempt.get("request_id"), "late": True,
+            })
             _wake()
-        return {"ok": True, "evidence": bool(stale and evidence), "state_changed": False}
+        return {"ok": True, "evidence": valid, "state_changed": False}
+
+
+def _reconcile_owned(directory: Path, delegation: dict, inspect, signal) -> bool:
+    rows = _ownership_rows(directory, delegation["activation_id"])
+    owned = _live_ownership(rows)
+    if owned is None:
+        return not rows or rows[-1].get("phase") in ("exited", "not_spawned")
+    if not owned.get("pid") or not owned.get("start_id"):
+        return False
+    probe = getattr(inspect, "owned_group", None)
+    reading = probe(owned) if probe is not None else inspect(owned["pid"])
+    if reading is None:
+        return False
+    if reading.get("group_alive") is not False:
+        if reading.get("group_alive") is not True or not _identified(owned, reading):
+            return False
+        signal(owned.get("pgid", owned["pid"]))
+        reading = probe(owned) if probe is not None else inspect(owned["pid"])
+        if reading is None or reading.get("group_alive") is not False:
+            return False
+    with run_control.control_lock(directory):
+        _append_ownership(directory, delegation, phase="exited", generation=owned.get("generation"),
+                          session_path=owned.get("session_path"), pid=owned.get("pid"),
+                          pgid=owned.get("pgid"), start_id=owned.get("start_id"), reason="confirmed_absent")
+    return True
 
 
 def reconcile(directory: Path, *, inspect, signal, open_child) -> dict:
-    """Fence dispatch, stop a positively identified child, and replace it only after that child is gone.
-
-    A reused PID or another run is never signalled. Abandoned pipes are not reattached.
-    """
-    generation = uuid.uuid4().hex
-    _set_run(directory, "recovering", generation)
-    blocked = False
-    for delegation in _delegations(directory):
-        snapshot = _activation_view(directory, delegation)
-        if snapshot["state"] in _terminal_states or not snapshot["occupies_slot"] and snapshot["state"] != "launching":
-            continue
-        if snapshot["state"] not in _live_states and snapshot["state"] != "recovering":
-            continue
-        owned = _live_ownership(_ownership_rows(directory, delegation["activation_id"]))
-        if owned is None:
-            continue
-        reading = inspect(owned["pid"])
-        if _identified(owned, reading):
-            signal(owned.get("pgid", owned["pid"]))
-            if _identified(owned, inspect(owned["pid"])):
-                blocked = True
-                continue
-        elif reading and reading.get("alive"):
-            pass
-        _append_ownership(
-            directory, delegation, phase="exited", generation=owned.get("generation"),
-            session_path=owned.get("session_path"), pid=owned.get("pid"),
-            pgid=owned.get("pgid"), start_id=owned.get("start_id"),
-            reason="not_owned" if reading and reading.get("alive") else "confirmed_absent",
-        )
-        if snapshot["state"] == "cancelling":
-            _append_state(directory, delegation, "cancelled", occupies_slot=False, reason="confirmed_absent")
-        elif snapshot["state"] not in _terminal_states and _request_uncertain(
-            directory, delegation.get("worker_session_id"),
-        ):
-            _append_state(directory, delegation, "recovering", occupies_slot=True, reason="recovery_required")
-        elif snapshot["state"] in ("launching", "active"):
-            _append_state(directory, delegation, "launching", occupies_slot=True, reason="child_absent")
-
-    replacements = 0
-    if not blocked and not _request_uncertain(directory):
-        for delegation in _delegations(directory):
-            snapshot = _activation_view(directory, delegation)
-            if snapshot["state"] != "launching" or not snapshot["occupies_slot"]:
-                continue
-            if _live_ownership(_ownership_rows(directory, delegation["activation_id"])) is not None:
-                continue
-            if _request_uncertain(directory, delegation.get("worker_session_id")):
-                _append_state(directory, delegation, "recovering", occupies_slot=True, reason="recovery_required")
-                continue
-            _open_activation(directory, delegation, open_child, snapshot["command_id"] or uuid.uuid4().hex)
-            if _live_ownership(_ownership_rows(directory, delegation["activation_id"])) is not None:
-                replacements += 1
-    held = blocked or _request_uncertain(directory) or any(
-        _activation_view(directory, row)["state"] == "recovering" for row in _delegations(directory)
-    )
-    status = "recovering" if held else "running"
-    if status == "running":
-        _set_run(directory, "running")
-    return {
-        "ok": True,
-        "status": status,
-        "generation": _control_generation(directory),
-        "replacements": replacements,
-        "blocked": blocked,
-    }
+    """Serialize restart, prove every old group absent, then resume only settled sessions."""
+    directory = Path(directory)
+    with (directory / "reconcile.lock").open("a") as fence:
+        fcntl.flock(fence, fcntl.LOCK_EX)
+        generation = uuid.uuid4().hex
+        with _launch_gate(directory):
+            _set_run(directory, "recovering", generation)
+            with run_control.control_lock(directory):
+                pending = []
+                for delegation in _delegations(directory):
+                    snapshot = _activation_view(directory, delegation)
+                    if snapshot["state"] == "queued":
+                        _openers[delegation["activation_id"]] = open_child
+                    if not snapshot["occupies_slot"]:
+                        continue
+                    original = snapshot.get("recovery_state") if snapshot["state"] == "recovering" else snapshot["state"]
+                    original = original or "active"
+                    _append_state(directory, delegation, "recovering", occupies_slot=True,
+                                  recovery_state=original, reason="recovery_required")
+                    pending.append((delegation, original))
+        blocked = False
+        for delegation, original in pending:
+            try:
+                absent = _reconcile_owned(directory, delegation, inspect, signal)
+            except Exception:
+                absent = False
+            with run_control.control_lock(directory):
+                if not absent:
+                    blocked = True
+                    continue
+                if _request_uncertain(directory, delegation.get("worker_session_id")):
+                    blocked = True
+                    continue
+                current = _activation_view(directory, delegation)["state"]
+                stopped = any(row.get("kind") == "run_stop" for row in run_control._control_rows(directory))
+                state = "cancelled" if stopped or original == "cancelling" or current == "cancelling" else original
+                if state in _terminal_states:
+                    _append_state(directory, delegation, state, occupies_slot=False, reason="confirmed_absent")
+                else:
+                    _append_state(directory, delegation, "recovering", occupies_slot=True,
+                                  recovery_state=original, reason="child_absent")
+        with run_control.control_lock(directory):
+            held = blocked or _request_uncertain(directory)
+        replacements = 0
+        if not held:
+            # The new generation may dispatch only after all old owners and request journals reconcile.
+            _set_run(directory, "running")
+            for delegation, original in pending:
+                with run_control.control_lock(directory):
+                    snapshot = _activation_view(directory, delegation)
+                    if snapshot["state"] != "recovering":
+                        continue
+                    _append_state(directory, delegation, "launching", occupies_slot=True,
+                                  recovery_state=original, reason="child_absent")
+                    command_id = uuid.uuid4().hex
+                _stop_sent.discard(delegation["activation_id"])
+                _open_activation(directory, delegation, open_child, command_id, expected_generation=generation)
+                if _live_ownership(_ownership_rows(directory, delegation["activation_id"])) is not None:
+                    replacements += 1
+            _fill_slots(directory)
+        return {"ok": True, "status": "recovering" if held else "running",
+                "generation": _control_generation(directory), "replacements": replacements, "blocked": bool(held)}
 
 
 def deliver(directory: Path, actor_id: str) -> dict:
@@ -694,13 +771,40 @@ def _io_lock(activation_id: str):
         return _io_locks.setdefault(activation_id, threading.RLock())
 
 
-def observe_exit(directory: Path, activation_id: str) -> bool:
+@contextmanager
+def _launch_gate(directory: Path):
+    key = str(directory.resolve())
+    held = getattr(_launch_gates, "held", None)
+    if held is None:
+        held = _launch_gates.held = set()
+    if key in held:
+        yield
+        return
+    with (directory / "activation-gate.lock").open("a") as gate:
+        fcntl.flock(gate, fcntl.LOCK_EX)
+        held.add(key)
+        try:
+            yield
+        finally:
+            held.remove(key)
+
+
+def observe_exit(directory: Path, activation_id: str, *, expected_transport=None, expected_generation=None) -> bool:
     """Observe injected process liveness; stdout EOF alone never releases a slot."""
     transport = _owned.get(activation_id)
     absent = getattr(transport, "confirmed_absent", None)
     if absent is None or not absent():
         return False
     with run_control.control_lock(directory):
+        if _recovering(directory) or _owned.get(activation_id) is not transport:
+            return False
+        if expected_transport is not None and transport is not expected_transport:
+            return False
+        if expected_generation is not None and expected_generation != _control_generation(directory):
+            return False
+        ownership = _live_ownership(_ownership_rows(directory, activation_id))
+        if ownership is None or ownership.get("generation") != _control_generation(directory):
+            return False
         delegation = next((row for row in _delegations(directory) if row["activation_id"] == activation_id), None)
         if delegation is None:
             return False
@@ -719,11 +823,15 @@ def observe_exit(directory: Path, activation_id: str) -> bool:
     return True
 
 
-def _stop_activation(directory: Path, delegation: dict) -> None:
+def _stop_activation(directory: Path, delegation: dict, *, expected_transport=None, expected_generation=None) -> None:
     activation_id = delegation["activation_id"]
     with _io_lock(activation_id):
         transport = _owned.get(activation_id)
         if transport is None:
+            return
+        if expected_transport is not None and transport is not expected_transport:
+            return
+        if expected_generation is not None and expected_generation != _control_generation(directory):
             return
         if activation_id not in _stop_sent:
             try:
@@ -743,14 +851,30 @@ def _stop_activation(directory: Path, delegation: dict) -> None:
         observe_exit(directory, activation_id)
 
 
-def _open_activation(directory: Path, stored: dict, open_child, command_id: str) -> None:
+def _open_activation(directory: Path, stored: dict, open_child, command_id: str,
+                     *, expected_generation: str | None = None) -> None:
     activation_id = stored["activation_id"]
     transport = None
     spawn_attempted = False
-    with _io_lock(activation_id):
+    with _launch_gate(directory), _io_lock(activation_id):
         try:
             with run_control.control_lock(directory):
+                if _recovering(directory):
+                    return
+                generation = _control_generation(directory)
+                if expected_generation is not None and generation != expected_generation:
+                    return
+                if generation is None:
+                    generation = uuid.uuid4().hex
+                    run_control._append_control(directory, {
+                        "schema_version": run_control.SCHEMA_VERSION, "kind": "run_generation",
+                        "event_id": uuid.uuid4().hex, "generation": generation, "status": "running",
+                    })
                 state = _activation_view(directory, stored)["state"]
+                if any(row.get("kind") == "run_stop" for row in run_control._control_rows(directory)):
+                    if _live_ownership(_ownership_rows(directory, activation_id)) is None:
+                        _append_state(directory, stored, "cancelled", occupies_slot=False, reason="run_stopped")
+                    return
                 if state == "cancelling":
                     _append_state(directory, stored, "cancelled", occupies_slot=False, reason="not_spawned")
                 elif state != "launching":
@@ -761,36 +885,50 @@ def _open_activation(directory: Path, stored: dict, open_child, command_id: str)
             launch = worker_launch(
                 directory, run_id=stored["run_id"], worker_actor_id=stored["worker_actor_id"],
                 worker_session_id=stored["worker_session_id"], job_id=stored["job_id"],
-                activation_id=activation_id, anchor=stored["anchor"],
+                activation_id=activation_id, anchor=stored["anchor"], generation=generation,
             )
-            generation = _control_generation(directory) or uuid.uuid4().hex
-            _append_ownership(
-                directory, stored, phase="intent", generation=generation,
-                session_path=launch["session_dir"],
-            )
+            with run_control.control_lock(directory):
+                _append_ownership(directory, stored, phase="intent", generation=generation,
+                                  session_path=launch["session_dir"])
             spawn_attempted = True
-            transport = open_child(launch)
+            try:
+                transport = open_child(launch)
+            except BaseException as error:
+                if getattr(error, "not_spawned", False):
+                    with run_control.control_lock(directory):
+                        _append_ownership(directory, stored, phase="not_spawned", generation=generation,
+                                          session_path=launch["session_dir"])
+                raise
+            _owned[activation_id] = transport
             identity = getattr(transport, "process_identity", None)
             described = identity() if identity is not None else None
-            if isinstance(described, dict) and described.get("pid") is not None:
-                _append_ownership(
-                    directory, stored, phase="spawned", generation=generation,
-                    session_path=launch["session_dir"], pid=described["pid"],
-                    pgid=described.get("pgid", described["pid"]),
-                    start_id=described.get("start_id"),
-                )
-            _owned[activation_id] = transport
+            if (
+                isinstance(described, dict) and type(described.get("pid")) is int and described["pid"] > 0
+                and described.get("start_id") and type(described.get("pgid", described["pid"])) is int
+                and described.get("pgid", described["pid"]) > 0
+                and described.get("run_id", stored["run_id"]) == stored["run_id"]
+                and described.get("generation", generation) == generation
+            ):
+                with run_control.control_lock(directory):
+                    _append_ownership(
+                        directory, stored, phase="spawned", generation=generation,
+                        session_path=launch["session_dir"], pid=described["pid"],
+                        pgid=described.get("pgid", described["pid"]), start_id=described["start_id"],
+                    )
+            else:
+                raise RuntimeError("worker process identity unavailable")
             transport.subscribe()
             ready = threading.Event()
             thread = threading.Thread(
-                target=_read_child, args=(directory, stored, command_id, transport, ready), daemon=True,
+                target=_read_child, args=(directory, stored, command_id, transport, ready, generation), daemon=True,
             )
             with _readers_guard:
                 _readers[activation_id] = thread
             thread.start()
             if not ready.wait(5):
                 raise RuntimeError("reader did not start")
-            if _activation_view(directory, stored)["state"] == "launching":
+            if (_activation_view(directory, stored)["state"] == "launching"
+                    and not _recovering(directory) and _control_generation(directory) == generation):
                 _write_prompt(transport, prompt_line(command_id, stored["task"], stored["anchor"]))
             if _activation_view(directory, stored)["state"] == "cancelling":
                 _stop_activation(directory, stored)
@@ -1063,7 +1201,7 @@ def cancel(
             state = snapshot["state"]
             if state == "queued":
                 state = "cancelled"
-            elif state in ("launching", "active"):
+            elif state in ("launching", "active", "recovering"):
                 state = "cancelling"
 
             def mutate(writer) -> list:
