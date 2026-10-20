@@ -4,7 +4,7 @@
 
 **Blocked by:** 12: Reconcile owned child processes after coordinator failure
 
-**Status:** needs-review
+**Status:** done
 
 **Branch:** `v8/13-settlement-recovery`
 
@@ -44,6 +44,28 @@ uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_orchestratio
 Expected: the named behavior check passes with no actual provider, Pi or Lean process. Aim for seconds and at most 60 seconds. No per-ticket full suite or slow suite.
 
 **Deferred to final E2E:** Actual Pi usage recovery and the full interruption matrix. See the shared [final E2E checklist](../final-e2e.md).
+
+
+## Review corrections and closure
+
+The original two recovery tests passed in 0.15s, but review found implementation gaps. The evidence reader used fixture-only filenames; later known usage could not reconcile existing unknown coverage; overlapping groups could be skipped silently; candidate recovery fabricated evaluation IDs and owners; recovery acknowledged evidence before delivery; and a rejected retry could incorrectly authorize replacement of a possibly-sent request. A direct transport-history reproduction confirmed that last bug. The original fixture's fictitious candidate IDs were replaced with saved artifacts and canonical evaluation/check IDs, and the reference seed now describes an actual reference rather than an unevaluated model candidate.
+
+Usage recovery now reads the actual cost ledger, trace journal and saved Pi sessions, with exact response/entry/request joins. Before shared settlement, the extension fsyncs a supporting `usage_evidence` record containing actual raw usage and exact grouped coverage. This record does not charge or update the total. Known zero remains known; missing usage and Pi's zero-filled error/abort placeholders remain unknown. Later known evidence explicitly reconciles unknown settlements. Ownership, malformed/torn artifacts, inconsistent actual amounts and incompatible coverage generate recovery issues that keep replacement fenced rather than guessing or double-charging. Live child sessions are not prematurely closed as unknown.
+
+Proof recovery uses committed candidates, saved artifact hashes and pinned evaluator/toolchain context. It resumes the original fast/full evaluation and check identities through the existing background queue, including persistence before the attempt or evaluation intent was filed. Unprovable context remains an explicit recovery issue. Exact worker findings can be reconstructed from committed attempts and passing evaluations, while recovery itself never writes an acknowledgement or advances an actor cursor. A final queue test reproduced the real `queued → running → crash` replay bug. Recovery now records `recovery_of` referencing the interrupted transition, retains the original check/evaluation IDs and propagates that reference through the resumed running/terminal transitions.
+
+Request lineage checks all transport attempts, preserves original ownership, replays existing exact preparation receipts and accepts only proven-unsent replacement. Once replaced, the old request cannot dispatch later. Late actual charges still count, but they cannot overwrite the original stop reason or deadline origin. No reservations, estimated charges or automatic remote resend were added.
+
+Verified with the focused offline checks:
+
+```bash
+UV_CACHE_DIR=/tmp/arena-uv-cache uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_orchestration.py::V8RecoverySmokeTests tests/test_orchestration.py::V8WorkerSmokeTests tests/test_orchestration.py::V8ControlSmokeTests tests/test_recovery_usage.py tests/test_recovery_proofs.py tests/test_request_lineage.py
+node packages/arena-pi/extensions/journal.test.ts
+```
+
+Results: **10 Python tests and 4 subtests passed in 0.58s; 8 Node tests passed**. Scoped Ruff and TypeScript syntax checks passed. Local Unix-socket access required scoped permission because the sandbox blocks binding. Independent review confirmed the final recovery-transition correction and found no remaining concrete blocker. No provider, real Pi, Lean, or live process inspection ran.
+
+Actual Pi usage/session recovery, real Lean verification and the broader interruption matrix remain final E2E coverage. Ticket 14 was not changed. Reviewer marks ticket 13 **done**.
 
 ---
 
