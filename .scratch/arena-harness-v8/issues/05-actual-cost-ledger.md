@@ -4,7 +4,7 @@
 
 **Blocked by:** 03: Retain exact attempts and derivations
 
-**Status:** needs-review
+**Status:** done
 
 **Branch:** `v8/05-actual-cost-ledger`
 
@@ -44,6 +44,16 @@ uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_orchestratio
 Expected: the named behavior check passes with no actual provider, Pi or Lean process. Aim for seconds and at most 60 seconds. No per-ticket full suite or slow suite.
 
 **Deferred to final E2E:** Actual Pi retry/compaction usage and crash windows. See the shared [final E2E checklist](../final-e2e.md).
+
+## Review corrections
+
+- Prepared-request identity hashes the complete supplied request, including its body. Changed payloads cannot reuse a request identity.
+- Unknown reconciliation evidence remains append-only and does not block a later known reconciliation. Coverage is still charged once.
+- Settlement replay repairs a missing threshold stop before returning and preserves the settlement identity/state in its response.
+- Control appends complete partial writes and separate any retained incomplete tail before appending the next record. Original evidence bytes remain intact.
+- Run state and cost projection expose unresolved accounting-failure records. The coverage accumulator is named `coverage`.
+- The single focused smoke includes these boundaries, including an interrupted stop append and injected short writes. Live provider/journal integration, dispatch admission and full request envelopes remain ticket 06 work; this ledger-only review does not certify the current runtime charging path.
+- Irreconcilable status is retained in the settlement itself. Replay/read repairs a missing accounting-failure record after interruption without duplicating it; the focused smoke includes that boundary.
 
 ---
 

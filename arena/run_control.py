@@ -58,7 +58,7 @@ def _control_rows(directory: Path) -> list[dict]:
     for line in path.read_bytes().splitlines():
         try:
             row = json.loads(line)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError):
             continue
         if isinstance(row, dict):
             rows.append(row)
@@ -68,11 +68,18 @@ def _control_rows(directory: Path) -> list[dict]:
 def _append_control(directory: Path, event: dict) -> dict:
     path = directory / "control.jsonl"
     data = (json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         start = os.lseek(fd, 0, os.SEEK_END)
-        os.write(fd, data)
+        separator = b"\n" if start and os.pread(fd, 1, start - 1) != b"\n" else b""
+        pending = memoryview(separator + data)
+        while pending:
+            written = os.write(fd, pending)
+            if written <= 0:
+                raise OSError("control ledger write made no progress")
+            pending = pending[written:]
+        start += len(separator)
         os.fsync(fd)
     finally:
         os.close(fd)
@@ -324,9 +331,7 @@ def prepare_request(directory: Path, request: dict) -> dict:
         raise OperationRejected("invalid_input", str(request.get("request_id") or ""))
     with control_lock(directory):
         rows = _control_rows(directory)
-        digest = argument_digest(
-            {key: request.get(key) for key in ("request_id", "run_id", "actor_id", "session_id", "job_id")}
-        )
+        digest = argument_digest(request)
         for row in rows:
             if row.get("kind") == "provider_request" and row.get("request_id") == request["request_id"]:
                 if row.get("argument_digest") != digest:
@@ -433,19 +438,25 @@ def _apply_coverage(rows: list[dict]) -> dict:
         "unknown": sorted(unknown),
         "originals": originals,
         "covered": {request_id for row in originals.values() for request_id in row.get("covered_request_ids") or []},
+        "accounting_failures": [
+            row
+            for row in rows
+            if row.get("kind") == "accounting_failure" and unknown.intersection(row.get("covered_request_ids") or [])
+        ],
     }
 
 
-def _projection(directory: Path, picture: dict, stopped: bool, stop_reason: str | None) -> None:
+def _projection(directory: Path, coverage: dict, stopped: bool, stop_reason: str | None) -> None:
     report = {
-        "spent_usd": _money(picture["total"]),
+        "spent_usd": _money(coverage["total"]),
         "limit_usd": _money(ACTUAL_COST_THRESHOLD),
-        "accounting": "unknown" if picture["unknown"] else "known",
-        "unknown_requests": picture["unknown"],
+        "accounting": "unknown" if coverage["unknown"] else "known",
+        "unknown_requests": coverage["unknown"],
+        "accounting_failures": coverage["accounting_failures"],
         "stopped": stopped,
         "stop_reason": stop_reason,
-        "by_actor": {key: _money(value) for key, value in sorted(picture["by_actor"].items())},
-        "by_job": {key: _money(value) for key, value in sorted(picture["by_job"].items())},
+        "by_actor": {key: _money(value) for key, value in sorted(coverage["by_actor"].items())},
+        "by_job": {key: _money(value) for key, value in sorted(coverage["by_job"].items())},
         "projection_of": "control.jsonl",
     }
     path = directory / "cost.json"
@@ -453,7 +464,7 @@ def _projection(directory: Path, picture: dict, stopped: bool, stop_reason: str 
 
 
 def _spend_view(rows: list[dict], *, reused: bool = False, stop_transition: bool = False) -> dict:
-    picture = _apply_coverage(rows)
+    coverage = _apply_coverage(rows)
     stops = [row.get("reason") for row in rows if row.get("kind") == "run_stop"]
     settlements = {
         row["settlement_id"]: {"state": row.get("state"), "reconciles": row.get("reconciles")}
@@ -462,11 +473,12 @@ def _spend_view(rows: list[dict], *, reused: bool = False, stop_transition: bool
     }
     return {
         "ok": True,
-        "total": _money(picture["total"]),
-        "accounting": "unknown" if picture["unknown"] else "known",
-        "unknown_requests": picture["unknown"],
-        "by_actor": {key: _money(value) for key, value in picture["by_actor"].items()},
-        "by_job": {key: _money(value) for key, value in picture["by_job"].items()},
+        "total": _money(coverage["total"]),
+        "accounting": "unknown" if coverage["unknown"] else "known",
+        "unknown_requests": coverage["unknown"],
+        "accounting_failures": coverage["accounting_failures"],
+        "by_actor": {key: _money(value) for key, value in coverage["by_actor"].items()},
+        "by_job": {key: _money(value) for key, value in coverage["by_job"].items()},
         "stopped": bool(stops),
         "stop_reason": stops[-1] if stops else None,
         "stop_transition": stop_transition,
@@ -479,8 +491,8 @@ def _spend_view(rows: list[dict], *, reused: bool = False, stop_transition: bool
 
 def _ensure_threshold_stop(directory: Path, rows: list[dict]) -> list[dict]:
     """A crash between the settlement line and the stop line is repaired under the same lock."""
-    picture = _apply_coverage(rows)
-    if picture["total"] < ACTUAL_COST_THRESHOLD:
+    coverage = _apply_coverage(rows)
+    if coverage["total"] < ACTUAL_COST_THRESHOLD:
         return rows
     if any(row.get("kind") == "run_stop" and row.get("reason") == "spend_threshold" for row in rows):
         return rows
@@ -491,23 +503,45 @@ def _ensure_threshold_stop(directory: Path, rows: list[dict]) -> list[dict]:
             "kind": "run_stop",
             "event_id": uuid.uuid4().hex,
             "reason": "spend_threshold",
-            "total": _money(picture["total"]),
+            "total": _money(coverage["total"]),
             "threshold": _money(ACTUAL_COST_THRESHOLD),
         },
     )
     rows = _control_rows(directory)
-    picture = _apply_coverage(rows)
-    _projection(directory, picture, True, "spend_threshold")
+    coverage = _apply_coverage(rows)
+    _projection(directory, coverage, True, "spend_threshold")
     return rows
+
+
+def _ensure_accounting_failures(directory: Path, rows: list[dict]) -> list[dict]:
+    recorded = {row.get("settlement_id") for row in rows if row.get("kind") == "accounting_failure"}
+    changed = False
+    for row in _settlement_rows(rows):
+        if not row.get("irreconcilable") or row.get("state") != "unknown" or row["settlement_id"] in recorded:
+            continue
+        _append_control(
+            directory,
+            {
+                "schema_version": SCHEMA_VERSION,
+                "kind": "accounting_failure",
+                "event_id": uuid.uuid4().hex,
+                "category": "accounting_unknown",
+                "settlement_id": row["settlement_id"],
+                "covered_request_ids": row["covered_request_ids"],
+            },
+        )
+        recorded.add(row["settlement_id"])
+        changed = True
+    return _control_rows(directory) if changed else rows
 
 
 def read_state(directory: Path) -> dict:
     """The shared actual-cost view. Repairs a missing threshold stop, then refreshes cost.json."""
     with control_lock(directory):
-        rows = _ensure_threshold_stop(directory, _control_rows(directory))
-        picture = _apply_coverage(rows)
+        rows = _ensure_accounting_failures(directory, _ensure_threshold_stop(directory, _control_rows(directory)))
+        coverage = _apply_coverage(rows)
         reason = next((row.get("reason") for row in reversed(rows) if row.get("kind") == "run_stop"), None)
-        _projection(directory, picture, reason is not None, reason)
+        _projection(directory, coverage, reason is not None, reason)
         return _spend_view(rows)
 
 
@@ -520,36 +554,47 @@ def settle_usage(directory: Path, settlement: dict) -> dict:
     if any(not isinstance(request_id, str) or not request_id for request_id in covered):
         raise OperationRejected("invalid_input", settlement_id)
     with control_lock(directory):
-        rows = _control_rows(directory)
+        rows = _ensure_accounting_failures(directory, _ensure_threshold_stop(directory, _control_rows(directory)))
         digest = argument_digest(_canonical_settlement(settlement))
         for row in _settlement_rows(rows):
             if row.get("settlement_id") != settlement_id:
                 continue
             if row.get("argument_digest") != digest:
-                return {"ok": False, "status": "operation_conflict", "settlement_id": settlement_id, "total": _spend_view(rows)["total"]}
-            return _spend_view(rows, reused=True)
+                return {
+                    "ok": False,
+                    "status": "operation_conflict",
+                    "settlement_id": settlement_id,
+                    "total": _spend_view(rows)["total"],
+                }
+            return {
+                **_spend_view(rows, reused=True),
+                "settlement_id": settlement_id,
+                "state": row["state"],
+            }
         prepared = _prepared(rows)
         missing = [request_id for request_id in covered if request_id not in prepared]
         if missing:
             raise OperationRejected("not_found", settlement_id)
-        picture = _apply_coverage(rows)
+        coverage = _apply_coverage(rows)
         reconciles = settlement.get("reconciles")
         if reconciles:
-            original = picture["originals"].get(reconciles)
+            original = coverage["originals"].get(reconciles)
             if original is None or original.get("state") != "unknown":
                 return {"ok": False, "status": "operation_conflict", "settlement_id": settlement_id}
             if list(original.get("covered_request_ids") or []) != covered:
                 return {"ok": False, "status": "operation_conflict", "settlement_id": settlement_id}
-            if any(row.get("reconciles") == reconciles for row in _settlement_rows(rows)):
+            if any(
+                row.get("reconciles") == reconciles and row.get("state") == "known" for row in _settlement_rows(rows)
+            ):
                 return {"ok": False, "status": "operation_conflict", "settlement_id": settlement_id}
-        elif any(request_id in picture["covered"] for request_id in covered):
+        elif any(request_id in coverage["covered"] for request_id in covered):
             return {"ok": False, "status": "operation_conflict", "settlement_id": settlement_id}
         amount = _decimal_amount(settlement.get("amount")) if settlement["state"] == "known" else None
         reported = _usage_amount(settlement.get("usage"))
         if amount is None or reported is None or amount != reported:
             amount = None
         state = "known" if amount is not None else "unknown"
-        before = picture["total"]
+        before = coverage["total"]
         already_stopped = any(row.get("kind") == "run_stop" and row.get("reason") == "spend_threshold" for row in rows)
         event = {
             "schema_version": SCHEMA_VERSION,
@@ -565,6 +610,7 @@ def settle_usage(directory: Path, settlement: dict) -> dict:
             "counted_amount": _money(amount) if amount is not None else None,
             "reported_amount": settlement.get("amount") if isinstance(settlement.get("amount"), str) else None,
             "usage": settlement.get("usage"),
+            "irreconcilable": bool(settlement.get("irreconcilable")),
             "argument_digest": digest,
         }
         if settlement.get("job_id"):
@@ -577,28 +623,21 @@ def settle_usage(directory: Path, settlement: dict) -> dict:
             event["candidate_ids"] = list(settlement["candidate_ids"])
         _append_control(directory, event)
         rows = _control_rows(directory)
-        picture = _apply_coverage(rows)
+        coverage = _apply_coverage(rows)
         stop_transition = False
-        if state == "known" and not already_stopped and picture["total"] >= ACTUAL_COST_THRESHOLD and before < ACTUAL_COST_THRESHOLD:
+        if (
+            state == "known"
+            and not already_stopped
+            and coverage["total"] >= ACTUAL_COST_THRESHOLD
+            and before < ACTUAL_COST_THRESHOLD
+        ):
             rows = _ensure_threshold_stop(directory, rows)
             stop_transition = True
-        if settlement.get("irreconcilable") and state == "unknown":
-            _append_control(
-                directory,
-                {
-                    "schema_version": SCHEMA_VERSION,
-                    "kind": "accounting_failure",
-                    "event_id": uuid.uuid4().hex,
-                    "category": "accounting_unknown",
-                    "settlement_id": settlement_id,
-                    "covered_request_ids": covered,
-                },
-            )
-            rows = _control_rows(directory)
-        picture = _apply_coverage(rows)
+        rows = _ensure_accounting_failures(directory, rows)
+        coverage = _apply_coverage(rows)
         stops = [row for row in rows if row.get("kind") == "run_stop"]
         reason = stops[-1].get("reason") if stops else None
-        _projection(directory, picture, bool(stops), reason)
+        _projection(directory, coverage, bool(stops), reason)
         view = _spend_view(rows, stop_transition=stop_transition)
         view["settlement_id"] = settlement_id
         view["state"] = state
