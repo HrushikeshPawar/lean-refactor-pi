@@ -447,12 +447,17 @@ def _money(value: Decimal) -> str:
 
 
 def _definitely_unsent(rows: list[dict], request_id: str) -> bool:
-    latest = None
+    if not any(row.get("kind") == "provider_request" and row.get("request_id") == request_id for row in rows):
+        return False
+    if request_id in _apply_coverage(rows)["covered"]:
+        return False
+    latest = {}
     for row in rows:
         if row.get("kind") in ("dispatch_intent", "dispatch") and row.get("request_id") == request_id:
-            latest = row
-    return latest is not None and (
-        latest.get("sent") == "unsent" or latest.get("status") in ("rejected_before_dispatch", "failed_before_start")
+            latest[row.get("attempt_id")] = row
+    return all(
+        row.get("sent") == "unsent" or row.get("status") in ("rejected_before_dispatch", "failed_before_start")
+        for row in latest.values()
     )
 
 
@@ -466,7 +471,15 @@ def prepare_request(directory: Path, request: dict) -> dict:
     with control_lock(directory):
         rows = _control_rows(directory)
         parent = request.get("lineage_of")
-        if parent and not _definitely_unsent(rows, parent):
+        existing = next((row for row in rows if row.get("kind") == "provider_request"
+                         and row.get("request_id") == request["request_id"]), None)
+        source = next((row for row in rows if row.get("kind") == "provider_request"
+                       and row.get("request_id") == parent), None)
+        if existing is None and parent and (
+            parent == request["request_id"] or source is None
+            or any(source.get(key) != request.get(key) for key in ("run_id", "actor_id", "session_id", "job_id"))
+            or not _definitely_unsent(rows, parent)
+        ):
             return {
                 "ok": False,
                 "status": "recovery_required",
@@ -534,6 +547,10 @@ def _fence_reason(rows: list[dict], attempt: dict) -> str | None:
     """A committed stop or recovery fence. Settled totals alone do not stop a dispatch."""
     if any(row.get("kind") == "run_stop" for row in rows):
         return "run_stopped"
+    if attempt.get("request_id") and any(
+        row.get("kind") == "provider_request" and row.get("lineage_of") == attempt["request_id"] for row in rows
+    ):
+        return "request_replaced"
     state = next((row.get("status") for row in reversed(rows) if row.get("kind") == "run_state"), None)
     if state == "recovering":
         return "recovering"
@@ -833,7 +850,7 @@ def _spend_view(rows: list[dict], *, reused: bool = False, stop_transition: bool
         "by_actor": {key: _money(value) for key, value in coverage["by_actor"].items()},
         "by_job": {key: _money(value) for key, value in coverage["by_job"].items()},
         "stopped": bool(stops),
-        "stop_reason": stops[-1] if stops else None,
+        "stop_reason": stops[0] if stops else None,
         "stop_transition": stop_transition,
         "stops": [reason for reason in stops if reason],
         "settlements": settlements,
@@ -847,7 +864,7 @@ def _ensure_threshold_stop(directory: Path, rows: list[dict]) -> list[dict]:
     coverage = _apply_coverage(rows)
     if coverage["total"] < ACTUAL_COST_THRESHOLD:
         return rows
-    if any(row.get("kind") == "run_stop" and row.get("reason") == "spend_threshold" for row in rows):
+    if any(row.get("kind") == "run_stop" for row in rows):
         return rows
     _append_control(
         directory,
@@ -990,7 +1007,7 @@ def settle_usage(directory: Path, settlement: dict) -> dict:
         rows = _ensure_accounting_failures(directory, rows)
         coverage = _apply_coverage(rows)
         stops = [row for row in rows if row.get("kind") == "run_stop"]
-        reason = stops[-1].get("reason") if stops else None
+        reason = stops[0].get("reason") if stops else None
         _projection(directory, coverage, bool(stops), reason)
         view = _spend_view(rows, stop_transition=stop_transition)
         view["settlement_id"] = settlement_id
