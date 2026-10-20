@@ -1565,13 +1565,10 @@ class V8RecoverySmokeTests(unittest.TestCase):
             self.assertNotEqual(gone["state"], "completed")
             self.assertTrue(gone["occupies_slot"])
 
-            run_control.settle_usage(directory, {
-                "settlement_id": "unknown-b", "run_id": "run-1", "actor_id": worker_b,
-                "session_id": session_b, "covered_request_ids": ["req-b"], "state": "unknown",
-            })
+            self.assertIn("req-b", run_control.read_state(directory)["unknown_requests"])
             self.assertTrue(orchestration._request_uncertain(directory, session_b))
             run_control.settle_usage(directory, {
-                "settlement_id": "known-b", "reconciles": "unknown-b", "run_id": "run-1",
+                "settlement_id": "known-b", "reconciles": "unknown:req-b", "run_id": "run-1",
                 "actor_id": worker_b, "session_id": session_b, "covered_request_ids": ["req-b"],
                 "state": "known", "amount": "0.01", "usage": {"cost": {"total": "0.01"}},
             })
@@ -1637,6 +1634,139 @@ class V8RecoverySmokeTests(unittest.TestCase):
             queued_job = orchestration.jobs(queued_run, [assignments[-1]["job_id"]])["jobs"][0]
             self.assertEqual(queued_job["state"], "launching")
             self.assertTrue(queued_job["occupies_slot"])
+
+    def test_v8_receipt_replay_after_crash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _seed_parent(directory)
+            identity = {"run_id": "run-1", "actor_id": "sol", "session_id": "sol-session", "job_id": "job-1"}
+            generation = "gen-settled"
+
+            def start(request_id: str):
+                return run_control.begin_dispatch(
+                    directory,
+                    {**identity, "request_id": request_id, "attempt_id": f"attempt-{request_id}", "generation": generation},
+                    lambda: None,
+                )
+
+            for request_id in ("req-settled", "req-journal", "req-session", "req-group-a", "req-group-b", "req-lost"):
+                started = start(request_id)
+                self.assertEqual(started["sent"], "uncertain")
+            run_control.settle_usage(directory, {
+                **identity, "settlement_id": "charge-settled", "covered_request_ids": ["req-settled"],
+                "state": "known", "amount": "0.10", "usage": {"cost": {"total": "0.10"}},
+            })
+            with run_control.control_lock(directory):
+                run_control._append_control(directory, {
+                    "schema_version": run_control.SCHEMA_VERSION, "kind": "run_state",
+                    "event_id": "recovering-fence", "status": "recovering",
+                })
+            unsent = start("req-unsent")
+            self.assertEqual(unsent["sent"], "unsent")
+            with run_control.control_lock(directory):
+                run_control._append_control(directory, {
+                    "schema_version": run_control.SCHEMA_VERSION, "kind": "run_stop",
+                    "event_id": "stop-operator", "reason": "operator_interrupt",
+                })
+                run_control._append_control(directory, {
+                    "schema_version": run_control.SCHEMA_VERSION, "kind": "track_deadline",
+                    "event_id": "deadline-origin", "origin": "2026-10-01T00:00:00Z",
+                })
+
+            def record_attempt(writer):
+                writer.append_ledger({
+                    "kind": "attempt", "candidate_id": "cand-pending", "proof_id": "cand-pending",
+                    "evaluation_id": "eval-pending",
+                })
+
+            run_control.apply_operation(directory, {
+                "operation_id": "attempt-pending", "kind": "attempt", "arguments": {"candidate_id": "cand-pending"},
+                **identity,
+            }, record_attempt)
+
+            def record_result(writer):
+                writer.append_ledger({
+                    "kind": "evaluation", "candidate_id": "cand-done", "key": "eval-done",
+                    "result": {"ok": True},
+                })
+
+            recorded = run_control.apply_operation(directory, {
+                "operation_id": "result-done", "kind": "evaluation", "arguments": {"candidate_id": "cand-done"},
+                **identity,
+            }, record_result)
+            done_event = recorded["evidence_refs"][0]["event_id"]
+            sends = []
+            (directory / "cost-journal.jsonl").write_text(
+                "\n".join(json.dumps(row) for row in (
+                    {"covered_request_ids": ["req-journal"], "usage": {"cost": {"total": "0.20"}}, "amount": "0.20", **identity},
+                    {"covered_request_ids": ["req-group-a", "req-group-b"], "usage": {"cost": {"total": "0.05"}}, "amount": "0.05", **identity},
+                    {"covered_request_ids": ["req-lost"], "estimate": True, "amount": "9.99", "usage": {"cost": {"total": "9.99"}}},
+                )) + "\n"
+            )
+            (directory / "session-evidence.jsonl").write_text(json.dumps({
+                "request_id": "req-session", "phase": "response", "usage": {"cost": {"total": "0.04"}},
+                "amount": "0.04", **identity,
+            }) + "\n")
+
+            def restart():
+                return orchestration.reconcile(
+                    directory,
+                    inspect=lambda _pid: {"alive": False, "group_alive": False},
+                    signal=lambda _pgid: None,
+                    open_child=lambda _launch: None,
+                )
+
+            first = restart()["receipts"]
+            second = restart()["receipts"]
+            self.assertEqual(first["total"], "0.39")
+            self.assertEqual(second["total"], "0.39")
+            self.assertEqual(second["stop_reason"], "operator_interrupt")
+            self.assertEqual(second["deadline_origin"], "2026-10-01T00:00:00Z")
+            self.assertEqual(second["accounting"], "unknown")
+            self.assertIn("req-lost", second["unknown_requests"])
+            self.assertTrue(second["accounting_failures"])
+            self.assertEqual(second["evaluations"], ["eval-pending"])
+            self.assertEqual(second["delivery_ids"], [done_event])
+            self.assertEqual(first["delivery_ids"], second["delivery_ids"])
+            self.assertEqual(
+                sum(1 for row in orchestration._history(directory) if row.get("key") == "eval-done"),
+                1,
+            )
+            self.assertEqual(
+                sum(
+                    1 for row in orchestration._history(directory)
+                    if row.get("type") == "verification" and row.get("evaluation_id") == "eval-pending"
+                ),
+                1,
+            )
+            replay = run_control.begin_dispatch(
+                directory,
+                {**identity, "request_id": "req-lost", "attempt_id": "attempt-req-lost", "generation": generation},
+                lambda: sends.append("sent"),
+            )
+            self.assertEqual(sends, [])
+            self.assertFalse(replay["admitted"])
+            blocked = run_control.prepare_request(directory, {
+                **identity, "request_id": "req-replacement", "lineage_of": "req-lost",
+            })
+            self.assertFalse(blocked["ok"])
+            prepared = run_control.prepare_request(directory, {
+                **identity, "request_id": "req-replacement", "lineage_of": "req-unsent",
+            })
+            self.assertTrue(prepared["ok"])
+            self.assertEqual(prepared["lineage_of"], "req-unsent")
+            again = run_control.settle_usage(directory, {
+                **identity, "settlement_id": "charge-settled", "covered_request_ids": ["req-settled"],
+                "state": "known", "amount": "0.10", "usage": {"cost": {"total": "0.10"}},
+            })
+            self.assertTrue(again["reused"])
+            self.assertEqual(run_control.read_state(directory)["total"], "0.39")
+            grouped = [
+                row for row in run_control._control_rows(directory)
+                if row.get("kind") == "settlement" and row.get("covered_request_ids") == ["req-group-a", "req-group-b"]
+            ]
+            self.assertEqual(len(grouped), 1)
+            self.assertEqual(run_control.read_state(directory)["stop_reason"], "operator_interrupt")
 
 
 class V8VerificationSmokeTests(FakeRunCase):

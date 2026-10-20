@@ -4,7 +4,7 @@
 
 **Blocked by:** 12: Reconcile owned child processes after coordinator failure
 
-**Status:** ready-for-agent
+**Status:** needs-review
 
 **Branch:** `v8/13-settlement-recovery`
 
@@ -26,12 +26,12 @@
 
 ## What to build and acceptance
 
-- [ ] 1. Crash around provider dispatch, response receipt and settlement append. Recover actual journal/session evidence using request identity and grouped-usage coverage.
-- [ ] 2. A repeated settlement is counted once. An uncertain remote call is not blindly resent, priced as zero or replaced with a worst-case estimate.
-- [ ] 3. Retain unknown accounting and explicit infrastructure failure when actual usage cannot be reconciled; no exactly-once remote-billing claim.
-- [ ] 4. Crash after candidate persistence before evaluation enqueue and after result persistence before cursor advance; stable receipts converge without duplicate attempts/checks or lost delivery.
-- [ ] 5. Recover original candidate/evaluation/artifact identities and maintain the recorded stop state. A restart cannot reset spend or the track deadline origin.
-- [ ] 6. Use the one assigned fast smoke for this slice. Retain the stated behavior requirements; actual-Pi/real-Lean journeys and the broader race matrix are final E2E coverage, not this ticket's gate.
+- [x] 1. Crash around provider dispatch, response receipt and settlement append. Recover actual journal/session evidence using request identity and grouped-usage coverage.
+- [x] 2. A repeated settlement is counted once. An uncertain remote call is not blindly resent, priced as zero or replaced with a worst-case estimate.
+- [x] 3. Retain unknown accounting and explicit infrastructure failure when actual usage cannot be reconciled; no exactly-once remote-billing claim.
+- [x] 4. Crash after candidate persistence before evaluation enqueue and after result persistence before cursor advance; stable receipts converge without duplicate attempts/checks or lost delivery.
+- [x] 5. Recover original candidate/evaluation/artifact identities and maintain the recorded stop state. A restart cannot reset spend or the track deadline origin.
+- [x] 6. Use the one assigned fast smoke for this slice. Retain the stated behavior requirements; actual-Pi/real-Lean journeys and the broader race matrix are final E2E coverage, not this ticket's gate.
 
 ## Verify
 

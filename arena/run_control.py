@@ -446,12 +446,36 @@ def _money(value: Decimal) -> str:
     return format(value, "f")
 
 
+def _definitely_unsent(rows: list[dict], request_id: str) -> bool:
+    latest = None
+    for row in rows:
+        if row.get("kind") in ("dispatch_intent", "dispatch") and row.get("request_id") == request_id:
+            latest = row
+    return latest is not None and (
+        latest.get("sent") == "unsent" or latest.get("status") in ("rejected_before_dispatch", "failed_before_start")
+    )
+
+
 def prepare_request(directory: Path, request: dict) -> dict:
-    """Record a provider request before dispatch. Repeating the same id is a no-op."""
+    """Record a provider request before dispatch. Repeating the same id is a no-op.
+
+    A new id may name ``lineage_of`` only when that parent was definitely never sent.
+    """
     if _missing_request(request):
         raise OperationRejected("invalid_input", str(request.get("request_id") or ""))
     with control_lock(directory):
-        _rows, result = _prepare_locked(directory, _control_rows(directory), request)
+        rows = _control_rows(directory)
+        parent = request.get("lineage_of")
+        if parent and not _definitely_unsent(rows, parent):
+            return {
+                "ok": False,
+                "status": "recovery_required",
+                "request_id": request["request_id"],
+                "lineage_of": parent,
+            }
+        _rows, result = _prepare_locked(directory, rows, request)
+        if parent and result.get("ok"):
+            result = {**result, "lineage_of": parent}
         return result
 
 
@@ -480,6 +504,8 @@ def _prepare_locked(directory: Path, rows: list[dict], request: dict) -> tuple[l
     }
     if request.get("job_id"):
         event["job_id"] = request["job_id"]
+    if request.get("lineage_of"):
+        event["lineage_of"] = request["lineage_of"]
     _append_control(directory, event)
     return _control_rows(directory), {
         "ok": True,
