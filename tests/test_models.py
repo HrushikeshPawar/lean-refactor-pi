@@ -68,6 +68,36 @@ class ModelConfigTests(unittest.TestCase):
         self.broken(lambda config: config["models"]["mimo-v2.6-pro"].update(tool_turn_reasoning_effort=""))
         self.broken(lambda config: config["retry"].update(base_delay_ms=0))
 
+    def test_v8_cap_exposure_report(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            report = models.cap_exposure_report(GOOD, home=home)
+            missing = copy.deepcopy(GOOD)
+            del missing["models"]["gpt-6.1-sol"]["request_output_tokens"]
+            gap = models.cap_exposure_report(missing, home=home)
+        self.assertEqual(report["status"], "exposed")
+        self.assertTrue(report["owner_go_nogo_required"])
+        self.assertIsNone(report["worst_case_bound_usd"])
+        self.assertIsNone(report["actual_billed_usd"])
+        self.assertEqual(report["catalog_parity"], "not_compared")
+        self.assertEqual(
+            report["illustrations"],
+            {
+                "sol_output_usd": "0.3200",
+                "deepseek_output_usd": "0.0384",
+                "three_model_outputs_usd": "0.3968",
+                "sol_100k_uncached_input_plus_output_usd": "0.5200",
+            },
+        )
+        self.assertEqual(report["headroom_usd"], "0.50")
+        self.assertIn("configuration_identity", report)
+        self.assertTrue(report["unknowns"])
+        self.assertFalse(report["mutates_spend_policy"])
+        self.assertEqual(gap["status"], "not_established")
+        self.assertIsNone(gap["illustrations"]["sol_output_usd"])
+        self.assertIsNone(gap["illustrations"]["sol_100k_uncached_input_plus_output_usd"])
+        self.assertNotEqual(gap["illustrations"]["sol_output_usd"], "0.0000")
+
 
 if __name__ == "__main__":
     unittest.main()

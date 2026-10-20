@@ -7,8 +7,10 @@ provider read: the models, and the providers the extension registers with Pi.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+from decimal import Decimal
 from functools import cache
 from pathlib import Path
 
@@ -287,3 +289,144 @@ def catalog_price_problems(config: dict | None = None, home: Path | None = None)
         if any(actual[key] is None or abs(actual[key] - value) > 1e-9 for key, value in expected.items()):
             problems.append(f"{name}: models.yaml price {expected} but Pi charges {actual}")
     return problems
+
+
+# Offline readiness only. These figures describe the shared stop; this module never charges or edits caps.
+SPEND_STOP_USD = Decimal("2.50")
+HEADROOM_USD = Decimal("0.50")
+# Decision 13: one Sol session and two active DeepSeek sessions. Not a measured concurrency.
+_SESSION_CONCURRENCY = {"gpt-6.1-sol": 1, "deepseek-v4.1-flash": 2}
+_SOL = "gpt-6.1-sol"
+_DEEPSEEK = "deepseek-v4.1-flash"
+_MILLION = Decimal(1_000_000)
+_CENTS = Decimal("0.0001")
+
+
+def _money(tokens: int, per_million) -> Decimal:
+    return (Decimal(tokens) * Decimal(str(per_million)) / _MILLION).quantize(_CENTS)
+
+
+def _usd(amount: Decimal | None) -> str | None:
+    return None if amount is None else f"{amount:.4f}"
+
+
+def cap_exposure_report(config: dict, *, home: Path | None = None) -> dict:
+    """Offline cap-exposure report. Does not reserve money, edit caps, or call a provider.
+
+    Illustrations use configured prices and the payload output ceiling. They are not an audited
+    worst case and they are not actual billed usage. `assured` requires a finite worst-case bound
+    inside the $0.50 headroom. A finite illustration above that headroom is `exposed`. A missing
+    effective limit is `not_established` and is not reported as zero dollars.
+    """
+    models_cfg = config.get("models") or {}
+    sol = models_cfg.get(_SOL) or {}
+    deepseek = models_cfg.get(_DEEPSEEK) or {}
+    unknowns = [
+        "The illustrations omit retries, compaction, cache writes, and reasoning tokens beyond the payload output ceiling.",
+        "This report does not read actual billed usage.",
+        "In-flight requests can settle after the $2.50 stop; no reservation closes that overshoot.",
+    ]
+    identity_source = {
+        "retry": config.get("retry"),
+        "spend_stop_usd": str(SPEND_STOP_USD),
+        "headroom_usd": str(HEADROOM_USD),
+        "session_concurrency": _SESSION_CONCURRENCY,
+        "models": {
+            name: {
+                key: model.get(key)
+                for key in ("provider", "id", "price", "context_window", "max_tokens", "request_output_tokens", "compaction")
+            }
+            for name, model in models_cfg.items()
+            if isinstance(model, dict)
+        },
+    }
+    identity = hashlib.sha256(json.dumps(identity_source, sort_keys=True, default=str).encode()).hexdigest()
+
+    def output_cost(model: dict) -> Decimal | None:
+        price = model.get("price") or {}
+        tokens = model.get("request_output_tokens")
+        rate = price.get("output") if isinstance(price, dict) else None
+        if not isinstance(tokens, int) or isinstance(tokens, bool) or tokens <= 0 or rate is None:
+            return None
+        return _money(tokens, rate)
+
+    sol_output = output_cost(sol)
+    deepseek_output = output_cost(deepseek)
+    illustrations = {
+        "sol_output_usd": _usd(sol_output),
+        "deepseek_output_usd": _usd(deepseek_output),
+        "three_model_outputs_usd": _usd(None if sol_output is None or deepseek_output is None else sol_output + 2 * deepseek_output),
+        "sol_100k_uncached_input_plus_output_usd": None,
+    }
+    sol_price = sol.get("price") if isinstance(sol.get("price"), dict) else {}
+    if sol_output is not None and sol_price.get("input") is not None:
+        illustrations["sol_100k_uncached_input_plus_output_usd"] = _usd(_money(100_000, sol_price["input"]) + sol_output)
+    else:
+        unknowns.append("gpt-6.1-sol has no finite effective output limit or uncached input price, so its exposure is not established.")
+
+    witness = illustrations["sol_100k_uncached_input_plus_output_usd"]
+    if witness is None or sol_output is None or deepseek_output is None:
+        status = "not_established"
+    elif Decimal(witness) > HEADROOM_USD:
+        status = "exposed"
+    else:
+        status = "not_established"
+        unknowns.append("The illustration is inside headroom, but retries, compaction, and concurrency are still unbounded here.")
+
+    catalog_parity = "not_compared"
+    if home is not None:
+        problems = catalog_price_problems(config, home)
+        saw_catalog = False
+        for name, model in models_cfg.items():
+            if not isinstance(model, dict):
+                continue
+            provider_name = model.get("provider", config.get("provider"))
+            if provider_name in (config.get("providers") or {}):
+                continue
+            if pi_catalog(provider_name, home):
+                saw_catalog = True
+        if saw_catalog and problems:
+            catalog_parity = "differs"
+        elif saw_catalog and not problems:
+            catalog_parity = "matches"
+    if catalog_parity != "matches":
+        unknowns.append("Configured prices alone do not establish provider/catalog parity.")
+
+    assessed = []
+    for name, model in models_cfg.items():
+        if not isinstance(model, dict):
+            continue
+        price = model.get("price") if isinstance(model.get("price"), dict) else None
+        provider_name = model.get("provider", config.get("provider"))
+        registered = provider_name in (config.get("providers") or {})
+        assessed.append(
+            {
+                "name": name,
+                "provider": provider_name,
+                "price_source": "configured" if registered or catalog_parity != "matches" else "catalog_matches_configured",
+                "price": price,
+                "context_window": model.get("context_window"),
+                "max_tokens": model.get("max_tokens"),
+                "request_output_tokens": model.get("request_output_tokens"),
+                "compaction": model.get("compaction"),
+                "output_cost_usd": _usd(output_cost(model)),
+                "sessions": _SESSION_CONCURRENCY.get(name),
+            }
+        )
+
+    return {
+        "status": status,
+        "owner_go_nogo_required": status != "assured",
+        "headroom_usd": "0.50",
+        "spend_stop_usd": "2.50",
+        "illustrations": illustrations,
+        "worst_case_bound_usd": None,
+        "actual_billed_usd": None,
+        "catalog_parity": catalog_parity,
+        "session_concurrency": dict(_SESSION_CONCURRENCY),
+        "retry": config.get("retry"),
+        "models": assessed,
+        "configuration_identity": identity,
+        "unknowns": unknowns,
+        "mutates_spend_policy": False,
+    }

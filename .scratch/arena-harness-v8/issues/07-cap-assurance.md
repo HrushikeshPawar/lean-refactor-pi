@@ -4,7 +4,7 @@
 
 **Blocked by:** None (no additional logical prerequisite).
 
-**Status:** ready-for-agent
+**Status:** needs-review
 
 **Branch:** `v8/07-cap-assurance`
 
@@ -26,12 +26,12 @@
 
 ## What to build and acceptance
 
-- [ ] 1. Read resolved provider/catalog prices, actual payload output limits, context constraints, reasoning/cache billing, compaction/retry paths and model concurrency. Record configuration identity and unknown assumptions.
-- [ ] 2. Reproduce the configured illustration: Sol output $0.3200, each DeepSeek output $0.0384, three outputs $0.3968; 100K uncached Sol input plus its output ceiling is $0.5200.
-- [ ] 3. Distinguish illustrative exposure from an attainable audited worst-case bound and actual billed usage. Configured prices alone do not establish provider/catalog parity.
-- [ ] 4. Return assured, exposed, or not established with evidence. A missing finite bound or exposure above headroom requires owner go/no-go before competition execution.
-- [ ] 5. Do not reserve money, change model caps/concurrency, stop on estimates, or authorize paid search. This is offline readiness output only.
-- [ ] 6. Test arithmetic and effective-configuration interpretation with fixtures; no Pi, Lean or network provider requests.
+- [x] 1. Read resolved provider/catalog prices, actual payload output limits, context constraints, reasoning/cache billing, compaction/retry paths and model concurrency. Record configuration identity and unknown assumptions.
+- [x] 2. Reproduce the configured illustration: Sol output $0.3200, each DeepSeek output $0.0384, three outputs $0.3968; 100K uncached Sol input plus its output ceiling is $0.5200.
+- [x] 3. Distinguish illustrative exposure from an attainable audited worst-case bound and actual billed usage. Configured prices alone do not establish provider/catalog parity.
+- [x] 4. Return assured, exposed, or not established with evidence. A missing finite bound or exposure above headroom requires owner go/no-go before competition execution.
+- [x] 5. Do not reserve money, change model caps/concurrency, stop on estimates, or authorize paid search. This is offline readiness output only.
+- [x] 6. Test arithmetic and effective-configuration interpretation with fixtures; no Pi, Lean or network provider requests.
 
 ## Verify
 
