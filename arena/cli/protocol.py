@@ -13,6 +13,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
+from arena import orchestration
 from arena import reply as tool_reply
 from arena import tools as v7_tools
 from arena.campaign import (
@@ -22,9 +23,9 @@ from arena.campaign import (
     island_packet,
     no_work_focus,
     restart_packet,
+    run_dir,
     stall_due,
     stall_restart_packet,
-    run_dir,
     state,
     submission,
     write_state,
@@ -50,6 +51,7 @@ ACTIONS = (
     "island_packet",
     "stall_due",
     "stall_restart_packet",
+    "await_results",
 )
 
 
@@ -95,6 +97,19 @@ def run(args: SimpleNamespace) -> dict:
         return memory(args.run_id, args.spent_usd, args.cap_usd)
     if args.action == "submission":
         return submission(args.run_id)
+    if args.action == "await_results":
+        request = {}
+        if args.request_file is not None:
+            request = json.loads(args.request_file.read_text())
+            if not isinstance(request, dict):
+                raise ValueError("request-file must contain an object")
+        # A normal tool result. no_pending_work continues the turn; it does not finish or delegate.
+        return orchestration.await_results(
+            run_dir(args.run_id),
+            actor_id=os.environ.get("ARENA_ACTOR_ID") or request.get("actor_id") or "sol",
+            cursor=request.get("cursor"),
+            job_ids=request.get("job_ids"),
+        )
     raise ValueError(f"Unsupported action: {args.action}")
 
 

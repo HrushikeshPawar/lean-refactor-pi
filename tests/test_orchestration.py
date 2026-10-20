@@ -1,12 +1,15 @@
 """Offline run-control journeys. No provider, Pi, or Lean process."""
 
 import hashlib
+import importlib.util
 import json
 import queue
+import subprocess
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from arena import orchestration, pi_rpc, run_control
@@ -1193,6 +1196,47 @@ class V8WorkerSmokeTests(unittest.TestCase):
             self.assertEqual(len(orchestration.jobs(directory)["jobs"]), 1)
             self.assertFalse(run_control.read_state(directory)["stopped"])
             self.assertNotIn("dispatch_started", (directory / "control.jsonl").read_text())
+            protocol_path = Path(__file__).parents[1] / "arena" / "cli" / "protocol.py"
+            spec = importlib.util.spec_from_file_location("await_protocol", protocol_path)
+            await_protocol = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(await_protocol)
+            with patch.object(await_protocol, "run_dir", return_value=directory):
+                continued = await_protocol.run(SimpleNamespace(
+                    action="await_results", theorem="demo", run_id="run-1", request_file=None,
+                    max_seconds=None, spent_usd=None, cap_usd=None,
+                ))
+            self.assertEqual(continued["wake_reason"], "no_pending_work")
+            self.assertNotEqual(continued.get("state"), "finished")
+            self.assertEqual(len(orchestration.jobs(directory)["jobs"]), 1)
+
+            orchestration.note_verification(
+                directory, job_id=fresh["job_id"], evaluation_id="check-wait", state="running",
+                run_id="run-1", actor_id="sol", session_id="sol-session",
+            )
+            orchestration._registered.clear()
+            check_replies = []
+            check_waiter = threading.Thread(
+                target=lambda: check_replies.append(await_actor("sol", finished["next_cursor"])),
+                daemon=True,
+            )
+            check_waiter.start()
+            self.assertTrue(orchestration._registered.wait(2))
+            subprocess.run(
+                [
+                    "uv", "run", "--no-sync", "python", "-c",
+                    "import sys\nfrom pathlib import Path\nfrom arena import orchestration\n"
+                    "orchestration.note_verification(Path(sys.argv[1]), job_id=sys.argv[2], "
+                    "evaluation_id=sys.argv[3], state='passed', run_id='run-1', actor_id='sol', "
+                    "session_id='sol-session')\n",
+                    str(directory), fresh["job_id"], "check-wait",
+                ],
+                check=True,
+            )
+            check_waiter.join(15)
+            self.assertFalse(check_waiter.is_alive())
+            self.assertEqual(check_replies[0]["wake_reason"], "result")
+            self.assertEqual(check_replies[0]["events"][0]["evaluation_id"], "check-wait")
+            self.assertEqual(await_actor("sol", check_replies[0]["next_cursor"])["wake_reason"], "no_pending_work")
 
             def start_job(operation_id):
                 return orchestration.delegate(

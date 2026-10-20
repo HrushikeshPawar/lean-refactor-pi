@@ -2004,6 +2004,16 @@ def record_evaluation(
         elif precomputed is not None:
             result = precomputed
         else:
+            job_id = operation.get("job_id") if isinstance(operation, dict) else None
+            job_id = job_id or os.environ.get("ARENA_JOB_ID")
+            if job_id and precomputed is None:
+                from arena import orchestration
+
+                orchestration.note_verification(
+                    directory, job_id=job_id, evaluation_id=key, state="running",
+                    run_id=run_id, actor_id=os.environ.get("ARENA_ACTOR_ID") or "sol",
+                    session_id=os.environ.get("ARENA_SESSION_ID") or run_id,
+                )
             try:
                 lean_lock_started = time.monotonic()
                 with lean_lock(directory, lane):
@@ -2028,6 +2038,15 @@ def record_evaluation(
                 }
                 if isinstance(error, FileNotFoundError):
                     result["lean_unavailable"] = True  # Lean (or the workspace) could not run: counts for the breaker
+            if job_id and precomputed is None:
+                from arena import orchestration
+
+                orchestration.note_verification(
+                    directory, job_id=job_id, evaluation_id=key,
+                    state="passed" if result.get("ok") else "proof_error",
+                    run_id=run_id, actor_id=os.environ.get("ARENA_ACTOR_ID") or "sol",
+                    session_id=os.environ.get("ARENA_SESSION_ID") or run_id,
+                )
         if not prior:
             result.setdefault("harness_timing", {})
             result["harness_timing"].update(

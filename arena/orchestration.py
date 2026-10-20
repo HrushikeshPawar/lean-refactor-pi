@@ -31,6 +31,8 @@ _active_states = frozenset(("launching", "queued", "active"))
 _live_states = frozenset(("queued", "launching", "active", "cancelling"))
 _interest = threading.Condition()
 _epoch = 0
+_registered = threading.Event()
+_terminal_checks = frozenset(("passed", "proof_error", "inconclusive"))
 
 
 def _wake() -> None:
@@ -908,7 +910,22 @@ def _selectable(row: dict, job_ids: list[str] | None) -> bool:
         return False
     if kind == "worker_finding":
         return True
+    if kind == "verification" and row.get("state") in _terminal_checks:
+        return True
     return kind == "assignment_state" and row.get("state") in _terminal_states
+
+
+def _open_checks(directory: Path, job_ids: list[str] | None) -> bool:
+    latest: dict[tuple[str, str], str] = {}
+    for row in _history(directory):
+        if (row.get("type") or row.get("kind")) != "verification":
+            continue
+        job_id = row.get("job_id")
+        evaluation_id = row.get("evaluation_id")
+        if not job_id or not evaluation_id or (job_ids is not None and job_id not in job_ids):
+            continue
+        latest[(job_id, evaluation_id)] = row.get("state") or ""
+    return any(state == "running" for state in latest.values())
 
 
 def _reader_can_emit(activation_id: str) -> bool:
@@ -920,6 +937,8 @@ def _reader_can_emit(activation_id: str) -> bool:
 
 
 def _has_producer(directory: Path, job_ids: list[str] | None) -> bool:
+    if _open_checks(directory, job_ids):
+        return True
     for snapshot in _selected_jobs(directory, job_ids):
         activation_id = snapshot["activation_id"]
         if snapshot["state"] not in _live_states:
@@ -955,7 +974,7 @@ def _public_event(row: dict) -> dict:
 def _wake_reason(events: list[dict]) -> str:
     if any(event["type"] == "run_stop" for event in events):
         return "run_stopped"
-    if any(event["type"] == "worker_finding" for event in events):
+    if any(event["type"] in ("worker_finding", "verification") for event in events):
         return "result"
     last = events[-1]
     if last.get("state") == "cancelled":
@@ -1035,6 +1054,46 @@ def _commit_delivery(
     }
 
 
+def note_verification(
+    directory: Path,
+    *,
+    job_id: str,
+    evaluation_id: str,
+    state: str,
+    run_id: str,
+    actor_id: str,
+    session_id: str,
+) -> dict:
+    """Record a submitted check. `running` keeps the job able to wake a waiter."""
+    if state not in {"running", *_terminal_checks}:
+        return _reject("", "verification_state")
+    if not job_id or not evaluation_id or not run_id or not actor_id or not session_id:
+        return _reject("", "identity")
+    arguments = {"job_id": job_id, "evaluation_id": evaluation_id, "state": state}
+    operation_id = run_control.argument_digest(arguments)[:32]
+
+    def mutate(ctx):
+        return [ctx.append_ledger({
+            "type": "verification", "job_id": job_id, "evaluation_id": evaluation_id, "state": state,
+        })]
+
+    applied = run_control.apply_operation(
+        directory,
+        {
+            "operation_id": operation_id,
+            "kind": "verification",
+            "arguments": arguments,
+            "run_id": run_id,
+            "actor_id": actor_id,
+            "session_id": session_id,
+            "job_id": job_id,
+        },
+        mutate,
+    )
+    _wake()
+    return applied
+
+
 def await_results(
     directory: Path,
     *,
@@ -1049,6 +1108,8 @@ def await_results(
         not isinstance(job_ids, list) or not all(isinstance(item, str) and item for item in job_ids)
     ):
         return _reject("", "job_ids")
+    run_control.ensure_directory_watch(directory)
+    _registered.clear()
     while True:
         with run_control.control_lock(directory):
             acked = _acked(directory, actor_id, cursor)
@@ -1071,8 +1132,10 @@ def await_results(
             with _interest:
                 seen = _epoch
         with _interest:
-            if _epoch == seen:
-                _interest.wait()
+            if _epoch != seen:
+                continue
+            _registered.set()
+            _interest.wait()
 
 
 def awaits_settlement(directory: Path, activation_id: str) -> bool:
