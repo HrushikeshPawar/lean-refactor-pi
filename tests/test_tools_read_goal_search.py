@@ -63,6 +63,32 @@ class ScratchResultTests(ToolCase):
         saved = [row for row in campaign.events(self.directory) if row["kind"] == "scratch"][-1]
         self.assertEqual(saved["code"], code)
 
+    def test_v8_scratch_failure_is_retrievable(self):
+        code = "-- original λ\r\n#check Nat.add_comm\r\n"
+        lean = patch.object(tools.engine, "run_lean", side_effect=AssertionError("lean must not run"))
+        with (
+            patch.object(tools.engine, "versions", return_value=[("v", "c")]),
+            patch.object(tools.engine, "candidate_file", side_effect=RuntimeError("fixture context unavailable")),
+            lean,
+            self.assertRaisesRegex(RuntimeError, "fixture context unavailable"),
+        ):
+            tools.scratch_tool("T", "logic", {"code": code})
+        saved = [row for row in campaign.events(self.directory) if row.get("experiment_id")][0]
+        with lean:
+            found = tools.read_tool("T", "logic", {"experiment": saved["experiment_id"]})
+        item = found["items"][0]
+        self.assertEqual(item["code"], code)
+        self.assertEqual(item["outcome"], "construction_error")
+        self.assertIn("fixture context unavailable", "\n".join(item["lines"]))
+        self.assertNotEqual(item.get("validity"), "passed")
+        legacy = tools.read_tool("T", "logic", {"experiment": "a" * 64})
+        campaign._append(self.directory, {"kind": "scratch", "code_sha256": "b" * 64})
+        missing = tools.read_tool("T", "logic", {"experiment": "b" * 64})
+        self.assertEqual(missing["items"][0]["code_status"], "missing")
+        self.assertIsNone(missing["items"][0]["code"])
+        self.assertIn("missing code", "\n".join(missing["items"][0]["lines"]))
+        self.assertFalse(legacy["ok"])
+
     def test_result_line_counts_messages_and_body_tokens_only_when_the_snippet_declares(self):
         check = self.scratch("#check Nat.add_comm\n")
         proof = self.scratch("example : 1 = 1 := trivial\n")

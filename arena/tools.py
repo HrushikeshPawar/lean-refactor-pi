@@ -6,7 +6,10 @@ import difflib
 import hashlib
 import re
 
-from arena import campaign, engine, graph, reply, salvage, search, text
+import os
+import time
+
+from arena import campaign, engine, experiments, graph, reply, salvage, search, text
 from arena.forbidden import official_filter
 from arena.prices import rates, snippet_tokens
 from arena.run_control import committed_operation_ids
@@ -16,9 +19,16 @@ TOOL_FORMS = {
     "compile": ["drafts[1..N]", "splice{base,steps,text}", "fill{hole,text}", "merge{base,take}"],
     "goal": ["node+hole", "node+line", "hole:nN.hK", "try:[snippets]"],
     "search": ["queries:[strings]", "kind:name|type|text", "after:prefix"],
-    "read": ["handle:decl:<name>", "node:nN", "hole:nN.hK", "view:source|prices|diff|outline|map", "step:sN"],
+    "read": [
+        "handle:decl:<name>",
+        "node:nN",
+        "hole:nN.hK",
+        "experiment:eN",
+        "view:source|prices|diff|outline|map",
+        "step:sN",
+    ],
     "finish": ["{}"],
-    "scratch": ["code:<lean commands>"],
+    "scratch": ["code:<lean commands>", "helpers:[experiment ids]"],
 }
 
 
@@ -68,9 +78,9 @@ def _empty_error(tool: str) -> dict:
         "compile": ["drafts", "splice", "fill", "merge", "base", "from", "note", "check"],
         "goal": ["node", "hole", "line", "try"],
         "search": ["queries", "kind", "after"],
-        "read": ["handle", "node", "hole", "view", "against", "step"],
+        "read": ["handle", "node", "hole", "experiment", "view", "against", "step"],
         "finish": [],
-        "scratch": ["code"],
+        "scratch": ["code", "helpers"],
     }[tool]
     return reply.error_reply("empty_arguments", "{}", valid, TOOL_FORMS[tool])
 
@@ -84,9 +94,9 @@ def _is_empty(request: object, tool: str) -> bool:
         "compile": ("drafts", "splice", "fill", "merge", "base", "from", "note", "check"),
         "goal": ("node", "hole", "line", "try"),
         "search": ("queries", "kind", "after"),
-        "read": ("handle", "node", "hole", "view", "against", "step"),
+        "read": ("handle", "node", "hole", "experiment", "view", "against", "step"),
         "finish": (),
-        "scratch": ("code",),
+        "scratch": ("code", "helpers"),
     }[tool]
     return not any(key in request and request[key] not in (None, "", [], {}) for key in keys)
 
@@ -1357,10 +1367,15 @@ def _handle_as_target(request: dict) -> dict:
 def read_tool(theorem: str, run_id: str, request: dict) -> dict:
     if _is_empty(request, "read"):
         return _empty_error("read")
-    valid = ["handle", "node", "hole", "view", "against", "step"]
+    valid = ["handle", "node", "hole", "experiment", "view", "against", "step"]
     unknown = sorted(set(request) - set(valid))
     if unknown:
         return _invalid("unknown_argument", unknown[0], valid, TOOL_FORMS["read"])
+    if request.get("experiment"):
+        others = [key for key in ("handle", "node", "hole") if request.get(key)]
+        if others:
+            return _invalid("bad_target", "experiment", ["experiment alone"], TOOL_FORMS["read"])
+        return _read_experiment(run_id, request["experiment"])
     request = _handle_as_target(request)
     view = request.get("view", "source")
     if request.get("handle") and view != "source":
@@ -1519,6 +1534,33 @@ def read_tool(theorem: str, run_id: str, request: dict) -> dict:
     )
 
 
+def _read_experiment(run_id: str, reference: str) -> dict:
+    found = experiments.retrieve(run_id, reference)
+    if found is None:
+        return _invalid("unknown_experiment", reference, [], TOOL_FORMS["read"])
+    if found["code_status"] == "missing":
+        lines = [_render("read_experiment_missing", experiment=reference)]
+    elif found["code_status"] == "ambiguous":
+        lines = [_render("read_experiment_ambiguous", experiment=reference)]
+    else:
+        lines = [
+            _render(
+                "read_experiment",
+                experiment=found["experiment_id"],
+                outcome=found["outcome"],
+                validity=found["validity"],
+            ),
+            found["code"],
+        ]
+        if found.get("diagnostic"):
+            lines.append(found["diagnostic"])
+    return reply.attach_context(
+        run_id,
+        reply.reply(items=[{"ref": found["experiment_id"], "ok": True, "lines": lines, "error": None, **found}]),
+        include_map=False,
+    )
+
+
 _MARK = re.compile(r"(?:.*:\sinfo:\s)?ARENA_MARK\s(\d+)")
 _INFO_COMMAND = re.compile(r"#(?:check_failure|check|print|eval|reduce|synth|where|help)\b")
 _STRIKE = re.compile("[\u0335\u0336]")
@@ -1658,10 +1700,13 @@ def scratch_tool(theorem: str, run_id: str, request: dict) -> dict:
     """Lean commands run in the target's environment in place of its declaration. Never a node, never scored."""
     if _is_empty(request, "scratch"):
         return _empty_error("scratch")
-    valid = ["code"]
+    valid = ["code", "helpers"]
     unknown = sorted(set(request) - set(valid))
     if unknown:
         return _invalid("unknown_argument", unknown[0], valid, TOOL_FORMS["scratch"])
+    helpers = request.get("helpers") or []
+    if not isinstance(helpers, list) or any(not isinstance(item, str) or not item for item in helpers):
+        return _invalid("bad_helpers", helpers, ["experiment ids"], TOOL_FORMS["scratch"])
     limit = int(text.numbers().get("scratch_max_chars", 4000))
     code = request.get("code")
     if not isinstance(code, str) or not code.strip():
@@ -1676,23 +1721,93 @@ def scratch_tool(theorem: str, run_id: str, request: dict) -> dict:
         return _invalid("forbidden", label, ["no forbidden constructs"], TOOL_FORMS["scratch"])
     digest = hashlib.sha256(code.encode()).hexdigest()
     earlier = sum(
-        1 for event in _history(run_id) if event.get("kind") == "scratch" and event.get("code_sha256") == digest
+        1
+        for event in _history(run_id)
+        if event.get("kind") == "scratch"
+        and event.get("code_sha256") == digest
+        and event.get("phase") != "outcome"
     )
     # Retain the exact input before context construction or Lean can fail; instrumentation is not the source.
-    campaign._append(campaign.run_dir(run_id), {"kind": "scratch", "code_sha256": digest, "code": code})
-    row = campaign.problem(theorem)
-    version, commit = engine.versions(row)[0]
-    # The snippet takes the target declaration's place in the same file the compile tool checks.
-    measured_code, measured_starts = _measured_snippet(code)
-    built = engine.candidate_file(row, measured_code, version, commit)
-    facts = [_render("scratch_repeat", count=earlier + 1)] if earlier else []
-    code_lines = code.splitlines()
-    declarations = [number for number, line in enumerate(code_lines, 1) if _DECLARATION_START.match(line)]
-    # The prefix goes in front of the snippet as compile's measure does; its lines are mapped back below.
-    inserted = _SNIPPET_PREFIX + (_MEASURE_DEFINITION if measured_starts else "")
-    wrapper_start = built["text"][: built["head"]].count("\n") + 1
-    lean_text = built["text"][: built["head"]] + inserted + built["text"][built["head"] :]
-    output = engine.run_lean(row, built["path"], lean_text, prefix_end=built["head"])
+    accepted = experiments.accept(run_id, code, helpers)
+    experiment_id = accepted["experiment_id"]
+    started = time.perf_counter()
+    missing = experiments.unresolved_helpers(run_id, helpers)
+    if missing:
+        experiments.finish(
+            run_id,
+            experiment_id,
+            code=code,
+            digest=digest,
+            outcome="dependency_missing",
+            raw=None,
+            rendered=[],
+            elapsed_ms=experiments.elapsed_since(started),
+            input_ref=accepted["input_ref"],
+            diagnostic="dependency_missing",
+        )
+        return reply.reply(
+            ok=False,
+            error=reply.request_error("dependency_missing", ",".join(missing), [], TOOL_FORMS["scratch"]),
+            items=[{"ref": experiment_id, "ok": False, "lines": [], "error": None, "code": code}],
+        )
+    if os.environ.get("ARENA_JOB_STATE") == "cancelling":
+        experiments.finish(
+            run_id,
+            experiment_id,
+            code=code,
+            digest=digest,
+            outcome="cancelled",
+            raw=None,
+            rendered=[_render("scratch_cancelled")],
+            elapsed_ms=experiments.elapsed_since(started),
+            input_ref=accepted["input_ref"],
+        )
+        return reply.reply(
+            items=[
+                {
+                    "ref": experiment_id,
+                    "ok": True,
+                    "lines": [_render("scratch_cancelled")],
+                    "error": None,
+                    "experiment_id": experiment_id,
+                    "outcome": "cancelled",
+                    "code": code,
+                    "promotion": {"state": "not_promoted", "reason": "promotion_not_in_slice"},
+                    "validity": "not_a_target_candidate",
+                }
+            ]
+        )
+    context = {"theorem_run": run_id}
+    try:
+        row = campaign.problem(theorem)
+        version, commit = engine.versions(row)[0]
+        context = {"theorem_run": run_id, "version": version, "commit": commit}
+        # The snippet takes the target declaration's place in the same file the compile tool checks.
+        measured_code, measured_starts = _measured_snippet(code)
+        built = engine.candidate_file(row, measured_code, version, commit)
+        facts = [_render("scratch_repeat", count=earlier + 1)] if earlier else []
+        code_lines = code.splitlines()
+        declarations = [number for number, line in enumerate(code_lines, 1) if _DECLARATION_START.match(line)]
+        # The prefix goes in front of the snippet as compile's measure does; its lines are mapped back below.
+        inserted = _SNIPPET_PREFIX + (_MEASURE_DEFINITION if measured_starts else "")
+        wrapper_start = built["text"][: built["head"]].count("\n") + 1
+        lean_text = built["text"][: built["head"]] + inserted + built["text"][built["head"] :]
+        output = engine.run_lean(row, built["path"], lean_text, prefix_end=built["head"])
+    except Exception as error:
+        experiments.finish(
+            run_id,
+            experiment_id,
+            code=code,
+            digest=digest,
+            outcome="construction_error",
+            raw=None,
+            rendered=[str(error)],
+            elapsed_ms=experiments.elapsed_since(started),
+            input_ref=accepted["input_ref"],
+            diagnostic=str(error),
+            context=context,
+        )
+        raise
     lines: list[str] = []
     heartbeats: dict[int, int] = {}
     errors = warnings = 0
@@ -1791,7 +1906,36 @@ def scratch_tool(theorem: str, run_id: str, request: dict) -> dict:
     else:
         lines.append(_render("scratch_result", status=status, errors=errors, warnings=warnings))
     lines.extend(body)
-    item = {"ref": "scratch", "ok": True, "lines": lines, "error": None, "repeat": bool(earlier)}
+    outcome = "timeout" if output is None else "failure" if errors else "success"
+    lines.append(_render("scratch_experiment", experiment=experiment_id, outcome=outcome))
+    lines.append(_render("scratch_not_promoted", reason="promotion is a later step"))
+    raw = None if output is None else output[1]
+    experiments.finish(
+        run_id,
+        experiment_id,
+        code=code,
+        digest=digest,
+        outcome=outcome,
+        raw=raw,
+        rendered=lines,
+        elapsed_ms=experiments.elapsed_since(started),
+        input_ref=accepted["input_ref"],
+        context=context,
+    )
+    item = {
+        "ref": experiment_id,
+        "ok": True,
+        "lines": lines,
+        "error": None,
+        "repeat": bool(earlier),
+        "experiment_id": experiment_id,
+        "outcome": outcome,
+        "code": code,
+        "promotion": {"state": "not_promoted", "reason": "promotion_not_in_slice"},
+        "validity": "not_a_target_candidate",
+        "compatibility": "not_checked",
+        "cold": "not_checked",
+    }
     return reply.reply(facts=facts, items=[item])
 
 

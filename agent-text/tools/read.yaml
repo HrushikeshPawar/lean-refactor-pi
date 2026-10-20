@@ -1,5 +1,6 @@
-description: "Return pinned source or a node's prices, diff, outline, tree, or graph map."
+description: "Return pinned source, a node's prices, diff, outline, tree, or graph map, or a stored scratch experiment."
 params:
+  experiment: "Scratch experiment id. Returns the exact submitted code and outcome without running Lean again. A hash-only historical row is reported as missing code."
   handle: "Declaration handle from search, e.g. decl:Nat.add_comm, or file lines, e.g. ArkLib/Foo.lean:120-150; or decl:Nat.add_comm:20-50."
   node: "Node identifier for node views."
   hole: "Hole identifier for its goal view."
