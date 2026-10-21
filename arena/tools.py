@@ -1914,6 +1914,9 @@ def _scratch_promote(
         operation = {"type": "splice", "base": anchor["node"], "steps": spec, "text": embedded}
     operation["experiment_id"] = experiment_id
     # Admission is checked again after dependency construction, just before submission.
+    from arena.run_control import submission_barrier
+
+    submission_barrier("before_promotion", campaign.run_dir(run_id))
     if _scratch_cancelled(run_id) or read_state(campaign.run_dir(run_id)).get("stopped"):
         reason = "cancelled" if _scratch_cancelled(run_id) else "run_stopped"
         return close(reason, {"state": "not_promoted", "reason": reason},

@@ -1065,6 +1065,33 @@ def _construction_relation(
     return _construction_payload(edge_type, sources, operation_data, named_parent, exact)
 
 
+def _admit_graph_submission(
+    directory: Path, proof_id: str, proof: str, operation: dict | None, *, duplicate: bool
+) -> bool:
+    """Authorize a graph attempt under the same stop boundary as candidate submission.
+
+    The caller already holds the control lock. A candidate submitted with the same
+    inputs stays admissible so its attempt can be recorded after that commit.
+    """
+    from arena.run_control import _submit_locked, actor_ids
+
+    identity = actor_ids(directory.name)
+    decision = _submit_locked(
+        directory,
+        {
+            "operation_id": uuid.uuid4().hex,
+            "run_id": directory.name,
+            "actor_id": identity["actor_id"],
+            "session_id": identity["session_id"],
+            "proof_id": proof_id,
+            "proof_sha256": hashlib.sha256(proof.encode()).hexdigest(),
+            "authorization": "duplicate" if duplicate else "candidate",
+            "inputs": operation,
+        },
+    )
+    return bool(decision["ok"])
+
+
 def _record_construction(
     directory: Path,
     proof_id: str,
@@ -1191,14 +1218,15 @@ def _file_node(
             (event for event in history if event.get("kind") == "edge" and event.get("proof_id") == proof_id), None
         )
         if existing:
-            _record_construction(
-                directory,
-                proof_id,
-                existing,
-                operation,
-                named_parent,
-                alternate=True,
-            )
+            if _admit_graph_submission(directory, proof_id, proof, operation, duplicate=True):
+                _record_construction(
+                    directory,
+                    proof_id,
+                    existing,
+                    operation,
+                    named_parent,
+                    alternate=True,
+                )
             if projection_out is not None:
                 projection_out.append(
                     Graph.from_history(
@@ -1250,6 +1278,8 @@ def _file_node(
             "measured_similarity": measured_score,
             "operation": operation_data,
         }
+        if not _admit_graph_submission(directory, proof_id, proof, operation, duplicate=False):
+            return {**event, "refused": "run_stopped"}, False
         _append(directory, event)
         _record_construction(directory, proof_id, event, operation, named_parent, alternate=False)
         earlier: dict[str, list[dict]] = {}
@@ -2039,20 +2069,38 @@ def record_evaluation(
             hypothesis = ""
         _snapshot(directory, candidate_id, proof)
         if candidate_id not in known:
-            _append(
+            from arena.run_control import SubmissionRefused, actor_ids, submit_candidate
+
+            identity = actor_ids(directory.name)
+            key = _evaluation_key(candidate_id, mode, row)
+            decision = submit_candidate(
                 directory,
                 {
-                    "kind": "candidate",
-                    "candidate_id": candidate_id,
-                    "parents": lineage,
-                    "hypothesis": hypothesis,
-                    "hypothesis_ref": hypothesis_ref,
-                    "origin": origin,
-                    "merge": merge,
-                    "source_versions": versions(row),
-                    "evaluator_sha256": _evaluator_sha(),
+                    "operation_id": uuid.uuid4().hex,
+                    "run_id": run_id,
+                    "actor_id": identity["actor_id"],
+                    "session_id": identity["session_id"],
+                    "proof_id": candidate_id,
+                    "proof_sha256": hashlib.sha256(proof.encode()).hexdigest(),
+                    "authorization": "candidate",
+                    "inputs": operation,
+                    "evaluation": {"mode": mode, "key": key, "state": "queued"},
+                    "candidate": {
+                        "kind": "candidate",
+                        "candidate_id": candidate_id,
+                        "parents": lineage,
+                        "hypothesis": hypothesis,
+                        "hypothesis_ref": hypothesis_ref,
+                        "origin": origin,
+                        "merge": merge,
+                        "source_versions": versions(row),
+                        "evaluator_sha256": _evaluator_sha(),
+                    },
                 },
             )
+            if not decision["ok"]:
+                raise SubmissionRefused(decision.get("operation_id") or "")
+            history = events(directory)
         elif explicit and not any(
             item.get("kind") == "derivation"
             and item.get("candidate_id") == candidate_id
@@ -2063,16 +2111,33 @@ def record_evaluation(
                 item for item in history if item.get("kind") == "candidate" and item["candidate_id"] == candidate_id
             )
             if original.get("parents", []) != explicit:
-                _append(
+                from arena.run_control import actor_ids, submit_candidate
+
+                identity = actor_ids(directory.name)
+                decision = submit_candidate(
                     directory,
                     {
-                        "kind": "derivation",
-                        "candidate_id": candidate_id,
-                        "parents": explicit,
-                        "origin": origin,
-                        "merge": merge,
+                        "operation_id": uuid.uuid4().hex,
+                        "run_id": run_id,
+                        "actor_id": identity["actor_id"],
+                        "session_id": identity["session_id"],
+                        "proof_id": candidate_id,
+                        "proof_sha256": hashlib.sha256(proof.encode()).hexdigest(),
+                        "authorization": "duplicate",
+                        "inputs": {"parents": explicit, "origin": origin},
                     },
                 )
+                if decision["ok"]:
+                    _append(
+                        directory,
+                        {
+                            "kind": "derivation",
+                            "candidate_id": candidate_id,
+                            "parents": explicit,
+                            "origin": origin,
+                            "merge": merge,
+                        },
+                    )
         key = _evaluation_key(candidate_id, mode, row)
         prior = next(
             (item for item in reversed(history) if item.get("kind") == "evaluation" and item["key"] == key), None
@@ -2100,6 +2165,9 @@ def record_evaluation(
                 result = precomputed
             else:
                 try:
+                    from arena.run_control import submission_barrier
+
+                    submission_barrier("during_lean", directory)
                     lean_lock_started = time.monotonic()
                     with lean_lock(directory, lane):
                         lean_lock_wait_seconds = round(time.monotonic() - lean_lock_started, 3)
@@ -2318,6 +2386,9 @@ def _probe_workers(count: int) -> int:
 def _compile_probe(name: str, row: dict, proof: str) -> dict:
     """Compile one draft. A complete draft is compiled exactly as a fast evaluation would be,
     so if it passes it becomes a candidate without another compile."""
+    from arena.run_control import submission_barrier
+
+    submission_barrier("during_lean", None)
     complete = not _has_hole(row, proof)
     try:
         return evaluate(name, proof, "fast" if complete else "probe")
@@ -2578,6 +2649,13 @@ def compile_operation(
     if mode not in ("fast", "full"):
         raise ValueError(text.render("messages/errors.evaluation_mode"))
     directory = run_dir(run_id)
+    from arena.run_control import read_state, submission_barrier
+
+    submission_barrier("before_construction", directory)
+    if read_state(directory).get("stopped"):
+        from arena.run_control import SubmissionRefused
+
+        raise SubmissionRefused()
     history = events(directory)
 
     def proof_for(reference: str) -> str:
@@ -3631,6 +3709,16 @@ SALVAGE_SOFT_CAP_SECONDS = 60
 
 def _run_salvage(name: str, run_id: str, node: Node, drain_deadline: float | None = None) -> dict:
     directory = run_dir(run_id)
+    from arena.run_control import read_state, submission_barrier
+
+    submission_barrier("before_construction", directory)
+    if read_state(directory).get("stopped"):
+        _append(directory, {
+            "kind": "salvage", "proof_id": node.proof_id, "status": "run_stopped",
+            "compiles": 0, "rounds": [], "kept": None, "sketch_id": None,
+        })
+        write_state(run_id)
+        return {"status": "run_stopped", "compiles": 0, "rounds": [], "text": None, "result": None, "kept": None}
     started = time.monotonic()
     proof = node.proof_text
     history = events(directory)
@@ -3646,6 +3734,10 @@ def _run_salvage(name: str, run_id: str, node: Node, drain_deadline: float | Non
     )
 
     def should_yield() -> str | None:
+        from arena.run_control import read_state
+
+        if read_state(directory).get("stopped"):
+            return "run_stopped"
         now = time.monotonic()
         if drain_deadline is not None and now >= drain_deadline:
             return "drain_budget_exhausted"
@@ -3709,6 +3801,16 @@ def _run_salvage(name: str, run_id: str, node: Node, drain_deadline: float | Non
 
 def _run_assembly(name: str, run_id: str, sketch: Node) -> None:
     directory = run_dir(run_id)
+    from arena.run_control import read_state, submission_barrier
+
+    submission_barrier("before_construction", directory)
+    if read_state(directory).get("stopped"):
+        _append(directory, {
+            "kind": "assembly", "sketch": sketch.proof_id, "node": None, "fills": {},
+            "alternatives": {}, "status": "run_stopped",
+        })
+        write_state(run_id)
+        return
     started = time.monotonic()
     fills: dict[str, str] = {}
     alternatives: dict[str, list[str]] = {}
@@ -3759,6 +3861,8 @@ def _run_assembly(name: str, run_id: str, sketch: Node) -> None:
             },
         )
     except Exception as error:
+        from arena.run_control import SubmissionRefused
+
         _append(
             directory,
             {
@@ -3767,7 +3871,7 @@ def _run_assembly(name: str, run_id: str, sketch: Node) -> None:
                 "node": None,
                 "fills": fills,
                 "alternatives": alternatives,
-                "status": "error",
+                "status": "run_stopped" if isinstance(error, SubmissionRefused) else "error",
                 "error": str(error)[:300],
                 "seconds": round(time.monotonic() - started, 2),
             },
@@ -4471,10 +4575,33 @@ def proof_eligibility(history: list[dict], proof_id: str) -> str:
 
 def select_proof(run_id: str, proof_id: str) -> dict:
     """An agent selects one exact proof. The selection does not extend to descendants."""
-    from arena.run_control import actor_ids
+    from arena.run_control import actor_ids, submit_candidate
 
     directory = run_dir(run_id)
     identity = actor_ids(directory.name)
+    proof_path = directory / "proofs" / f"{proof_id}.lean"
+    proof_bytes = proof_path.read_bytes() if proof_path.is_file() else proof_id.encode()
+    decision = submit_candidate(
+        directory,
+        {
+            "operation_id": uuid.uuid4().hex,
+            "run_id": run_id,
+            "actor_id": identity["actor_id"],
+            "session_id": identity["session_id"],
+            "proof_id": proof_id,
+            "proof_sha256": hashlib.sha256(proof_bytes).hexdigest(),
+            "authorization": "exact_selection",
+            "inputs": {"proof_id": proof_id},
+        },
+    )
+    if not decision["ok"]:
+        return {
+            "ok": False,
+            "status": "run_stopped",
+            "category": "run_stopped",
+            "proof_id": proof_id,
+            "eligibility": proof_eligibility(events(directory), proof_id),
+        }
     _append(
         directory,
         {

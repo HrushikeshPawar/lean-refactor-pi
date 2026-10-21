@@ -38,6 +38,31 @@ class OperationRejected(ValueError):
         self.operation_id = operation_id
 
 
+class SubmissionRefused(OperationRejected):
+    """The run stop committed before this exact candidate was submitted."""
+
+    def __init__(self, operation_id: str = ""):
+        super().__init__("run_stopped", operation_id)
+
+
+_submission_barriers: dict[str, Callable[[Path | None], None]] = {}
+
+
+def set_submission_barrier(point: str, hook: Callable[[Path | None], None] | None) -> None:
+    """Install one deterministic stop-race hook. ``None`` removes it."""
+    if hook is None:
+        _submission_barriers.pop(point, None)
+    else:
+        _submission_barriers[point] = hook
+
+
+def submission_barrier(point: str, directory: Path | None = None) -> None:
+    """Run a test hook at a named submission point. Production runs have none."""
+    hook = _submission_barriers.get(point)
+    if hook is not None:
+        hook(directory)
+
+
 def listen_for_wait(listener) -> None:
     """Wake an orchestration waiter after a durable run stop. The listener must not take the control lock."""
     if listener not in _wait_listeners:
@@ -1013,6 +1038,135 @@ def settle_usage(directory: Path, settlement: dict) -> dict:
         view["settlement_id"] = settlement_id
         view["state"] = state
         return view
+
+
+def _submission_identity(attempt: dict) -> dict:
+    return {
+        "proof_id": attempt.get("proof_id"),
+        "proof_sha256": attempt.get("proof_sha256"),
+        "authorization": attempt.get("authorization"),
+        "inputs": attempt.get("inputs"),
+    }
+
+
+def _submitted_match(rows: list[dict], attempt: dict) -> dict | None:
+    identity = _submission_identity(attempt)
+    found = None
+    for row in rows:
+        if row.get("kind") != "candidate_submission" or row.get("status") != "submitted":
+            continue
+        if _submission_identity(row) == identity:
+            found = row
+    return found
+
+
+def _submit_locked(directory: Path, attempt: dict) -> dict:
+    """Admit one exact candidate while the caller holds the control lock.
+
+    Construction stays outside this section. The stop check and the candidate
+    record commit together. A matching submission stays admitted after a later stop.
+    """
+    required = ("operation_id", "run_id", "actor_id", "session_id", "proof_id", "proof_sha256", "authorization")
+    missing = [key for key in required if not attempt.get(key)]
+    if missing:
+        raise OperationRejected("invalid_input", str(attempt.get("operation_id") or ""))
+    submission_barrier("before_submission", directory)
+    rows = _control_rows(directory)
+    identity = _submission_identity(attempt)
+    digest = argument_digest(identity)
+    prior = _submitted_match(rows, attempt)
+    if prior is not None:
+        submission_barrier("after_submission", directory)
+        return {
+            "ok": True,
+            "status": "submitted",
+            "reused": True,
+            "operation_id": prior.get("operation_id"),
+            "proof_id": attempt["proof_id"],
+            "evaluation": prior.get("evaluation"),
+        }
+    if any(row.get("kind") == "run_stop" for row in rows):
+        if not any(
+            row.get("kind") == "candidate_unsubmitted" and _submission_identity(row) == identity for row in rows
+        ):
+            _append_control(
+                directory,
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "kind": "candidate_unsubmitted",
+                    "event_id": uuid.uuid4().hex,
+                    "operation_id": attempt["operation_id"],
+                    "run_id": attempt["run_id"],
+                    "actor_id": attempt["actor_id"],
+                    "session_id": attempt["session_id"],
+                    "status": "run_stopped",
+                    "argument_digest": digest,
+                    **identity,
+                },
+            )
+        return {
+            "ok": False,
+            "status": "run_stopped",
+            "category": "run_stopped",
+            "operation_id": attempt["operation_id"],
+            "proof_id": attempt["proof_id"],
+        }
+    evaluation = attempt.get("evaluation")
+    _append_control(
+        directory,
+        {
+            "schema_version": SCHEMA_VERSION,
+            "kind": "candidate_submission",
+            "event_id": uuid.uuid4().hex,
+            "operation_id": attempt["operation_id"],
+            "run_id": attempt["run_id"],
+            "actor_id": attempt["actor_id"],
+            "session_id": attempt["session_id"],
+            "status": "submitted",
+            "argument_digest": digest,
+            "evaluation": evaluation,
+            **identity,
+        },
+    )
+    if evaluation:
+        _append_control(
+            directory,
+            {
+                "schema_version": SCHEMA_VERSION,
+                "kind": "evaluation_request",
+                "event_id": uuid.uuid4().hex,
+                "operation_id": attempt["operation_id"],
+                "run_id": attempt["run_id"],
+                "proof_id": attempt["proof_id"],
+                "state": "queued",
+                "mode": evaluation.get("mode"),
+                "key": evaluation.get("key"),
+            },
+        )
+    candidate = attempt.get("candidate")
+    if isinstance(candidate, dict):
+        from arena.campaign import _append, events
+
+        if not any(
+            row.get("kind") == "candidate" and row.get("candidate_id") == attempt["proof_id"]
+            for row in events(directory)
+        ):
+            _append(directory, candidate)
+    submission_barrier("after_submission", directory)
+    return {
+        "ok": True,
+        "status": "submitted",
+        "reused": False,
+        "operation_id": attempt["operation_id"],
+        "proof_id": attempt["proof_id"],
+        "evaluation": evaluation,
+    }
+
+
+def submit_candidate(directory: Path, attempt: dict) -> dict:
+    """Serialize exact candidate submission with run stopping."""
+    with control_lock(directory):
+        return _submit_locked(directory, attempt)
 
 
 def input_roles(operation: dict | None) -> list[dict]:

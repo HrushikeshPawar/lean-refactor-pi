@@ -4,7 +4,7 @@
 
 **Blocked by:** 06: Enforce the stop before every provider dispatch; 15: Promote an anchored replacement inside scratch
 
-**Status:** ready-for-agent
+**Status:** needs-review
 
 **Branch:** `v8/16-stop-submission-races`
 
@@ -26,12 +26,12 @@
 
 ## What to build and acceptance
 
-- [ ] 1. Serialize exact candidate/inputs/authorization/evaluation-request submission with run stopping. Queued tool admission or construction alone does not count.
-- [ ] 2. Place deterministic barriers before construction, before submission commit, after submission, during Lean and before scratch promotion; test both orderings.
-- [ ] 3. After stopping, retain experiment diagnostics but do not construct, promote, assemble or create a new authorizing attempt. Return not_promoted/run_stopped as appropriate.
-- [ ] 4. Apply identical ordering to compile, scratch promotion, salvage, assembly and duplicate-proof authorization, not just the foreground tool.
-- [ ] 5. Finish already-submitted checks and eligible exact-proof certification without new model calls or proof transformations.
-- [ ] 6. Use the one assigned fast smoke for this slice. Retain the stated behavior requirements; actual-Pi/real-Lean journeys and the broader race matrix are final E2E coverage, not this ticket's gate.
+- [x] 1. Serialize exact candidate/inputs/authorization/evaluation-request submission with run stopping. Queued tool admission or construction alone does not count.
+- [x] 2. Place deterministic barriers before construction, before submission commit, after submission, during Lean and before scratch promotion; test both orderings.
+- [x] 3. After stopping, retain experiment diagnostics but do not construct, promote, assemble or create a new authorizing attempt. Return not_promoted/run_stopped as appropriate.
+- [x] 4. Apply identical ordering to compile, scratch promotion, salvage, assembly and duplicate-proof authorization, not just the foreground tool.
+- [x] 5. Finish already-submitted checks and eligible exact-proof certification without new model calls or proof transformations.
+- [x] 6. Use the one assigned fast smoke for this slice. Retain the stated behavior requirements; actual-Pi/real-Lean journeys and the broader race matrix are final E2E coverage, not this ticket's gate.
 
 ## Verify
 

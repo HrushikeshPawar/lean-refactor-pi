@@ -317,6 +317,76 @@ class V8ControlSmokeTests(unittest.TestCase):
             self.assertEqual(failure["accounting"], "unknown")
             self.assertEqual(len(failure["accounting_failures"]), 1)
 
+    def test_v8_stop_submission_order(self):
+        """A stop before submission leaves no candidate. A submission before the stop keeps its check."""
+        from arena import campaign, tools
+        from tests.test_tools_read_goal_search import ToolCase
+
+        def stop(directory):
+            if directory is None:
+                return
+            run_control._append_control(directory, {
+                "schema_version": run_control.SCHEMA_VERSION,
+                "kind": "run_stop",
+                "event_id": "stop-barrier",
+                "reason": "operator_interrupt",
+            })
+
+        def journey(barrier: str) -> dict:
+            class _Holder(ToolCase):
+                def runTest(self):
+                    return None
+
+            case = _Holder()
+            case.setUp()
+            try:
+                parent = tools.compile_tool("T", "logic", {"drafts": ["by\n  sorry"]})["items"][0]["node"]
+                before = [
+                    row for row in campaign.events(case.directory) if row.get("kind") == "candidate"
+                ]
+                run_control.set_submission_barrier(barrier, stop)
+                item = tools.scratch_tool("T", "logic", {
+                    "replacement": "trivial", "at": {"node": parent, "steps": [1, 1]},
+                })["items"][0]
+                rows = campaign.events(case.directory)
+                control = run_control._control_rows(case.directory)
+                experiment = tools.experiments.retrieve("logic", item["experiment_id"])
+                return {
+                    "item": item, "before": before, "rows": rows, "control": control,
+                    "experiment_code": experiment["code"],
+                }
+            finally:
+                run_control.set_submission_barrier(barrier, None)
+                case.doCleanups()
+
+        stopped = journey("before_submission")
+        self.assertEqual(stopped["item"]["promotion"]["state"], "not_promoted")
+        self.assertEqual(stopped["item"]["promotion"]["reason"], "run_stopped")
+        self.assertEqual(
+            [row.get("candidate_id") for row in stopped["rows"] if row.get("kind") == "candidate"],
+            [row.get("candidate_id") for row in stopped["before"]],
+        )
+        prior_ids = {row.get("candidate_id") for row in stopped["before"]}
+        self.assertFalse(any(
+            row.get("kind") == "evaluation_request" and row.get("proof_id") not in prior_ids
+            for row in stopped["control"]
+        ))
+        self.assertTrue(stopped["experiment_code"])
+
+        submitted = journey("after_submission")
+        promotion = submitted["item"]["promotion"]
+        self.assertTrue(promotion.get("attempt_id") or promotion.get("proof_id") or promotion.get("node"))
+        new_ids = [
+            row.get("candidate_id") for row in submitted["rows"] if row.get("kind") == "candidate"
+        ]
+        self.assertGreater(len(new_ids), len(submitted["before"]))
+        requests = [
+            row for row in submitted["control"]
+            if row.get("kind") == "evaluation_request" and row.get("state") == "queued"
+        ]
+        self.assertTrue(requests)
+        self.assertIn(requests[-1]["proof_id"], new_ids)
+
 
 class _HeldChild:
     def __init__(self):
