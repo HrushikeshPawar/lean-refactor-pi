@@ -829,29 +829,48 @@ def _goal_cases(goals: list[str], cap: int) -> str:
     return "\n".join(names) + "\n\n" + "\n\n".join(blocks)
 
 
+def _target_lines(lines: list[str]) -> set[int]:
+    """A conclusion line and the indented lines that continue it."""
+    protected: set[int] = set()
+    active = False
+    for index, line in enumerate(lines):
+        if line.startswith("⊢"):
+            active = True
+            protected.add(index)
+        elif active and (not line or line[0].isspace()):
+            protected.add(index)
+        else:
+            active = False
+    return protected
+
+
+def _preview_keeping_targets(shown: str, limit: int) -> str:
+    """Shorten a goal view without dropping a conclusion. The caller keeps the untrimmed text."""
+    if len(shown) <= limit:
+        return shown
+    lines = shown.splitlines()
+    protected = _target_lines(lines)
+    droppable = [index for index in range(len(lines)) if index not in protected]
+    omitted = 0
+    while len("\n".join(lines)) > limit and droppable:
+        lines.pop(droppable.pop(0))
+        protected = _target_lines(lines)
+        droppable = [index for index in range(len(lines)) if index not in protected]
+        omitted += 1
+    body = "\n".join(lines)
+    if omitted:
+        body += "\n" + _render("try_goals_cut", count=omitted)
+    return body
+
+
 def _try_goals(item: dict) -> str:
-    """The goals a snippet leaves: its open goals, or the unsolved goals of its error. Cut at a line boundary."""
-    goals = str(item.get("goals_after") or "").strip()
-    output = str(item.get("output") or "")
-    marker = output.find("unsolved goals")
-    if not goals and item.get("returncode") != 0 and marker >= 0:
-        rest = output[marker:].split("\n", 1)
-        kept = []
-        for line in (rest[1] if len(rest) > 1 else "").splitlines():
-            if re.match(r"\S+:\d+:\d+: ", line):
-                break
-            kept.append(line)
-        goals = "\n".join(kept).strip()
+    """The goals a snippet leaves. Hypotheses may be shortened; each ⊢ target stays whole."""
+    goals = _open_goal_text(item)
     if not goals:
         return ""
     blocks = [block.strip() for block in re.split(r"\n\s*\n", goals) if block.strip()]
     shown = _goal_cases(blocks, int(text.numbers().get("goal_cases_max", 12)))
-    limit = int(text.numbers().get("goal_try_chars", 1500))
-    if len(shown) <= limit:
-        return shown
-    kept = shown[:limit].rsplit("\n", 1)[0]
-    omitted = len(shown.splitlines()) - len(kept.splitlines())
-    return kept + "\n" + _render("try_goals_cut", count=omitted)
+    return _preview_keeping_targets(shown, int(text.numbers().get("goal_try_chars", 1500)))
 
 
 def goal_tool(theorem: str, run_id: str, request: dict) -> dict:
@@ -1006,16 +1025,17 @@ def goal_tool(theorem: str, run_id: str, request: dict) -> dict:
                 left = _try_goals(item)
                 if left:
                     lines.append(left)
+                open_goals = _open_goal_text(item)
                 items.append(
                     {
                         "ref": f"t{index}",
-                        "ok": not item.get("timeout") and item.get("returncode") == 0,
+                        "ok": not item.get("timeout") and (item.get("returncode") == 0 or bool(open_goals)),
                         "lines": lines,
                         # The verdict line already says how the snippet failed; a second error line would repeat it.
                         "error": None,
                         "tokens": snippet_tokens(snippet),
                         "delta": snippet_tokens(snippet) - snippet_tokens("sorry"),
-                        "goals": item.get("goals_after"),
+                        "goals": open_goals or item.get("goals_after"),
                         "output": item.get("output"),
                     }
                 )
@@ -1029,10 +1049,30 @@ def goal_tool(theorem: str, run_id: str, request: dict) -> dict:
         )
 
 
+def _open_goal_text(item: dict) -> str:
+    """Goals left by a snippet. A closed snippet stays closed even if its log mentions unsolved goals."""
+    goals = str(item.get("goals_after") or "").strip()
+    output = str(item.get("output") or "")
+    marker = output.find("unsolved goals")
+    if not goals and item.get("returncode") not in (0, None) and marker >= 0:
+        rest = output[marker:].split("\n", 1)
+        kept = []
+        for line in (rest[1] if len(rest) > 1 else "").splitlines():
+            if re.match(r"\S+:\d+:\d+: ", line):
+                break
+            kept.append(line)
+        goals = "\n".join(kept).strip()
+    return goals
+
+
 def _try_verdict(item: dict) -> str:
-    """One snippet's outcome: timed out, its first error, the goals it leaves open, or closed."""
+    """One snippet's outcome: timed out, open goals, its first error, or closed."""
     if item.get("timeout"):
         return _render("try_timeout")
+    goals = _open_goal_text(item)
+    if goals:
+        count = len(re.findall(r"^⊢", goals, re.M)) or 1
+        return _render("try_open", count=count)
     if item.get("returncode") != 0:
         output = str(item.get("output") or "")
         found = re.search(r"\berror: (.*)", output)
@@ -1043,10 +1083,6 @@ def _try_verdict(item: dict) -> str:
             )
             return _render("try_error", message=message or found.group(1).strip())
         return _render("try_error", message=output.strip().splitlines()[0] if output.strip() else "-")
-    goals = str(item.get("goals_after") or "")
-    count = len(re.findall(r"^⊢", goals, re.M))
-    if goals.strip():
-        return _render("try_open", count=count or 1)
     return _render("try_closed")
 
 
@@ -1073,6 +1109,19 @@ def _capped_hits(hits: list[dict]) -> list[dict]:
     return kept
 
 
+def _signature_preview(signature: str, limit: int) -> str:
+    """Keep the end of a long signature, where the conclusion sits. Backticks stay out of the cell."""
+    if len(signature) <= limit:
+        return reply.cell(signature, limit)
+    return reply.cell("…" + signature[-(limit - 1) :].lstrip(), limit)
+
+
+def _relevant_suggestion(query: str, suggestion: str) -> bool:
+    """A suggestion is relevant when it continues the queried name, not a distant edit."""
+    left, right = query.casefold(), suggestion.casefold()
+    return len(left) >= 3 and (right.startswith(left) or left.startswith(right))
+
+
 def _search_row(hit: dict) -> str:
     """One table row: the name once, its signature without the restated name, the place, and why it matched."""
     name = str(hit.get("name") or str(hit.get("handle", "")).removeprefix("decl:"))
@@ -1087,7 +1136,7 @@ def _search_row(hit: dict) -> str:
     return _render(
         "search_row",
         name=reply.cell(name, 120),
-        signature=reply.cell(signature, chars),
+        signature=_signature_preview(signature, chars),
         place=place,
         why=reply.cell(why, 80),
     )
@@ -1123,6 +1172,8 @@ def search_tool(theorem: str, run_id: str, request: dict) -> dict:
         # The after form without queries has an empty query: its prefix names the miss instead.
         label = str(query) or (after or "")
         error = row.get("error")
+        if error and error.get("code") == "not_found":
+            error = None
         missing = _missing_line(row, label)
         head = _render("search_head", query=label)
         if error:
@@ -1156,7 +1207,12 @@ def search_tool(theorem: str, run_id: str, request: dict) -> dict:
             lines.append(_search_row(hit))
         if any(hit.get("why") == "exact" for hit in shown_hits):
             exact += 1
-        suggestions = row.get("suggestions") or []
+        carried = row.get("suggestions") or []
+        suggestions = carried or [
+            name
+            for name in ((row.get("error") or {}).get("suggestions") or [])
+            if _relevant_suggestion(label, str(name))
+        ]
         if not shown_hits and not missing:
             lines.append(
                 _render(
@@ -1557,17 +1613,20 @@ def _read_experiment(run_id: str, reference: str) -> dict:
     elif found["code_status"] == "ambiguous":
         lines = [_render("read_experiment_ambiguous", experiment=reference)]
     else:
-        lines = [
-            _render(
-                "read_experiment",
-                experiment=found["experiment_id"],
-                outcome=found["outcome"],
-                validity=found["validity"],
-            ),
-            found["code"],
-        ]
-        if found.get("diagnostic"):
-            lines.append(found["diagnostic"])
+        # The outcome row already rendered this evidence. Read it back instead of projecting it again.
+        lines = [line for line in (found.get("rendered") or []) if isinstance(line, str)]
+        if not lines:
+            lines = [
+                _render(
+                    "read_experiment",
+                    experiment=found["experiment_id"],
+                    outcome=found["outcome"],
+                    validity=found["validity"],
+                ),
+                found["code"],
+            ]
+            if found.get("diagnostic"):
+                lines.append(found["diagnostic"])
     return reply.attach_context(
         run_id,
         reply.reply(items=[{"ref": found["experiment_id"], "ok": True, "lines": lines, "error": None, **found}]),
@@ -2018,6 +2077,23 @@ def _scratch_promote(
                 cold=verification["cold"],
             ),
         ]
+        if passed:
+            lines.append(
+                _render(
+                    "scratch_best",
+                    best="all-pin verified best" if verification["full"] == "passed" else "provisional best",
+                    node=node.id,
+                )
+            )
+        for name, delta in deltas.items():
+            if name == "heartbeats_by_version" and isinstance(delta, dict):
+                for version, change in delta.items():
+                    lines.append(_render("scratch_delta", name=f"heartbeats {version}", delta=change))
+            else:
+                lines.append(_render("scratch_delta", name=name, delta=delta))
+        for key in ("attempt_id", "derivation_id", "construction_operation_id"):
+            if promotion.get(key):
+                lines.append(_render("scratch_ref", name=key, value=promotion[key]))
     except Exception as error:
         references = {key: result.get(key) for key in (
             "node", "proof_id", "attempt_id", "derivation_id", "construction_operation_id",

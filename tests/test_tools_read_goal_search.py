@@ -537,6 +537,49 @@ class ToolReplyTextTests(CascadeToolCase):
         missing = tools.read_tool("T", "logic", {"node": node, "view": "outline", "step": "s9"})
         self.assertEqual(missing["error"]["code"], "unknown_step")
 
+    def test_v8_reply_preserves_actionable_evidence(self):
+        conclusion = "TargetConclusion"
+        binders = " ".join(f"(h{index} : Nat)" for index in range(30))
+        signature = f"Nat.long : ∀ {binders}, {conclusion} = {conclusion}"
+        hit = {
+            "name": "Nat.long",
+            "handle": "decl:Nat.long",
+            "signature": signature + " `tick",
+            "module": "Init",
+            "line": 3,
+            "why": "exact",
+        }
+        miss = {
+            "query": "Nope.missing",
+            "hits": [],
+            "error": {"code": "not_found", "input": "Nope.missing", "suggestions": ["List.nil"]},
+        }
+        with patch("arena.tools.search.search", return_value={"queries": [miss, {"query": "Nat.long", "hits": [hit]}]}):
+            found = tools.search_tool("T", "logic", {"queries": ["Nope.missing", "Nat.long"]})
+        miss_item, hit_item = found["items"]
+        shown = "\n".join(line for item in found["items"] for line in item["lines"])
+        self.assertTrue(miss_item["ok"])
+        self.assertEqual(miss_item.get("hits"), [])
+        self.assertNotIn("invalid", shown.lower())
+        self.assertNotIn("List.nil", shown)
+        self.assertIn(conclusion, shown)
+        self.assertEqual(hit_item["hits"][0]["signature"], signature + " `tick")
+        self.assertEqual(shown.count("`") % 2, 0)
+        saved = next(event for event in campaign.events(self.directory) if event.get("kind") == "search")
+        self.assertEqual(saved["hits"][0]["signature"], signature + " `tick")
+        target = "⊢ " + " ".join([conclusion] * 12)
+        goals = "\n".join(f"h{index} : Nat" for index in range(40)) + "\n" + target
+        node = self.sketch()
+        tried = self.goal_with_tries(
+            [{"returncode": 1, "output": "T.lean:2:2: error: unsolved goals\n" + goals}],
+            {"hole": f"{node}.h1", "try": ["sorry"]},
+        )
+        body = "\n".join(line for item in tried["items"] for line in item["lines"])
+        self.assertIn("open goals", body)
+        self.assertNotIn("error:", body)
+        self.assertIn(conclusion, body)
+        self.assertEqual(tried["items"][1]["goals"], goals)
+
 
 class ReadHandleForgivingTests(CascadeToolCase):
     def test_decl_handle_with_a_literal_first_last_suffix_reads_the_whole_declaration(self):
