@@ -4,7 +4,7 @@
 
 **Blocked by:** 08, 10, 11 (the Python implementations), 21 (shared tool schema)
 
-**Status:** needs-review
+**Status:** done
 
 **Branch:** `v8/21b-sol-management-tools`
 
@@ -38,6 +38,19 @@
 - [x] 4. A non-Sol actor cannot delegate or cancel, including by writing to the socket directly.
 - [x] 5. Documented input errors are rejected before dispatch with the documented class; the help from ticket 21 matches what executes.
 - [x] 6. Use one focused smoke for this slice. Actual Pi registration payloads and a real two-worker journey are final E2E coverage.
+
+## Review closure
+
+Sonnet and Claude reviews confirmed the following:
+- Identity comes only from the harness environment, and a body `actor_id` is ignored.
+- A missing tool-call id fails closed with `invalid_input/identity`.
+- A same-id retry returns the receipt without a second child, and different arguments give `operation_conflict`.
+- The coordinator rejects a non-Sol `delegate`/`cancel` even at the socket.
+- Nothing spawns a child outside the coordinator.
+
+One blocker was fixed in `srm`. `_delegate`/`_cancel` had been inserted inside `Coordinator.close()`, leaving its tail unreachable. Shutdown then kept `coordinator.json`, the socket directory and the run-owner lock (appendix F). `tests/test_recovery_runtime.py::test_startup_reconciles_before_endpoint` caught it; the named smoke did not exercise `close()`. The same commit makes an unexpected exception from delegate/cancel return a retryable `recovery_required` reply instead of dropping the connection, because the receipt may already be committed.
+
+Checks: `tests/test_recovery_runtime.py tests/test_coordinator_wait.py tests/test_orchestration.py` pass (15), ruff clean. Notes: `await_results` in protocol.py still falls back to a body `actor_id` when `ARENA_ACTOR_ID` is unset. `jobs` is not filtered by actor (Sol is the only delegator). The delegate help does not say that `proof` scope rejects steps/hole.
 
 ## Verify
 
