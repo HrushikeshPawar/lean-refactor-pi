@@ -4,7 +4,7 @@
 
 **Blocked by:** 04: Isolate actor state and enforce exact ownership; 09: Publish early results and resume the same hypothesis; 15: Promote an anchored replacement inside scratch
 
-**Status:** needs-review
+**Status:** done
 
 **Branch:** `v8/22-served-evidence`
 
@@ -59,6 +59,18 @@ Commit `ook` serves exact ledger bytes (`read_bytes`, byte offsets, sha256 per l
    - `_served_actors` keeps the first `session_id`; a multi-session actor must list all sessions or be marked ambiguous.
 
 Extend the existing smoke with one uncommitted-row case and one unknown-usage case. Do not add a test per bullet. Run the whole touched test files. `tests/test_graph.py` has 7 older failures (6 lineage/stall plus 1 that needs `lake`) and `tests/test_viewer.py::DataTests::test_dashboard_sections` is older too; report them unchanged unless this rework fixes them.
+
+## Review closure
+
+Rework `xxw` fixed both blockers. Node detail and experiment retrieval read only lines whose `operation_id` is absent or committed (the same predicate as `committed_history`), and `nN` resolves once against the published history for every part of the response. Serving reads spend through `_spend_view(_control_rows(...))` without taking the control lock or writing, and `cost.spent_usd` equals `spend.total`. Unknown usage reports `accounting: unknown`, torn cost-ledger lines are skipped, call references carry job, request and evaluation ids by explicit join, missing lineage and undecodable artifacts are explicit, and job-log rows carry `source`, activation, operation and event ids.
+
+Claude review fixes in the closing commit:
+- Settles were deduplicated by `request_id`, which `journal.ts` stamps from the extension's current request and can repeat across distinct charges (for example a compaction settle). That could under-count per-problem spend in reports. Deduplication now keys on the settle's own `id` plus compaction `session_entry_id`, so only a replayed row is dropped.
+- `_served_actors` dropped actors with no session; they are now listed with `session_status: missing`.
+
+Accepted deviation: intentional waiting is not shown, because `await_results` writes no durable wait row (only the delivery receipt on return). Showing it needs a new durable wait-start/wait-end row, which is deferred to final E2E/follow-up.
+
+Checks: `tests/test_viewer.py tests/test_summary.py tests/test_orchestration.py tests/test_tools_compile.py` give 88 passed. The only failure, `DataTests::test_dashboard_sections`, predates this ticket (stale v7-shaped cold fixture since v8-17). Ruff clean. Older failures outside this ticket, all predating it: 6 stale `test_graph.py` lineage/stall tests (v8-15/16), the `lake` packet test, `test_seed.py`/`test_golf.py` (8, `campaign._used_session` removed in v8-17 while `seed.py:175` still calls it: a real crash in seeded cold verification).
 
 ## Verify
 
