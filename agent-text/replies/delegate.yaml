@@ -1,0 +1,5 @@
+task: "Give task: what the worker should do."
+follow_up: "A follow-up sends only task and job_id; omit scope and at."
+scope: "A fresh job needs scope proof or step and at with a saved node."
+anchor_proof: "scope proof is the whole proof: send at with node only. For a step range use scope step with at node and steps [first, last], or hole."
+anchor_step: "scope step needs at with node plus exactly one of steps [first, last] or hole."

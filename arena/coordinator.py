@@ -14,7 +14,7 @@ import threading
 import uuid
 from pathlib import Path
 
-from arena import orchestration
+from arena import orchestration, text
 
 _MAX_REQUEST = 65536
 
@@ -218,29 +218,35 @@ class Coordinator:
         self.close()
 
 
+def _delegate_invalid(reason: str, operation_id, hint: str | None = None) -> dict:
+    """A rejected delegate body, with the one-line fix the model needs."""
+    return {"ok": False, "category": "invalid_input", "reason": reason,
+            "hint": text.render(f"replies/delegate.{hint or reason}"), "operation_id": operation_id}
+
+
 def _rejected_delegate(request: dict) -> dict | None:
     """Reject a delegate body before the coordinator opens a worker."""
     operation_id = request.get("operation_id")
     task = request.get("task")
     if not isinstance(task, str) or not task:
-        return {"ok": False, "category": "invalid_input", "reason": "task", "operation_id": operation_id}
+        return _delegate_invalid("task", operation_id)
     job_id = request.get("job_id")
     scope = request.get("scope")
     anchor = request.get("at")
     if job_id is not None:
         if not isinstance(job_id, str) or not job_id or scope is not None or anchor is not None:
-            return {"ok": False, "category": "invalid_input", "reason": "follow-up", "operation_id": operation_id}
+            return _delegate_invalid("follow-up", operation_id, "follow_up")
         return None
     if scope not in ("proof", "step") or not isinstance(anchor, dict) or not isinstance(anchor.get("node"), str) or not anchor.get("node"):
-        return {"ok": False, "category": "invalid_input", "reason": "scope", "operation_id": operation_id}
+        return _delegate_invalid("scope", operation_id)
     steps = anchor.get("steps")
     hole = anchor.get("hole")
     has_steps = isinstance(steps, list) and len(steps) == 2 and all(type(item) is int for item in steps)
     has_hole = isinstance(hole, str) and bool(hole)
     if scope == "step" and has_steps == has_hole:
-        return {"ok": False, "category": "invalid_input", "reason": "anchor", "operation_id": operation_id}
+        return _delegate_invalid("anchor", operation_id, "anchor_step")
     if scope == "proof" and ("steps" in anchor or "hole" in anchor):
-        return {"ok": False, "category": "invalid_input", "reason": "anchor", "operation_id": operation_id}
+        return _delegate_invalid("anchor", operation_id, "anchor_proof")
     return None
 
 

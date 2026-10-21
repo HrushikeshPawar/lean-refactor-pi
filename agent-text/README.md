@@ -222,7 +222,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `packet/sections.titles.worker` | 1 | Initial theorem packet | once per run |
 | `packet/sections.titles.worker_goals` | 6 | Initial theorem packet | once per run |
 | `packet/task` | 10 | Initial theorem packet | once per run |
-| `packet/team` | 65 | Initial theorem packet | once per run |
+| `packet/team` | 63 | Initial theorem packet | once per run |
 | `packet/team-cost` | 10 | Initial theorem packet | once per run |
 | `packet/worker` | 62 | Initial theorem packet | once per run |
 | `replies/check.could_not_run` | 7 | Tool replies | when the matching tool result occurs |
@@ -230,6 +230,11 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/check.failed` | 10 | Tool replies | when the matching tool result occurs |
 | `replies/check.passed` | 8 | Tool replies | when the matching tool result occurs |
 | `replies/check.queued` | 5 | Tool replies | when the matching tool result occurs |
+| `replies/delegate.anchor_proof` | 27 | Tool replies | when the matching tool result occurs |
+| `replies/delegate.anchor_step` | 15 | Tool replies | when the matching tool result occurs |
+| `replies/delegate.follow_up` | 11 | Tool replies | when the matching tool result occurs |
+| `replies/delegate.scope` | 14 | Tool replies | when the matching tool result occurs |
+| `replies/delegate.task` | 7 | Tool replies | when the matching tool result occurs |
 | `replies/merge.entry` | 5 | Tool replies | when the matching tool result occurs |
 | `replies/merge.hypothesis` | 5 | Tool replies | when the matching tool result occurs |
 | `replies/merge.none_checked` | 2 | Tool replies | when the matching tool result occurs |
@@ -423,12 +428,12 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `tools/compile.params.splice_steps` | 6 | Model tool definitions | every request |
 | `tools/compile.params.splice_text` | 6 | Model tool definitions | every request |
 | `tools/delegate.description` | 25 | Model tool definitions | every request |
-| `tools/delegate.params.at` | 11 | Model tool definitions | every request |
+| `tools/delegate.params.at` | 16 | Model tool definitions | every request |
 | `tools/delegate.params.at_hole` | 6 | Model tool definitions | every request |
 | `tools/delegate.params.at_node` | 4 | Model tool definitions | every request |
 | `tools/delegate.params.at_steps` | 6 | Model tool definitions | every request |
 | `tools/delegate.params.job_id` | 10 | Model tool definitions | every request |
-| `tools/delegate.params.scope` | 12 | Model tool definitions | every request |
+| `tools/delegate.params.scope` | 39 | Model tool definitions | every request |
 | `tools/delegate.params.task` | 5 | Model tool definitions | every request |
 | `tools/goal.description` | 41 | Model tool definitions | every request |
 | `tools/goal.params.hole` | 6 | Model tool definitions | every request |

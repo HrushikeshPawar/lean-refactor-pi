@@ -1,9 +1,9 @@
 description: "Give one hypothesis to a worker. A fresh job needs scope and an anchor. A follow-up sends task and job_id and keeps that job's anchor."
 params:
   task: "What the worker should do."
-  scope: "proof or step. Required for a fresh job. Rejected on a follow-up."
+  scope: "Required for a fresh job; rejected on a follow-up. proof: the worker searches the whole proof from the node; at has node only. step: the worker edits one part of the node; at has node plus steps or hole."
   job_id: "Existing job to resume. Omit when starting a fresh job."
-  at: "Parent node plus one step range or hole. Fresh jobs only."
+  at: "Saved parent node; with scope step, also exactly one of steps or hole. Fresh jobs only."
   at_node: "Immutable parent proof node."
   at_steps: "Inclusive step indexes, first then last."
   at_hole: "Hole to edit. Exclusive with steps."
