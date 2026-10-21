@@ -4,7 +4,7 @@
 
 **Blocked by:** 06: Enforce the stop before every provider dispatch; 15: Promote an anchored replacement inside scratch
 
-**Status:** needs-review
+**Status:** done
 
 **Branch:** `v8/16-stop-submission-races`
 
@@ -44,6 +44,14 @@ uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_orchestratio
 Expected: the named behavior check passes with no actual provider, Pi or Lean process. Aim for seconds and at most 60 seconds. No per-ticket full suite or slow suite.
 
 **Deferred to final E2E:** All five stop-race barriers across real Lean and background transforms. See the shared [final E2E checklist](../final-e2e.md).
+
+## Review closure
+
+Review found and corrected partial submission publication, cross-invocation authorization reuse, missing operation-conflict checks and the recoverable settlement/stop gap. Submission and refusal now use committed operation receipts covering the exact owner, proof, inputs, authorization and evaluation intent. Only the same committed invocation can replay after stop; a matching proof alone grants no authorization. Admission repairs a missing derived spend stop under the control lock.
+
+Probe, batch and salvage checks now admit their exact inputs before Lean. Batch precompilation remains available. Later candidate/probe outcomes use committed child operations linked to the original admission; refused results cannot become canonical graph nodes. Agent compilation commits exact selection with admission, preserving eligibility when checks finish after stop. Authorization decisions and tool history use committed projections, so partial candidate rows cannot bypass admission. Salvage test fixtures now pass committed operation identities to graph replay without weakening their assertions.
+
+Final check: `UV_CACHE_DIR=/tmp/arena-uv-cache uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_submission_control.py tests/test_stop_submission.py tests/test_orchestration.py::V8ControlSmokeTests::test_v8_stop_submission_order tests/test_scratch_promotion.py` — **9 passed, 9 subtests passed in 0.65s**. Touched-file Ruff passed. The worker also checked the affected salvage journeys with fake Lean. Independent caller review found no remaining blocker. No actual provider, Pi or Lean process ran; the broad suite and real process/five-barrier matrix remain final E2E coverage. Ticket 17 was not started.
 
 ---
 
