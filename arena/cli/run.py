@@ -21,10 +21,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import TypedDict
 
-from arena import lean_health, lean_session, text
+from rich.console import Console
+
+from arena import campaign, lean_health, lean_session, text
 from arena import models as model_config
 from arena.campaign import _runtime_event, autocheck, init, packet, run_dir, submission, write_state
-from arena.cli import live
+from arena.cli import live, run_report
 from arena.coordinator import Coordinator
 from arena.engine import ROOT
 from arena.provenance import code_version
@@ -78,12 +80,50 @@ class _Echo:
         return getattr(self.stream, name)
 
 
+class _LiveSink:
+    """While the live view is up, whole lines written to stdout or stderr become events in its panel (nothing is
+    printed over the layout). Once the view is gone, text goes to the real stream."""
+
+    def __init__(self, stream):
+        self.stream, self.partial = stream, ""
+
+    def write(self, data: str) -> int:
+        self.partial += data
+        *done, self.partial = self.partial.split("\n")
+        for line in done:
+            if line.strip():
+                emit(line)
+        return len(data)
+
+    def flush(self) -> None:
+        pass
+
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
+
+
+def emit(text_line: str) -> None:
+    """One operator line: in the live panel when it is up, else the setup panel or plain output."""
+    line = text_line if text_line.startswith("[") else f"[{datetime.now().astimezone().strftime('%H:%M:%S')}] {text_line}"
+    if _LIVE is None or not _LIVE.line(line):
+        stream = _LIVE_STREAMS[1] if _LIVE_STREAMS else sys.stdout
+        print(line, file=stream, flush=True)
+
+
+_LIVE_STREAMS: tuple | None = None  # the real (stdout, stderr) while the live view owns them
+
+
+def _phase_sink(directory: Path, event: dict) -> None:
+    note = run_report.phase_note(directory, event)
+    if note:
+        emit(note)
+
+
 class _Setup:
     """The setup phase (Lean session, health gate, warm-up) in a small live panel of its own; its lines are shown
     again inside the run view once Pi starts. Plain output when the panel cannot start."""
 
     def __init__(self, run_id: str):
-        from rich.console import Console
         from rich.live import Live
         from rich.panel import Panel
         from rich.text import Text
@@ -268,12 +308,19 @@ def live_view(args, directory: Path, health: dict | None, worker: subprocess.Pop
         merge_worker=worker,
         clear=bool(lines),
     )
+    global _LIVE_STREAMS
+    saved = (sys.stdout, sys.stderr)
     for line in lines:
         if _LIVE is None or not _LIVE.line(line):
             print(line, flush=True)
+    if _LIVE is not None:
+        _LIVE_STREAMS = saved
+        sys.stdout, sys.stderr = _LiveSink(saved[0]), _LiveSink(saved[1])
     try:
         yield
     finally:
+        sys.stdout, sys.stderr = saved
+        _LIVE_STREAMS = None
         display, _LIVE = _LIVE, None
         if display is not None:
             display.stop()
@@ -459,6 +506,7 @@ def _release_setup() -> None:
 
 
 def execute(options: RunOptions) -> int:
+    campaign.RUNTIME_SINK = _phase_sink
     try:
         return run(options)
     except KeyboardInterrupt:
@@ -467,6 +515,7 @@ def execute(options: RunOptions) -> int:
         print("interrupted before Pi started; no model spend", file=sys.stderr, flush=True)
         return 130
     finally:
+        campaign.RUNTIME_SINK = None
         _release_setup()
         _BACKGROUND["stop"].set()
         stop_lean_session()
@@ -939,6 +988,7 @@ def finish(
         report_path.write_text(json.dumps(cost_report_from_ledger(directory), indent=2) + "\n")
         print("Pi wrote no cost report for this segment; reconstructed it from the cost journal", file=sys.stderr)
     summary_phase_ended = False
+    fancy = live.enabled(args.plain)  # a terminal gets the rich summary; redirected output keeps plain text
     try:
         # Checks still queued when the model stopped are finished here (no model cost), on a normal end
         # and on an operator stop alike, so the submission reflects every candidate the model produced.
@@ -957,15 +1007,16 @@ def finish(
         answer = submission(args.run_id)
         _runtime_event(directory, {"kind": "phase", "phase_id": summary_phase_id, "phase": "summary", "status": "end"})
         summary_phase_ended = True
-        print(
-            f"Submission: {answer.get('candidate') or 'none'}"
-            + (
-                f" proxy {answer['proxy']} ({answer['tokens']} tok, {answer['heartbeats']} HB)"
-                if answer.get("candidate")
-                else f" ({answer['reason']})"
-            ),
-            flush=True,
-        )
+        if not fancy:
+            print(
+                f"Submission: {answer.get('candidate') or 'none'}"
+                + (
+                    f" proxy {answer['proxy']} ({answer['tokens']} tok, {answer['heartbeats']} HB)"
+                    if answer.get("candidate")
+                    else f" ({answer['reason']})"
+                ),
+                flush=True,
+            )
     except Exception as error:
         if "summary_phase_id" in locals() and not summary_phase_ended:
             _runtime_event(
@@ -980,20 +1031,14 @@ def finish(
             )
         print(f"Choosing the submission failed: {error}", file=sys.stderr)
     try:
-        print(
-            render_text(
-                write_summary(
-                    directory,
-                    "interrupted"
-                    if interrupted is not None and not tripped
-                    else lean_health.STOP_REASON
-                    if tripped
-                    else None,
-                )
-            ),
-            end="",
-            flush=True,
+        written = write_summary(
+            directory,
+            "interrupted" if interrupted is not None and not tripped else lean_health.STOP_REASON if tripped else None,
         )
+        if fancy:
+            run_report.print_run_summary(Console(), directory, written)
+        else:
+            print(render_text(written), end="", flush=True)
     except Exception as error:  # a summary failure must never hide the run's own result
         print(f"Run summary failed: {error}", file=sys.stderr)
     if tripped:
@@ -1016,9 +1061,10 @@ def finish(
         print("Arena limit configuration changed", file=sys.stderr)
         return 1
     spent_usd = float(report["spent_usd"])
-    print(f"Spent ${spent_usd:.6f} of the ${args.limit_usd:.2f} limit", flush=True)
+    if not fancy:
+        print(f"Spent ${spent_usd:.6f} of the ${args.limit_usd:.2f} limit", flush=True)
     cache = report.get("cache_utilization", {})
-    if cache.get("all", {}).get("reuse_pct") is not None:
+    if not fancy and cache.get("all", {}).get("reuse_pct") is not None:
         print(
             f"Cache hit rate: all={cache['all']['reuse_pct']:.1f}% recent-10={cache['recent_ten']['reuse_pct']:.1f}%",
             flush=True,

@@ -10,7 +10,6 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 import threading
 import time
 import uuid
@@ -783,14 +782,19 @@ def _append(directory: Path, event: dict) -> None:
     }
 
 
+# Set by `arena run` to show a concise human line for a phase; the event itself only goes to the ledger.
+RUNTIME_SINK: Callable[[Path, dict], None] | None = None
+
+
 def _runtime_event(directory: Path, event: dict) -> None:
-    """Persist and immediately mirror operator-facing lifecycle events to the campaign log."""
+    """Persist an operator-facing lifecycle event; never prints raw JSON."""
     _append(directory, event)
-    print(
-        json.dumps({"run_id": directory.name, **event}, ensure_ascii=False, separators=(",", ":")),
-        file=sys.stderr,
-        flush=True,
-    )
+    sink = RUNTIME_SINK
+    if sink is not None:
+        try:
+            sink(directory, event)
+        except Exception:  # a display problem must not break the run
+            pass
 
 
 def _evaluate(
