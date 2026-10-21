@@ -4,7 +4,7 @@
 
 **Blocked by:** 04: Isolate actor state and enforce exact ownership; 09: Publish early results and resume the same hypothesis; 15: Promote an anchored replacement inside scratch
 
-**Status:** needs-review
+**Status:** changes-requested
 
 **Branch:** `v8/22-served-evidence`
 
@@ -32,6 +32,33 @@
 - [x] 4. Retrieve original serialized lineage/artifact bytes and every alternate derivation through node/experiment detail without generated replacements.
 - [x] 5. Use existing viewer/replay fixtures with multi-actor histories, including duplicate proofs and historical ambiguity. Preserve lazy loading and escaped text.
 - [x] 6. Compaction memory is not part of this slice; prove complete original evidence access first.
+
+## Review findings (Claude, 2026-10-21)
+
+Commit `ook` serves exact ledger bytes (`read_bytes`, byte offsets, sha256 per line), adds no text/time/similarity inference, and introduces no new failures in `tests/test_viewer.py`/`tests/test_graph.py`. The items below are reopened.
+
+**Blockers**
+1. **Uncommitted rows leak into node detail.** `experiments.original_lines` (used by `viewer_data._lineage_records` and `experiments.retrieve`) scans raw `ledger.jsonl`. `attempts`/`derivations` come from `published_history` and the committed projection. After a crash between `append_ledger` and the committed receipt, the panel shows an attempt/derivation/scratch row that ticket 16 says must not exist. Select lines whose `operation_id` is absent or in `run_control.committed_operation_ids(directory)`, matching `committed_history`.
+2. **Two node numberings in one response.** `viewer_data` resolves `nN` via `_proof_of(read_jsonl(ledger), node)` (raw) in one place and via `published_history` in `_served_lineage`. One uncommitted candidate before the node shifts the numbering, so `attempts` describe one proof while `records`/`artifact` describe another. Resolve `proof_id` once from the published history and pass it through. Decision 26 asks for one projection.
+
+**Should-fix**
+3. **Serving must not write run state.** `serve._attributed_spend` calls `run_control.read_state`, which takes `control_lock` and can append `run_stop`/`accounting_failure` rows and rewrite `cost.json`. Every graph poll can therefore mutate the run and contend with writers. Read without repair, e.g. `_spend_view(_control_rows(directory))`.
+4. **One actual spend total (decisions 30, 63; appendix D).**
+   - With `control.jsonl` present, the payload carries both `spend.total` (control) and `cost.spent_usd` (legacy cost ledger), and they can disagree. Serve one total; derive any timeline from the same source or label it as a non-authoritative breakdown.
+   - The no-control fallback skips `usage_known: false` rows yet reports `accounting: "known"`. Report it as unknown/incomplete.
+   - The new `request_id` dedup makes the viewer disagree with `summary.ledger_spend` (0.2 vs 0.4 on the test ledger). Use one dedup rule in both, or none.
+   - A torn tail line in `cost-ledger.jsonl` makes `json.loads` raise a 500. Skip torn lines.
+5. **Joins and explicit missing (decisions 54, 57, 62).**
+   - `call_refs` lacks `job_id`, `request_id` and evaluation ids.
+   - Alternate attempts get a reference but no call.
+   - A legacy node without attempt/derivation events gets no `artifact`/`records`/missing marker; mark it missing explicitly.
+   - An undecodable artifact (`data.decode()`) raises a 500.
+6. **Job log is a raw dump.**
+   - `campaign._served_jobs` mixes orchestration jobs with runtime `job` events (`phase:kind:candidate` ids) under one `job_id` key, with no kind/activation/operation/event id, so consumers cannot tell them apart or join to originals.
+   - `kind == "wait"` rows are never written, so intentional waiting (decision 63) is not served. Derive the waiting state from `await_results` registration, or drop the claim.
+   - `_served_actors` keeps the first `session_id`; a multi-session actor must list all sessions or be marked ambiguous.
+
+Extend the existing smoke with one uncommitted-row case and one unknown-usage case. Do not add a test per bullet. Run the whole touched test files. `tests/test_graph.py` has 7 older failures (6 lineage/stall plus 1 that needs `lake`) and `tests/test_viewer.py::DataTests::test_dashboard_sections` is older too; report them unchanged unless this rework fixes them.
 
 ## Verify
 
