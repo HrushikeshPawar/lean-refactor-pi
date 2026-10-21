@@ -343,6 +343,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/tools.scratch_delta` | 2 | Tool replies | when the matching tool result occurs |
 | `replies/tools.scratch_experiment` | 9 | Tool replies | when the matching tool result occurs |
 | `replies/tools.scratch_failed` | 1 | Tool replies | when the matching tool result occurs |
+| `replies/tools.scratch_filed_unpromoted` | 11 | Tool replies | when the matching tool result occurs |
 | `replies/tools.scratch_general_only` | 8 | Tool replies | when the matching tool result occurs |
 | `replies/tools.scratch_helper_lines` | 15 | Tool replies | when the matching tool result occurs |
 | `replies/tools.scratch_inconclusive` | 15 | Tool replies | when the matching tool result occurs |

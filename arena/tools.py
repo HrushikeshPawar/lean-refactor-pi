@@ -2270,11 +2270,12 @@ def _scratch_promote(
         lines = [
             _render("scratch_experiment", experiment=experiment_id, outcome=outcome),
             _render(
-                "scratch_promoted",
+                "scratch_promoted" if passed else "scratch_filed_unpromoted",
                 node=node.id,
                 fast=verification["fast"],
                 full=verification["full"],
                 cold=verification["cold"],
+                **({} if passed else {"reason": promotion["reason"]}),
             ),
         ]
         best = _best_label(history, node.proof_id) if passed else None
