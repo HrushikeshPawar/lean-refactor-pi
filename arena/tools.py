@@ -1972,10 +1972,11 @@ def _scratch_promote(
         node = _node(run_id, result["node"])
         cold = next((row for row in reversed(history) if row.get("kind") == "cold_verification"
                      and row.get("candidate_id") == node.proof_id), None)
+        cold = campaign._cold_view(campaign.run_dir(run_id), history, cold)
         verification = {
             "fast": status if complete else "incomplete",
             "full": full,
-            "cold": "not_checked" if cold is None else (
+            "cold": "not_checked" if cold is None else cold.get("outcome") or (
                 "passed" if cold.get("confirmed") else (
                     "proof_error" if campaign._verification_outcome(cold) == "proof_error" else "inconclusive"
                 )

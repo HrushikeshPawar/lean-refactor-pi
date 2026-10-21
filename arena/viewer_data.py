@@ -539,7 +539,7 @@ def control_events(directory: Path, start: float | None) -> list[dict]:
     return rows
 
 
-def lean_mix(ledger: list[dict]) -> dict:
+def lean_mix(ledger: list[dict], directory: Path | None = None) -> dict:
     """How Lean ran: session (warm worker) versus cold compiles, per kind of check."""
     paths: dict[str, dict] = {}
     for event in ledger:
@@ -555,7 +555,12 @@ def lean_mix(ledger: list[dict]) -> dict:
             row["seconds"] = round(row["seconds"] + float(lean.get("seconds") or 0), 2)
             row["by_check"][label] = row["by_check"].get(label, 0) + 1
     colds = [e for e in ledger if e.get("kind") == "cold_verification"]
-    return {"paths": paths, "cold_verification": colds[-1] if colds else None}
+    cold = colds[-1] if colds else None
+    if directory is not None and cold is not None:
+        from arena.campaign import _cold_view
+
+        cold = _cold_view(directory, ledger, cold)
+    return {"paths": paths, "cold_verification": cold}
 
 
 def run_dashboard(run_id: str, directory: Path) -> dict:
@@ -586,7 +591,7 @@ def run_dashboard(run_id: str, directory: Path) -> dict:
         "route_progress": route_progress(route_rows),
         "controls": control_events(directory, start),
         "runtime_events": [e for e in ledger if e.get("kind") in ("phase", "job")][-100:],
-        "lean": lean_mix(ledger),
+        "lean": lean_mix(ledger, directory),
         "packet": packet_text,
     }
 

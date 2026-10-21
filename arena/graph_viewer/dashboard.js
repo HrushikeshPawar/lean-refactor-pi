@@ -232,7 +232,14 @@
     const mix = data.lean, paths = Object.entries(mix.paths), total = paths.reduce((a, [, v]) => a + v.runs, 0), cold = mix.cold_verification;
     const compile = total ? `<div class="line1"><span class="lbl">Compiles</span><div class="stack">${paths.map(([k, v], i) => `<span class="k${i}" data-width="${(100 * v.runs / total).toFixed(1)}" title="${esc(k)} ${v.runs}"></span>`).join('')}</div>
       <span class="small">${paths.map(([k, v]) => `${esc(k)} ${v.runs} · ${v.seconds}s`).join(' · ')}</span></div>` : '<div class="line1 muted">No Lean runs recorded.</div>';
-    const versions = cold ? `<div class="line1"><span class="lbl">Cold</span>${cold.confirmed ? badge('confirmed', 'good') : badge('not confirmed', 'bad')}${Object.entries(cold.passed || {}).map(([k, v]) => badge(`${k} ${v ? '✓' : '✗'}`, v ? 'good' : 'bad')).join('')}</div>
+    const coldOutcome = cold?.outcome || (cold?.confirmed ? 'passed' : 'inconclusive');
+    const pinBadges = Object.entries(cold?.passed || {}).map(([pin, passed]) => {
+      const info = cold.compat?.[pin] || {};
+      const outcome = info.outcome || (passed ? 'passed' : 'inconclusive');
+      return badge(`${pin} ${outcome === 'passed' ? '✓' : outcome === 'proof_error' ? '✗' : '?'}`,
+        outcome === 'passed' ? 'good' : outcome === 'proof_error' ? 'bad' : 'mid');
+    }).join('');
+    const versions = cold ? `<div class="line1"><span class="lbl">Cold</span>${badge(coldOutcome, coldOutcome === 'passed' ? 'good' : coldOutcome === 'proof_error' ? 'bad' : 'mid')}${cold.cause ? badge(cold.cause, 'mid') : ''}${pinBadges}</div>
       <div class="line1"><span class="lbl">Heartbeats</span><span>recorded ${num(cold.recorded_heartbeats)} · cold ${num(cold.cold_heartbeats)}</span>${cold.recorded_heartbeats === cold.cold_heartbeats ? badge('match', 'good') : badge('differ', 'mid')}</div>` : '<div class="line1"><span class="lbl">Cold</span><span class="muted">not run yet</span></div>';
     place('c-lean', `${compile}${versions}${data.submission ? `<div class="line1 small muted">Submission ${esc(data.submission.candidate)}: proxy ${esc(data.submission.proxy)}, ${esc(data.submission.tokens)} tok / ${esc(data.submission.heartbeats)} hb, ${esc(data.submission.verified_by)}</div>` : ''}`);
   }
