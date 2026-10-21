@@ -135,12 +135,14 @@ class PlanTests(unittest.TestCase):
 class ColdVerificationTests(unittest.TestCase):
     def test_cold_verification_compiles_every_version_and_rejects_one_failure(self):
         from arena import campaign
+        from tests.test_cold_outcomes import admit_fixture_proof
 
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
             (directory / "proofs").mkdir()
             (directory / "proofs" / "c1.lean").write_text("theorem t : True := by trivial\n")
-            history = [{"theorem": "T", "versions": ["v1", "v2"]}]
+            admit_fixture_proof(directory, "c1")
+            history = [{"theorem": "T", "versions": [["v1", "c1"], ["v2", "c2"]]}]
             calls = []
 
             def compile_version(_row, _proof, version, _commit, **_kwargs):
@@ -154,6 +156,7 @@ class ColdVerificationTests(unittest.TestCase):
                 mock.patch.object(campaign, "lean_lock", return_value=contextlib.nullcontext()),
                 mock.patch.object(campaign, "force_cold", return_value=contextlib.nullcontext()),
                 mock.patch("arena.engine.problem", return_value={"name": "T", "proof_length": 1}),
+                mock.patch.object(campaign, "problem", return_value={"name": "T", "version_info": [{"v1": "c1"}, {"v2": "c2"}]}),
                 mock.patch("arena.engine.versions", return_value=[("v1", "c1"), ("v2", "c2")]),
                 mock.patch("arena.engine.measure_version", return_value=("v1", "c1")),
                 mock.patch("arena.engine.validate_proof", return_value=1),
@@ -171,6 +174,7 @@ class ColdVerificationTests(unittest.TestCase):
 
     def test_v8_inconclusive_cold_uses_certified_fallback(self):
         from arena import campaign
+        from tests.test_cold_outcomes import admit_fixture_proof
 
         proof_a = "theorem t : True := by\n  exact True.intro\n"
         proof_b = "theorem t : True := by\n  trivial\n"
@@ -180,6 +184,8 @@ class ColdVerificationTests(unittest.TestCase):
             proofs.mkdir()
             (proofs / "higher.lean").write_text(proof_a)
             (proofs / "lower.lean").write_text(proof_b)
+            admit_fixture_proof(directory, "higher")
+            admit_fixture_proof(directory, "lower")
             original = (proofs / "higher.lean").read_bytes()
 
             def full(score: float) -> dict:
@@ -236,7 +242,12 @@ class ColdVerificationTests(unittest.TestCase):
                 mock.patch.object(campaign, "lean_lock", return_value=contextlib.nullcontext()),
                 mock.patch.object(campaign, "force_cold", return_value=contextlib.nullcontext()),
                 mock.patch.object(campaign, "_evaluate", side_effect=timeout),
+                mock.patch.object(campaign, "problem", return_value={"name": "T", "version_info": [{"v1": "c1"}]}),
             ):
+                identity, _proof, error = campaign._cold_input(directory, history, "lower", 10)
+                self.assertIsNone(error)
+                history[-1].update(identity)
+                (directory / "ledger.jsonl").write_text("".join(json.dumps(row) + "\n" for row in history))
                 answer = campaign.submission("run")
                 retry = campaign.cold_verify("run", {"id": "higher", "heartbeats": 10})
 

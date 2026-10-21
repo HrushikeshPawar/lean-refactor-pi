@@ -2017,6 +2017,7 @@ def _model_view(result: dict) -> dict:
     # `ok` says the tool ran; `compiled` says whether the draft compiled. On a failed compile the
     # heartbeat is only the work done before the error, not a cost of the draft.
     failed = any(not info.get("passed") for info in (result.get("compat") or {}).values())
+    view["outcome"] = _verification_outcome(result)
     if failed:
         view = {("heartbeat_to_failure" if key == "heartbeat" else key): value for key, value in view.items()}
         view["compiled"] = False
@@ -2033,7 +2034,8 @@ def _model_view(result: dict) -> dict:
     compat = {}
     for version, info in (result.get("compat") or {}).items():
         item = {"passed": bool(info.get("passed"))}
-        for key in ("heartbeats", "diagnostics", "full_diagnostics_ref", "error"):
+        for key in ("heartbeats", "diagnostics", "full_diagnostics_ref", "error", "outcome", "cause",
+                    "retryable", "exit_code", "timeout"):
             if info.get(key) not in (None, [], ""):
                 item["heartbeats_to_failure" if key == "heartbeats" and not item["passed"] else key] = info[key]
         lean = info.get("lean") or {}
@@ -2072,6 +2074,8 @@ def _verification_outcome(result: dict) -> str:
     """Separate an evaluated proof from checks that could not establish an outcome."""
     compat = result.get("compat") or {}
     if result.get("lean_unavailable") or result.get("timeout") or not compat:
+        if result.get("outcome") == "proof_error":
+            return "proof_error"
         return "inconclusive"
     if result.get("ok") is not False and all(info.get("passed") is True for info in compat.values()):
         return "passed"
@@ -2082,6 +2086,8 @@ def _verification_outcome(result: dict) -> str:
         and info.get("exit_code") == 1
         and not info.get("lean_unavailable")
         and not info.get("timeout")
+        and info.get("outcome") != "inconclusive"
+        and info.get("cause") not in {"context", "measurement", "resource_denial", "toolchain_unavailable", "worker_crash"}
         for info in compat.values()
     ):
         return "proof_error"
@@ -3262,6 +3268,21 @@ def _line_costs(proof: str, profile: dict | None) -> dict:
     return {"tactic": [row(line, spent) for line in tactic], "quiet": [row(line, stated) for line in quiet]}
 
 
+def _cold_view(directory: Path, history: list[dict], event: dict | None) -> dict | None:
+    """Present a cold check only for the bytes and context currently being inspected."""
+    if event is None:
+        return None
+    identity, _proof, error = _cold_input(
+        directory, history, event.get("proof_id") or event["candidate_id"], event.get("recorded_heartbeats")
+    )
+    if error or any(event.get(key) != value for key, value in identity.items()) or (
+        event.get("outcome") == "passed" and not _cold_passed(event)
+    ):
+        return {**event, "outcome": "inconclusive", "cause": "context", "confirmed": False, "retryable": True}
+    outcome = event.get("outcome") or ("passed" if _cold_passed(event) else "inconclusive")
+    return {**event, "outcome": outcome}
+
+
 def graph_state(run_id: str) -> dict:
     directory = run_dir(run_id)
     from arena.run_control import published_history
@@ -3358,6 +3379,8 @@ def graph_state(run_id: str) -> dict:
             else ("primary" if next(iter(compat.values()), {}).get("passed") else "fail")
         )
         node["verification"] = row["status"]
+        node["verification_outcome"] = _verification_outcome(result)
+        row["outcome"] = node["verification_outcome"]
         node["cold"] = None
         if row["status"] == "full" and row["local_proxy"] is not None and row["local_proxy"] > best_proxy:
             best_proxy = row["local_proxy"]
@@ -3372,7 +3395,14 @@ def graph_state(run_id: str) -> dict:
             ),
             None,
         )
-        node["cold"] = None if cold is None else bool(cold.get("confirmed"))
+        cold = _cold_view(directory, history, cold)
+        cold_outcome = None if cold is None else cold.get("outcome") or (
+            "passed" if cold.get("confirmed") else _verification_outcome(cold)
+        )
+        node["cold"] = True if cold_outcome == "passed" else False if cold_outcome == "proof_error" else None
+        node["cold_outcome"] = cold_outcome
+        node["cold_cause"] = None if cold is None else cold.get("cause")
+        node["cold_retryable"] = False if cold is None else bool(cold.get("retryable"))
     fingerprints: dict[str, set[str]] = {}
     for identifier in order:
         node = nodes[identifier]
@@ -4633,174 +4663,243 @@ COLD_ATTEMPTS = 2  # one original check plus one infrastructure retry of that sa
 
 
 def _pin_cause(info: dict) -> str:
-    """Why one pin failed to certify. A finished Lean error is the only proof failure."""
+    """Only a completed Lean error condemns a proof; structured infrastructure wins."""
     if info.get("timeout") or info.get("cause") == "timeout":
         return "timeout"
-    exit_code = info.get("exit_code")
-    if exit_code == 1 and info.get("passed") is False and not info.get("lean_unavailable"):
-        return "proof_error"
     if info.get("cause") in ("toolchain_unavailable", "resource_denial", "worker_crash", "context", "measurement"):
         return info["cause"]
-    if info.get("cause") == "worker_crash" or (isinstance(exit_code, int) and exit_code not in (0, 1)):
+    if info.get("outcome") == "inconclusive":
+        return info.get("cause") or "context"
+    if info.get("lean_unavailable"):
+        return "toolchain_unavailable"
+    if info.get("outcome") == "proof_error" or info.get("cause") == "proof_error":
+        return "proof_error"
+    exit_code = info.get("exit_code")
+    if exit_code == 1 and info.get("passed") is False:
+        return "proof_error"
+    if isinstance(exit_code, int) and exit_code not in (0, 1):
         return "worker_crash"
     blob = f"{info.get('error') or ''} {(info.get('lean') or {}).get('reason') or ''}".lower()
     if "timed out" in blob or "timeout" in blob:
         return "timeout"
-    if info.get("lean_unavailable"):
-        return "toolchain_unavailable"
     if "memory" in blob:
         return "resource_denial"
     return "context"
 
 
 def _classify_cold(compat: dict, confirmed: bool, close: bool, error: str | None = None) -> dict:
-    """passed, proof_error, or inconclusive. Inconclusive does not condemn the proof."""
+    """Inconclusive checks neither certify nor invalidate a submitted proof."""
     if confirmed:
         return {"outcome": "passed", "cause": None, "retryable": False}
     if error:
-        cause = _pin_cause({"error": error, "lean_unavailable": True})
-        if cause == "proof_error":
-            cause = "context"
-        return {"outcome": "inconclusive", "cause": cause, "retryable": True}
+        return {"outcome": "inconclusive", "cause": "context", "retryable": True}
     if compat and all(info.get("passed") is True for info in compat.values()) and not close:
         return {"outcome": "inconclusive", "cause": "measurement", "retryable": True}
     causes = [_pin_cause(info) for info in compat.values() if info.get("passed") is not True]
-    if any(cause == "proof_error" for cause in causes):
+    if "proof_error" in causes:
         return {"outcome": "proof_error", "cause": "proof_error", "retryable": False}
     return {"outcome": "inconclusive", "cause": causes[0] if causes else "context", "retryable": True}
 
 
-def _used_session(row: dict) -> bool:
-    """Whether the evaluation that made this candidate verified relied on a Lean session."""
-    full = [e for e in row["evaluations"] if e["status"] == "full"]
-    chosen = max(full, key=lambda e: e["score"] or -1, default=None)
-    return chosen is not None and any(
-        (info.get("lean") or {}).get("path") == "session" for info in (chosen["result"].get("compat") or {}).values()
-    )
-
-
 def _cold_events(history: list[dict], candidate_id: str) -> list[dict]:
-    return [
-        item
-        for item in history
-        if item.get("kind") == "cold_verification" and item.get("candidate_id") == candidate_id
-    ]
+    """Latest state of each attempt, retaining start and completion in the raw ledger."""
+    attempts = {}
+    for index, event in enumerate(history):
+        if event.get("kind") != "cold_verification" or event.get("candidate_id") != candidate_id:
+            continue
+        key = (event["check_id"], event["attempt"]) if event.get("check_id") and event.get("attempt") else (index,)
+        attempts.pop(key, None)
+        attempts[key] = event
+    return list(attempts.values())
 
 
 def _cold_passed(event: dict | None) -> bool:
-    """An already recorded all-pin cold pass. Missing outcome keeps the old confirmed flag."""
-    if not event:
+    """A positive event must explicitly establish every required pin."""
+    if not event or event.get("outcome") != "passed" or not event.get("confirmed"):
         return False
-    if event.get("outcome") == "proof_error":
-        return False
-    if event.get("outcome") == "passed":
-        return True
-    return bool(event.get("confirmed")) and event.get("outcome") != "inconclusive"
+    pins = [version for version, _commit in (event.get("context") or {}).get("pins", [])]
+    passed = event.get("passed") or {}
+    return bool(pins) and set(passed) == set(pins) and all(value is True for value in passed.values())
+
+
+def _cold_input(
+    directory: Path, history: list[dict], candidate_id: str, heartbeats: int | None
+) -> tuple[dict, str | None, str | None]:
+    """Identity covers the exact bytes, evaluator and immutable source/toolchain pins."""
+    errors = []
+    context = {"pins": history[0].get("versions") or [], "evaluator_sha256": None}
+    try:
+        context["evaluator_sha256"] = _evaluator_sha()
+    except (OSError, ValueError) as error:
+        errors.append(str(error))
+    proof_bytes = None
+    try:
+        proof_bytes = (directory / "proofs" / f"{candidate_id}.lean").read_bytes()
+        proof = proof_bytes.decode("utf-8")
+        from arena.run_control import _control_rows
+
+        committed = committed_operation_ids(directory)
+        submitted_hashes = {
+            event["proof_sha256"] for event in _control_rows(directory)
+            if event.get("kind") == "candidate_submission" and event.get("proof_id") == candidate_id
+            and event.get("operation_id") in committed and event.get("proof_sha256")
+        }
+        if submitted_hashes and submitted_hashes != {hashlib.sha256(proof_bytes).hexdigest()}:
+            errors.append("saved proof bytes do not match the committed submission hash")
+        elif not submitted_hashes and hashlib.sha256(
+            (history[0]["theorem"] + "\0" + proof).encode()
+        ).hexdigest() != candidate_id:
+            errors.append("saved proof bytes do not match the submitted proof identity")
+    except (OSError, UnicodeError) as error:
+        proof = None
+        errors.append(str(error))
+    try:
+        benchmark = problem(history[0]["theorem"])
+        context["benchmark_sha256"] = hashlib.sha256(
+            json.dumps(benchmark, sort_keys=True, ensure_ascii=False).encode()
+        ).hexdigest()
+        if json.loads(json.dumps(versions(benchmark))) != json.loads(json.dumps(context["pins"])):
+            errors.append("saved toolchain pins do not match the current benchmark")
+    except Exception as error:
+        errors.append(str(error))
+    identity = {
+        "proof_id": candidate_id,
+        "proof_sha256": hashlib.sha256(proof_bytes).hexdigest() if proof_bytes is not None else None,
+        "mode": "cold",
+        "context": context,
+        "recorded_heartbeats": heartbeats,
+    }
+    identity["check_id"] = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+    return identity, proof, "; ".join(errors) or None
+
+
+def _matching_cold(history: list[dict], identity: dict) -> list[dict]:
+    return [
+        event
+        for event in _cold_events(history, identity["proof_id"])
+        if event.get("check_id") == identity["check_id"]
+        and all(event.get(key) == value for key, value in identity.items())
+    ]
+
+
+def _certified_cold(directory: Path, history: list[dict], row: dict) -> dict | None:
+    identity, _proof, error = _cold_input(directory, history, row["id"], row.get("heartbeats"))
+    if error:
+        return None
+    matches = _matching_cold(history, identity)
+    return matches[-1] if matches and _cold_passed(matches[-1]) else None
 
 
 def cold_verify(run_id: str, row: dict) -> dict:
-    """Clean cold compile of one exact submitted proof on every toolchain.
-
-    A session result is only a fast estimate. A candidate chosen as the answer must also pass
-    a fresh `lake env lean` on every version, with heartbeats within tolerance of what was recorded.
-    A completed proof error is kept. Timeout, resource denial, a missing toolchain, a worker crash,
-    or a measurement/context failure is inconclusive and may be repeated, up to `COLD_ATTEMPTS`,
-    against the same proof bytes.
-    """
+    """Independently check exact submitted bytes, with one bounded infrastructure retry."""
     directory = run_dir(run_id)
-    history = events(directory)
-    prior = _cold_events(history, row["id"])
-    done = prior[-1] if prior else None
-    recorded = done.get("outcome") if done else None
-    if done and recorded is None and done.get("passed") and not all(done["passed"].values()):
-        recorded = "proof_error"
-    if done and (_cold_passed(done) or recorded == "proof_error" or not done.get("retryable", recorded != "proof_error")):
-        return done
-    if done and len(prior) >= COLD_ATTEMPTS:
-        return {**done, "retryable": False}
-    if lean_health.tripped(directory):
-        # Paused, not recorded: the verification can still run once Lean is healthy again.
-        return {
+    # Counting attempts and running the check share this lock across threads/processes.
+    with _candidate_lock(directory, row["id"]):
+        history = _published_events(directory)
+        identity, proof, context_error = _cold_input(directory, history, row["id"], row.get("heartbeats"))
+        prior = _matching_cold(history, identity)
+        done = prior[-1] if prior else None
+        if done and done.get("state") == "running":
+            # Acquiring the same candidate lock proves the previous checker is no longer
+            # executing. Its durable start consumes one attempt even without a receipt.
+            done = {key: value for key, value in done.items() if key != "ts"}
+            done.update(
+                state="finished",
+                outcome="inconclusive",
+                cause="worker_crash",
+                confirmed=False,
+                retryable=done["attempt"] < COLD_ATTEMPTS,
+                error="cold check interrupted before completion",
+                recovered=True,
+            )
+            _append(directory, done)
+        if done and (_cold_passed(done) or done.get("outcome") == "proof_error"):
+            return done
+        if done and (len(prior) >= COLD_ATTEMPTS or not done.get("retryable", True)):
+            return {**done, "retryable": False}
+        event = {
             "kind": "cold_verification",
             "candidate_id": row["id"],
-            "proof_id": row["id"],
-            "mode": "cold",
+            **identity,
+            "attempt": len(prior) + 1,
             "confirmed": False,
-            "outcome": "inconclusive",
-            "cause": "toolchain_unavailable",
-            "retryable": True,
-            "error": text.render("messages/errors.cold_verification_paused"),
-            "recorded_heartbeats": row["heartbeats"],
-            "paused": True,
+            "recorded_heartbeats": row.get("heartbeats"),
         }
-    name = history[0]["theorem"]
-    proof_path = directory / "proofs" / f"{row['id']}.lean"
-    proof = proof_path.read_text()
-    proof_sha = hashlib.sha256(proof.encode()).hexdigest()
-    phase_id = f"cold_verify:{os.getpid()}:{time.monotonic_ns()}"
-    started = time.monotonic()
-    _runtime_event(
-        directory,
-        {"kind": "phase", "phase": "cold_verify", "phase_id": phase_id, "status": "start", "candidate_id": row["id"]},
-    )
-    try:
-        with lean_lock(directory, "background"), force_cold():
-            cold = _evaluate(name, proof, "full", lane="background")
-        compat = cold["compat"]
-        passed = {version: bool(info.get("passed")) for version, info in compat.items()}
-        total = len(history[0].get("versions") or [1])
-        recorded, measured = row["heartbeats"], cold.get("heartbeat")
-        close = (
-            recorded is not None
-            and measured is not None
-            and abs(measured - recorded) <= COLD_TOLERANCE * max(recorded, 1)
+        event["attempt_id"] = hashlib.sha256(f"{identity['check_id']}:{event['attempt']}".encode()).hexdigest()
+        _append(
+            directory, {**event, "state": "running", "outcome": "inconclusive", "cause": "context", "retryable": True}
         )
-        confirmed = len(passed) == total and all(passed.values()) and close
-        classified = _classify_cold(compat, confirmed, close)
-        event = {
-            "kind": "cold_verification",
-            "candidate_id": row["id"],
-            "proof_id": row["id"],
-            "proof_sha256": proof_sha,
-            "mode": "cold",
-            "attempt": len(prior) + 1,
-            "confirmed": confirmed,
-            "passed": passed,
-            "compat": cold["compat"],
-            "recorded_heartbeats": recorded,
-            "cold_heartbeats": measured,
-            **classified,
-        }
-    except Exception as error:  # an unverifiable candidate must not be submitted
-        classified = _classify_cold({}, False, False, str(error)[:300])
-        event = {
-            "kind": "cold_verification",
-            "candidate_id": row["id"],
-            "proof_id": row["id"],
-            "proof_sha256": proof_sha,
-            "mode": "cold",
-            "attempt": len(prior) + 1,
-            "confirmed": False,
-            "error": str(error)[:300],
-            "recorded_heartbeats": row["heartbeats"],
-            **classified,
-        }
-    _append(directory, event)
-    _runtime_event(
-        directory,
-        {
-            "kind": "phase",
-            "phase": "cold_verify",
-            "phase_id": phase_id,
-            "status": "error" if event.get("error") else "end",
-            "candidate_id": row["id"],
-            "seconds": round(time.monotonic() - started, 2),
-            "confirmed": bool(event.get("confirmed")),
-            "error": event.get("error"),
-        },
-    )
-    return event
+        phase_id = f"cold_verify:{os.getpid()}:{time.monotonic_ns()}"
+        started = time.monotonic()
+        _runtime_event(
+            directory,
+            {
+                "kind": "phase",
+                "phase": "cold_verify",
+                "phase_id": phase_id,
+                "status": "start",
+                "candidate_id": row["id"],
+            },
+        )
+        try:
+            if context_error:
+                event.update(_classify_cold({}, False, False, context_error), error=context_error)
+            elif lean_health.tripped(directory):
+                event.update(
+                    outcome="inconclusive",
+                    cause="resource_denial",
+                    retryable=True,
+                    error=text.render("messages/errors.cold_verification_paused"),
+                    paused=True,
+                )
+            else:
+                with lean_lock(directory, "background"), force_cold():
+                    cold = _evaluate(history[0]["theorem"], proof, "full", lane="background")
+                compat = cold.get("compat") or {}
+                passed = {
+                    version: info.get("passed") is True and info.get("outcome", "passed") == "passed"
+                    for version, info in compat.items()
+                }
+                recorded, measured = row.get("heartbeats"), cold.get("heartbeat")
+                close = (
+                    recorded is not None
+                    and measured is not None
+                    and abs(measured - recorded) <= COLD_TOLERANCE * max(recorded, 1)
+                )
+                required = {version for version, _commit in identity["context"]["pins"]}
+                confirmed = bool(required) and set(passed) == required and all(passed.values()) and close
+                event.update(
+                    confirmed=confirmed,
+                    passed=passed,
+                    compat=compat,
+                    cold_heartbeats=measured,
+                    **_classify_cold(compat, confirmed, close),
+                )
+        except Exception as error:
+            from arena.engine import ProofValidityError
 
+            if isinstance(error, ProofValidityError):
+                event.update(outcome="proof_error", cause="validity_error", retryable=False, error=str(error))
+            else:
+                event.update(_classify_cold({}, False, False, str(error)), error=str(error))
+        if event.get("outcome") == "inconclusive" and event["attempt"] >= COLD_ATTEMPTS:
+            event["retryable"] = False
+        event["state"] = "finished"
+        _append(directory, event)
+        _runtime_event(
+            directory,
+            {
+                "kind": "phase",
+                "phase": "cold_verify",
+                "phase_id": phase_id,
+                "status": "error" if event.get("error") else "end",
+                "candidate_id": row["id"],
+                "seconds": round(time.monotonic() - started, 2),
+                "confirmed": bool(event.get("confirmed")),
+                "error": event.get("error"),
+            },
+        )
+        return event
 
 _HARNESS_ORIGINS = frozenset({"auto_merge", "assembly", "golf", "harness", "salvage"})
 
@@ -4900,10 +4999,10 @@ def submission(run_id: str) -> dict:
     """The run's answer: the best candidate that passes every version. Written by the harness so
     nothing depends on the model remembering to submit.
 
-    A candidate whose checks ran in a Lean session is re-verified by a clean cold compile first; one
-    that fails it is skipped and listed under `rejected_on_cold`."""
+    Every candidate requires independent all-pin cold certification. Infrastructure failures
+    retain uncertainty and permit only an already-certified eligible fallback."""
     directory = run_dir(run_id)
-    history = events(directory)
+    history = _published_events(directory)
     rows = _summaries(history)
     # Harness transformations need selection of this exact proof in addition to verification.
     pool = sorted(
@@ -4921,10 +5020,7 @@ def submission(run_id: str) -> dict:
     )
     best, rejected, cold, pending = None, [], None, []
     for index, row in enumerate(pool):
-        if not _used_session(row):
-            best = row
-            break
-        certified = next((item for item in reversed(_cold_events(history, row["id"])) if _cold_passed(item)), None)
+        certified = _certified_cold(directory, history, row)
         if certified:
             best, cold = row, certified
             break
@@ -4961,7 +5057,7 @@ def submission(run_id: str) -> dict:
                 }
             )
             for later in pool[index + 1 :]:
-                prior = next((item for item in reversed(_cold_events(history, later["id"])) if _cold_passed(item)), None)
+                prior = _certified_cold(directory, _published_events(directory), later)
                 if prior:
                     best, cold = later, prior
                     break
@@ -4976,21 +5072,26 @@ def submission(run_id: str) -> dict:
                 "outcome": cold.get("outcome", "proof_error"),
             }
         )
+    proof_bytes = None
+    if best is not None:
+        try:
+            proof_bytes = (directory / "proofs" / f"{best['id']}.lean").read_bytes()
+            if hashlib.sha256(proof_bytes).hexdigest() != cold["proof_sha256"]:
+                raise ValueError("proof bytes changed after cold certification")
+        except (OSError, ValueError) as error:
+            pending.append({"candidate_id": best["id"], "outcome": "inconclusive",
+                            "cause": "context", "retryable": False, "error": str(error)})
+            best = None
     if best is None:
         answer = {
             "ok": True,
             "candidate": None,
             "reason": "no model candidate passed every version; the original proof stands",  # log: internal record # not-model-facing
         }
-        if pending:
-            answer["reason"] = "no certified submission exists"  # log: internal record # not-model-facing
-        elif rejected:
-            answer["reason"] = (
-                "no candidate that passed in the Lean session also passed a clean cold compile"  # log: internal record # not-model-facing
-            )
+        answer["reason"] = "no certified submission exists"  # log: internal record # not-model-facing
+        (directory / "submission.lean").unlink(missing_ok=True)
     else:
-        proof = (directory / "proofs" / f"{best['id']}.lean").read_text()
-        (directory / "submission.lean").write_text(proof)
+        (directory / "submission.lean").write_bytes(proof_bytes)
         answer = {
             "ok": True,
             "candidate": f"#{best['n']}",
@@ -4999,9 +5100,7 @@ def submission(run_id: str) -> dict:
             "heartbeats": best["heartbeats"],
             "proxy": best["score"],
             "proof_file": "submission.lean",
-            "verified_by": "cold compile"
-            if cold and cold["confirmed"]
-            else "cold compile (no session used)",  # log: internal record # not-model-facing
+            "verified_by": "cold compile",  # log: internal record # not-model-facing
         }
         if cold and cold["confirmed"]:
             # The clean compile is the certified measurement; the session figure is kept for audit.

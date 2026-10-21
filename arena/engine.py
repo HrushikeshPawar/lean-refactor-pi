@@ -74,6 +74,10 @@ def versions(row: dict) -> list[tuple[str, str]]:
     return [(version, commit) for pair in row["version_info"] for version, commit in pair.items()]
 
 
+class ProofValidityError(ValueError):
+    """The submitted target text violates the proof validity rules."""
+
+
 def validate_proof(row: dict, proof: str, allow_sorry: bool = False) -> int:
     statement = row["statement"]
     if not proof.startswith(statement):
@@ -753,6 +757,7 @@ def compile_version(
     if output is None:
         return {
             "passed": False,
+            "outcome": "inconclusive",
             "timeout": True,
             "cause": "timeout",
             "retryable": True,
@@ -773,9 +778,37 @@ def compile_version(
         "raw_output": output,
         "lean": lean_run,
     }
-    if isinstance(returncode, int) and returncode not in (0, 1):
-        result["cause"] = "worker_crash"
-        result["retryable"] = True
+    if passed:
+        result.update(outcome="passed", cause=None, retryable=False)
+    else:
+        diagnostics = [item for item in parse_diagnostics(output) if item["severity"] == "error"]
+        resource_error = re.compile(
+            r"(?im)^\s*(?:\(kernel\)\s*|(?:fatal\s+)?error:\s*|Lean:\s*)*"
+            r"(?:out of memory|failed to allocate memory|cannot allocate memory|resource temporarily unavailable)\b"
+        )
+        target_errors = [
+            item for item in diagnostics
+            for line, in_wrapper in [map_measured_line(item["line"], wrapper_start)
+                                     if wrapper_start is not None else (item["line"], False)]
+            if not in_wrapper and built["start_line"] <= line <= built["end_line"]
+        ]
+        target_error = any(not resource_error.search(item["message"]) for item in target_errors)
+        wrapper_error = wrapper_start is not None and any(
+            item["severity"] == "error" and map_measured_line(item["line"], wrapper_start)[1]
+            for item in parse_diagnostics(output)
+        )
+        if returncode == 1 and target_error:
+            cause = "proof_error"
+        elif returncode not in (0, 1):
+            cause = "worker_crash"
+        elif wrapper_error or (returncode == 0 and measure and match is None):
+            cause = "measurement"
+        elif resource_error.search(output) or any(resource_error.search(item["message"]) for item in diagnostics):
+            cause = "resource_denial"
+        else:
+            cause = "context"
+        result.update(outcome="proof_error" if cause == "proof_error" else "inconclusive",
+                      cause=cause, retryable=cause != "proof_error")
     return result
 
 
@@ -792,7 +825,10 @@ def evaluate(name: str, proof: str, mode: str = "fast", known: dict | None = Non
 
     row = problem(name)
     probe = mode == "probe"
-    length = validate_proof(row, proof, allow_sorry=probe)
+    try:
+        length = validate_proof(row, proof, allow_sorry=probe)
+    except ValueError as error:
+        raise ProofValidityError(str(error)) from error
     targets = versions(row)
     if not targets:
         raise ValueError(text.render("messages/errors.toolchains_missing"))
