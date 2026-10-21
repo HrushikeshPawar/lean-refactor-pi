@@ -169,6 +169,93 @@ class ColdVerificationTests(unittest.TestCase):
             self.assertFalse(result["confirmed"])
             self.assertEqual(result["passed"], {"v1": True, "v2": False})
 
+    def test_v8_inconclusive_cold_uses_certified_fallback(self):
+        from arena import campaign
+
+        proof_a = "theorem t : True := by\n  exact True.intro\n"
+        proof_b = "theorem t : True := by\n  trivial\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            proofs = directory / "proofs"
+            proofs.mkdir()
+            (proofs / "higher.lean").write_text(proof_a)
+            (proofs / "lower.lean").write_text(proof_b)
+            original = (proofs / "higher.lean").read_bytes()
+
+            def full(score: float) -> dict:
+                return {
+                    "ok": True,
+                    "mode": "full",
+                    "tokens": 4,
+                    "heartbeat": 10,
+                    "compat": {"v1": {"passed": True, "heartbeats": 10, "lean": {"path": "session"}}},
+                    "metrics": {"proxy": score},
+                }
+
+            history = [
+                {"kind": "problem", "theorem": "T", "versions": [["v1", "c1"]]},
+                {"kind": "candidate", "candidate_id": "higher", "origin": "model"},
+                {"kind": "evaluation", "candidate_id": "higher", "mode": "full", "result": full(90)},
+                {"kind": "candidate", "candidate_id": "lower", "origin": "model"},
+                {"kind": "evaluation", "candidate_id": "lower", "mode": "full", "result": full(70)},
+                {
+                    "kind": "cold_verification",
+                    "candidate_id": "lower",
+                    "confirmed": True,
+                    "outcome": "passed",
+                    "passed": {"v1": True},
+                    "mode": "cold",
+                    "cold_heartbeats": 10,
+                    "recorded_heartbeats": 10,
+                },
+            ]
+            (directory / "ledger.jsonl").write_text(
+                "".join(json.dumps(row) + "\n" for row in history)
+            )
+            seen = []
+
+            def timeout(_name, proof, _mode, **_kwargs):
+                seen.append(proof)
+                return {
+                    "ok": True,
+                    "mode": "full",
+                    "compat": {
+                        "v1": {
+                            "passed": False,
+                            "timeout": True,
+                            "error": "Lean timed out",
+                            "diagnostics": ["clock"],
+                        }
+                    },
+                    "heartbeat": None,
+                }
+
+            with (
+                mock.patch.object(campaign, "run_dir", return_value=directory),
+                mock.patch.object(campaign.lean_health, "tripped", return_value=None),
+                mock.patch.object(campaign, "lean_lock", return_value=contextlib.nullcontext()),
+                mock.patch.object(campaign, "force_cold", return_value=contextlib.nullcontext()),
+                mock.patch.object(campaign, "_evaluate", side_effect=timeout),
+            ):
+                answer = campaign.submission("run")
+                retry = campaign.cold_verify("run", {"id": "higher", "heartbeats": 10})
+
+            self.assertEqual(answer["candidate_id"], "lower")
+            self.assertNotIn("rejected_on_cold", answer)
+            pending = answer["pending_checks"]
+            self.assertEqual(pending[0]["candidate_id"], "higher")
+            self.assertEqual(pending[0]["outcome"], "inconclusive")
+            self.assertEqual(pending[0]["cause"], "timeout")
+            self.assertEqual(seen, [proof_a, proof_a])
+            self.assertEqual(retry["outcome"], "inconclusive")
+            self.assertEqual(retry["proof_id"], "higher")
+            self.assertEqual(retry["mode"], "cold")
+            self.assertIn("clock", json.dumps(retry.get("compat")))
+            self.assertEqual((proofs / "higher.lean").read_bytes(), original)
+            kinds = [json.loads(line)["kind"] for line in (directory / "ledger.jsonl").read_text().splitlines()]
+            self.assertEqual(kinds.count("candidate"), 2)
+            self.assertGreaterEqual(kinds.count("cold_verification"), 3)
+
 
 class GateTests(unittest.TestCase):
     def test_packet_failure_aborts_before_any_run(self):

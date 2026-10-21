@@ -753,6 +753,9 @@ def compile_version(
     if output is None:
         return {
             "passed": False,
+            "timeout": True,
+            "cause": "timeout",
+            "retryable": True,
             "error": agent_text.render("messages/errors.lean_timeout", timeout=timeout),
             "lean": lean_run,
         }
@@ -770,6 +773,9 @@ def compile_version(
         "raw_output": output,
         "lean": lean_run,
     }
+    if isinstance(returncode, int) and returncode not in (0, 1):
+        result["cause"] = "worker_crash"
+        result["retryable"] = True
     return result
 
 
