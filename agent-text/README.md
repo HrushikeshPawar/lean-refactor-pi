@@ -123,10 +123,20 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `messages/salvage.salvaged` | 6 | Agent messages and notices | when the matching event occurs |
 | `messages/salvage.salvaged_unseen` | 11 | Agent messages and notices | when the matching event occurs |
 | `messages/trim.result_stub` | 9 | Agent messages and notices | when a repeat is shortened |
-| `packet/price-table` | 16 | Prices action replies | when the table is requested |
-| `packet/price-table.legend` | 34 | Prices action replies | when the table is requested |
-| `packet/price-table.row` | 15 | Prices action replies | when the table is requested |
-| `packet/price-table.total` | 19 | Prices action replies | when the table is requested |
+| `packet/price-table` | 12 | Prices action replies | when the table is requested |
+| `packet/price-table.detail` | 9 | Prices action replies | when the table is requested |
+| `packet/price-table.detail_assumption` | 20 | Prices action replies | when the table is requested |
+| `packet/price-table.detail_head` | 14 | Prices action replies | when the table is requested |
+| `packet/price-table.detail_row` | 9 | Prices action replies | when the table is requested |
+| `packet/price-table.hotspot` | 21 | Prices action replies | when the table is requested |
+| `packet/price-table.hotspot_omitted` | 8 | Prices action replies | when the table is requested |
+| `packet/price-table.legend` | 14 | Prices action replies | when the table is requested |
+| `packet/price-table.missing_hb` | 18 | Prices action replies | when the table is requested |
+| `packet/price-table.no_hb` | 10 | Prices action replies | when the table is requested |
+| `packet/price-table.row` | 11 | Prices action replies | when the table is requested |
+| `packet/price-table.row_no_hb` | 9 | Prices action replies | when the table is requested |
+| `packet/price-table.summary` | 28 | Prices action replies | when the table is requested |
+| `packet/price-table.zero` | 10 | Prices action replies | when the table is requested |
 | `packet/restart.island_blank` | 29 | Initial theorem packet | once per run |
 | `packet/restart.island_start` | 22 | Initial theorem packet | once per run |
 | `packet/restart.island_statement` | 6 | Initial theorem packet | once per run |
@@ -137,7 +147,9 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `packet/restart.tried_line` | 5 | Initial theorem packet | once per run |
 | `packet/restart.tried_no_gain` | 7 | Initial theorem packet | once per run |
 | `packet/scoring` | 144 | Initial theorem packet | once per run |
+| `packet/search` | 103 | Initial theorem packet | once per run |
 | `packet/sections.fixed.budget_certification_failed` | 8 | Initial theorem packet | once per run |
+| `packet/sections.fixed.catalog_line` | 4 | Initial theorem packet | once per run |
 | `packet/sections.fixed.context_missing` | 4 | Initial theorem packet | once per run |
 | `packet/sections.fixed.dependency_intro` | 13 | Initial theorem packet | once per run |
 | `packet/sections.fixed.dependency_name` | 1 | Initial theorem packet | once per run |
@@ -160,8 +172,8 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `packet/sections.fixed.namespace` | 2 | Initial theorem packet | once per run |
 | `packet/sections.fixed.none` | 1 | Initial theorem packet | once per run |
 | `packet/sections.fixed.packet_not_certifiable` | 6 | Initial theorem packet | once per run |
-| `packet/sections.fixed.pin` | 6 | Initial theorem packet | once per run |
-| `packet/sections.fixed.pins` | 6 | Initial theorem packet | once per run |
+| `packet/sections.fixed.pin` | 2 | Initial theorem packet | once per run |
+| `packet/sections.fixed.pins` | 17 | Initial theorem packet | once per run |
 | `packet/sections.fixed.profile_line` | 11 | Initial theorem packet | once per run |
 | `packet/sections.fixed.profile_selfref` | 33 | Initial theorem packet | once per run |
 | `packet/sections.fixed.profile_total` | 22 | Initial theorem packet | once per run |
@@ -172,7 +184,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `packet/sections.fixed.type_construct` | 4 | Initial theorem packet | once per run |
 | `packet/sections.fixed.type_coverage` | 10 | Initial theorem packet | once per run |
 | `packet/sections.fixed.type_definition` | 5 | Initial theorem packet | once per run |
-| `packet/sections.fixed.used_intro` | 24 | Initial theorem packet | once per run |
+| `packet/sections.fixed.used_intro` | 18 | Initial theorem packet | once per run |
 | `packet/sections.fixed.used_line` | 4 | Initial theorem packet | once per run |
 | `packet/sections.fixed.used_preview` | 11 | Initial theorem packet | once per run |
 | `packet/sections.required.dependencies` | 3 | Initial theorem packet | once per run |
@@ -287,21 +299,21 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/tools.read_experiment_missing` | 4 | Tool replies | when the matching tool result occurs |
 | `replies/tools.read_hole` | 5 | Tool replies | when the matching tool result occurs |
 | `replies/tools.read_node_source` | 10 | Tool replies | when the matching tool result occurs |
-| `replies/tools.read_outline_cols` | 15 | Tool replies | when the matching tool result occurs |
+| `replies/tools.read_outline_cols` | 13 | Tool replies | when the matching tool result occurs |
 | `replies/tools.read_outline_cut` | 8 | Tool replies | when the matching tool result occurs |
-| `replies/tools.read_outline_hint` | 18 | Tool replies | when the matching tool result occurs |
-| `replies/tools.read_outline_row` | 13 | Tool replies | when the matching tool result occurs |
+| `replies/tools.read_outline_hint` | 19 | Tool replies | when the matching tool result occurs |
+| `replies/tools.read_outline_row` | 11 | Tool replies | when the matching tool result occurs |
 | `replies/tools.read_price_row` | 7 | Tool replies | when the matching tool result occurs |
 | `replies/tools.read_range` | 1 | Tool replies | when the matching tool result occurs |
 | `replies/tools.read_source` | 3 | Tool replies | when the matching tool result occurs |
 | `replies/tools.read_step` | 3 | Tool replies | when the matching tool result occurs |
 | `replies/tools.read_step_after` | 2 | Tool replies | when the matching tool result occurs |
 | `replies/tools.read_step_before` | 2 | Tool replies | when the matching tool result occurs |
-| `replies/tools.read_tree_cols` | 17 | Tool replies | when the matching tool result occurs |
-| `replies/tools.read_tree_head` | 34 | Tool replies | when the matching tool result occurs |
-| `replies/tools.read_tree_more` | 5 | Tool replies | when the matching tool result occurs |
+| `replies/tools.read_tree_cols` | 15 | Tool replies | when the matching tool result occurs |
+| `replies/tools.read_tree_head` | 26 | Tool replies | when the matching tool result occurs |
+| `replies/tools.read_tree_more` | 10 | Tool replies | when the matching tool result occurs |
 | `replies/tools.read_tree_pending` | 15 | Tool replies | when the matching tool result occurs |
-| `replies/tools.read_tree_row` | 15 | Tool replies | when the matching tool result occurs |
+| `replies/tools.read_tree_row` | 13 | Tool replies | when the matching tool result occurs |
 | `replies/tools.read_tree_total` | 23 | Tool replies | when the matching tool result occurs |
 | `replies/tools.read_tree_total_floor` | 22 | Tool replies | when the matching tool result occurs |
 | `replies/tools.refresh_tail` | 6 | Tool replies | when the matching tool result occurs |

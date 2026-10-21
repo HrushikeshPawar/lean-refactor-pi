@@ -41,4 +41,4 @@ node_status:
 price_columns:
   template: "packet/price-table.legend"
   numbers: "computed per step"
-  marker: "self_hb: heartbeats"
+  marker: "incl_hb: heartbeats"

@@ -45,7 +45,7 @@ memory_library_lines: 15
 memory_read_entries: 30
 budget:
   static_words: 685
-  packet_words: 214
+  packet_words: 290
   reply_words: 40
 # Steps below the step table are named when tried at most this often and still worth at least this many points.
 untried_step_max_tries: 2

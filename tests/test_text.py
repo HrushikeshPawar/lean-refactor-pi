@@ -252,6 +252,7 @@ class TextRendererTests(unittest.TestCase):
             "packet/scoring",
             "packet/price-table",
             "packet/price-table.legend",
+            "packet/search",
             "packet/sections.titles.goals",
             "packet/sections.titles.library",
         )

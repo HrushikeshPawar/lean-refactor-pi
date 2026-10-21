@@ -745,23 +745,32 @@ class TruncationTests(unittest.TestCase):
         self.assertNotIn("entry 39 ", first)
 
 
-@slow
-@LEAN
-class FixturePacketTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.text = context.render_packet(NAME)
+def _live_packet(test):
+    def wrapped(self):
+        if type(self).text is None:
+            type(self).text = context.render_packet(NAME)
+        return test(self)
 
+    wrapped.__name__ = test.__name__
+    return slow(LEAN(wrapped))
+
+
+class FixturePacketTests(unittest.TestCase):
+    text = None
+
+    @_live_packet
     def test_statement_types_are_defined_with_constructors(self):
         self.assertIn("Core.UpdateStates.update_some", self.text)
         self.assertIn("Core.InitStates.init_some", self.text)
         self.assertIn("Imperative.SemanticStore", self.text)
 
+    @_live_packet
     def test_earlier_lemmas_and_used_constants_include_namespaced_and_library_names(self):
         self.assertIn("Core.InitStatesSomeMonotone", self.text)
         self.assertIn("List.unzip_zip", self.text)
         self.assertIn("Core.updatedStatesInit [theorem]", self.text)
 
+    @_live_packet
     def test_relevant_lemmas_are_ranked_ahead_of_nearby_unrelated_ones(self):
         ranked = [e["item"]["name"] for e in context.score_earlier(context.lean_context(NAME))]
         for name in ("Core.updatedStatesUpdate", "Core.updatedStatesDefMonotone", "Core.updatedStatesComm"):
@@ -769,12 +778,14 @@ class FixturePacketTests(unittest.TestCase):
             self.assertLess(ranked.index(name), 12, name)
         self.assertIn(context.EARLIER_TITLE, self.text)
 
+    @_live_packet
     def test_pinned_constant_index_keeps_elaborated_constructor_queryable(self):
         indexed = context.constant_index(
             context.lean_context(NAME), name="Exists.intro", kind="constructor", origin="elaborated-proof"
         )
         self.assertEqual(len(indexed), 1)
 
+    @_live_packet
     def test_cached_constant_ranges_match_one_based_source_coordinates(self):
         indexed = context.constant_index(context.lean_context(NAME), name="Core.updatedStates")
         self.assertEqual(len(indexed), 1)
@@ -782,6 +793,7 @@ class FixturePacketTests(unittest.TestCase):
         source = campaign.source_range(NAME, "decl:Core.updatedStates")
         self.assertEqual((entry["start_line"], entry["end_line"]), (source["line"], source["end_line"]))
 
+    @_live_packet
     def test_tags_classify_generated_instance_core_and_project_constants(self):
         tags = {item["name"]: item["tag"] for item in context.lean_context(NAME)["constant"]}
         self.assertTrue(all(tag == "generated" for name, tag in tags.items() if "_simp_" in name))
@@ -789,14 +801,17 @@ class FixturePacketTests(unittest.TestCase):
         self.assertEqual(tags.get("Core.updatedStatesInit"), "helper")
         self.assertNotIn("of_eq_true\n", self.text)
 
+    @_live_packet
     def test_pins_and_imports_are_stated_once(self):
         self.assertEqual(self.text.count("Available imports"), 1)
         self.assertEqual(self.text.count("Lean toolchain and source revisions"), 1)
 
+    @_live_packet
     def test_source_occurrences_can_appear_in_both_statement_and_proof(self):
         items = [item for item in context.lean_context(NAME)["source"] if item["name"] == "Core.updatedStates"]
         self.assertEqual({item["origin"] for item in items}, {"statement", "proof"})
 
+    @_live_packet
     def test_goal_steps_prices_and_exchange_rates_are_present(self):
         from arena.engine import problem, versions
         from arena.scoring import exchange_rates
@@ -809,11 +824,61 @@ class FixturePacketTests(unittest.TestCase):
         self.assertIn(str(rates["points_per_100_heartbeats"]), self.text)
         self.assertIn(str(rates["points_per_lost_version"]), self.text)
 
+    @_live_packet
     def test_packet_is_deterministic_bounded_and_strategy_free(self):
         self.assertEqual(self.text, context.render_packet(NAME))
         self.assertLessEqual(len(self.text), context.MAX_PACKET_CHARS + 2)
         for phrase in DENYLIST:
             self.assertNotIn(phrase, self.text, phrase)
+
+    def test_v8_packet_nested_hotspot_and_retrieval(self):
+        import json
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from arena.engine import problem
+        from arena.steps import split_steps
+
+        ski = "Cslib.SKI.parallelReduction_diamond"
+        fixture = json.loads(
+            (Path(__file__).parent / "fixtures" / "agent_text" / "ski-context.json").read_text()
+        )
+        try:
+            profile = context.reference_profile(ski, cache_only=True)
+        except ValueError:
+            profile = {}
+        if not profile:
+            profile = json.loads(
+                (Path(__file__).parent / "fixtures" / "agent_text" / "ski-profile.json").read_text()
+            )
+        with patch.object(context, "cached_context", return_value=fixture), patch.object(
+            context, "reference_profile", return_value=profile
+        ):
+            packet = context.render_packet(ski, cache_only=True)
+        nested = max(
+            (entry for entry in profile["entries"] if int(entry.get("depth") or 0) > 0 and entry.get("hb")),
+            key=lambda entry: int(entry["hb"]),
+        )
+        parent = next(
+            step
+            for step in split_steps(problem(ski)["src"])
+            if step.first_line <= nested["proof_line"] <= step.last_line
+        )
+        self.assertIn(f"parent {parent.id} lines {parent.first_line}-{parent.last_line}", packet)
+        self.assertIn(f"range {nested['proof_line']}-{nested.get('end_proof_line') or nested['proof_line']}", packet)
+        self.assertIn("Proof total (not a step)", packet)
+        self.assertNotIn("| total |", packet)
+        self.assertNotIn("pts_if_gone", packet)
+        self.assertNotIn("self_hb |", packet)
+        self.assertIn("not tied to any line", packet)
+        self.assertNotIn("tokens missing", packet)
+        self.assertIn("zero (measured), not missing", packet)
+        self.assertIn("Full detail: read(node=n1, view=tree:2) proof=reference", packet)
+        self.assertIn("Not a splice target", packet)
+        self.assertIn("Inclusive costs are not summed", packet)
+        self.assertNotRegex(packet, r"source revision [0-9a-f]")
+        self.assertIn("whole-structure theorem", packet)
+        self.assertIn(str(profile["measured_total"]), packet)
 
 
 @slow

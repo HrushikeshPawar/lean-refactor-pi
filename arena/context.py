@@ -622,43 +622,43 @@ def _used_section(context: dict) -> list[str]:
     ordered = sorted(occurrences.items())
     lines = [template("packet/sections.fixed.used_intro").strip()]
     for name, items in ordered:
-        statement = ",".join(str(i["proof_line"]) for i in items if i.get("origin") == "statement")
-        proof = ",".join(str(i["proof_line"]) for i in items if i.get("origin") == "proof")
-        unknown = ",".join(str(i.get("proof_line", "?")) for i in items if i.get("origin") == "unknown")
-        external = ",".join(str(i["source_line"]) for i in items if i.get("origin") == "external")
+        item = items[0]
+        role = item.get("tag") or item.get("decl") or "declaration"
+        places = sorted({str(i.get("proof_line")) for i in items if i.get("proof_line") is not None})
+        where = f"proof lines {', '.join(places)}" if places else "location retained in source"
+        signature = (
+            _clip(_readable(_one_line(item["sig"])), LIMITS["used_chars"]) if item.get("sig") else "signature missing"
+        )
         lines.append(
             render_text(
-                "packet/sections.fixed.used_line",
-                name=name,
-                kind=items[0]["decl"],
-                statement=statement or "-",
-                proof=proof or "-",
-                unknown=f" U:{unknown}" if unknown else "",
-                external=f" file line {external}" if external else "",
+                "packet/sections.fixed.catalog_line", name=name, role=role, where=where, signature=signature
             )
         )
-    preview = _preview([items[0] for _, items in ordered], context.get("root", ""))
-    lines.extend(
-        [
-            "",
-            render_text(
-                "packet/sections.fixed.used_preview",
-                shown=sum(bool(i.get("sig")) for i in preview),
-                distinct=len(ordered),
-                unavailable=sum(not bool(items[0].get("sig")) for _, items in ordered),
-            ),
-        ]
-    )
-    lines.extend(
-        render_text(
-            "packet/sections.fixed.signature",
-            name=i["name"],
-            kind=i["decl"],
-            module=i["module"],
-            signature=_clip(_readable(_one_line(i["sig"])), LIMITS["used_chars"]),
+    helpers, _counts, _named = _extra_dependencies(context)
+    seen = {name for name, _items in ordered}
+    for item in helpers:
+        if item["name"] in seen:
+            continue
+        signature = (
+            _clip(_readable(_one_line(item["sig"])), LIMITS["used_chars"]) if item.get("sig") else "signature missing"
         )
-        for i in preview
-        if i.get("sig")
+        lines.append(
+            render_text(
+                "packet/sections.fixed.catalog_line",
+                name=item["name"],
+                role=item.get("tag") or "helper",
+                where=item.get("module") or "module retained",
+                signature=signature,
+            )
+        )
+        seen.add(item["name"])
+    lines.append(
+        render_text(
+            "packet/sections.fixed.used_preview",
+            shown=len(seen),
+            distinct=len(seen),
+            unavailable=sum(not bool(items[0].get("sig")) for _, items in ordered),
+        )
     )
     return lines
 
@@ -668,7 +668,6 @@ def _dependency_section(context: dict) -> list[str]:
     if not helpers:
         return []
     lines = [template("packet/sections.fixed.dependency_intro").strip()]
-    lines.extend(render_text("packet/sections.fixed.dependency_name", name=i["name"]) for i in helpers)
     lines += [
         "",
         render_text(
@@ -686,17 +685,6 @@ def _dependency_section(context: dict) -> list[str]:
             unavailable=sum(not bool(i.get("sig")) for i in helpers),
         ),
     ]
-    lines.extend(
-        render_text(
-            "packet/sections.fixed.signature",
-            name=i["name"],
-            kind=i["decl"],
-            module=i["module"],
-            signature=_clip(_readable(_one_line(i["sig"])), LIMITS["used_chars"]),
-        )
-        for i in preview
-        if i.get("sig")
-    )
     return lines
 
 
@@ -985,11 +973,11 @@ def _fit(parts: list[tuple[str, list[str]]], limit: int) -> str:
     return _join_sections(_fit_sections(parts, limit))
 
 
-def _reference_price_table(table: dict) -> list[str]:
-    """The step table (one renderer with the read view's prices) and its column legend; the rates are in Scoring."""
+def _reference_price_table(table: dict, proof: str, profile: dict | None) -> list[str]:
+    """Shared structural overview, nested hotspot, and full-detail pointer."""
     from arena.campaign import render_price_table
 
-    return [*render_price_table(table).splitlines(), *template("packet/price-table.legend").strip().splitlines()]
+    return render_price_table(table, proof, profile, proof_id="reference").splitlines()
 
 
 def packet_sections(name: str, *, cache_only: bool = False) -> list[tuple[str, str]]:
@@ -1002,9 +990,8 @@ def packet_sections(name: str, *, cache_only: bool = False) -> list[tuple[str, s
     prof = reference_profile(name, cache_only=cache_only)
     if cache_only and not prof:
         raise ValueError(f"Cached reference profile is unavailable for {name}")  # not-model-facing: CLI cache refusal.
-    pins = "; ".join(
-        render_text("packet/sections.fixed.pin", version=version, commit=commit) for version, commit in targets
-    )
+    pins = "; ".join(render_text("packet/sections.fixed.pin", version=version) for version, _commit in targets)
+    pins = f"{len(targets)} required ({pins})"
     rates = exchange_rates(name, len(targets))
     task = render_text("packet/task", name=name, statement=row["statement"]).strip().splitlines()
     scoring = (
@@ -1030,7 +1017,7 @@ def packet_sections(name: str, *, cache_only: bool = False) -> list[tuple[str, s
         f"{len(targets)}/{len(targets)}",
     )
     table["total"]["proxy"] = REFERENCE_SCORE
-    price_lines = _reference_price_table(table)
+    price_lines = _reference_price_table(table, row["src"], prof)
     note = (
         ""
         if not context.get("error")
@@ -1072,12 +1059,12 @@ def packet_sections(name: str, *, cache_only: bool = False) -> list[tuple[str, s
             [f"```lean\n{row['src']}\n```", *price_lines],
         ),
         (template("packet/sections.titles.profile").strip(), _profile_section(prof, row["src"], name)),
+        ("", template("packet/search").strip().splitlines()),
         (titles["goals"], _goal_section(context, row["src"], facts=goal_facts)),
         (LIBRARY_TITLE, _library_section(context)),
         (titles["types"], _types_section(context)),
         (titles["source"], _used_section(context)),
         (titles["dependencies"], _dependency_section(context)),
-        (LOCAL_TITLE, _local_section(context)),
         (EARLIER_TITLE, _earlier_section(context)),
     ]
     if note:

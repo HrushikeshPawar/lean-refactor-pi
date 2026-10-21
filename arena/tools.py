@@ -1331,7 +1331,6 @@ def _outline(theorem: str, run_id: str, node, wanted: object) -> tuple[list[str]
                 last=step.last_line,
                 tokens=reply.shown(row.get("tokens")),
                 heartbeats=reply.shown(row.get("incl_hb")),
-                points=reply.shown(row.get("pts_if_gone")),
                 text=reply.cell(first_line, 60),
             )
         )
@@ -1385,6 +1384,16 @@ def read_tool(theorem: str, run_id: str, request: dict) -> dict:
         return _read_experiment(run_id, request["experiment"])
     request = _handle_as_target(request)
     view = request.get("view", "source")
+    tree_page = 1
+    if isinstance(view, str) and view.startswith("tree"):
+        if view == "tree":
+            tree_page = 1
+            view = "tree"
+        elif re.fullmatch(r"tree:[1-9][0-9]*", view):
+            tree_page = int(view.split(":", 1)[1])
+            view = "tree"
+        else:
+            return _invalid("bad_view", view, ["tree", "tree:<page>"], TOOL_FORMS["read"])
     if request.get("handle") and view != "source":
         return _invalid("bad_view", view, ["source"], TOOL_FORMS["read"])
     if request.get("step") and view != "outline":
@@ -1488,29 +1497,42 @@ def read_tool(theorem: str, run_id: str, request: dict) -> dict:
         if lines is None:
             return _invalid("unknown_step", request.get("step"), [step.id for step in node.steps], TOOL_FORMS["read"])
     elif view == "tree":
-        tree = campaign.cost_tree(theorem, run_id, node.id)
+        tree = campaign.cost_tree(theorem, run_id, node.id, page=tree_page, page_size=TREE_ROWS)
         if not tree["profiled"]:
             lines = [_render("read_tree_pending", node=node.id)]
         else:
             # The costliest nodes by points, shown in source order so nesting stays readable.
-            keep = sorted(range(len(tree["rows"])), key=lambda index: -tree["rows"][index]["points"])[:TREE_ROWS]
-            shown_rows = [tree["rows"][index] for index in sorted(keep)]
-            lines = [_render("read_tree_head", node=node.id), text.template("replies/tools.read_tree_cols").strip()]
+            evidence = tree["evidence"]
+            shown_rows = evidence["page"]
+            lines = [
+                _render(
+                    "read_tree_head",
+                    node=node.id,
+                    page=evidence["page_index"],
+                    pages=evidence["page_count"],
+                ),
+                text.template("replies/tools.read_tree_cols").strip(),
+            ]
             lines += [
                 _render(
                     "read_tree_row",
-                    line=row["line"],
-                    text=("· " * row["depth"]) + reply.cell(row["text"]),
+                    line=row["range"],
+                    text=reply.cell(row["text"]),
                     kind=row["kind"],
                     tokens=row["tokens"],
-                    heartbeats=row["heartbeats"],
-                    own=reply.shown(row["own_heartbeats"]),
-                    points=row["points"],
+                    heartbeats=row["incl_hb"],
+                    own=row["self_hb"],
                 )
                 for row in shown_rows
             ]
-            if len(tree["rows"]) > len(shown_rows):
-                lines.append(_render("read_tree_more", count=len(tree["rows"]) - len(shown_rows)))
+            if evidence["omitted_on_page"]:
+                lines.append(
+                    _render(
+                        "read_tree_more",
+                        count=evidence["omitted_on_page"],
+                        retrieval=evidence["retrieval"],
+                    )
+                )
             totals = {
                 "measured": reply.shown(tree["measured"]),
                 "attributed": reply.shown(tree["attributed"]),

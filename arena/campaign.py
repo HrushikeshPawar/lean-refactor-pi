@@ -1609,7 +1609,10 @@ def _start_material(theorem: str, run_id: str, node: Node) -> dict:
     """The node's proof and its three costliest steps by tokens, from the same price rows as the read view."""
     table = price_table(theorem, run_id, node.id)
     rows = sorted(table["rows"], key=lambda row: (-row["tokens"], row["first_line"]))[:3]
-    return {"proof": node.proof_text, "prices": render_price_table({**table, "rows": rows})}
+    return {
+        "proof": node.proof_text,
+        "prices": render_price_table({**table, "rows": rows}, node.proof_text, None, node.proof_id, node.id),
+    }
 
 
 def no_work_focus(run_id: str, theorem: str) -> dict:
@@ -3039,34 +3042,28 @@ def render_price_row(row: dict, root: bool = False, parent_is_best: bool = False
     return "\n".join(rendered)
 
 
-def render_price_table(table: dict) -> str:
-    rows = [text.render("packet/price-table").strip()]
-    rows.extend(
-        [
-            text.render(
-                "packet/price-table.row",
-                step=row["id"],
-                lines=f"{row['first_line']}-{row['last_line']}",
-                tokens=row["tokens"],
-                self_hb=fmt_hb(row["self_hb"]),
-                incl_hb=fmt_hb(row["incl_hb"]),
-                pts_if_gone="-" if row["pts_if_gone"] is None else f"{row['pts_if_gone']:+.2f}",
-                text=row["text"],
-            )
-            for row in table["rows"]
-        ]
+def render_price_table(
+    table: dict,
+    proof: str = "",
+    profile: dict | None = None,
+    proof_id: str = "reference",
+    node_label: str = "n1",
+) -> str:
+    """Structural overview. Totals are not a step row. pts_if_gone stays off this text."""
+    from arena.evidence import cost_evidence, render_cost_overview
+
+    total = table.get("total") or {}
+    evidence = cost_evidence(
+        proof,
+        profile,
+        proof_id=proof_id,
+        total_tokens=total.get("tokens"),
+        published_score=total.get("proxy"),
+        versions=total.get("versions"),
+        local_hb=total.get("heartbeats"),
+        node_label=node_label,
     )
-    total = table["total"]
-    rows.append(
-        text.render(
-            "packet/price-table.total",
-            tokens=total["tokens"],
-            heartbeats=fmt_hb(total["heartbeats"]),
-            versions=total["versions"] or "-",
-            score="-" if total["proxy"] is None else f"{total['proxy']:.2f}",
-        )
-    )
-    return "\n".join(rows)
+    return "\n".join(render_cost_overview(table, evidence))
 
 
 def _reference_tokens(name: str, node: Node) -> int:
@@ -3116,7 +3113,7 @@ def _span(lines: list[str], entry: dict) -> str:
     return "\n".join(body)
 
 
-def cost_tree(name: str, run_id: str, reference: str) -> dict:
+def cost_tree(name: str, run_id: str, reference: str, page: int = 1, page_size: int = 30) -> dict:
     """A node's measured cost tree: every profiled tactic and stated term in source order with its nesting depth,
     tokens of its source span, total and own heartbeats, and the points it would return if it cost nothing.
     Cached data only; never Lean."""
@@ -3164,14 +3161,31 @@ def cost_tree(name: str, run_id: str, reference: str) -> dict:
         floor = cached_heartbeat_floor(name)
     except (ValueError, OSError, KeyError):
         floor = None
+    from arena.evidence import cost_evidence, render_cost_detail
+
+    node_label = _update_id(history, proof_id)
+    evidence = cost_evidence(
+        node.proof_text,
+        profile,
+        proof_id=proof_id,
+        total_tokens=node.tokens,
+        published_score=node.score,
+        versions=None,
+        local_hb=(profile or {}).get("measured_total") if profile else None,
+        node_label=node_label,
+        page=page,
+        page_size=page_size,
+    )
     return {
-        "node": _update_id(history, proof_id),
+        "node": node_label,
         "profiled": profile is not None,
         "rows": rows,
         "measured": (profile or {}).get("measured_total"),
         "attributed": (profile or {}).get("profiled_total"),
         "unattributed": (profile or {}).get("unattributed"),
         "floor": floor,
+        "evidence": evidence,
+        "detail": render_cost_detail(evidence),
     }
 
 
@@ -3208,7 +3222,13 @@ def price_table(name: str, run_id: str, reference: str | None = None) -> dict:
             profiles[node.proof_id] = reference_result
             profiled = True
     table = _table_for_node(name, node, profiles, price_rates, total_versions)
-    return {**table, "text": render_price_table(table), "profiled": profiled}
+    return {
+        **table,
+        "text": render_price_table(
+            table, node.proof_text, profiles.get(node.proof_id), node.proof_id, node.id
+        ),
+        "profiled": profiled,
+    }
 
 
 def map_view(run_id: str) -> dict:

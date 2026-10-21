@@ -4,7 +4,7 @@
 
 **Blocked by:** 04: Isolate actor state and enforce exact ownership; 18: Recover usable target goals and definitions
 
-**Status:** ready-for-agent
+**Status:** needs-review
 
 **Branch:** `v8/19-packet-cost-views`
 
@@ -26,12 +26,12 @@
 
 ## What to build and acceptance
 
-- [ ] 1. Show exact statement/scope, compatibility requirement, full proof access and one relevant declaration catalog. Remove default raw revision hashes, flattened branch-local dumps and repeated occurrence/signature telemetry.
-- [ ] 2. Separate proof totals from structural rows. Show inclusive costs and nested measured hotspots with parent/range/proof identity, clipping/omission coverage and full-detail retrieval.
-- [ ] 3. Keep exclusive/self costs in detailed views; omit all-missing columns and conditional legends; remove default pts_if_gone and distinguish published denominators from local measurement.
-- [ ] 4. Do not sum overlapping spans or treat indentation regions as legal splice targets. Full profile access expands/pages beyond the existing selected-row limit.
-- [ ] 5. Add the generic search method without task-specific solutions, compulsory lookup rituals, fixed budget phases or universal tactic-cost claims.
-- [ ] 6. Cache-only comparisons of all three examples prove intact facts and reachable full evidence. Preserve raw proof bytes/line mappings and update text budgets deliberately.
+- [x] 1. Show exact statement/scope, compatibility requirement, full proof access and one relevant declaration catalog. Remove default raw revision hashes, flattened branch-local dumps and repeated occurrence/signature telemetry.
+- [x] 2. Separate proof totals from structural rows. Show inclusive costs and nested measured hotspots with parent/range/proof identity, clipping/omission coverage and full-detail retrieval.
+- [x] 3. Keep exclusive/self costs in detailed views; omit all-missing columns and conditional legends; remove default pts_if_gone and distinguish published denominators from local measurement.
+- [x] 4. Do not sum overlapping spans or treat indentation regions as legal splice targets. Full profile access expands/pages beyond the existing selected-row limit.
+- [x] 5. Add the generic search method without task-specific solutions, compulsory lookup rituals, fixed budget phases or universal tactic-cost claims.
+- [x] 6. Cache-only comparisons of all three examples prove intact facts and reachable full evidence. Preserve raw proof bytes/line mappings and update text budgets deliberately.
 
 ## Verify
 
