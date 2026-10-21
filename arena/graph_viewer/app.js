@@ -1,5 +1,6 @@
 /* Static Arena graph viewer. The loopback server supplies graph.json; snapshots set GRAPH_SNAPSHOT. */
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
 (() => {
   if (/[?&]embed=1/.test(location.search)) document.body.classList.add('embed');
   const $ = id => document.getElementById(id);
@@ -395,6 +396,7 @@ const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;',
     $('detail').querySelectorAll('[data-go]').forEach(el=>el.onclick=()=>select(el.dataset.go));
     $('detail').querySelectorAll('[data-open]').forEach(el=>el.onclick=()=>openDetail(el.dataset.open));
   }
+  const nodeExperiments=node=>(data.experiments||[]).filter(e=>e.proof_id===node.id||(e.at&&JSON.stringify(e.at).includes(node.id))||(e.at&&[node.node,numberForId(node.id)].some(label=>label&&(e.at===label||e.at.node===label))));
   function detail() {
     if (pById.has(selected)) { probeDetail(pById.get(selected)); return; }
     const node=byId.get(selected);
@@ -411,7 +413,9 @@ const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;',
         <div class="actions"><button type="button" data-open="overview" class="primary">Details ↗</button><button type="button" data-open="diff">Diff ↗</button><button type="button" data-open="proof">Proof ↗</button><button type="button" data-open="lineage">Lineage ↗</button></div></div>
       ${node.hypothesis||node.origin==='auto_merge'?`<div class="card hypcard"><h3>Note</h3><p class="hyp">${esc(node.hypothesis||'Deterministic combination of disjoint edits')}</p></div>`:''}
       <div class="card"><h3>Evaluations (${node.evaluations.length})</h3><div class="evals">${evals||'<p class="muted">None yet.</p>'}</div></div>
+      <div class="card"><h3>Verification</h3><div class="tags">${verificationHtml(node)}</div>${attemptsHtml(node.attempts,node.evaluations)}${derivationsHtml(node.alternate_derivations,'Alternate derivations')}${experimentsHtml(nodeExperiments(node),'Scratch experiments on this proof')}</div>
       <div class="card ancard"><h3>Ancestry (${chain.length})</h3><div class="evals">${chain.map(n=>`<div class="eval-line"><button data-go="${esc(n.id)}" class="${n.id===node.id?'primary':''}">#${esc(n.index)}</button><span class="tag ${n.status==='full'?'good':n.status==='fail'?'bad':''}">${esc(status(n))}</span><span>${esc(n.tokens ?? '?')} tok · ${esc(n.heartbeat ?? '?')} hb · ${esc(n.local_proxy?.toFixed?.(2) ?? '—')}</span></div>`).join('')}</div></div></div>`;
+    bindExperiments($('detail'));
     $('detail').querySelectorAll('[data-go]').forEach(el=>el.onclick=()=>select(el.dataset.go));
     paintSwatches($('detail'));
     $('detail').querySelectorAll('[data-open]').forEach(el=>el.onclick=()=>openDetail(el.dataset.open));
@@ -499,7 +503,6 @@ const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;',
 
   // Stacked bottom to top: cheap cache reads first, the usually dominant output last.
   const COST_PARTS=[['cache_read','Cache read','#5fd3a5'],['input','Input','#c792ea'],['cache_write','Cache write','#edc475'],['output','Output','#78baff']];
-  const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
   function niceTicks(min,max,count) {
     if(!(max>min))return [min];
     // Smallest 1/2/5 step that keeps at most `count` intervals.
@@ -722,6 +725,70 @@ const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;',
   refresh(); if(!window.GRAPH_SNAPSHOT)setInterval(refresh,2500);
 })();
 
+// v8 evidence: attempts, derivations, scratch experiments, verification, jobs, actors, spend. Every field is escaped.
+const tagHtml = (text, kind = '') => `<span class="tag ${kind}">${esc(text)}</span>`;
+function verificationHtml(node) {
+  const tags = [tagHtml(`checked: ${node.verification || 'unevaluated'}`, node.verification === 'full' ? 'good' : node.verification === 'fail' ? 'bad' : '')];
+  const cold = node.cold_outcome;
+  tags.push(tagHtml(cold ? `cold: ${cold}${node.cold_cause ? ` (${node.cold_cause})` : ''}` : 'cold: not run', cold === 'passed' ? 'good' : cold === 'proof_error' ? 'bad' : ''));
+  if (node.cold_retryable) tags.push(tagHtml('cold retryable'));
+  if (cold !== 'passed') tags.push(tagHtml('provisional', 'bad'));
+  tags.push(tagHtml(`eligibility: ${node.eligibility || '?'}`, node.eligibility === 'eligible' ? 'good' : ''));
+  return tags.join(' ');
+}
+function attemptsHtml(attempts, evaluations, open = false) {
+  const rows = (attempts || []).map(a => {
+    const ev = (evaluations || []).find(e => e.evaluation_id && e.evaluation_id === a.evaluation_id);
+    const ids = ['tool_call_id', 'job_id', 'request_id', 'operation_id', 'attempt_id'].filter(k => a[k]).map(k => `${k} ${esc(a[k])}`).join(' · ');
+    return `<div class="eval-line"><b>${esc(a.actor_id ?? 'unknown actor')}</b> ${tagHtml(a.relation || 'attempt')} <span class="muted">${esc(a.session_id ?? 'no session')}</span>${ev ? ` <span class="tag">eval #${esc(ev.number)} ${esc(ev.mode)}</span>` : ''}${(a.missing || []).length ? ` ${tagHtml(`missing ${a.missing.join(', ')}`, 'bad')}` : ''}<div class="muted small">${ids}</div></div>`;
+  }).join('');
+  return rows ? `<details${open ? ' open' : ''}><summary>Attempts (${attempts.length})</summary>${rows}</details>` : '';
+}
+function derivationsHtml(derivations, label = 'Derivations') {
+  const rows = (derivations || []).map((d, i) => `<div class="eval-line">${tagHtml(d.type || d.relation || d.kind || 'derivation')} <span class="muted">${esc(d.source || '')}</span> parents ${esc((d.parents || []).map(p => String(p).slice(0, 8)).join(', ') || 'none')}${d.exact === false ? ' ' + tagHtml('inexact') : ''}${(d.missing || []).length ? ` ${tagHtml(`missing ${d.missing.join(', ')}`, 'bad')}` : ''}</div>`).join('');
+  return rows ? `<details><summary>${label} (${derivations.length})</summary>${rows}</details>` : '';
+}
+const experimentTag = e => tagHtml(e.outcome || e.phase || 'accepted', e.outcome === 'success' || e.outcome === 'passed' ? 'good' : e.outcome === 'failure' ? 'bad' : '');
+function experimentRowsHtml(list) {
+  return (list || []).map(e => `<div class="eval-line"><button type="button" data-experiment="${esc(e.experiment_id)}" title="Load code and diagnostics">${esc(String(e.experiment_id || e.code_sha256 || '?').slice(0, 10))}</button> ${experimentTag(e)} <span class="muted">${esc(e.actor_id ?? '')}${e.at ? ` · at ${esc(typeof e.at === 'string' ? e.at : JSON.stringify(e.at))}` : ''}${e.elapsed_ms != null ? ` · ${esc(e.elapsed_ms)} ms` : ''}</span>${e.promotion?.state ? ' ' + tagHtml(`${e.promotion.state}${e.promotion.reason ? `: ${e.promotion.reason}` : ''}`, e.promotion.state === 'promoted' ? 'good' : '') : ''}${e.headline ? `<div class="muted small">${esc(e.headline)}</div>` : ''}<div class="exp-body"></div></div>`).join('');
+}
+function experimentsHtml(list, title = 'Scratch experiments') {
+  return list?.length ? `<details><summary>${title} (${list.length})</summary>${experimentRowsHtml(list)}</details>` : '';
+}
+function experimentDetailHtml(x) {
+  if (x.missing) return '<p class="muted">Experiment not found.</p>';
+  const rendered = Array.isArray(x.rendered) ? x.rendered.join('\n') : x.rendered;
+  return `<div class="facts-small">${tagHtml(x.outcome || '?')} ${x.promotion ? tagHtml(`${x.promotion.state}${x.promotion.reason ? `: ${x.promotion.reason}` : ''}`) : ''} ${tagHtml(`validity: ${x.validity ?? '?'}`)} ${tagHtml(`compat: ${x.compatibility ?? '?'}`)} ${tagHtml(`cold: ${x.cold ?? '?'}`)}${x.code_status && x.code_status !== 'retained' ? ' ' + tagHtml(`code ${x.code_status}`, 'bad') : ''}</div>`
+    + (x.code != null ? `<h4>Code</h4><pre>${esc(x.code)}</pre>` : '')
+    + (rendered ? `<h4>Diagnostics</h4><pre>${esc(rendered)}</pre>` : '') + (x.diagnostic ? `<pre>${esc(x.diagnostic)}</pre>` : '')
+    + (x.raw ? `<details><summary>Raw Lean output</summary><pre>${esc(x.raw)}</pre></details>` : '')
+    + `<p class="muted small">${['actor_id', 'session_id', 'job_id', 'tool_call_id', 'request_id', 'operation_id'].filter(k => x[k]).map(k => `${k} ${esc(x[k])}`).join(' · ')}</p>`;
+}
+// Experiment buttons load their code on first click, so the graph payload stays small.
+function bindExperiments(root, runPath = '') {
+  root.querySelectorAll('[data-experiment]').forEach(button => button.onclick = () => {
+    const body = button.parentElement.querySelector('.exp-body');
+    if (body.dataset.loaded) { body.hidden = !body.hidden; return; }
+    body.dataset.loaded = '1';
+    body.textContent = 'Loading...';
+    fetch(`${runPath}experiment/${encodeURIComponent(button.dataset.experiment)}.json`)
+      .then(r => { if (!r.ok) throw new Error(`${r.status} ${r.statusText}`); return r.json(); })
+      .then(x => { body.innerHTML = experimentDetailHtml(x); })
+      .catch(error => { body.textContent = String(error.message || error); delete body.dataset.loaded; });
+  });
+}
+function runEvidenceHtml(data) {
+  const spend = data.spend || {}, total = spend.total != null ? Number(spend.total) : null;
+  const share = obj => Object.entries(obj || {}).map(([k, v]) => `<div class="eval-line"><b>${esc(k)}</b> <span>${esc(money(Number(v)))}</span></div>`).join('');
+  const actors = (data.actors || []).map(a => `<div class="eval-line"><b>${esc(a.actor_id)}</b> ${tagHtml(a.waiting ? 'waiting' : 'active', a.waiting ? 'good' : '')} ${a.session_status !== 'recorded' ? tagHtml(`session ${a.session_status}`, 'bad') : ''}<div class="muted small">${esc((a.sessions || []).join(', ') || 'no session recorded')}</div></div>`).join('');
+  const jobs = (data.job_log || []).map(j => `<div class="eval-line">${tagHtml(j.source)} <b>${esc(String(j.job_id ?? j.phase ?? '?').slice(0, 40))}</b> ${tagHtml(j.status ?? '?', j.status === 'failed' || j.status === 'cancelled' ? 'bad' : '')} <span class="muted">${esc([j.actor_id, j.check, j.phase].filter(Boolean).join(' · '))}${j.queue ? ` · queue ${esc(Object.entries(j.queue).map(([k, v]) => `${k} ${v}`).join(', '))}` : ''}</span></div>`).join('');
+  return `<div class="card ancard"><h3>Spend${total != null ? ` ${esc(money(total))}` : ''}${spend.accounting && spend.accounting !== 'known' ? ' ' + tagHtml(`accounting ${spend.accounting}`, 'bad') : ''}</h3><div class="muted small">source ${esc(spend.authority ?? '?')}${data.limit_usd ? ` · limit ${esc(money(Number(data.limit_usd)))}` : ''}</div>
+      <details><summary>By actor</summary>${share(spend.by_actor) || '<p class="muted">none</p>'}</details>
+      <details><summary>By job</summary>${share(spend.by_job) || '<p class="muted">none</p>'}</details></div>
+    <div class="card ancard"><h3>Actors (${(data.actors || []).length})</h3>${actors || '<p class="muted">None recorded.</p>'}<p class="muted small">Waiting shows only when a durable wait row exists.</p></div>
+    <div class="card ancard"><details><summary>Jobs and checks (${(data.job_log || []).length})</summary>${jobs || '<p class="muted">None.</p>'}</details>${experimentsHtml(data.experiments)}</div>`;
+}
+
 // The "Reasoning & calls" tab. `go(id)` is a select button for an id in the graph, or '' when it is not there.
 // Graph ids (`n3`) in the filing line and hole fills become buttons through `payload.ids`; everything else is escaped.
 function callsHtml(payload, go) {
@@ -742,6 +809,12 @@ function callsHtml(payload, go) {
     const rows = payload.holes.map(hole => `<tr><td>${esc(hole.id)}</td><td>${esc(hole.goal)}</td><td>${esc(hole.status)}</td><td>${(hole.fills || []).map(named).join(' ')}</td></tr>`).join('');
     lines.push(`<table class="holes"><thead><tr><th>Hole</th><th>Goal</th><th>Status</th><th>Fills</th></tr></thead><tbody>${rows}</tbody></table>`);
   }
+  if (payload.lineage && payload.lineage !== 'recorded') lines.push(`<p>${tagHtml(`lineage ${payload.lineage}`, 'bad')}</p>`);
+  lines.push(attemptsHtml(payload.attempts, [], true), derivationsHtml(payload.derivations));
+  const refs = (payload.call_refs || []).filter(ref => ref.call);
+  if (refs.length) lines.push(`<details><summary>Calls by every attempt (${refs.length})</summary>${refs.map(ref => `<h4>${esc(ref.actor_id ?? '?')} · ${esc(ref.call.name)} · ${esc(ref.tool_call_id)}</h4><pre>${esc(ref.call.delivered)}</pre>${ref.call.trimmed ? `<details><summary>Untrimmed result</summary><pre>${esc(ref.call.untrimmed)}</pre></details>` : ''}`).join('')}</details>`);
+  if (payload.records?.length) lines.push(`<details><summary>Original ledger records (${payload.records.length})</summary>${payload.records.map(r => `<div class="muted small">${esc(r.kind)} bytes ${esc(r.start)}-${esc(r.end)} sha256 ${esc(String(r.sha256).slice(0, 12))}</div><pre>${esc(r.line)}</pre>`).join('')}</details>`);
+  if (payload.artifact?.bytes != null) lines.push(`<details><summary>Original artifact ${esc(payload.artifact.path ?? '')}</summary><pre>${esc(payload.artifact.bytes)}</pre></details>`);
   const siblings = (payload.siblings || []).map(id => go(id) || esc(String(id).slice(0, 8))).join(' ');
   if (siblings) lines.push(`<p class="row">${siblings}</p>`);
   return lines.join('');

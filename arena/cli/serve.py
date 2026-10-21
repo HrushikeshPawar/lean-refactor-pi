@@ -361,6 +361,7 @@ def handler_for(runs: Runs | str, langfuse: Langfuse | None = None):
 
         def viewer(self, run_id: str, rest: str) -> None:
             node_match = re.fullmatch(r"node/([A-Za-z0-9._-]+)\.json", rest)
+            experiment_match = re.fullmatch(r"experiment/([A-Za-z0-9._:-]+)\.json", rest)
             if rest == "graph.json":
                 self.send(memo_json("graph", run_id, lambda: graph_payload(run_id)), "application/json; charset=utf-8")
             elif rest == "dashboard.json":
@@ -379,6 +380,11 @@ def handler_for(runs: Runs | str, langfuse: Langfuse | None = None):
             elif rest in VIEWER_FILES:
                 filename, content_type = VIEWER_FILES[rest]
                 self.send((ASSETS / filename).read_bytes(), content_type)
+            elif experiment_match:
+                from arena import experiments
+
+                body = experiments.retrieve(run_id, experiment_match.group(1)) or {"missing": experiment_match.group(1)}
+                self.send(json.dumps(body, ensure_ascii=False).encode(), "application/json; charset=utf-8")
             elif node_match:
                 node_id = node_match.group(1)
                 if ".." in node_id:

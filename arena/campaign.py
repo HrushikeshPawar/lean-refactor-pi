@@ -3289,18 +3289,30 @@ def _job_source(event: dict) -> str | None:
 
 
 def _served_experiments(history: list[dict]) -> list[dict]:
-    return [
-        {
-            "experiment_id": event.get("experiment_id"),
-            "phase": event.get("phase"),
-            "outcome": event.get("outcome"),
-            "actor_id": event.get("actor_id"),
-            "proof_id": event.get("proof_id") or event.get("candidate_id"),
-            "job_id": event.get("job_id"),
-        }
-        for event in history
-        if event.get("kind") == "scratch"
-    ]
+    """One row per experiment: its accepted, raw and outcome rows joined by `experiment_id`."""
+    found: dict[str, dict] = {}
+    for event in history:
+        if event.get("kind") != "scratch":
+            continue
+        key = event.get("experiment_id") or event.get("code_sha256") or ""
+        row = found.setdefault(key, {"experiment_id": event.get("experiment_id")})
+        row["phase"] = event.get("phase")
+        for field in ("actor_id", "session_id", "tool_call_id", "job_id", "code_sha256", "elapsed_ms"):
+            if event.get(field) is not None:
+                row[field] = event[field]
+        row["proof_id"] = event.get("proof_id") or event.get("candidate_id") or row.get("proof_id")
+        at = (event.get("request") or {}).get("at")
+        if at is not None:
+            row["at"] = at
+        if event.get("phase") == "outcome":
+            row["outcome"] = event.get("outcome")
+            for field in ("promotion", "validity", "compatibility", "cold"):
+                row[field] = event.get(field)
+            rendered = event.get("rendered")
+            row["headline"] = rendered[0] if isinstance(rendered, list) and rendered else event.get("diagnostic")
+        else:
+            row.setdefault("outcome", event.get("outcome"))
+    return list(found.values())
 
 
 def _served_actors(history: list[dict]) -> list[dict]:
