@@ -40,17 +40,29 @@ def _parent_step(steps, entry: dict):
 def _range(entry: dict) -> str:
     start = entry.get("proof_line")
     end = entry.get("end_proof_line") or start
+    if entry.get("column") is not None or entry.get("end_column") is not None:
+        return f"{start}:{entry.get('column', 0)}-{end}:{entry.get('end_column', 'end')}"
     return f"{start}-{end}"
+
+
+def source_span(lines: list[str], entry: dict) -> str:
+    """Exact profiled source slice; columns use the profiler's offsets unchanged."""
+    first, last = entry.get("proof_line"), entry.get("end_proof_line") or entry.get("proof_line")
+    if not isinstance(first, int) or not 0 < first <= len(lines):
+        return ""
+    if not isinstance(last, int) or last < first or last > len(lines):
+        return ""
+    start, end = int(entry.get("column") or 0), entry.get("end_column")
+    if first == last:
+        return lines[first - 1][start : end if isinstance(end, int) else None]
+    return "\n".join(
+        [lines[first - 1][start:], *lines[first : last - 1], lines[last - 1][: end if isinstance(end, int) else None]]
+    )
 
 
 def _span_tokens(proof: str, entry: dict) -> int | None:
     """Tokens of this span alone. Callers must not add overlapping spans together."""
-    start = entry.get("proof_line")
-    end = entry.get("end_proof_line") or start
-    lines = proof.splitlines()
-    if not isinstance(start, int) or not isinstance(end, int) or start < 1 or end < start:
-        return None
-    chunk = "\n".join(lines[start - 1 : end])
+    chunk = source_span(proof.splitlines(), entry)
     if not chunk.strip():
         return None
     return snippet_tokens(chunk)
@@ -60,7 +72,7 @@ def _preview(text: str, limit: int = 60) -> str:
     compact = " ".join(text.split())
     if len(compact) <= limit:
         return compact
-    return compact[:limit].rstrip() + "… (clipped)"
+    return render("packet/price-table.clipped", text=compact[:limit].rstrip())
 
 
 def cost_evidence(
@@ -80,7 +92,7 @@ def cost_evidence(
 
     Inclusive heartbeats are not added together. Indentation is not a splice id.
     """
-    pending = profile is None
+    pending = bool((profile or {}).get("pending"))
     entries = list((profile or {}).get("entries") or [])
     steps = split_steps(proof) if proof else []
     structural = [
@@ -129,7 +141,6 @@ def cost_evidence(
     start_at = (page - 1) * page_size
     page_rows = detail[start_at : start_at + page_size]
     page_count = max(1, (len(detail) + page_size - 1) // page_size) if detail else 1
-    zeros = [row for row in detail if row["self_state"] == "zero"]
     published = "missing" if published_score is None else published_score
     if pending:
         local_state = "pending"
@@ -139,6 +150,17 @@ def cost_evidence(
         local_state = metric_state(local_hb)
     return {
         "proof_id": proof_id,
+        "has_columns": any(entry.get("column") is not None or entry.get("end_column") is not None for entry in entries),
+        "measurement": {
+            "proof_id": proof_id,
+            **{
+                key: profile[key]
+                for key in (
+                    "version", "commit", "pin", "mode", "context", "context_id", "context_sha256", "granularity"
+                )
+                if profile is not None and key in profile
+            },
+        },
         "summary": {
             "tokens": show_metric(total_tokens),
             "published_score": published,
@@ -154,10 +176,10 @@ def cost_evidence(
         "page_index": page,
         "page_count": page_count,
         "omitted_on_page": max(0, len(detail) - page * page_size),
-        "zero_example": zeros[0] if zeros else None,
-        "retrieval": f"read(node={node_label}, view=tree:{page + 1}) proof={proof_id}"
+        "retrieval": f"read(node={node_label}, view=tree) proof={proof_id}",
+        "next_retrieval": f"read(node={node_label}, view=tree:{page + 1}) proof={proof_id}"
         if page < page_count
-        else f"read(node={node_label}, view=tree) proof={proof_id}",
+        else None,
     }
 
 
@@ -208,9 +230,8 @@ def render_cost_overview(table: dict, evidence: dict) -> list[str]:
     )
     if evidence["omitted_hotspots"]:
         lines.append(render("packet/price-table.hotspot_omitted", count=evidence["omitted_hotspots"]))
-    zero = evidence.get("zero_example")
-    if zero:
-        lines.append(render("packet/price-table.zero", range=zero["range"]))
+    if evidence["hotspots"] and evidence["has_columns"]:
+        lines.append(render("packet/price-table.coordinates"))
     lines.append(render("packet/price-table.detail", retrieval=evidence["retrieval"]))
     return lines
 
@@ -223,8 +244,11 @@ def render_cost_detail(evidence: dict) -> list[str]:
             page=evidence["page_index"],
             pages=evidence["page_count"],
             omitted=evidence["omitted_on_page"],
+            proof=evidence["proof_id"],
         ),
     ]
+    if evidence["has_columns"]:
+        lines.append(render("packet/price-table.coordinates"))
     lines.extend(
         render(
             "packet/price-table.detail_row",
@@ -232,8 +256,11 @@ def render_cost_detail(evidence: dict) -> list[str]:
             depth=row["depth"],
             self_hb=row["self_hb"],
             incl_hb=row["incl_hb"],
+            tokens=row["tokens"],
             text=row["text"],
         )
         for row in evidence["page"]
     )
+    if evidence["next_retrieval"]:
+        lines.append(render("packet/price-table.next", retrieval=evidence["next_retrieval"]))
     return lines

@@ -866,20 +866,66 @@ class FixturePacketTests(unittest.TestCase):
             if step.first_line <= nested["proof_line"] <= step.last_line
         )
         self.assertIn(f"parent {parent.id} lines {parent.first_line}-{parent.last_line}", packet)
-        self.assertIn(f"range {nested['proof_line']}-{nested.get('end_proof_line') or nested['proof_line']}", packet)
+        from arena.evidence import _range, cost_evidence, render_cost_detail, source_span
+
+        self.assertIn(f"range {_range(nested)}", packet)
         self.assertIn("Proof total (not a step)", packet)
         self.assertNotIn("| total |", packet)
         self.assertNotIn("pts_if_gone", packet)
         self.assertNotIn("self_hb |", packet)
         self.assertIn("not tied to any line", packet)
         self.assertNotIn("tokens missing", packet)
-        self.assertIn("zero (measured), not missing", packet)
-        self.assertIn("Full detail: read(node=n1, view=tree:2) proof=reference", packet)
+        self.assertNotIn("Self hb at range", packet)
+        self.assertIn("Full detail: read(node=n1, view=tree) proof=reference", packet)
         self.assertIn("Not a splice target", packet)
         self.assertIn("Inclusive costs are not summed", packet)
         self.assertNotRegex(packet, r"source revision [0-9a-f]")
         self.assertIn("whole-structure theorem", packet)
         self.assertIn(str(profile["measured_total"]), packet)
+
+        proof = "  first | exact trivial | simp"
+        span = {
+            "proof_line": 1, "end_proof_line": 1, "column": 10, "end_column": 23,
+            "depth": 1, "hb": 5, "self_hb": 0, "text": "exact trivial",
+        }
+        evidence = cost_evidence(
+            proof, {"entries": [span] * 31, "version": "fixture-pin", "mode": "fixture"},
+            proof_id="p-exact", total_tokens=6,
+            published_score=None, versions=None, local_hb=5, node_label="n8",
+        )
+        self.assertEqual(source_span(proof.splitlines(), span), "exact trivial")
+        self.assertEqual(evidence["hotspots"][0]["tokens"], "2")
+        self.assertEqual(evidence["measurement"], {
+            "proof_id": "p-exact", "version": "fixture-pin", "mode": "fixture",
+        })
+        self.assertEqual(evidence["hotspots"][0]["range"], "1:10-1:23")
+        self.assertIn("tokens 2 self_hb 0 incl_hb 5", "\n".join(render_cost_detail(evidence)))
+        self.assertEqual(evidence["retrieval"], "read(node=n8, view=tree) proof=p-exact")
+        self.assertEqual(evidence["next_retrieval"], "read(node=n8, view=tree:2) proof=p-exact")
+        self.assertEqual(cost_evidence(
+            proof, None, proof_id="p", total_tokens=6, published_score=None,
+            versions=None, local_hb=5,
+        )["summary"]["local_hb"], "5")
+        from types import SimpleNamespace
+
+        from arena import tools
+
+        price = {
+            "rows": [], "total": {"tokens": 6, "heartbeats": 5},
+            "text": campaign.render_price_table(
+                {"rows": [], "total": {"tokens": 6, "heartbeats": 5}},
+                proof, {"entries": [span]}, "p-exact", "n8",
+            ),
+        }
+        with (
+            patch.object(tools, "_node", return_value=SimpleNamespace(id="n8", origin="reference")),
+            patch.object(tools, "_nodes", return_value=([], SimpleNamespace(nodes=[]))),
+            patch.object(campaign, "price_table", return_value=price),
+            patch.object(tools.reply, "attach_context", side_effect=lambda _run, result, **_kw: result),
+        ):
+            read = tools.read_tool(ski, "fixture", {"node": "n8", "view": "prices"})
+        self.assertEqual(read["items"][0]["lines"], price["text"].splitlines())
+        self.assertIn("proof p-exact", "\n".join(read["items"][0]["lines"]))
 
 
 @slow

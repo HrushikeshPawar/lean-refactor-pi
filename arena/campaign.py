@@ -3088,7 +3088,9 @@ def _table_for_node(name: str, node: Node, profiles: dict[str, dict], price_rate
         node.proof_text,
         profile_result,
         price_rates,
-        node.tokens if node.tokens is not None else _reference_tokens(name, node),
+        _reference_tokens(name, node) if node.origin == "reference" else (
+            node.tokens if node.tokens is not None else _reference_tokens(name, node)
+        ),
         node.heartbeats,
         _versions_total(node.versions, total_versions),
     )
@@ -3098,19 +3100,9 @@ def _table_for_node(name: str, node: Node, profiles: dict[str, dict], price_rate
 
 def _span(lines: list[str], entry: dict) -> str:
     """The source text a profile entry covers, from its start line and column to its end line and column."""
-    first, last = entry.get("proof_line"), entry.get("end_proof_line") or entry.get("proof_line")
-    if not isinstance(first, int) or not 0 < first <= len(lines):
-        return ""
-    start, end = int(entry.get("column") or 0), entry.get("end_column")
-    last = min(int(last), len(lines))
-    if first == last:
-        return lines[first - 1][start : end if isinstance(end, int) else None]
-    body = [
-        lines[first - 1][start:],
-        *lines[first : last - 1],
-        lines[last - 1][: end if isinstance(end, int) else None],
-    ]
-    return "\n".join(body)
+    from arena.evidence import source_span
+
+    return source_span(lines, entry)
 
 
 def cost_tree(name: str, run_id: str, reference: str, page: int = 1, page_size: int = 30) -> dict:

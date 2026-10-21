@@ -1453,24 +1453,7 @@ def read_tool(theorem: str, run_id: str, request: dict) -> dict:
         data["source"] = node.proof_text
     elif view == "prices":
         price = campaign.price_table(theorem, run_id, node.id)
-        if node.origin == "reference":
-            # The packet's reference table counts the row's proof length (statement excluded); the node's fallback
-            # count includes the statement, so the total is taken from the row the packet uses.
-            price = {**price, "total": {**price.get("total", {}), "tokens": campaign.problem(theorem)["proof_length"]}}
-            price["text"] = campaign.render_price_table(price)
-        # A value not measured yet is stored as None; the model sees "n/a", never Python's None.
-        total = {key: "n/a" if value is None else value for key, value in price.get("total", {}).items()}
-        lines = [
-            _render(
-                "read_price_row",
-                node=node.id,
-                tokens=total.get("tokens", "n/a"),
-                heartbeats=total.get("heartbeats", "n/a"),
-                versions=total.get("versions", "n/a"),
-            ),
-            *str(price.get("text") or "").splitlines(),
-            *text.template("packet/price-table.legend").strip().splitlines(),
-        ]
+        lines = str(price.get("text") or "").splitlines()
         data["prices"] = price
     elif view == "diff":
         against = request.get("against")
@@ -1501,18 +1484,20 @@ def read_tool(theorem: str, run_id: str, request: dict) -> dict:
         if not tree["profiled"]:
             lines = [_render("read_tree_pending", node=node.id)]
         else:
-            # The costliest nodes by points, shown in source order so nesting stays readable.
             evidence = tree["evidence"]
             shown_rows = evidence["page"]
             lines = [
                 _render(
                     "read_tree_head",
                     node=node.id,
+                    proof=evidence["proof_id"],
                     page=evidence["page_index"],
                     pages=evidence["page_count"],
                 ),
                 text.template("replies/tools.read_tree_cols").strip(),
             ]
+            if evidence["has_columns"]:
+                lines.insert(1, text.template("packet/price-table.coordinates").strip())
             lines += [
                 _render(
                     "read_tree_row",
@@ -1530,7 +1515,7 @@ def read_tool(theorem: str, run_id: str, request: dict) -> dict:
                     _render(
                         "read_tree_more",
                         count=evidence["omitted_on_page"],
-                        retrieval=evidence["retrieval"],
+                        retrieval=evidence["next_retrieval"],
                     )
                 )
             totals = {
