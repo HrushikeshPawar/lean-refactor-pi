@@ -4,7 +4,7 @@
 
 **Blocked by:** 09: Publish early results and resume the same hypothesis; 15: Promote an anchored replacement inside scratch; 19: Show readable packets and nested measured hotspots
 
-**Status:** needs-review
+**Status:** done
 
 **Branch:** `v8/20-tool-replies`
 
@@ -26,12 +26,24 @@
 
 ## What to build and acceptance
 
-- [ ] 1. Return outcomes, explicit attempts/experiments, operation inputs, named comparison deltas and primary/full/cold state. Label provisional and all-pin verified best separately.
+- [x] 1. Return outcomes, explicit attempts/experiments, operation inputs, named comparison deltas and primary/full/cold state. Label provisional and all-pin verified best separately.
 - [x] 2. Fix inline fences, cut-off signatures/targets, false invalid-request messages on search misses, irrelevant suggestions and open-goal error wording.
 - [x] 3. Use actor-local changes instead of unchanged full graph maps. Keep explicit full-state views and stable exact retrieval for every abbreviated item.
 - [x] 4. Keep notes optional; inherit hypothesis references and harness-known metadata. Scratch returns promotion results from its original call.
 - [x] 5. Keep the public input schemas unchanged in this slice. The schema/help parity ticket follows separately.
 - [x] 6. Use the one assigned fast smoke for this slice. Retain the stated behavior requirements; actual-Pi/real-Lean journeys and the broader race matrix are final E2E coverage, not this ticket's gate.
+
+## Review closure
+
+Codex review left acceptance 1 partial: compile replies lacked operation inputs and named deltas. Grok's follow-up added them, with the invocation's own attempt, derivation, operation and evaluation references, input roles, token and per-pin heartbeat deltas, primary/full/cold state and separate provisional/all-pin best labels. Claude's review fixed three defects in it:
+
+- A second unanchored submission of an existing proof previously recorded no attempt (decision 23). The follow-up recorded it, but also wrote a non-exact `root` derivation that contradicted the stored edge (decision 24). Only exact constructions now write derivations; the repeat is an attempt alone.
+- A goal try with a real error followed by `unsolved goals` reported "open goals". The first error now wins unless it is itself the unsolved-goals error.
+- A missing construction digest could match a legacy derivation; the join now requires a digest.
+
+Validation: `uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_tools_compile.py tests/test_tools_read_goal_search.py tests/test_scratch_promotion.py` gives **45 passed, 17 subtests**; scoped Ruff passed. Running whole touched files exposed three stale assertions that earlier tickets left failing, because each ran only its own smoke: the outline lost `pts_if_gone` at `5d4df6a` (v8-19, decision 52); unreceipted candidates stopped projecting as graph nodes at `ac15ca3` (v8-16, intended); the prices view switched to pre-rendered text at `540def8` (v8-19). Each was confirmed as intended behavior and updated in commit `nrm`. The local `.venv` had drifted from `uv.lock` (no `cyclopts`, `rich`, `ruff`) and was restored with `uv sync`.
+
+Open notes, not blockers: `_best_label` and pending-check detection rescan history per draft (candidates × events), so compute once per call if compile latency grows on long runs. Compile deltas compare against the latest parent result sharing the first pin, while scratch uses `_node_result`; unify in ticket 22. Full-pin count uses `history[0]["versions"]` in compile but `campaign.versions(problem)` in scratch. Scratch heartbeat deltas print unsigned.
 
 ## Verify
 
