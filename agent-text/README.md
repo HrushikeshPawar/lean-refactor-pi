@@ -49,7 +49,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `messages/continuation.request_failed` | 4 | Agent messages and notices | when the matching event occurs |
 | `messages/continuation.skeleton` | 17 | Agent messages and notices | when the matching event occurs |
 | `messages/continuation.turn_cut` | 2 | Agent messages and notices | when the matching event occurs |
-| `messages/continuation.turn_ended_with_text` | 14 | Agent messages and notices | when the matching event occurs |
+| `messages/continuation.turn_ended_with_text` | 39 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.ambiguous_symbol` | 5 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.cold_session_unavailable` | 4 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.cold_verification_paused` | 7 | Agent messages and notices | when the matching event occurs |

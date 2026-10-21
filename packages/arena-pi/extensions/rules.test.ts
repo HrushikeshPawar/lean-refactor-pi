@@ -14,8 +14,8 @@ test("failure and completed continuations share spend and points-left facts", as
   const failed = await continuationPush({ ...facts, failed: true, cause: "Provider timeout" });
   const completed = await continuationPush({ ...facts, failed: false });
   assert.match(failed, /request failed: Provider timeout/i);
-  assert.doesNotMatch(failed, /turn ended with text/i);
-  assert.match(completed, /turn ended with text/i);
+  assert.doesNotMatch(failed, /made no tool call/i);
+  assert.match(completed, /made no tool call/i);
   assert.equal(failed.slice(failed.indexOf("$0.04")), completed.slice(completed.indexOf("$0.04")));
   assert.doesNotMatch(failed, /points left/i);
 });
