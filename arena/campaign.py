@@ -754,11 +754,11 @@ def _source_hint(name: str, symbol: str) -> tuple[str, str | None, tuple[int, in
     return symbol, module, span
 
 
-def packet(name: str) -> str:
-    """Kickoff packet: task, exchange rates, source-derived context. Built once per row and cached."""
+def packet(name: str, model: str | None = None) -> str:
+    """Kickoff packet: task, exchange rates, source-derived context. The model is the orchestrating one."""
     from arena.context import render_packet
 
-    return render_packet(name)
+    return render_packet(name, model=model)
 
 
 def _append(directory: Path, event: dict) -> None:
@@ -895,7 +895,7 @@ def _copy_tracked(project: Path, shadow: Path) -> None:
         shutil.copy2(source, target)
 
 
-def init(name: str, run_id: str, extra: str = "", seed: Path | None = None) -> dict:
+def init(name: str, run_id: str, extra: str = "", seed: Path | None = None, model: str | None = None) -> dict:
     """Start a run. With `seed`, the graph of that ended run replaces the reference-only start."""
     directory = run_dir(run_id)
     # The runner may already have started the run's Lean session here; nothing else counts as a run.
@@ -907,7 +907,7 @@ def init(name: str, run_id: str, extra: str = "", seed: Path | None = None) -> d
     version, commit = versions(row)[0]
     project = workspace(row, version, commit)
     directory.mkdir(parents=True, exist_ok=True)
-    text = packet(name) + ("\nAdditional instructions:\n" + extra + "\n" if extra else "")
+    text = packet(name, model) + ("\nAdditional instructions:\n" + extra + "\n" if extra else "")
     (directory / "packet.txt").write_text(text)
     shadow = directory / "scratch" / "project"
     _copy_tracked(project, shadow)

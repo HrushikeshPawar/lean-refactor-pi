@@ -530,7 +530,7 @@ def offline_campaign(root: Path, packets=None):
     with (
         mock.patch.object(rc, "RUNS", root),
         mock.patch.object(rc, "check_indexes"),
-        mock.patch("arena.campaign.packet", side_effect=packets or (lambda row: "x" * 1234)),
+        mock.patch("arena.campaign.packet", side_effect=packets or (lambda row, model=None: "x" * 1234)),
         mock.patch.object(rc, "Housekeeping", housekeeping),
         mock.patch.object(rc.scheduler, "ResourceSampler", FakeSampler),
         mock.patch.object(rc.scheduler, "mem_total_default", return_value=16.0),

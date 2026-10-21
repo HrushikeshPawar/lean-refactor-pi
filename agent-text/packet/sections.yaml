@@ -3,6 +3,7 @@ titles:
   types: "Project definitions and predicates"
   scope: "Scope at the theorem (namespace, open, variable, universe in effect before the statement)"
   reference: "Original proof and step prices ({count} tokens)"
+  team: "Team"
   goals: "Goals before original steps"
   profile: "Original proof heartbeats by line"
   source: "Source-named declarations"

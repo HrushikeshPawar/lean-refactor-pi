@@ -264,6 +264,8 @@ class TextRendererTests(unittest.TestCase):
             "packet/price-table",
             "packet/price-table.legend",
             "packet/search",
+            "packet/team",
+            "packet/team-cost",
             "packet/sections.titles.goals",
             "packet/sections.titles.library",
         )
@@ -698,6 +700,28 @@ class RuleConsistencyTests(unittest.TestCase):
 
 class PacketBehaviourTests(unittest.TestCase):
     """Checkbox 18 (a)-(c), from fixture contexts; no Lean."""
+
+    def test_team_section_only_in_orchestrator_packet_with_computed_numbers(self):
+        from arena import context
+        from arena.models import _SESSION_CONCURRENCY, load
+        from arena.pi_rpc import WORKER_MODEL
+
+        cached, measured = _fixture("ski")
+        prices = load()["models"]
+        ratio = round(prices["gpt-6.1-sol"]["price"]["output"] / prices[WORKER_MODEL]["price"]["output"])
+
+        def team(model):
+            with (
+                patch.object(context, "cached_context", return_value=cached),
+                patch.object(context, "reference_profile", return_value=measured),
+            ):
+                return context.packet_sections(ROWS["ski"], cache_only=True, model=model)
+
+        body = dict(team("gpt-6.1-sol"))["Team"]
+        self.assertIn(f"up to {_SESSION_CONCURRENCY[WORKER_MODEL]} worker sessions ({WORKER_MODEL})", body)
+        self.assertIn(f"costs about {ratio}\u00d7 less than yours", body)
+        self.assertNotIn("less than yours", dict(team(WORKER_MODEL))["Team"])
+        self.assertNotIn("Team", dict(team(None)))
 
     def test_packet_order_rates_price_rows_goals_and_library_format(self):
         from arena import context

@@ -558,7 +558,7 @@ def run(options: RunOptions) -> int:
         prompt = (
             text.render("messages/run.preflight")
             if args.preflight
-            else packet(args.theorem) + ("\nAdditional instructions:\n" + extra + "\n" if extra else "")
+            else packet(args.theorem, args.model) + ("\nAdditional instructions:\n" + extra + "\n" if extra else "")
         )
     if args.no_langfuse and not args.test_extension:
         print("error: --no-langfuse is only for offline runs with --test-extension", file=sys.stderr)
@@ -615,7 +615,7 @@ def run(options: RunOptions) -> int:
         print("\n".join(price_problems), file=sys.stderr)
         return 1
     if not args.resume_run:
-        init(args.theorem, args.run_id, extra, seed=args.seed_run)
+        init(args.theorem, args.run_id, extra, seed=args.seed_run, model=args.model)
         if args.seed_run is not None:
             # The recorded packet hash stays that of the plain packet; the prior work follows it.
             section = prior_work(args.run_id, args.seed_run)

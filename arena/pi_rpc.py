@@ -6,6 +6,7 @@ import json
 from codecs import getincrementaldecoder
 from pathlib import Path
 
+WORKER_MODEL = "deepseek-v4.1-flash"
 WORKER_TOOLS = ("compile", "goal", "search", "read", "scratch")
 
 
@@ -61,7 +62,7 @@ def worker_launch(
     job_id: str,
     activation_id: str,
     anchor: dict,
-    model: str = "deepseek-v4.1-flash",
+    model: str = WORKER_MODEL,
     generation: str | None = None,
 ) -> dict:
     """Fresh RPC launch. The adapter merges env overrides over os.environ to retain provider auth."""

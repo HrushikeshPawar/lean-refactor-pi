@@ -44,7 +44,7 @@ memory_read_entries: 30
 memory_recovery_entries: 8
 budget:
   static_words: 800
-  packet_words: 290
+  packet_words: 365
   reply_words: 40
 # Steps below the step table are named when tried at most this often and still worth at least this many points.
 untried_step_max_tries: 2

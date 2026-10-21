@@ -935,7 +935,23 @@ def _reference_price_table(table: dict, proof: str, profile: dict | None) -> lis
     return render_price_table(table, proof, profile, proof_id="reference").splitlines()
 
 
-def packet_sections(name: str, *, cache_only: bool = False) -> list[tuple[str, str]]:
+def _team_section(model: str | None) -> list[str]:
+    """The orchestrator's team paragraph. Worker count, model and the output-price ratio are computed here."""
+    if model is None:
+        return []
+    from arena.models import _SESSION_CONCURRENCY, load
+    from arena.pi_rpc import WORKER_MODEL
+
+    prices = load()["models"]
+    # One simple rule: how many times cheaper a worker's output token is than the orchestrator's.
+    ratio = round(prices[model]["price"]["output"] / prices[WORKER_MODEL]["price"]["output"])
+    cost = render_text("packet/team-cost", ratio=ratio) if ratio > 1 else ""
+    return render_text(
+        "packet/team", workers=_SESSION_CONCURRENCY[WORKER_MODEL], worker_model=WORKER_MODEL, cost=cost
+    ).strip().splitlines()
+
+
+def packet_sections(name: str, *, cache_only: bool = False, model: str | None = None) -> list[tuple[str, str]]:
     row = problem(name)
     targets = versions(row)
     context = cached_context(name) if cache_only else lean_context(name)
@@ -1015,6 +1031,7 @@ def packet_sections(name: str, *, cache_only: bool = False) -> list[tuple[str, s
         ),
         (template("packet/sections.titles.profile").strip(), _profile_section(prof, row["src"], name)),
         ("", template("packet/search").strip().splitlines()),
+        (template("packet/sections.titles.team").strip(), _team_section(model)),
         (titles["goals"], _goal_section(context, row["src"], facts=goal_facts)),
         (LIBRARY_TITLE, _library_section(context)),
         (titles["types"], _types_section(context)),
@@ -1047,5 +1064,6 @@ def packet_sections(name: str, *, cache_only: bool = False) -> list[tuple[str, s
     ]
 
 
-def render_packet(name: str, *, cache_only: bool = False) -> str:
-    return "\n\n".join(content for _title, content in packet_sections(name, cache_only=cache_only)) + "\n"
+def render_packet(name: str, *, cache_only: bool = False, model: str | None = None) -> str:
+    sections = packet_sections(name, cache_only=cache_only, model=model)
+    return "\n\n".join(content for _title, content in sections) + "\n"

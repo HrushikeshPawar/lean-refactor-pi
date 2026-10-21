@@ -253,7 +253,7 @@ def _packet_body(run: Run, turn: int) -> str:
         return ""
     from arena.context import render_packet
 
-    return render_packet(theorem, cache_only=True)
+    return render_packet(theorem, cache_only=True, model=run.config.get("model"))
 
 
 def _nodes_body(run: Run, turn: int) -> str:

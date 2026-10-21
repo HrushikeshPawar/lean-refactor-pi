@@ -284,8 +284,11 @@ def write_seed_proofs(specs: list[dict], proofs: dict[str, str]) -> None:
             path.write_text(proofs[spec["row"]].strip() + "\n")
 
 
-def check_packets(rows: list[str], packet_fn=None, progress: Progress | None = None) -> dict[str, str]:
-    """Row -> sha256 of its certified packet. Any uncertifiable row aborts the campaign."""
+def check_packets(
+    rows: list[str], packet_fn=None, progress: Progress | None = None, models: list[str] | None = None
+) -> dict[str, str]:
+    """Row -> sha256 of its certified packet; with `models`, also "row|model" -> sha256 of that orchestrator's packet.
+    Any uncertifiable row aborts the campaign."""
     if packet_fn is None:
         from arena.campaign import packet as packet_fn
     progress = progress or Progress()
@@ -303,11 +306,13 @@ def check_packets(rows: list[str], packet_fn=None, progress: Progress | None = N
         started = time.monotonic()
         try:
             text = packet_fn(row)
+            by_model = {model: packet_fn(row, model) for model in models or ()}
         except Exception as error:
             failures.append(f"{row}: {error}")
             progress.step_end(key, False, str(error), f"{name}: FAILED after {time.monotonic() - started:.0f}s")
             continue
         hashes[row] = hashlib.sha256(text.encode()).hexdigest()
+        hashes.update({f"{row}|{model}": hashlib.sha256(t.encode()).hexdigest() for model, t in by_model.items()})
         progress.step_end(
             key,
             True,
@@ -1122,7 +1127,7 @@ def _campaign_body(
     }
     try:
         check_indexes(rows)
-        expected = check_packets(rows, progress=progress)
+        expected = check_packets(rows, progress=progress, models=models)
         fallback = getattr(args, "fallback_model", None)
         checked = list(dict.fromkeys([*models, *([fallback] if fallback else [])]))
         progress.plain(f"preflight: {check_preflight(checked, args.skip_preflight, progress=progress)}")
@@ -1223,7 +1228,7 @@ def _campaign_body(
                     args.thinking,
                     passthrough_tokens,
                     out,
-                    expected[spec["row"]],
+                    expected.get(f'{spec["row"]}|{spec["model"]}', expected[spec["row"]]),
                     housekeeping=housekeeping,
                     prewarm=prewarm,
                     sampler=sampler,
