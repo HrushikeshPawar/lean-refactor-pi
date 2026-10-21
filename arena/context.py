@@ -233,7 +233,9 @@ def lean_context(name: str) -> dict:
     inserted = source.replace("@@ROOTS@@", roots).replace("@@TARGET@@", _lean_name(name))
     built = candidate_file(row, row["src"], version, commit)
     text = built["text"][: built["head"]] + inserted + built["text"][built["head"] :]
-    ran = run_lean(row, built["path"], text, timeout=CONTEXT_TIMEOUT, prefix_end=built["head"])
+    ran = run_lean(
+        row, built["path"], text, timeout=CONTEXT_TIMEOUT, prefix_end=built["head"], request_class="opportunistic"
+    )
     if ran is None:
         return {"error": render_text("messages/errors.lean_context_timeout")}
     _returncode, output = ran

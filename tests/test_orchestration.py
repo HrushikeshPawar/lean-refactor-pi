@@ -1897,3 +1897,119 @@ class V8VerificationSmokeTests(FakeRunCase):
         self.assertEqual(states, ["running", "inconclusive"])
         self.assertFalse(orchestration._open_checks(self.directory, ["job-transport"]))
 
+
+class _IdleServer:
+    def alive(self):
+        return True
+
+    def doc(self, uri):
+        from arena import lean_session
+
+        return lean_session._Doc(uri)
+
+    def close_doc(self, _slot):
+        return None
+
+    def stop(self):
+        return None
+
+    def check(self, *_args, **_kwargs):
+        raise AssertionError("memory denial must not start a Lean check")
+
+
+class V8AdmissionSmokeTests(unittest.TestCase):
+    def test_v8_request_class_dispatch(self):
+        from arena import lean_session
+
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            project = directory / "proj"
+            project.mkdir()
+            session = lean_session.Session(
+                directory / "service",
+                budget=lean_session.WorkerBudget(directory / "tokens", 1),
+                mem_fn=lambda: (64.0, None),
+            )
+            self.addCleanup(session.shutdown)
+            key = {"code": lean_session.code_sha()}
+            entry = lean_session._Entry(project.resolve(), key, _IdleServer())
+            session.entries[str(project.resolve())] = entry
+            holder = session._acquire(entry, 5, "model", "import Shared\n", "opportunistic")
+            order = []
+
+            def queued(request_class):
+                slot = session._acquire(entry, 5, "model", "import Shared\n", request_class)
+                with entry.condition:
+                    order.append((request_class, slot.queue_reason))
+                    entry.condition.notify_all()
+                session._release(entry, slot)
+
+            classes = ("ds_experiment", "full_check", "sol_foreground", "opportunistic")
+            threads = [threading.Thread(target=queued, args=(name,)) for name in classes]
+            for thread in threads:
+                thread.start()
+            with entry.condition:
+                while len(entry.waiters) < len(classes):
+                    entry.condition.wait()
+            session._release(entry, holder)
+            with entry.condition:
+                while len(order) < len(classes):
+                    entry.condition.wait()
+            for thread in threads:
+                thread.join(5)
+            self.assertEqual(
+                [name for name, _reason in order],
+                ["sol_foreground", "full_check", "ds_experiment", "opportunistic"],
+            )
+            self.assertEqual(order[1][1], "queued behind sol_foreground")
+            self.assertTrue(all(not thread.is_alive() for thread in threads))
+
+            busy = entry.slots[0]
+            with entry.condition:
+                busy.busy = True
+                busy.request_class = "ds_experiment"
+            session.budget = lean_session.WorkerBudget(directory / "tokens-two", 2)
+            admitted = []
+
+            def second(request_class):
+                slot = session._acquire(entry, 5, "model", "import Shared\n", request_class)
+                with entry.condition:
+                    admitted.append(request_class)
+                    entry.condition.notify_all()
+                session._release(entry, slot)
+
+            extra = [threading.Thread(target=second, args=(name,)) for name in ("ds_experiment", "sol_foreground")]
+            for thread in extra:
+                thread.start()
+            with entry.condition:
+                while admitted != ["sol_foreground"]:
+                    entry.condition.wait()
+                self.assertEqual(
+                    [waiter.queue_reason for waiter in entry.waiters],
+                    ["queued: one DeepSeek Lean compilation is in flight"],
+                )
+                busy.busy = False
+                entry.condition.notify_all()
+            for thread in extra:
+                thread.join(5)
+            self.assertEqual(admitted, ["sol_foreground", "ds_experiment"])
+
+            session.mem_fn = lambda: (1.0, None)
+            entry.slots.clear()
+            denied = session.check({
+                "protocol": lean_session.PROTOCOL,
+                "project": str(project),
+                "fingerprint": key,
+                "text": "theorem t : True := by\n  trivial\n",
+                "display": "T.lean",
+                "timeout": 1,
+                "lane": "background",
+                "request_class": "sol_foreground",
+            })
+            self.assertFalse(denied["ok"])
+            self.assertIn("memory", denied["reason"])
+            self.assertEqual(denied["outcome"], "inconclusive")
+            self.assertEqual(denied["cause"], "resource")
+            self.assertEqual(denied["admission"], "denied")
+            self.assertEqual(lean_session.normalize_request_class("background"), "full_check")
+

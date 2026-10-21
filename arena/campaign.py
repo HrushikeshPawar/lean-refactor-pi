@@ -792,12 +792,22 @@ def _runtime_event(directory: Path, event: dict) -> None:
     )
 
 
-def _evaluate(name: str, proof: str, mode: str, known: dict | None = None, lane: str = "model") -> dict:
+def _evaluate(
+    name: str,
+    proof: str,
+    mode: str,
+    known: dict | None = None,
+    lane: str = "model",
+    request_class: str | None = None,
+) -> dict:
     """`engine.evaluate`, sending background-lane work (full checks, cold verification) to the Lean session's
     background lane when the engine supports lanes, so it never takes a model worker."""
+    kwargs = {}
     if lane != "model" and "lane" in inspect.signature(evaluate).parameters:
-        return evaluate(name, proof, mode, known=known, lane=lane)
-    return evaluate(name, proof, mode, known=known)
+        kwargs["lane"] = lane
+    if request_class is not None and "request_class" in inspect.signature(evaluate).parameters:
+        kwargs["request_class"] = request_class
+    return evaluate(name, proof, mode, known=known, **kwargs)
 
 
 def _refuse_if_tripped(directory: Path) -> None:
@@ -2006,6 +2016,13 @@ def record_evaluation(
                             mode,
                             known=_compiled_versions(history, candidate_id, row) if mode == "full" else None,
                             lane=lane,
+                            request_class=(
+                                "full_check"
+                                if mode == "full"
+                                else "opportunistic"
+                                if origin in {"assembly", "golf"} or trigger == "golf"
+                                else None
+                            ),
                         )
                 except (ValueError, FileNotFoundError) as error:
                     result = {
@@ -3657,7 +3674,7 @@ def _salvage_compile(name: str, text_value: str) -> dict:
     if directory is None:
         raise ValueError
     with lean_lock(directory, "background"):
-        result = _evaluate(name, text_value, "probe", lane="background")
+        result = _evaluate(name, text_value, "probe", lane="background", request_class="opportunistic")
     compat = result.get("compat") or {}
     first = next(iter(compat.values()), {})
     diagnostics = first.get("diagnostics") or []
@@ -4650,7 +4667,9 @@ def cold_verify(run_id: str, row: dict) -> dict:
                 )
             else:
                 with lean_lock(directory, "background"), force_cold():
-                    cold = _evaluate(history[0]["theorem"], proof, "full", lane="background")
+                    cold = _evaluate(
+                        history[0]["theorem"], proof, "full", lane="background", request_class="full_check"
+                    )
                 compat = cold.get("compat") or {}
                 passed = {
                     version: info.get("passed") is True and info.get("outcome", "passed") == "passed"

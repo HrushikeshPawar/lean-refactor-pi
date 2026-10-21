@@ -386,7 +386,9 @@ def _instrumented(
     built = candidate_file(row, proof, version, commit)
     inserted = preamble(depth)
     text = built["text"][: built["head"]] + inserted + built["text"][built["head"] :]
-    ran = run_lean(row, built["path"], text, prefix_end=built["head"], lane=lane)
+    ran = run_lean(
+        row, built["path"], text, prefix_end=built["head"], lane=lane, request_class="opportunistic"
+    )
     if ran is None:
         raise ValueError(agent_text.render("messages/errors.profile_timeout"))
     returncode, output = ran

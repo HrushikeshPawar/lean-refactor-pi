@@ -293,7 +293,7 @@ def golf_run(name: str, run_id: str, seconds: float, clock: Callable[[], float] 
         nonlocal failures
         try:
             with campaign.lean_lock(directory, "batch"):
-                result = campaign._evaluate(name, text, "fast", lane="batch")
+                result = campaign._evaluate(name, text, "fast", lane="batch", request_class="opportunistic")
         except Exception:
             failures += 1
             return None
@@ -360,7 +360,7 @@ def golf_file(
     def score(text: str) -> float | None:
         try:
             with engine.force_cold():
-                return proxy_of(engine.evaluate(name, text, "fast"))
+                return proxy_of(engine.evaluate(name, text, "fast", request_class="opportunistic"))
         except (ValueError, FileNotFoundError):
             return None
 
@@ -369,7 +369,7 @@ def golf_file(
         return outcome, proof
     for text, _, _ in reversed(outcome.accepted):
         with engine.force_cold():
-            full = engine.evaluate(name, text, "full")
+            full = engine.evaluate(name, text, "full", request_class="opportunistic")
         if proxy_of(full) is not None:
             outcome.score = proxy_of(full)
             return outcome, text

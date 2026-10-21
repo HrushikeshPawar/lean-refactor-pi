@@ -83,6 +83,7 @@ def _reference_check(row: dict, version: str, commit: str, timeout: int = LIMIT_
             prefix_end=cast(int, built["head"]),
             timeout=timeout,
             lane=lane,
+            request_class="opportunistic",
         )
     except Exception as error:
         return {

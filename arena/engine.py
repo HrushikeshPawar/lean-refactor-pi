@@ -582,7 +582,13 @@ def _session_request(row: dict, project: Path, text: str, prefix_end: int | None
 
 
 def run_lean(
-    row: dict, project: Path, text: str, timeout: int | None = None, prefix_end: int | None = None, lane: str = "model"
+    row: dict,
+    project: Path,
+    text: str,
+    timeout: int | None = None,
+    prefix_end: int | None = None,
+    lane: str = "model",
+    request_class: str | None = None,
 ) -> tuple[int, str] | None:
     """Compile `text` as the target's file inside the pinned project; None on timeout.
 
@@ -606,12 +612,17 @@ def run_lean(
             "protocol": lean_session.PROTOCOL,
             "timeout": timeout,
             "lane": lane,
+            "request_class": request_class,
             "row": row.get("name", "") if lane == "batch" else "",
             "toolchain": (project / "lean-toolchain").read_text().strip()
             if lane == "batch" and (project / "lean-toolchain").is_file()
             else "",
             "measure": "arena_measure_heartbeats" in text,
         }
+        if request_class is None:
+            actor = os.environ.get("ARENA_ACTOR_ID") or "sol"
+            request_class = "ds_experiment" if actor != "sol" else "sol_foreground"
+        payload["request_class"] = request_class
         if payload["toolchain"].startswith("leanprover/lean4:"):
             payload["toolchain"] = payload["toolchain"].removeprefix("leanprover/lean4:")
         if run_id := os.environ.get(lean_session.RUN_ID_ENV):
@@ -690,6 +701,7 @@ def lean_goals(
         "position": {"line": line, "column": column},
         "timeout": lean_timeout() if timeout is None else timeout,
         "lane": "model",
+        "request_class": "ds_experiment" if os.environ.get("ARENA_ACTOR_ID", "sol") not in ("", "sol") else "sol_foreground",
     }
     if run_id := os.environ.get(lean_session.RUN_ID_ENV):
         payload["run_id"] = run_id
@@ -714,6 +726,7 @@ def lean_try(
         "snippets": snippets,
         "timeout": lean_timeout() if timeout is None else timeout,
         "lane": "model",
+        "request_class": "ds_experiment" if os.environ.get("ARENA_ACTOR_ID", "sol") not in ("", "sol") else "sol_foreground",
     }
     if run_id := os.environ.get(lean_session.RUN_ID_ENV):
         payload["run_id"] = run_id
@@ -732,6 +745,7 @@ def compile_version(
     probe: bool = False,
     report_start_line: int | None = None,
     lane: str = "model",
+    request_class: str | None = None,
 ) -> dict:
     prepared_at = time.monotonic()
     built = candidate_file(row, proof, version, commit)
@@ -748,10 +762,14 @@ def compile_version(
 
     wrapper_start = built["text"][: built["head"]].count("\n") + 1 if measure else None
     timeout = lean_timeout()
-    output = run_lean(row, built["path"], assemble(True), timeout=timeout, prefix_end=built["head"], lane=lane)
+    output = run_lean(
+        row, built["path"], assemble(True), timeout=timeout, prefix_end=built["head"], lane=lane, request_class=request_class
+    )
     if output is not None and probe and output[0] != 0 and _HARNESS_ERROR.search(output[1]):
         # Harness-origin error: the model must see only the plain draft's own result.
-        output = run_lean(row, built["path"], assemble(False), timeout=timeout, prefix_end=built["head"], lane=lane)
+        output = run_lean(
+            row, built["path"], assemble(False), timeout=timeout, prefix_end=built["head"], lane=lane, request_class=request_class
+        )
     lean_run = last_lean_run()
     lean_run["candidate_prepare_seconds"] = preparation_seconds
     if output is None:
@@ -812,7 +830,14 @@ def compile_version(
     return result
 
 
-def evaluate(name: str, proof: str, mode: str = "fast", known: dict | None = None, lane: str = "model") -> dict:
+def evaluate(
+    name: str,
+    proof: str,
+    mode: str = "fast",
+    known: dict | None = None,
+    lane: str = "model",
+    request_class: str | None = None,
+) -> dict:
     """Compile one proof. `probe` allows `sorry`, checks one version, never scores.
 
     `known` maps versions to compile results already obtained for this exact
@@ -832,6 +857,14 @@ def evaluate(name: str, proof: str, mode: str = "fast", known: dict | None = Non
     targets = versions(row)
     if not targets:
         raise ValueError(text.render("messages/errors.toolchains_missing"))
+    if request_class is None:
+        actor = os.environ.get("ARENA_ACTOR_ID") or "sol"
+        if mode == "full":
+            request_class = "full_check"
+        elif actor != "sol":
+            request_class = "ds_experiment"
+        else:
+            request_class = "sol_foreground"
     measured_on = measure_version(row)
     checked = targets if mode == "full" else targets[:1]
     if mode == "fast" and measured_on != targets[0]:
@@ -853,6 +886,7 @@ def evaluate(name: str, proof: str, mode: str = "fast", known: dict | None = Non
             probe=probe,
             report_start_line=primary_start,
             lane=lane,
+            request_class=request_class,
         )
         if mode != "full" and not compat[version]["passed"]:
             break

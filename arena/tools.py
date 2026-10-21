@@ -283,7 +283,7 @@ def all_errors(name: str, run_id: str, node, result: dict) -> tuple[list[dict], 
             break
         replacement = "\n".join(planned)
         try:
-            checked = campaign.evaluate(name, replacement, "probe")
+            checked = campaign.evaluate(name, replacement, "probe", request_class="opportunistic")
         except (OSError, ValueError, RuntimeError):
             incomplete = True
             break

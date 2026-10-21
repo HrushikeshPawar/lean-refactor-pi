@@ -121,7 +121,15 @@ def smoke(toolchain: str, project: Path | None = None) -> dict:
     built = engine.candidate_file(row, row["src"], version, commit)
     header, body = built["text"][: built["head"]], built["text"][built["head"] :]
     started = time.monotonic()
-    direct = engine.run_lean(row, project, built["text"], timeout=600, prefix_end=built["head"], lane="background")
+    direct = engine.run_lean(
+        row,
+        project,
+        built["text"],
+        timeout=600,
+        prefix_end=built["head"],
+        lane="background",
+        request_class="opportunistic",
+    )
     process = ReplProcess(project, toolchain)
     try:
         process.start()
