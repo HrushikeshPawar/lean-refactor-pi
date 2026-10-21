@@ -108,7 +108,10 @@ class Coordinator:
                 raise ValueError("invalid management request")
             action = request.get("action")
             if action in ("delegate", "cancel"):
-                result = self._delegate(request) if action == "delegate" else self._cancel(request)
+                try:
+                    result = self._delegate(request) if action == "delegate" else self._cancel(request)
+                except Exception as error:  # The receipt may be committed; a same-id retry returns it.
+                    result = {**_failure(type(error).__name__), "operation_id": request.get("operation_id")}
                 connection.sendall(json.dumps(result).encode() + b"\n")
                 return
             if action != "await_results":
@@ -160,6 +163,16 @@ class Coordinator:
             thread.join(timeout=1)
         if self._thread is not None:
             self._thread.join(timeout=1)
+        endpoint = self.directory / "coordinator.json"
+        try:
+            if json.loads(endpoint.read_text()).get("generation") == self._generation:
+                endpoint.unlink()
+        except (FileNotFoundError, ValueError):
+            pass
+        if self._temporary is not None:
+            shutil.rmtree(self._temporary, ignore_errors=True)
+        if self._owner is not None:
+            self._owner.close()
 
     def _delegate(self, request: dict) -> dict:
         if request.get("actor_id") != "sol":
@@ -197,16 +210,6 @@ class Coordinator:
             session_id=str(request.get("session_id") or ""),
             job_id=job_id,
         )
-        endpoint = self.directory / "coordinator.json"
-        try:
-            if json.loads(endpoint.read_text()).get("generation") == self._generation:
-                endpoint.unlink()
-        except (FileNotFoundError, ValueError):
-            pass
-        if self._temporary is not None:
-            shutil.rmtree(self._temporary, ignore_errors=True)
-        if self._owner is not None:
-            self._owner.close()
 
     def __enter__(self) -> Coordinator:
         return self.start()
