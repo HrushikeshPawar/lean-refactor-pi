@@ -178,8 +178,6 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `packet/sections.fixed.goal_shared` | 2 | Initial theorem packet | once per run |
 | `packet/sections.fixed.imports` | 3 | Initial theorem packet | once per run |
 | `packet/sections.fixed.library_line` | 6 | Initial theorem packet | once per run |
-| `packet/sections.fixed.local_intro` | 15 | Initial theorem packet | once per run |
-| `packet/sections.fixed.local_line` | 7 | Initial theorem packet | once per run |
 | `packet/sections.fixed.namespace` | 2 | Initial theorem packet | once per run |
 | `packet/sections.fixed.none` | 1 | Initial theorem packet | once per run |
 | `packet/sections.fixed.numbered_source` | 8 | Initial theorem packet | once per run |
@@ -207,7 +205,6 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `packet/sections.titles.earlier` | 6 | Initial theorem packet | once per run |
 | `packet/sections.titles.goals` | 4 | Initial theorem packet | once per run |
 | `packet/sections.titles.library` | 3 | Initial theorem packet | once per run |
-| `packet/sections.titles.locals` | 2 | Initial theorem packet | once per run |
 | `packet/sections.titles.pinned` | 2 | Initial theorem packet | once per run |
 | `packet/sections.titles.profile` | 5 | Initial theorem packet | once per run |
 | `packet/sections.titles.reference` | 7 | Initial theorem packet | once per run |
@@ -258,8 +255,6 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/tools.filing_merge` | 8 | Tool replies | when the matching tool result occurs |
 | `replies/tools.filing_root` | 3 | Tool replies | when the matching tool result occurs |
 | `replies/tools.filing_splice` | 7 | Tool replies | when the matching tool result occurs |
-| `replies/tools.finish_archive` | 2 | Tool replies | when the matching tool result occurs |
-| `replies/tools.finish_points` | 8 | Tool replies | when the matching tool result occurs |
 | `replies/tools.goal_cases_omitted` | 7 | Tool replies | when the matching tool result occurs |
 | `replies/tools.goal_hyps_omitted` | 4 | Tool replies | when the matching tool result occurs |
 | `replies/tools.goal_item` | 4 | Tool replies | when the matching tool result occurs |
@@ -423,7 +418,6 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `tools/delegate.params.job_id` | 10 | Model tool definitions | every request |
 | `tools/delegate.params.scope` | 12 | Model tool definitions | every request |
 | `tools/delegate.params.task` | 5 | Model tool definitions | every request |
-| `tools/finish.description` | 22 | Model tool definitions | every request |
 | `tools/goal.description` | 41 | Model tool definitions | every request |
 | `tools/goal.params.hole` | 6 | Model tool definitions | every request |
 | `tools/goal.params.line` | 7 | Model tool definitions | every request |

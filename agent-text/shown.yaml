@@ -46,9 +46,6 @@ tools:
   compile:
     where: "Model tool definitions"
     per_run: "every request"
-  finish:
-    where: "Model tool definitions"
-    per_run: "every request"
   goal:
     where: "Model tool definitions"
     per_run: "every request"

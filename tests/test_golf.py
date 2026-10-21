@@ -167,6 +167,7 @@ class RunPassTests(FakeRunCase):
             patch.object(campaign, "problem", return_value={"name": "T", "statement": STATEMENT}),
             patch.object(campaign.lean_health, "tripped", return_value=False),
             patch.object(campaign, "evaluate", side_effect=self.judging_eval),
+            patch("arena.scoring.local_proxy", side_effect=lambda _n, tokens, _hb, _c: round(100 - tokens, 2)),
         ):
             item.start()
             self.addCleanup(item.stop)
@@ -194,6 +195,10 @@ class RunPassTests(FakeRunCase):
         (row,) = [e for e in history if e.get("kind") == "golf"]
         self.assertEqual((row["tried"], row["accepted"]), (outcome.tried, len(outcome.accepted)))
         self.assertEqual(row["verified"], golfed[-1]["id"])
+        # A golf candidate is harness-made: the submission takes it only once an exact selection names it.
+        campaign._append(
+            self.directory, {"kind": "proof_selection", "proof_id": golfed[-1]["id"], "candidate_id": golfed[-1]["id"]}
+        )
         answer = campaign.submission("logic")
         self.assertEqual(answer["candidate_id"], golfed[-1]["id"])
         self.assertGreater(answer["proxy"], start["metrics"]["proxy"])

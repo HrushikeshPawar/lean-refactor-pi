@@ -182,6 +182,7 @@ class CertificationTests(unittest.TestCase):
         with (
             patch.object(arena_certify.environments, "provisioned", return_value=found),
             patch.object(arena_certify, "evaluate", return_value=result),
+            patch.object(arena_certify, "render_packet", return_value="packet"),
         ):
             return arena_certify.certify("Core.InitsUpdatesComm")
 

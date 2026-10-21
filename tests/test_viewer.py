@@ -280,7 +280,9 @@ class DataTests(unittest.TestCase):
         self.assertEqual(kinds, ["limit", "finish", "control"])
         self.assertEqual(board["lean"]["paths"]["session"]["runs"], 2)
         self.assertEqual(board["lean"]["paths"]["cold"]["by_check"], {"probe": 1})
-        self.assertTrue(board["lean"]["cold_verification"]["confirmed"])
+        cold = board["lean"]["cold_verification"]
+        self.assertFalse(cold["confirmed"])  # the fixture event has no identity: unbound evidence is withheld
+        self.assertEqual(cold["cause"], "context")
         self.assertEqual(board["packet"], "kickoff packet text")
 
     def test_dashboard_builds_from_a_legacy_ledger_with_ideas_and_old_tool_names(self):

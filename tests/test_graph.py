@@ -399,12 +399,15 @@ class GraphCampaignTests(FakeRunCase):
                 {"type": "draft", "base": "n1", "text": "theorem t := by\n  good"},
             )
         self.assertEqual(result["node"], "n2")
-        self.assertEqual(
-            result["edge"],
-            {"type": "edited_from", "from": [campaign._candidate_ids(campaign.events(self.directory))[0]]},
-        )
+        edge = result["edge"]
+        parent = campaign._candidate_ids(campaign.events(self.directory))[0]
+        self.assertEqual((edge["type"], edge["from"]), ("edited_from", [parent]))
+        self.assertEqual((edge["operation"]["type"], edge["operation"]["from"]), ("edited_from", [parent]))
+        self.assertIn("construction_digest", edge)
         projection = Graph.from_history(
-            campaign.events(self.directory), lambda ident: (self.directory / "proofs" / f"{ident}.lean").read_text()
+            campaign.events(self.directory),
+            lambda ident: (self.directory / "proofs" / f"{ident}.lean").read_text(),
+            committed_operations=campaign.committed_operation_ids(self.directory),
         )
         self.assertEqual([node.id for node in projection.nodes], ["n1", "n2"])
         self.assertEqual(projection.nodes[1].status, "closed")

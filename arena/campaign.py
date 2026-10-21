@@ -3910,7 +3910,7 @@ def _run_full_check(name: str, run_id: str, job: dict) -> str:
     pending = [event for event in latest.values() if event["state"] == "queued"]
     mode = check_mode(job["id"], pending[0]["evaluation_id"], problem(name)) if pending else "full"
     if mode is None:
-        raise ValueError("queued evaluation context changed")
+        raise ValueError("queued evaluation context changed")  # log: internal error # not-model-facing
     checks = [_check_arguments(event) for event in pending
               if event["evaluation_id"] == pending[0]["evaluation_id"]] if pending else _queue_full_check(
                   directory, run_id, job["id"],
@@ -4560,11 +4560,11 @@ def _cold_input(
             and event.get("operation_id") in committed and event.get("proof_sha256")
         }
         if submitted_hashes and submitted_hashes != {hashlib.sha256(proof_bytes).hexdigest()}:
-            errors.append("saved proof bytes do not match the committed submission hash")
+            errors.append("saved proof bytes do not match the committed submission hash")  # log: internal error # not-model-facing
         elif not submitted_hashes and hashlib.sha256(
             (history[0]["theorem"] + "\0" + proof).encode()
         ).hexdigest() != candidate_id:
-            errors.append("saved proof bytes do not match the submitted proof identity")
+            errors.append("saved proof bytes do not match the submitted proof identity")  # log: internal error # not-model-facing
     except (OSError, UnicodeError) as error:
         proof = None
         errors.append(str(error))
@@ -4574,7 +4574,7 @@ def _cold_input(
             json.dumps(benchmark, sort_keys=True, ensure_ascii=False).encode()
         ).hexdigest()
         if json.loads(json.dumps(versions(benchmark))) != json.loads(json.dumps(context["pins"])):
-            errors.append("saved toolchain pins do not match the current benchmark")
+            errors.append("saved toolchain pins do not match the current benchmark")  # log: internal error # not-model-facing
     except Exception as error:
         errors.append(str(error))
     identity = {
@@ -4624,7 +4624,7 @@ def cold_verify(run_id: str, row: dict) -> dict:
                 cause="worker_crash",
                 confirmed=False,
                 retryable=done["attempt"] < COLD_ATTEMPTS,
-                error="cold check interrupted before completion",
+                error="cold check interrupted before completion",  # log: internal error # not-model-facing
                 recovered=True,
             )
             _append(directory, done)
@@ -4894,7 +4894,7 @@ def submission(run_id: str) -> dict:
         try:
             proof_bytes = (directory / "proofs" / f"{best['id']}.lean").read_bytes()
             if hashlib.sha256(proof_bytes).hexdigest() != cold["proof_sha256"]:
-                raise ValueError("proof bytes changed after cold certification")
+                raise ValueError("proof bytes changed after cold certification")  # log: internal error # not-model-facing
         except (OSError, ValueError) as error:
             pending.append({"candidate_id": best["id"], "outcome": "inconclusive",
                             "cause": "context", "retryable": False, "error": str(error)})

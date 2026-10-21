@@ -174,7 +174,7 @@ def seed_agent_dir(target: Path, source: Path, provider: str, model_id: str, max
 
 
 def attempt_has_model_error(event_log: Path, offset: int, intentional_stop: bool = False) -> bool:
-    """Ignore the abort that ends a run on purpose (spend limit, confirmed finish) and errors Pi's retry loop recovered."""
+    """Ignore the abort that ends a run on purpose (spend limit) and errors Pi's retry loop recovered."""
     pending_error = False
     with event_log.open("rb") as events:
         events.seek(offset)
@@ -867,7 +867,7 @@ def stamp_tool_event(line: str) -> str:
 
 
 def _stopped_on_purpose(directory: Path) -> bool:
-    """True when the cost ledger's last control row says the run ended by its spend limit or a confirmed finish."""
+    """True when the cost ledger's last control row says the run ended by its spend limit."""
     controls = []
     with contextlib.suppress(OSError, ValueError):
         controls = [
@@ -875,7 +875,7 @@ def _stopped_on_purpose(directory: Path) -> bool:
             for row in map(json.loads, (directory / "cost-ledger.jsonl").read_text().splitlines())
             if row.get("kind") == "control"
         ]
-    return bool(controls) and controls[-1].get("stop") in ("limit_reached", "finished")
+    return bool(controls) and controls[-1].get("stop") == "limit_reached"
 
 
 def kill_group(process: subprocess.Popen, number: int) -> None:

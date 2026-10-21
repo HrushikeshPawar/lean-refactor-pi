@@ -385,10 +385,8 @@ class TextRendererTests(unittest.TestCase):
     def test_five_tool_descriptions_include_the_shared_limits(self):
         numbers = text.numbers()
         compile_description = text.render("tools/compile.description")
-        finish_description = text.render("tools/finish.description")
         self.assertIn(str(numbers["compile_max_drafts"]), compile_description)
-        self.assertIn(str(numbers["finish_remaining_pct"]), finish_description)
-        for name in ("compile", "goal", "search", "read", "finish"):
+        for name in ("compile", "goal", "search", "read"):
             with self.subTest(tool=name):
                 self.assertTrue(text.render(f"tools/{name}.description"))
 
@@ -459,7 +457,7 @@ def _rates(stem: str) -> dict:
 
 
 class HiddenStopTests(unittest.TestCase):
-    """D42: before the final tenth no model-facing text names finishing, stopping or the threshold."""
+    """D42: no model-facing text names finishing, stopping or the threshold; Pi offers no finish tool."""
 
     def before_threshold(self) -> dict[str, str]:
         from arena.cli.run import SYSTEM_PROMPT
@@ -488,12 +486,10 @@ class HiddenStopTests(unittest.TestCase):
                 # Rank and line numbers may be any integer; a percentage or fraction of the limit may not.
                 self.assertNotRegex(packet, rf"(?<![\d.])(?:{pct}|{100 - pct})\s*%")
 
-    def test_finish_is_named_only_by_the_texts_shown_once_it_is_offered(self):
-        pct = text.numbers()["finish_remaining_pct"]
+    def test_no_finish_text_exists(self):
         templates = {**_rendered("messages/"), **_rendered("replies/"), **_rendered("tools/")}
-        naming = sorted(key for key, rendered in templates.items() if re.search(r"\bfinish", rendered, re.I))
-        self.assertEqual([key for key in naming if not key.startswith("tools/finish.")], [])
-        self.assertRegex(text.render("tools/finish.description"), _number_pattern(pct))
+        self.assertEqual(sorted(key for key in text.keys() if key.startswith("tools/finish")), [])  # noqa: SIM118
+        self.assertEqual(sorted(key for key, rendered in templates.items() if re.search(r"\bfinish", rendered, re.I)), [])
 
 
 class PlaceholderTests(unittest.TestCase):
@@ -733,7 +729,7 @@ class PacketBehaviourTests(unittest.TestCase):
                 ]
                 self.assertEqual(rows, [f"s{i}" for i in range(1, len(rows) + 1)])
                 steps = [
-                    line[len(goal_prefix) :].split(":")[0]
+                    line[len(goal_prefix) :].split(" proof line ")[0]
                     for line in sections[goals][1].splitlines()
                     if line.startswith(goal_prefix)
                 ]
@@ -762,33 +758,3 @@ class PacketBehaviourTests(unittest.TestCase):
         self.assertFalse({f"decl:{name}" for name in known} & handles)
         self.assertLessEqual(len(lines), context.LIMITS["library"])
         self.assertLessEqual(sum(len(line) + 1 for line in lines), context.LIMITS["library_budget"])
-
-    def test_an_over_limit_packet_sheds_every_local_line_before_any_library_line(self):
-        from arena import context
-
-        inventory, _ = _fixture("core")
-        library = len(_section(_sections("core"), context.LIBRARY_TITLE))
-        self.assertGreater(library, 0)
-        # Many locals with long types, as in the row whose packet overflowed (fiberwise).
-        inventory["local"] = [
-            {**inventory["local"][0], "name": f"h{i}", "type": "T " * 150, "proof_line": i} for i in range(400)
-        ]
-        with patch.object(context, "MAX_PACKET_CHARS", 10**7):
-            full = _sections("core", inventory)
-        self.assertGreater(len("\n\n".join(body for _title, body in full)), context.MAX_PACKET_CHARS)
-        sections = _sections("core", inventory)
-        packet = "\n\n".join(body for _title, body in sections)
-        self.assertLessEqual(len(packet), context.MAX_PACKET_CHARS)
-        self.assertEqual(len(_section(sections, context.LIBRARY_TITLE)), library)
-        self.assertLess(len(_section(sections, context.LOCAL_TITLE)), len(_section(full, context.LOCAL_TITLE)))
-        self.assertEqual(_section(sections, context.EARLIER_TITLE), [])
-        # A tighter limit forces library lines out: by then no local line is left.
-        without = [(title, body) for title, body in full if not title.startswith(context.LOCAL_TITLE)]
-        without = [(t, b) for t, b in without if not t.startswith(context.EARLIER_TITLE)]
-        limit = len("\n\n".join(body for _title, body in without)) - 2000
-        with patch.object(context, "MAX_PACKET_CHARS", limit):
-            tight = _sections("core", inventory)
-        self.assertLessEqual(len("\n\n".join(body for _title, body in tight)), limit)
-        self.assertEqual(_section(tight, context.LOCAL_TITLE), [])
-        self.assertLess(len(_section(tight, context.LIBRARY_TITLE)), library)
-        self.assertGreater(len(_section(tight, context.LIBRARY_TITLE)), 0)

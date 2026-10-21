@@ -314,13 +314,20 @@ def _published_reference(theorem: object) -> tuple[int, int] | None:
         return None
 
 
+# The v7 finish tool description as the model saw it. Pi no longer offers finish; replay keeps showing it for old runs.
+_V7_FINISH_DESCRIPTION = (  # not-model-facing
+    "End the run. Returns the archive and the points left per axis. "
+    "Offered when at most {pct}% of the spend limit remains."
+)
+
+
 def _tools_body(run: Run, turn: int) -> str:
     from arena import text
 
-    names = ["compile", "goal", "search", "read"]
+    lines = [f"{name}: {text.render(f'tools/{name}.description')}" for name in ("compile", "goal", "search", "read")]
     if _finish_open(run, _turn(run, turn)):
-        names.append("finish")
-    return "\n".join(f"{name}: {text.render(f'tools/{name}.description')}" for name in names)
+        lines.append(f"finish: {_V7_FINISH_DESCRIPTION.format(pct=text.numbers()['finish_remaining_pct'])}")
+    return "\n".join(lines)
 
 
 def _safe(title: str, build: Callable[[Run, int], str]) -> Callable[[Run, int], tuple[str, str]]:

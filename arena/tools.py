@@ -28,7 +28,6 @@ TOOL_FORMS = {
         "view:source|prices|diff|outline|map",
         "step:sN",
     ],
-    "finish": ["{}"],
     "scratch": ["code:<lean commands>", "replacement+at", "helpers:[experiment ids]"],
 }
 
@@ -83,7 +82,6 @@ def _empty_error(tool: str) -> dict:
         "goal": ["node", "hole", "line", "try"],
         "search": ["queries", "kind", "after"],
         "read": ["handle", "node", "hole", "experiment", "ref", "view", "against", "step"],
-        "finish": [],
         "scratch": ["code", "replacement", "at", "helpers"],
     }[tool]
     return reply.error_reply("empty_arguments", "{}", valid, TOOL_FORMS[tool])
@@ -92,14 +90,11 @@ def _empty_error(tool: str) -> dict:
 def _is_empty(request: object, tool: str) -> bool:
     if not isinstance(request, dict):
         return True
-    if tool == "finish":
-        return False
     keys = {
         "compile": ("drafts", "splice", "fill", "merge", "base", "from", "note", "check"),
         "goal": ("node", "hole", "line", "try"),
         "search": ("queries", "kind", "after"),
         "read": ("handle", "node", "hole", "experiment", "ref", "view", "against", "step"),
-        "finish": (),
         "scratch": ("code", "replacement", "at", "helpers"),
     }[tool]
     return not any(key in request and request[key] not in (None, "", [], {}) for key in keys)
@@ -2694,46 +2689,3 @@ def _scratch_check(theorem, run_id, code, helpers, accepted, earlier, started, e
         "cold": "not_checked",
     }
     return reply.reply(facts=facts, items=[item])
-
-
-def finish_tool(theorem: str, run_id: str, request: dict | None = None) -> dict:
-    if request not in (None, {}):
-        return _invalid("bad_arguments", request, [], TOOL_FORMS["finish"])
-    history, _projection = _nodes(run_id)
-    map_data = campaign.map_view(run_id)
-    archive = (
-        ", ".join(
-            f"{row['letter']}:{row['node']} {'-' if row['score'] is None else row['score']}"
-            for row in map_data.get("archive", [])
-        )
-        or "empty"
-    )
-    state = campaign.state(run_id)
-    baseline = state.get("baseline") or {}
-    best = state.get("best") or {}
-
-    def left(axis: str) -> float | str:
-        reference = baseline.get(axis)
-        value = best.get(axis)
-        if not isinstance(reference, (int, float)) or not reference or not isinstance(value, (int, float)):
-            return "unknown"
-        saved = 100 * (1 - value / reference)
-        return round(max(0.0, (100 - saved) / 3), 1)
-
-    compatibility = (
-        round(
-            max(
-                0.0,
-                100 * (1 - sum(best.get("versions", {}).values()) / max(1, len(history[0].get("versions") or [1]))) / 3,
-            ),
-            1,
-        )
-        if best.get("versions")
-        else "unknown"
-    )
-    facts = [
-        _render("finish_archive", archive=archive),
-        _render("finish_points", tokens=left("tokens"), heartbeats=left("heartbeats"), compatibility=compatibility),
-    ][: int(text.numbers().get("finish_points_lines", 4))]
-    campaign._append(campaign.run_dir(run_id), {"kind": "finish"})
-    return reply.attach_context(run_id, reply.reply(facts=facts, stop=True))

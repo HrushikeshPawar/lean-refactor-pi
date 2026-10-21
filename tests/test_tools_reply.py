@@ -148,9 +148,9 @@ class ReplyTests(unittest.TestCase):
         with patch.object(campaign, "state", return_value={"updates": [update]}):
             unseen = reply.attach_context(self.run_id, reply.reply())
         self.assertEqual(unseen["facts"], ["## Updates", update["unseen_text"]])
-        (campaign.run_dir(self.run_id) / reply.DELIVERY_FILE).write_text('{"delivered_seq": -1}\n')
         shown = reply.reply(items=[{"ref": "d1", "ok": True, "lines": ["n7 <- n2 draft status broken."]}])
-        with patch.object(campaign, "state", return_value={"updates": [update]}):
+        later = {"seq": 2, "text": update["text"], "source": ["n7"], "unseen_text": update["unseen_text"]}
+        with patch.object(campaign, "state", return_value={"updates": [update, later]}):
             seen = reply.attach_context(self.run_id, shown)
         self.assertEqual(seen["facts"], ["## Updates", update["text"]])
 

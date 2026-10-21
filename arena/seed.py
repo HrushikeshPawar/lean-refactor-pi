@@ -172,11 +172,10 @@ def start_from_proof(name: str, run_id: str, path: Path) -> dict:
         raise ValueError(  # not-model-facing
             f"seed proof {path} does not pass every toolchain ({_failed_versions(row)})"
         )
-    if campaign._used_session(row):
-        cold = campaign.cold_verify(run_id, row)
-        if not cold["confirmed"]:
-            detail = cold.get("error") or f"passed {cold.get('passed')}, heartbeats {cold.get('cold_heartbeats')}"
-            raise ValueError(f"seed proof {path} fails the cold verification ({detail})")  # not-model-facing
+    cold = campaign.cold_verify(run_id, row)
+    if not cold["confirmed"]:
+        detail = cold.get("error") or f"passed {cold.get('passed')}, heartbeats {cold.get('cold_heartbeats')}"
+        raise ValueError(f"seed proof {path} fails the cold verification ({detail})")  # not-model-facing
     for event in (
         {
             "kind": "seeded",

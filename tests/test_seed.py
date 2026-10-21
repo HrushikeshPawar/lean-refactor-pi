@@ -342,6 +342,12 @@ class SeedProofTests(FakeRunCase):
 
     proof = "theorem t := by\n  exact seed"
 
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.object(campaign, "cold_verify", return_value={"confirmed": True})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def write(self, text: str | None = None) -> Path:
         path = Path(self.temporary.name) / "seed.lean"
         path.write_text(text or self.proof)

@@ -7,7 +7,6 @@ titles:
   profile: "Original proof heartbeats by line"
   source: "Source-named declarations"
   dependencies: "Elaborated proof dependencies"
-  locals: "Local variables"
   library: "Imported declarations (ranked)"
   earlier: "Earlier declarations from this file (ranked)"
 required:
@@ -48,8 +47,6 @@ fixed:
   dependency_intro: "Qualified declaration names used by the original proof; project and this file first."
   dependency_summary: "Other categories: {counts}; also source-named: {named}."
   dependency_preview: "Signature preview: {shown} shown of {helpers} helpers; {unavailable} unavailable."
-  local_intro: "Local variable name : type; lines are where the Lean local context exposes the variable."
-  local_line: "{name} : {type} [scope: {scope}; lines: {lines}]"
   library_line: "{rank}. decl:{name} · {module} · {signature}"
   dependency_name: "decl:{name}"
   root_namespace: "(root namespace)"

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { continuationKey, continuationPush } from "./rules.ts";
-import { numbers } from "./text.ts";
+import { keys, numbers, render } from "./text.ts";
 
 test("a failed request selects its own continuation fact", () => {
   assert.equal(continuationKey(true), "request_failed");
@@ -32,5 +32,15 @@ test("continuation facts never name finishing, at any remaining fraction", async
       assert.doesNotMatch(rendered, stopText, rendered);
       assert.doesNotMatch(rendered, new RegExp(`(?<![\\d.])(?:${pct}|${100 - pct})(?![\\d]|\\.\\d)`), rendered);
     }
+  }
+});
+
+test("no finish text exists: Pi offers no finish tool", async () => {
+  const all = await keys();
+  assert.deepEqual(all.filter(key => key.startsWith("tools/finish")), []);
+  for (const key of all.filter(key => key.startsWith("replies/") || key.startsWith("messages/") || key.startsWith("tools/"))) {
+    let rendered: string;
+    try { rendered = await render(key); } catch { continue; }  // a template that needs values cannot be rendered bare
+    assert.doesNotMatch(rendered, /\bfinish/i, key);
   }
 });

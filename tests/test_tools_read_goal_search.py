@@ -425,23 +425,6 @@ class ReadGoalSearchTests(CascadeToolCase):
         missing = tools.read_tool("T", "logic", {"view": "source"})
         self.assertEqual(missing["error"]["code"], "bad_target")
 
-    def test_finish_returns_archive_and_stops(self):
-        with (
-            patch.object(
-                campaign,
-                "state",
-                return_value={
-                    "baseline": {"tokens": 100, "heartbeats": 1000},
-                    "best": {"tokens": 80, "heartbeats": 500, "versions": {"v1": True}},
-                },
-            ),
-            patch.object(campaign, "map_view", return_value={"archive": [{"letter": "A", "node": "n1", "score": 90}]}),
-        ):
-            result = tools.finish_tool("T", "logic", {})
-        self.assertTrue(result["stop"])
-        self.assertTrue(any("Archive:" in fact for fact in result["facts"]))
-        self.assertTrue(any("Points left:" in fact for fact in result["facts"]))
-
 
 class ToolReplyTextTests(CascadeToolCase):
     def goal_with_tries(self, results: list[dict], request: dict) -> dict:

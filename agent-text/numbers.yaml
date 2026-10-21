@@ -15,7 +15,6 @@ scratch_output_chars: 300
 goal_hyp_chars: 1000
 outline_max_chars: 6000
 read_source_lines: 400
-finish_points_lines: 4
 source_lines_per_call: 400
 find_files_per_query: 30
 search_hits_default: 10
@@ -40,7 +39,6 @@ packet_scope_chars: 600
 packet_library: 60
 packet_library_budget: 7000
 packet_library_chars: 340
-packet_local_type_chars: 320
 memory_library_lines: 15
 memory_read_entries: 30
 memory_recovery_entries: 8

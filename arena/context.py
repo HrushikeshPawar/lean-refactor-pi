@@ -58,7 +58,6 @@ LIMITS = {
         "library",
         "library_budget",
         "library_chars",
-        "local_type_chars",
     )
 }
 DEPENDENCIES_TITLE = template("packet/sections.required.dependencies").strip()
@@ -676,38 +675,6 @@ def _dependency_section(context: dict) -> list[str]:
     return lines
 
 
-def _local_section(context: dict) -> list[str]:
-    proof_lines: dict[tuple[str, str, str], set[int]] = {}
-    file_lines: dict[tuple[str, str, str], set[int]] = {}
-    for item in context.get("local", []):
-        key = (item["name"], item["type"], item["scope"])
-        if "proof_line" in item:
-            proof_lines.setdefault(key, set()).add(item["proof_line"])
-        elif item.get("origin") == "external" and item.get("source_line") is not None:
-            file_lines.setdefault(key, set()).add(item["source_line"])
-    keys = sorted(set(proof_lines) | set(file_lines))
-    if not keys:
-        return []
-    lines = [template("packet/sections.fixed.local_intro").strip()]
-    rendered = []
-    for name, ty, scope in keys:
-        places = [str(line) for line in sorted(proof_lines.get((name, ty, scope), ()))]
-        files = [str(line) for line in sorted(file_lines.get((name, ty, scope), ()))]
-        if files:
-            places.append("file " + ",".join(files))
-        rendered.append(
-            render_text(
-                "packet/sections.fixed.local_line",
-                name=name,
-                type=_clip(_one_line(ty), LIMITS["local_type_chars"]),
-                scope=scope,
-                lines=",".join(places),
-            )
-        )
-    lines.extend(rendered)
-    return lines
-
-
 def _imports(row: dict) -> list[str]:
     if is_standalone(row):
         source = row.get("header") or ""
@@ -716,7 +683,7 @@ def _imports(row: dict) -> list[str]:
         source = built["text"][: built["head"]]
     return [
         match.group(0).strip()
-        for match in re.finditer(r"(?m)^[ \t]*(?:public[ \t]+)?import\s+[^\n]+", source)
+        for match in re.finditer(r"(?m)^[ \t]*(?:public[ \t]+)?import\s+[^\n]+", source)  # log: regex # not-model-facing
     ]
 
 
@@ -895,7 +862,6 @@ def _earlier_section(context: dict) -> list[str]:
     return lines
 
 
-LOCAL_TITLE = template("packet/sections.titles.locals").strip()
 GOALS_FLOOR = int(numbers()["packet_goal_floor"])
 LIBRARY_TITLE = template("packet/sections.titles.library").strip()
 
@@ -934,7 +900,7 @@ def _fit_sections(parts: list[tuple[str, list[str]]], limit: int) -> list[tuple[
 
     # Shed low-value bulk before useful earlier lemmas. Goals keep a floor, then a last line.
     goals = template("packet/sections.titles.goals").strip()
-    stages = [(LOCAL_TITLE, 0), (LIBRARY_TITLE, 0), (goals, GOALS_FLOOR), (EARLIER_TITLE, 0), (goals, 1)]
+    stages = [(LIBRARY_TITLE, 0), (goals, GOALS_FLOOR), (EARLIER_TITLE, 0), (goals, 1)]
     coverage_prefix = template("packet/sections.fixed.goal_coverage").split("{")[0]
     footer = next((body[-1] for title, body in sections if title == goals and body
                    and body[-1].startswith(coverage_prefix)), None)

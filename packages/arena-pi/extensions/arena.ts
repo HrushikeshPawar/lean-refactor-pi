@@ -226,7 +226,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
       post_hook: delta ? delta.middle : text.toString("utf8") };
   }
   function sharedIdentity() {
-    if (!runId) throw new Error("Shared accounting needs a run identity");
+    if (!runId) throw new Error("Shared accounting needs a run identity");  // not-model-facing
     return {
       runId,
       actorId: process.env.ARENA_ACTOR_ID || "sol",
@@ -249,7 +249,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     let sharedStopped = false;
     if (runDirectory && runId) {
       for (const item of costEvents().filter(item => item.kind === "settle" && item.shared_authority !== "control.jsonl")) {
-        if (typeof item.id !== "string") throw new Error("Historical settlement has no request identity");
+        if (typeof item.id !== "string") throw new Error("Historical settlement has no request identity");  // not-model-facing
         const usage = item.usage_known !== false && typeof item.usd === "number" && Number.isFinite(item.usd) && item.usd >= 0
           ? { cost: { total: item.usd }, legacy_journal: item } : { legacy_journal: item };
         await settleProviderUsage(runDirectory, {

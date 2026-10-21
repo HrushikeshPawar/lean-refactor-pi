@@ -660,10 +660,10 @@ class LibrarySectionTests(unittest.TestCase):
         self.assertEqual(_proof_length(head + " := fun x => x.1 -- note"), 4)  # `=>` once, comment removed
 
 
-class LocalSheddingTests(unittest.TestCase):
+class PacketSheddingTests(unittest.TestCase):
     GOALS = context.template("packet/sections.titles.goals").strip()
 
-    def parts(self, locals_=76, goals=12, library=30):
+    def parts(self, goals=12, library=30):
         return [
             ("Head", ["keep head"]),
             ("Reference proof", ["ref " + "r" * 100] * 3),
@@ -671,7 +671,6 @@ class LocalSheddingTests(unittest.TestCase):
             ("Elaborated proof dependencies", ["dep " + "d" * 100] * 3),
             ("Environment", ["env " + "e" * 100] * 3),
             (self.GOALS, [f"goal {i} " + "g" * 200 for i in range(goals)]),
-            (context.LOCAL_TITLE, ["Hdr local names"] + [f"loc{i} : " + "l" * 200 for i in range(locals_)]),
             (context.LIBRARY_TITLE, [f"lib{i} " + "b" * 200 for i in range(library)]),
         ]
 
@@ -681,27 +680,14 @@ class LocalSheddingTests(unittest.TestCase):
     def test_under_budget_packet_is_untouched(self):
         parts = self.parts()
         text = context._fit(parts, 10**7)
-        self.assertEqual(self.count(text, "loc"), 76)
         self.assertEqual(self.count(text, "lib"), 30)
         self.assertEqual(self.count(text, "goal "), 12)
 
-    def test_all_locals_are_shed_before_any_library_line(self):
+    def test_remaining_goals_shed_after_library(self):
         parts = self.parts(goals=context.GOALS_FLOOR)
-        keep = [p for p in parts if p[0] != context.LOCAL_TITLE]
-        limit = len(context._fit(keep, 10**7))
-        text = context._fit(parts, limit)
-        self.assertEqual(self.count(text, "loc"), 0)
-        self.assertEqual(self.count(text, "lib"), 30)
-        self.assertEqual(self.count(text, "goal "), context.GOALS_FLOOR)
-        for required in ("keep head", "ref ", "used ", "dep ", "env "):
-            self.assertIn(required, text)
-
-    def test_remaining_goals_shed_after_locals_and_library(self):
-        parts = self.parts(goals=context.GOALS_FLOOR)
-        keep = [p for p in parts if p[0] not in (context.LIBRARY_TITLE, context.LOCAL_TITLE)]
+        keep = [p for p in parts if p[0] != context.LIBRARY_TITLE]
         text = context._fit(parts, len(context._fit(keep, 10**7)) - 600)
         self.assertEqual(self.count(text, "lib"), 0)
-        self.assertEqual(self.count(text, "loc"), 0)
         self.assertLess(self.count(text, "goal "), context.GOALS_FLOOR)
         self.assertGreaterEqual(self.count(text, "goal "), 1)
 
@@ -1050,8 +1036,7 @@ class ProfileSectionTests(unittest.TestCase):
     def test_lines_total_and_remainder_are_reported_with_own_name_references(self):
         body = context._profile_section(self.PROF, self.SRC, "A.foo")
         text = "\n".join(body)
-        self.assertIn("line 3 · 80 self hb · 5 tokens", text)
-        self.assertNotIn("line 4 ·", text)  # zero-cost lines are not listed
+        self.assertNotIn("self hb", text)  # self costs live in the detail view
         self.assertIn("Measured 300", text)
         self.assertIn("85 are attributed", text)
         self.assertIn("215 (71.7%)", text)
@@ -1059,7 +1044,7 @@ class ProfileSectionTests(unittest.TestCase):
 
     def test_no_own_name_reference_means_no_reference_line(self):
         body = context._profile_section(self.PROF, "theorem foo : P := by\n  exact bar", "A.foo")
-        self.assertEqual(len(body), 3)
+        self.assertEqual(len(body), 1)
         self.assertNotIn("refers to its own", "\n".join(body))
 
     def test_missing_profile_gives_no_section(self):

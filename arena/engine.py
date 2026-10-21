@@ -477,7 +477,7 @@ class LeanInconclusive(ValueError):
     Lean timeout refuse here too."""
 
     def __init__(self, cause: str, admission: str, reason: str = ""):
-        super().__init__(reason or f"Lean was not run: {cause}")
+        super().__init__(reason or f"Lean was not run: {cause}")  # log: internal error # not-model-facing
         self.cause, self.admission, self.reason = cause, admission, reason
 
 
@@ -852,7 +852,7 @@ def compile_version(
     else:
         diagnostics = [item for item in parse_diagnostics(output) if item["severity"] == "error"]
         resource_error = re.compile(
-            r"(?im)^\s*(?:\(kernel\)\s*|(?:fatal\s+)?error:\s*|Lean:\s*)*"
+            r"(?im)^\s*(?:\(kernel\)\s*|(?:fatal\s+)?error:\s*|Lean:\s*)*"  # log: regex # not-model-facing
             r"(?:out of memory|failed to allocate memory|cannot allocate memory|resource temporarily unavailable)\b"
         )
         target_errors = [

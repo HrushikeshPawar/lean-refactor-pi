@@ -3,7 +3,7 @@ import test from "node:test";
 import { nearestToolName, normalizeToolArguments, requireToolArguments } from "./toolnames.ts";
 import { render } from "./text.ts";
 
-const registered = ["compile", "finish", "goal", "read", "search"];
+const registered = ["compile", "goal", "read", "search"];
 
 test("suggests the nearest name from the five registered tools", () => {
   assert.equal(nearestToolName("compil", registered), "compile");
