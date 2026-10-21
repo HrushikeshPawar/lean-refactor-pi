@@ -777,7 +777,13 @@ export default async function arenaExtension(pi: ExtensionAPI) {
   });
 
   const scratchParams = Type.Object({
-    code: Type.String({ description: await renderText("tools/scratch.params.code") }),
+    code: Type.Optional(Type.String({ description: await renderText("tools/scratch.params.code") })),
+    replacement: Type.Optional(Type.String({ description: await renderText("tools/scratch.params.replacement") })),
+    at: Type.Optional(Type.Object({
+      node: Type.String(),
+      steps: Type.Optional(Type.Array(Type.Integer(), { minItems: 2, maxItems: 2 })),
+      hole: Type.Optional(Type.String()),
+    }, { description: await renderText("tools/scratch.params.at") })),
     helpers: Type.Optional(Type.Array(Type.String(), { description: await renderText("tools/scratch.params.helpers") })),
   });
   await registerTool({ name: "scratch", label: "Scratch Lean commands",

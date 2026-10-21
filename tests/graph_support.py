@@ -54,11 +54,12 @@ class FakeRunCase(unittest.TestCase):
         instrumented = instrument_sorries(proof)
         sorry_lines = [int(match.group(1)) for match in re.finditer(r"ARENA_SORRY (\d+)", instrumented)]
         compat: dict[str, dict] = {
-            "v1": (known or {}).get("v1") or {"passed": not bad_lines, "diagnostics": diagnostics}
+            "v1": (known or {}).get("v1") or {"passed": not bad_lines, "exit_code": 1 if bad_lines else 0, "diagnostics": diagnostics}
         }
         if mode == "full":
             compat["v2"] = {
                 "passed": not bad_lines and "old" not in proof,
+                "exit_code": 1 if bad_lines or "old" in proof else 0,
                 "diagnostics": diagnostics,
                 "error_headlines": [] if "old" not in proof else ["line 3 (proof line 2): unknown tactic"],
             }

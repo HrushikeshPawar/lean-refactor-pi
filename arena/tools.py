@@ -1721,19 +1721,20 @@ def _proof_local(code: str) -> bool:
 
 
 def _frozen_anchor(run_id: str, anchor: dict) -> dict | str:
-    path = campaign.run_dir(run_id) / str(anchor.get("path") or "")
-    digest = anchor.get("proof_sha256")
-    if not path.is_file() or not isinstance(digest, str):
-        return "node"
-    if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+    """Revalidate a stored snapshot against canonical saved artifacts, never caller paths."""
+    from arena.orchestration import _resolve_anchor
+
+    scope = "step" if "hole" in anchor or "steps" in anchor else "proof"
+    resolved = _resolve_anchor(campaign.run_dir(run_id), scope, anchor)
+    if isinstance(resolved, str):
+        return resolved
+    if any(anchor.get(key) != value for key, value in resolved.items()):
         return "anchor_changed"
-    if "hole" not in anchor and "steps" not in anchor:
-        return "anchor"
-    return anchor
+    return resolved
 
 
-def _scratch_anchor(run_id: str, request: dict) -> dict | str:
-    """Resolve the invocation anchor once. A job anchor is the recorded snapshot, not the live focus."""
+def _scratch_anchor(run_id: str, request: dict, *, full_target: bool = False) -> dict | str:
+    """Resolve once. Jobs retain their recorded snapshot; caller hashes confer no authority."""
     from arena.orchestration import _resolve_anchor, jobs
 
     supplied = request.get("at")
@@ -1747,24 +1748,43 @@ def _scratch_anchor(run_id: str, request: dict) -> dict | str:
         if snapshot is not None:
             inherited = snapshot.get("anchor")
     if supplied is None:
-        if not isinstance(inherited, dict):
-            return "anchor"
-        return _frozen_anchor(run_id, inherited)
+        if isinstance(inherited, dict):
+            return _frozen_anchor(run_id, inherited)
+        if full_target:
+            try:
+                node, _proof = _focus_proof(run_id)
+            except (KeyError, StopIteration, ValueError):
+                return "node"
+            return _resolve_anchor(campaign.run_dir(run_id), "proof", {"node": node})
+        return "anchor"
     if not isinstance(supplied, dict):
         return "anchor"
+    resolved = _resolve_anchor(campaign.run_dir(run_id), "step", supplied)
+    if isinstance(resolved, str):
+        return resolved
     if isinstance(inherited, dict):
-        same_node = supplied.get("node") in {inherited.get("node"), inherited.get("proof_id")}
-        same_target = (
-            supplied.get("hole") == inherited.get("hole")
-            if "hole" in supplied or "hole" in inherited
-            else list(supplied.get("steps") or []) == list(inherited.get("steps") or [])
-        )
-        if not same_node or not same_target:
+        frozen = _frozen_anchor(run_id, inherited)
+        if isinstance(frozen, str):
+            return frozen
+        if resolved != frozen:
             return "ambiguous_anchor"
-        return _frozen_anchor(run_id, inherited)
-    if isinstance(supplied.get("proof_sha256"), str):
-        return _frozen_anchor(run_id, supplied)
-    return _resolve_anchor(campaign.run_dir(run_id), "step", supplied)
+        return frozen
+    return resolved
+
+
+def _embeddable_scratch(code: str) -> bool:
+    """Conservatively admit proof-local tactics, not Lean commands or declarations."""
+    from arena.forbidden import remove_comments
+
+    source = remove_comments(code)
+    commands = re.compile(
+        r"(?m)^\s*(?:@\[|#|(?:private|protected|noncomputable|unsafe)\b|"
+        r"(?:def|theorem|lemma|example|abbrev|axiom|instance|class|structure|inductive|"
+        r"opaque|import|namespace|section|end|open|export|variable|universe|set_option|"
+        r"attribute|include|omit)\b)"
+    )
+    return commands.search(source) is None and official_filter()(re.sub(r"\bsorry\b", "trivial", code)) is None
+
 
 
 def _promotion_item(experiment_id: str, code: str, outcome: str, lines: list[str], promotion: dict, *, ok: bool = True):
@@ -1778,12 +1798,15 @@ def _promotion_item(experiment_id: str, code: str, outcome: str, lines: list[str
         "code": code,
         "promotion": promotion,
         "validity": "not_a_target_candidate",
-        "compatibility": promotion.get("verification", {}).get("full", "not_checked"),
-        "cold": promotion.get("verification", {}).get("cold", "not_checked"),
+        "compatibility": "not_checked",
+        "cold": "not_checked",
     }
 
 
-def _scratch_promote(theorem: str, run_id: str, request: dict, helpers: list[str]) -> dict:
+def _scratch_promote(
+    theorem: str, run_id: str, request: dict, helpers: list[str], *, source_code: str | None = None,
+    body_offset: int | None = None, original_request: dict | None = None,
+) -> dict:
     limit = int(text.numbers().get("scratch_max_chars", 4000))
     replacement = request.get("replacement")
     if not isinstance(replacement, str) or not replacement.strip():
@@ -1797,11 +1820,16 @@ def _scratch_promote(theorem: str, run_id: str, request: dict, helpers: list[str
     label = official_filter()(re.sub(r"\bsorry\b", "trivial", replacement))
     if label:
         return _invalid("forbidden", label, ["no forbidden constructs"], TOOL_FORMS["scratch"])
-    anchor = _scratch_anchor(run_id, request)
+    anchor = _scratch_anchor(run_id, request, full_target=source_code is not None)
     if isinstance(anchor, str):
         return _invalid("bad_anchor", anchor, ["node + one step range or hole"], TOOL_FORMS["scratch"])
+    submitted_code = replacement if source_code is None else source_code
+    context = {"form": "anchored" if source_code is None else "full_target", "anchor": anchor}
+    if body_offset is not None:
+        context["body_range"] = {"start": body_offset, "end": len(submitted_code)}
     accepted = experiments.accept(
-        run_id, replacement, helpers, context={"form": "anchored", "anchor": anchor}
+        run_id, submitted_code, helpers, context=context,
+        request=request if original_request is None else original_request,
     )
     experiment_id = accepted["experiment_id"]
     if accepted.get("replayed"):
@@ -1813,7 +1841,7 @@ def _scratch_promote(theorem: str, run_id: str, request: dict, helpers: list[str
         experiments.finish(
             run_id,
             experiment_id,
-            code=replacement,
+            code=submitted_code,
             digest=digest,
             outcome=outcome,
             raw=None,
@@ -1821,14 +1849,17 @@ def _scratch_promote(theorem: str, run_id: str, request: dict, helpers: list[str
             elapsed_ms=experiments.elapsed_since(started),
             input_ref=accepted["input_ref"],
             diagnostic=diagnostic,
-            context={"form": "anchored", "anchor": anchor},
+            context=context,
             promotion=promotion,
-            compatibility=promotion.get("verification", {}).get("full", "not_checked"),
-            cold=promotion.get("verification", {}).get("cold", "not_checked"),
+            compatibility="not_checked",
+            cold="not_checked",
         )
         evidence = experiments.retrieve(run_id, experiment_id)
-        item = _promotion_item(experiment_id, replacement, outcome, lines, evidence["promotion"], ok=ok)
-        return reply.reply(ok=ok, items=[{**item, **{k: evidence[k] for k in evidence if k not in item}}])
+        item = _promotion_item(experiment_id, submitted_code, outcome, lines, evidence["promotion"], ok=ok)
+        response = reply.reply(ok=ok, items=[{**item, **{k: evidence[k] for k in evidence if k not in item}}])
+        if diagnostic == "run_stopped":
+            response["error"] = reply.request_error("run_stopped", run_id, [], TOOL_FORMS["scratch"])
+        return response
 
     from arena.run_control import read_state
 
@@ -1846,13 +1877,33 @@ def _scratch_promote(theorem: str, run_id: str, request: dict, helpers: list[str
         closed = close("dependency_missing", promotion, lines, ok=False, diagnostic="dependency_missing")
         closed["error"] = reply.request_error("dependency_missing", ",".join(missing), [], TOOL_FORMS["scratch"])
         return closed
-    retained = [experiments.retrieve(run_id, reference) for reference in helpers]
-    if any(found is None or not _proof_local(found["code"]) for found in retained):
+    # The materialized prefix includes transitive dependencies, so validate all of it.
+    if not _embeddable_scratch(prefix):
         promotion = {"state": "not_promoted", "reason": "helper_not_embeddable"}
         lines = [_render("scratch_not_promoted", reason="helper_not_embeddable")]
         return close("recorded", promotion, lines, ok=False, diagnostic="helper_not_embeddable")
+    if not _embeddable_scratch(replacement):
+        reason = _nonpromotion_reason(replacement)
+        return close("recorded", {"state": "not_promoted", "reason": reason},
+                     [_render("scratch_not_promoted", reason=reason)], ok=False, diagnostic=reason)
+    if _scratch_cancelled(run_id):
+        return close("cancelled", {"state": "not_promoted", "reason": "cancelled"},
+                     [_render("scratch_cancelled")], ok=False, diagnostic="cancelled")
     embedded = prefix + replacement
-    if "hole" in anchor:
+    if source_code is not None:
+        proof = submitted_code
+        if prefix:
+            import textwrap
+
+            body = replacement.lstrip()
+            if not re.match(r"by(?:\s|$)", body):
+                reason = "helper_not_embeddable"
+                return close("recorded", {"state": "not_promoted", "reason": reason},
+                             [_render("scratch_not_promoted", reason=reason)], ok=False)
+            body = prefix + textwrap.dedent(body[2:]).lstrip("\r\n")
+            proof = submitted_code[:body_offset] + "by\n" + textwrap.indent(body, "  ")
+        operation = {"type": "draft", "base": anchor["node"], "text": proof}
+    elif "hole" in anchor:
         operation = {"type": "fill", "hole": anchor["hole"], "text": embedded}
     else:
         step_ids = anchor.get("step_ids") or []
@@ -1861,64 +1912,114 @@ def _scratch_promote(theorem: str, run_id: str, request: dict, helpers: list[str
             return close("recorded", promotion, [_render("scratch_not_promoted", reason="anchor")], ok=False)
         spec = step_ids[0] if len(step_ids) == 1 else f"{step_ids[0]}-{step_ids[-1]}"
         operation = {"type": "splice", "base": anchor["node"], "steps": spec, "text": embedded}
+    operation["experiment_id"] = experiment_id
+    # Admission is checked again after dependency construction, just before submission.
+    if _scratch_cancelled(run_id) or read_state(campaign.run_dir(run_id)).get("stopped"):
+        reason = "cancelled" if _scratch_cancelled(run_id) else "run_stopped"
+        return close(reason, {"state": "not_promoted", "reason": reason},
+                     [_render("scratch_not_promoted", reason=reason)], ok=False, diagnostic=reason)
     try:
-        result = campaign.compile_operation(theorem, run_id, operation)
-    except (OSError, KeyError, StopIteration, ValueError, RuntimeError) as error:
-        promotion = {"state": "not_promoted", "reason": "invalid_operation"}
+        result = campaign.compile_operation(theorem, run_id, operation, named_parent=anchor["proof_id"])
+    except Exception as error:
+        reason = "run_stopped" if read_state(campaign.run_dir(run_id)).get("stopped") else "invalid_operation"
+        evidence = getattr(error, "operation_evidence", {})
+        promotion = {"state": "not_promoted", "reason": reason,
+                     **{key: value for key, value in evidence.items() if key not in {"raw_result", "edge"}}}
+        if "edge" in evidence:
+            promotion["derivation"] = evidence["edge"]
         return close("recorded", promotion, [str(error)], ok=False, diagnostic=str(error))
-    passed = bool(next(iter((result.get("compat") or {}).values()), {}).get("passed"))
-    parent_tokens = next(
-        (
-            event["result"]["tokens"]
-            for event in reversed(_history(run_id))
-            if event.get("proof_id") == anchor.get("proof_id")
-            and isinstance(event.get("result"), dict)
-            and isinstance(event["result"].get("tokens"), int)
-        ),
-        None,
-    )
-    deltas = {}
-    if isinstance(parent_tokens, int) and isinstance(result.get("tokens"), int):
-        deltas["tokens"] = result["tokens"] - parent_tokens
-    verification = {
-        "fast": "passed" if passed else "proof_error",
-        "full": "pending" if passed else "not_checked",
-        "cold": "not_checked",
-    }
-    promotion = {
-        "state": "promoted" if passed else "failed",
-        "node": result.get("node"),
-        "derivation": result.get("edge"),
-        "evaluation_id": result.get("evaluation_id"),
-        "deltas": deltas,
-        "verification": verification,
-    }
-    if not passed:
-        promotion["reason"] = "proof_error"
-    node = _node(run_id, result["node"])
-    promotion["proof_id"] = node.proof_id
-    outcome = "success" if passed else "failure"
-    lines = [
-        _render("scratch_experiment", experiment=experiment_id, outcome=outcome),
-        _render(
-            "scratch_promoted",
-            node=node.id,
-            fast=verification["fast"],
-            full=verification["full"],
-            cold=verification["cold"],
-        ),
-    ]
+    try:
+        raw_result = result.get("raw_result") or result
+        status = campaign._verification_outcome(raw_result)
+        complete = result.get("complete", not bool(raw_result.get("contains_sorry")))
+        passed = status == "passed" and complete
+        parent_result = _node_result(run_id, anchor["proof_id"])
+        parent_tokens = parent_result.get("tokens")
+        deltas = {}
+        if isinstance(parent_tokens, int) and isinstance(result.get("tokens"), int):
+            deltas["tokens"] = result["tokens"] - parent_tokens
+        if status == "passed" and campaign._verification_outcome(parent_result) == "passed":
+            # Heartbeats are comparable only on the same pinned version.
+            heartbeat_deltas = {
+                version: info["heartbeats"] - parent_info["heartbeats"]
+                for version, info in (raw_result.get("compat") or {}).items()
+                for parent_info in [(parent_result.get("compat") or {}).get(version, {})]
+                if isinstance(info.get("heartbeats"), int) and isinstance(parent_info.get("heartbeats"), int)
+            }
+            if heartbeat_deltas:
+                deltas["heartbeats_by_version"] = heartbeat_deltas
+        history = _history(run_id)
+        full_result = result.get("full_result")
+        full = campaign._verification_outcome(full_result) if isinstance(full_result, dict) else "not_checked"
+        if full == "passed" and len(full_result.get("compat") or {}) != len(campaign.versions(campaign.problem(theorem))):
+            full = "inconclusive"
+        if full_result is None and any(
+            job["id"] == result.get("proof_id") for job in campaign._autocheck_jobs(campaign._summaries(history))
+        ):
+            full = "pending"
+        node = _node(run_id, result["node"])
+        cold = next((row for row in reversed(history) if row.get("kind") == "cold_verification"
+                     and row.get("candidate_id") == node.proof_id), None)
+        verification = {
+            "fast": status if complete else "incomplete",
+            "full": full,
+            "cold": "not_checked" if cold is None else (
+                "passed" if cold.get("confirmed") else (
+                    "proof_error" if campaign._verification_outcome(cold) == "proof_error" else "inconclusive"
+                )
+            ),
+        }
+        promotion = {
+            "state": "promoted" if passed else "failed" if status == "proof_error" else "not_promoted",
+            "node": node.id,
+            "proof_id": node.proof_id,
+            "derivation": result.get("edge"),
+            "attempt_id": result.get("attempt_id"),
+            "attempt_ids": [result["attempt_id"]] if result.get("attempt_id") else [],
+            "derivation_id": result.get("derivation_id"),
+            "construction_operation_id": result.get("construction_operation_id"),
+            "evaluation_id": result.get("evaluation_id"),
+            "evaluation_ref": result.get("evaluation_ref"),
+            "deltas": deltas,
+            "verification": verification,
+            "diagnostics": {version: value.get("diagnostics", [])
+                            for version, value in (raw_result.get("compat") or {}).items()},
+        }
+        if not passed:
+            promotion["reason"] = "incomplete" if not complete else status
+        outcome = "success" if passed else "failure" if status == "proof_error" else "incomplete" if not complete else status
+        lines = [
+            _render("scratch_experiment", experiment=experiment_id, outcome=outcome),
+            _render(
+                "scratch_promoted",
+                node=node.id,
+                fast=verification["fast"],
+                full=verification["full"],
+                cold=verification["cold"],
+            ),
+        ]
+    except Exception as error:
+        references = {key: result.get(key) for key in (
+            "node", "proof_id", "attempt_id", "derivation_id", "construction_operation_id",
+            "evaluation_id", "evaluation_ref", "edge",
+        )}
+        references["derivation"] = references.pop("edge")
+        promotion = {"state": "not_promoted", "reason": "processing_error", **references}
+        return close("processing_error", promotion, [str(error)], ok=False, diagnostic=str(error))
     return close(outcome, promotion, lines, ok=True)
 
 
 def scratch_tool(theorem: str, run_id: str, request: dict) -> dict:
-    """Lean commands run in the target's environment in place of its declaration. Never a node, never scored."""
+    """Retain isolated experiments and submit exact target proofs through normal compile."""
     if _is_empty(request, "scratch"):
         return _empty_error("scratch")
     valid = ["code", "replacement", "at", "helpers"]
     unknown = sorted(set(request) - set(valid))
     if unknown:
         return _invalid("unknown_argument", unknown[0], valid, TOOL_FORMS["scratch"])
+    prior = experiments.replay_request(run_id, request)
+    if prior is not None:
+        return _read_experiment(run_id, prior["experiment_id"])
     if _scratch_form(request) == "mixed":
         return _invalid("mixed_form", "code+replacement", ["code", "replacement+at"], TOOL_FORMS["scratch"])
     if _scratch_form(request) == "anchored":
@@ -1941,6 +2042,25 @@ def scratch_tool(theorem: str, run_id: str, request: dict) -> dict:
     label = official_filter()(re.sub(r"\bsorry\b", "trivial", code))
     if label:
         return _invalid("forbidden", label, ["no forbidden constructs"], TOOL_FORMS["scratch"])
+    discovery_error = None
+    try:
+        statement = campaign.problem(theorem).get("statement")
+    except Exception as error:
+        statement = None
+        discovery_error = error
+    if isinstance(statement, str) and statement.strip():
+        start = len(code) - len(code.lstrip())
+        head = statement
+        if code.startswith(head, start):
+            assignment = re.match(r"\s*:=", code[start + len(head):])
+            if assignment is not None:
+                body_offset = start + len(head) + assignment.end()
+                body = code[body_offset:]
+                if body.strip() and _embeddable_scratch(body):
+                    return _scratch_promote(
+                        theorem, run_id, {"replacement": body}, helpers,
+                        source_code=code, body_offset=body_offset, original_request=request,
+                    )
     digest = hashlib.sha256(code.encode()).hexdigest()
     earlier = sum(
         1
@@ -1950,13 +2070,15 @@ def scratch_tool(theorem: str, run_id: str, request: dict) -> dict:
         and event.get("phase") in {None, "accepted"}
     )
     # Retain the exact input before context construction or Lean can fail; instrumentation is not the source.
-    accepted = experiments.accept(run_id, code, helpers)
+    accepted = experiments.accept(run_id, code, helpers, request=request)
     experiment_id = accepted["experiment_id"]
     if accepted.get("replayed"):
         return _read_experiment(run_id, experiment_id)
     started = time.perf_counter()
     execution = {"stage": "construction", "context": {"theorem_run": run_id}, "raw": None}
     try:
+        if discovery_error is not None:
+            raise discovery_error
         return _scratch_check(theorem, run_id, code, helpers, accepted, earlier, started, execution)
     except Exception as error:
         outcome = (

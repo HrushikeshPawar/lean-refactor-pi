@@ -1,4 +1,6 @@
-description: "Run isolated Lean commands in this theorem's environment, such as example ... := by trace_state; rfl, #check or #print. Nothing becomes a node or is scored. A local OK is not target validity, compatibility, or cold status. Replies name a stable experiment id. Read that id later to retrieve the exact input and outcome. Reuse an earlier snippet only by passing its experiment id in helpers."
+description: "Run an isolated Lean experiment, or submit an exact target replacement in the same call. Use code for commands, examples or a complete target theorem; use replacement with at or the job's recorded anchor for a proof edit. Unambiguous target proofs use normal compile and return candidate references and verification coverage. A local experiment OK is not target certification. Every accepted input has a retrievable experiment id."
 params:
   code: "Lean commands that take the target declaration's place; no import lines. sorry is allowed here. Unicode and line endings are kept exactly."
+  replacement: "Exact proof-local replacement for the anchored steps or hole. Mutually exclusive with code."
+  at: "Saved parent node plus steps [first,last] or hole reference. Omit only when the job has a recorded anchor."
   helpers: "Optional experiment ids whose recorded snippets this call depends on. Only named helpers and their recorded dependencies are included. Diagnostic lines use that combined source."
