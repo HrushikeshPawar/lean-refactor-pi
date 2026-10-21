@@ -3588,18 +3588,21 @@ def _served_actors(history: list[dict]) -> list[dict]:
     for event in history:
         actor = event.get("actor_id")
         session = event.get("session_id")
-        if not actor or not session:
+        if not actor:
             continue
-        sessions.setdefault(actor, set()).add(session)
+        found = sessions.setdefault(actor, set())
+        if session:
+            found.add(session)
     rows = []
     for actor, found in sessions.items():
         ordered = sorted(found)
+        status = "missing" if not ordered else "recorded" if len(ordered) == 1 else "ambiguous"
         rows.append(
             {
                 "actor_id": actor,
                 "session_id": ordered[0] if len(ordered) == 1 else None,
                 "sessions": ordered,
-                "session_status": "recorded" if len(ordered) == 1 else "ambiguous",
+                "session_status": status,
             }
         )
     return rows

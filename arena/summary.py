@@ -176,7 +176,7 @@ def session_spend(directory: Path) -> dict | None:
 
 def counted_settles(cost_events: list[dict]) -> tuple[list[dict], bool]:
     """One row per request. Unknown usage is incomplete, not a zero charge."""
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
     kept: list[dict] = []
     unknown = False
     for event in cost_events:
@@ -185,11 +185,13 @@ def counted_settles(cost_events: list[dict]) -> tuple[list[dict], bool]:
         if event.get("usage_known") is False:
             unknown = True
             continue
-        request_id = event.get("request_id")
-        if request_id:
-            if request_id in seen:
+        # A settle row's own id names the request it charges; request_id is stamped from the
+        # extension's current request and can repeat across distinct charges, so it is not a key.
+        if event.get("id"):
+            key = (str(event["id"]), str(event.get("session_entry_id") or ""))
+            if key in seen:
                 continue
-            seen.add(request_id)
+            seen.add(key)
         kept.append(event)
     return kept, unknown
 

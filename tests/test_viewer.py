@@ -721,8 +721,8 @@ class NodeCallTests(unittest.TestCase):
             ],
         )
         (self.directory / "cost-ledger.jsonl").write_text(
-            '{"kind":"settle","request_id":"req-1","usd":0.2,"actor_id":"sol","job_id":"j-fail"}\n'
-            '{"kind":"settle","request_id":"req-1","usd":0.2,"actor_id":"sol","job_id":"j-fail","candidate_ids":["c2","c2b"]}\n'
+            '{"kind":"settle","id":"req-1","request_id":"req-1","usd":0.2,"actor_id":"sol","job_id":"j-fail"}\n'
+            '{"kind":"settle","id":"req-1","request_id":"req-1","usd":0.2,"actor_id":"sol","job_id":"j-fail","candidate_ids":["c2","c2b"]}\n'
             '{"kind":"settle","request_id":"req-unknown","usd":9,"usage_known":false}\n'
             '{"kind":"settle","usd":1\n'
         )
