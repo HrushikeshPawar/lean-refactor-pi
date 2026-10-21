@@ -152,6 +152,9 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `packet/price-table.summary` | 28 | Prices action replies | when the table is requested |
 | `packet/scoring` | 144 | Initial theorem packet | once per run |
 | `packet/search` | 103 | Initial theorem packet | once per run |
+| `packet/sections.fixed.anchor_hole` | 9 | Initial theorem packet | once per run |
+| `packet/sections.fixed.anchor_proof` | 8 | Initial theorem packet | once per run |
+| `packet/sections.fixed.anchor_steps` | 13 | Initial theorem packet | once per run |
 | `packet/sections.fixed.budget_certification_failed` | 8 | Initial theorem packet | once per run |
 | `packet/sections.fixed.catalog_external` | 5 | Initial theorem packet | once per run |
 | `packet/sections.fixed.catalog_line` | 4 | Initial theorem packet | once per run |
@@ -197,13 +200,17 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `packet/sections.fixed.used_intro` | 21 | Initial theorem packet | once per run |
 | `packet/sections.fixed.used_line` | 4 | Initial theorem packet | once per run |
 | `packet/sections.fixed.used_preview` | 9 | Initial theorem packet | once per run |
+| `packet/sections.fixed.worker_goal_omitted` | 13 | Initial theorem packet | once per run |
+| `packet/sections.fixed.worker_hole_goal` | 3 | Initial theorem packet | once per run |
 | `packet/sections.required.dependencies` | 3 | Initial theorem packet | once per run |
 | `packet/sections.required.environment` | 2 | Initial theorem packet | once per run |
 | `packet/sections.required.reference` | 5 | Initial theorem packet | once per run |
 | `packet/sections.required.source` | 2 | Initial theorem packet | once per run |
+| `packet/sections.titles.anchored` | 11 | Initial theorem packet | once per run |
 | `packet/sections.titles.dependencies` | 3 | Initial theorem packet | once per run |
 | `packet/sections.titles.earlier` | 6 | Initial theorem packet | once per run |
 | `packet/sections.titles.goals` | 4 | Initial theorem packet | once per run |
+| `packet/sections.titles.hypothesis` | 2 | Initial theorem packet | once per run |
 | `packet/sections.titles.library` | 3 | Initial theorem packet | once per run |
 | `packet/sections.titles.pinned` | 2 | Initial theorem packet | once per run |
 | `packet/sections.titles.profile` | 5 | Initial theorem packet | once per run |
@@ -212,9 +219,12 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `packet/sections.titles.source` | 2 | Initial theorem packet | once per run |
 | `packet/sections.titles.team` | 1 | Initial theorem packet | once per run |
 | `packet/sections.titles.types` | 4 | Initial theorem packet | once per run |
+| `packet/sections.titles.worker` | 1 | Initial theorem packet | once per run |
+| `packet/sections.titles.worker_goals` | 6 | Initial theorem packet | once per run |
 | `packet/task` | 10 | Initial theorem packet | once per run |
 | `packet/team` | 65 | Initial theorem packet | once per run |
 | `packet/team-cost` | 10 | Initial theorem packet | once per run |
+| `packet/worker` | 62 | Initial theorem packet | once per run |
 | `replies/check.could_not_run` | 7 | Tool replies | when the matching tool result occurs |
 | `replies/check.diagnostic` | 6 | Tool replies | when the matching tool result occurs |
 | `replies/check.failed` | 10 | Tool replies | when the matching tool result occurs |

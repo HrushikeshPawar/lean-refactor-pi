@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import json
 import threading
 import uuid
 from contextlib import contextmanager
@@ -852,6 +853,21 @@ def _stop_activation(directory: Path, delegation: dict, *, expected_transport=No
         observe_exit(directory, activation_id)
 
 
+def _worker_packet(directory: Path, stored: dict) -> str:
+    """The fresh worker session's startup packet, from the saved anchor node and the run's theorem."""
+    from arena import context
+    from arena.campaign import _proof_reader
+    from arena.graph import Graph
+
+    graph = Graph.from_history(
+        events(directory), _proof_reader(directory),
+        committed_operations=run_control.committed_operation_ids(directory),
+    )
+    node = next(item for item in graph.nodes if item.id == stored["anchor"]["node"])
+    theorem = json.loads((directory / "run-config.json").read_text())["theorem"]
+    return context.worker_packet(theorem, task=stored["task"], anchor=stored["anchor"], node=node)
+
+
 def _open_activation(directory: Path, stored: dict, open_child, command_id: str,
                      *, expected_generation: str | None = None) -> None:
     activation_id = stored["activation_id"]
@@ -883,6 +899,7 @@ def _open_activation(directory: Path, stored: dict, open_child, command_id: str,
             if state == "cancelling":
                 _fill_slots(directory)
                 return
+            packet = None if stored.get("resumed") else _worker_packet(directory, stored)
             launch = worker_launch(
                 directory, run_id=stored["run_id"], worker_actor_id=stored["worker_actor_id"],
                 worker_session_id=stored["worker_session_id"], job_id=stored["job_id"],
@@ -930,7 +947,7 @@ def _open_activation(directory: Path, stored: dict, open_child, command_id: str,
                 raise RuntimeError("reader did not start")
             if (_activation_view(directory, stored)["state"] == "launching"
                     and not _recovering(directory) and _control_generation(directory) == generation):
-                _write_prompt(transport, prompt_line(command_id, stored["task"], stored["anchor"]))
+                _write_prompt(transport, prompt_line(command_id, stored["task"], stored["anchor"], packet))
             if _activation_view(directory, stored)["state"] == "cancelling":
                 _stop_activation(directory, stored)
         except Exception as error:

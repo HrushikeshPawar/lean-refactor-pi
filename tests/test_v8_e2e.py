@@ -24,6 +24,13 @@ from arena import orchestration, run_control
 from tests.slow import slow
 from tests.test_orchestration import _PROOF, _HeldChild, _request, _seed_parent
 
+def setUpModule():
+    # The fixture theorem "demo" is not a catalogued problem; its packet render has its own test in test_text.
+    patcher = patch.object(orchestration, "_worker_packet", return_value="WORKER PACKET")
+    patcher.start()
+    unittest.addModuleCleanup(patcher.stop)
+
+
 ROOT = Path(__file__).resolve().parents[1]
 ELAN_HOME = "/mnt/SharedDrive/Ubuntu-SymLinks/.elan/.elan"
 
@@ -267,21 +274,13 @@ class V8E2ETests(unittest.TestCase):
             gone = orchestration.reconcile(
                 directory, inspect=lambda pid: probes.get(pid, {"alive": False, "group_alive": False}),
                 signal=signalled.append, open_child=open_child)
-            self.assertEqual(gone["status"], "recovering", "an uncertain remote request is not blindly resent")
-            self.assertEqual(len(children), opened_before)
-            settle("s-recon-d", d_worker, d_session, ["req-d"], "0.01", job_id=fresh["job_id"],
-                   reconciles="unknown:req-d")
-            still = orchestration.reconcile(
-                directory, inspect=lambda pid: probes.get(pid, {"alive": False, "group_alive": False}),
-                signal=signalled.append, open_child=open_child)
-            self.assertEqual(still["status"], "recovering", "unknown usage keeps the fence explicit until reconciled")
-            self.assertEqual(len(children), opened_before)
-            settle("s-recon-unknown", follow_worker, follow["session_id"], ["worker-unknown"], "0.01",
-                   job_id=a["job_id"], reconciles="s-unknown")
-            resumed = orchestration.reconcile(
-                directory, inspect=lambda pid: probes.get(pid, {"alive": False, "group_alive": False}),
-                signal=signalled.append, open_child=open_child)
-            self.assertEqual(resumed["status"], "running")
+            # The owner is confirmed dead, so recovery records req-d as unknown usage and resumes; req-d is not resent.
+            self.assertEqual(gone["status"], "running", "a dead owner's uncertain request settles as unknown")
+            self.assertIn("req-d", run_control._apply_coverage(run_control._control_rows(directory))["unknown"])
+            self.assertFalse(any(row.get("request_id") == "req-d" and row.get("kind") == "dispatch"
+                                 for row in run_control._control_rows(directory)[-50:]
+                                 if row.get("attempt_id") != "attempt-d"), "req-d is not resent")
+            resumed = gone
             self.assertGreaterEqual(resumed["replacements"], 1)
             self.assertEqual(len(children), opened_before + resumed["replacements"])
 

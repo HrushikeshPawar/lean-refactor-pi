@@ -46,9 +46,11 @@ def cancel_lines(command_id: str) -> bytes:
     )
 
 
-def prompt_line(command_id: str, task: str, anchor: dict) -> bytes:
-    """Pi 1.3.0 prompt has no tools field. The allowlist is the process launch, not this record."""
-    message = task + "\n\n" + json.dumps({"anchor": anchor}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+def prompt_line(command_id: str, task: str, anchor: dict, packet: str | None = None) -> bytes:
+    """Pi 1.3.0 prompt has no tools field. The allowlist is the process launch, not this record.
+
+    A fresh worker session's first prompt carries its packet, which already holds the task."""
+    message = (packet.rstrip() if packet else task) + "\n\n" + json.dumps({"anchor": anchor}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     record = {"type": "prompt", "id": command_id, "message": message}
     return (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
 

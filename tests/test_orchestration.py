@@ -21,6 +21,13 @@ from tests.graph_support import FakeRunCase
 _PROOF = "theorem demo : True ∧ True := by\n  trivial\n  trivial\n"
 
 
+def setUpModule():
+    # The fixture theorem "demo" is not a catalogued problem; its packet render has its own test in test_text.
+    patcher = patch.object(orchestration, "_worker_packet", return_value="WORKER PACKET")
+    patcher.start()
+    unittest.addModuleCleanup(patcher.stop)
+
+
 def _seed_parent(directory: Path) -> None:
     (directory / "run-config.json").write_text(json.dumps({"theorem": "demo", "model": "gpt-6-sol"}))
     (directory / "proofs").mkdir(parents=True)
@@ -649,7 +656,7 @@ class V8WorkerSmokeTests(unittest.TestCase):
                 "anchor": {"node": "n1", "steps": [1, 2]},
                 "open_child": lambda _launch: child,
             })
-            self.assertTrue(json.loads(child.written)["message"].startswith("try the step\n"))
+            self.assertTrue(json.loads(child.written)["message"].startswith("WORKER PACKET\n"))
             self.assertEqual(flushed, [True])
             child._chunks.put(None)
             orchestration.join_activation(result["activation_id"])
@@ -821,6 +828,10 @@ class V8WorkerSmokeTests(unittest.TestCase):
             self.assertNotEqual(follow["activation_id"], fresh["activation_id"])
             self.assertEqual(follow["anchor"], fresh["anchor"])
             self.assertEqual(children[1][0]["session_dir"], children[0][0]["session_dir"])
+            self.assertTrue(json.loads(children[0][1].written)["message"].startswith("WORKER PACKET"))
+            follow_message = json.loads(children[1][1].written)["message"]
+            self.assertNotIn("WORKER PACKET", follow_message)
+            self.assertTrue(follow_message.startswith("narrow the same step"))
             self.assertEqual(children[1][0]["env"]["ARENA_ACTIVATION_ID"], follow["activation_id"])
             self.assertEqual(children[1][0]["env"]["ARENA_SESSION_ID"], fresh["session_id"])
             resumed_view = orchestration.jobs(directory, [fresh["job_id"]])["jobs"][0]

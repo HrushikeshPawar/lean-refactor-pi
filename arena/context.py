@@ -951,21 +951,9 @@ def _team_section(model: str | None) -> list[str]:
     ).strip().splitlines()
 
 
-def packet_sections(name: str, *, cache_only: bool = False, model: str | None = None) -> list[tuple[str, str]]:
-    row = problem(name)
-    targets = versions(row)
-    context = cached_context(name) if cache_only else lean_context(name)
-    if cache_only and not context:
-        raise ValueError(f"Cached context is unavailable for {name}")  # not-model-facing: CLI cache refusal.
-    context["root"] = "" if is_standalone(row) else row["file_path"].split("/")[0]
-    prof = reference_profile(name, cache_only=cache_only)
-    if cache_only and not prof:
-        raise ValueError(f"Cached reference profile is unavailable for {name}")  # not-model-facing: CLI cache refusal.
-    pins = "; ".join(render_text("packet/sections.fixed.pin", version=version) for version, _commit in targets)
-    pins = f"{len(targets)} required ({pins})"
-    rates = exchange_rates(name, len(targets))
-    task = render_text("packet/task", name=name, statement=row["statement"]).strip().splitlines()
-    scoring = (
+def _scoring_lines(rates: dict) -> list[str]:
+    """The scoring contract, shared by every actor's startup packet."""
+    return (
         render_text(
             "packet/scoring",
             points_per_token=rates["points_per_token"],
@@ -979,6 +967,49 @@ def packet_sections(name: str, *, cache_only: bool = False, model: str | None = 
         .strip()
         .splitlines()
     )
+
+
+def _pinned_part(row: dict, targets: list) -> tuple[str, list[str]]:
+    """Source, required toolchains and imports, shared by every actor's startup packet."""
+    pins = "; ".join(render_text("packet/sections.fixed.pin", version=version) for version, _commit in targets)
+    pins = f"{len(targets)} required ({pins})"
+    source_line = (
+        render_text("packet/sections.fixed.standalone_source", source=row["source"])
+        if is_standalone(row)
+        else render_text(
+            "packet/sections.fixed.source",
+            source=row["source"],
+            path=row["file_path"],
+            start=row["start_line"],
+            end=row["end_line"],
+        )
+    )
+    return (
+        template("packet/sections.titles.pinned").strip(),
+        [
+            source_line,
+            render_text("packet/sections.fixed.pins", pins=pins),
+            render_text(
+                "packet/sections.fixed.imports",
+                imports=", ".join(_imports(row)) or template("packet/sections.fixed.none").strip(),
+            ),
+        ],
+    )
+
+
+def packet_sections(name: str, *, cache_only: bool = False, model: str | None = None) -> list[tuple[str, str]]:
+    row = problem(name)
+    targets = versions(row)
+    context = cached_context(name) if cache_only else lean_context(name)
+    if cache_only and not context:
+        raise ValueError(f"Cached context is unavailable for {name}")  # not-model-facing: CLI cache refusal.
+    context["root"] = "" if is_standalone(row) else row["file_path"].split("/")[0]
+    prof = reference_profile(name, cache_only=cache_only)
+    if cache_only and not prof:
+        raise ValueError(f"Cached reference profile is unavailable for {name}")  # not-model-facing: CLI cache refusal.
+    rates = exchange_rates(name, len(targets))
+    task = render_text("packet/task", name=name, statement=row["statement"]).strip().splitlines()
+    scoring = _scoring_lines(rates)
     table = step_table(
         row["src"],
         prof,
@@ -996,34 +1027,13 @@ def packet_sections(name: str, *, cache_only: bool = False, model: str | None = 
     )
     titles = {
         key: template(f"packet/sections.titles.{key}").strip()
-        for key in ("pinned", "types", "scope", "goals", "source", "dependencies")
+        for key in ("types", "scope", "goals", "source", "dependencies")
     }
-    source_line = (
-        render_text("packet/sections.fixed.standalone_source", source=row["source"])
-        if is_standalone(row)
-        else render_text(
-            "packet/sections.fixed.source",
-            source=row["source"],
-            path=row["file_path"],
-            start=row["start_line"],
-            end=row["end_line"],
-        )
-    )
     goal_facts = _goal_facts(context, row["src"])
     parts: list[tuple[str, list[str]]] = [
         ("", task),
         ("", scoring),
-        (
-            titles["pinned"],
-            [
-                source_line,
-                render_text("packet/sections.fixed.pins", pins=pins),
-                render_text(
-                    "packet/sections.fixed.imports",
-                    imports=", ".join(_imports(row)) or template("packet/sections.fixed.none").strip(),
-                ),
-            ],
-        ),
+        _pinned_part(row, targets),
         (titles["scope"], _scope_section(row)),
         (
             render_text("packet/sections.titles.reference", count=row["proof_length"]),
@@ -1067,3 +1077,58 @@ def packet_sections(name: str, *, cache_only: bool = False, model: str | None = 
 def render_packet(name: str, *, cache_only: bool = False, model: str | None = None) -> str:
     sections = packet_sections(name, cache_only=cache_only, model=model)
     return "\n\n".join(content for _title, content in sections) + "\n"
+
+
+def _anchor_lines(anchor: dict, node) -> list[str]:
+    """Anchor description, then the recorded goal states it covers, from the saved node."""
+    if "hole" in anchor:
+        hole = next((item for item in node.holes if f"{node.id}.h{item['index']}" == anchor["hole"]), None)
+        head = render_text("packet/sections.fixed.anchor_hole", node=node.id, hole=anchor["hole"],
+                           line=anchor["source"]["line"])
+        goal = (hole or {}).get("goal")
+        text = _show_goal(goal, LIMITS["goal_chars"])[0] if goal else ""
+        return [head, *([render_text("packet/sections.fixed.worker_hole_goal", hole=anchor["hole"], text=text)]
+                        if text else [])]
+    if "steps" not in anchor:
+        return [render_text("packet/sections.fixed.anchor_proof", node=node.id,
+                            count=len(node.proof_text.splitlines()))]
+    start, end = anchor["steps"]
+    chosen = node.steps[start - 1 : end]
+    head = render_text("packet/sections.fixed.anchor_steps", node=node.id, start=start, end=end,
+                       first=chosen[0].first_line, last=chosen[-1].last_line)
+    recorded = [(step, _show_goal(step.before, LIMITS["goal_chars"])[0]) for step in chosen if step.before]
+    lines = [
+        render_text("packet/sections.fixed.goal", step=step.id, line=step.first_line, text=text)
+        for step, text in recorded[: LIMITS["goals"]]
+    ]
+    if len(recorded) > LIMITS["goals"]:
+        lines.append(render_text("packet/sections.fixed.worker_goal_omitted", count=len(recorded) - LIMITS["goals"]))
+    return [head, *lines]
+
+
+def worker_packet(name: str, *, task: str, anchor: dict, node) -> str:
+    """First prompt of a delegated worker: the shared startup contract plus its anchor. No Sol-only sections.
+
+    `node` is the graph node the anchor resolved to, so the proof text and goals are the saved ones.
+    """
+    row = problem(name)
+    targets = versions(row)
+    rates = exchange_rates(name, len(targets))
+    numbered = [
+        render_text("replies/tools.source_line", line=number, text=line)
+        for number, line in enumerate(node.proof_text.splitlines(), 1)
+    ]
+    anchored = _anchor_lines(anchor, node)
+    parts: list[tuple[str, list[str]]] = [
+        ("", render_text("packet/task", name=name, statement=row["statement"]).strip().splitlines()),
+        ("", _scoring_lines(rates)),
+        _pinned_part(row, targets),
+        (template("packet/sections.titles.scope").strip(), _scope_section(row)),
+        (template("packet/sections.titles.worker").strip(), template("packet/worker").strip().splitlines()),
+        ("", template("packet/search").strip().splitlines()),
+        (render_text("packet/sections.titles.anchored", node=node.id), numbered),
+        ("", anchored[:1]),
+        (template("packet/sections.titles.worker_goals").strip(), anchored[1:]),
+        (template("packet/sections.titles.hypothesis").strip(), task.strip().splitlines()),
+    ]
+    return _join_sections(parts) + "\n"

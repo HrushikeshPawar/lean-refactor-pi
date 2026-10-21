@@ -1,6 +1,7 @@
 import ast
 import io
 import json
+from dataclasses import replace
 import os
 import re
 import tempfile
@@ -722,6 +723,50 @@ class PacketBehaviourTests(unittest.TestCase):
         self.assertIn(f"costs about {ratio}\u00d7 less than yours", body)
         self.assertNotIn("less than yours", dict(team(WORKER_MODEL))["Team"])
         self.assertNotIn("Team", dict(team(None)))
+
+    def test_worker_packet_carries_contract_anchor_and_task_without_team(self):
+        from types import SimpleNamespace
+
+        from arena import context
+        from arena.steps import split_steps
+
+        proof = "theorem t : True := by\n  intro h\n  trivial"
+        steps = [replace(step, before=f"goal before {step.id}") for step in split_steps(proof)]
+        node = SimpleNamespace(id="n1", proof_text=proof, steps=steps, holes=[])
+        sol = "gpt-6.1-sol"
+        cached, measured = _fixture("ski")
+        with (
+            patch.object(context, "cached_context", return_value=cached),
+            patch.object(context, "reference_profile", return_value=measured),
+        ):
+            orchestrator = context.render_packet(ROWS["ski"], cache_only=True, model=sol)
+        whole = context.worker_packet(ROWS["ski"], task="try symmetry", anchor={"node": "n1"}, node=node)
+        stepped = context.worker_packet(
+            ROWS["ski"], task="try symmetry", anchor={"node": "n1", "steps": [2, 2]}, node=node
+        )
+        row = context.problem(ROWS["ski"])
+        for packet in (whole, stepped):
+            self.assertIn(row["statement"], packet)
+            self.assertIn("2:   intro h", packet)
+            self.assertIn("try symmetry", packet)
+            self.assertIn(text.template("packet/scoring").splitlines()[0], packet)
+            self.assertIn("You are a worker", packet)
+            self.assertNotIn("worker sessions", packet)
+            self.assertNotIn("\nTeam\n", packet)
+            self.assertNotIn(text.template("packet/sections.titles.goals").strip(), packet)
+        self.assertIn("worker sessions", orchestrator)
+        self.assertIn("the whole proof (3 lines)", whole)
+        self.assertNotIn("goal before", whole)
+        self.assertIn("steps 2-2", stepped)
+        self.assertIn(f"goal before {steps[1].id}", stepped)
+        self.assertNotIn(f"goal before {steps[0].id}", stepped)
+        own = sum(len(text.template(key).split()) for key in (
+            "packet/worker", "packet/sections.titles.worker", "packet/sections.titles.hypothesis",
+            "packet/sections.titles.anchored", "packet/sections.titles.worker_goals",
+            "packet/sections.fixed.anchor_proof", "packet/sections.fixed.anchor_steps",
+            "packet/sections.fixed.anchor_hole", "packet/sections.fixed.worker_hole_goal",
+            "packet/sections.fixed.worker_goal_omitted"))
+        self.assertLessEqual(own, text.numbers()["budget.worker_words"])
 
     def test_packet_order_rates_price_rows_goals_and_library_format(self):
         from arena import context

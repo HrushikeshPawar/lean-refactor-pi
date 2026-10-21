@@ -10,8 +10,17 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from arena import coordinator, orchestration
 from tests.test_orchestration import _HeldChild, _seed_parent
+
+
+@pytest.fixture(autouse=True)
+def _stub_worker_packet():
+    # The fixture theorem "demo" is not a catalogued problem; its packet render has its own test in test_text.
+    with patch.object(orchestration, "_worker_packet", return_value="WORKER PACKET"):
+        yield
 
 
 def test_protocol_process_waits_for_owned_worker():
