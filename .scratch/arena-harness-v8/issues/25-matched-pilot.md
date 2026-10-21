@@ -4,7 +4,7 @@
 
 **Blocked by:** 07: Assess configuration cap exposure offline; 13: Recover charges, candidate receipts and delivery after crashes; 20: Make five-tool replies concise and complete; 21: Generate accurate actor-specific schema help; 23: Recover strategic context and exact evidence after compaction; 24: Demonstrate real Lean admission priorities
 
-**Status:** ready-for-agent
+**Status:** deferred
 
 **Branch:** `v8/25-matched-pilot`
 
@@ -15,6 +15,8 @@
 **Ownership:** Evaluation preparation/reporting only. No paid run, submission or long resource experiment starts automatically.
 
 **Shared contracts:** [S2](../contracts.md#s2-shared-spend-and-dispatch-ordering)
+
+**Decision:** Owner decision 2026-10-21: not built as a separate ticket. The owner's next step is a complete from-scratch run, not a matched A/B pilot. Final E2E verifies what that run needs: a campaign launch with the v8 configuration and per-problem actual-spend reporting.
 
 ## Current implementation context and contract
 

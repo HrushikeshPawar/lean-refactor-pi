@@ -4,7 +4,7 @@
 
 **Blocked by:** 10: Admit two workers and cancel stale work cleanly; 17: Distinguish proof failures from inconclusive cold checks
 
-**Status:** changes-requested
+**Status:** done
 
 **Branch:** `v8/24-lean-priority-admission`
 
@@ -68,6 +68,18 @@ Commit `qln` implements real dispatch priority: `select_waiter` chooses by class
 Accept the keyword in the stubs. `test_environments.py::CertificationTests::test_matching_reference_is_certified` failed before this ticket and is not yours.
 
 Extend the existing admission smoke with one denied DS request (inconclusive, no cold spawn: inject `_run_cold` and assert it is not called) and one omitted-class harness call (opportunistic). Run the whole touched test files. No real Lean is needed.
+
+## Review closure
+
+Grok was unavailable, so a Sonnet minion implemented the review fixes and Claude reviewed them (`stn`).
+- `engine.run_lean` raises `LeanInconclusive(cause, admission)` for a denied, queued or inconclusive session reply. `compile_version` and scratch report it as inconclusive. `_verification_outcome` maps any empty-compat result to inconclusive, so no handler can turn it into a proof error.
+- The cold path remains only for a missing or unreachable session, with Sol-foreground or full-check work.
+- Every cold spawn (force_cold golf, index, submission, cold certification) first passes the machine `WorkerBudget.opening` memory admission with its class. Cold certification remains a fresh process.
+- Omitted classes are `opportunistic` in the engine and the daemon. Agent tool calls derive the class from the actor, and `full_check` is limited to harness-submitted promising checks.
+
+The admission smoke had a thread-timing flake: an exact `queue_reason` label, where "no free worker" is also true before the Sol waiter registers. It now accepts either label, keeps the strict class-order assertion, and passed 20/20.
+
+Checks: the minion's run over the admission, session, engine, warm, environments, tools, scratch, golf, campaign, submission, profile and REPL tests gave 269 passed. The 3 failures are older (`test_golf` RunPassTests ×2, `test_environments` certification), queued for the pre-E2E cleanup.
 
 ## Verify
 

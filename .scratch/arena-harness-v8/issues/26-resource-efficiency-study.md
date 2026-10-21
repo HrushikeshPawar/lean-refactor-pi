@@ -4,7 +4,7 @@
 
 **Blocked by:** 24: Demonstrate real Lean admission priorities
 
-**Status:** ready-for-agent
+**Status:** deferred
 
 **Branch:** `v8/26-resource-efficiency-study`
 
@@ -15,6 +15,8 @@
 **Ownership:** Resource-study harness and offline validation. Actual measurements are a separately scoped owner-scheduled task, not a default test gate.
 
 **Shared contracts:** [S6](../contracts.md#s6-scope-and-error-contracts)
+
+**Decision:** Owner decision 2026-10-21: skipped. The spec makes the resource study optional and not a prerequisite. Revisit only if E2E or the live run shows Lean contention.
 
 ## Current implementation context and contract
 
