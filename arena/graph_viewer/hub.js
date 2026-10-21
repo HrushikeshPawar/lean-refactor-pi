@@ -34,6 +34,12 @@
 
   const shortModel = r => String(r.model || '—').replace(/^.*\//, '');
   const pctChange = (v, base) => v == null || !base ? '' : `${v <= base ? '−' : '+'}${Math.abs(100 * (v - base) / base).toFixed(0)}%`;
+  // Signed delta of v against base as a coloured span: green when better (lowerBetter flips it), red when worse.
+  const beat = (v, base, lowerBetter, d = 0) => {
+    if (v == null || base == null) return '';
+    const diff = +(v - base).toFixed(d), better = lowerBetter ? diff < 0 : diff > 0;
+    return `<span class="${diff === 0 ? '' : better ? 'up' : 'down'}">${diff > 0 ? '+' : diff < 0 ? '−' : '±'}${Math.abs(diff)}</span>`;
+  };
   const stat = r => r.status === 'finished' ? (r.stop_reason || 'stopped').replace(/_/g, ' ') : r.status;
   // Column definitions: label, width, sort value, cell html. Eight columns so the table never needs a horizontal scroll.
   const COLS = [
@@ -46,9 +52,9 @@
       const checks = `fast ${dur(r.fast_check_age_s)} · full ${dur(r.full_check_age_s)}`;
       return `<div class="l1"><span class="badge ${r.full_check_stale ? 'bad' : 'mid'}" title="${esc(checks)}">${esc(r.phase || 'idle')}</span> ${esc(job)}</div><div class="l2 ${r.full_check_stale ? 'down' : ''}">${r.active_checker ? `checker: ${esc(r.active_checker.phase)} · ` : ''}${esc(checks)}${r.full_check_stale ? ' · full stale' : ''}</div>`; }},
     {k: 'proxy', label: 'Best proxy', w: 10, v: r => r.best?.proxy ?? -1, h: (r, top) => r.best?.proxy == null ? '—' :
-      `<div class="l1"><span class="${top ? 'best' : ''}">${r.best.proxy.toFixed(2)}</span> <span class="${r.delta_proxy >= 0 ? 'up' : 'down'}">${r.delta_proxy >= 0 ? '+' : ''}${r.delta_proxy}</span></div><div class="l2">${esc(r.best.candidate || '')}</div>`},
+      `<div class="l1"><span class="${top ? 'best' : ''}">${r.best.proxy.toFixed(2)}</span> <span class="${r.delta_proxy >= 0 ? 'up' : 'down'}">${r.delta_proxy >= 0 ? '+' : ''}${r.delta_proxy}</span></div><div class="l2">${esc(r.best.candidate || '')}${r.target ? ` · beat ${r.target.proxy.toFixed(2)} ${beat(r.best.proxy, r.target.proxy, false, 2)}` : ''}</div>`},
     {k: 'tokens', label: 'Tokens / heartbeats', w: 12, v: r => r.best?.tokens ?? 1e9, h: r => r.best?.tokens == null ? '—' :
-      `<div class="l1">${esc(r.best.tokens)} / ${esc(r.best.heartbeats)}</div><div class="l2">${pctChange(r.best.tokens, r.reference?.tokens)} / ${pctChange(r.best.heartbeats, r.reference?.heartbeats)}</div>`},
+      `<div class="l1">${esc(r.best.tokens)} / ${esc(r.best.heartbeats)}</div><div class="l2">${pctChange(r.best.tokens, r.reference?.tokens)} / ${pctChange(r.best.heartbeats, r.reference?.heartbeats)}</div>${r.target && (r.target.tokens != null || r.target.heartbeats != null) ? `<div class="l2">beat ${esc(r.target.tokens ?? '—')} / ${esc(r.target.heartbeats ?? '—')}: ${beat(r.best.tokens, r.target.tokens, true) || '—'} / ${beat(r.best.heartbeats, r.target.heartbeats, true) || '—'}</div>` : ''}`},
     {k: 'spend', label: 'Spend / limit', w: 14, v: r => r.spent_usd, h: r => {
       const share = capShare(r), kind = share > 1 ? ' over' : share > 0.8 ? ' warn' : '';
       return `<div class="l1"><span class="bar${kind}"><span data-width="${Math.min(100, 100 * (share || 0)).toFixed(1)}"></span></span>${money(r.spent_usd)}</div><div class="l2">of ${money(r.limit_usd)}</div>`; }},

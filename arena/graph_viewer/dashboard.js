@@ -31,19 +31,29 @@
     $('sub').textContent = `${s.model || c.model || ''} · ${s.theorem || c.theorem || ''} · thinking ${s.thinking || c.thinking || '—'}`;
     document.title = `Dashboard ${data.run_id}`;
   }
+  /* A KPI subline: signed delta of `v` against `base`, green when better, red when worse (lowerBetter flips the direction). */
+  const dline = (label, base, v, lowerBetter, d = 0, pct = false) => {
+    if (base == null) return null;
+    if (v == null) return {t: `${label} ${num(base, d)}`};
+    const diff = v - base, better = lowerBetter ? diff < 0 : diff > 0, p = pct && base ? ` (${diff <= 0 ? '−' : '+'}${Math.abs(100 * diff / base).toFixed(0)}%)` : '';
+    return {t: `${label} ${num(base, d)} · ${signed(diff, d)}${p}`, c: diff === 0 ? '' : better ? 'good' : 'bad'};
+  };
   function kpis() {
     const s = data.summary || {}, cost = s.cost || {}, cache = s.cache || {}, best = (s.progress || {}).best_verified_candidate, sub = data.submission;
-    const ref = data.reference, pctOf = (v, base) => base ? `${v <= base ? '−' : '+'}${Math.abs(100 * (v - base) / base).toFixed(0)}%` : '';
+    const ref = data.reference || {}, tg = data.target || {}, lab = c => (data.node_labels || {})[c] || c;
+    const mine = key => best ? best[key] : null;
     const items = [
-      ['Best verified', best ? best.proxy : '—', best ? `${best.candidate} · ${best.proxy - data.baseline_proxy >= 0 ? '+' : ''}${(best.proxy - data.baseline_proxy).toFixed(2)} vs ${data.baseline_proxy}` : 'none yet', best && best.proxy > data.baseline_proxy],
-      ['Tokens / heartbeats', best ? `${num(best.tokens)} / ${num(best.heartbeats)}` : '—', ref ? `orig ${num(ref.tokens)} / ${num(ref.heartbeats)}` + (best ? ` (${pctOf(best.tokens, ref.tokens)} / ${pctOf(best.heartbeats, ref.heartbeats)})` : '') : ''],
-      ['Spend', money(data.spend.spent_usd), `limit $${+(data.spend.limit_usd ?? 0).toFixed(2)}`],
-      ['Requests', num(cost.requests ?? data.spend.points.length), `${cost.retries ?? 0} retries · ${cost.requests_after_best ?? '—'} after best`],
-      ['Post-best spend', money(cost.spent_after_best_usd), `bookkeeping+rejected ${cost.bookkeeping_and_rejected_pct ?? '—'}%`],
-      ['Cache hit rate', cache.reuse_pct != null ? cache.reuse_pct + '%' : '—', `recent 10: ${cache.reuse_pct_recent_10 ?? '—'}% · cost savings ${cache.savings_pct ?? '—'}%`],
-      ['Tool results', num((s.tools || {}).results), `${(s.tools || {}).error_total ?? 0} errors`],
-      ['Submission', sub ? `${sub.candidate} · ${sub.proxy}` : 'none', sub ? (sub.verified_by === 'cold compile' ? 'cold-verified' : `verified by ${sub.verified_by || '?'}`) : (data.finished ? 'not submitted' : 'running')]];
-    $('kpis').innerHTML = items.map(([l, v, n, good]) => `<div class="kpi" title="${esc(n)}"><div class="l">${esc(l)}</div><div class="v${good ? ' good' : ''}">${esc(v)}</div><div class="n">${esc(n)}</div></div>`).join('');
+      ['Best verified', best ? best.proxy : '—', [best && {t: `${lab(best.candidate)} · ${signed(best.proxy - data.baseline_proxy)} vs original ${data.baseline_proxy}`, c: best.proxy > data.baseline_proxy ? 'good' : ''},
+        dline('to beat', tg.proxy, mine('proxy'), false, 2)], best && (tg.proxy != null ? best.proxy > tg.proxy : best.proxy > data.baseline_proxy)],
+      ['Tokens', best ? num(best.tokens) : '—', [dline('orig', ref.tokens, mine('tokens'), true, 0, true), dline('to beat', tg.tokens, mine('tokens'), true)], best && tg.tokens != null && best.tokens < tg.tokens],
+      ['Heartbeats', best ? num(best.heartbeats) : '—', [dline('orig', ref.heartbeats, mine('heartbeats'), true, 0, true), dline('to beat', tg.heartbeats, mine('heartbeats'), true)], best && tg.heartbeats != null && best.heartbeats < tg.heartbeats],
+      ['Spend', money(data.spend.spent_usd), [{t: `limit $${+(data.spend.limit_usd ?? 0).toFixed(2)}`}, {t: `post-best ${money(cost.spent_after_best_usd)} · overhead ${cost.bookkeeping_and_rejected_pct ?? '—'}%`}]],
+      ['Requests', num(cost.requests ?? data.spend.points.length), [{t: `${cost.retries ?? 0} retries · ${cost.requests_after_best ?? '—'} after best`}, {t: `${num((s.tools || {}).results)} tool results · ${(s.tools || {}).error_total ?? 0} errors`}]],
+      ['Cache hit rate', cache.reuse_pct != null ? cache.reuse_pct + '%' : '—', [{t: `recent 10: ${cache.reuse_pct_recent_10 ?? '—'}%`}, {t: `cost savings ${cache.savings_pct ?? '—'}%`}]],
+      ['Submission', sub ? `${lab(sub.candidate)} · ${sub.proxy}` : 'none', [{t: sub ? (sub.verified_by === 'cold compile' ? 'cold-verified' : `verified by ${sub.verified_by || '?'}`) : (data.finished ? 'not submitted' : 'running')},
+        tg.proxy != null ? {t: `best to beat from ${tg.submission}`} : null]]];
+    $('kpis').innerHTML = items.map(([l, v, lines, good]) => { const rows = lines.filter(Boolean), tip = rows.map(r => r.t).join('\n');
+      return `<div class="kpi" title="${esc(tip)}"><div class="l">${esc(l)}</div><div class="v${good ? ' good' : ''}">${esc(v)}</div>${rows.map(r => `<div class="n ${r.c || ''}">${esc(r.t)}</div>`).join('')}</div>`; }).join('');
   }
 
   /* ---- overview widgets: x is the evaluation number (0 = the original proof) or the API request number ---- */

@@ -366,7 +366,16 @@ def run_card(run_id: str, langfuse: Langfuse | None = None) -> dict:
     directory = run_dir(run_id)
     row = hub_row(run_id, directory, campaign_of(run_id, directory.parent))
     row["langfuse_url"] = langfuse.session_url(run_id) if langfuse else None
+    row["target"] = target_to_beat(row.get("theorem"), directory.parent)
     return row
+
+
+def dashboard_payload(run_id: str) -> dict:
+    directory = run_dir(run_id)
+    payload = run_dashboard(run_id, directory)
+    theorem = (payload.get("summary") or {}).get("theorem") or (payload.get("config") or {}).get("theorem")
+    payload["target"] = target_to_beat(theorem, directory.parent)
+    return payload
 
 
 def run_dashboard_start(run_id: str) -> float | None:
@@ -410,7 +419,7 @@ def handler_for(runs: Runs | str, langfuse: Langfuse | None = None):
                 self.send(memo_json("graph", run_id, lambda: graph_payload(run_id)), "application/json; charset=utf-8")
             elif rest == "dashboard.json":
                 self.send(
-                    memo_json("dashboard", run_id, lambda: run_dashboard(run_id, run_dir(run_id))),
+                    memo_json("dashboard", run_id, lambda: dashboard_payload(run_id)),
                     "application/json; charset=utf-8",
                 )
             elif rest == "langfuse.json":

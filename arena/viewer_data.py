@@ -342,6 +342,21 @@ def _candidate_labels(ledger: list[dict]) -> dict[str, str]:
     return labels
 
 
+def node_labels(directory: Path, ledger: list[dict]) -> dict[str, str]:
+    """`#N` candidate label (dashboard order) to the model's graph id (`n7`), as the graph page shows it."""
+    from arena.campaign import _proof_reader
+    from arena.graph import Graph
+    from arena.run_control import published_history
+
+    try:
+        history = published_history(directory, ledger)
+        projection = Graph.from_history(history, _proof_reader(directory), committed_operations=committed_operation_ids(directory))
+    except Exception:
+        return {}
+    graph_ids = {node.proof_id: node.id for node in projection.nodes}
+    return {label: graph_ids[cid] for cid, label in _candidate_labels(ledger).items() if cid in graph_ids}
+
+
 def score_timeline(ledger: list[dict], start: float | None) -> list[dict]:
     labels = _candidate_labels(ledger)
     rows, best = [], None
@@ -586,6 +601,7 @@ def run_dashboard(run_id: str, directory: Path) -> dict:
         "reference": _reference(summary.get("theorem")),
         "baseline_proxy": BASELINE_PROXY,
         "scores": score_timeline(ledger, start),
+        "node_labels": node_labels(directory, ledger),
         "spend": spend_series(directory, start, limit),
         "tools": tool_timeline(directory, start),
         "routes": (route_rows := route_table(ledger)),
