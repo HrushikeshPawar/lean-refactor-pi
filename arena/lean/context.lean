@@ -113,15 +113,28 @@ elab "arena_context " cmd:command : command => do
               (fun c => c.toString == "Tactic" || c.toString == "Meta")) then "tactic"
     else if root == "Init" || root == "Lean" then "core"
     else "helper"
-  -- top-level tactics of the declaration's proof `by`, not a `by` inside a binder
+  -- Select the outer declaration's value before inspecting terms. `bracketedBinder`
+  -- is a parser category, while its syntax nodes have concrete binder kinds; skipping
+  -- that category would still walk into a default value such as `(h : Nat := by ...)`.
+  -- Breadth-first selection reaches the target value before any local declaration in
+  -- its signature or proof, including declarations introduced by nested tactic terms.
+  let rec findDeclValue : Nat → Array Lean.Syntax → Option Lean.Syntax
+    | 0, _ => none
+    | fuel + 1, nodes =>
+      match nodes.find? (fun s => s.getKind == ``Lean.Parser.Command.declValSimple ||
+          s.getKind == ``Lean.Parser.Command.declValEqns) with
+      | some value =>
+        if value.getKind == ``Lean.Parser.Command.declValSimple then some (value.getArg 1)
+        else some value
+      | none => findDeclValue fuel (nodes.flatMap (fun s => s.getArgs))
+  -- Top-level tactics of the declaration's proof `by`, not a `by` in its signature.
   let rec findBy : Nat → Lean.Syntax → Option Lean.Syntax
     | 0, _ => none
     | fuel + 1, s =>
-      if s.getKind == ``Lean.Parser.Term.bracketedBinder then none
-      else if s.getKind == ``Lean.Parser.Term.byTactic then some s
+      if s.getKind == ``Lean.Parser.Term.byTactic then some s
       else s.getArgs.findSome? (findBy fuel)
   let mut topLevel : Array (String.Pos.Raw × String.Pos.Raw) := #[]
-  match findBy 200 cmd.raw with
+  match (findDeclValue 200 #[cmd.raw]).bind (findBy 200) with
   | some b =>
     let seq := b.getArg 1
     let items := ((seq.getArg 0).getArg 0).getArgs
