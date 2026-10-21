@@ -4,7 +4,7 @@
 
 **Blocked by:** 10: Admit two workers and cancel stale work cleanly; 17: Distinguish proof failures from inconclusive cold checks
 
-**Status:** needs-review
+**Status:** changes-requested
 
 **Branch:** `v8/24-lean-priority-admission`
 
@@ -32,6 +32,42 @@
 - [x] 4. Compete foreground, worker and full-check requests with recorded dispatch order and memory-denial/inconclusive outcomes; tests do not read other live runs.
 - [x] 5. Use the one assigned fast smoke for this slice. Retain the stated behavior requirements; actual-Pi/real-Lean journeys and the broader race matrix are final E2E coverage, not this ticket's gate.
 - [x] 6. Keep more-worker/retention optimization in its separate experiment, not speculative new defaults.
+
+## Review findings (Claude, 2026-10-21)
+
+Commit `qln` implements real dispatch priority: `select_waiter` chooses by class and then FIFO, the one-DS-compile cap is rechecked under `self.lock` with the rejected slot freed, and `check`/`try_snippets` release in `finally` and notify waiters. The items below are reopened. Admission is only as strong as its least-guarded path, and the first two items let Lean work avoid it entirely.
+
+**Blocker**
+1. **A denial becomes an unadmitted cold Lean** (decision 42; acceptance 3–4). `engine.run_lean` checks only `reply.get("ok")`. Any other reply, including memory denial (`no room for a Lean worker: memory`), the queue timeout and the new DS-cap rejection, falls through to `_run_cold`, which spawns `lake env lean` with no class, memory, token or cap check. Three speculative DS compiles under memory pressure become three heavy unadmitted processes, and a capped second DS compile simply runs cold. `_admission_reply`'s `outcome: inconclusive`, `cause` and `admission` are never read by `run_lean`, so a denial turns into a cold pass or fail instead of an inconclusive result.
+   - **Fix:** when the session is configured and replies with `admission` denied or queued, or with an `inconclusive` outcome, return an inconclusive result to the caller (no cold run) and preserve `cause`. Keep the cold path only for "no session configured" or an unreachable daemon, and never for `ds_experiment` or `opportunistic`.
+   - Make the callers that report verdicts (compile, scratch, `evaluate`) show inconclusive with the cause, never a proof error.
+
+**Should-fix**
+2. **`force_cold` paths skip admission** but carry class labels that are never consulted: `golf_file` (golf.py:362, 371), `build_index` (index.py:261), `cold_verify` (campaign.py:4669) and `submission.py:131`. Cold certification must stay a fresh independent process (ticket 17), but it and the other cold paths still need the 5 GiB memory admission before spawning. Take an admission token from the session (or the same memory check) before any cold spawn, with the call's class. Golf and index are `opportunistic`; cold certification is `full_check`.
+3. **Fail-open defaults.** An omitted class becomes `sol_foreground` in `run_lean`/`evaluate` and `full_check` at the daemon. Callers without a class:
+   - `profile.compile_version` (profile.py:425, 432, 474);
+   - `lean_repl.py:263`;
+   - the `lean_load.py:462` payload;
+   - `warm_session` (engine.py:686; campaigns.py:1338, 1344);
+   - `cli/certify.py` fast;
+   - `cli/evaluate.py`.
+
+   Pass explicit classes at every call site. Make the omitted default `opportunistic` (the daemon's too). Only tool calls that originate from an agent derive `sol_foreground`/`ds_experiment` from the actor.
+4. **"Promising" full checks.** Every `mode == "full"` evaluation becomes `full_check`, including a full check a DS worker requests in its own tool call, which then outranks and escapes the DS cap. Use `full_check` for harness-submitted promising checks (the autocheck queue and certification). A full check requested in a worker's tool call keeps `ds_experiment`.
+
+**Nits**
+- A queue timeout is reported as `admission: denied`, so the queued branch of `_admission_reply` is unreachable.
+- `try_snippets` and `warm` failures do not carry `outcome`/`cause`/`admission`.
+- The DS cap is global across workers, which matches "one DS Lean compilation"; state it in the code comment.
+
+**Test stubs broken by the new keyword:** `request_class` reaches stubs that do not accept it. This breaks 4 tests outside the named smoke:
+- `tests/graph_support.py::FakeRunCase.fake_eval` (used by `test_tools_read_goal_search.py::test_goal_at_error_line_is_blocked_until_error_is_replaced` and `test_goal_try_at_the_failing_line_runs_in_place_of_that_line`);
+- `compile_stub` in `tests/test_environments.py::MeasurementVersionTests::test_fast_mode_also_compiles_the_measurement_version_and_records_it`;
+- `fake` in `tests/test_lean_session_warm.py::ColdPathTests::test_arena_lean_timeout_is_used_and_named_in_the_error`.
+
+Accept the keyword in the stubs. `test_environments.py::CertificationTests::test_matching_reference_is_certified` failed before this ticket and is not yours.
+
+Extend the existing admission smoke with one denied DS request (inconclusive, no cold spawn: inject `_run_cold` and assert it is not called) and one omitted-class harness call (opportunistic). Run the whole touched test files. No real Lean is needed.
 
 ## Verify
 
