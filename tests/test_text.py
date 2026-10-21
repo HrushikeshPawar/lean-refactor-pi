@@ -190,16 +190,13 @@ class TextRendererTests(unittest.TestCase):
         self.assertEqual(result["theorem"], "Core.InitsUpdatesComm")
         self.assertEqual([part["part"] for part in parts[:3]], ["system prompt", "skill", "tools/compile"])
         self.assertEqual(
-            [part["part"] for part in parts[3:11]],
+            [part["part"] for part in parts[3:8]],
             [
                 "tools/goal",
                 "tools/search",
                 "tools/read",
                 "tools/scratch",
-                "tools/delegate",
-                "tools/jobs",
                 "tools/await_results",
-                "tools/cancel",
             ],
         )
         self.assertNotIn("tools/finish", [part["part"] for part in parts])
@@ -292,7 +289,8 @@ class TextRendererTests(unittest.TestCase):
                 text._load.cache_clear()
 
     def test_v8_inspection_matches_actor_schema(self):
-        from arena.tool_schema import accept_tool_input, registered_tools, render_tool_sections
+        from arena import tools
+        from arena.tool_schema import registered_tools, render_tool_sections
 
         injected = {
             "roles": {"sol": ["compile"], "worker": ["compile"]},
@@ -332,10 +330,10 @@ class TextRendererTests(unittest.TestCase):
         sol = [tool["name"] for tool in registered_tools("sol")]
         worker = [tool["name"] for tool in registered_tools("worker")]
         self.assertEqual(worker, ["compile", "goal", "search", "read", "scratch"])
-        self.assertEqual(
-            sol,
-            ["compile", "goal", "search", "read", "scratch", "delegate", "jobs", "await_results", "cancel"],
-        )
+        self.assertEqual(sol, ["compile", "goal", "search", "read", "scratch", "await_results"])
+        self.assertNotIn("delegate", sol)
+        self.assertNotIn("jobs", sol)
+        self.assertNotIn("cancel", sol)
         live = dict(render_tool_sections(registered_tools("sol")))
         self.assertIn("fill: object, optional", live["compile"])
         self.assertIn("  hole: string, required", live["compile"])
@@ -344,14 +342,20 @@ class TextRendererTests(unittest.TestCase):
         self.assertNotIn("finish", sol)
         self.assertNotIn("delegate", worker)
 
-        accepted = accept_tool_input("compile", {"drafts": ["by rfl"]})
+        empty_compile = tools.compile_tool("T", "logic", {})
+        empty_goal = tools.goal_tool("T", "logic", {})
+        self.assertEqual(empty_compile["error"]["code"], "empty_arguments")
+        self.assertEqual(empty_goal["error"]["code"], empty_compile["error"]["code"])
+        over = tools.compile_tool("T", "logic", {"drafts": ["by rfl"] * 5})
+        self.assertEqual(over["error"]["code"], "bad_drafts")
+        with (
+            patch("arena.campaign.problem", return_value={"name": "T", "statement": "theorem t : True", "src": "by trivial"}),
+            patch("arena.tools._focus_proof", return_value=("n1", "theorem t : True := by\n  trivial")),
+            patch("arena.engine._proof_length", side_effect=lambda proof, *_args: len(proof)),
+        ):
+            accepted = tools.compile_tool("T", "logic", {"check": "tokens", "drafts": ["by trivial"]})
         self.assertTrue(accepted["ok"])
-        self.assertTrue(accepted["accepted"])
-        over = accept_tool_input("compile", {"drafts": ["by rfl"] * 5})
-        self.assertEqual(over, {"ok": False, "category": "invalid_input", "reason": "drafts exceeds 4 items"})
-        malformed = accept_tool_input("compile", {"fill": {"text": "by rfl"}})
-        self.assertEqual(malformed["category"], "invalid_input")
-        self.assertFalse(malformed["ok"])
+        self.assertGreater(accepted["items"][0]["tokens"], 0)
 
         fixtures = Path(__file__).parent / "fixtures/agent_text"
         context = json.loads((fixtures / "core-context.json").read_text())

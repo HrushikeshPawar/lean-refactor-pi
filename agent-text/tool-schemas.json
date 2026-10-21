@@ -1,14 +1,13 @@
 {
   "roles": {
     "worker": ["compile", "goal", "search", "read", "scratch"],
-    "sol": ["compile", "goal", "search", "read", "scratch", "delegate", "jobs", "await_results", "cancel"]
+    "sol": ["compile", "goal", "search", "read", "scratch", "await_results"]
   },
   "tools": {
     "compile": {
       "handler": true,
       "exclusive": ["drafts", "splice", "fill", "merge"],
       "requireOne": true,
-      "countsAs": {"splice": ["steps", "text"]},
       "properties": {
         "drafts": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItemsFrom": "compile_max_drafts", "description": "drafts"},
         "splice": {
@@ -111,10 +110,6 @@
       }
     },
     "delegate": {
-      "modes": [
-        {"required": ["task", "job_id"], "forbidden": ["scope", "at"]},
-        {"required": ["task", "scope"]}
-      ],
       "properties": {
         "task": {"type": "string", "required": true, "description": "task"},
         "scope": {"type": "string", "enum": ["proof", "step"], "description": "scope"},
@@ -133,8 +128,7 @@
     },
     "jobs": {
       "properties": {
-        "job_ids": {"type": "array", "items": {"type": "string"}, "description": "job_ids"},
-        "cursor": {"type": "string", "description": "cursor"}
+        "job_ids": {"type": "array", "items": {"type": "string"}, "description": "job_ids"}
       }
     },
     "await_results": {

@@ -4,7 +4,7 @@
 
 **Blocked by:** 11: Wait without polling or no-event deadlocks; 15: Promote an anchored replacement inside scratch
 
-**Status:** needs-review
+**Status:** changes-requested
 
 **Branch:** `v8/21-schema-help`
 
@@ -27,11 +27,22 @@
 ## What to build and acceptance
 
 - [x] 1. Generate help from actual registered schemas and shared descriptions, retaining nesting, field types, limits, defaults and exclusive input alternatives.
-- [x] 2. Cover five proof-search tools and Sol management tools; workers cannot see delegation or strategic-board replacement powers.
+- [ ] 2. Cover five proof-search tools and Sol management tools; workers cannot see delegation or strategic-board replacement powers.
 - [x] 3. Remove obsolete finish help and drift such as flattened fill/splice parameter descriptions.
-- [x] 4. Verify a documented request is accepted at the public tool boundary and malformed/over-limit inputs return the documented error class.
+- [ ] 4. Verify a documented request is accepted at the public tool boundary and malformed/over-limit inputs return the documented error class.
 - [x] 5. Cache-only inspection starts neither Lean nor a provider; fixture output and schema shape agree across actor roles.
-- [x] 6. Update text budgets/goldens deliberately without duplicating rules or prose into a second schema catalog.
+- [ ] 6. Update text budgets/goldens deliberately without duplicating rules or prose into a second schema catalog.
+
+## Review findings (Claude, 2026-10-21)
+
+Commit `564fc1b` gets the core design right: Pi TypeBox parameters and inspection help both come from `agent-text/tool-schemas.json`. A field-by-field comparison with the removed TypeBox code found nesting, optionality, bounds and the read-view union preserved. No new `tests/test_text.py` failure is attributable to this commit. Items 2, 4 and 6 are reopened:
+
+1. **Item 2: help documents tools Sol cannot call.** `delegate`, `jobs` and `cancel` appear in Sol's help but are not registered with Pi, which breaks decision 58 ("represented accurately"). The registration gap predates this ticket (08–11 built them only at the Python boundary); wiring is ticket **21b**. In this ticket, keep them in the schema but make the help match what is executable at this commit, or land after 21b. Do not leave a schema field that the implementation ignores: `jobs.cursor` is documented, but `orchestration.jobs(directory, job_ids)` has no cursor and no actor filter. Settle that shape here and record it for 21b.
+2. **Item 4: the boundary check uses a second validator.** `arena.tool_schema.accept_tool_input` is called only by the test, not on the live path, and it already disagrees with the real tools: `goal {}` is accepted by it but returns `empty_arguments` live, and `compile {}` returns `invalid_input` from it but `empty_arguments` live. Decision 44 forbids a separately maintained interpretation. Either route the live Python entry (the protocol/tool dispatch that receives Pi requests) through `accept_tool_input` and align the error classes, or delete it and assert accepted/rejected inputs against the real `tools.*_tool` entry points. Also: `delegate` mode with `scope` must require `at`, and `scope: step` needs exactly one of `steps`/`hole` (orchestration.py rejects both cases the schema accepts).
+3. **Item 6: budgets are not current.** `test_repository_templates_parse_and_readme_budget_is_current` fails: regenerate with `arena text budget --write` (it also picks up ticket 20's reply rows). `test_word_budget_limits` reads 794 against `budget.static_words` 685. It went over in ticket 14 (+78 words in scratch help) and grew in 15/16/19. Make the deliberate call the item asks for: trim the scratch/tool descriptions, or raise `budget.static_words` in `numbers.yaml` with a one-line reason. The reviewer recommends raising it to 800, since v8 scratch genuinely does more.
+4. **Nit:** the worker allowlist is five tools because arena.ts registers the proof tools unconditionally, not because `roles` is consulted. Gate all registrations through `executableTools(toolSchemas, actorRole)`.
+
+Check for the rework: the named smoke plus whole `tests/test_text.py`. That file has older failures that are not this ticket's (v7 over-limit packet; ticket 11 `await_results` text naming finish; ticket 17 long literals in `campaign.py`/`context.py`; ticket 18/19 packet goal rows). The README budget and word-budget tests must pass after this rework. Report the rest unchanged.
 
 ## Verify
 

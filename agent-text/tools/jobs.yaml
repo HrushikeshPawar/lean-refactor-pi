@@ -1,4 +1,3 @@
 description: "Read this actor's jobs. Returns queued, active, settled and cancelling states. Starts no model work."
 params:
   job_ids: "Jobs to include. Omit for every job you delegated."
-  cursor: "Actor-owned cursor. Omit to continue from the last delivered evidence."
