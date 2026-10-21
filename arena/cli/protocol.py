@@ -13,7 +13,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
-from arena import coordinator
+from arena import coordinator, orchestration
 from arena import reply as tool_reply
 from arena import tools as v7_tools
 from arena.campaign import (
@@ -52,6 +52,9 @@ ACTIONS = (
     "stall_due",
     "stall_restart_packet",
     "await_results",
+    "delegate",
+    "jobs",
+    "cancel",
 )
 
 
@@ -110,7 +113,45 @@ def run(args: SimpleNamespace) -> dict:
             cursor=request.get("cursor"),
             job_ids=request.get("job_ids"),
         )
+    if args.action in ("delegate", "jobs", "cancel"):
+        return _management(args)
     raise ValueError(f"Unsupported action: {args.action}")
+
+
+def _harness_actor() -> str:
+    return os.environ.get("ARENA_ACTOR_ID") or "sol"
+
+
+def _management(args: SimpleNamespace) -> dict:
+    """Identity comes from the harness. The request body cannot choose the actor."""
+    request = {}
+    if args.request_file is not None:
+        request = json.loads(args.request_file.read_text())
+        if not isinstance(request, dict):
+            raise ValueError("request-file must contain an object")
+    if args.action == "jobs":
+        if any(key != "job_ids" for key in request):
+            return {"ok": False, "category": "invalid_input", "reason": "unknown input"}
+        job_ids = request.get("job_ids")
+        if job_ids is not None and (not isinstance(job_ids, list) or any(not isinstance(item, str) for item in job_ids)):
+            return {"ok": False, "category": "invalid_input", "reason": "job_ids"}
+        return orchestration.jobs(run_dir(args.run_id), job_ids)
+    identity = {
+        "actor_id": _harness_actor(),
+        "session_id": os.environ.get("ARENA_SESSION_ID") or args.run_id,
+        "operation_id": os.environ.get("ARENA_TOOL_CALL_ID") or "",
+        "run_id": args.run_id,
+    }
+    if args.action == "cancel":
+        return coordinator.submit(run_dir(args.run_id), {"action": "cancel", "job_id": request.get("job_id"), **identity})
+    return coordinator.submit(run_dir(args.run_id), {
+        "action": "delegate",
+        "task": request.get("task"),
+        "scope": request.get("scope"),
+        "job_id": request.get("job_id"),
+        "at": request.get("at"),
+        **identity,
+    })
 
 
 def publish_state(run_id: str) -> None:

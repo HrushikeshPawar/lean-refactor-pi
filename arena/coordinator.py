@@ -103,9 +103,15 @@ class Coordinator:
                 if len(request_bytes) > _MAX_REQUEST:
                     raise ValueError("request too large")
             request = json.loads(bytes(request_bytes).split(b"\n", 1)[0])
-            if (not isinstance(request, dict) or request.get("action") != "await_results"
-                    or request.get("generation") != self._generation
+            if (not isinstance(request, dict) or request.get("generation") != self._generation
                     or not isinstance(request.get("actor_id"), str)):
+                raise ValueError("invalid management request")
+            action = request.get("action")
+            if action in ("delegate", "cancel"):
+                result = self._delegate(request) if action == "delegate" else self._cancel(request)
+                connection.sendall(json.dumps(result).encode() + b"\n")
+                return
+            if action != "await_results":
                 raise ValueError("invalid management request")
 
             def disconnected() -> None:
@@ -154,6 +160,43 @@ class Coordinator:
             thread.join(timeout=1)
         if self._thread is not None:
             self._thread.join(timeout=1)
+
+    def _delegate(self, request: dict) -> dict:
+        if request.get("actor_id") != "sol":
+            return {"ok": False, "category": "invalid_input", "reason": "actor",
+                    "operation_id": request.get("operation_id")}
+        rejected = _rejected_delegate(request)
+        if rejected is not None:
+            return rejected
+        return orchestration.delegate(
+            self.directory,
+            operation_id=str(request.get("operation_id") or ""),
+            run_id=str(request.get("run_id") or ""),
+            actor_id="sol",
+            session_id=str(request.get("session_id") or ""),
+            task=request["task"],
+            open_child=self._open_child,
+            scope=request.get("scope"),
+            anchor=request.get("at"),
+            job_id=request.get("job_id"),
+        )
+
+    def _cancel(self, request: dict) -> dict:
+        if request.get("actor_id") != "sol":
+            return {"ok": False, "category": "invalid_input", "reason": "actor",
+                    "operation_id": request.get("operation_id")}
+        job_id = request.get("job_id")
+        if not isinstance(job_id, str) or not job_id:
+            return {"ok": False, "category": "invalid_input", "reason": "job_id",
+                    "operation_id": request.get("operation_id")}
+        return orchestration.cancel(
+            self.directory,
+            operation_id=str(request.get("operation_id") or ""),
+            run_id=str(request.get("run_id") or ""),
+            actor_id="sol",
+            session_id=str(request.get("session_id") or ""),
+            job_id=job_id,
+        )
         endpoint = self.directory / "coordinator.json"
         try:
             if json.loads(endpoint.read_text()).get("generation") == self._generation:
@@ -172,15 +215,40 @@ class Coordinator:
         self.close()
 
 
-def await_results(directory: Path, *, actor_id: str, cursor=None, job_ids=None) -> dict:
-    """Call the run owner. Missing ownership never falls back to local worker tables."""
+def _rejected_delegate(request: dict) -> dict | None:
+    """Reject a delegate body before the coordinator opens a worker."""
+    operation_id = request.get("operation_id")
+    task = request.get("task")
+    if not isinstance(task, str) or not task:
+        return {"ok": False, "category": "invalid_input", "reason": "task", "operation_id": operation_id}
+    job_id = request.get("job_id")
+    scope = request.get("scope")
+    anchor = request.get("at")
+    if job_id is not None:
+        if not isinstance(job_id, str) or not job_id or scope is not None or anchor is not None:
+            return {"ok": False, "category": "invalid_input", "reason": "follow-up", "operation_id": operation_id}
+        return None
+    if scope not in ("proof", "step") or not isinstance(anchor, dict) or not isinstance(anchor.get("node"), str) or not anchor.get("node"):
+        return {"ok": False, "category": "invalid_input", "reason": "scope", "operation_id": operation_id}
+    steps = anchor.get("steps")
+    hole = anchor.get("hole")
+    has_steps = isinstance(steps, list) and len(steps) == 2 and all(type(item) is int for item in steps)
+    has_hole = isinstance(hole, str) and bool(hole)
+    if scope == "step" and has_steps == has_hole:
+        return {"ok": False, "category": "invalid_input", "reason": "anchor", "operation_id": operation_id}
+    if scope == "proof" and ("steps" in anchor or "hole" in anchor):
+        return {"ok": False, "category": "invalid_input", "reason": "anchor", "operation_id": operation_id}
+    return None
+
+
+def submit(directory: Path, request: dict) -> dict:
+    """Send one management request to the live coordinator. The caller does not open workers."""
     try:
         endpoint = json.loads((directory / "coordinator.json").read_text())
+        payload = {**request, "generation": endpoint["generation"]}
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
             connection.connect(endpoint["address"])
-            request = {"action": "await_results", "generation": endpoint["generation"],
-                       "actor_id": actor_id, "cursor": cursor, "job_ids": job_ids}
-            connection.sendall(json.dumps(request).encode() + b"\n")
+            connection.sendall(json.dumps(payload).encode() + b"\n")
             with connection.makefile("rb") as stream:
                 response = stream.readline()
             if not response:
@@ -188,3 +256,8 @@ def await_results(directory: Path, *, actor_id: str, cursor=None, job_ids=None) 
             return json.loads(response)
     except (OSError, ValueError, KeyError):
         return _failure("coordinator_unavailable")
+
+
+def await_results(directory: Path, *, actor_id: str, cursor=None, job_ids=None) -> dict:
+    """Call the run owner. Missing ownership never falls back to local worker tables."""
+    return submit(directory, {"action": "await_results", "actor_id": actor_id, "cursor": cursor, "job_ids": job_ids})

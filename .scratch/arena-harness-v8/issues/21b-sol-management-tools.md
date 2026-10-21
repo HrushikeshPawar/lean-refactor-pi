@@ -4,7 +4,7 @@
 
 **Blocked by:** 08, 10, 11 (the Python implementations), 21 (shared tool schema)
 
-**Status:** ready-for-agent
+**Status:** needs-review
 
 **Branch:** `v8/21b-sol-management-tools`
 
@@ -32,12 +32,12 @@
 
 ## What to build and acceptance
 
-- [ ] 1. Sol's `delegate`, `jobs` and `cancel` are registered Pi tools built from `agent-text/tool-schemas.json`. Worker registration excludes them by construction.
-- [ ] 2. `delegate` and `cancel` execute in the run's live coordinator over its socket. No child process is spawned outside the coordinator.
-- [ ] 3. Operation, actor and session identity come from the harness environment. Retrying one tool call is idempotent; reusing its id with different arguments fails as `operation_conflict`.
-- [ ] 4. A non-Sol actor cannot delegate or cancel, including by writing to the socket directly.
-- [ ] 5. Documented input errors are rejected before dispatch with the documented class; the help from ticket 21 matches what executes.
-- [ ] 6. Use one focused smoke for this slice. Actual Pi registration payloads and a real two-worker journey are final E2E coverage.
+- [x] 1. Sol's `delegate`, `jobs` and `cancel` are registered Pi tools built from `agent-text/tool-schemas.json`. Worker registration excludes them by construction.
+- [x] 2. `delegate` and `cancel` execute in the run's live coordinator over its socket. No child process is spawned outside the coordinator.
+- [x] 3. Operation, actor and session identity come from the harness environment. Retrying one tool call is idempotent; reusing its id with different arguments fails as `operation_conflict`.
+- [x] 4. A non-Sol actor cannot delegate or cancel, including by writing to the socket directly.
+- [x] 5. Documented input errors are rejected before dispatch with the documented class; the help from ticket 21 matches what executes.
+- [x] 6. Use one focused smoke for this slice. Actual Pi registration payloads and a real two-worker journey are final E2E coverage.
 
 ## Verify
 

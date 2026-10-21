@@ -1,7 +1,7 @@
 {
   "roles": {
     "worker": ["compile", "goal", "search", "read", "scratch"],
-    "sol": ["compile", "goal", "search", "read", "scratch", "await_results"]
+    "sol": ["compile", "goal", "search", "read", "scratch", "delegate", "jobs", "await_results", "cancel"]
   },
   "tools": {
     "compile": {
@@ -110,6 +110,7 @@
       }
     },
     "delegate": {
+      "handler": true,
       "properties": {
         "task": {"type": "string", "required": true, "description": "task"},
         "scope": {"type": "string", "enum": ["proof", "step"], "description": "scope"},
@@ -127,6 +128,7 @@
       }
     },
     "jobs": {
+      "handler": true,
       "properties": {
         "job_ids": {"type": "array", "items": {"type": "string"}, "description": "job_ids"}
       }
@@ -139,6 +141,7 @@
       }
     },
     "cancel": {
+      "handler": true,
       "properties": {
         "job_id": {"type": "string", "required": true, "description": "job_id"}
       }

@@ -190,13 +190,16 @@ class TextRendererTests(unittest.TestCase):
         self.assertEqual(result["theorem"], "Core.InitsUpdatesComm")
         self.assertEqual([part["part"] for part in parts[:3]], ["system prompt", "skill", "tools/compile"])
         self.assertEqual(
-            [part["part"] for part in parts[3:8]],
+            [part["part"] for part in parts[3:11]],
             [
                 "tools/goal",
                 "tools/search",
                 "tools/read",
                 "tools/scratch",
+                "tools/delegate",
+                "tools/jobs",
                 "tools/await_results",
+                "tools/cancel",
             ],
         )
         self.assertNotIn("tools/finish", [part["part"] for part in parts])
@@ -330,17 +333,19 @@ class TextRendererTests(unittest.TestCase):
         sol = [tool["name"] for tool in registered_tools("sol")]
         worker = [tool["name"] for tool in registered_tools("worker")]
         self.assertEqual(worker, ["compile", "goal", "search", "read", "scratch"])
-        self.assertEqual(sol, ["compile", "goal", "search", "read", "scratch", "await_results"])
-        self.assertNotIn("delegate", sol)
-        self.assertNotIn("jobs", sol)
-        self.assertNotIn("cancel", sol)
+        self.assertEqual(
+            sol, ["compile", "goal", "search", "read", "scratch", "delegate", "jobs", "await_results", "cancel"]
+        )
         live = dict(render_tool_sections(registered_tools("sol")))
         self.assertIn("fill: object, optional", live["compile"])
         self.assertIn("  hole: string, required", live["compile"])
         self.assertIn("one of: drafts | splice | fill | merge", live["compile"])
         self.assertIn("default focus", live["compile"])
         self.assertNotIn("finish", sol)
-        self.assertNotIn("delegate", worker)
+        for name in ("delegate", "jobs", "cancel"):
+            self.assertNotIn(name, worker)
+        catalog = json.loads((Path(__file__).parents[1] / "agent-text" / "tool-schemas.json").read_text())
+        self.assertNotIn("cursor", catalog["tools"]["jobs"]["properties"])
 
         empty_compile = tools.compile_tool("T", "logic", {})
         empty_goal = tools.goal_tool("T", "logic", {})

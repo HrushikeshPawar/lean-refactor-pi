@@ -739,6 +739,26 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     },
   });
 
+  for (const name of ["delegate", "jobs", "cancel"]) {
+    if (!executableTools(toolSchemas, actorRole).includes(name)) continue;
+    const params = await parametersFor(name, toolSchemas.tools[name], sharedNumbers);
+    await registerTool({
+      name, label: name,
+      description: await renderText(`tools/${name}.description`), parameters: params,
+      async execute(_id: string, toolParams: Record<string, unknown>, signal?: AbortSignal) {
+        const directory = await mkdtemp(resolve(tmpdir(), "arena-manage-"));
+        try {
+          const file = resolve(directory, "request.json");
+          await writeFile(file, JSON.stringify(toolParams), "utf8");
+          const result = await campaign(name, ["--request-file", file], signal);
+          return { isError: result.ok === false, content: [{ type: "text", text: JSON.stringify(result) }], details: result };
+        } finally {
+          await rm(directory, { recursive: true, force: true });
+        }
+      },
+    });
+  }
+
   if (executableTools(toolSchemas, actorRole).includes("await_results")) {
     const waitParams = await parametersFor("await_results", toolSchemas.tools.await_results, sharedNumbers);
     await registerTool({ name: "await_results", label: "await_results",
