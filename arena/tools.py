@@ -2338,12 +2338,18 @@ def scratch_tool(theorem: str, run_id: str, request: dict) -> dict:
         return _invalid("forbidden", label, ["no forbidden constructs"], TOOL_FORMS["scratch"])
     discovery_error = None
     try:
-        statement = campaign.problem(theorem).get("statement")
+        problem = campaign.problem(theorem)
+        statement = problem.get("statement")
     except Exception as error:
-        statement = None
+        problem, statement = {}, None
         discovery_error = error
     if isinstance(statement, str) and statement.strip():
         start = len(code) - len(code.lstrip())
+        # Models often repeat the header's own `open`/`set_option` lines before the statement; the target file has them.
+        preamble = {line.strip() for line in (problem.get("header") or "").splitlines()
+                    if line.strip() and not line.startswith("import")}
+        while (end := code.find("\n", start)) >= 0 and code[start:end].strip() in preamble:
+            start = end + 1 + len(code[end + 1:]) - len(code[end + 1:].lstrip())
         head = statement
         if code.startswith(head, start):
             assignment = re.match(r"\s*:=", code[start + len(head):])

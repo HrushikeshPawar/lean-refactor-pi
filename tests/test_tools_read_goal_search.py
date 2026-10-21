@@ -207,6 +207,14 @@ class ScratchResultTests(ToolCase):
         self.assertTrue(failed["promotion"]["node"])
 
 
+    def test_v8_scratch_promotes_full_theorem_after_repeated_header_lines(self):
+        row = {**ROW, "header": "import Mathlib\n\nopen Set Function\n\n"}
+        code = "open Set Function\n\ntheorem t : True := by\n  trivial"
+        with patch.object(campaign, "problem", return_value=row):
+            item = tools.scratch_tool("T", "logic", {"code": code})["items"][0]
+        self.assertEqual(item["promotion"]["state"], "promoted")
+
+
 class CascadeToolCase(ToolCase):
     cascade_errors = True
 
