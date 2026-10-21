@@ -122,7 +122,7 @@ class CompileToolTests(CascadeCase):
         self.assertIsNone(first["best"])  # The existing reference is shorter.
         self.assertIn("primary passed; full pending; cold not_checked", "\n".join(first["lines"]))
         for item in (first, repeated):
-            self.assertIn(item["attempt_id"], "\n".join(item["lines"]))
+            self.assertNotIn(item["attempt_id"], "\n".join(item["lines"]))
         base = tools.compile_tool("T", "logic", {"drafts": ["by\n  sorry"]})["items"][0]["node"]
         replacement = tools.compile_tool("T", "logic", {"base": base, "drafts": ["by\n  trivial"], "from": "n1"})["items"][0]
         self.assertEqual(replacement["node"], first["node"])

@@ -517,8 +517,6 @@ def _compile_evidence(name: str, run_id: str, item: dict, history: list[dict], p
         item["lines"].append(_render("compile_input", role=source["role"], node=source["node"] or "?",
                                     detail=source.get("step") or source.get("steps") or source.get("hole") or "",
                                     deltas=", ".join(changes) or _render("compile_not_comparable")))
-    item["lines"].extend(_render("compile_reference", name=key, value=value)
-                         for key, value in refs.items() if value and key != "evaluation_ref")
 
 
 def _compile_item(name: str, run_id: str, node_ref: str, result: dict, filing: str) -> dict:
@@ -2294,9 +2292,6 @@ def _scratch_promote(
                     lines.append(_render("compile_heartbeat_delta", version=version, delta=change))
             else:
                 lines.append(_render("scratch_delta", name=name, delta=delta))
-        for key in ("attempt_id", "derivation_id", "construction_operation_id"):
-            if promotion.get(key):
-                lines.append(_render("scratch_ref", name=key, value=promotion[key]))
     except Exception as error:
         references = {key: result.get(key) for key in (
             "node", "proof_id", "attempt_id", "derivation_id", "construction_operation_id",
