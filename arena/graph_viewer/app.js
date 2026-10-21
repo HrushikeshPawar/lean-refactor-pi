@@ -6,37 +6,40 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
   const $ = id => document.getElementById(id);
   // localStorage can throw (private windows, blocked site data): every access is wrapped.
   const store = {get(k){try{return localStorage.getItem(k)}catch{return null}}, set(k,v){try{localStorage.setItem(k,v)}catch{}}};
-  let data, byId = new Map(), pById = new Map(), probeItems = [], probeKids = new Map(), coords = new Map(),
+  let data, byId = new Map(), pById = new Map(), probeItems = [], scratchItems = [], sById = new Map(), actorIds = [], probeKids = new Map(), coords = new Map(),
       selected = store.get('arena-selected') || null, hadStored = store.get('arena-selected') !== null,
       view = null, dragging = null, lastRevision = '', collapsed = new Set(), chartSpecs = [],
-      showProbes = store.get('arena-probes') !== '0', showBest = store.get('arena-bestpath') !== '0',
-      colorBy = ['route','status'].includes(store.get('arena-colorby')) ? store.get('arena-colorby') : 'route',
+      showProbes = store.get('arena-probes') !== '0', showScratch = store.get('arena-scratch') !== '0', showBest = store.get('arena-bestpath') !== '0',
+      colorBy = ['route','status','actor'].includes(store.get('arena-colorby')) ? store.get('arena-colorby') : 'route',
       legendOpen = store.get('arena-legend') !== '0', hoverGroup = null,
-      off = {kind: new Set(), status: new Set(), route: new Set()},
+      off = {kind: new Set(), status: new Set(), route: new Set(), actor: new Set()},
       bestPath = {nodes: new Set(), edges: new Set()}, tokenRange = [0, 1], routeById = new Map();
   const graph = $('graph'), wrap = $('graph-wrap'), minimap = $('minimap'), tip = $('node-tip');
   const STEP_X = 90, STEP_Y = 100;
   const STATUSES = [['verified','Verified 3/3'],['compiled','Compiled'],['unchecked','Not checked: below best'],['skeleton','Skeleton (sorry)'],['failed','Failed'],['unevaluated','Unevaluated']];
-  const KINDS = [['candidate','Candidates'],['merge','Merges ⊕'],['probe','Probes']];
+  const KINDS = [['candidate','Candidates'],['merge','Merges ⊕'],['probe','Probes'],['scratch','Scratch ⬦']];
 
   function status(node) { return node.status || 'fail'; }
   function best(node) { return node.evaluations.findLast(e => e.mode === 'full' && Object.keys(e.result.compat || {}).length === 3 && Object.values(e.result.compat).every(v => v.passed)) || node.evaluations.at(-1); }
   function nodeLabel(node) { return `#${node.index} ${node.id.slice(0,8)}`; }
   function numberForId(id) { return byId.has(id) ? `#${byId.get(id).index}` : pById.has(id) ? `probe ${id.slice(0,6)}` : String(id ?? '?').slice(0,8); }
   const isProbe = it => it.kind === 'probe';
-  const itemOf = id => byId.get(id) || pById.get(id);
-  const allItems = () => showProbes ? [...data.nodes, ...probeItems] : data.nodes;
-  const kidsOf = id => [...(byId.get(id)?.children || []), ...(probeKids.get(id) || [])];
+  const isScratch = it => it.kind === 'scratch';
+  const itemOf = id => byId.get(id) || pById.get(id) || sById.get(id);
+  const allItems = () => [...data.nodes, ...(showProbes ? probeItems : []), ...(showScratch ? scratchItems : [])];
+  const kidsOf = id => [...(byId.get(id)?.children || []), ...(probeKids.get(id) || []), ...scratchItems.filter(x => x.parents[0] === id).map(x => x.id)];
   function stat(it) {
+    if (it.kind === 'scratch') return 'scratch';
     if (isProbe(it)) return it.status === 'skeleton' ? 'skeleton' : it.status === 'pass' ? 'compiled' : 'failed';
     // A fast (primary-toolchain) check only, no full check ever ran: the harness skips the full check below the verified best.
     if (it.status === 'primary' && !/\bsorry\b/.test(it.proof || '') && !it.evaluations?.some(e => e.mode === 'full')) return 'unchecked';
     return {full:'verified', primary:'compiled', fail:'failed'}[it.status] || 'unevaluated';
   }
-  const kindOf = it => isProbe(it) ? 'probe' : it.origin === 'auto_merge' ? 'merge' : 'candidate';
+  const kindOf = it => isProbe(it) ? 'probe' : isScratch(it) ? 'scratch' : it.origin === 'auto_merge' ? 'merge' : 'candidate';
   // Node size follows proof length (tokens); probes are small diamonds of a fixed size.
   function radius(it) {
     if (isProbe(it)) return 10;
+    if (isScratch(it)) return 9;
     const t = it.tokens; if (t == null) return 16;
     const [lo, hi] = tokenRange; return 15 + 11 * Math.sqrt(Math.max(0, Math.min(1, (t - lo) / Math.max(1, hi - lo))));
   }
@@ -127,6 +130,7 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
     for(const node of allItems()){
       const p=coords.get(node.id);if(!p)continue;
       for(const parent of node.parents){const a=coords.get(parent);if(a)edges.push(`<line class="mm-edge" x1="${a.x}" y1="${a.y}" x2="${p.x}" y2="${p.y}"/>`);}
+      if(isScratch(node)){dots.push(`<circle class="mm-node scratch ${scratchResult(node)}${selected===node.id?' sel':''}" cx="${p.x}" cy="${p.y}" r="${selected===node.id?14:5}"/>`);continue;}
       dots.push(`<circle class="mm-node ${esc(stat(node))}${selected===node.id?' sel':''}" cx="${p.x}" cy="${p.y}" r="${selected===node.id?16:isProbe(node)?6:11}"/>`);
     }
     minimap.innerHTML=`${edges.join('')}${dots.join('')}<rect class="mm-view" x="${view.x}" y="${view.y}" width="${view.w}" height="${view.h}"/>`;
@@ -146,19 +150,29 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
   const GREY = '#6f7f93';
   const routeColor = id => { const n = Number(String(id ?? '').replace(/\D/g, '')); return !id ? GREY : n <= 1 ? '#7a869a' : `hsl(${Math.round((n * 137.508) % 360)} 62% 52%)`; };
   const STATUS_FILL = {verified:'#1d644b', compiled:'#796029', unchecked:'#4d4630', skeleton:'#4b3a78', failed:'#783a49', unevaluated:'#24465f'};
-  const fillOf = it => colorBy === 'route' ? routeColor(it.route) : STATUS_FILL[stat(it)];
+  // Actor of a node: whoever made its first exact derivation (else its first attempt); probes and scratch rows carry their own actor_id.
+  const UNKNOWN_ACTOR = 'unknown';
+  const actorOf = it => isScratch(it) ? it.actor_id || UNKNOWN_ACTOR : isProbe(it) ? it.actor_id || UNKNOWN_ACTOR
+    : (it.attempts || []).find(a => a.relation === 'exact' && a.actor_id)?.actor_id || (it.attempts || []).find(a => a.actor_id)?.actor_id || UNKNOWN_ACTOR;
+  const actorColor = id => id === 'sol' ? '#e0a030' : id === UNKNOWN_ACTOR ? GREY : `hsl(${Math.round((190 + 47 * Math.max(0, actorIds.indexOf(id))) % 360)} 60% 52%)`;
+  const actorLabel = id => id === 'sol' ? 'sol (orchestrator)' : id;
+  const SCRATCH_FILL = {ok:'#1d644b', failed:'#783a49', other:'#4d5a6b'};
+  const scratchResult = e => e.outcome === 'success' || e.outcome === 'passed' ? 'ok' : e.outcome === 'failure' || e.outcome === 'proof_error' ? 'failed' : 'other';
+  const fillOf = it => isScratch(it) ? SCRATCH_FILL[scratchResult(it)] : colorBy === 'route' ? routeColor(it.route) : colorBy === 'actor' ? actorColor(actorOf(it)) : STATUS_FILL[stat(it)];
   const clip = (text, n) => { text = String(text ?? '').replace(/\s+/g, ' ').trim(); return text.length > n ? text.slice(0, n - 1) + '…' : text; };
-  const groupKey = (group, it) => group === 'route' ? (it.route || 'none') : group === 'kind' ? kindOf(it) : stat(it);
+  const groupKey = (group, it) => group === 'route' ? (it.route || 'none') : group === 'kind' ? kindOf(it) : group === 'actor' ? actorOf(it) : stat(it);
   function visible(it) {
-    if (off.kind.has(kindOf(it)) || off.status.has(stat(it)) || off.route.has(it.route || 'none')) return false;
+    if (off.kind.has(kindOf(it)) || off.actor.has(actorOf(it))) return false;
+    if (!isScratch(it) && (off.status.has(stat(it)) || off.route.has(it.route || 'none'))) return false;
     const query = $('search').value.trim().toLowerCase();
+    if (isScratch(it)) return !query || [it.experiment_id, it.headline, it.outcome, it.actor_id].some(x => String(x ?? '').toLowerCase().includes(query));
     return !query || [it.id, it.hypothesis, it.proof, it.origin, it.route, ...(it.headlines || [])].some(x => String(x ?? '').toLowerCase().includes(query));
   }
-  const anyFilter = () => Object.values(off).some(set => set.size) || $('search').value.trim() || !showProbes;
+  const anyFilter = () => Object.values(off).some(set => set.size) || $('search').value.trim() || !showProbes || !showScratch;
   function toggleGroup(group, key, solo) {
     const set = off[group];
     if (solo) {
-      const keys = group === 'route' ? [...routeById.keys(), 'none'] : group === 'status' ? STATUSES.map(x => x[0]) : KINDS.map(x => x[0]);
+      const keys = group === 'route' ? [...routeById.keys(), 'none'] : group === 'actor' ? actorIds : group === 'status' ? STATUSES.map(x => x[0]) : KINDS.map(x => x[0]);
       const only = keys.every(k => k === key ? !set.has(k) : set.has(k));
       set.clear(); if (!only) keys.forEach(k => { if (k !== key) set.add(k); });
     } else set.has(key) ? set.delete(key) : set.add(key);
@@ -166,21 +180,23 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
   }
   function resetFilters() {
     Object.values(off).forEach(set => set.clear()); $('search').value = '';
-    if (!showProbes) { showProbes = true; store.set('arena-probes', '1'); relayout(); }
+    if (!showProbes) { showProbes = true; store.set('arena-probes', '1'); }
+    if (!showScratch) { showScratch = true; store.set('arena-scratch', '1'); }
+    relayout();
     renderChips(); renderLegend(); renderGraph();
   }
   function relayout() { layout(); }
   function counts(group) {
     const out = new Map();
-    for (const it of data.nodes.concat(probeItems)) { const k = groupKey(group, it); out.set(k, (out.get(k) || 0) + 1); }
+    for (const it of data.nodes.concat(probeItems, group === 'kind' || group === 'actor' ? scratchItems : [])) { const k = groupKey(group, it); out.set(k, (out.get(k) || 0) + 1); }
     return out;
   }
   function paintSwatches(root) { root.querySelectorAll('[data-bg]').forEach(el => { el.style.background = el.dataset.bg; }); }
   // Chips: kind and status filters. The Probes chip shows or hides the probe nodes and re-lays out the graph.
   function renderChips() {
     const k = counts('kind'), st = counts('status');
-    const chip = (group, key, label, n, on, extra = '') => `<button type="button" class="chip${on ? '' : ' off'}${extra}" data-group="${group}" data-key="${key}" aria-pressed="${on}" title="Click to ${on ? 'hide' : 'show'}; shift-click to show only this">${group === 'status' ? `<i class="st-dot st-${key}"></i>` : key === 'probe' ? '<i class="probe-dot"></i>' : ''}${esc(label)} <b>${n ?? 0}</b></button>`;
-    $('chips').innerHTML = KINDS.map(([key, label]) => chip('kind', key, label, k.get(key), key === 'probe' ? showProbes : !off.kind.has(key))).join('')
+    const chip = (group, key, label, n, on, extra = '') => `<button type="button" class="chip${on ? '' : ' off'}${extra}" data-group="${group}" data-key="${key}" aria-pressed="${on}" title="Click to ${on ? 'hide' : 'show'}; shift-click to show only this">${group === 'status' ? `<i class="st-dot st-${key}"></i>` : key === 'probe' ? '<i class="probe-dot"></i>' : key === 'scratch' ? '<i class="scratch-dot"></i>' : ''}${esc(label)} <b>${n ?? 0}</b></button>`;
+    $('chips').innerHTML = KINDS.map(([key, label]) => chip('kind', key, label, k.get(key), key === 'probe' ? showProbes : key === 'scratch' ? showScratch : !off.kind.has(key))).join('')
       + '<span class="chip-sep"></span>' + STATUSES.filter(([key]) => st.get(key) || off.status.has(key)).map(([key, label]) => chip('status', key, label, st.get(key), !off.status.has(key))).join('');
     $('best-path').setAttribute('aria-pressed', String(showBest)); $('best-path').disabled = !bestPath.nodes.size;
     $('reset-filters').hidden = !anyFilter();
@@ -189,7 +205,12 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
   $('chips').addEventListener('click', e => {
     const b = e.target.closest('.chip'); if (!b) return;
     const {group, key} = b.dataset;
-    if (group === 'kind' && key === 'probe') { showProbes = !showProbes; store.set('arena-probes', showProbes ? '1' : '0'); if (selected && isProbe(itemOf(selected) || {}) && !showProbes) { selected = null; store.set('arena-selected', ''); detail(); } relayout(); renderChips(); renderGraph(); renderLegend(); return; }
+    if (group === 'kind' && (key === 'probe' || key === 'scratch')) {
+      if (key === 'probe') { showProbes = !showProbes; store.set('arena-probes', showProbes ? '1' : '0'); } else { showScratch = !showScratch; store.set('arena-scratch', showScratch ? '1' : '0'); }
+      const sel = selected && itemOf(selected);
+      if (sel && ((isProbe(sel) && !showProbes) || (isScratch(sel) && !showScratch))) { selected = null; store.set('arena-selected', ''); detail(); }
+      relayout(); renderChips(); renderGraph(); renderLegend(); return;
+    }
     toggleGroup(group, key, e.shiftKey);
   });
   $('reset-filters').onclick = resetFilters;
@@ -197,7 +218,7 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
   // shift-click = show only it, hover = spotlight it on the graph.
   function renderLegend() {
     const panel = $('legend'); if (!data) return;
-    const seg = [['route','Route'],['status','Status']].map(([id, label]) => `<button type="button" data-color="${id}" aria-pressed="${colorBy === id}">${label}</button>`).join('');
+    const seg = [['route','Route'],['status','Status'],['actor','Actor']].map(([id, label]) => `<button type="button" data-color="${id}" aria-pressed="${colorBy === id}">${label}</button>`).join('');
     const n = counts(colorBy);
     let rows = '';
     if (colorBy === 'route') {
@@ -207,6 +228,8 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
         const tags = `${r.original ? '<span class="lp-tag">original</span>' : ''}${r.credited ? '<span class="lp-tag good" title="credited: verified structure and new goal states">credited</span>' : r.explored ? '<span class="lp-tag" title="explored but not credited">explored</span>' : ''}`;
         return `<button type="button" class="lp-item${off.route.has(key) ? ' off' : ''}" data-group="route" data-key="${esc(key)}" aria-pressed="${!off.route.has(key)}" title="${esc(r.label || '')}"><i class="sw" data-bg="${routeColor(r.route === 'none' ? null : r.route)}"></i><span class="lp-name"><b>${esc(key)}</b> ${esc(clip(r.short_label || r.label, 44))}</span><span class="lp-stats">${tags}${esc(stats)} · ${n.get(key) ?? 0} nodes</span></button>`;
       }).join('');
+    } else if (colorBy === 'actor') {
+      rows = actorIds.map(key => `<button type="button" class="lp-item${off.actor.has(key) ? ' off' : ''}" data-group="actor" data-key="${esc(key)}" aria-pressed="${!off.actor.has(key)}"><i class="sw" data-bg="${actorColor(key)}"></i><span class="lp-name"><b>${esc(actorLabel(key))}</b></span><span class="lp-stats">${n.get(key) ?? 0} nodes</span></button>`).join('');
     } else {
       rows = STATUSES.map(([key, label]) => `<button type="button" class="lp-item${off.status.has(key) ? ' off' : ''}" data-group="status" data-key="${key}" aria-pressed="${!off.status.has(key)}"><i class="sw" data-bg="${STATUS_FILL[key]}"></i><span class="lp-name">${esc(label)}</span><span class="lp-stats">${n.get(key) ?? 0} nodes</span></button>`).join('');
     }
@@ -215,6 +238,8 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
       <div class="lp-key"><span><svg width="34" height="14"><circle cx="7" cy="7" r="4.5" class="k-small"/><circle cx="24" cy="7" r="6.5" class="k-big"/></svg>size = proof tokens</span>
       <span><svg width="34" height="14"><circle cx="7" cy="7" r="6" class="b-ver"/><circle cx="25" cy="7" r="6" class="b-fail"/></svg>border = result</span>
       <span><svg width="34" height="14"><path d="M8,1 L14,7 L8,13 L2,7Z" class="k-probe"/></svg>probe</span>
+      <span><svg width="34" height="14"><path d="M7,1 L13,7 L7,13 L1,7Z" class="k-scratch ok"/><path d="M25,1 L31,7 L25,13 L19,7Z" class="k-scratch failed"/></svg>scratch experiment (ok / failed)</span>
+      <span><svg width="34" height="14"><path d="M1,7H33" class="k-scratch-edge"/></svg>scratch link (dashed; solid ring = promoted)</span>
       <span><svg width="34" height="14"><path d="M1,7H33" class="k-best"/></svg>best path</span></div></div>`;
     paintSwatches(panel);
   }
@@ -234,8 +259,8 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
 
   function lineageOf(id) {
     const nodes=new Set(), edges=[], seenEdges=new Set();
-    if (pById.has(id)) {
-      const probe = pById.get(id), parent = probe.parents[0];
+    if (pById.has(id) || sById.has(id)) {
+      const probe = itemOf(id), parent = probe.parents[0];
       const base = parent ? lineageOf(parent) : {nodes: new Set(), edges: [], edgeKeys: new Set()};
       base.nodes.add(id);
       if (parent) { base.edges.push({parent, child: id}); base.edgeKeys.add(`${parent}:${id}`); }
@@ -275,7 +300,7 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
     const edges = [], boxes = [], items = allItems();
     for (const it of items) {
       if (!coords.has(it.id)) continue;
-      const p = coords.get(it.id), dim = visible(it) ? '' : ' dim', probe = isProbe(it);
+      const p = coords.get(it.id), dim = visible(it) ? '' : ' dim', probe = isProbe(it), scratch = isScratch(it);
       const derivations = it.derivations?.length ? it.derivations : [{parents: it.parents}];
       derivations.forEach((d, i) => d.parents.forEach(parent => {
         const a = coords.get(parent); if (!a) return;
@@ -283,13 +308,18 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
         const focus = lineage.edgeKeys.has(key) ? ' lineage' : '', faded = selected && !focus ? ' unrelated' : '';
         const onBest = showBest && bestPath.edges.has(key) ? ' bestpath' : '';
         const ay = a.y + radius(itemOf(parent)), cy = p.y - radius(it), bend = Math.max(18, (cy - ay) * .48);
-        edges.push(`<path class="edge${probe ? ' probe-edge' : ''}${i ? ' alternate' : ''}${onBest}${focus}${faded}${dim}" d="M${a.x},${ay} C${a.x},${ay + bend} ${p.x},${cy - bend} ${p.x},${cy}"/>`);
+        edges.push(`<path class="edge${probe ? ' probe-edge' : ''}${scratch ? ' scratch-edge' : ''}${i ? ' alternate' : ''}${onBest}${focus}${faded}${dim}" d="M${a.x},${ay} C${a.x},${ay + bend} ${p.x},${cy - bend} ${p.x},${cy}"/>`);
       }));
+      if (scratch && it.promotedTo && coords.has(it.promotedTo) && (showScratch)) {
+        const b = coords.get(it.promotedTo), top = Math.min(p.y, b.y) - 38;
+        edges.push(`<path class="edge scratch-edge promotes${selected && selected !== it.id && selected !== it.promotedTo ? ' unrelated' : ''}${dim}" d="M${p.x},${p.y} Q${(p.x + b.x) / 2},${top} ${b.x},${b.y}"/>`);
+      }
       const R = radius(it), st = stat(it);
-      const cls = `node k-${probe ? 'probe' : 'candidate'} st-${st}${it.origin === 'auto_merge' ? ' auto_merge' : ''}${milestone.has(it.id) ? ' best' : ''}${showBest && bestPath.nodes.has(it.id) ? ' onbest' : ''}${lineage.nodes.has(it.id) && selected !== it.id ? ' ancestor' : ''}${selected === it.id ? ' selected' : ''}${selected && !lineage.nodes.has(it.id) ? ' unrelated' : ''}${dim}${hoverGroup && groupKey(hoverGroup.group, it) !== hoverGroup.key ? ' spot-off' : ''}`;
-      const data_ = `data-id="${esc(it.id)}" data-route="${esc(it.route || 'none')}" data-status="${st}" data-kind="${kindOf(it)}"`;
+      const cls = `node k-${probe ? 'probe' : scratch ? 'scratch res-' + scratchResult(it) + (it.promotedTo ? ' promoted' : '') : 'candidate'} st-${st}${it.origin === 'auto_merge' ? ' auto_merge' : ''}${milestone.has(it.id) ? ' best' : ''}${showBest && bestPath.nodes.has(it.id) ? ' onbest' : ''}${lineage.nodes.has(it.id) && selected !== it.id ? ' ancestor' : ''}${selected === it.id ? ' selected' : ''}${selected && !lineage.nodes.has(it.id) ? ' unrelated' : ''}${dim}${hoverGroup && groupKey(hoverGroup.group, it) !== hoverGroup.key ? ' spot-off' : ''}`;
+      const data_ = `data-id="${esc(it.id)}" data-route="${esc(it.route || 'none')}" data-status="${st}" data-kind="${kindOf(it)}" data-actor="${esc(actorOf(it))}"`;
       const fill = fillOf(it);
-      if (probe) boxes.push(`<g class="${cls}" ${data_} transform="translate(${p.x},${p.y})"><circle class="hit" r="15"/><path class="node-body" fill="${fill}" d="M0,${-R} L${R},0 L0,${R} L${-R},0Z"/></g>`);
+      if (scratch) boxes.push(`<g class="${cls}" ${data_} transform="translate(${p.x},${p.y})"><circle class="hit" r="14"/>${colorBy === 'actor' ? `<path class="actor-ring" fill="none" stroke="${actorColor(actorOf(it))}" d="M0,${-R - 4} L${R + 4},0 L0,${R + 4} L${-R - 4},0Z"/>` : ''}<path class="node-body" fill="${fill}" d="M0,${-R} L${R},0 L0,${R} L${-R},0Z"/></g>`);
+      else if (probe) boxes.push(`<g class="${cls}" ${data_} transform="translate(${p.x},${p.y})"><circle class="hit" r="15"/><path class="node-body" fill="${fill}" d="M0,${-R} L${R},0 L0,${R} L${-R},0Z"/></g>`);
       else boxes.push(`<g class="${cls}" ${data_} transform="translate(${p.x},${p.y})"><circle class="hit" r="${R + 4}"/>${it.origin === 'auto_merge' ? `<circle class="merge-ring" r="${R + 6}"/><text class="merge-badge" x="${R - 1}" y="${-R + 2}">⊕</text>` : ''}<circle class="node-body" r="${R}" fill="${fill}"/><text class="node-number${String(it.index).length > 2 ? ' small' : ''}" text-anchor="middle" dominant-baseline="central">#${esc(it.index)}</text>${it.id === topBest ? `<text class="best-star" x="${-R + 2}" y="${-R + 4}">★</text>` : ''}</g>`);
     }
     graph.innerHTML = edges.join('') + boxes.join(''); applyView();
@@ -306,6 +336,11 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
     const r = routeById.get(it.route), row = (k, v) => v == null || v === '' ? '' : `<div class="tip-row"><span>${k}</span><b>${v}</b></div>`;
     const route = it.route ? `<i class="sw" data-bg="${routeColor(it.route)}"></i>${esc(it.route)}${it.route_inherited ? ' (parent)' : ''}${r ? ` · ${esc(clip(r.label, 46))}` : ''}` : '<span class="muted">none</span>';
     const routeState = r ? `${r.depth ?? 0} goal states${r.min_holes != null ? `, min ${r.min_holes} holes` : ''}${r.credited ? ' · credited' : r.explored ? ' · explored' : ''}` : '';
+    if (isScratch(it)) {
+      return `<div class="tip-head">Scratch · ${esc(String(it.experiment_id ?? it.code_sha256 ?? '?').slice(0, 12))} ${tagHtml(it.outcome || it.phase || 'accepted', scratchResult(it) === 'ok' ? 'good' : scratchResult(it) === 'failed' ? 'bad' : '')}</div>
+        ${row('Actor', `<i class="sw" data-bg="${actorColor(actorOf(it))}"></i>${esc(actorLabel(actorOf(it)))}`)}${row('Anchor', esc(it.anchorNote))}${row('Promotion', it.promotion?.state ? esc(`${it.promotion.state}${it.promotion.reason ? `: ${it.promotion.reason}` : ''}`) : null)}
+        ${it.promotedTo ? row('Promoted to', esc(numberForId(it.promotedTo))) : ''}${it.headline ? `<div class="tip-note">${esc(clip(it.headline, 160))}</div>` : ''}`;
+    }
     if (isProbe(it)) {
       return `<div class="tip-head">Probe · ${esc(it.id.slice(0, 8))} ${stTag(stat(it))}</div>${row('Tokens', it.tokens != null ? esc(it.tokens) : null)}${row('Heartbeats', it.heartbeat != null ? esc(it.heartbeat) : null)}
         ${row('Open goals', it.status === 'skeleton' ? `${esc(it.goals)} ${it.goals === 1 ? 'hole' : 'holes'}` : it.status === 'fail' ? `${esc(it.errors ?? '?')} error${it.errors === 1 ? '' : 's'}` : 'none')}
@@ -315,6 +350,7 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
     const proxy = it.local_proxy?.toFixed?.(2);
     return `<div class="tip-head">${esc(nodeLabel(it))} ${stTag(stat(it))}${it.origin === 'auto_merge' ? ' <span class="merge-mark">⊕ merge</span>' : ''}${data.milestones.at(-1)?.candidate_id === it.id ? ' <span class="tag good">best verified</span>' : ''}</div>
       ${row('Tokens', it.tokens != null ? esc(it.tokens) : null)}${row('Heartbeats', it.heartbeat != null ? esc(it.heartbeat) : null)}${row('Proxy', proxy ? esc(proxy) : null)}
+      ${row('Actor', `<i class="sw" data-bg="${actorColor(actorOf(it))}"></i>${esc(actorLabel(actorOf(it)))}`)}
       ${row('Route', route)}${row('Route state', esc(routeState))}${row('Parents', it.parents.length ? it.parents.map(x => esc(numberForId(x))).join(', ') : 'root')}
       ${it.hypothesis ? `<div class="tip-note">${esc(clip(it.hypothesis, 170))}</div>` : ''}`;
   }
@@ -372,6 +408,7 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
     return {evaluated,derived,ancestry,reference,root};
   }
   const goBtn=p=>`<button data-go="${esc(p)}">${esc(byId.get(p)?nodeLabel(byId.get(p)):pById.has(p)?`probe ${p.slice(0,6)}`:p.slice(0,8))}</button>`;
+  const actorBadge=it=>{const own=actorOf(it),others=[...new Set((it.attempts||[]).map(a=>a.actor_id).filter(a=>a&&a!==own))];return `<span class="route-badge"><i class="sw" data-bg="${actorColor(own)}"></i><b>${esc(actorLabel(own))}</b>${others.length?` <span class="muted">also ${others.map(esc).join(', ')}</span>`:''}</span>`;};
   const routeBadge=id=>{const r=routeById.get(id);return `<span class="route-badge"><i class="sw" data-bg="${routeColor(id)}"></i><b>${esc(id)}</b> ${r?esc(clip(r.label,60)):''}${r?.credited?' <span class="tag good">credited</span>':r?.explored?' <span class="tag">explored</span>':''}</span>`;};
   // Nothing selected: the run at a glance (best path, routes) instead of an empty panel.
   function overview() {
@@ -397,7 +434,20 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
     $('detail').querySelectorAll('[data-open]').forEach(el=>el.onclick=()=>openDetail(el.dataset.open));
   }
   const nodeExperiments=node=>(data.experiments||[]).filter(e=>e.proof_id===node.id||(e.at&&JSON.stringify(e.at).includes(node.id))||(e.at&&[node.node,numberForId(node.id)].some(label=>label&&(e.at===label||e.at.node===label))));
+  function scratchDetail(x) {
+    $('detail').innerHTML = `<div class="side"><div class="card sumcard"><h2>Scratch experiment ${tagHtml(x.outcome || x.phase || 'accepted', scratchResult(x) === 'ok' ? 'good' : scratchResult(x) === 'failed' ? 'bad' : '')}</h2>
+      ${facts([['Experiment', esc(x.experiment_id ?? x.code_sha256 ?? '?')], ['Actor', `<span class="route-badge"><i class="sw" data-bg="${actorColor(actorOf(x))}"></i>${esc(actorLabel(actorOf(x)))}</span>`],
+        ['Anchor', `${esc(x.anchorNote)} ${x.parents[0] ? goBtn(x.parents[0]) : ''}`],
+        ['Promotion', x.promotion?.state ? `${esc(x.promotion.state)}${x.promotion.reason ? `: ${esc(x.promotion.reason)}` : ''}${x.promotedTo ? ' ' + goBtn(x.promotedTo) : ''}` : '<span class="muted">none</span>']])}
+      <div class="muted small">A scratch experiment is a trial run outside the proof graph. Dashed link = anchor; arc = promoted into a proof node.</div></div>
+      <div class="card">${experimentRowsHtml([x])}</div></div>`;
+    paintSwatches($('detail'));
+    bindExperiments($('detail'));
+    $('detail').querySelector('[data-experiment]')?.click();
+    $('detail').querySelectorAll('[data-go]').forEach(el => el.onclick = () => select(el.dataset.go));
+  }
   function detail() {
+    if (sById.has(selected)) { scratchDetail(sById.get(selected)); return; }
     if (pById.has(selected)) { probeDetail(pById.get(selected)); return; }
     const node=byId.get(selected);
     if (!node) { overview(); return; }
@@ -408,7 +458,7 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
     $('detail').innerHTML=`<div class="side">
       <div class="card sumcard"><h2>${esc(nodeLabel(node))} ${node.origin==='auto_merge'?'<span class="merge-mark">⊕ merge</span>':''}</h2>
         ${facts([['Status',tag(status(node),node.status==='full'?'good':node.status==='fail'?'bad':'')],['Tokens',esc(node.tokens ?? '?')],['Heartbeats',esc(node.heartbeat ?? '?')],['Score',esc(proxy ?? '—')],
-                 ['Route',node.route?routeBadge(node.route):'<span class="muted">none</span>'],['Parent',parents.length?parents.map(goBtn).join(' '):'<span class="muted">root</span>'],
+                 ['Actor',actorBadge(node)],['Route',node.route?routeBadge(node.route):'<span class="muted">none</span>'],['Parent',parents.length?parents.map(goBtn).join(' '):'<span class="muted">root</span>'],
                  ['Children',node.children.length?node.children.map(goBtn).join(' '):'<span class="muted">none</span>'],...((probeKids.get(node.id)||[]).length?[['Probes',(probeKids.get(node.id)).map(goBtn).join(' ')]]:[])])}
         <div class="actions"><button type="button" data-open="overview" class="primary">Details ↗</button><button type="button" data-open="diff">Diff ↗</button><button type="button" data-open="proof">Proof ↗</button><button type="button" data-open="lineage">Lineage ↗</button></div></div>
       ${node.hypothesis||node.origin==='auto_merge'?`<div class="card hypcard"><h3>Note</h3><p class="hyp">${esc(node.hypothesis||'Deterministic combination of disjoint edits')}</p></div>`:''}
@@ -484,6 +534,7 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
   function select(id,{focus=true}={}) {
     if(!itemOf(id))return;
     if(isProbe(itemOf(id))&&!showProbes){showProbes=true;store.set('arena-probes','1');layout();}
+    if(isScratch(itemOf(id))&&!showScratch){showScratch=true;store.set('arena-scratch','1');layout();}
     selected=id; store.set('arena-selected',id); if(focus&&coords.has(id))focusOn(id); renderGraph(); detail(); renderCharts();
   }
   function clearSelection() {
@@ -690,6 +741,32 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
     $('merge-feed').innerHTML=data.merge_checks.slice(-25).reverse().map(c=>`<div class="feed-row">${c.candidate_id?`<button data-go="${esc(c.candidate_id)}">merge ${esc(numberForId(c.candidate_id))}</button>`:`<span class="muted">skip</span>`}<span>${esc(c.parents?.map(numberForId).join(' + '))}</span><span class="muted">${esc(c.reason || (c.full_passed?'3/3 valid':c.fast_passed?'primary valid':'Lean failed'))}</span></div>`).join('')||'<p class="muted">No pair checks yet.</p>';
     $('merge-feed').querySelectorAll('[data-go]').forEach(el=>el.onclick=()=>select(el.dataset.go));
   }
+  // Scratch experiments become canvas nodes. Anchor rule: `at.node` (label, id or #n; a ".step" suffix is dropped);
+  // else the node it was promoted into (its first parent); else the current best verified proof; else the root.
+  // The ledger rows carry no timestamp, so "best" is the best now, not the best when the experiment ran.
+  function nodeByRef(ref) {
+    if (typeof ref !== 'string' || !ref) return null;
+    for (const key of [ref, ref.split('.')[0]]) {
+      const n = data.nodes.find(x => x.node === key || x.id === key || x.proof_id === key || `#${x.index}` === key || `n${x.index}` === key);
+      if (n) return n;
+    }
+    return null;
+  }
+  function buildScratch() {
+    const best = byId.get(data.milestones.at(-1)?.candidate_id) || data.nodes[0];
+    scratchItems = (data.experiments || []).map((e, i) => {
+      const at = e.at, promoted = e.promotion?.state === 'promoted' ? nodeByRef(e.promotion.node) || nodeByRef(e.promotion.proof_id) : null;
+      let anchor = nodeByRef(typeof at === 'string' ? at : at?.node) || nodeByRef(e.proof_id), note = at ? `at ${typeof at === 'string' ? at : at.node ?? JSON.stringify(at)}` : '';
+      if (!anchor && promoted) { anchor = byId.get(promoted.parents[0]); note = 'unanchored; parent of promoted node'; }
+      if (!anchor) { anchor = best; note = `${at ? note + ' not found; ' : 'unanchored; '}attached to ${data.milestones.length ? 'current best verified' : 'root'}`; }
+      return {...e, id: `x:${e.experiment_id || e.code_sha256 || i}`, kind: 'scratch', index: `x${i + 1}`, order: 2e6 + i, parents: anchor ? [anchor.id] : [],
+              anchorNote: note, promotedTo: promoted?.id || null};
+    }).filter(x => x.parents.length);
+    sById = new Map(scratchItems.map(x => [x.id, x]));
+    const ids = new Set(['sol', ...(data.actors || []).map(a => a.actor_id).filter(Boolean)]);
+    for (const it of [...data.nodes, ...probeItems, ...scratchItems]) ids.add(actorOf(it));
+    actorIds = [...ids].sort((a, b) => (a === 'sol' ? -1 : b === 'sol' ? 1 : a === UNKNOWN_ACTOR ? 1 : b === UNKNOWN_ACTOR ? -1 : a.localeCompare(b)));
+  }
   // Derived structures: probe nodes (those that never became candidates), token range, routes, best path.
   function prepare() {
     const known = new Set(data.nodes.map(n => n.id));
@@ -704,6 +781,7 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
     probeKids = new Map();
     for (const p of probeItems) for (const parent of p.parents) probeKids.set(parent, [...(probeKids.get(parent) || []), p.id]);
     for (const n of data.nodes) n.order = n.index;
+    buildScratch();
     const tokens = data.nodes.map(n => n.tokens).filter(t => t != null);
     tokenRange = tokens.length ? [Math.min(...tokens), Math.max(...tokens)] : [0, 1];
     computeBestPath();
