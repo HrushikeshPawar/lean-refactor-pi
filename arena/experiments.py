@@ -16,6 +16,28 @@ from arena.run_control import OperationRejected, actor_ids, apply_operation, pub
 from arena.traces import call_context
 
 
+def _call_operation_id(identity: dict) -> str | None:
+    call = identity.get("tool_call_id")
+    if not call:
+        return None
+    key = ":".join(str(identity.get(k) or "") for k in ("actor_id", "session_id", "activation_id"))
+    return f"scratch:{key}:{call}"
+
+
+def replay_request(run_id: str, request: dict) -> dict | None:
+    """Resolve a repeated invocation before mutable focus can change its anchor."""
+    operation_id = _call_operation_id({**actor_ids(run_id), **call_context()})
+    if operation_id is None:
+        return None
+    accepted = next((row for row in _scratch(campaign.run_dir(run_id))
+                     if row.get("phase") == "accepted" and row.get("operation_id") == operation_id), None)
+    if accepted is None or "request" not in accepted:
+        return None
+    if accepted["request"] != request:
+        raise OperationRejected("operation_conflict", operation_id)
+    return retrieve(run_id, accepted["experiment_id"])
+
+
 def accept(
     run_id: str,
     code: str,
@@ -23,19 +45,20 @@ def accept(
     *,
     context: dict | None = None,
     operation_id: str | None = None,
+    request: dict | None = None,
 ) -> dict:
     """Commit the exact snippet before construction, replaying the same tool call once."""
     directory = campaign.run_dir(run_id)
     digest = hashlib.sha256(code.encode()).hexdigest()
     identity = {**actor_ids(run_id), **call_context()}
     if operation_id is None:
-        call = identity.get("tool_call_id")
-        key = ":".join(str(identity.get(k) or "") for k in ("actor_id", "session_id", "activation_id"))
-        operation_id = f"scratch:{key}:{call}" if call else f"scratch:{uuid.uuid4().hex}"
+        operation_id = _call_operation_id(identity) or f"scratch:{uuid.uuid4().hex}"
     experiment_id = "e-" + hashlib.sha256(operation_id.encode()).hexdigest()
     init = next((row for row in campaign.events(directory) if row.get("kind") == "init"), None)
     submitted_context = {"theorem_run": run_id, **({"run_init": init} if init else {}), **(context or {})}
     arguments = {"code": code, "helpers": list(helpers), "identity": identity, "context": context or {}}
+    if request is not None:
+        arguments["request"] = request
     operation = {
         **identity,
         "operation_id": operation_id,
@@ -57,6 +80,7 @@ def accept(
                 "code_sha256": digest,
                 "code": code,
                 "helpers": list(helpers),
+                **({"request": request} if request is not None else {}),
                 "context": submitted_context,
             }
         )
@@ -117,6 +141,10 @@ def finish(
         "elapsed_ms": elapsed_ms,
         "input_ref": authoritative_ref,
         "context": context or {},
+        "promotion": promotion if promotion is not None else {"state": "not_promoted", "reason": "not_requested"},
+        "validity": validity,
+        "compatibility": compatibility,
+        "cold": cold,
     }
     identity = _identity(accepted)
     receipt = apply_operation(
@@ -139,10 +167,6 @@ def finish(
                     "code_sha256": digest,
                     "code": code,
                     **data,
-                    "promotion": promotion or {"state": "not_promoted", "reason": "promotion_not_in_slice"},
-                    "validity": validity,
-                    "compatibility": compatibility,
-                    "cold": cold,
                 }
             )
         ],
@@ -270,7 +294,7 @@ def _joined(rows: list[dict]) -> dict:
         "diagnostic": None,
         "elapsed_ms": None,
         "input_ref": _input_ref(accepted),
-        "promotion": {"state": "not_promoted", "reason": "promotion_not_in_slice"},
+        "promotion": {"state": "not_promoted", "reason": "outcome_pending"},
         "validity": "not_a_target_candidate",
         "compatibility": "not_checked",
         "cold": "not_checked",

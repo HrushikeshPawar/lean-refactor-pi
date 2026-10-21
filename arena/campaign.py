@@ -85,6 +85,7 @@ _SESSION: ContextVar[_Session | None] = ContextVar("source_session", default=Non
 _NAMED_PARENT_UNSET = object()
 _BATCH_FOCUS: ContextVar[tuple[bool, str | None]] = ContextVar("arena_batch_focus", default=(False, None))
 _BATCH_NEWLY_FILED: ContextVar[set[str] | None] = ContextVar("arena_batch_newly_filed", default=None)
+_OPERATION_RECEIPTS: ContextVar[list[dict] | None] = ContextVar("arena_operation_receipts", default=None)
 _SALVAGE_DIRECTORY: ContextVar[Path | None] = ContextVar("arena_salvage_directory", default=None)
 
 
@@ -1047,7 +1048,8 @@ def _construction_relation(
         edge_type = operation["type"]
         sources = list(operation.get("from") or [])
         operation_data = (
-            {"hole": operation["hole"], "text": operation["text"]}
+            {"hole": operation["hole"], "text": operation["text"],
+             **({"experiment_id": operation["experiment_id"]} if operation.get("experiment_id") else {})}
             if edge_type == "filled_from"
             else {key: value for key, value in operation.items() if key != "type"}
         )
@@ -1147,7 +1149,7 @@ def _record_construction(
             )
         return ctx.evidence
 
-    _apply_locked(
+    receipt = _apply_locked(
         directory,
         {
             "operation_id": uuid.uuid4().hex,
@@ -1160,6 +1162,9 @@ def _record_construction(
         },
         mutate,
     )
+    receipts = _OPERATION_RECEIPTS.get()
+    if receipts is not None:
+        receipts.append(receipt)
 
 
 def _file_node(
@@ -1218,7 +1223,8 @@ def _file_node(
             sources = list(operation.get("from", []))
             exact = True
             operation_data = (
-                {"hole": operation["hole"], "text": operation["text"]}
+                {"hole": operation["hole"], "text": operation["text"],
+                 **({"experiment_id": operation["experiment_id"]} if operation.get("experiment_id") else {})}
                 if edge_type == "filled_from"
                 else dict(operation)
             )
@@ -2432,6 +2438,7 @@ def probe(
             {
                 "kind": "probe",
                 "proof_id": proof_id,
+                "evaluation_id": _evaluation_key(proof_id, "probe", row),
                 "parent": parent_id,
                 "named_parent": None if named_parent is _NAMED_PARENT_UNSET else named_parent,
                 "note": note,
@@ -2642,22 +2649,70 @@ def compile_operation(
     else:
         raise ValueError(text.render("messages/errors.operation_type_invalid", kind=kind))
 
+    if operation.get("experiment_id"):
+        edge_operation["experiment_id"] = operation["experiment_id"]
     proof = normalize_draft(name, proof)
-    result = probe(
-        name,
-        run_id,
-        proof,
-        operation=edge_operation,
-        mode=mode,
-        note=note,
-        named_parent=named_parent,
-    )
+    receipts: list[dict] = []
+    token = _OPERATION_RECEIPTS.set(receipts)
+    failure = None
+    result = {}
+    try:
+        result = probe(
+            name,
+            run_id,
+            proof,
+            operation=edge_operation,
+            mode=mode,
+            note=note,
+            named_parent=named_parent,
+        )
+    except Exception as error:
+        failure = error
+    finally:
+        _OPERATION_RECEIPTS.reset(token)
     proof_id = hashlib.sha256((name + "\0" + proof).encode()).hexdigest()
-    filed = next(
-        event for event in events(directory) if event.get("kind") == "edge" and event.get("proof_id") == proof_id
-    )
-    node = _graph_node_id(events(directory), proof_id)
-    return {**result, "node": node, "edge": {"type": filed["type"], "from": filed["from"]}}
+    from arena.run_control import published_history
+
+    history = published_history(directory, events(directory))
+    event_ids = {ref["event_id"] for receipt in receipts for ref in receipt.get("evidence_refs", [])}
+    attempt = next((event for event in history if event.get("kind") == "attempt"
+                    and event.get("event_id") in event_ids and event.get("proof_id") == proof_id), None)
+    key = _evaluation_key(proof_id, mode, problem(name))
+    evaluation = next((event for event in reversed(history) if event.get("kind") == "evaluation"
+                       and event.get("key") == key), None)
+    if evaluation is None:
+        evaluation = next((event for event in reversed(history) if event.get("kind") == "probe"
+                           and event.get("proof_id") == proof_id), None)
+    full_key = _evaluation_key(proof_id, "full", problem(name))
+    full = next((event for event in reversed(history) if event.get("kind") == "evaluation"
+                 and event.get("key") == full_key), None)
+    construction = (attempt or {}).get("data") or {}
+    derivation = next((event for event in history if event.get("kind") == "derivation"
+                       and event.get("proof_id") == proof_id
+                       and (event.get("data") or {}).get("construction_digest") == construction.get("construction_digest")), None)
+    evidence = {
+        **result,
+        "node": _graph_node_id(history, proof_id) if attempt else None,
+        "proof_id": proof_id,
+        "complete": not _has_hole(problem(name), proof),
+        "edge": {"type": edge_operation["type"], "from": edge_operation["from"],
+                 "operation": construction.get("operation"),
+                 "construction_digest": construction.get("construction_digest")},
+        "attempt_id": (attempt or {}).get("event_id"),
+        "derivation_id": (derivation or {}).get("event_id"),
+        "construction_operation_id": (attempt or {}).get("operation_id"),
+        "evaluation_id": (evaluation or {}).get("key") or (evaluation or {}).get("evaluation_id"),
+        "evaluation_ref": None if evaluation is None else {
+            "record": "ledger.jsonl",
+            "row": next(index for index, event in enumerate(events(directory), 1) if event == evaluation),
+        },
+        "raw_result": (evaluation or {}).get("result") or {},
+        "full_result": (full or {}).get("result"),
+    }
+    if failure is not None:
+        failure.operation_evidence = evidence
+        raise failure
+    return evidence
 
 
 def _cached_profiles(name: str, history: list[dict]) -> dict[str, dict]:

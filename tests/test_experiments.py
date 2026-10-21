@@ -50,6 +50,11 @@ class ExperimentEvidenceTests(unittest.TestCase):
                 experiments.finish("run", chosen["experiment_id"], **outcome)
                 experiments.finish("run", chosen["experiment_id"], **outcome)
                 with self.assertRaises(OperationRejected):
+                    experiments.finish(
+                        "run", chosen["experiment_id"], **outcome,
+                        promotion={"state": "promoted", "node": "unrelated"},
+                    )
+                with self.assertRaises(OperationRejected):
                     experiments.finish("run", chosen["experiment_id"], **{**outcome, "code": "changed"})
             result = experiments.retrieve("run", chosen["experiment_id"])
             self.assertEqual(result["code"], code)
