@@ -4,7 +4,7 @@
 
 **Blocked by:** 09: Publish early results and resume the same hypothesis; 15: Promote an anchored replacement inside scratch; 19: Show readable packets and nested measured hotspots
 
-**Status:** ready-for-agent
+**Status:** needs-review
 
 **Branch:** `v8/20-tool-replies`
 
@@ -27,11 +27,11 @@
 ## What to build and acceptance
 
 - [ ] 1. Return outcomes, explicit attempts/experiments, operation inputs, named comparison deltas and primary/full/cold state. Label provisional and all-pin verified best separately.
-- [ ] 2. Fix inline fences, cut-off signatures/targets, false invalid-request messages on search misses, irrelevant suggestions and open-goal error wording.
-- [ ] 3. Use actor-local changes instead of unchanged full graph maps. Keep explicit full-state views and stable exact retrieval for every abbreviated item.
-- [ ] 4. Keep notes optional; inherit hypothesis references and harness-known metadata. Scratch returns promotion results from its original call.
-- [ ] 5. Keep the public input schemas unchanged in this slice. The schema/help parity ticket follows separately.
-- [ ] 6. Use the one assigned fast smoke for this slice. Retain the stated behavior requirements; actual-Pi/real-Lean journeys and the broader race matrix are final E2E coverage, not this ticket's gate.
+- [x] 2. Fix inline fences, cut-off signatures/targets, false invalid-request messages on search misses, irrelevant suggestions and open-goal error wording.
+- [x] 3. Use actor-local changes instead of unchanged full graph maps. Keep explicit full-state views and stable exact retrieval for every abbreviated item.
+- [x] 4. Keep notes optional; inherit hypothesis references and harness-known metadata. Scratch returns promotion results from its original call.
+- [x] 5. Keep the public input schemas unchanged in this slice. The schema/help parity ticket follows separately.
+- [x] 6. Use the one assigned fast smoke for this slice. Retain the stated behavior requirements; actual-Pi/real-Lean journeys and the broader race matrix are final E2E coverage, not this ticket's gate.
 
 ## Verify
 
