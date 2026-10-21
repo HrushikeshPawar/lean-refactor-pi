@@ -37,7 +37,8 @@ The current cleanup baseline is committed on `v8/02-current-work` above the exis
 | 21 | [Generate accurate actor-specific schema help](issues/21-schema-help.md) | `v8/21-schema-help` | `v8/20-tool-replies` | 11, 15 |
 | 21b | [Let Sol call delegate, jobs and cancel from Pi](issues/21b-sol-management-tools.md) | `v8/21b-sol-management-tools` | `v8/21-schema-help` | 08, 10, 11, 21 |
 | 22 | [Inspect every concurrent attempt and exact derivation](issues/22-served-evidence.md) | `v8/22-served-evidence` | `v8/21b-sol-management-tools` | 04, 09, 15 |
-| 23 | [Recover strategic context and exact evidence after compaction](issues/23-compaction-resume.md) | `v8/23-compaction-resume` | `v8/22-served-evidence` | 11, 22 |
+| 22b | [Remove Sol's legacy finish, plateau and forced-restart control](issues/22b-no-legacy-stops.md) | `v8/22b-no-legacy-stops` | `v8/22-served-evidence` | 06, 11 |
+| 23 | [Recover strategic context and exact evidence after compaction](issues/23-compaction-resume.md) | `v8/23-compaction-resume` | `v8/22b-no-legacy-stops` | 11, 22 |
 | 24 | [Demonstrate real Lean admission priorities](issues/24-lean-priority-admission.md) | `v8/24-lean-priority-admission` | `v8/23-compaction-resume` | 10, 17 |
 | 25 | [Prepare the owner-run matched-spend pilot](issues/25-matched-pilot.md) | `v8/25-matched-pilot` | `v8/24-lean-priority-admission` | 07, 13, 20, 21, 23, 24 |
 | 26 | [Prepare a separate retention and concurrency experiment](issues/26-resource-efficiency-study.md) | `v8/26-resource-efficiency-study` | `v8/25-matched-pilot` | 24 |

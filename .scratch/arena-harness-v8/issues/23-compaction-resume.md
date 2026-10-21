@@ -8,7 +8,7 @@
 
 **Branch:** `v8/23-compaction-resume`
 
-**Stacked on:** `v8/22-served-evidence`
+**Stacked on:** `v8/22b-no-legacy-stops`
 
 **Read first:** [Harness v8 specification](../../../docs/SPEC-harness-v8.md), Decisions 20, 25, 32, 60; appendix A, F and G. The shared GitButler/testing rules are included below, matching [_common.md](_common.md).
 
@@ -47,13 +47,13 @@ Expected: the named behavior check passes with no actual provider, Pi or Lean pr
 
 ---
 
-<!-- Shared v8 implementation rules. Included in every numbered ticket with 23, v8/23-compaction-resume and v8/22-served-evidence resolved. This template is not an implementation ticket. -->
+<!-- Shared v8 implementation rules. Included in every numbered ticket with 23, v8/23-compaction-resume and v8/22b-no-legacy-stops resolved. This template is not an implementation ticket. -->
 
 ## Before you start
 
 1. Read this whole ticket, the named sections of `docs/SPEC-harness-v8.md`, and the shared contract sections linked above. The current v8 decisions and the user's minimum-fast-test policy are binding. Do not rediscover or reverse settled budget, ownership, lineage or lifecycle decisions.
 2. Read the installed `but` skill before version-control commands. Run `but status` to confirm the named stack parent and identify existing uncommitted work. You are not alone in the checkout. Do not modify or commit another ticket's work. Unrelated dirty files may remain; overlapping uncommitted changes or an unexpected parent must be reported before editing.
-3. If your branch is absent and the named parent is the reviewed current top of the stack, create only this ticket's branch with `but branch new v8/23-compaction-resume --above v8/22-served-evidence`. If it exists, verify its position and continue. Do not create later branches, move existing lower branches, or repair an unexpected stack on your own.
+3. If your branch is absent and the named parent is the reviewed current top of the stack, create only this ticket's branch with `but branch new v8/23-compaction-resume --above v8/22b-no-legacy-stops`. If it exists, verify its position and continue. Do not create later branches, move existing lower branches, or repair an unexpected stack on your own.
 4. Run every Python command through `uv run`, including tests, helper scripts and one-off snippets. Never invoke the virtualenv interpreter directly or use a bare Python interpreter. Use `uv run --no-sync python` with the existing environment for the single focused check in Verify. A cheap targeted baseline is useful when the old behavior is testable. A proposed new selector must be implemented or mapped to an existing equivalent; no tests collected is not a pass. Do not run dependency synchronization or install packages by habit.
 5. If a named interface differs because a predecessor changed it, follow that reviewed interface and record the mapping. If the behavior contract conflicts with current callers, stop and report the concrete conflict instead of broadening the design.
 
@@ -77,7 +77,7 @@ Expected: the named behavior check passes with no actual provider, Pi or Lean pr
 
 ## Version control (GitButler)
 
-Your branch is **`v8/23-compaction-resume`**, directly above **`v8/22-served-evidence`**. Work proceeds one reviewed ticket at a time, oldest to newest. Logical blockers are listed separately from this immediate stack parent.
+Your branch is **`v8/23-compaction-resume`**, directly above **`v8/22b-no-legacy-stops`**. Work proceeds one reviewed ticket at a time, oldest to newest. Logical blockers are listed separately from this immediate stack parent.
 
 - Use `but` for status, diffs, branch creation, commits and history inspection. Never substitute raw Git write commands or run `but setup`.
 - Commit only your own changes. Use `but diff`, copy the current file/hunk IDs, then `but commit -b v8/23-compaction-resume -m "type(scope): summary" <id> <id>`. Never omit IDs when another session has dirty work. Use hunk IDs if one file mixes ownership.
