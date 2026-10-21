@@ -512,7 +512,7 @@ class PlaceholderTests(unittest.TestCase):
                 text._check("demo", body)
 
     def test_a_missing_or_unused_value_raises(self):
-        key = "messages/continuation.focus_material"
+        key = "messages/continuation.skeleton"
         values = _dummies(key)
         self.assertTrue(values)
         missing = dict(values)

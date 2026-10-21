@@ -807,6 +807,13 @@ export default async function arenaExtension(pi: ExtensionAPI) {
       if (turnHadProofAttempt || turnHadNovelContext || turnHadVerifiedImprovement) noWorkTurns = 0;
       else noWorkTurns += 1;
     }
+    // A worker's settlement can cross the shared stop between Sol's own settles. Read it here so the
+    // run ends as limit_reached instead of failing its next dispatch at the gate.
+    if (runDirectory && !limitHit) {
+      const shared = await readSharedSpend(runDirectory);
+      spentUsd = Number(shared.total);
+      limitHit = shared.stopped || limitReached(spentUsd, limit);
+    }
     const stop = stopDecision({
       limitHit,
       providerUnreachable: failure === "transport" && outageStartedAt !== undefined && nextWait(outageAttempt, Number(process.env.ARENA_BACKOFF_MS ?? 2000), outageStartedAt, Date.now(), Number(process.env.ARENA_OUTAGE_LIMIT_MS ?? 600000)).stop,
