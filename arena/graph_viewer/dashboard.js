@@ -11,6 +11,11 @@
   try { tab = localStorage.getItem('arena-dash-tab') || tab; } catch {}
   if (!TABS.some(([id]) => id === tab)) tab = 'tools';
 
+  let hideInit = false;  // shared with the graph page's "Hide original point & rescale"
+  try { hideInit = localStorage.getItem('arena-hideinit') === '1'; } catch {}
+  const lab = c => (data.node_labels || {})[c] || c;
+  const beatRef = (v, fmt) => v == null ? [] : [{y: v, cls: 'beat', label: `to beat ${fmt(v)}`}];
+
   const toolIndex = new Map();
   const toolClass = name => { if (!toolIndex.has(name)) toolIndex.set(name, toolIndex.size % 8); return 'k' + toolIndex.get(name); };
   const badge = (text, kind = '') => `<span class="badge ${kind}">${esc(text)}</span>`;
@@ -40,7 +45,7 @@
   };
   function kpis() {
     const s = data.summary || {}, cost = s.cost || {}, cache = s.cache || {}, best = (s.progress || {}).best_verified_candidate, sub = data.submission;
-    const ref = data.reference || {}, tg = data.target || {}, lab = c => (data.node_labels || {})[c] || c;
+    const ref = data.reference || {}, tg = data.target || {};
     const mine = key => best ? best[key] : null;
     const items = [
       ['Best verified', best ? best.proxy : '—', [best && {t: `${lab(best.candidate)} · ${signed(best.proxy - data.baseline_proxy)} vs original ${data.baseline_proxy}`, c: best.proxy > data.baseline_proxy ? 'good' : ''},
@@ -67,7 +72,7 @@
   };
   const evalTip = (r, key, sw) => {
     const ref = data.reference || {}, score = r.proxy ?? r.estimated_proxy, mark = k => k === key ? {sw, bold: true} : {};
-    return C.tipCard({title: `Evaluation ${r.n} · candidate ${r.candidate}`, sub: `${r.mode} check${r.compiled === false ? ' · did not compile' : ''} · at ${dur(r.t)}`,
+    return C.tipCard({title: `Evaluation ${r.n} · candidate ${lab(r.candidate)}`, sub: `${r.mode} check${r.compiled === false ? ' · did not compile' : ''} · at ${dur(r.t)}`,
       rows: [{label: r.proxy == null ? 'Fast estimate' : 'Score', value: score == null ? '—' : String(score), ...mark('proxy'), ...vs(score, data.baseline_proxy, false)},
              {label: 'Tokens', value: num(r.tokens), ...mark('tokens'), ...vs(r.tokens, ref.tokens, true, 0)},
              {label: 'Heartbeats', value: num(r.heartbeats), ...mark('heartbeats'), ...vs(r.heartbeats, ref.heartbeats, true, 0)}],
@@ -81,15 +86,16 @@
     const ptF = r => [r.n, r.proxy, evalTip(r, 'proxy', 'k0'), r.candidate_id];
     const ptE = r => [r.n, r.estimated_proxy, evalTip(r, 'proxy', 'k2'), r.candidate_id];
     return C.line([
-      {cls: 'k1', step: true, dots: false, points: [[0, data.baseline_proxy], ...rows.filter(r => r.best_verified != null).map(r => [r.n, r.best_verified])]},
-      {cls: 'korig', noLine: true, r: 6, points: [[0, data.baseline_proxy, origTip('Score', data.baseline_proxy)]]},
+      {cls: 'k1', step: true, dots: false, points: [...(hideInit ? [] : [[0, data.baseline_proxy]]), ...rows.filter(r => r.best_verified != null).map(r => [r.n, r.best_verified])]},
+      {cls: 'korig', noLine: true, r: 6, points: hideInit ? [] : [[0, data.baseline_proxy, origTip('Score', data.baseline_proxy)]]},
       {cls: 'k0', noLine: true, r: 5, points: full.map(ptF)},
       {cls: 'k2', noLine: true, hollow: true, r: 4, points: fast.map(ptE)}],
-      {refs: [{y: data.baseline_proxy, cls: 'base', label: ''}], pointLabels: [{x: 0, y: data.baseline_proxy, text: `original ${data.baseline_proxy}`, dy: -12}],
-       extendTo: end, xMin: 0, xMax: end, xTime: false, intX: true, better: 'max', yMax: 100, yMin: 0, height: spark ? 64 : 360, spark,
-       fmtY: C.fmt.score, yLabel: 'proxy score (0 to 100)', xLabel: 'evaluation number (0 = original proof)',
-       best: bestFull && {x: bestFull.n, y: bestFull.proxy, text: `best ${bestFull.proxy} (${bestFull.candidate})`},
-       legend: [['korig', 'original proof (evaluation 0)'], ['k0', 'full evaluation, all versions checked'], ['k2', 'fast estimate (hollow)'], ['k1', 'best verified so far']], label: 'score by evaluation'});
+      {refs: [...(hideInit ? [] : [{y: data.baseline_proxy, cls: 'base', label: ''}]), ...beatRef((data.target || {}).proxy, v => v.toFixed(2))], includeRefs: true,
+       pointLabels: hideInit ? [] : [{x: 0, y: data.baseline_proxy, text: `original ${data.baseline_proxy}`, dy: -12}],
+       extendTo: end, xMin: hideInit ? 1 : 0, xMax: end, xTime: false, intX: true, better: 'max', yMax: 100, yMin: 0, height: spark ? 64 : 360, spark,
+       fmtY: C.fmt.score, yLabel: 'proxy score (0 to 100)', xLabel: hideInit ? 'evaluation number (original hidden)' : 'evaluation number (0 = original proof)',
+       best: bestFull && {x: bestFull.n, y: bestFull.proxy, text: `best ${bestFull.proxy} (${lab(bestFull.candidate)})`},
+       legend: [...(hideInit ? [] : [['korig', 'original proof (evaluation 0)']]), ['k0', 'full evaluation, all versions checked'], ['k2', 'fast estimate (hollow)'], ['k1', 'best verified so far']], label: 'score by evaluation'});
   }
 
   const PARTS = [['cache_read', 'Cache read', 'cp0'], ['input', 'Input', 'cp1'], ['cache_write', 'Cache write', 'cp2'], ['output', 'Output', 'cp3']];
@@ -119,18 +125,19 @@
   function metricHtml(key, ref, unit, cls, spark) {
     const ok = data.scores.filter(r => r.compiled && r[key] != null), end = evalEnd();
     // The original proof is evaluation 0, so the best-so-far line starts from it.
-    let low = ref ?? Infinity; const steps = ref != null ? [[0, ref]] : [];
+    let low = ref ?? Infinity; const steps = ref != null && !hideInit ? [[0, ref]] : [];
     for (const r of ok) { low = Math.min(low, r[key]); steps.push([r.n, low]); }
     const lowest = ok.reduce((m, r) => !m || r[key] < m[key] ? r : m, null);
     const pt = r => [r.n, r[key], evalTip(r, key, cls), r.candidate_id];
     return C.line([
       {cls, step: true, dots: false, points: steps},
-      {cls: 'korig', noLine: true, r: 6, points: ref != null ? [[0, ref, origTip(unit[0].toUpperCase() + unit.slice(1), num(ref))]] : []},
+      {cls: 'korig', noLine: true, r: 6, points: ref != null && !hideInit ? [[0, ref, origTip(unit[0].toUpperCase() + unit.slice(1), num(ref))]] : []},
       {cls, noLine: true, r: 4, points: ok.filter(r => r.mode === 'full').map(pt)},
       {cls, noLine: true, r: 4, hollow: true, points: ok.filter(r => r.mode !== 'full').map(pt)}],
-      {refs: ref != null ? [{y: ref, cls: 'base', label: ''}] : [], pointLabels: ref != null ? [{x: 0, y: ref, text: `original ${num(ref)}`, dy: 24}] : [],
-       includeRefs: true, extendTo: end, xMin: 0, xMax: end, xTime: false, intX: true, better: 'min', yMin: 0, height: spark ? 64 : 360, spark, fmtY: C.fmt.num,
-       yLabel: unit, xLabel: 'evaluation number (0 = original proof)', best: lowest && {below: true, x: lowest.n, y: lowest[key], text: `${num(lowest[key])} (${lowest.candidate})`},
+      {refs: [...(ref != null && !hideInit ? [{y: ref, cls: 'base', label: ''}] : []), ...beatRef((data.target || {})[key === 'tokens' ? 'tokens' : 'heartbeats'], num)],
+       pointLabels: ref != null && !hideInit ? [{x: 0, y: ref, text: `original ${num(ref)}`, dy: 24}] : [],
+       includeRefs: true, extendTo: end, xMin: hideInit ? 1 : 0, xMax: end, xTime: false, intX: true, better: 'min', yMin: 0, height: spark ? 64 : 360, spark, fmtY: C.fmt.num,
+       yLabel: unit, xLabel: hideInit ? 'evaluation number (original hidden)' : 'evaluation number (0 = original proof)', best: lowest && {below: true, x: lowest.n, y: lowest[key], text: `${num(lowest[key])} (${lab(lowest.candidate)})`},
        legend: [['korig', 'original proof'], [cls, 'full evaluation (hollow = fast)']], label: unit});
   }
 
@@ -154,7 +161,9 @@
             spark: spendHtml(true), full: spendHtml(false), modalSub: `${money(sp.spent_usd)} spent · cumulative, stacked by billed component`, table: spendTable()};
   }
   const WIDGETS = ['score', 'tokens', 'hb', 'spend'];
+  function syncToggle() { const t = $('hide-init'); if (t) t.checked = hideInit; }
   function widgets() {
+    syncToggle();
     $('widgets').innerHTML = WIDGETS.map(k => { const w = widgetInfo(k);
       return `<button type="button" class="widget" data-w="${k}" aria-label="Open the ${esc(w.title)} chart"><div class="w-head"><span class="w-title">${esc(w.title)}</span><span class="w-open" aria-hidden="true">&#10530;</span></div>
         <div class="w-val${w.good ? ' good' : ''}">${esc(w.value)} <span class="w-sup">${esc(w.sup)}</span></div><div class="w-sub">${esc(w.sub)}</div><div class="w-chart">${w.spark}</div></button>`; }).join('');
@@ -169,7 +178,7 @@
     const cell = (v, base, lower, d) => v == null ? '—' : `${num(v, d)}${base != null ? ` <span class="${(lower ? v < base : v > base) ? 'good' : v === base ? 'muted' : 'bad'}">${signed(v - base, d)}</span>` : ''}`;
     return `<table><thead><tr><th class="num">#</th><th>candidate</th><th>mode</th><th class="num">score</th><th class="num">tokens</th><th class="num">heartbeats</th><th>compiled</th><th class="num">at</th></tr></thead><tbody>
       <tr><td class="num">0</td><td>original proof</td><td>reference</td><td class="num">${num(data.baseline_proxy, 2)}</td><td class="num">${num(ref.tokens)}</td><td class="num">${num(ref.heartbeats)}</td><td></td><td></td></tr>
-      ${rows.map(r => { const v = r.proxy ?? r.estimated_proxy; return `<tr class="click" data-cand="${esc(r.candidate_id)}"><td class="num">${r.n}</td><td>${esc(r.candidate)}</td><td>${esc(r.mode)}</td><td class="num">${v == null ? '—' : cell(v, data.baseline_proxy, false, 2)}${r.proxy == null && v != null ? ' <span class="muted">est.</span>' : ''}</td>
+      ${rows.map(r => { const v = r.proxy ?? r.estimated_proxy; return `<tr class="click" data-cand="${esc(r.candidate_id)}"><td class="num">${r.n}</td><td>${esc(lab(r.candidate))}</td><td>${esc(r.mode)}</td><td class="num">${v == null ? '—' : cell(v, data.baseline_proxy, false, 2)}${r.proxy == null && v != null ? ' <span class="muted">est.</span>' : ''}</td>
         <td class="num">${cell(r.tokens, ref.tokens, true, 0)}</td><td class="num">${cell(r.heartbeats, ref.heartbeats, true, 0)}</td><td>${r.compiled ? 'yes' : badge('no', 'bad')}</td><td class="num">${dur(r.t)}</td></tr>`; }).join('')}</tbody></table>`;
   }
   function spendTable() {
@@ -282,7 +291,7 @@
   function evaluationsPanel() {
     const rows = data.scores;
     $('panel').innerHTML = `<div class="card"><div class="head"><h2>Evaluations (${rows.length})</h2></div><div class="scroll"><table><thead><tr><th>t</th><th>candidate</th><th>mode</th><th class="num">proxy</th><th class="num">est.</th><th class="num">tokens</th><th class="num">heartbeats</th><th>compiled</th></tr></thead><tbody>
-      ${rows.map(r => `<tr><td>${dur(r.t)}</td><td>${esc(r.candidate)}</td><td>${esc(r.mode)}</td><td class="num">${r.proxy ?? '—'}</td><td class="num">${r.estimated_proxy ?? '—'}</td><td class="num">${num(r.tokens)}</td><td class="num">${num(r.heartbeats)}</td><td>${r.compiled ? 'yes' : badge('no', 'bad')}</td></tr>`).join('')}</tbody></table></div></div>`;
+      ${rows.map(r => `<tr><td>${dur(r.t)}</td><td>${esc(lab(r.candidate))}</td><td>${esc(r.mode)}</td><td class="num">${r.proxy ?? '—'}</td><td class="num">${r.estimated_proxy ?? '—'}</td><td class="num">${num(r.tokens)}</td><td class="num">${num(r.heartbeats)}</td><td>${r.compiled ? 'yes' : badge('no', 'bad')}</td></tr>`).join('')}</tbody></table></div></div>`;
   }
 
   function spendPanel() {
@@ -349,6 +358,11 @@
   }
   function selectTab(id) { tab = id; try { localStorage.setItem('arena-dash-tab', tab); } catch {} renderPanel(); }
   function openTool(k) { selectedTool = k; selectTab('tools'); toolsTimeline(); $('drill').scrollIntoView({behavior: 'smooth', block: 'start'}); }
+  $('hide-init').onchange = e => {
+    hideInit = e.target.checked;
+    try { localStorage.setItem('arena-hideinit', hideInit ? '1' : '0'); } catch {}
+    safely(widgets); safely(renderModal);
+  };
   function safely(fn) { try { fn(); } catch (error) { console.error(error); } }  // one broken card must never blank the others
 
   function render() {
