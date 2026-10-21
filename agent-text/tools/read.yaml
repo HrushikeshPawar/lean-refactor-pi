@@ -4,6 +4,6 @@ params:
   handle: "Declaration handle from search, e.g. decl:Nat.add_comm, or file lines, e.g. ArkLib/Foo.lean:120-150; or decl:Nat.add_comm:20-50."
   node: "Node identifier for node views."
   hole: "Hole identifier for its goal view."
-  view: "Choose source, prices, diff, outline, tree (cost per tactic and stated term), or map."
+  view: "Choose source, prices, diff, outline, tree or tree:<positive page> (cost per tactic and stated term), or map."
   against: "Comparison node for the diff view."
   step: "Step id; outline view gives its goals."

@@ -765,7 +765,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     node: Type.Optional(Type.String({ description: await renderText("tools/read.params.node") })),
     hole: Type.Optional(Type.String({ description: await renderText("tools/read.params.hole") })),
     view: Type.Optional(Type.Union([Type.Literal("source"), Type.Literal("prices"), Type.Literal("diff"),
-      Type.Literal("outline"), Type.Literal("tree"), Type.Literal("map")], { description: await renderText("tools/read.params.view") })),
+      Type.Literal("outline"), Type.Literal("tree"), Type.String({ pattern: "^tree:[1-9][0-9]*$" }), Type.Literal("map")], { description: await renderText("tools/read.params.view") })),
     against: Type.Optional(Type.String({ description: await renderText("tools/read.params.against") })),
     step: Type.Optional(Type.String({ description: await renderText("tools/read.params.step") })),
   });
