@@ -4,7 +4,7 @@
 
 **Blocked by:** 06 (shared stop), 11 (event waiting / no_pending_work continuation)
 
-**Status:** needs-review
+**Status:** done
 
 **Branch:** `v8/22b-no-legacy-stops`
 
@@ -42,6 +42,22 @@
 - [x] 4. Dead protocol actions, constants and templates for the removed behaviors are deleted, not flagged off.
 - [x] 5. Update `control.test.ts` and the five `tests/test_graph.py::StallCampaignTests` cases. Those tests also need `committed_operations=campaign.committed_operation_ids(...)` in their `Graph.from_history` calls (stale since v8-16; see the 22 review closure). Their assertions about a forced focus row change to "no focus row".
 - [x] 6. One focused smoke plus the whole touched test files. A real Pi run reaching the $2.50 stop is final E2E coverage.
+
+## Review closure
+
+Commit `stw` removes every below-budget stop and forced action. `stopDecision` returns only `limit_reached`, `usage_limit`, `provider_unreachable`, `error_loop` or null, and its branch is the handler's only `continue: false`. No references remain to the deleted actions or constants. `_check_stall` appends the stall audit row without a focus row. Worker assignment settlement is untouched, because workers run with `ARENA_AUTOCONTINUE=0`. Failed turns stay bounded: transport by the outage limit, model by the error streak, usage_limit immediately.
+
+Claude review fix in the closing commit:
+- `limitHit` was refreshed only by Sol's own settles. A worker crossing the shared stop made Sol's next dispatch fail at the gate, retry as a model failure, and end as `error_loop` instead of `limit_reached`. The turn-end handler now reads the shared total first.
+- `PlaceholderTests` used the deleted `continuation.focus_material` and now uses `continuation.skeleton`.
+
+Checks: `node --test extensions/*.test.ts` passes 40/40. `tests/test_graph.py::StallCampaignTests`, `HiddenStopTests` and `PlaceholderTests` pass. The remaining `tests/test_text.py` failures are older (long literals, over-limit packet, packet order).
+
+For the final E2E and cleanup pass, not fixed here:
+- The slow `tests/test_runner.py` cases (:376, :896-905, :953, :1101), `tests/test_golden_session.py:109` and the comment at `tests/test_campaign_handoff_slow.py:42` still expect `finished`/`no_work_fallback`. Rewrite them as "continues until the cost stop".
+- Dead v7 text and code: `agent-text/tools/finish.yaml`, `numbers.yaml::finish_remaining_pct`, the `finish` action in `arena/cli/protocol.py`, `seed.py` `HIDDEN_TOOL`, and `run.py::_stopped_on_purpose` listing `finished`.
+- An operator abort is classified as a model failure (it backs off, then `error_loop`) rather than a distinct operator reason inside the handler.
+- Repeated zero-cost turns with unknown usage never advance the actual total; consider an accounting-failure stop on a streak of unknown-usage settles (appendix D).
 
 ## Verify
 
