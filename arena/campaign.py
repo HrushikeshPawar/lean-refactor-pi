@@ -1179,7 +1179,9 @@ def _construction_relation(
         )
         exact = True
     elif alternate:
-        return None
+        # An unanchored repeat is still this actor's submitted attempt. Its text
+        # does not prove that the caller repeated an earlier exact construction.
+        return _construction_payload("root", [], None, named_parent, False)
     else:
         edge_type = edge.get("type")
         sources = list(edge.get("from") or [])
@@ -1254,7 +1256,8 @@ def _record_construction(
                 data = event.get("data") or {}
                 if data.get("construction_digest"):
                     prior.add(data["construction_digest"])
-        fresh_derivation = digest not in prior
+        # Only an exact construction is lineage; an unanchored repeat is an attempt alone.
+        fresh_derivation = payload["exact"] and digest not in prior
     else:
         fresh_derivation = False
     identity = actor_ids(directory.name)
