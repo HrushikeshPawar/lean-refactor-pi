@@ -383,7 +383,8 @@ class ParseTests(unittest.TestCase):
         self.assertIn("file line 12", packet)
         self.assertNotRegex(packet, r"S:-\d+")
         self.assertIn("decl:Proj.reuseLemma", packet)
-        self.assertIn("goal:s1", packet)
+        self.assertNotIn("goal:s1", packet)
+        self.assertIn("goal(node=<original proof node>, line=<proof line>)", packet)
         self.assertIn("1 captured of 3", packet)
         self.assertIn("Extraction complete", packet)
         self.assertLess(packet.count("(unavailable)"), 2)
@@ -393,6 +394,81 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(coverage["goals_captured"], 1)
         self.assertEqual(coverage["goals_expected"], 3)
         self.assertGreater(coverage["display_clipped"], 0)
+
+        with self.subTest("complete scoped multiline conclusions"):
+            goal = "case first\nh : Shared\n⊢ firstTarget\n  continuation one\ncase second\nh : Shared\n⊢ secondTarget\n  continuation two"
+            shown, clipped = context._show_goal(goal, 10)
+            self.assertTrue(clipped)
+            for fragment in ("case first", "case second", "firstTarget\n  continuation one", "secondTarget\n  continuation two"):
+                self.assertIn(fragment, shown)
+            single, _ = context._show_goal("h : Shared\n⊢ result", 100)
+            self.assertEqual(single.count("h : Shared"), 1)
+
+        with self.subTest("coverage includes steps beyond display cap and rejects empty states"):
+            long_proof = "theorem long : True := by\n" + "  exact trivial\n" * 45
+            steps = context.split_steps(long_proof)
+            inventory = {"complete": True, "goal": [
+                {"proof_line": step.first_line, "text": "⊢ True"} for step in steps
+            ]}
+            inventory["goal"][0]["text"] = ""
+            coverage = context.context_coverage(inventory, long_proof)
+            self.assertEqual(coverage["goals_expected"], 45)
+            self.assertEqual(coverage["goals_captured"], 44)
+            self.assertEqual(coverage["goals_omitted"], 1)
+            self.assertEqual(coverage["goals_displayed"], context.LIMITS["goals"])
+            self.assertEqual(coverage["goal_display_omitted"], 44 - context.LIMITS["goals"])
+            body = context._goal_section(inventory, long_proof)
+            title = context.template("packet/sections.titles.goals").strip()
+            fitted = context._fit_sections([(title, body)], len(context._join_sections([(title, body)])) - 25)
+            fitted_text = context._join_sections(fitted)
+            self.assertIn("44 captured of 45", fitted_text)
+            self.assertIn("Packet fitting omitted", fitted_text)
+            self.assertLess(len(fitted[0][1]), len(body))
+
+        with self.subTest("restart fitting removes whole multiline goal entries"):
+            inventory = {"complete": True, "goal": [
+                {"proof_line": step.first_line,
+                 "text": f"⊢ target{index}\n  continuation{index}"}
+                for index, step in enumerate(context.split_steps(long_proof))
+            ]}
+            body = context._goal_section(inventory, long_proof)
+            content = title + "\n" + "\n".join(body)
+            for cut in (1, 25, 70, 120, 150):
+                fitted = campaign._kickoff_within([(title, content)], len(content) - cut)
+                for index in range(context.LIMITS["goals"]):
+                    if f"⊢ target{index}\n" in fitted:
+                        self.assertIn(f"⊢ target{index}\n  continuation{index}", fitted)
+                self.assertIn("45 captured of 45", fitted)
+                self.assertIn("Packet fitting omitted", fitted)
+
+        with self.subTest("wrapper offsets preserve external lines and reject wrapper syntax"):
+            records = "\n".join("ARENA_CTX " + json.dumps({
+                "kind": "source", "name": name, "line": line, "column": 0, "decl": "def",
+                "module": "this file", "tag": "helper",
+            }) for name, line in (("earlier", 12), ("wrapper", 30), ("target", 122)))
+            mapped = context.parse_context(records, 100, 20, (2, 0), insertion_line=18)
+            earlier, wrapper, target = mapped["source"]
+            self.assertEqual(earlier["source_line"], 12)
+            self.assertEqual(earlier["origin"], "external")
+            self.assertEqual(wrapper["origin"], "unknown")
+            self.assertNotIn("source_line", wrapper)
+            self.assertNotIn("proof_line", wrapper)
+            self.assertEqual(target["proof_line"], 3)
+            self.assertEqual(target["origin"], "proof")
+            rendered = "\n".join(context._used_section(mapped))
+            self.assertIn("U:?", rendered)
+            self.assertIn("file line 12", rendered)
+
+        with self.subTest("strict implicit binder default precedes actual proof"):
+            strict = "theorem t ⦃h : Nat := by omega⦄ : True := by trivial"
+            self.assertEqual(context._proof_boundary(strict, 1), (1, strict.rindex(":=")))
+
+        with self.subTest("legacy type cache does not silently drop the ninth target"):
+            legacy = {"type": [{key: value for key, value in item.items() if key != "role"}
+                               for item in parsed["type"]]}
+            types = "\n".join(context._types_section(legacy))
+            self.assertIn("decl:Proj.hammingClose", types)
+            self.assertIn("Unknown statement roles: 17", types)
 
 
 class RankingTests(unittest.TestCase):

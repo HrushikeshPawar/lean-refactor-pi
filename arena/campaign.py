@@ -1744,7 +1744,21 @@ def _kickoff_within(sections: list[tuple[str, str]], limit: int) -> str:
     for title, content in sections:
         head = f"{title}\n"
         if title and content.startswith(head):
-            parts.append((title, content[len(head) :].split("\n")))
+            lines = content[len(head) :].split("\n")
+            if title == context.template("packet/sections.titles.goals").strip():
+                # Restore the atomic per-step entries flattened by packet serialization.
+                goal_pattern = re.escape(context.template("packet/sections.fixed.goal"))
+                for field, pattern in (("step", r"s\d+"), ("line", r"\d+"), ("text", ".*")):
+                    goal_pattern = goal_pattern.replace(re.escape("{" + field + "}"), pattern)
+                coverage_prefix = context.template("packet/sections.fixed.goal_coverage").split("{")[0]
+                entries: list[str] = []
+                for line in lines:
+                    if not entries or re.fullmatch(goal_pattern, line) or line.startswith(coverage_prefix):
+                        entries.append(line)
+                    else:
+                        entries[-1] += "\n" + line
+                lines = entries
+            parts.append((title, lines))
         else:
             parts.append(("", content.split("\n")))
     fitted = context._fit_sections(parts, limit)
