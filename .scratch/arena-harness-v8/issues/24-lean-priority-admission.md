@@ -4,7 +4,7 @@
 
 **Blocked by:** 10: Admit two workers and cancel stale work cleanly; 17: Distinguish proof failures from inconclusive cold checks
 
-**Status:** ready-for-agent
+**Status:** needs-review
 
 **Branch:** `v8/24-lean-priority-admission`
 
@@ -26,12 +26,12 @@
 
 ## What to build and acceptance
 
-- [ ] 1. Initially allow one DeepSeek Lean compilation. Demonstrate Sol foreground and promising full checks ahead of speculative worker experiments, with opportunistic background work last.
-- [ ] 2. Do not infer priority from lane labels or attempt unsafe preemption. Show how already-running checks yield/complete safely and queued work is selected.
-- [ ] 3. Preserve warm-state identity, demand-driven allocation, the 5 GiB safeguard, timeout recovery and checker cleanup. Inject resource readings in deterministic tests.
-- [ ] 4. Compete foreground, worker and full-check requests with recorded dispatch order and memory-denial/inconclusive outcomes; tests do not read other live runs.
-- [ ] 5. Use the one assigned fast smoke for this slice. Retain the stated behavior requirements; actual-Pi/real-Lean journeys and the broader race matrix are final E2E coverage, not this ticket's gate.
-- [ ] 6. Keep more-worker/retention optimization in its separate experiment, not speculative new defaults.
+- [x] 1. Initially allow one DeepSeek Lean compilation. Demonstrate Sol foreground and promising full checks ahead of speculative worker experiments, with opportunistic background work last.
+- [x] 2. Do not infer priority from lane labels or attempt unsafe preemption. Show how already-running checks yield/complete safely and queued work is selected.
+- [x] 3. Preserve warm-state identity, demand-driven allocation, the 5 GiB safeguard, timeout recovery and checker cleanup. Inject resource readings in deterministic tests.
+- [x] 4. Compete foreground, worker and full-check requests with recorded dispatch order and memory-denial/inconclusive outcomes; tests do not read other live runs.
+- [x] 5. Use the one assigned fast smoke for this slice. Retain the stated behavior requirements; actual-Pi/real-Lean journeys and the broader race matrix are final E2E coverage, not this ticket's gate.
+- [x] 6. Keep more-worker/retention optimization in its separate experiment, not speculative new defaults.
 
 ## Verify
 
