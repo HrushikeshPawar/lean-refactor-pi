@@ -412,7 +412,11 @@ class GraphCampaignTests(FakeRunCase):
 
 class StallCampaignTests(FakeRunCase):
     def test_stall_threshold_rejects_an_invalid_environment_value(self):
-        graph = Graph.from_history(campaign.events(self.directory), campaign._proof_reader(self.directory))
+        graph = Graph.from_history(
+            campaign.events(self.directory),
+            campaign._proof_reader(self.directory),
+            committed_operations=campaign.committed_operation_ids(self.directory),
+        )
         with (
             patch.dict("os.environ", {"ARENA_STALL_M": "zero"}),
             self.assertRaisesRegex(ValueError, "stall threshold must be a positive integer"),
@@ -448,7 +452,11 @@ class StallCampaignTests(FakeRunCase):
         add(target, "r2", 5, None)
         add("b" * 64, "r1", 4, root)
         add("c" * 64, "r1", 3, root)
-        graph = Graph.from_history(campaign.events(self.directory), campaign._proof_reader(self.directory))
+        graph = Graph.from_history(
+            campaign.events(self.directory),
+            campaign._proof_reader(self.directory),
+            committed_operations=campaign.committed_operation_ids(self.directory),
+        )
         with patch.dict("os.environ", {"ARENA_STALL_M": "2", "ARENA_STALL_TARGET": "map_only"}):
             campaign._check_stall(self.directory, graph, {"c" * 64})
         history = campaign.events(self.directory)
@@ -467,15 +475,18 @@ class StallCampaignTests(FakeRunCase):
 
         add("d" * 64, "r1", 2, "c" * 64)
         add("e" * 64, "r1", 1, "d" * 64)
-        graph = Graph.from_history(campaign.events(self.directory), campaign._proof_reader(self.directory))
+        graph = Graph.from_history(
+            campaign.events(self.directory),
+            campaign._proof_reader(self.directory),
+            committed_operations=campaign.committed_operation_ids(self.directory),
+        )
         with patch.dict("os.environ", {"ARENA_STALL_M": "2", "ARENA_STALL_TARGET": "best_other_cell"}):
             campaign._check_stall(self.directory, graph, {"d" * 64, "e" * 64})
         history = campaign.events(self.directory)
-        focus = [item for item in history if item.get("kind") == "focus" and item.get("reason") == "stall"][-1]
-        self.assertEqual(
-            (focus["proof_id"], focus["reason"], focus["root"], focus["cell"]), (target, "stall", root, "B")
+        self.assertFalse(any(item.get("kind") == "focus" and item.get("reason") == "stall" for item in history))
+        replayed = Graph.from_history(
+            history, campaign._proof_reader(self.directory), committed_operations=campaign.committed_operation_ids(self.directory)
         )
-        replayed = Graph.from_history(history, campaign._proof_reader(self.directory))
         self.assertEqual(graph_module.stall_fires(replayed, 2), graph_module.stall_fires(graph, 2))
         self.assertEqual(
             replayed.stall_events,
@@ -484,13 +495,7 @@ class StallCampaignTests(FakeRunCase):
                 {"root": root, "count": 2, "mode": "best_other_cell", "target": target},
             ],
         )
-        self.assertEqual(
-            campaign.state("logic")["updates"][-1],
-            {
-                "seq": next(index for index, event in enumerate(history) if event == focus),
-                "text": "Focus set to n2: archive cell B, score 5, 1 nodes in the cell.",
-            },
-        )
+        self.assertFalse(campaign.state("logic")["updates"])
 
     def test_stall_without_an_other_cell_is_audited_once_without_focus_or_update(self):
         root = campaign._candidate_ids(campaign.events(self.directory))[0]
@@ -517,7 +522,11 @@ class StallCampaignTests(FakeRunCase):
             filed.add(proof_id)
             parent = proof_id
 
-        graph = Graph.from_history(campaign.events(self.directory), campaign._proof_reader(self.directory))
+        graph = Graph.from_history(
+            campaign.events(self.directory),
+            campaign._proof_reader(self.directory),
+            committed_operations=campaign.committed_operation_ids(self.directory),
+        )
         expected_fires = graph_module.stall_fires(graph, 2)
         with patch.dict("os.environ", {"ARENA_STALL_M": "2", "ARENA_STALL_TARGET": "best_other_cell"}):
             campaign._check_stall(self.directory, graph, filed)
@@ -532,7 +541,9 @@ class StallCampaignTests(FakeRunCase):
             [{"root": root, "count": 2, "mode": "best_other_cell", "target": None}],
         )
         self.assertFalse(campaign.state("logic")["updates"])
-        replayed = Graph.from_history(history, campaign._proof_reader(self.directory))
+        replayed = Graph.from_history(
+            history, campaign._proof_reader(self.directory), committed_operations=campaign.committed_operation_ids(self.directory)
+        )
         self.assertEqual(graph_module.stall_fires(replayed, 2), expected_fires)
         self.assertEqual(
             replayed.stall_events,
@@ -554,7 +565,11 @@ class StallCampaignTests(FakeRunCase):
         )
         campaign._append(self.directory, {"kind": "edge", "proof_id": target, "from": []})
         campaign._append(self.directory, {"kind": "route", "proof_id": target, "route": "r2"})
-        later_graph = Graph.from_history(campaign.events(self.directory), campaign._proof_reader(self.directory))
+        later_graph = Graph.from_history(
+            campaign.events(self.directory),
+            campaign._proof_reader(self.directory),
+            committed_operations=campaign.committed_operation_ids(self.directory),
+        )
         with patch.dict("os.environ", {"ARENA_STALL_M": "2", "ARENA_STALL_TARGET": "best_other_cell"}):
             campaign._check_stall(self.directory, later_graph, {target})
         later_history = campaign.events(self.directory)
@@ -589,7 +604,11 @@ class StallCampaignTests(FakeRunCase):
             add(proof_id, "r1", 0, parent)
             parent = proof_id
 
-        graph = Graph.from_history(campaign.events(self.directory), campaign._proof_reader(self.directory))
+        graph = Graph.from_history(
+            campaign.events(self.directory),
+            campaign._proof_reader(self.directory),
+            committed_operations=campaign.committed_operation_ids(self.directory),
+        )
         with patch.dict("os.environ", {"ARENA_STALL_M": "12", "ARENA_STALL_TARGET": "best_other_cell"}):
             campaign._check_stall(self.directory, graph, {f"{index:064x}" for index in range(1, 25)})
 
@@ -597,11 +616,10 @@ class StallCampaignTests(FakeRunCase):
         stall_events = [event for event in history if event.get("kind") == "stall"]
         self.assertEqual([(event["root"], event["count"]) for event in stall_events], [(root, 12), (root, 12)])
         self.assertEqual([event["target"] for event in stall_events], ["a" * 64, "a" * 64])
-        self.assertEqual(
-            len([event for event in history if event.get("kind") == "focus" and event.get("reason") == "stall"]),
-            1,
+        self.assertFalse(any(event.get("kind") == "focus" and event.get("reason") == "stall" for event in history))
+        replayed = Graph.from_history(
+            history, campaign._proof_reader(self.directory), committed_operations=campaign.committed_operation_ids(self.directory)
         )
-        replayed = Graph.from_history(history, campaign._proof_reader(self.directory))
         self.assertEqual(graph_module.stall_fires(replayed, 12), graph_module.stall_fires(graph, 12))
         self.assertEqual(
             replayed.stall_events,
@@ -702,7 +720,9 @@ class StallCampaignTests(FakeRunCase):
             )
         self.assertEqual(splice["edge"]["type"], "edited_from")
         current_graph = Graph.from_history(
-            campaign.events(self.directory), lambda ident: (self.directory / "proofs" / f"{ident}.lean").read_text()
+            campaign.events(self.directory),
+            lambda ident: (self.directory / "proofs" / f"{ident}.lean").read_text(),
+            committed_operations=campaign.committed_operation_ids(self.directory),
         )
         splice_event = next(
             item
@@ -735,7 +755,9 @@ class StallCampaignTests(FakeRunCase):
         edges_before = len([item for item in campaign.events(self.directory) if item.get("kind") == "edge"])
         self.evaluate(proof, mode="full")
         graph = Graph.from_history(
-            campaign.events(self.directory), lambda ident: (self.directory / "proofs" / f"{ident}.lean").read_text()
+            campaign.events(self.directory),
+            lambda ident: (self.directory / "proofs" / f"{ident}.lean").read_text(),
+            committed_operations=campaign.committed_operation_ids(self.directory),
         )
         self.assertEqual(len(graph.nodes), 2)
         self.assertEqual(

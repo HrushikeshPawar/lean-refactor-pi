@@ -37,7 +37,6 @@ from arena.engine import (
 )
 from arena.graph import (
     FILING_MIN_SIMILARITY,
-    Cell,
     Graph,
     Node,
     archive,
@@ -48,7 +47,6 @@ from arena.graph import (
     measured_parent,
     merge_steps,
     merge_text,
-    quality,
     ranked_frontier,
     similarity,
     splice_text,
@@ -1502,7 +1500,6 @@ def _check_stall(directory: Path, graph: Graph, newly_filed: set[str]) -> None:
     mode = os.environ.get("ARENA_STALL_TARGET", "best_other_cell")
     if mode not in ("best_other_cell", "least_visited", "map_only"):
         raise ValueError(text.render("messages/errors.stall_target", mode=mode))
-    current_focus = graph.focus
     for fired in stall_fires(graph, threshold):
         if fired["after"] not in newly_filed:
             continue
@@ -1517,52 +1514,9 @@ def _check_stall(directory: Path, graph: Graph, newly_filed: set[str]) -> None:
                 "target": target.node.proof_id if target else None,
             },
         )
-        if target is None or target.node.proof_id == current_focus:
-            continue
-        _append(
-            directory,
-            {
-                "kind": "focus",
-                "proof_id": target.node.proof_id,
-                "reason": "stall",
-                "root": fired["root"],
-                "cell": target.letter,
-                "visits": target.visits,
-            },
-        )
-        current_focus = target.node.proof_id
 
 
-STALL_RESTART_TRIES = 2  # candidates after a stall nudge, same route and no new best, before the harness restarts
 ROUTE_TALLY_MIN = 8  # variants on one route, none above the best, before compile replies show the tally
-
-
-def _route_nodes_after_stall(history: list[dict], graph: Graph) -> tuple[list[Node], float | None]:
-    """Nodes filed after the last stall event, and the best score among earlier nodes."""
-    stall_at = max((i for i, item in enumerate(history) if item.get("kind") == "stall"), default=None)
-    if stall_at is None:
-        return [], None
-    by_id = {node.proof_id: node for node in graph.nodes}
-    before_ids = [e["proof_id"] for e in history[:stall_at] if e.get("kind") == "route"]
-    after_ids = [e["proof_id"] for e in history[stall_at:] if e.get("kind") == "route"]
-    if any(e.get("kind") == "restart" for e in history[stall_at:]):
-        return [], None
-    before = [by_id[i].score for i in before_ids if i in by_id and by_id[i].score is not None]
-    return [by_id[i] for i in after_ids if i in by_id], max(before, default=None)
-
-
-def stall_due(run_id: str) -> bool:
-    """True when STALL_RESTART_TRIES nodes were filed after the last stall nudge, all on one route, none above the
-    best from before it, and no restart since."""
-    directory = run_dir(run_id)
-    history = events(directory)
-    graph = Graph.from_history(
-        history, _proof_reader(directory), committed_operations=committed_operation_ids(directory)
-    )
-    after, best = _route_nodes_after_stall(history, graph)
-    if len(after) < STALL_RESTART_TRIES or len({node.route for node in after}) != 1:
-        return False
-    return not any(node.score is not None and (best is None or node.score > best) for node in after)
 
 
 def route_tally(run_id: str) -> str | None:
@@ -1584,162 +1538,6 @@ def route_tally(run_id: str) -> str | None:
     if len(members) < ROUTE_TALLY_MIN:
         return None
     return text.render("messages/phase.route_tally", label=route, variants=len(members))
-
-
-def _best_first(cells: list[Cell]) -> list[Cell]:
-    return sorted(cells, key=lambda cell: (-(quality(cell.node) or 0.0), cell.letter))
-
-
-def _no_work_candidates(graph: Graph, current_route: str | None) -> list[Node]:
-    """Starting points in order: best cells of other routes, the original, then other closed nodes by quality."""
-    others = [
-        cell.node
-        for cell in _best_first(archive(graph))
-        if (current_route is None or cell.route != current_route) and not routes.is_draft(cell.node.proof_text)
-    ]
-    original = [node for node in graph.nodes if node.origin == "reference"]
-    closed = sorted(
-        (node for node in graph.nodes if node.status == "closed" and not routes.is_draft(node.proof_text)),
-        key=lambda node: (-(quality(node) or 0.0), node.id),
-    )
-    unique: dict[str, Node] = {}
-    for node in [*others, *original, *closed]:
-        unique.setdefault(node.proof_id, node)
-    return list(unique.values())
-
-
-def _start_material(theorem: str, run_id: str, node: Node) -> dict:
-    """The node's proof and its three costliest steps by tokens, from the same price rows as the read view."""
-    table = price_table(theorem, run_id, node.id)
-    rows = sorted(table["rows"], key=lambda row: (-row["tokens"], row["first_line"]))[:3]
-    return {
-        "proof": node.proof_text,
-        "prices": render_price_table({**table, "rows": rows}, node.proof_text, None, node.proof_id, node.id),
-    }
-
-
-def no_work_focus(run_id: str, theorem: str) -> dict:
-    """Move focus after a turn with no work: never to the current focus, never to a starting point already offered."""
-    directory = run_dir(run_id)
-    history = events(directory)
-    graph = Graph.from_history(
-        history, _proof_reader(directory), committed_operations=committed_operation_ids(directory)
-    )
-    current = next((node for node in graph.nodes if node.proof_id == graph.focus), None)
-    offered = {item["proof_id"] for item in history if item.get("kind") == "focus" and item.get("reason") == "no_work"}
-    candidates = [
-        node for node in _no_work_candidates(graph, current.route if current else None) if node.proof_id != graph.focus
-    ]
-    fresh = [node for node in candidates if node.proof_id not in offered]
-    # Once every candidate was offered, the cycle starts again; the current focus stays excluded.
-    pool = fresh or candidates
-    if not pool:
-        return {"moved": False}
-    target = pool[0]
-    _append(directory, {"kind": "focus", "proof_id": target.proof_id, "reason": "no_work"})
-    history = events(directory)
-    return {"moved": True, "label": _update_id(history, target.proof_id), **_start_material(theorem, run_id, target)}
-
-
-def _restart_order(graph: Graph) -> list[Node]:
-    """Restart starting points in rotation: the best clean node, the original reference, then the best cell of each
-    other route that scores no lower than that best. Sketches and test drafts never start a restart."""
-    reference = next((node for node in graph.nodes if node.origin == "reference"), None)
-    scored = [node for node in graph.nodes if node.score is not None and not routes.is_draft(node.proof_text)]
-    best = max(scored, key=lambda node: node.score) if scored else reference
-    if best is None:
-        raise ValueError(text.render("messages/errors.node_reference_invalid", reference="restart start"))
-    excluded = {node.route for node in (best, reference) if node is not None}
-    per_route: dict[str | None, Node] = {}
-    for cell in _best_first(archive(graph)):
-        node = cell.node
-        if cell.route in excluded or routes.is_draft(node.proof_text) or node.score is None:
-            continue
-        if best.score is not None and node.score < best.score:
-            continue
-        per_route.setdefault(cell.route, node)
-    unique: dict[str, Node] = {}
-    for node in [best, reference, *per_route.values()]:
-        if node is not None:
-            unique.setdefault(node.proof_id, node)
-    return list(unique.values())
-
-
-def _island_order(graph: Graph) -> list[Node | None]:
-    """Island starting points in rotation: the statement alone (None), the original reference, then the best scored
-    node on another route than the best. Each island leaves the best node's skeleton behind."""
-    reference = next((node for node in graph.nodes if node.origin == "reference"), None)
-    scored = [node for node in graph.nodes if node.score is not None and not routes.is_draft(node.proof_text)]
-    best = max(scored, key=lambda node: node.score) if scored else None
-    other = next(
-        (
-            cell.node
-            for cell in _best_first(archive(graph))
-            if cell.node.score is not None
-            and not routes.is_draft(cell.node.proof_text)
-            and best is not None
-            and cell.route != best.route
-        ),
-        None,
-    )
-    return [None, *[node for node in (reference, other) if node is not None and node is not best]]
-
-
-def _tried_since_restart(history: list[dict], graph: Graph) -> list[str]:
-    """Distinct ideas tried since the last restart that failed or did not beat the best so far, newest last."""
-    start = max((seq for seq, item in enumerate(history) if item.get("kind") == "restart"), default=-1)
-    nodes = {node.proof_id: node for node in graph.nodes}
-    best = max(
-        (
-            score
-            for score in (
-                _metric_score((item.get("result") or {}).get("metrics"))
-                for item in history[: start + 1]
-                if item.get("kind") == "evaluation"
-            )
-            if score is not None
-        ),
-        default=None,
-    )
-    lines: list[str] = []
-    for item in history[start + 1 :]:
-        result = item.get("result") or {}
-        if item.get("kind") == "probe":
-            proof_id = item["proof_id"]
-            verdict = _failure_text(result) if _probe_failed(result) else None
-        elif item.get("kind") == "evaluation":
-            proof_id = item["candidate_id"]
-            metrics = result.get("metrics") or {}
-            score = _metric_score(metrics)
-            if not metrics.get("compiled"):
-                verdict = _failure_text(result)
-            elif score is None or (best is not None and score <= best):
-                verdict = None
-            else:
-                best = score
-                continue
-        else:
-            continue
-        node = nodes.get(proof_id)
-        parents = (node.edge or {}).get("from") or [] if node else []
-        parent = nodes.get(parents[0]) if parents else None
-        changes = changed_steps(parent.steps, node.steps) if parent and node else []
-        steps = ", ".join(step_id for change in changes for step_id in change["ids"]) or "whole proof"
-        outcome = (
-            text.render("packet/restart.tried_failed", reason=verdict)
-            if verdict
-            else text.render("packet/restart.tried_no_gain")
-        )
-        lines.append(
-            text.render(
-                "packet/restart.tried_line",
-                label=_update_id(history, proof_id),
-                steps=steps,
-                verdict=outcome,
-            )
-        )
-    distinct = [line for index, line in enumerate(lines) if line not in lines[index + 1 :]]
-    return distinct[-8:]
 
 
 def _kickoff_within(sections: list[tuple[str, str]], limit: int) -> str:
@@ -1770,119 +1568,6 @@ def _kickoff_within(sections: list[tuple[str, str]], limit: int) -> str:
     fitted = context._fit_sections(parts, limit)
     return "\n\n".join((f"{title}\n" if title else "") + "\n".join(body) for title, body in fitted) + "\n"
 
-
-def island_packet(name: str, run_id: str) -> dict:
-    """A new island after a turn that ended with text: a fresh context from the statement alone, the original
-    reference, or another route's best node, in rotation. The best so far stays recorded."""
-    return restart_packet(name, run_id, island=True)
-
-
-def stall_restart_packet(name: str, run_id: str) -> dict:
-    """Restart after a stall nudge went unheeded: from the best node of another route, or else the best node's
-    parent as a fresh route."""
-    return restart_packet(name, run_id, reason="stall")
-
-
-def _stall_start(graph: Graph, history: list[dict]) -> Node | None:
-    scored = [node for node in graph.nodes if node.score is not None and not routes.is_draft(node.proof_text)]
-    if not scored:
-        return None
-    best = max(scored, key=lambda node: node.score)
-    last_route = next((node.route for node in reversed(graph.nodes) if node.route), None)
-    for cell in _best_first(archive(graph)):
-        node = cell.node
-        if cell.route != last_route and not routes.is_draft(node.proof_text) and node.score is not None:
-            return node
-    by_id = {node.proof_id: node for node in graph.nodes}
-    parents = (best.edge or {}).get("from") or []
-    return by_id.get(parents[0], best) if parents else best
-
-
-def restart_packet(name: str, run_id: str, island: bool = False, reason: str | None = None) -> dict:
-    """Restart the conversation at the next starting point: the kickoff packet, the start node, the costliest steps,
-    the ideas already tried, and the map. The whole packet stays within the packet budget."""
-    from arena import context, reply
-
-    directory = run_dir(run_id)
-    history = events(directory)
-    graph = Graph.from_history(
-        history, _proof_reader(directory), committed_operations=committed_operation_ids(directory)
-    )
-    restarts = sum(1 for item in history if item.get("kind") == "restart")
-    reference = next((node for node in graph.nodes if node.origin == "reference"), None)
-    if island:
-        islands = sum(1 for item in history if item.get("kind") == "restart" and item.get("island"))
-        pick = _island_order(graph)[islands % len(_island_order(graph))]
-        blank, start = pick is None, pick or reference
-    elif reason == "stall":
-        blank, start = False, _stall_start(graph, history)
-    else:
-        order = _restart_order(graph)
-        blank, start = False, order[restarts % len(order)]
-    if start is None:
-        raise ValueError(text.render("messages/errors.node_reference_invalid", reference="restart start"))
-    scored = [node for node in graph.nodes if node.score is not None]
-    best_node = max(scored, key=lambda node: node.score) if scored else None
-    tried = _tried_since_restart(history, graph)
-    _append(
-        directory,
-        {
-            "kind": "restart",
-            "proof_id": start.proof_id,
-            "island": island,
-            "blank": blank,
-            **({"reason": reason} if reason else {}),
-        },
-    )
-    _append(directory, {"kind": "focus", "proof_id": start.proof_id, "reason": "island" if island else "restart"})
-    history = events(directory)
-    graph_map = map_view_from(history, directory)
-    map_lines = list(reply._map_lines({**graph_map, "open": []}))
-    label = _update_id(history, start.proof_id)
-    best = f"{_update_id(history, best_node.proof_id)} (score {best_node.score})" if best_node is not None else label
-    if blank:
-        statement = problem(name)["statement"]
-        head = [
-            text.render("packet/restart.island_blank", best=best),
-            text.render("packet/restart.island_statement", statement=statement),
-        ]
-    else:
-        material = _start_material(name, run_id, start)
-        head = [
-            text.render("packet/restart.island_start", label=label, best=best)
-            if island
-            else text.render("packet/restart.start", label=label),
-            f"```lean\n{start.proof_text}\n```",
-            text.render("packet/restart.prices_heading"),
-            material["prices"].rstrip("\n"),
-        ]
-    sections = context.packet_sections(name)
-    while True:
-        tail = "\n".join(
-            [
-                *head,
-                *([text.render("packet/restart.tried_heading"), *tried] if tried else []),
-                text.render("messages/compaction-memory.map_heading"),
-                *map_lines,
-            ]
-        )
-        try:
-            kickoff = _kickoff_within(sections, context.MAX_PACKET_CHARS - len(tail) - 2)
-            break
-        except ValueError:
-            # The kickoff cannot shrink further: shed the map first, then the tried list.
-            if map_lines:
-                map_lines.pop()
-            elif tried:
-                tried.pop(0)
-            else:
-                raise
-    return {
-        "ok": True,
-        "text": kickoff.rstrip("\n") + "\n" + tail + "\n",
-        "label": label,
-        "restart": restarts + 1,
-    }
 
 
 def _metric_score(metrics: dict | None) -> float | None:

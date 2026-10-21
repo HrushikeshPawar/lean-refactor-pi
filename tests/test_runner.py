@@ -170,13 +170,8 @@ def _spend_numbers(spent: float, cap: float) -> list[str]:
 
 
 def _spend_facts(message: str) -> str:
-    """A continuation up to its focus move: the focus line and the proof and prices after it are not spend facts."""
-    from arena import text
-
-    focus = text.render("messages/continuation.focus_moved", label="n0").replace("n0", r"n\d+")
-    lines = message.splitlines()
-    cut = next((i for i, line in enumerate(lines) if re.fullmatch(focus, line)), len(lines))
-    return "\n".join(lines[:cut])
+    """Spend facts in a continuation. A stall or focus line is not part of the continuation."""
+    return message
 
 
 def cheap_tool(name: str, arguments: dict, **usage) -> dict:
@@ -866,16 +861,11 @@ class ErrorLoopAndContinuationTests(unittest.TestCase):
         # Only continuations sent before spend reached the final tenth; those after it are checked elsewhere.
         before_tenth = [(m, s) for m, s in self.continuations(run) if 1 - s / cap > pct / 100]
         self.assertGreaterEqual(len(before_tenth), 2)
-        focus = text.render("messages/continuation.focus_moved", label="n0").replace("n0", r"(n\d+)")
         for message, spent in before_tenth:
             with self.subTest(message=message):
                 self.assertGreater(1 - spent / cap, pct / 100)
                 self.assertNotRegex(message, STOP_TEXT)
                 self.assertNotRegex(message, rf"(?<![\d.]){pct}(?!\d|\.\d)")
-                # Spend is the only fact, plus at most one focus move to a node id (a text-only turn moves the
-                # focus before the final tenth); the proof and prices after a move are not counted.
-                moves = [line for line in message.splitlines() if re.fullmatch(focus, line)]
-                self.assertLessEqual(len(moves), 1)
                 numbers = re.findall(r"\d+(?:\.\d+)?", _spend_facts(message))
                 self.assertEqual(sorted(numbers), sorted(_spend_numbers(spent, cap)))
 
@@ -894,13 +884,10 @@ class ErrorLoopAndContinuationTests(unittest.TestCase):
         )
         pct = text.numbers()["finish_remaining_pct"]
         cap = float(run.json("run-config.json")["limit_usd"])
-        available = text.render("messages/continuation.finish_available")
         for message, spent in self.continuations(run):
             with self.subTest(message=message):
                 self.assertLessEqual(1 - spent / cap, pct / 100)
-                lines = message.splitlines()
-                self.assertEqual(lines.count(available), 1)
-                self.assertEqual([line for line in lines if STOP_TEXT.search(line)], [available])
+                self.assertNotRegex(message, STOP_TEXT)
                 self.assertIn(_spend_numbers(spent, cap)[0], message)
 
     def test_one_text_only_turn_in_the_final_tenth_stops_provider_continuations(self):

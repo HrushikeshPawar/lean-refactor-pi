@@ -470,9 +470,7 @@ class HiddenStopTests(unittest.TestCase):
             texts.update(_rendered(f"tools/{tool}."))
         texts.update(_rendered("messages/footer"))
         texts.update(_rendered("messages/compaction-memory."))
-        continuation = _rendered("messages/continuation.")
-        continuation.pop("messages/continuation.finish_available")
-        texts.update(continuation)
+        texts.update(_rendered("messages/continuation."))
         return texts
 
     def test_text_before_the_threshold_never_mentions_ending_the_run(self):
@@ -494,9 +492,7 @@ class HiddenStopTests(unittest.TestCase):
         pct = text.numbers()["finish_remaining_pct"]
         templates = {**_rendered("messages/"), **_rendered("replies/"), **_rendered("tools/")}
         naming = sorted(key for key, rendered in templates.items() if re.search(r"\bfinish", rendered, re.I))
-        self.assertEqual(
-            [key for key in naming if not key.startswith("tools/finish.")], ["messages/continuation.finish_available"]
-        )
+        self.assertEqual([key for key in naming if not key.startswith("tools/finish.")], [])
         self.assertRegex(text.render("tools/finish.description"), _number_pattern(pct))
 
 

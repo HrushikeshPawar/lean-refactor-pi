@@ -4,7 +4,7 @@
 
 **Blocked by:** 06 (shared stop), 11 (event waiting / no_pending_work continuation)
 
-**Status:** ready-for-agent
+**Status:** needs-review
 
 **Branch:** `v8/22b-no-legacy-stops`
 
@@ -36,12 +36,12 @@
 
 ## What to build and acceptance
 
-- [ ] 1. No below-budget voluntary, plateau, no-work or continuation-count stop remains in Sol's control path.
-- [ ] 2. No harness-forced restart, island or focus move remains. Stall statistics are recorded and shown, never acted on.
-- [ ] 3. Failure, operator and actual-cost stops keep distinct reasons.
-- [ ] 4. Dead protocol actions, constants and templates for the removed behaviors are deleted, not flagged off.
-- [ ] 5. Update `control.test.ts` and the five `tests/test_graph.py::StallCampaignTests` cases. Those tests also need `committed_operations=campaign.committed_operation_ids(...)` in their `Graph.from_history` calls (stale since v8-16; see the 22 review closure). Their assertions about a forced focus row change to "no focus row".
-- [ ] 6. One focused smoke plus the whole touched test files. A real Pi run reaching the $2.50 stop is final E2E coverage.
+- [x] 1. No below-budget voluntary, plateau, no-work or continuation-count stop remains in Sol's control path.
+- [x] 2. No harness-forced restart, island or focus move remains. Stall statistics are recorded and shown, never acted on.
+- [x] 3. Failure, operator and actual-cost stops keep distinct reasons.
+- [x] 4. Dead protocol actions, constants and templates for the removed behaviors are deleted, not flagged off.
+- [x] 5. Update `control.test.ts` and the five `tests/test_graph.py::StallCampaignTests` cases. Those tests also need `committed_operations=campaign.committed_operation_ids(...)` in their `Graph.from_history` calls (stale since v8-16; see the 22 review closure). Their assertions about a forced focus row change to "no focus row".
+- [x] 6. One focused smoke plus the whole touched test files. A real Pi run reaching the $2.50 stop is final E2E coverage.
 
 ## Verify
 

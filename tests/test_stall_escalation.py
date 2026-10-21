@@ -8,7 +8,7 @@ def _node(i, route, score):
     return SimpleNamespace(proof_id=f"p{i}", route=route, score=score)
 
 
-def _run(after_scores, routes_after):
+def _tally(after_scores, routes_after):
     nodes = [_node(0, "r1", 0.5), _node(1, "r2", 0.7)]
     nodes += [_node(10 + i, r, s) for i, (r, s) in enumerate(zip(routes_after, after_scores, strict=True))]
     history = [{"kind": "route", "proof_id": n.proof_id} for n in nodes[:2]]
@@ -19,17 +19,13 @@ def _run(after_scores, routes_after):
         mock.patch.object(campaign, "run_dir", lambda _: None),
         mock.patch.object(campaign, "events", lambda _: history),
         mock.patch.object(campaign, "_proof_reader", lambda _: None),
-        mock.patch.object(campaign.Graph, "from_history", lambda *_: graph),
+        mock.patch.object(campaign, "committed_operation_ids", lambda _: set()),
+        mock.patch.object(campaign.Graph, "from_history", lambda *_a, **_k: graph),
     ):
-        return campaign.stall_due("x"), campaign.route_tally("x")
+        return campaign.route_tally("x")
 
 
-def test_stall_due_after_n_same_route_tries_without_new_best():
-    n = campaign.STALL_RESTART_TRIES
-    assert _run([0.6] * n, ["r2"] * n)[0]
-    assert _run([0.6] * (n - 1), ["r2"] * (n - 1))[0] is False
-    assert _run([0.6] * (n - 1) + [0.8], ["r2"] * n)[0] is False
-    assert _run([0.6] * n, ["r2"] * (n - 1) + ["r3"])[0] is False
+def test_route_tally_is_information_after_enough_same_route_variants():
     t = campaign.ROUTE_TALLY_MIN
-    assert "r2:" in _run([0.6] * t, ["r2"] * t)[1]
-    assert _run([0.6] * (t - 1), ["r2"] * (t - 1))[1] is None
+    assert "r2:" in _tally([0.6] * t, ["r2"] * t)
+    assert _tally([0.6] * (t - 1), ["r2"] * (t - 1)) is None

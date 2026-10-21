@@ -22,10 +22,6 @@ spend_limit:
   template: "messages/footer"
   numbers: "run limit and settled spend"
   marker: "budget:"
-finish_availability:
-  template: "messages/continuation.finish_available"
-  numbers: "finish_remaining_pct"
-  marker: "now finishes the run"
 graph_operations:
   template: "tools/compile.description"
   numbers: "compile_max_drafts"

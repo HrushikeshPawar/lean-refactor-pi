@@ -1,13 +1,10 @@
 // The spend rule: after every LLM call the call's actual cost (Pi's `usage.cost.total`) is added to the
 // run total. At or above the limit the agent stops. No estimates, no reservations; the call that crosses
 // the limit may overshoot it, and that is accepted.
-import { numbers, render } from "./text.ts";
+import { render } from "./text.ts";
 
 export const DEFAULT_LIMIT_USD = 0.5;
 export const MAX_LIMIT_USD = 2.5;
-// The model may finish only when at most this fraction of the limit is left.
-const sharedNumbers = await numbers();
-export const FINISH_REMAINING_FRACTION = sharedNumbers.finish_remaining_pct / 100;
 
 export function limitUsd(env: NodeJS.ProcessEnv = process.env): number {
   const limit = Number(env.ARENA_LIMIT_USD ?? String(DEFAULT_LIMIT_USD));
@@ -26,12 +23,6 @@ export function callCost(usage: { cost?: { total?: number } } | undefined): numb
 
 export function limitReached(spentUsd: number, limit: number): boolean {
   return spentUsd >= limit;
-}
-
-export function finishAllowed(spentUsd: number, limit: number) {
-  const remainingUsd = Math.max(0, limit - spentUsd);
-  const remainingFraction = limit > 0 ? remainingUsd / limit : 0;
-  return { allowed: remainingFraction <= FINISH_REMAINING_FRACTION + 1e-12, remainingUsd, remainingFraction };
 }
 
 /** One factual footer line: spend against the limit. No advice. */

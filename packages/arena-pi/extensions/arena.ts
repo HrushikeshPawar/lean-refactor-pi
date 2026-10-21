@@ -12,8 +12,8 @@ import { nearestToolName, normalizeToolArguments, requireToolArguments } from ".
 import { BlobStore, DeltaChain, settleWithUsageEvidence, splitRequest, stampRecord } from "./journal.ts";
 import { nothingToSummarize, objectToolArguments, ResultTrimmer } from "./trim.ts";
 import { stopDecision } from "./control.ts";
-import { continuationFacts, continuationPush } from "./rules.ts";
-import { cacheAlarm, cacheHitPct, callCost, finishAllowed, limitReached, limitUsd, spendFooter } from "./spend.ts";
+import { continuationPush } from "./rules.ts";
+import { cacheAlarm, cacheHitPct, callCost, limitReached, limitUsd, spendFooter } from "./spend.ts";
 import { numbers as textNumbers, render as renderText } from "./text.ts";
 import { classifyFailure, nextWait } from "./outage.ts";
 import { applyToolTurnEffort, requestDetailedSummary } from "./thinking.ts";
@@ -807,25 +807,12 @@ export default async function arenaExtension(pi: ExtensionAPI) {
       if (turnHadProofAttempt || turnHadNovelContext || turnHadVerifiedImprovement) noWorkTurns = 0;
       else noWorkTurns += 1;
     }
-    const noWorkThisTurn = !failed && !(turnHadProofAttempt || turnHadNovelContext || turnHadVerifiedImprovement);
-    // A finish: a turn that completed, stopped on its own (not cut by the length limit), wrote visible text and
-    // asked for no tool, once the finish rule allows it.
-    const remaining = finishAllowed(spentUsd, limit);
-    // A turn that completed on its own with visible text and no tool call: it finishes the run in the final tenth
-    // and opens a new island before it.
-    const doneTurn = !failed && lastAssistant?.stopReason === "stop"
-      && (lastAssistant.content ?? []).some(block => block.type === "text" && block.text.trim() !== "")
-      && !(lastAssistant.content ?? []).some(block => block.type === "toolCall");
-    const finishTurn = remaining.allowed && doneTurn;
-    // ARENA_ISLANDS=0 keeps the plain continuation after a text-only turn (tests of continuation text use it).
-    const islandTurn = doneTurn && process.env.ARENA_ISLANDS !== "0";
-    const stallDue = !failed && (await campaign("stall_due")).due === true;
-    const { stop, moveFocus, restart, island } = stopDecision({ stallDue, limitHit, finishTurn, doneTurn: islandTurn, noWorkThisTurn,
+    const stop = stopDecision({
+      limitHit,
       providerUnreachable: failure === "transport" && outageStartedAt !== undefined && nextWait(outageAttempt, Number(process.env.ARENA_BACKOFF_MS ?? 2000), outageStartedAt, Date.now(), Number(process.env.ARENA_OUTAGE_LIMIT_MS ?? 600000)).stop,
       errorLoop: failure === "model" && errorStreak >= MAX_ERROR_STREAK,
       usageLimit: failure === "usage_limit",
-      continuations, noWorkTurns, plateau, stallUsd: spentUsd - spentAtBestChange, limitUsd: limit,
-      remainingFraction: remaining.remainingFraction, finishAllowed: remaining.allowed });
+    });
     turnHadProofAttempt = false;
     turnHadNovelContext = false;
     turnHadVerifiedImprovement = false;
@@ -869,33 +856,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     const cause = failed ? String((event as any).errorMessage ?? lastAssistant?.errorMessage ?? "") : undefined;
     const content = await continuationPush({ failed, cause, cutTokens, skeleton: checks?.skeleton, spentUsd,
       limitUsd: limit, baseline: checks?.baseline, best: checks?.best ?? state.best });
-    // Second no-work turn in a row, before the final tenth: the run restarts from a packet at the next starting
-    // point. The compaction draft keeps nothing before it, so the old reasoning leaves the model's context.
-    if (restart) {
-      const restarted = await campaign(island ? "island_packet" : stallDue ? "stall_restart_packet" : "restart_packet");
-      if (restarted.ok === true && typeof restarted.text === "string") {
-        await campaign("reset_delivered");
-        trimmer.forget();
-        noWorkTurns = 0;
-        plateau = 0;
-        spentAtBestChange = spentUsd;
-        appendCost({ kind: "restart", continuations, restart: restarted.restart, island, label: restarted.label, chars: restarted.text.length });
-        const facts = await continuationFacts(spentUsd, limit, checks?.baseline, checks?.best ?? state.best, checks?.skeleton);
-        return { entries: [...event.entries,
-          { type: "compaction" as const, summary: restarted.text, firstKeptEntryId: null },
-          { type: "custom_message" as const, customType: "arena-continuation",
-            content: await renderText("messages/continuation.restart", { facts }), display: false }], continue: true };
-      }
-      console.error(`[arena-restart] not restarted: ${restarted.error ?? "no packet"}`); // log: operator diagnostic. // not-model-facing
-    }
-    // No work before the final tenth: focus moves to a different starting point, stated as one fact line and the
-    // starting point's proof and costliest steps.
-    const moved = moveFocus ? await campaign("no_work_focus") : undefined;
-    const focusLine = moved?.moved ? await renderText("messages/continuation.focus_moved", { label: moved.label }) : undefined;
-    const focusMaterial = moved?.moved ? await renderText("messages/continuation.focus_material",
-      { label: moved.label, proof: moved.proof, prices: moved.prices }) : undefined;
-    const nextText = [content, focusLine, focusMaterial].filter(line => line !== undefined).join("\n");
     return { entries: [...event.entries, { type: "custom_message" as const, customType: "arena-continuation",
-      content: nextText, display: false }], continue: true };
+      content, display: false }], continue: true };
   });
 }

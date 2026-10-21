@@ -32,11 +32,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `messages/compaction-memory.read_heading` | 3 | Agent messages and notices | when the matching event occurs |
 | `messages/compaction-memory.seed_header` | 8 | Agent messages and notices | when the matching event occurs |
 | `messages/continuation.cause_clause` | 2 | Agent messages and notices | when the matching event occurs |
-| `messages/continuation.finish_available` | 28 | Agent messages and notices | when the matching event occurs |
-| `messages/continuation.focus_material` | 7 | Agent messages and notices | when the matching event occurs |
-| `messages/continuation.focus_moved` | 8 | Agent messages and notices | when the matching event occurs |
 | `messages/continuation.request_failed` | 4 | Agent messages and notices | when the matching event occurs |
-| `messages/continuation.restart` | 9 | Agent messages and notices | when the matching event occurs |
 | `messages/continuation.skeleton` | 17 | Agent messages and notices | when the matching event occurs |
 | `messages/continuation.turn_cut` | 2 | Agent messages and notices | when the matching event occurs |
 | `messages/continuation.turn_ended_with_text` | 14 | Agent messages and notices | when the matching event occurs |
@@ -139,15 +135,6 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `packet/price-table.row` | 11 | Prices action replies | when the table is requested |
 | `packet/price-table.row_no_hb` | 9 | Prices action replies | when the table is requested |
 | `packet/price-table.summary` | 28 | Prices action replies | when the table is requested |
-| `packet/restart.island_blank` | 29 | Initial theorem packet | once per run |
-| `packet/restart.island_start` | 22 | Initial theorem packet | once per run |
-| `packet/restart.island_statement` | 6 | Initial theorem packet | once per run |
-| `packet/restart.prices_heading` | 6 | Initial theorem packet | once per run |
-| `packet/restart.start` | 18 | Initial theorem packet | once per run |
-| `packet/restart.tried_failed` | 2 | Initial theorem packet | once per run |
-| `packet/restart.tried_heading` | 10 | Initial theorem packet | once per run |
-| `packet/restart.tried_line` | 5 | Initial theorem packet | once per run |
-| `packet/restart.tried_no_gain` | 7 | Initial theorem packet | once per run |
 | `packet/scoring` | 144 | Initial theorem packet | once per run |
 | `packet/search` | 103 | Initial theorem packet | once per run |
 | `packet/sections.fixed.budget_certification_failed` | 8 | Initial theorem packet | once per run |
@@ -388,7 +375,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/tools.try_timeout` | 2 | Tool replies | when the matching tool result occurs |
 | `skill/SKILL` | 155 | Agent skill instructions | once per run |
 | `skill/lean-facts` | 137 | Agent skill instructions | once per run |
-| `tools/await_results.description` | 26 | Model tool definitions | every request |
+| `tools/await_results.description` | 20 | Model tool definitions | every request |
 | `tools/await_results.params.cursor` | 11 | Model tool definitions | every request |
 | `tools/await_results.params.job_ids` | 12 | Model tool definitions | every request |
 | `tools/cancel.description` | 13 | Model tool definitions | every request |

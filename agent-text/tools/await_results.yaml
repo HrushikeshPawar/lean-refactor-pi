@@ -1,4 +1,4 @@
-description: "Wait for retained worker or verification evidence without a model request. Returns events and a wake_reason. no_pending_work means continue reasoning; it does not finish the run."
+description: "Wait for retained worker or verification evidence without a model request. Returns events and a wake_reason. no_pending_work means continue reasoning."
 params:
   cursor: "Actor-owned delivery cursor. Omit to continue from your last delivered evidence."
   job_ids: "Optional jobs to wait for. Omit to receive all your delegated jobs."
