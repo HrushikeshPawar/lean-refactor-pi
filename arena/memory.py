@@ -67,12 +67,135 @@ def memory_text(state: dict, seed: bool = False) -> str:
         render("messages/compaction-memory.hole", hole=row["hole"], goal=row.get("goal") or "n/a")
         for row in state.get("holes", [])
     )
+    strategy = state.get("strategy")
+    if strategy:
+        lines.append(render("messages/compaction-memory.strategy_heading"))
+        lines.append(render("messages/compaction-memory.strategy", text=strategy))
+    else:
+        lines.append(render("messages/compaction-memory.no_strategy"))
+    lines.append(render("messages/compaction-memory.jobs_heading"))
+    lines.extend(
+        render("messages/compaction-memory.job", job_id=row["job_id"], state=row["state"])
+        for row in state.get("jobs", [])
+    )
+    lines.append(render("messages/compaction-memory.focus_heading"))
+    lines.extend(
+        render("messages/compaction-memory.focus", actor=actor, proof=proof)
+        for actor, proof in state.get("focus", [])
+    )
+    lines.append(render("messages/compaction-memory.findings_heading"))
+    for row in state.get("findings", []):
+        if row.get("hypothesis"):
+            lines.append(
+                render(
+                    "messages/compaction-memory.note",
+                    actor=row["actor"],
+                    text=row["text"],
+                    hypothesis=row["hypothesis"],
+                    ref=row["ref"],
+                )
+            )
+        else:
+            lines.append(
+                render("messages/compaction-memory.finding", actor=row["actor"], text=row["text"], ref=row["ref"])
+            )
+    lines.append(render("messages/compaction-memory.evidence_heading"))
+    lines.extend(
+        render("messages/compaction-memory.evidence", kind=row["kind"], ref=row["ref"])
+        for row in state.get("evidence", [])
+    )
     return "\n".join(lines)
+
+
+_FAILED_OUTCOMES = frozenset(
+    {"failure", "timeout", "cancelled", "run_stopped", "dependency_missing", "processing_error", "recorded"}
+)
+
+
+def _event_ref(event: dict) -> str | None:
+    for key in ("event_id", "experiment_id", "operation_id"):
+        identity = event.get(key)
+        if isinstance(identity, str) and identity:
+            return identity
+    return None
+
+
+def _finding(event: dict, ref: str, text: str, hypothesis: str | None = None) -> dict | None:
+    actor = event.get("actor_id")
+    if not isinstance(actor, str) or not actor or not text:
+        return None
+    row = {"actor": actor, "text": text, "ref": ref}
+    if hypothesis:
+        row["hypothesis"] = hypothesis
+    return row
+
+
+def _recovery(history: list[dict], jobs: list[dict], focus: list[tuple[str, str]]) -> dict:
+    """References into the stored history. This projection does not write or start work."""
+    from arena.campaign import current_strategy
+
+    evidence = []
+    findings = []
+    for event in history:
+        kind = event.get("kind")
+        ref = _event_ref(event)
+        if kind in ("derivation", "attempt") and ref:
+            evidence.append({"kind": kind, "ref": ref})
+        elif kind == "scratch" and event.get("phase") == "outcome" and ref:
+            outcome = event.get("outcome")
+            promotion = event.get("promotion") if isinstance(event.get("promotion"), dict) else {}
+            failed = outcome in _FAILED_OUTCOMES and promotion.get("state") != "promoted"
+            if failed:
+                evidence.append({"kind": "experiment", "ref": event.get("experiment_id") or ref})
+                reason = promotion.get("reason") or event.get("diagnostic") or outcome
+                row = _finding(
+                    event,
+                    event.get("experiment_id") or ref,
+                    render("messages/compaction-memory.failed_experiment", outcome=str(outcome), reason=str(reason)),
+                )
+                if row:
+                    findings.append(row)
+        elif kind == "observation" and ref:
+            hypothesis = event.get("hypothesis_ref")
+            row = _finding(event, ref, event.get("text") or "", hypothesis if isinstance(hypothesis, str) else None)
+            if row:
+                findings.append(row)
+        elif kind == "candidate" and ref and isinstance(event.get("hypothesis"), str) and event["hypothesis"]:
+            row = _finding(event, ref, event["hypothesis"], event.get("hypothesis_ref"))
+            if row:
+                findings.append(row)
+    return {
+        "strategy": current_strategy(history),
+        "jobs": [{"job_id": job["job_id"], "state": job["state"]} for job in jobs],
+        "focus": focus,
+        "findings": findings,
+        "evidence": evidence,
+    }
+
+
+def original_evidence(run_id: str, ref: str) -> dict | None:
+    """The stored record or artifact named by a summary reference. The summary is not a substitute."""
+    from arena import campaign, experiments
+
+    directory = campaign.run_dir(run_id)
+    history = campaign.events(directory)
+    matches = [event for event in history if event.get("event_id") == ref]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        return {"ref": ref, "records": matches}
+    experiment = experiments.retrieve(run_id, ref)
+    if experiment is not None:
+        return experiment
+    proof = campaign._proof_reader(directory)(ref)
+    if proof is not None:
+        return {"kind": "proof", "proof_id": ref, "text": proof}
+    return None
 
 
 def memory(run_id: str, spent_usd: float | None = None, cap_usd: float | None = None) -> dict:
     """Build compaction state from stored run records; spend is shown by the footer."""
-    from arena import campaign, context, reply
+    from arena import campaign, context, orchestration, reply
     from arena.graph import Graph
 
     directory = campaign.run_dir(run_id)
@@ -80,7 +203,8 @@ def memory(run_id: str, spent_usd: float | None = None, cap_usd: float | None = 
     graph = Graph.from_history(
         history, campaign._proof_reader(directory), committed_operations=committed_operation_ids(directory)
     )
-    graph_map = campaign.map_view(run_id)
+    theorem = history[0].get("theorem") if history else None
+    graph_map = campaign.map_view(run_id) if theorem else {"best": None, "open": []}
     best_id = (graph_map.get("best") or {}).get("node")
     best_node = next((node for node in graph.nodes if node.id == best_id), None)
     best = None
@@ -93,7 +217,7 @@ def memory(run_id: str, spent_usd: float | None = None, cap_usd: float | None = 
             "price": campaign.price_table(theorem, run_id, best_node.id)["text"],
         }
     library: dict[str, dict] = {}
-    if history:
+    if history and theorem:
         for row in context.cached_context(history[0]["theorem"]).get("library", [])[: int(numbers()["packet_library"])]:
             if row.get("sig"):
                 library[row["name"]] = {
@@ -133,4 +257,6 @@ def memory(run_id: str, spent_usd: float | None = None, cap_usd: float | None = 
         "reads": history,
         "holes": graph_map.get("open", []),
     }
-    return {"ok": True, "text": memory_text(state)}
+    recovered = _recovery(history, orchestration.jobs(directory)["jobs"], reply.actor_focuses(run_id))
+    state.update(recovered)
+    return {"ok": True, "text": memory_text(state), "jobs": recovered["jobs"], "evidence": recovered["evidence"]}

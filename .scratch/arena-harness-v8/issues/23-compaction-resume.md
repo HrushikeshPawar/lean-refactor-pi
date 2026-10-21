@@ -4,7 +4,7 @@
 
 **Blocked by:** 11: Wait without polling or no-event deadlocks; 22: Inspect every concurrent attempt and exact derivation
 
-**Status:** ready-for-agent
+**Status:** needs-review
 
 **Branch:** `v8/23-compaction-resume`
 
@@ -26,12 +26,12 @@
 
 ## What to build and acceptance
 
-- [ ] 1. Retain current strategy, actor-local focus/jobs, useful failed experiments and exact proof/experiment/lineage references in the working summary.
-- [ ] 2. Sol alone replaces shared strategy; workers retain attributed observations and hypothesis-local notes. Notes remain optional for new intent.
-- [ ] 3. Retrieve complete original records and artifacts after compaction/resume; summaries cannot overwrite lineage or erase alternate derivations.
-- [ ] 4. Keep actual shared-cost and no-voluntary-finish wording consistent; do not reintroduce raw pin hashes, transcript dumps or paid waiting polls.
-- [ ] 5. Combine compacted/resumed session evidence with jobs/no-event waiting so a settled or cancelled assignment is not restarted accidentally.
-- [ ] 6. Use the one assigned fast smoke for this slice. Retain the stated behavior requirements; actual-Pi/real-Lean journeys and the broader race matrix are final E2E coverage, not this ticket's gate.
+- [x] 1. Retain current strategy, actor-local focus/jobs, useful failed experiments and exact proof/experiment/lineage references in the working summary.
+- [x] 2. Sol alone replaces shared strategy; workers retain attributed observations and hypothesis-local notes. Notes remain optional for new intent.
+- [x] 3. Retrieve complete original records and artifacts after compaction/resume; summaries cannot overwrite lineage or erase alternate derivations.
+- [x] 4. Keep actual shared-cost and no-voluntary-finish wording consistent; do not reintroduce raw pin hashes, transcript dumps or paid waiting polls.
+- [x] 5. Combine compacted/resumed session evidence with jobs/no-event waiting so a settled or cancelled assignment is not restarted accidentally.
+- [x] 6. Use the one assigned fast smoke for this slice. Retain the stated behavior requirements; actual-Pi/real-Lean journeys and the broader race matrix are final E2E coverage, not this ticket's gate.
 
 ## Verify
 

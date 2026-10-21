@@ -1,8 +1,12 @@
 """Compaction memory is a projection of stored harness state."""
 
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
-from arena.memory import memory_text
+from arena import campaign, orchestration, reply
+from arena.memory import memory, memory_text, original_evidence
 
 
 class MemoryTests(unittest.TestCase):
@@ -43,6 +47,188 @@ class MemoryTests(unittest.TestCase):
         self.assertIn("Best node:", result)
         self.assertIn("Map:", result)
         self.assertIn("Read so far:", result)
+
+    def test_v8_resume_recovers_references_not_work(self):
+        pin = "sha256:" + "ab" * 32
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            with patch.object(campaign, "run_dir", return_value=directory):
+                campaign._append(directory, {"kind": "strategy", "actor_id": "sol", "text": "keep the second parent"})
+                campaign._append(directory, {"kind": "strategy", "actor_id": "worker", "text": "must not replace strategy"})
+                campaign._append(
+                    directory,
+                    {
+                        "type": "delegation",
+                        "job_id": "job-done",
+                        "activation_id": "act-done",
+                        "actor_id": "sol",
+                        "worker_actor_id": "worker-a",
+                        "worker_session_id": "sess-a",
+                        "session_id": "sol-sess",
+                        "task": "close the first parent",
+                        "hypothesis": "close the first parent",
+                        "scope": "proof",
+                        "anchor": {"node": "n1"},
+                        "tools": [],
+                        "state": "active",
+                    },
+                )
+                campaign._append(
+                    directory,
+                    {
+                        "type": "assignment_state",
+                        "job_id": "job-done",
+                        "activation_id": "act-done",
+                        "state": "completed",
+                        "occupies_slot": False,
+                    },
+                )
+                campaign._append(
+                    directory,
+                    {
+                        "type": "delegation",
+                        "job_id": "job-stop",
+                        "activation_id": "act-stop",
+                        "actor_id": "sol",
+                        "worker_actor_id": "worker-b",
+                        "worker_session_id": "sess-b",
+                        "session_id": "sol-sess",
+                        "task": "try the alternate",
+                        "hypothesis": "try the alternate",
+                        "scope": "proof",
+                        "anchor": {"node": "n2", "step_hashes": [pin]},
+                        "tools": [],
+                        "state": "active",
+                    },
+                )
+                campaign._append(
+                    directory,
+                    {
+                        "type": "assignment_state",
+                        "job_id": "job-stop",
+                        "activation_id": "act-stop",
+                        "state": "cancelled",
+                        "occupies_slot": False,
+                    },
+                )
+                campaign._append(
+                    directory,
+                    {
+                        "kind": "derivation",
+                        "event_id": "der-main",
+                        "proof_id": "proof-main",
+                        "candidate_id": "proof-main",
+                        "parents": [],
+                        "data": {"relation": "exact", "artifact": "main-body"},
+                    },
+                )
+                campaign._append(
+                    directory,
+                    {
+                        "kind": "derivation",
+                        "event_id": "der-alt",
+                        "proof_id": "proof-alt",
+                        "candidate_id": "proof-alt",
+                        "parents": ["proof-main"],
+                        "data": {"relation": "exact", "artifact": pin},
+                    },
+                )
+                campaign._append(
+                    directory,
+                    {
+                        "kind": "attempt",
+                        "event_id": "att-alt",
+                        "proof_id": "proof-alt",
+                        "candidate_id": "proof-alt",
+                        "actor_id": "worker-b",
+                    },
+                )
+                campaign._append(
+                    directory,
+                    {
+                        "kind": "candidate",
+                        "event_id": "cand-note",
+                        "candidate_id": "proof-alt",
+                        "actor_id": "worker-b",
+                        "hypothesis": "hole might be Nat",
+                        "parents": ["proof-main"],
+                    },
+                )
+                campaign._append(
+                    directory,
+                    {
+                        "kind": "scratch",
+                        "phase": "accepted",
+                        "state": "accepted",
+                        "experiment_id": "exp-1",
+                        "actor_id": "worker-a",
+                        "run_id": "resume",
+                        "context": {"theorem_run": "resume"},
+                        "code": "UNIQUE_SNIPPET",
+                    },
+                )
+                campaign._append(
+                    directory,
+                    {
+                        "kind": "scratch",
+                        "phase": "outcome",
+                        "event_id": "exp-fail",
+                        "experiment_id": "exp-1",
+                        "actor_id": "worker-a",
+                        "outcome": "failure",
+                        "promotion": {"state": "not_promoted", "reason": "goal_open"},
+                    },
+                )
+                campaign._append(
+                    directory,
+                    {
+                        "kind": "observation",
+                        "event_id": "obs-a",
+                        "actor_id": "worker-a",
+                        "text": "the first parent stays open",
+                        "hypothesis_ref": "job-done",
+                    },
+                )
+                proof_dir = directory / "proofs"
+                proof_dir.mkdir()
+                (proof_dir / "proof-alt.lean").write_text("alternate body\n")
+                reply.set_actor_focus("resume", "proof-main", actor="worker-a")
+                before = (directory / "ledger.jsonl").read_bytes()
+                built = memory("resume")
+                again = memory("resume")
+                reloaded = original_evidence("resume", "der-alt")
+                main = original_evidence("resume", "der-main")
+                experiment = original_evidence("resume", "exp-1")
+                proof = original_evidence("resume", "proof-alt")
+                states = {job["job_id"]: job["state"] for job in orchestration.jobs(directory)["jobs"]}
+                self.assertEqual((directory / "ledger.jsonl").read_bytes(), before)
+            text = built["text"]
+            self.assertEqual(built["ok"], True)
+            self.assertIn("keep the second parent", text)
+            self.assertNotIn("must not replace strategy", text)
+            self.assertIn("job-done completed", text)
+            self.assertIn("job-stop cancelled", text)
+            self.assertIn("worker-a proof-main", text)
+            self.assertIn("der-main", text)
+            self.assertIn("der-alt", text)
+            self.assertIn("att-alt", text)
+            self.assertIn("exp-1", text)
+            self.assertIn("failure goal_open", text)
+            self.assertIn("hole might be Nat", text)
+            self.assertIn("hypothesis job-done", text)
+            self.assertIn("worker-a", text)
+            self.assertNotIn(pin, text)
+            self.assertNotIn("UNIQUE_SNIPPET", text)
+            self.assertNotIn("alternate body", text)
+            self.assertNotIn("voluntary", text.lower())
+            self.assertEqual(again["jobs"], built["jobs"])
+            self.assertEqual(states, {"job-done": "completed", "job-stop": "cancelled"})
+            self.assertEqual({job["job_id"]: job["state"] for job in built["jobs"]}, states)
+            self.assertEqual(reloaded["data"]["artifact"], pin)
+            self.assertEqual(main["data"]["artifact"], "main-body")
+            self.assertNotEqual(reloaded["proof_id"], main["proof_id"])
+            self.assertEqual(experiment["code"], "UNIQUE_SNIPPET")
+            self.assertEqual(proof["text"], "alternate body\n")
 
 
 if __name__ == "__main__":

@@ -139,6 +139,15 @@ def _write_actor(run_id: str, actor: str, bucket: dict, state: dict | None = Non
     return state
 
 
+def actor_focuses(run_id: str) -> list[tuple[str, str]]:
+    """Every actor-local filing anchor. Reading it does not move focus or start work."""
+    found = []
+    for actor, bucket in _load(run_id).get("actors", {}).items():
+        if isinstance(bucket, dict) and isinstance(bucket.get("focus"), str):
+            found.append((actor, bucket["focus"]))
+    return found
+
+
 def actor_focus_proof(run_id: str, actor: str | None = None) -> str | None:
     actor = actor or current_actor()
     focus = _bucket(_load(run_id), actor).get("focus")
