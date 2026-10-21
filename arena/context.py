@@ -386,6 +386,7 @@ def _type_items(context: dict) -> tuple[list[dict], list[dict]]:
 def _types_section(context: dict) -> list[str]:
     chosen, omitted = _type_items(context)
     lines = []
+    catalog = _catalog_names(context)
     for item in chosen:
         if item["decl"] in ("inductive", "structure"):
             body = "\n".join(f"  | {_clip(c, LIMITS['type_chars'])}" for c in item["ctors"])
@@ -394,7 +395,7 @@ def _types_section(context: dict) -> list[str]:
                     "packet/sections.fixed.type_construct",
                     name=item["name"],
                     kind=item["decl"],
-                    signature=_clip(_readable(item["sig"]), LIMITS["type_chars"]),
+                    signature="" if item["name"] in catalog else _clip(_readable(item["sig"]), LIMITS["type_chars"]),
                     body=_readable(body),
                 )
             )
@@ -404,7 +405,7 @@ def _types_section(context: dict) -> list[str]:
                     "packet/sections.fixed.type_definition",
                     name=item["name"],
                     kind=item["decl"],
-                    signature=_clip(item["sig"], LIMITS["type_chars"]),
+                    signature="" if item["name"] in catalog else _clip(item["sig"], LIMITS["type_chars"]),
                     value=_clip(item.get("value", ""), LIMITS["type_chars"]),
                 )
             )
@@ -421,28 +422,16 @@ def _types_section(context: dict) -> list[str]:
 
 
 def _profile_section(prof: dict, src: str, name: str) -> list[str]:
-    """Per-line self heartbeats of the reference proof, the unattributed remainder, and own-name references."""
-    lines = prof.get("line_profile") or []
+    """Measured attribution coverage and own-name references; self costs stay in detail."""
     measured, attributed, remainder = prof.get("measured_total"), prof.get("profiled_total"), prof.get("unattributed")
-    if not lines or measured is None or attributed is None or remainder is None:
+    if measured is None or attributed is None or remainder is None:
         return []
-    top = sorted((x for x in lines if x["self_hb"] > 0), key=lambda x: -x["self_hb"])[: LIMITS["profile_lines"]]
-    body = [
-        render_text(
-            "packet/sections.fixed.profile_line",
-            line=x["proof_line"],
-            self_hb=x["self_hb"],
-            tokens=x["tokens"],
-            text=_clip(x["text"].strip(), 70),
-        )
-        for x in sorted(top, key=lambda x: x["proof_line"])
-    ]
+    body = []
     body.append(
         render_text(
             "packet/sections.fixed.profile_total",
             measured=measured,
             attributed=attributed,
-            shown=len(top),
             remainder=remainder,
             share=round(100 * remainder / measured, 1) if measured else 0,
         )
@@ -615,51 +604,44 @@ def _preview(items: list[dict], root: str) -> list[dict]:
     ]
 
 
-def _used_section(context: dict) -> list[str]:
+def _catalog_names(context: dict) -> set[str]:
+    helpers, _counts, _named = _extra_dependencies(context)
+    return {item["name"] for item in context.get("source", [])} | {item["name"] for item in helpers}
+
+
+def _used_section(context: dict, *, signatures: bool = True) -> list[str]:
     occurrences: dict[str, list[dict]] = {}
     for item in context.get("source", []):
         occurrences.setdefault(item["name"], []).append(item)
-    ordered = sorted(occurrences.items())
-    lines = [template("packet/sections.fixed.used_intro").strip()]
-    for name, items in ordered:
-        item = items[0]
-        role = item.get("tag") or item.get("decl") or "declaration"
-        places = sorted({str(i.get("proof_line")) for i in items if i.get("proof_line") is not None})
-        where = f"proof lines {', '.join(places)}" if places else "location retained in source"
-        signature = (
-            _clip(_readable(_one_line(item["sig"])), LIMITS["used_chars"]) if item.get("sig") else "signature missing"
-        )
-        lines.append(
-            render_text(
-                "packet/sections.fixed.catalog_line", name=name, role=role, where=where, signature=signature
-            )
-        )
     helpers, _counts, _named = _extra_dependencies(context)
-    seen = {name for name, _items in ordered}
     for item in helpers:
-        if item["name"] in seen:
-            continue
-        signature = (
-            _clip(_readable(_one_line(item["sig"])), LIMITS["used_chars"]) if item.get("sig") else "signature missing"
-        )
-        lines.append(
-            render_text(
-                "packet/sections.fixed.catalog_line",
-                name=item["name"],
-                role=item.get("tag") or "helper",
-                where=item.get("module") or "module retained",
-                signature=signature,
-            )
-        )
-        seen.add(item["name"])
-    lines.append(
-        render_text(
-            "packet/sections.fixed.used_preview",
-            shown=len(seen),
-            distinct=len(seen),
-            unavailable=sum(not bool(items[0].get("sig")) for _, items in ordered),
-        )
-    )
+        occurrences.setdefault(item["name"], [item])
+    lines = [template("packet/sections.fixed.used_intro").strip()]
+    unavailable = 0
+    for name, items in sorted(occurrences.items()):
+        item = next((item for item in items if item.get("sig")), items[0])
+        role = item.get("decl") or item.get("tag") or "declaration"
+        locations = []
+        for origin in ("statement", "proof", "unknown"):
+            places = sorted({i["proof_line"] for i in items
+                             if i.get("proof_line") is not None and i.get("origin", "unknown") == origin})
+            if places:
+                locations.append(render_text(f"packet/sections.fixed.catalog_{origin}",
+                                             lines=", ".join(map(str, places))))
+        external = sorted({i["source_line"] for i in items if i.get("source_line") is not None})
+        if external:
+            locations.append(render_text("packet/sections.fixed.catalog_external", lines=", ".join(map(str, external)),
+                                             module=item.get("module") or template("packet/sections.fixed.catalog_location_missing").strip()))
+        where = "; ".join(locations) or item.get("module") or template("packet/sections.fixed.catalog_location_missing").strip()
+        unavailable += not bool(item.get("sig"))
+        signature = ("" if not signatures else
+                     _clip(_readable(_one_line(item["sig"])), LIMITS["used_chars"]) if item.get("sig") else
+                     template("packet/sections.fixed.catalog_signature_missing").strip())
+        lines.append(render_text("packet/sections.fixed.catalog_line", name=name, role=role, where=where, signature=signature))
+    lines.append(render_text("packet/sections.fixed.used_preview", shown=len(occurrences) - unavailable if signatures else 0,
+                             distinct=len(occurrences), unavailable=unavailable))
+    if not signatures:
+        lines.append(render_text("packet/sections.fixed.catalog_signatures_omitted", count=len(occurrences) - unavailable))
     return lines
 
 
@@ -884,6 +866,7 @@ def score_earlier(context: dict) -> list[dict]:
 def _earlier_section(context: dict) -> list[str]:
     """Ranked lemma lines under the character budget; zero-relevance (distance-only) entries fill at most 5 slots."""
     lines, used, filler = [], 0, 0
+    catalog = _catalog_names(context)
     for entry in score_earlier(context):
         item = entry["item"]
         if not entry["relevance"]:
@@ -897,7 +880,7 @@ def _earlier_section(context: dict) -> list[str]:
             name=item["name"],
             kind=item["decl"],
             reason=tag,
-            signature=_clip(_readable(_one_line(item["sig"])), LIMITS["earlier_chars"]),
+            signature="" if item["name"] in catalog else _clip(_readable(_one_line(item["sig"])), LIMITS["earlier_chars"]),
         )
         if used + len(line) > LIMITS["earlier_budget"] or len(lines) >= LIMITS["earlier"]:
             break
@@ -1056,7 +1039,7 @@ def packet_sections(name: str, *, cache_only: bool = False) -> list[tuple[str, s
         (titles["scope"], _scope_section(row)),
         (
             render_text("packet/sections.titles.reference", count=row["proof_length"]),
-            [f"```lean\n{row['src']}\n```", *price_lines],
+            [f"```lean\n{row['src']}\n```", template("packet/sections.fixed.numbered_source").strip(), *price_lines],
         ),
         (template("packet/sections.titles.profile").strip(), _profile_section(prof, row["src"], name)),
         ("", template("packet/search").strip().splitlines()),
@@ -1076,7 +1059,13 @@ def packet_sections(name: str, *, cache_only: bool = False) -> list[tuple[str, s
         raise ValueError(
             render_text("packet/sections.fixed.packet_not_certifiable", reasons="; ".join(result["reasons"]))
         )
-    fitted = _fit_sections(parts, MAX_PACKET_CHARS)
+    try:
+        fitted = _fit_sections(parts, MAX_PACKET_CHARS)
+    except ValueError:
+        # Keep every declaration and source coordinate when signature previews cannot fit.
+        compact = [(title, _used_section(context, signatures=False) if title == titles["source"] else body)
+                   for title, body in parts]
+        fitted = _fit_sections(compact, MAX_PACKET_CHARS)
     return [
         (
             title or ("Task" if index == 0 else "Scoring" if index == 1 else "Notice"),

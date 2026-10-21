@@ -62,7 +62,7 @@ class ParseTests(unittest.TestCase):
             ],
         }
         self.assertIn("decl:A.foo", "\n".join(context._used_section(inventory)))
-        self.assertIn("decl:A.helper", "\n".join(context._dependency_section(inventory)))
+        self.assertIn("decl:A.helper", "\n".join(context._used_section(inventory)))
 
     def test_records_are_grouped_and_lines_mapped_past_the_instrumentation(self):
         output = "\n".join(
@@ -159,7 +159,8 @@ class ParseTests(unittest.TestCase):
         parsed = context.parse_context(output, 0, 1, None)
         self.assertEqual(parsed["source"][0]["origin"], "unknown")
         text = "\n".join(context._used_section(parsed))
-        self.assertIn("A.foo [theorem] S:- P:- U:4", text)
+        self.assertIn("decl:A.foo", text)
+        self.assertIn("unknown-role proof lines 4", text)
 
     def test_dependency_tags_split_helpers_from_glue_and_counts_agree(self):
         def dep(name, tag, module="Other"):
@@ -380,7 +381,7 @@ class ParseTests(unittest.TestCase):
         self.assertIn("decl:Proj.hammingClose", packet)
         self.assertIn("public import Public.Mod", packet)
         self.assertNotIn("private import", packet)
-        self.assertIn("file line 12", packet)
+        self.assertIn("original file lines 12", packet)
         self.assertNotRegex(packet, r"S:-\d+")
         self.assertIn("decl:Proj.reuseLemma", packet)
         self.assertNotIn("goal:s1", packet)
@@ -456,8 +457,8 @@ class ParseTests(unittest.TestCase):
             self.assertEqual(target["proof_line"], 3)
             self.assertEqual(target["origin"], "proof")
             rendered = "\n".join(context._used_section(mapped))
-            self.assertIn("U:?", rendered)
-            self.assertIn("file line 12", rendered)
+            self.assertIn("decl:wrapper [def] this file signature unavailable", rendered)
+            self.assertIn("original file lines 12", rendered)
 
         with self.subTest("strict implicit binder default precedes actual proof"):
             strict = "theorem t ⦃h : Nat := by omega⦄ : True := by trivial"
