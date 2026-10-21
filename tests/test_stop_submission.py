@@ -64,7 +64,7 @@ class StopSubmissionTests(FakeRunCase):
     def test_admitted_failed_probe_finishes_after_stop_without_authorizing_a_retry(self):
         proof = "theorem t := by\n  bad"
 
-        def lean(name, submitted, mode):
+        def lean(name, submitted, mode, **_kwargs):
             self.stop()
             return self.fake_eval(name, submitted, mode)
 
@@ -94,7 +94,7 @@ class StopSubmissionTests(FakeRunCase):
         drafts = ["theorem t := by\n  bad", "theorem t := by\n  bad\n  sorry"]
         expected = {hashlib.sha256(("T\0" + proof).encode()).hexdigest() for proof in drafts}
 
-        def lean(name, proof, mode):
+        def lean(name, proof, mode, **_kwargs):
             submitted = {
                 row["proof_id"]
                 for row in run_control._control_rows(self.directory)
@@ -137,7 +137,7 @@ class StopSubmissionTests(FakeRunCase):
         proof_id = result["candidate_id"]
         self.assertEqual(campaign.proof_eligibility(campaign.events(self.directory), proof_id), "ineligible")
 
-        def lean(name, submitted, mode, known=None):
+        def lean(name, submitted, mode, known=None, **_kwargs):
             self.stop()
             return self.fake_eval(name, submitted, mode, known=known)
 

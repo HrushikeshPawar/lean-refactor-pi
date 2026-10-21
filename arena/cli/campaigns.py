@@ -971,7 +971,7 @@ def cli_execute(options: CampaignOptions, passthrough: tuple[str, ...] = ()) -> 
         print(f"unknown preset {args.preset!r}; choose from {', '.join(sorted(PRESETS))}", file=sys.stderr)
         return 2
     preset = PRESETS[args.preset] if args.preset else {}
-    for name, default in (("rows", None), ("models", None), ("replicates", 3), ("limit_usd", 0.5), ("jobs", 1)):
+    for name, default in (("rows", None), ("models", None), ("replicates", 3), ("limit_usd", MAX_LIMIT_USD), ("jobs", 1)):
         if getattr(args, name) is None:
             value = preset.get("cap" if name == "limit_usd" else name, default)
             setattr(args, name, ",".join(value) if isinstance(value, list) else value)

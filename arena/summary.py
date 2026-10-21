@@ -223,7 +223,7 @@ def ledger_spend(cost_events: list[dict], session_usd: float | None = None) -> d
 def cost_report_from_ledger(directory: Path) -> dict:
     """Reconstruct the cost report from the durable journal when Pi could not write it."""
     if (directory / "control.jsonl").is_file():
-        from arena.run_control import ACTUAL_COST_THRESHOLD, read_state
+        from arena.run_control import read_state, run_threshold
 
         state = read_state(directory)
         config = _read_json(directory / "run-config.json")
@@ -231,7 +231,7 @@ def cost_report_from_ledger(directory: Path) -> dict:
             "theorem": config.get("theorem"),
             "model": config.get("model"),
             "spent_usd": state["total"],
-            "limit_usd": str(ACTUAL_COST_THRESHOLD),
+            "limit_usd": str(run_threshold(directory)),
             "accounting": state["accounting"],
             "accounting_failures": state["accounting_failures"],
             "unknown_requests": state["unknown_requests"],
@@ -473,7 +473,9 @@ def build_summary(directory: Path) -> dict:
     if shared_accounting:
         recon["authority"] = "control.jsonl"
     recon["cost_report_usd"] = report.get("spent_usd")
-    cap_value = report.get("limit_usd") or configured_cap(config) or report.get("soft_cap_usd") or report.get("hard_cap_usd")
+    cap_value = (
+        report.get("limit_usd") or configured_cap(config) or report.get("soft_cap_usd") or report.get("hard_cap_usd")
+    )
     cap = float(cap_value) if cap_value is not None else None
     remaining = max(0.0, float(cap or 0.0) - spent)
     by_kind: dict[str, dict] = {}

@@ -117,7 +117,7 @@ def _read_spend(directory: Path, events: list[dict]) -> dict:
     if (directory / "control.jsonl").is_file():
         from arena.run_control import _control_rows, _spend_view
 
-        state = _spend_view(_control_rows(directory))
+        state = _spend_view(directory, _control_rows(directory))
         return {
             "total": state["total"],
             "by_actor": state["by_actor"],

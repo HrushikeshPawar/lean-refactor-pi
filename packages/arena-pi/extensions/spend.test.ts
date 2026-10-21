@@ -3,7 +3,7 @@ import test from "node:test";
 import { callCost, limitReached, limitUsd, spendFooter } from "./spend.ts";
 
 test("the limit defaults to fifty cents and anything above two and a half dollars is refused at startup", () => {
-  assert.equal(limitUsd({}), 0.5);
+  assert.equal(limitUsd({}), 2.5);
   assert.equal(limitUsd({ ARENA_LIMIT_USD: "2.5" }), 2.5);
   assert.throws(() => limitUsd({ ARENA_LIMIT_USD: "2.51" }), /above the maximum/);
   assert.throws(() => limitUsd({ ARENA_LIMIT_USD: "0" }), /positive/);

@@ -1373,7 +1373,7 @@ def _selected_jobs(directory: Path, job_ids: list[str] | None) -> list[dict]:
 
 
 def _spend(directory: Path) -> dict:
-    return run_control._spend_view(run_control._control_rows(directory))
+    return run_control._spend_view(directory, run_control._control_rows(directory))
 
 
 def _commit_delivery(

@@ -1,7 +1,9 @@
 """Fast checks for exact submission receipts and interruption safety."""
 
+import json
 import tempfile
 import unittest
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
@@ -95,3 +97,39 @@ class SubmissionReceiptTests(unittest.TestCase):
             refused = run_control.submit_candidate(directory, attempt())
             self.assertEqual(refused["status"], "run_stopped")
             self.assertEqual(run_control.read_state(directory)["stop_reason"], "spend_threshold")
+
+        # The run's threshold comes from its run-config; a run without one uses 2.50.
+        def charge(directory, amount):
+            run_control.prepare_request(
+                directory,
+                {"request_id": "call", "run_id": "run", "actor_id": "sol", "session_id": "session", "body": {"p": 1}},
+            )
+            return run_control.settle_usage(
+                directory,
+                {
+                    "settlement_id": "charge",
+                    "run_id": "run",
+                    "actor_id": "sol",
+                    "session_id": "session",
+                    "covered_request_ids": ["call"],
+                    "state": "known",
+                    "amount": amount,
+                    "usage": {"cost": {"total": amount}},
+                },
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            (directory / "run-config.json").write_text('{"limit_usd": 0.3}')
+            view = charge(directory, "0.30")
+            self.assertEqual((view["stop_reason"], view["limit_usd"]), ("spend_threshold", "0.3"))
+            self.assertEqual(json.loads((directory / "cost.json").read_text())["limit_usd"], "0.3")
+            self.assertEqual(run_control.run_threshold(directory), Decimal("0.3"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            view = charge(directory, "0.30")
+            self.assertFalse(view["stopped"])
+            self.assertEqual(view["limit_usd"], "2.50")
+            (directory / "run-config.json").write_text('{"limit_usd": 9}')
+            self.assertEqual(run_control.run_threshold(directory), Decimal("2.50"))

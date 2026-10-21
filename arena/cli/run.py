@@ -16,6 +16,7 @@ import threading
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TypedDict
@@ -27,12 +28,13 @@ from arena.cli import live
 from arena.coordinator import Coordinator
 from arena.engine import ROOT
 from arena.provenance import code_version
+from arena.run_control import run_threshold
 from arena.seed import check_seed, prior_work, read_seed_proof, start_from_proof
 from arena.skill import skill_hash, skill_prompt
 from arena.summary import configured_cap, cost_report_from_ledger, render_text, write_summary
 from arena.traces import langfuse_environment, langfuse_extension, plugin_problems
 
-DEFAULT_LIMIT_USD = 0.5
+DEFAULT_LIMIT_USD = 2.5
 MAX_LIMIT_USD = 2.5  # keep equal to MAX_LIMIT_USD in packages/arena-pi/extensions/spend.ts
 
 SYSTEM_PROMPT = text.render("messages/run.system_prompt")
@@ -782,7 +784,11 @@ def run(options: RunOptions) -> int:
 
     for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(number, interrupt)
-    with Coordinator(directory) as coordinator, event_log.open("a") as output, live_view(args, directory, health, worker):
+    with (
+        Coordinator(directory) as coordinator,
+        event_log.open("a") as output,
+        live_view(args, directory, health, worker),
+    ):
         env["ARENA_GENERATION"] = coordinator.generation
         model_phase_id = f"model:{os.getpid()}:{time.monotonic_ns()}"
         process = subprocess.Popen(
@@ -832,7 +838,10 @@ def run(options: RunOptions) -> int:
             kill_group(process, signal.SIGKILL)
             exit_code = process.wait()
         stderr_reader.join(timeout=5)
-    _runtime_event(directory, {"kind": "phase", "phase": "model", "phase_id": model_phase_id, "status": "end", "exit_code": exit_code})
+    _runtime_event(
+        directory,
+        {"kind": "phase", "phase": "model", "phase_id": model_phase_id, "status": "end", "exit_code": exit_code},
+    )
     if state["timer"] is not None:
         state["timer"].cancel()
     # Lean servers and evaluations Pi started share its process group.
@@ -941,7 +950,9 @@ def finish(
                 flush=True,
             )
         summary_phase_id = f"summary:{os.getpid()}:{time.monotonic_ns()}"
-        _runtime_event(directory, {"kind": "phase", "phase": "summary", "phase_id": summary_phase_id, "status": "start"})
+        _runtime_event(
+            directory, {"kind": "phase", "phase": "summary", "phase_id": summary_phase_id, "status": "start"}
+        )
         write_state(args.run_id)
         answer = submission(args.run_id)
         _runtime_event(directory, {"kind": "phase", "phase_id": summary_phase_id, "phase": "summary", "status": "end"})
@@ -957,7 +968,16 @@ def finish(
         )
     except Exception as error:
         if "summary_phase_id" in locals() and not summary_phase_ended:
-            _runtime_event(directory, {"kind": "phase", "phase": "summary", "phase_id": summary_phase_id, "status": "error", "error": str(error)[:300]})
+            _runtime_event(
+                directory,
+                {
+                    "kind": "phase",
+                    "phase": "summary",
+                    "phase_id": summary_phase_id,
+                    "status": "error",
+                    "error": str(error)[:300],
+                },
+            )
         print(f"Choosing the submission failed: {error}", file=sys.stderr)
     try:
         print(
@@ -992,7 +1012,7 @@ def finish(
     if report.get("error") or report.get("theorem") != args.theorem:
         print(f"Invalid cost report: {report.get('error', 'theorem mismatch')}", file=sys.stderr)
         return 1
-    if float(report.get("limit_usd") or 0) != args.limit_usd:
+    if Decimal(str(report.get("limit_usd") or 0)) != run_threshold(directory):
         print("Arena limit configuration changed", file=sys.stderr)
         return 1
     spent_usd = float(report["spent_usd"])

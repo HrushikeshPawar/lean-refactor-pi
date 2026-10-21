@@ -3,7 +3,7 @@
 // the limit may overshoot it, and that is accepted.
 import { render } from "./text.ts";
 
-export const DEFAULT_LIMIT_USD = 0.5;
+export const DEFAULT_LIMIT_USD = 2.5;
 export const MAX_LIMIT_USD = 2.5;
 
 export function limitUsd(env: NodeJS.ProcessEnv = process.env): number {

@@ -23,7 +23,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 SCHEMA_VERSION = 1
-ACTUAL_COST_THRESHOLD = Decimal("2.50")
+ACTUAL_COST_THRESHOLD = Decimal("2.50")  # production default and the maximum a run may use
 _wait_listeners: list = []
 
 _MISSING = ("actor_id", "session_id", "tool_call_id", "operation_id")
@@ -110,7 +110,10 @@ class DirectoryWatch:
             self._fds.extend((stop_read, self._stop_write))
             self.available = True
             self._thread = threading.Thread(
-                target=self._read, args=(fd, stop_read), name=f"wait-{directory.name}", daemon=True,
+                target=self._read,
+                args=(fd, stop_read),
+                name=f"wait-{directory.name}",
+                daemon=True,
             )
             self._thread.start()
         except (AttributeError, OSError, RuntimeError):
@@ -496,14 +499,26 @@ def prepare_request(directory: Path, request: dict) -> dict:
     with control_lock(directory):
         rows = _control_rows(directory)
         parent = request.get("lineage_of")
-        existing = next((row for row in rows if row.get("kind") == "provider_request"
-                         and row.get("request_id") == request["request_id"]), None)
-        source = next((row for row in rows if row.get("kind") == "provider_request"
-                       and row.get("request_id") == parent), None)
-        if existing is None and parent and (
-            parent == request["request_id"] or source is None
-            or any(source.get(key) != request.get(key) for key in ("run_id", "actor_id", "session_id", "job_id"))
-            or not _definitely_unsent(rows, parent)
+        existing = next(
+            (
+                row
+                for row in rows
+                if row.get("kind") == "provider_request" and row.get("request_id") == request["request_id"]
+            ),
+            None,
+        )
+        source = next(
+            (row for row in rows if row.get("kind") == "provider_request" and row.get("request_id") == parent), None
+        )
+        if (
+            existing is None
+            and parent
+            and (
+                parent == request["request_id"]
+                or source is None
+                or any(source.get(key) != request.get(key) for key in ("run_id", "actor_id", "session_id", "job_id"))
+                or not _definitely_unsent(rows, parent)
+            )
         ):
             return {
                 "ok": False,
@@ -585,8 +600,9 @@ def _fence_reason(rows: list[dict], attempt: dict) -> str | None:
             attempts[row["attempt_id"]] = row
     coverage = _apply_coverage(rows)
     known = coverage["covered"] - set(coverage["unknown"])
-    if any(row.get("status") == "dispatch_uncertain" and row.get("request_id") not in known
-           for row in attempts.values()):
+    if any(
+        row.get("status") == "dispatch_uncertain" and row.get("request_id") not in known for row in attempts.values()
+    ):
         return "recovery_required"
     generation = next(
         (
@@ -835,6 +851,17 @@ def _apply_coverage(rows: list[dict]) -> dict:
     }
 
 
+def run_threshold(directory: Path) -> Decimal:
+    """The run's one actual-cost threshold: ``limit_usd`` in run-config.json, at most the default."""
+    try:
+        value = Decimal(str(json.loads((directory / "run-config.json").read_text()).get("limit_usd")))
+    except (OSError, ValueError, TypeError, InvalidOperation, AttributeError):
+        return ACTUAL_COST_THRESHOLD
+    if not value.is_finite() or value <= 0:
+        return ACTUAL_COST_THRESHOLD
+    return min(value, ACTUAL_COST_THRESHOLD)
+
+
 def _projection(directory: Path, coverage: dict, stopped: bool, stop_reason: str | None) -> None:
     try:
         config = json.loads((directory / "run-config.json").read_text())
@@ -844,7 +871,7 @@ def _projection(directory: Path, coverage: dict, stopped: bool, stop_reason: str
         "theorem": config.get("theorem"),
         "model": config.get("model"),
         "spent_usd": _money(coverage["total"]),
-        "limit_usd": _money(ACTUAL_COST_THRESHOLD),
+        "limit_usd": _money(run_threshold(directory)),
         "accounting": "unknown" if coverage["unknown"] else "known",
         "unknown_requests": coverage["unknown"],
         "accounting_failures": coverage["accounting_failures"],
@@ -858,7 +885,7 @@ def _projection(directory: Path, coverage: dict, stopped: bool, stop_reason: str
     path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
 
 
-def _spend_view(rows: list[dict], *, reused: bool = False, stop_transition: bool = False) -> dict:
+def _spend_view(directory: Path, rows: list[dict], *, reused: bool = False, stop_transition: bool = False) -> dict:
     coverage = _apply_coverage(rows)
     stops = [row.get("reason") for row in rows if row.get("kind") == "run_stop"]
     settlements = {
@@ -869,6 +896,7 @@ def _spend_view(rows: list[dict], *, reused: bool = False, stop_transition: bool
     return {
         "ok": True,
         "total": _money(coverage["total"]),
+        "limit_usd": _money(run_threshold(directory)),
         "accounting": "unknown" if coverage["unknown"] else "known",
         "unknown_requests": coverage["unknown"],
         "accounting_failures": coverage["accounting_failures"],
@@ -887,7 +915,8 @@ def _spend_view(rows: list[dict], *, reused: bool = False, stop_transition: bool
 def _ensure_threshold_stop(directory: Path, rows: list[dict]) -> list[dict]:
     """A crash between the settlement line and the stop line is repaired under the same lock."""
     coverage = _apply_coverage(rows)
-    if coverage["total"] < ACTUAL_COST_THRESHOLD:
+    threshold = run_threshold(directory)
+    if coverage["total"] < threshold:
         return rows
     if any(row.get("kind") == "run_stop" for row in rows):
         return rows
@@ -899,7 +928,7 @@ def _ensure_threshold_stop(directory: Path, rows: list[dict]) -> list[dict]:
             "event_id": uuid.uuid4().hex,
             "reason": "spend_threshold",
             "total": _money(coverage["total"]),
-            "threshold": _money(ACTUAL_COST_THRESHOLD),
+            "threshold": _money(threshold),
         },
     )
     rows = _control_rows(directory)
@@ -938,7 +967,7 @@ def read_state(directory: Path) -> dict:
         coverage = _apply_coverage(rows)
         reason = next((row.get("reason") for row in reversed(rows) if row.get("kind") == "run_stop"), None)
         _projection(directory, coverage, reason is not None, reason)
-        return _spend_view(rows)
+        return _spend_view(directory, rows)
 
 
 def settle_usage(directory: Path, settlement: dict) -> dict:
@@ -960,10 +989,10 @@ def settle_usage(directory: Path, settlement: dict) -> dict:
                     "ok": False,
                     "status": "operation_conflict",
                     "settlement_id": settlement_id,
-                    "total": _spend_view(rows)["total"],
+                    "total": _spend_view(directory, rows)["total"],
                 }
             return {
-                **_spend_view(rows, reused=True),
+                **_spend_view(directory, rows, reused=True),
                 "settlement_id": settlement_id,
                 "state": row["state"],
             }
@@ -1024,8 +1053,8 @@ def settle_usage(directory: Path, settlement: dict) -> dict:
         if (
             state == "known"
             and not already_stopped
-            and coverage["total"] >= ACTUAL_COST_THRESHOLD
-            and before < ACTUAL_COST_THRESHOLD
+            and coverage["total"] >= run_threshold(directory)
+            and before < run_threshold(directory)
         ):
             rows = _ensure_threshold_stop(directory, rows)
             stop_transition = True
@@ -1034,7 +1063,7 @@ def settle_usage(directory: Path, settlement: dict) -> dict:
         stops = [row for row in rows if row.get("kind") == "run_stop"]
         reason = stops[0].get("reason") if stops else None
         _projection(directory, coverage, bool(stops), reason)
-        view = _spend_view(rows, stop_transition=stop_transition)
+        view = _spend_view(directory, rows, stop_transition=stop_transition)
         view["settlement_id"] = settlement_id
         view["state"] = state
         return view
@@ -1100,18 +1129,22 @@ def _submit_locked(directory: Path, attempt: dict) -> dict:
             "receipt": receipt,
         }
     if any(row.get("kind") == "run_stop" for row in rows):
+
         def refuse(writer):
-            writer.evidence.append(_append_control(directory,
-                {
-                    "schema_version": SCHEMA_VERSION,
-                    "kind": "candidate_unsubmitted",
-                    "event_id": uuid.uuid4().hex,
-                    "operation_id": attempt["operation_id"],
-                    "status": "run_stopped",
-                    "argument_digest": digest,
-                    **identity,
-                },
-            ))
+            writer.evidence.append(
+                _append_control(
+                    directory,
+                    {
+                        "schema_version": SCHEMA_VERSION,
+                        "kind": "candidate_unsubmitted",
+                        "event_id": uuid.uuid4().hex,
+                        "operation_id": attempt["operation_id"],
+                        "status": "run_stopped",
+                        "argument_digest": digest,
+                        **identity,
+                    },
+                )
+            )
 
         refused = _apply_locked(directory, {**attempt, "kind": "candidate_unsubmitted", "arguments": identity}, refuse)
         return {
