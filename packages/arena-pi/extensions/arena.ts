@@ -5,7 +5,6 @@ import { appendFileSync, chmodSync, closeSync, fsyncSync, mkdirSync, openSync, r
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve, relative, sep } from "node:path";
-import { Type } from "typebox";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { RawArguments, repairMalformedToolArguments } from "./rawargs.ts";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
@@ -20,6 +19,7 @@ import { classifyFailure, nextWait } from "./outage.ts";
 import { applyToolTurnEffort, requestDetailedSummary } from "./thinking.ts";
 import { installDispatchGate, pythonDispatch, readSharedSpend, settleProviderUsage, type SharedSpend } from "./provider_gate.ts";
 import { renderReply } from "./reply.ts";
+import { executableTools, loadToolSchemas, parametersFor } from "./tool_schema.ts";
 
 const root = resolve(import.meta.dirname, "../../..");
 const workspaces = resolve(root, "workspaces");
@@ -693,33 +693,9 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     }
   }
 
-  const compileParams = Type.Object({
-    drafts: Type.Optional(Type.Array(Type.String(), { minItems: 1, maxItems: sharedNumbers.compile_max_drafts,
-      description: await renderText("tools/compile.params.drafts") })),
-    splice: Type.Optional(Type.Object({
-      base: Type.Optional(Type.String({ description: await renderText("tools/compile.params.splice_base") })),
-      steps: Type.String({ description: await renderText("tools/compile.params.splice_steps") }),
-      text: Type.String({ description: await renderText("tools/compile.params.splice_text") }),
-    }, { description: await renderText("tools/compile.params.splice") })),
-    steps: Type.Optional(Type.String({ description: await renderText("tools/compile.params.splice_steps") })),
-    text: Type.Optional(Type.String({ description: await renderText("tools/compile.params.splice_text") })),
-    fill: Type.Optional(Type.Object({
-      hole: Type.String({ description: await renderText("tools/compile.params.fill_hole") }),
-      text: Type.String({ description: await renderText("tools/compile.params.fill_text") }),
-    }, { description: await renderText("tools/compile.params.fill") })),
-    merge: Type.Optional(Type.Object({
-      base: Type.Optional(Type.String({ description: await renderText("tools/compile.params.merge_base") })),
-      take: Type.Array(Type.Object({
-        from: Type.String({ description: await renderText("tools/compile.params.merge_from") }),
-        step: Type.String({ description: await renderText("tools/compile.params.merge_step") }),
-      }), { description: await renderText("tools/compile.params.merge_take") }),
-    }, { description: await renderText("tools/compile.params.merge") })),
-    base: Type.Optional(Type.String({ description: await renderText("tools/compile.params.base") })),
-    from: Type.Optional(Type.String({ description: await renderText("tools/compile.params.from") })),
-    note: Type.Optional(Type.String({ description: await renderText("tools/compile.params.note") })),
-    check: Type.Optional(Type.Union([Type.Literal("tokens"), Type.Literal("lean")],
-      { description: await renderText("tools/compile.params.check") })),
-  });
+  const toolSchemas = loadToolSchemas();
+  const actorRole = workerTheorem ? "worker" : "sol";
+  const compileParams = await parametersFor("compile", toolSchemas.tools.compile, sharedNumbers);
   await registerTool({
     name: "compile", label: "compile",
     description: await renderText("tools/compile.description"), parameters: compileParams,
@@ -731,13 +707,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     },
   });
 
-  const goalParams = Type.Object({
-    node: Type.Optional(Type.String({ description: await renderText("tools/goal.params.node") })),
-    hole: Type.Optional(Type.String({ description: await renderText("tools/goal.params.hole") })),
-    line: Type.Optional(Type.Number({ description: await renderText("tools/goal.params.line") })),
-    try: Type.Optional(Type.Array(Type.String(), { maxItems: sharedNumbers.goal_try_max,
-      description: await renderText("tools/goal.params.try") })),
-  });
+  const goalParams = await parametersFor("goal", toolSchemas.tools.goal, sharedNumbers);
   await registerTool({ name: "goal", label: "Read a goal",
     description: await renderText("tools/goal.description"), parameters: goalParams,
     async execute(_id: string, params: Record<string, unknown>) {
@@ -745,13 +715,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     },
   });
 
-  const searchParams = Type.Object({
-    queries: Type.Optional(Type.Array(Type.String(), { minItems: 1,
-      description: await renderText("tools/search.params.queries") })),
-    kind: Type.Optional(Type.Union([Type.Literal("name"), Type.Literal("type"), Type.Literal("text")],
-      { description: await renderText("tools/search.params.kind") })),
-    after: Type.Optional(Type.String({ description: await renderText("tools/search.params.after") })),
-  });
+  const searchParams = await parametersFor("search", toolSchemas.tools.search, sharedNumbers);
   await registerTool({ name: "search", label: "Search declarations",
     description: await renderText("tools/search.description"), parameters: searchParams,
     async execute(_id: string, params: Record<string, unknown>) {
@@ -759,16 +723,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     },
   });
 
-  const readParams = Type.Object({
-    experiment: Type.Optional(Type.String({ description: await renderText("tools/read.params.experiment") })),
-    handle: Type.Optional(Type.String({ description: await renderText("tools/read.params.handle") })),
-    node: Type.Optional(Type.String({ description: await renderText("tools/read.params.node") })),
-    hole: Type.Optional(Type.String({ description: await renderText("tools/read.params.hole") })),
-    view: Type.Optional(Type.Union([Type.Literal("source"), Type.Literal("prices"), Type.Literal("diff"),
-      Type.Literal("outline"), Type.Literal("tree"), Type.String({ pattern: "^tree:[1-9][0-9]*$" }), Type.Literal("map")], { description: await renderText("tools/read.params.view") })),
-    against: Type.Optional(Type.String({ description: await renderText("tools/read.params.against") })),
-    step: Type.Optional(Type.String({ description: await renderText("tools/read.params.step") })),
-  });
+  const readParams = await parametersFor("read", toolSchemas.tools.read, sharedNumbers);
   await registerTool({ name: "read", label: "Read pinned context",
     description: await renderText("tools/read.description"), parameters: readParams,
     async execute(_id: string, params: Record<string, unknown>) {
@@ -776,16 +731,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     },
   });
 
-  const scratchParams = Type.Object({
-    code: Type.Optional(Type.String({ description: await renderText("tools/scratch.params.code") })),
-    replacement: Type.Optional(Type.String({ description: await renderText("tools/scratch.params.replacement") })),
-    at: Type.Optional(Type.Object({
-      node: Type.String(),
-      steps: Type.Optional(Type.Array(Type.Integer(), { minItems: 2, maxItems: 2 })),
-      hole: Type.Optional(Type.String()),
-    }, { description: await renderText("tools/scratch.params.at") })),
-    helpers: Type.Optional(Type.Array(Type.String(), { description: await renderText("tools/scratch.params.helpers") })),
-  });
+  const scratchParams = await parametersFor("scratch", toolSchemas.tools.scratch, sharedNumbers);
   await registerTool({ name: "scratch", label: "Scratch Lean commands",
     description: await renderText("tools/scratch.description"), parameters: scratchParams,
     async execute(_id: string, params: Record<string, unknown>) {
@@ -793,12 +739,8 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     },
   });
 
-  if (!workerTheorem) {
-    const waitParams = Type.Object({
-      cursor: Type.Optional(Type.String({ description: await renderText("tools/await_results.params.cursor") })),
-      job_ids: Type.Optional(Type.Array(Type.String(), {
-        description: await renderText("tools/await_results.params.job_ids") })),
-    });
+  if (executableTools(toolSchemas, actorRole).includes("await_results")) {
+    const waitParams = await parametersFor("await_results", toolSchemas.tools.await_results, sharedNumbers);
     await registerTool({ name: "await_results", label: "await_results",
       description: await renderText("tools/await_results.description"), parameters: waitParams,
       async execute(_id: string, params: Record<string, unknown>, signal?: AbortSignal) {

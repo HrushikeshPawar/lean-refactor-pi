@@ -4,7 +4,7 @@
 
 **Blocked by:** 11: Wait without polling or no-event deadlocks; 15: Promote an anchored replacement inside scratch
 
-**Status:** ready-for-agent
+**Status:** needs-review
 
 **Branch:** `v8/21-schema-help`
 
@@ -26,12 +26,12 @@
 
 ## What to build and acceptance
 
-- [ ] 1. Generate help from actual registered schemas and shared descriptions, retaining nesting, field types, limits, defaults and exclusive input alternatives.
-- [ ] 2. Cover five proof-search tools and Sol management tools; workers cannot see delegation or strategic-board replacement powers.
-- [ ] 3. Remove obsolete finish help and drift such as flattened fill/splice parameter descriptions.
-- [ ] 4. Verify a documented request is accepted at the public tool boundary and malformed/over-limit inputs return the documented error class.
-- [ ] 5. Cache-only inspection starts neither Lean nor a provider; fixture output and schema shape agree across actor roles.
-- [ ] 6. Update text budgets/goldens deliberately without duplicating rules or prose into a second schema catalog.
+- [x] 1. Generate help from actual registered schemas and shared descriptions, retaining nesting, field types, limits, defaults and exclusive input alternatives.
+- [x] 2. Cover five proof-search tools and Sol management tools; workers cannot see delegation or strategic-board replacement powers.
+- [x] 3. Remove obsolete finish help and drift such as flattened fill/splice parameter descriptions.
+- [x] 4. Verify a documented request is accepted at the public tool boundary and malformed/over-limit inputs return the documented error class.
+- [x] 5. Cache-only inspection starts neither Lean nor a provider; fixture output and schema shape agree across actor roles.
+- [x] 6. Update text budgets/goldens deliberately without duplicating rules or prose into a second schema catalog.
 
 ## Verify
 

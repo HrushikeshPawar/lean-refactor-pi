@@ -190,8 +190,19 @@ class TextRendererTests(unittest.TestCase):
         self.assertEqual(result["theorem"], "Core.InitsUpdatesComm")
         self.assertEqual([part["part"] for part in parts[:3]], ["system prompt", "skill", "tools/compile"])
         self.assertEqual(
-            [part["part"] for part in parts[3:7]], ["tools/goal", "tools/search", "tools/read", "tools/finish"]
+            [part["part"] for part in parts[3:11]],
+            [
+                "tools/goal",
+                "tools/search",
+                "tools/read",
+                "tools/scratch",
+                "tools/delegate",
+                "tools/jobs",
+                "tools/await_results",
+                "tools/cancel",
+            ],
         )
+        self.assertNotIn("tools/finish", [part["part"] for part in parts])
         self.assertTrue(any(part["part"].startswith("Pinned environment") for part in parts))
         for part in parts:
             self.assertEqual(part["chars"], len(part["text"]))
@@ -279,6 +290,88 @@ class TextRendererTests(unittest.TestCase):
                     else:
                         self.assertEqual(text.render(case["key"], **case.get("values", {})), case["expect"])
                 text._load.cache_clear()
+
+    def test_v8_inspection_matches_actor_schema(self):
+        from arena.tool_schema import accept_tool_input, registered_tools, render_tool_sections
+
+        injected = {
+            "roles": {"sol": ["compile"], "worker": ["compile"]},
+            "tools": {
+                "compile": {
+                    "exclusive": ["drafts", "fill"],
+                    "requireOne": True,
+                    "properties": {
+                        "drafts": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 1,
+                            "maxItems": 4,
+                            "description": "drafts",
+                        },
+                        "fill": {
+                            "type": "object",
+                            "description": "fill",
+                            "properties": {
+                                "hole": {"type": "string", "required": True, "description": "fill_hole"},
+                                "text": {"type": "string", "required": True, "description": "fill_text"},
+                            },
+                        },
+                    },
+                }
+            },
+        }
+        rendered = dict(render_tool_sections(registered_tools("sol", injected)))
+        self.assertIn("fill: object, optional", rendered["compile"])
+        self.assertIn("  hole: string, required", rendered["compile"])
+        self.assertNotRegex(rendered["compile"], r"(?m)^fill_hole:")
+        widened = json.loads(json.dumps(injected))
+        widened["tools"]["compile"]["properties"]["fill"]["properties"]["hole"]["type"] = "integer"
+        widened_help = dict(render_tool_sections(registered_tools("sol", widened)))["compile"]
+        self.assertIn("  hole: integer, required", widened_help)
+
+        sol = [tool["name"] for tool in registered_tools("sol")]
+        worker = [tool["name"] for tool in registered_tools("worker")]
+        self.assertEqual(worker, ["compile", "goal", "search", "read", "scratch"])
+        self.assertEqual(
+            sol,
+            ["compile", "goal", "search", "read", "scratch", "delegate", "jobs", "await_results", "cancel"],
+        )
+        live = dict(render_tool_sections(registered_tools("sol")))
+        self.assertIn("fill: object, optional", live["compile"])
+        self.assertIn("  hole: string, required", live["compile"])
+        self.assertIn("one of: drafts | splice | fill | merge", live["compile"])
+        self.assertIn("default focus", live["compile"])
+        self.assertNotIn("finish", sol)
+        self.assertNotIn("delegate", worker)
+
+        accepted = accept_tool_input("compile", {"drafts": ["by rfl"]})
+        self.assertTrue(accepted["ok"])
+        self.assertTrue(accepted["accepted"])
+        over = accept_tool_input("compile", {"drafts": ["by rfl"] * 5})
+        self.assertEqual(over, {"ok": False, "category": "invalid_input", "reason": "drafts exceeds 4 items"})
+        malformed = accept_tool_input("compile", {"fill": {"text": "by rfl"}})
+        self.assertEqual(malformed["category"], "invalid_input")
+        self.assertFalse(malformed["ok"])
+
+        fixtures = Path(__file__).parent / "fixtures/agent_text"
+        context = json.loads((fixtures / "core-context.json").read_text())
+        profile = json.loads((fixtures / "core-profile.json").read_text())
+        output = io.StringIO()
+        with (
+            patch("arena.context.cached_context", return_value=context),
+            patch("arena.context.reference_profile", return_value=profile),
+            patch("arena.context.lean_context", side_effect=AssertionError("Lean started")),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(render_template(theorem="Core.InitsUpdatesComm", json_output=True, actor="worker"), 0)
+        parts = json.loads(output.getvalue())["parts"]
+        self.assertEqual(
+            [part["part"] for part in parts if part["part"].startswith("tools/")],
+            ["tools/compile", "tools/goal", "tools/search", "tools/read", "tools/scratch"],
+        )
+        compile = next(part["text"] for part in parts if part["part"] == "tools/compile")
+        self.assertIn("  hole: string, required", compile)
+        self.assertNotIn("tools/finish", [part["part"] for part in parts])
 
     def test_five_tool_descriptions_include_the_shared_limits(self):
         numbers = text.numbers()
