@@ -176,8 +176,7 @@ class Coordinator:
 
     def _delegate(self, request: dict) -> dict:
         if request.get("actor_id") != "sol":
-            return {"ok": False, "category": "invalid_input", "reason": "actor",
-                    "operation_id": request.get("operation_id")}
+            return _hinted("actor", request.get("operation_id"), "replies/delegate.actor")
         rejected = _rejected_delegate(request)
         if rejected is not None:
             return rejected
@@ -195,13 +194,12 @@ class Coordinator:
         )
 
     def _cancel(self, request: dict) -> dict:
+        operation_id = request.get("operation_id")
         if request.get("actor_id") != "sol":
-            return {"ok": False, "category": "invalid_input", "reason": "actor",
-                    "operation_id": request.get("operation_id")}
+            return _hinted("actor", operation_id, "replies/cancel.actor")
         job_id = request.get("job_id")
         if not isinstance(job_id, str) or not job_id:
-            return {"ok": False, "category": "invalid_input", "reason": "job_id",
-                    "operation_id": request.get("operation_id")}
+            return _hinted("job_id", operation_id, "replies/cancel.job_id")
         return orchestration.cancel(
             self.directory,
             operation_id=str(request.get("operation_id") or ""),
@@ -216,6 +214,11 @@ class Coordinator:
 
     def __exit__(self, *_exc) -> None:
         self.close()
+
+
+def _hinted(reason: str, operation_id, hint: str) -> dict:
+    return {"ok": False, "category": "invalid_input", "reason": reason,
+            "hint": text.render(hint), "operation_id": operation_id}
 
 
 def _delegate_invalid(reason: str, operation_id, hint: str | None = None) -> dict:

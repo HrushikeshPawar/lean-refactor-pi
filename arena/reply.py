@@ -35,7 +35,7 @@ def reply(
 
 
 def request_error(code: str, bad_input: object, valid: list[str], forms: list[str]) -> dict:
-    return {"code": code, "input": str(bad_input), "valid": valid[:8], "forms": forms}
+    return {"code": code, "input": str(bad_input), "valid": valid[:10], "forms": forms}
 
 
 def error_reply(code: str, bad_input: object, valid: list[str], forms: list[str]) -> dict:

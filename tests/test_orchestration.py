@@ -731,6 +731,7 @@ class V8WorkerSmokeTests(unittest.TestCase):
                 open_child=open_child,
             )
             self.assertEqual(busy["category"], "busy")
+            self.assertTrue(busy["hint"])
             self.assertEqual(len(children), 1)
             changed = orchestration.delegate(
                 directory,

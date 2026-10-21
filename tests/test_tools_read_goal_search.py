@@ -657,3 +657,21 @@ class ReadHandleForgivingTests(CascadeToolCase):
         by_hole = tools.read_tool("T", "logic", {"hole": f"{node}.h1"})
         self.assertNotEqual((by_handle.get("error") or {}).get("code"), "bad_handle")
         self.assertEqual(by_handle, by_hole)
+
+
+class ActionableRejectionTests(CascadeToolCase):
+    def test_representative_rejections_say_how_to_fix_the_call(self):
+        from arena import coordinator
+
+        node = self.sketch()
+        step = tools.read_tool("T", "logic", {"node": node, "step": "s1"})["error"]
+        self.assertIn("with view outline", " ".join(step["valid"]))
+        unknown = tools.read_tool("T", "logic", {"node": "n99"})["error"]
+        self.assertIn(node, unknown["valid"])
+        hole = tools.read_tool("T", "logic", {"hole": "n99.h1"})["error"]
+        self.assertEqual((hole["code"], hole["input"], hole["valid"]), ("invalid_hole", "n99.h1", ["nN.hK"]))
+        line = tools.goal_tool("T", "logic", {"node": node, "line": 99})["error"]
+        self.assertEqual(line["code"], "invalid_goal")
+        self.assertIn("outside the proof", line["input"])
+        cancel = coordinator.Coordinator._cancel(object(), {"actor_id": "sol"})
+        self.assertEqual((cancel["reason"], cancel["hint"]), ("job_id", "cancel needs job_id, one string."))

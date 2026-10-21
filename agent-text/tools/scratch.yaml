@@ -2,5 +2,6 @@ description: "Run an isolated Lean experiment, or submit an exact target replace
 params:
   code: "Lean commands that take the target declaration's place; no import lines. sorry is allowed here. Unicode and line endings are kept exactly."
   replacement: "Exact proof-local replacement for the anchored steps or hole. Mutually exclusive with code."
-  at: "Saved parent node plus steps [first,last] or hole reference. Omit only when the job has a recorded anchor."
+  at: "Saved parent node plus steps [first,last] counted from 1 (s2-s3 is [2,3]), or hole. Omit only when the job's anchor is a step range or hole. For a whole-proof anchor send code with the full theorem, or use compile drafts."
   helpers: "Optional experiment ids whose recorded snippets this call depends on. Only named helpers and their recorded dependencies are included. Diagnostic lines use that combined source."
+  at_hole: "Open hole id of that node, such as n3.h1. Exclusive with steps."

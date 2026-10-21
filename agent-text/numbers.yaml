@@ -43,7 +43,7 @@ memory_library_lines: 15
 memory_read_entries: 30
 memory_recovery_entries: 8
 budget:
-  static_words: 800
+  static_words: 860
   packet_words: 365
   worker_words: 150
   reply_words: 40

@@ -13,7 +13,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
-from arena import coordinator, orchestration
+from arena import coordinator, orchestration, text
 from arena import reply as tool_reply
 from arena import tools as v7_tools
 from arena.campaign import (
@@ -109,10 +109,11 @@ def _management(args: SimpleNamespace) -> dict:
             raise ValueError("request-file must contain an object")
     if args.action == "jobs":
         if any(key != "job_ids" for key in request):
-            return {"ok": False, "category": "invalid_input", "reason": "unknown input"}
+            return {"ok": False, "category": "invalid_input", "reason": text.render("replies/jobs.unknown_input")}
         job_ids = request.get("job_ids")
         if job_ids is not None and (not isinstance(job_ids, list) or any(not isinstance(item, str) for item in job_ids)):
-            return {"ok": False, "category": "invalid_input", "reason": "job_ids"}
+            return {"ok": False, "category": "invalid_input", "reason": "job_ids",
+                    "hint": text.render("replies/jobs.job_ids")}
         return orchestration.jobs(run_dir(args.run_id), job_ids)
     identity = {
         "actor_id": _harness_actor(),

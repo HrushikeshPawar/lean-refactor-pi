@@ -16,7 +16,7 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-from arena import run_control
+from arena import run_control, text
 from arena.campaign import _append, events
 from arena.pi_rpc import WORKER_TOOLS, FrameReader, cancel_lines, prompt_line, worker_launch
 from arena.run_control import OperationRejected
@@ -45,8 +45,15 @@ def _wake() -> None:
         _interest.notify_all()
 
 
-def _reject(operation_id: str, reason: str, category: str = "invalid_input") -> dict:
-    return {"ok": False, "category": category, "reason": reason, "operation_id": operation_id}
+def _reject(operation_id: str, reason: str, category: str = "invalid_input", hint: str | None = None) -> dict:
+    """A rejection. hint is a replies/ template key whose text says how to fix the call."""
+    rejected = {"ok": False, "category": category, "reason": reason, "operation_id": operation_id}
+    if hint is not None:
+        rejected["hint"] = text.render(hint)
+    return rejected
+
+
+_ANCHOR_HINTS = {"node": "node", "hole": "hole", "steps": "steps", "scope": "scope"}
 
 
 def _resolve_anchor(directory: Path, scope: str, anchor: object) -> dict | str:
@@ -998,12 +1005,12 @@ def _follow_up(
         with run_control.control_lock(directory):
             current = _job_snapshot(directory, job_id)
             if current is None:
-                return _reject(operation_id, "job", "not_found")
+                return _reject(operation_id, "job", "not_found", "replies/delegate.job")
             source = _job_rows(directory, job_id)[0]
             if run_id != source["run_id"] or actor_id != source["actor_id"]:
-                return _reject(operation_id, "ownership")
+                return _reject(operation_id, "ownership", hint="replies/delegate.ownership")
             if not _same_anchor(directory, current, scope, anchor):
-                return _reject(operation_id, "anchor")
+                return _reject(operation_id, "anchor", hint="replies/delegate.follow_up")
             arguments = {
                 "job_id": job_id,
                 "task": task,
@@ -1016,9 +1023,9 @@ def _follow_up(
             control_rows = run_control._abort_open_intents(directory, run_control._control_rows(directory))
             existing = run_control._receipt(control_rows, operation_id)
             if existing is None and _recovering(directory):
-                return _reject(operation_id, "recovering", "recovery_required")
+                return _reject(operation_id, "recovering", "recovery_required", "replies/delegate.recovering")
             if existing is None and (current["state"] in _active_states | {"cancelling"} or current["occupies_slot"]):
-                return _reject(operation_id, "active", "busy")
+                return _reject(operation_id, "active", "busy", "replies/delegate.active")
             delegation = {
                 "operation_id": operation_id,
                 "run_id": source["run_id"],
@@ -1088,7 +1095,7 @@ def delegate(
 ) -> dict:
     """Accept one hypothesis, or resume its saved session, and return before the worker settles."""
     if not operation_id or not run_id or not actor_id or not session_id or not isinstance(task, str) or not task:
-        return _reject(operation_id, "identity")
+        return _reject(operation_id, "identity", hint="replies/delegate.identity")
     if job_id:
         return _follow_up(
             directory,
@@ -1103,10 +1110,11 @@ def delegate(
             open_child=open_child,
         )
     if scope is None or anchor is None:
-        return _reject(operation_id, "scope")
+        return _reject(operation_id, "scope", hint="replies/delegate.scope")
     resolved = _resolve_anchor(directory, scope, anchor)
     if isinstance(resolved, str):
-        return _reject(operation_id, resolved)
+        key = _ANCHOR_HINTS.get(resolved) or ("anchor_step" if scope == "step" else "anchor_proof")
+        return _reject(operation_id, resolved, hint=f"replies/delegate.{key}")
     job_id = uuid.uuid4().hex
     activation_id = uuid.uuid4().hex
     worker_session_id = uuid.uuid4().hex
@@ -1143,7 +1151,7 @@ def delegate(
     try:
         with run_control.control_lock(directory):
             if run_control._receipt(run_control._control_rows(directory), operation_id) is None and _recovering(directory):
-                return _reject(operation_id, "recovering", "recovery_required")
+                return _reject(operation_id, "recovering", "recovery_required", "replies/delegate.recovering")
             if _can_admit_directly(directory):
                 delegation["state"] = "launching"
             applied = run_control._apply_locked(
@@ -1198,16 +1206,16 @@ def cancel(
 ) -> dict:
     """Commit cancellation of one exact activation before touching its transport."""
     if not operation_id or not run_id or not actor_id or not session_id or not job_id:
-        return _reject(operation_id, "identity")
+        return _reject(operation_id, "identity", hint="replies/cancel.identity")
     arguments = {"job_id": job_id, "run_id": run_id, "actor_id": actor_id, "session_id": session_id}
     try:
         with run_control.control_lock(directory):
             current = _job_snapshot(directory, job_id)
             if current is None:
-                return _reject(operation_id, "job", "not_found")
+                return _reject(operation_id, "job", "not_found", "replies/cancel.job")
             source = _job_rows(directory, job_id)[0]
             if run_id != source["run_id"] or actor_id != source["actor_id"]:
-                return _reject(operation_id, "ownership")
+                return _reject(operation_id, "ownership", hint="replies/cancel.ownership")
             previous = next((row for row in _states(directory)
                              if row.get("operation_id") == operation_id and row.get("cancel_operation_id")), None)
             activation_id = previous["activation_id"] if previous is not None else current["activation_id"]
@@ -1519,11 +1527,11 @@ def await_results(
 
 def _await_results(directory, actor_id, cursor, job_ids, cancel_event, blocked) -> dict:
     if not actor_id:
-        return _reject("", "identity")
+        return _reject("", "identity", hint="replies/await_results.identity")
     if job_ids is not None and (
         not isinstance(job_ids, list) or not all(isinstance(item, str) and item for item in job_ids)
     ):
-        return _reject("", "job_ids")
+        return _reject("", "job_ids", hint="replies/await_results.job_ids")
     with run_control.watch_directory(directory) as watch:
         while True:
             with run_control.control_lock(directory):
@@ -1531,7 +1539,7 @@ def _await_results(directory, actor_id, cursor, job_ids, cancel_event, blocked) 
                     return {**_reject("", "wait_cancelled", "cancelled"), "retryable": True}
                 acked = _acked(directory, actor_id, cursor)
                 if acked is None:
-                    return _reject("", "cursor")
+                    return _reject("", "cursor", hint="replies/await_results.cursor")
                 fresh = [
                     row for row in _wait_rows(directory)
                     if row.get("event_id") and row["event_id"] not in acked and _selectable(row, job_ids)

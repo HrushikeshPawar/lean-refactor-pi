@@ -1,0 +1,2 @@
+unknown_input: "jobs takes only job_ids: a list of job id strings."
+job_ids: "job_ids must be a list of job id strings; omit it to list every job."

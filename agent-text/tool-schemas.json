@@ -102,7 +102,7 @@
           "properties": {
             "node": {"type": "string", "required": true},
             "steps": {"type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2},
-            "hole": {"type": "string"}
+            "hole": {"type": "string", "description": "at_hole"}
           },
           "exclusive": ["steps", "hole"],
           "requireOne": true

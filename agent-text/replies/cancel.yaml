@@ -1,0 +1,5 @@
+job: "Unknown job_id; jobs lists yours."
+job_id: "cancel needs job_id, one string."
+ownership: "That job belongs to another actor; jobs lists yours."
+actor: "Only the lead actor may cancel."
+identity: "The call had no usable identity or job_id; send job_id as one string."

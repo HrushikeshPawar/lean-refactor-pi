@@ -25,8 +25,9 @@ TOOL_FORMS = {
         "hole:nN.hK",
         "experiment:eN",
         "ref:<evidence>",
-        "view:source|prices|diff|outline|map",
-        "step:sN",
+        "view:source|prices|diff|outline|tree|tree:<page>|map",
+        "step:sN (with view outline)",
+        "against:nN (with view diff)",
     ],
     "scratch": ["code:<lean commands>", "replacement+at", "helpers:[experiment ids]"],
 }
@@ -78,7 +79,7 @@ def _focus_ref(run_id: str) -> str:
 
 def _empty_error(tool: str) -> dict:
     valid = {
-        "compile": ["drafts", "splice", "fill", "merge", "base", "from", "note", "check"],
+        "compile": ["drafts", "splice", "fill", "merge", "steps", "text", "base", "from", "note", "check"],
         "goal": ["node", "hole", "line", "try"],
         "search": ["queries", "kind", "after"],
         "read": ["handle", "node", "hole", "experiment", "ref", "view", "against", "step"],
@@ -732,14 +733,15 @@ def compile_tool(theorem: str, run_id: str, request: dict) -> dict:
 
 def _compile_tool(theorem: str, run_id: str, request: dict) -> dict:
     valid = ["drafts", "splice", "fill", "merge", "base", "from", "note", "check"]
+    shown = [*valid[:4], "steps", "text", *valid[4:]]
     request = _flat_splice(request)
     if _is_empty(request, "compile"):
         return _empty_error("compile")
     if not isinstance(request, dict):
-        return _invalid("bad_arguments", request, valid, TOOL_FORMS["compile"])
+        return _invalid("bad_arguments", request, shown, TOOL_FORMS["compile"])
     unknown = sorted(set(request) - set(valid))
     if unknown:
-        return _invalid("unknown_argument", unknown[0], valid, TOOL_FORMS["compile"])
+        return _invalid("unknown_argument", unknown[0], shown, TOOL_FORMS["compile"])
     operations = [key for key in ("drafts", "splice", "fill", "merge") if key in request]
     if (
         len(operations) == 1
@@ -1070,6 +1072,9 @@ def goal_tool(theorem: str, run_id: str, request: dict) -> dict:
                     TOOL_FORMS["goal"],
                 )
             proof_line = int(line_value)
+            count = len(proof.splitlines())
+            if not 1 <= proof_line <= count:
+                raise ValueError(_render("goal_line_range", line=proof_line, count=count))
         earlier = [
             item
             for item in (_primary(_node_result(run_id, node.proof_id)).get("diagnostics") or [])
@@ -1309,6 +1314,12 @@ def _search_row(hit: dict) -> str:
     )
 
 
+def _empty_forms(code: object, kind: object) -> list[str]:
+    if code == "empty_query" and kind in ("name", "type", "text"):
+        return [_render(f"search_empty_{kind}")]
+    return ["nonempty query"]
+
+
 def search_tool(theorem: str, run_id: str, request: dict) -> dict:
     if _is_empty(request, "search"):
         return _empty_error("search")
@@ -1350,7 +1361,7 @@ def search_tool(theorem: str, run_id: str, request: dict) -> dict:
                     str(query),
                     error.get("code", "search_error"),
                     error.get("input", query),
-                    error.get("valid", ["nonempty query"]),
+                    error.get("valid") or _empty_forms(error.get("code"), kind),
                     TOOL_FORMS["search"],
                     [
                         head,
@@ -1593,6 +1604,25 @@ def _handle_as_target(request: dict) -> dict:
     return {**rest, key: value}
 
 
+def _node_choices(run_id: str) -> list[str]:
+    """The newest saved node ids, or the id form when none can be listed."""
+    try:
+        ids = [item.id for item in _nodes(run_id)[1].nodes]
+    except (OSError, ValueError, KeyError):
+        ids = []
+    return ids[-8:] or [_render("read_node_form")]
+
+
+def _hole_choices(run_id: str, hole_ref: object) -> list[str]:
+    """Open hole ids of the named node when it resolves, else the full id form."""
+    try:
+        node = _node(run_id, str(hole_ref).split(".", 1)[0])
+        choices = [f"{node.id}.h{row['index']}" for row in node.holes]
+    except (OSError, ValueError, KeyError, StopIteration):
+        choices = []
+    return choices[:8] or ["nN.hK"]
+
+
 def read_tool(theorem: str, run_id: str, request: dict) -> dict:
     if _is_empty(request, "read"):
         return _empty_error("read")
@@ -1661,12 +1691,12 @@ def read_tool(theorem: str, run_id: str, request: dict) -> dict:
                     ]
                 ),
             )
-        except (ValueError, IndexError, StopIteration) as error:
-            return _invalid("invalid_hole", error, [], TOOL_FORMS["read"])
+        except (ValueError, IndexError, StopIteration):
+            return _invalid("invalid_hole", hole_ref, _hole_choices(run_id, hole_ref), TOOL_FORMS["read"])
     try:
         node = _node(run_id, request["node"])
     except (ValueError, StopIteration):
-        return _invalid("unknown_node", request.get("node"), [], TOOL_FORMS["read"])
+        return _invalid("unknown_node", request.get("node"), _node_choices(run_id), TOOL_FORMS["read"])
     projection = _nodes(run_id)[1]
     lines = []
     data = {}
@@ -2094,7 +2124,7 @@ def _scratch_promote(
         return _invalid("forbidden", label, ["no forbidden constructs"], TOOL_FORMS["scratch"])
     anchor = _scratch_anchor(run_id, request, full_target=source_code is not None)
     if isinstance(anchor, str):
-        return _invalid("bad_anchor", anchor, ["node + one step range or hole"], TOOL_FORMS["scratch"])
+        return _invalid("bad_anchor", anchor, [_render("scratch_anchor_form")], TOOL_FORMS["scratch"])
     submitted_code = replacement if source_code is None else source_code
     context = {"form": "anchored" if source_code is None else "full_target", "anchor": anchor}
     if body_offset is not None:
@@ -2181,7 +2211,7 @@ def _scratch_promote(
         step_ids = anchor.get("step_ids") or []
         if not step_ids:
             promotion = {"state": "not_promoted", "reason": "anchor"}
-            return close("recorded", promotion, [_render("scratch_not_promoted", reason="anchor")], ok=False)
+            return close("recorded", promotion, [_render("scratch_not_promoted_anchor")], ok=False)
         spec = step_ids[0] if len(step_ids) == 1 else f"{step_ids[0]}-{step_ids[-1]}"
         operation = {"type": "splice", "base": anchor["node"], "steps": spec, "text": embedded}
     operation["experiment_id"] = experiment_id
