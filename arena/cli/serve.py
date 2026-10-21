@@ -14,6 +14,7 @@ keys in ~/.pi/agent/langfuse.json (never sent to the browser) and cached; `--no-
 from __future__ import annotations
 
 import fnmatch
+import inspect
 import json
 import re
 import signal
@@ -207,6 +208,8 @@ def graph_payload(run_id: str) -> dict:
     give_reference_its_numbers(payload)
     config = directory / "run-config.json"
     payload["limit_usd"] = configured_cap(json.loads(config.read_text())) if config.exists() else None
+    payload["models"] = run_models(directory)
+    payload["target"] = target_to_beat(payload.get("theorem"), directory.parent)
     report = directory / "cost.json"
     payload["cost_report"] = json.loads(report.read_text()) if report.exists() else {}
     if "pi_embedded_estimate" not in payload["cost_report"]:
@@ -231,6 +234,46 @@ def graph_payload(run_id: str) -> dict:
             "missing_entries": missing_entries,
         }
     return payload
+
+
+def run_models(directory: Path) -> dict:
+    """The model behind the orchestrator role (run-config `model`) and behind workers, which every run
+    launches with `pi_rpc.worker_launch`'s default model."""
+    from arena.pi_rpc import worker_launch
+
+    worker = inspect.signature(worker_launch).parameters["model"].default
+    try:
+        config = json.loads((directory / "run-config.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        return {"orchestrator": None, "worker": worker}
+    return {"orchestrator": config.get("model"), "worker": worker}
+
+
+def target_to_beat(theorem: str | None, runs_root: Path) -> dict | None:
+    """Our latest submission's number for this theorem: the newest runs/pi-budget/*/submission-final/scores.json
+    (by mtime) that has the row. scores.json holds proxy and source only; tokens and heartbeats come from the
+    source run's submission.json when the source is a run."""
+    if not theorem:
+        return None
+    files = sorted(runs_root.glob("*/submission-final/scores.json"), key=lambda f: f.stat().st_mtime, reverse=True)
+    for file in files:
+        try:
+            row = json.loads(file.read_text()).get(theorem)
+        except (OSError, json.JSONDecodeError, AttributeError):
+            continue
+        if not isinstance(row, dict) or row.get("proxy") is None:
+            continue
+        source = str(row.get("source") or "")
+        tokens = heartbeats = None
+        try:
+            made = json.loads((runs_root / source.split(" ")[0] / "submission.json").read_text())
+            if made.get("proxy") == row["proxy"]:
+                tokens, heartbeats = made.get("tokens"), made.get("heartbeats")
+        except (OSError, json.JSONDecodeError, AttributeError):
+            pass
+        return {"proxy": row["proxy"], "tokens": tokens, "heartbeats": heartbeats, "source": source,
+                "submission": file.parent.parent.name}
+    return None
 
 
 def baseline_point(payload: dict) -> dict | None:

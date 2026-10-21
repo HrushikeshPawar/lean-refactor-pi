@@ -9,7 +9,7 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
   let data, byId = new Map(), pById = new Map(), probeItems = [], scratchItems = [], sById = new Map(), actorIds = [], probeKids = new Map(), coords = new Map(),
       selected = store.get('arena-selected') || null, hadStored = store.get('arena-selected') !== null,
       view = null, dragging = null, lastRevision = '', collapsed = new Set(), chartSpecs = [],
-      showProbes = store.get('arena-probes') !== '0', showScratch = store.get('arena-scratch') !== '0', showBest = store.get('arena-bestpath') !== '0',
+      hideInit = store.get('arena-hideinit') === '1', showProbes = store.get('arena-probes') !== '0', showScratch = store.get('arena-scratch') !== '0', showBest = store.get('arena-bestpath') !== '0',
       colorBy = ['route','status','actor'].includes(store.get('arena-colorby')) ? store.get('arena-colorby') : 'route',
       legendOpen = store.get('arena-legend') !== '0', hoverGroup = null,
       off = {kind: new Set(), status: new Set(), route: new Set(), actor: new Set()},
@@ -17,7 +17,7 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
   const graph = $('graph'), wrap = $('graph-wrap'), minimap = $('minimap'), tip = $('node-tip');
   const STEP_X = 90, STEP_Y = 100;
   const STATUSES = [['verified','Verified 3/3'],['compiled','Compiled'],['unchecked','Not checked: below best'],['skeleton','Skeleton (sorry)'],['failed','Failed'],['unevaluated','Unevaluated']];
-  const KINDS = [['candidate','Candidates'],['merge','Merges ⊕'],['probe','Probes'],['scratch','Scratch ⬦']];
+  const KINDS = [['candidate','Candidates'],['merge','Merges ⊕'],['probe','Probes'],['scratch','Scratch ⬡']];
 
   function status(node) { return node.status || 'fail'; }
   function best(node) { return node.evaluations.findLast(e => e.mode === 'full' && Object.keys(e.result.compat || {}).length === 3 && Object.values(e.result.compat).every(v => v.passed)) || node.evaluations.at(-1); }
@@ -39,8 +39,8 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
   const kindOf = it => isProbe(it) ? 'probe' : isScratch(it) ? 'scratch' : it.origin === 'auto_merge' ? 'merge' : 'candidate';
   // Node size follows proof length (tokens); probes are small diamonds of a fixed size.
   function radius(it) {
-    if (isProbe(it)) return 10;
-    if (isScratch(it)) return 9;
+    if (isProbe(it)) return 11;
+    if (isScratch(it)) return 12;
     const t = it.tokens; if (t == null) return 16;
     const [lo, hi] = tokenRange; return 15 + 11 * Math.sqrt(Math.max(0, Math.min(1, (t - lo) / Math.max(1, hi - lo))));
   }
@@ -150,14 +150,24 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
   // ---- colour, grouping and filters -------------------------------------------------------------
   const GREY = '#6f7f93';
   const routeColor = id => { const n = Number(String(id ?? '').replace(/\D/g, '')); return !id ? GREY : n <= 1 ? '#7a869a' : `hsl(${Math.round((n * 137.508) % 360)} 62% 52%)`; };
-  const STATUS_FILL = {verified:'#1d644b', compiled:'#796029', unchecked:'#4d4630', skeleton:'#4b3a78', failed:'#783a49', unevaluated:'#24465f'};
+  // Colour-blind-safe set (Okabe-Ito based): green / sky blue / amber / vermillion / purple / grey differ in hue and lightness.
+  const STATUS_FILL = {verified:'#1b6b4a', compiled:'#1d5f8c', unchecked:'#3d4856', skeleton:'#94640a', failed:'#9b2c25', unevaluated:'#58408a'};
   // Actor of a node: whoever made its first exact derivation (else its first attempt); probes and scratch rows carry their own actor_id.
   const UNKNOWN_ACTOR = 'unknown';
   const actorOf = it => isScratch(it) ? it.actor_id || UNKNOWN_ACTOR : isProbe(it) ? it.actor_id || UNKNOWN_ACTOR
     : (it.attempts || []).find(a => a.relation === 'exact' && a.actor_id)?.actor_id || (it.attempts || []).find(a => a.actor_id)?.actor_id || UNKNOWN_ACTOR;
   const actorColor = id => id === 'sol' ? '#e0a030' : id === UNKNOWN_ACTOR ? GREY : `hsl(${Math.round((190 + 47 * Math.max(0, actorIds.indexOf(id))) % 360)} 60% 52%)`;
-  const actorLabel = id => id === 'sol' ? 'sol (orchestrator)' : id;
-  const SCRATCH_FILL = {ok:'#1d644b', failed:'#783a49', other:'#4d5a6b'};
+  // Roles with the real model: the orchestrator is actor "sol" internally whatever model it runs.
+  const actorLabel = id => {
+    const m = data?.models || {}, own = (data?.actors || []).find(a => a.actor_id === id)?.model;
+    if (id === 'sol') return m.orchestrator ? `orchestrator · ${m.orchestrator}` : 'orchestrator';
+    if (id === UNKNOWN_ACTOR) return id;
+    return own || m.worker ? `${id} · ${own || m.worker}` : id;
+  };
+  const probeLabel = p => p.node || p.index;
+  const tagWidth = (label, pad) => Math.round(Math.max(30, 7.5 * String(label).length + pad));
+  const hexPath = (w, h) => `M${-w / 2},0 L${-w / 2 + h / 2},${-h / 2} L${w / 2 - h / 2},${-h / 2} L${w / 2},0 L${w / 2 - h / 2},${h / 2} L${-w / 2 + h / 2},${h / 2}Z`;
+  const SCRATCH_FILL = {ok:STATUS_FILL.verified, failed:STATUS_FILL.failed, other:'#44505f'};
   const scratchResult = e => e.outcome === 'success' || e.outcome === 'passed' ? 'ok' : e.outcome === 'failure' || e.outcome === 'proof_error' ? 'failed' : 'other';
   const fillOf = it => isScratch(it) ? SCRATCH_FILL[scratchResult(it)] : colorBy === 'route' ? routeColor(it.route) : colorBy === 'actor' ? actorColor(actorOf(it)) : STATUS_FILL[stat(it)];
   const clip = (text, n) => { text = String(text ?? '').replace(/\s+/g, ' ').trim(); return text.length > n ? text.slice(0, n - 1) + '…' : text; };
@@ -238,9 +248,9 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
       <div class="lp-body"${legendOpen ? '' : ' hidden'}><div class="lp-list">${rows}</div>
       <div class="lp-key"><span><svg width="34" height="14"><circle cx="7" cy="7" r="4.5" class="k-small"/><circle cx="24" cy="7" r="6.5" class="k-big"/></svg>size = proof tokens</span>
       <span><svg width="34" height="14"><circle cx="7" cy="7" r="6" class="b-ver"/><circle cx="25" cy="7" r="6" class="b-fail"/></svg>border = result</span>
-      <span><svg width="34" height="14"><path d="M8,1 L14,7 L8,13 L2,7Z" class="k-probe"/></svg>probe</span>
-      <span><svg width="34" height="14"><path d="M7,1 L13,7 L7,13 L1,7Z" class="k-scratch ok"/><path d="M25,1 L31,7 L25,13 L19,7Z" class="k-scratch failed"/></svg>scratch experiment (ok / failed)</span>
-      <span><svg width="34" height="14"><path d="M1,7H33" class="k-scratch-edge"/></svg>scratch link (dashed; solid ring = promoted)</span>
+      <span><svg width="34" height="16"><rect x="3" y="2" width="28" height="12" rx="4" class="k-probe"/></svg>probe (label = model node id)</span>
+      <span><svg width="64" height="16"><path d="M2,8 L6,2 L24,2 L28,8 L24,14 L6,14Z" class="k-scratch ok"/><path d="M36,8 L40,2 L58,2 L62,8 L58,14 L40,14Z" class="k-scratch failed"/></svg>scratch experiment e1, e2… (ok / failed)</span>
+      <span><svg width="34" height="14"><path d="M1,7H33" class="k-scratch-edge"/></svg>scratch link (dashed; thick border = promoted)</span>
       <span><svg width="34" height="14"><path d="M1,7H33" class="k-best"/></svg>best path</span></div></div>`;
     paintSwatches(panel);
   }
@@ -319,8 +329,10 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
       const cls = `node k-${probe ? 'probe' : scratch ? 'scratch res-' + scratchResult(it) + (it.promotedTo ? ' promoted' : '') : 'candidate'} st-${st}${it.origin === 'auto_merge' ? ' auto_merge' : ''}${milestone.has(it.id) ? ' best' : ''}${showBest && bestPath.nodes.has(it.id) ? ' onbest' : ''}${lineage.nodes.has(it.id) && selected !== it.id ? ' ancestor' : ''}${selected === it.id ? ' selected' : ''}${selected && !lineage.nodes.has(it.id) ? ' unrelated' : ''}${dim}${hoverGroup && groupKey(hoverGroup.group, it) !== hoverGroup.key ? ' spot-off' : ''}`;
       const data_ = `data-id="${esc(it.id)}" data-route="${esc(it.route || 'none')}" data-status="${st}" data-kind="${kindOf(it)}" data-actor="${esc(actorOf(it))}"`;
       const fill = fillOf(it);
-      if (scratch) boxes.push(`<g class="${cls}" ${data_} transform="translate(${p.x},${p.y})"><circle class="hit" r="14"/>${colorBy === 'actor' ? `<path class="actor-ring" fill="none" stroke="${actorColor(actorOf(it))}" d="M0,${-R - 4} L${R + 4},0 L0,${R + 4} L${-R - 4},0Z"/>` : ''}<path class="node-body" fill="${fill}" d="M0,${-R} L${R},0 L0,${R} L${-R},0Z"/></g>`);
-      else if (probe) boxes.push(`<g class="${cls}" ${data_} transform="translate(${p.x},${p.y})"><circle class="hit" r="15"/><path class="node-body" fill="${fill}" d="M0,${-R} L${R},0 L0,${R} L${-R},0Z"/></g>`);
+      if (scratch) { const lab = it.index, w = tagWidth(lab, 20) + 6, h = 2 * R;
+        boxes.push(`<g class="${cls}" ${data_} transform="translate(${p.x},${p.y})"><rect class="hit" x="${-w / 2 - 3}" y="${-R - 3}" width="${w + 6}" height="${h + 6}"/>${colorBy === 'actor' ? `<path class="actor-ring" fill="none" stroke="${actorColor(actorOf(it))}" d="${hexPath(w + 8, h + 8)}"/>` : ''}<path class="node-body" fill="${fill}" d="${hexPath(w, h)}"/><text class="node-tag" text-anchor="middle" dominant-baseline="central">${esc(lab)}</text></g>`); }
+      else if (probe) { const lab = probeLabel(it), w = tagWidth(lab, 14), h = 2 * R;
+        boxes.push(`<g class="${cls}" ${data_} transform="translate(${p.x},${p.y})"><rect class="hit" x="${-w / 2 - 3}" y="${-R - 3}" width="${w + 6}" height="${h + 6}"/>${colorBy === 'actor' ? `<rect class="actor-ring" fill="none" stroke="${actorColor(actorOf(it))}" x="${-w / 2 - 4}" y="${-R - 4}" width="${w + 8}" height="${h + 8}" rx="9"/>` : ''}<rect class="node-body" fill="${fill}" x="${-w / 2}" y="${-R}" width="${w}" height="${h}" rx="7"/><text class="node-tag" text-anchor="middle" dominant-baseline="central">${esc(lab)}</text></g>`); }
       else boxes.push(`<g class="${cls}" ${data_} transform="translate(${p.x},${p.y})"><circle class="hit" r="${R + 4}"/>${it.origin === 'auto_merge' ? `<circle class="merge-ring" r="${R + 6}"/><text class="merge-badge" x="${R - 1}" y="${-R + 2}">⊕</text>` : ''}<circle class="node-body" r="${R}" fill="${fill}"/><text class="node-number${shortLabel(it).length > 3 ? ' small' : ''}" text-anchor="middle" dominant-baseline="central">${esc(shortLabel(it))}</text>${it.id === topBest ? `<text class="best-star" x="${-R + 2}" y="${-R + 4}">★</text>` : ''}</g>`);
     }
     graph.innerHTML = edges.join('') + boxes.join(''); applyView();
@@ -338,12 +350,12 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
     const route = it.route ? `<i class="sw" data-bg="${routeColor(it.route)}"></i>${esc(it.route)}${it.route_inherited ? ' (parent)' : ''}${r ? ` · ${esc(clip(r.label, 46))}` : ''}` : '<span class="muted">none</span>';
     const routeState = r ? `${r.depth ?? 0} goal states${r.min_holes != null ? `, min ${r.min_holes} holes` : ''}${r.credited ? ' · credited' : r.explored ? ' · explored' : ''}` : '';
     if (isScratch(it)) {
-      return `<div class="tip-head">Scratch · ${esc(String(it.experiment_id ?? it.code_sha256 ?? '?').slice(0, 12))} ${tagHtml(it.outcome || it.phase || 'accepted', scratchResult(it) === 'ok' ? 'good' : scratchResult(it) === 'failed' ? 'bad' : '')}</div>
+      return `<div class="tip-head">Scratch ${esc(it.index)} · ${esc(String(it.experiment_id ?? it.code_sha256 ?? '?').slice(0, 12))} ${tagHtml(it.outcome || it.phase || 'accepted', scratchResult(it) === 'ok' ? 'good' : scratchResult(it) === 'failed' ? 'bad' : '')}</div>
         ${row('Actor', `<i class="sw" data-bg="${actorColor(actorOf(it))}"></i>${esc(actorLabel(actorOf(it)))}`)}${row('Anchor', esc(it.anchorNote))}${row('Promotion', it.promotion?.state ? esc(`${it.promotion.state}${it.promotion.reason ? `: ${it.promotion.reason}` : ''}`) : null)}
         ${it.promotedTo ? row('Promoted to', esc(numberForId(it.promotedTo))) : ''}${it.headline ? `<div class="tip-note">${esc(clip(it.headline, 160))}</div>` : ''}`;
     }
     if (isProbe(it)) {
-      return `<div class="tip-head">Probe · ${esc(it.id.slice(0, 8))} ${stTag(stat(it))}</div>${row('Tokens', it.tokens != null ? esc(it.tokens) : null)}${row('Heartbeats', it.heartbeat != null ? esc(it.heartbeat) : null)}
+      return `<div class="tip-head">Probe ${esc(probeLabel(it))} · ${esc(it.id.slice(0, 8))} ${stTag(stat(it))}</div>${row('Tokens', it.tokens != null ? esc(it.tokens) : null)}${row('Heartbeats', it.heartbeat != null ? esc(it.heartbeat) : null)}
         ${row('Open goals', it.status === 'skeleton' ? `${esc(it.goals)} ${it.goals === 1 ? 'hole' : 'holes'}` : it.status === 'fail' ? `${esc(it.errors ?? '?')} error${it.errors === 1 ? '' : 's'}` : 'none')}
         ${row('Route', route)}${row('Route state', esc(routeState))}${row('Parent', it.parent ? esc(numberForId(it.parent)) : null)}
         ${it.headlines?.[0] ? `<div class="tip-note">${esc(clip(it.headlines[0], 160))}</div>` : it.first_goal ? `<div class="tip-note mono">${esc(clip(it.first_goal, 160))}</div>` : ''}`;
@@ -415,7 +427,7 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
   function overview() {
     const top=data.milestones.at(-1),routes=(data.routes||[]);
     $('detail').innerHTML=`<div class="side"><div class="card sumcard"><h2>Run overview</h2><p class="muted small">Click a node to inspect it; click it again, click empty canvas or press Esc to clear. Hover a legend item to spotlight it.</p>
-      ${facts([['Candidates',esc(data.nodes.length)],['Probes',esc(probeItems.length)],['Best verified',top?`<button data-go="${esc(top.candidate_id)}" class="primary">${esc(numberForId(top.candidate_id))}</button> proxy ${esc(top.local_proxy?.toFixed?.(2)??'—')}, ${esc(top.tokens??'?')} tok`:'<span class="muted">none yet</span>'],['Best path',bestPath.nodes.size?`${bestPath.nodes.size} proofs, original to best`:'<span class="muted">n/a</span>']])}</div>
+      ${facts([['Candidates',esc(data.nodes.length)],['Probes',esc(probeItems.length)],['Best verified',top?`<button data-go="${esc(top.candidate_id)}" class="primary">${esc(numberForId(top.candidate_id))}</button> proxy ${esc(top.local_proxy?.toFixed?.(2)??'—')}, ${esc(top.tokens??'?')} tok`:'<span class="muted">none yet</span>'],...(data.target?[['Best to beat',`<b>${esc(data.target.proxy.toFixed(2))}</b> proxy <span class="muted">· run best ${esc(top?.local_proxy?.toFixed?.(2)??'—')}</span>${deltaHtml(top?.local_proxy,data.target.proxy)}`]]:[]),['Best path',bestPath.nodes.size?`${bestPath.nodes.size} proofs, original to best`:'<span class="muted">n/a</span>']])}</div>
       <div class="card ancard"><h3>Routes (${routes.length})</h3><div class="evals">${routes.map(r=>`<div class="eval-line route-line" data-route-solo="${esc(r.route)}"><i class="sw" data-bg="${routeColor(r.route)}"></i><b>${esc(r.route)}</b><span class="muted">${esc(clip(r.label,52))}</span><span>${esc(r.attempts??0)} att${r.best_proxy!=null?` · ${esc(r.best_proxy.toFixed(1))}`:''}</span>${r.credited?'<span class="tag good">credited</span>':r.explored?'<span class="tag">explored</span>':''}</div>`).join('')||'<p class="muted">No routes recorded.</p>'}</div></div></div>`;
     paintSwatches($('detail'));
     $('detail').querySelectorAll('[data-go]').forEach(el=>el.onclick=()=>select(el.dataset.go));
@@ -423,7 +435,7 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
   }
   function probeDetail(p) {
     const tag=(text,kind='')=>`<span class="tag ${kind}">${esc(text)}</span>`,st=stat(p);
-    $('detail').innerHTML=`<div class="side"><div class="card sumcard"><h2>Probe ${esc(p.id.slice(0,8))} ${stTag(st)}</h2>
+    $('detail').innerHTML=`<div class="side"><div class="card sumcard"><h2>Probe ${esc(probeLabel(p))} <span class="muted">${esc(p.id.slice(0,8))}</span> ${stTag(st)}</h2>
       ${facts([['Tokens',esc(p.tokens??'?')],['Heartbeats',esc(p.heartbeat??'—')],['Open goals',p.status==='skeleton'?`${esc(p.goals)} (sorry skeleton)`:p.status==='fail'?`${esc(p.errors??'?')} error(s)`:'none'],
         ['Route',p.route?routeBadge(p.route):'<span class="muted">none</span>'],['Parent',p.parent?goBtn(p.parent):'<span class="muted">none</span>']])}
       <div class="muted small">A probe is a quick compile of a proof sketch; it is not an evaluated candidate and has no score.</div>
@@ -436,8 +448,8 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
   }
   const nodeExperiments=node=>(data.experiments||[]).filter(e=>e.proof_id===node.id||(e.at&&JSON.stringify(e.at).includes(node.id))||(e.at&&[node.node,numberForId(node.id)].some(label=>label&&(e.at===label||e.at.node===label))));
   function scratchDetail(x) {
-    $('detail').innerHTML = `<div class="side"><div class="card sumcard"><h2>Scratch experiment ${tagHtml(x.outcome || x.phase || 'accepted', scratchResult(x) === 'ok' ? 'good' : scratchResult(x) === 'failed' ? 'bad' : '')}</h2>
-      ${facts([['Experiment', esc(x.experiment_id ?? x.code_sha256 ?? '?')], ['Actor', `<span class="route-badge"><i class="sw" data-bg="${actorColor(actorOf(x))}"></i>${esc(actorLabel(actorOf(x)))}</span>`],
+    $('detail').innerHTML = `<div class="side"><div class="card sumcard"><h2>Scratch experiment ${esc(x.index)} ${tagHtml(x.outcome || x.phase || 'accepted', scratchResult(x) === 'ok' ? 'good' : scratchResult(x) === 'failed' ? 'bad' : '')}</h2>
+      ${facts([['Experiment', `<b>${esc(x.index)}</b> <span class="muted">${esc(x.experiment_id ?? x.code_sha256 ?? '?')}</span>`], ['Actor', `<span class="route-badge"><i class="sw" data-bg="${actorColor(actorOf(x))}"></i>${esc(actorLabel(actorOf(x)))}</span>`],
         ['Anchor', `${esc(x.anchorNote)} ${x.parents[0] ? goBtn(x.parents[0]) : ''}`],
         ['Promotion', x.promotion?.state ? `${esc(x.promotion.state)}${x.promotion.reason ? `: ${esc(x.promotion.reason)}` : ''}${x.promotedTo ? ' ' + goBtn(x.promotedTo) : ''}` : '<span class="muted">none</span>']])}
       <div class="muted small">A scratch experiment is a trial run outside the proof graph. Dashed link = anchor; arc = promoted into a proof node.</div></div>
@@ -570,6 +582,7 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
     const ys=points.map(p=>p[spec.key]);
     let yMin=spec.zero?0:Math.min(...ys),yMax=Math.max(...ys);
     if(spec.cap)yMax=Math.max(yMax,spec.cap);
+    if(spec.target!=null){yMax=Math.max(yMax,spec.target);if(!spec.zero)yMin=Math.min(yMin,spec.target);}
     const xr=xMax-xMin||1,yr=yMax-yMin||1;
     return {xs,xMin,xMax,yMin,yMax,xTicks:niceTicks(xMin,xMax,box.ticks),
       sx:x=>box.x0+(x-xMin)*(box.x1-box.x0)/xr,sy:y=>box.y1-(y-yMin)*(box.y1-box.y0)/yr};
@@ -595,6 +608,12 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
     if(!spec.cap)return '';
     const y=sc.sy(spec.cap).toFixed(1);
     return `<path class="cap-line" d="M${box.x0} ${y}H${box.x1}"/>${label?`<text class="axis-label cap-label" x="${box.x0+6}" y="${y-5}">limit ${esc(money(spec.cap))}</text>`:''}`;
+  }
+  // Our latest submission's value for this theorem: the line the run has to cross.
+  function targetLine(spec,sc,box,label) {
+    if(spec.target==null)return '';
+    const y=sc.sy(spec.target).toFixed(1),v=spec.target.toFixed(spec.key==='local_proxy'?2:0);
+    return `<path class="target-line" d="M${box.x0} ${y}H${box.x1}"/><text class="axis-label target-label" x="${box.x0+(label?6:4)}" y="${Number(y)+(label?-4:10)}">to beat ${esc(v)}${spec.key==='local_proxy'?' (proxy)':''}</text>`;
   }
   function headValue(spec,value) {
     if(spec.unit==='$')return money(value)+(spec.cap?` / ${money(spec.cap)}`:'');
@@ -674,7 +693,7 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
     const headline=spec.better==='max'?Math.max(...values):spec.better==='min'?Math.min(...values):last[key];
     const areas=spec.stack?stackedAreas(points,sc.xs,sc.sx,sc.sy,'area'):'';
     chartGeometry.set(`card-${index}`,{spec,points,sc,box});
-    return `<button type="button" class="chart" data-chart="${index}" aria-label="Open enlarged ${esc(title)} chart"><span class="chart-head"><span class="chart-title">${esc(title)}</span><strong title="${spec.better?'best so far':'current'}">${esc(headValue(spec,headline))}</strong></span><svg viewBox="0 0 350 96" data-geometry="card-${index}" aria-hidden="true">${areas}${capLine(spec,sc,box,false)}<path class="chart-baseline" d="M${box.x0} ${box.y1}H${box.x1}"/>${xAxis(sc,box,90,false)}<path class="series" d="${linePath(points,sc.xs,sc.sx,sc.sy,p=>p[key])}"/><circle class="chart-end" cx="${lx}" cy="${ly}" r="4"/></svg>${spec.stack?`<span class="card-legend">${costLegend(spec,points,false)}</span>`:''}<span class="chart-foot">${points.length} ${esc(spec.xLabel.toLowerCase())}s <span>Click to inspect ↗</span></span></button>`;
+    return `<button type="button" class="chart" data-chart="${index}" aria-label="Open enlarged ${esc(title)} chart"><span class="chart-head"><span class="chart-title">${esc(title)}</span><strong title="${spec.better?'best so far':'current'}">${esc(headValue(spec,headline))}</strong></span><svg viewBox="0 0 350 96" data-geometry="card-${index}" aria-hidden="true">${areas}${capLine(spec,sc,box,false)}${targetLine(spec,sc,box,false)}<path class="chart-baseline" d="M${box.x0} ${box.y1}H${box.x1}"/>${xAxis(sc,box,90,false)}<path class="series" d="${linePath(points,sc.xs,sc.sx,sc.sy,p=>p[key])}"/><circle class="chart-end" cx="${lx}" cy="${ly}" r="4"/></svg>${spec.stack?`<span class="card-legend">${costLegend(spec,points,false)}</span>`:''}<span class="chart-foot">${points.length} ${esc(spec.xLabel.toLowerCase())}s <span>Click to inspect ↗</span></span></button>`;
   }
   function chartTable(spec,points) {
     if(spec.stack){
@@ -697,7 +716,7 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
     const areas=spec.stack?stackedAreas(points,sc.xs,sc.sx,sc.sy,'modal-area'):'';
     const legend=spec.stack?`<div class="modal-legend">${costLegend(spec,points,true)}</div>`:'';
     chartGeometry.set('modal',{spec,points,sc,box,big:true});
-    $('chart-dialog-body').innerHTML=`<div class="modal-head"><div><h2>${esc(spec.title)}</h2><p class="muted">${points.length} ${esc(spec.xLabel.toLowerCase())}s · ${esc(spec.caption)}</p></div><button id="close-chart" type="button" aria-label="Close chart">✕</button></div>${legend}<svg class="modal-chart" data-geometry="modal" viewBox="0 0 900 340" role="img" aria-label="${esc(spec.title)} full series"><g class="modal-grid">${grid}${xAxis(sc,box,307,true)}</g>${areas}${capLine(spec,sc,box,true)}<path class="modal-series" d="${linePath(points,sc.xs,sc.sx,sc.sy,p=>p[spec.key])}"/>${dots}<text class="axis-label axis-title" x="${(box.x0+box.x1)/2}" y="330" text-anchor="middle">${esc(spec.xLabel)}</text></svg><div class="chart-table-wrap"><table class="chart-table">${chartTable(spec,points)}</table></div>`;
+    $('chart-dialog-body').innerHTML=`<div class="modal-head"><div><h2>${esc(spec.title)}</h2><p class="muted">${points.length} ${esc(spec.xLabel.toLowerCase())}s · ${esc(spec.caption)}</p></div><button id="close-chart" type="button" aria-label="Close chart">✕</button></div>${legend}<svg class="modal-chart" data-geometry="modal" viewBox="0 0 900 340" role="img" aria-label="${esc(spec.title)} full series"><g class="modal-grid">${grid}${xAxis(sc,box,307,true)}</g>${areas}${capLine(spec,sc,box,true)}${targetLine(spec,sc,box,true)}<path class="modal-series" d="${linePath(points,sc.xs,sc.sx,sc.sy,p=>p[spec.key])}"/>${dots}<text class="axis-label axis-title" x="${(box.x0+box.x1)/2}" y="330" text-anchor="middle">${esc(spec.xLabel)}</text></svg><div class="chart-table-wrap"><table class="chart-table">${chartTable(spec,points)}</table></div>`;
     const dialog=$('chart-dialog');$('close-chart').onclick=()=>dialog.close();
     attachHover($('chart-dialog-body').querySelector('[data-geometry="modal"]'),'modal',$('chart-dialog-body'));
     $('chart-dialog-body').querySelectorAll('[data-candidate]').forEach(row=>row.onclick=()=>{dialog.close();select(row.dataset.candidate)});
@@ -707,12 +726,13 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
   function renderCharts() {
     const bestIds=new Set(data.milestones.map(m=>m.candidate_id));
     // The original proof is evaluation 0, so score charts start from where the run started.
-    const rows=[...(data.baseline?[data.baseline]:[]),...data.timeline].map(r=>({...r,is_best:bestIds.has(r.candidate_id)}));
-    const pick='Click a candidate row to inspect its proof.';
+    const rows=[...(data.baseline&&!hideInit?[data.baseline]:[]),...data.timeline].map(r=>({...r,is_best:bestIds.has(r.candidate_id)}));
+    const pick='Click a candidate row to inspect its proof.',tg=data.target||{};
+    $('hide-init').checked=hideInit;
     chartSpecs=[
-      {title:'Provisional score · 3/3 only',rows:rows.filter(r=>r.status==='full'),key:'local_proxy',unit:'',xLabel:'Evaluation',caption:pick,better:'max'},
-      {title:'Proof tokens',rows:rows.filter(r=>r.status!=='fail'),key:'tokens',unit:'',xLabel:'Evaluation',caption:pick,better:'min'},
-      {title:'Primary heartbeats',rows:rows.filter(r=>r.status!=='fail'),key:'heartbeat',unit:'',xLabel:'Evaluation',caption:pick,better:'min'},
+      {title:'Provisional score · 3/3 only',rows:rows.filter(r=>r.status==='full'),key:'local_proxy',unit:'',xLabel:'Evaluation',caption:pick,better:'max',target:tg.proxy},
+      {title:'Proof tokens',rows:rows.filter(r=>r.status!=='fail'),key:'tokens',unit:'',xLabel:'Evaluation',caption:pick,better:'min',target:tg.tokens},
+      {title:'Primary heartbeats',rows:rows.filter(r=>r.status!=='fail'),key:'heartbeat',unit:'',xLabel:'Evaluation',caption:pick,better:'min',target:tg.heartbeats},
       {title:'API spend by component',rows:data.cost_timeline||[],key:'spent_usd',unit:'$',xLabel:'API request',
        stack:true,zero:true,cap:data.limit_usd||null,
        caption:'Cumulative ledger spend, stacked by price component; the dashed line is the spend limit.'},
@@ -721,6 +741,17 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
     $('charts').querySelectorAll('[data-chart]').forEach(el=>el.onclick=()=>openChart(Number(el.dataset.chart)));
     $('charts').querySelectorAll('[data-geometry]').forEach(svg=>attachHover(svg,svg.dataset.geometry,document.body));
   }
+  $('hide-init').onchange=e=>{hideInit=e.target.checked;store.set('arena-hideinit',hideInit?'1':'0');renderCharts();};
+  // Run best next to the submission's number, same proxy basis: green when the run beats it, red when it trails.
+  function deltaHtml(run,base) {
+    if(run==null||base==null)return '';
+    const d=Math.round((run-base)*100)/100;
+    return ` <span class="${d>0?'good':d<0?'bad':'muted'}">(${d>0?'+':''}${d.toFixed(2)} vs best to beat)</span>`;
+  }
+  function runBest(top) {
+    if(top?.local_proxy==null)return '—';
+    return {html:`${esc(top.local_proxy.toFixed(2))}${deltaHtml(top.local_proxy,data.target?.proxy)}`};
+  }
   function renderMeta() {
     $('run-label').textContent=`${data.theorem || ''} · ${data.run_id} · ${data.nodes.length} recorded nodes`;
     const full=data.nodes.filter(n=>n.status==='full').length, autos=data.nodes.filter(n=>n.origin==='auto_merge').length;
@@ -728,9 +759,10 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
     const pass=probeItems.filter(p=>p.status==='pass').length,skel=probeItems.filter(p=>p.status==='skeleton').length;
     $('metrics').innerHTML=[['Candidates',data.nodes.length,`${full} verified 3/3 · ${autos} auto merges`],['Probes',probes,`${pass} compiled · ${skel} skeletons · ${probes-pass-skel} failed`],
       ['Routes',routes.length,`${routes.filter(r=>r.attempts).length} with attempts`],['Credited routes',`${rp.credited_routes??0} / ${rp.explored_routes??0}`,'credited / explored'],
-      ['Best proxy',top?.local_proxy!=null?top.local_proxy.toFixed(2):'—',top?`${numberForId(top.candidate_id)} · ${top.tokens??'?'} tokens`:'no verified candidate'],
+      ['Best proxy',runBest(top),top?`${numberForId(top.candidate_id)} · ${top.tokens??'?'} tokens`:'no verified candidate'],
+      ...(data.target?[['Best to beat',`${data.target.proxy.toFixed(2)} proxy`,`our latest submission (${data.target.submission}) · ${data.target.source}`]]:[]),
       ['Evaluations',data.evaluations,''],['New goal state',rp.new_state_share==null?'—':`${Math.round(100*rp.new_state_share)}%`,'of model attempts'],['Merge checks',data.merge_checks.length,'']]
-      .map(([k,v,t])=>`<span class="metric" title="${esc(t)}">${esc(k)} <b>${esc(v)}</b></span>`).join('');
+      .map(([k,v,t])=>`<span class="metric" title="${esc(t)}">${esc(k)} <b>${typeof v==='object'?v.html:esc(v)}</b></span>`).join('');
         $('frontier').innerHTML=(data.frontier||[]).slice(0,8).map(r=>`<div class="frontier-row"><button data-go="${r.candidate_id}">${esc(numberForId(r.candidate_id))}</button><span>${esc(r.status)} · priority ${esc(r.priority_total)} · ${esc(r.tokens ?? '?')} tokens</span></div>`).join('')||'<p class="muted">No eligible seeds yet.</p>';
     $('frontier').querySelectorAll('[data-go]').forEach(el=>el.onclick=()=>select(el.dataset.go));
     $('worker').innerHTML=`<span class="tag">${esc(data.worker?.state ?? 'not running')}</span> <span class="muted">${data.worker?.updated_at ? esc(new Date(data.worker.updated_at*1000).toLocaleTimeString()) : ''}</span>${data.worker?.detail?.candidate_id ? `<span>${esc(numberForId(data.worker.detail.candidate_id))}</span>` : ''}${data.worker?.detail?.error ? `<pre>${esc(data.worker.detail.error)}</pre>` : ''}`;
@@ -760,7 +792,7 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
       let anchor = nodeByRef(typeof at === 'string' ? at : at?.node) || nodeByRef(e.proof_id), note = at ? `at ${typeof at === 'string' ? at : at.node ?? JSON.stringify(at)}` : '';
       if (!anchor && promoted) { anchor = byId.get(promoted.parents[0]); note = 'unanchored; parent of promoted node'; }
       if (!anchor) { anchor = best; note = `${at ? note + ' not found; ' : 'unanchored; '}attached to ${data.milestones.length ? 'current best verified' : 'root'}`; }
-      return {...e, id: `x:${e.experiment_id || e.code_sha256 || i}`, kind: 'scratch', index: `x${i + 1}`, order: 2e6 + i, parents: anchor ? [anchor.id] : [],
+      return {...e, id: `x:${e.experiment_id || e.code_sha256 || i}`, kind: 'scratch', index: `e${i + 1}`, order: 2e6 + i, parents: anchor ? [anchor.id] : [],
               anchorNote: note, promotedTo: promoted?.id || null};
     }).filter(x => x.parents.length);
     sById = new Map(scratchItems.map(x => [x.id, x]));
