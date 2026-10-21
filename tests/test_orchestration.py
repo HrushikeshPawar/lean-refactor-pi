@@ -1247,6 +1247,15 @@ class V8WorkerSmokeTests(unittest.TestCase):
                 waiter.start()
                 try:
                     self.assertTrue(registered.wait(1))
+                    # Immediate returns above wrote nothing; this blocked wait is durable and shows as waiting.
+                    from arena.campaign import _served_actors
+                    history = orchestration._history(directory)
+                    started = [row for row in history if row.get("kind") == "wait"]
+                    self.assertEqual(len(started), 1)
+                    self.assertEqual((started[0]["actor_id"], started[0]["job_ids"], started[0]["cursor"]),
+                                     ("sol", [fresh["job_id"]], sol["next_cursor"]))
+                    self.assertFalse([row for row in history if row.get("kind") == "wait_end"])
+                    self.assertTrue(next(row for row in _served_actors(history) if row["actor_id"] == "sol")["waiting"])
                     child._chunks.put((json.dumps({
                         "type": "tool_execution_end", "toolName": "compile", "toolCallId": tool_call,
                         "isError": False, "result": {"details": {"ok": True, "items": [{
@@ -1258,6 +1267,11 @@ class V8WorkerSmokeTests(unittest.TestCase):
                     self.assertEqual(replies[0]["wake_reason"], "result")
                     self.assertEqual(replies[0]["events"][0]["attempt_id"], attempt_id)
                     sol = replies[0]
+                    history = orchestration._history(directory)
+                    ended = [row for row in history if row.get("kind") == "wait_end"]
+                    self.assertEqual([(row["wait_id"], row["wake_reason"]) for row in ended],
+                                     [(started[0]["wait_id"], "result")])
+                    self.assertFalse(next(row for row in _served_actors(history) if row["actor_id"] == "sol")["waiting"])
                 finally:
                     if waiter.is_alive():
                         child._chunks.put(None)

@@ -1480,7 +1480,34 @@ def await_results(
     job_ids: list[str] | None = None,
     cancel_event: threading.Event | None = None,
 ) -> dict:
-    """Return retained evidence or no_pending_work. Waiting performs no provider request."""
+    """Return retained evidence or no_pending_work. Waiting performs no provider request.
+
+    A wait that actually blocks is durable: a `wait` row when it starts and a `wait_end` row with the same
+    wait id and the wake reason when it ends, so an intentionally waiting orchestrator is visible. An
+    immediate return writes nothing.
+    """
+    waiting: dict[str, str] = {}
+
+    def blocked() -> None:
+        if waiting:
+            return
+        waiting["id"] = uuid.uuid4().hex
+        _append(directory, {"event_id": uuid.uuid4().hex, "kind": "wait", "wait_id": waiting["id"],
+                            "actor_id": actor_id, "job_ids": sorted(job_ids) if job_ids is not None else None,
+                            "cursor": cursor})
+
+    result: dict = {}
+    try:
+        result = _await_results(directory, actor_id, cursor, job_ids, cancel_event, blocked)
+        return result
+    finally:
+        if waiting:
+            _append(directory, {"event_id": uuid.uuid4().hex, "kind": "wait_end", "wait_id": waiting["id"],
+                                "actor_id": actor_id,
+                                "wake_reason": result.get("wake_reason") or result.get("reason") or "interrupted"})
+
+
+def _await_results(directory, actor_id, cursor, job_ids, cancel_event, blocked) -> dict:
     if not actor_id:
         return _reject("", "identity")
     if job_ids is not None and (
@@ -1516,6 +1543,7 @@ def await_results(
                     if cancel_event is not None and cancel_event.is_set():
                         return {**_reject("", "wait_cancelled", "cancelled"), "retryable": True}
                     seen = _epoch
+            blocked()
             with _interest:
                 if _epoch != seen:
                     continue

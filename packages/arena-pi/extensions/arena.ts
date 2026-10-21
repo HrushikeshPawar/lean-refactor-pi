@@ -85,6 +85,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
   const outputLimit = Number(process.env.ARENA_REQUEST_OUTPUT_TOKENS ?? 0);
   let spentUsd = 0;
   let settledCalls = 0;
+  let unknownUsageStreak = 0;  // consecutive Sol message settles with unknown usage
   let limitHit = false;
   // Tool calls of the message that crossed the limit still running; the run aborts when the last one ends.
   let limitToolsLeft = 0;
@@ -437,6 +438,9 @@ export default async function arenaExtension(pi: ExtensionAPI) {
       && !message.usage?.totalTokens;
     const usage = failedWithoutUsage ? undefined : message.usage;
     const known = knownUsage(usage);
+    // Failed calls have their own retry budget; only a completed response with unknown usage counts here.
+    if (known) unknownUsageStreak = 0;
+    else if (!failedWithoutUsage) unknownUsageStreak += 1;
     await settle(id, usage, { response_id: message.responseId ?? null }, ctx, blocks.filter(block => block.type === "toolCall").length);
     appendTrace({ ...delivered, settled_usd: known ? callCost(message.usage) : null,
       usage: { input: message.usage?.input ?? 0, output: message.usage?.output ?? 0,
@@ -819,6 +823,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
       providerUnreachable: failure === "transport" && outageStartedAt !== undefined && nextWait(outageAttempt, Number(process.env.ARENA_BACKOFF_MS ?? 2000), outageStartedAt, Date.now(), Number(process.env.ARENA_OUTAGE_LIMIT_MS ?? 600000)).stop,
       errorLoop: failure === "model" && errorStreak >= MAX_ERROR_STREAK,
       usageLimit: failure === "usage_limit",
+      unknownUsageStreak,
     });
     turnHadProofAttempt = false;
     turnHadNovelContext = false;

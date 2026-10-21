@@ -70,7 +70,9 @@ class GoldenSessionTests(unittest.TestCase):
         # The model thinks before its closing text-only turn, as a real one does: only a full check kicked in the
         # background (not the closing drain) can land in that window. The fake answers faster than Lean checks.
         cls.turns = turns
-        cls.run_ = FakeRun([*steps, {"text": "done", "delay_ms": FINISH_THINKING_MS}], session=True, timeout=1800)
+        # The text-only turn continues the run; a final read crosses the limit and ends it.
+        closing = [{"text": "done", "delay_ms": FINISH_THINKING_MS}, cheap_tool("read", {"view": "map"}, output=20_000)]
+        cls.run_ = FakeRun([*steps, *closing], session=True, timeout=1800)
         try:
             cls.run_.run(guard=False)  # every guard condition is asserted below, each on its own
             cls.requests = cls.run_.requests
@@ -102,11 +104,11 @@ class GoldenSessionTests(unittest.TestCase):
             ]
         return texts
 
-    def test_every_scripted_turn_reached_the_model_and_finish_ended_the_run(self):
-        # Every tool turn plus the closing text-only turn reached the model.
-        self.assertEqual(len(self.requests), len(self.turns) + 1, self.run_.stdout[-2000:])
-        self.assertEqual([row.get("name") for row in self.results()], [name for name, _, _ in self.turns])
-        self.assertEqual(self.summary.get("stop_reason"), "finished", self.run_.stdout[-2000:])
+    def test_every_scripted_turn_reached_the_model_and_the_limit_ended_the_run(self):
+        # Every tool turn, the text-only turn and the limit-crossing read reached the model.
+        self.assertEqual(len(self.requests), len(self.turns) + 2, self.run_.stdout[-2000:])
+        self.assertEqual([row.get("name") for row in self.results()], [name for name, _, _ in self.turns] + ["read"])
+        self.assertEqual(self.summary.get("stop_reason"), "limit_reached", self.run_.stdout[-2000:])
 
     def test_no_tool_result_is_an_internal_error(self):
         self.assertEqual(self.problems, [])

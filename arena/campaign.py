@@ -3237,6 +3237,20 @@ def graph_state(run_id: str) -> dict:
     }
 
 
+_WAIT_STATUS = {"wait": "waiting", "wait_end": "wait_ended"}
+
+
+def _open_waits(history: list[dict]) -> set[str]:
+    """Actors whose latest `wait` has no matching `wait_end`."""
+    open_waits: dict[str, str] = {}
+    for event in history:
+        if event.get("kind") == "wait" and event.get("actor_id"):
+            open_waits[event["wait_id"]] = event["actor_id"]
+        elif event.get("kind") == "wait_end":
+            open_waits.pop(event.get("wait_id"), None)
+    return set(open_waits.values())
+
+
 def _served_jobs(history: list[dict]) -> list[dict]:
     rows = []
     for event in history:
@@ -3247,7 +3261,7 @@ def _served_jobs(history: list[dict]) -> list[dict]:
             {
                 "source": source,
                 "job_id": event.get("job_id"),
-                "status": event.get("status") or event.get("state"),
+                "status": event.get("status") or event.get("state") or _WAIT_STATUS.get(event.get("kind")),
                 "actor_id": event.get("actor_id"),
                 "session_id": event.get("session_id"),
                 "candidate_id": event.get("candidate_id") or event.get("proof_id"),
@@ -3269,6 +3283,8 @@ def _job_source(event: dict) -> str | None:
         return "check"
     if event.get("kind") == "job":
         return "runtime"
+    if event.get("kind") in ("wait", "wait_end"):
+        return "wait"
     return None
 
 
@@ -3297,6 +3313,7 @@ def _served_actors(history: list[dict]) -> list[dict]:
         found = sessions.setdefault(actor, set())
         if session:
             found.add(session)
+    waiting = _open_waits(history)
     rows = []
     for actor, found in sessions.items():
         ordered = sorted(found)
@@ -3307,6 +3324,7 @@ def _served_actors(history: list[dict]) -> list[dict]:
                 "session_id": ordered[0] if len(ordered) == 1 else None,
                 "sessions": ordered,
                 "session_status": status,
+                "waiting": actor in waiting,
             }
         )
     return rows
