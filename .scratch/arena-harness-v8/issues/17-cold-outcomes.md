@@ -4,7 +4,7 @@
 
 **Blocked by:** 16: Order candidate submission against the shared stop
 
-**Status:** ready-for-agent
+**Status:** needs-review
 
 **Branch:** `v8/17-cold-outcomes`
 
@@ -26,12 +26,12 @@
 
 ## What to build and acceptance
 
-- [ ] 1. Expose passed, proof/validity error and inconclusive check outcomes with exact proof/pin/mode and retained diagnostics.
-- [ ] 2. Classify timeout, resource denial, unavailable toolchain, worker crash and measurement/context failures as inconclusive with cause and bounded retryability.
-- [ ] 3. A retry repeats the same submitted proof/check identity without proof modification or renewed model search during closing.
-- [ ] 4. Retain every check attempt; an inconclusive result neither proves incompatibility nor counts as a compatible pin.
-- [ ] 5. If certification remains unavailable, use only an already eligible certified fallback or report that no certified submission exists.
-- [ ] 6. Use the one assigned fast smoke for this slice. Retain the stated behavior requirements; actual-Pi/real-Lean journeys and the broader race matrix are final E2E coverage, not this ticket's gate.
+- [x] 1. Expose passed, proof/validity error and inconclusive check outcomes with exact proof/pin/mode and retained diagnostics.
+- [x] 2. Classify timeout, resource denial, unavailable toolchain, worker crash and measurement/context failures as inconclusive with cause and bounded retryability.
+- [x] 3. A retry repeats the same submitted proof/check identity without proof modification or renewed model search during closing.
+- [x] 4. Retain every check attempt; an inconclusive result neither proves incompatibility nor counts as a compatible pin.
+- [x] 5. If certification remains unavailable, use only an already eligible certified fallback or report that no certified submission exists.
+- [x] 6. Use the one assigned fast smoke for this slice. Retain the stated behavior requirements; actual-Pi/real-Lean journeys and the broader race matrix are final E2E coverage, not this ticket's gate.
 
 ## Verify
 
