@@ -4,7 +4,7 @@
 
 **Blocked by:** 11: Wait without polling or no-event deadlocks; 22: Inspect every concurrent attempt and exact derivation
 
-**Status:** needs-review
+**Status:** done
 
 **Branch:** `v8/23-compaction-resume`
 
@@ -48,6 +48,19 @@ Commit `nxl` writes nothing to the ledger, keeps strategy Sol-only, reuses `orch
 6. **Unbounded summary.** Findings and Evidence have no cap, unlike `memory_read_entries` and `memory_library_lines`, so every attempt and derivation is relisted at every compaction. Cap them with a template-owned number and say how many were omitted; the references stay retrievable.
 
 Extend the smoke with one uncommitted row (excluded from the summary and from retrieval), two workers (each sees only its own focus and notes), and one traversal ref (returns missing). Run the whole touched test files. Older failures that are not this ticket's and predate ticket 19's tip: `tests/test_context.py::ProfileSectionTests` (2), `tests/test_text_lint.py::test_model_facing_modules_have_no_inline_prose`, `tests/test_tools_reply.py::test_an_update_names_its_source_node_only_once_the_model_has_seen_it`, plus the known `tests/test_text.py` ones.
+
+## Review closure
+
+Rework `txr` resolves all six review items:
+- `memory()` and `original_evidence()` read `published_history` once, so an aborted, unreceipted row appears in neither the summary nor retrieval.
+- The compacting actor comes from `current_actor()` or an explicit argument. Sol's plan and attributed shared observations go to everyone. Each worker sees only its own focus, notes and job; Sol sees every job.
+- Proof retrieval accepts only a 64-hex id with a published attempt, inside the run's `proofs/` directory, so `../../../escaped` is missing.
+- Retrieval accepts `event_id` and `operation_id`, and the model reaches it through `read` with `ref`, which is added to `agent-text/tool-schemas.json` so Pi's TypeBox accepts it.
+- Findings and evidence keep the latest `memory_recovery_entries` (8) and state how many were omitted.
+
+The extended smoke covers an aborted row, two workers with distinct focus, and traversal through both `original_evidence` and the real `read` tool.
+
+Checks: `tests/test_memory.py tests/test_tools_read_goal_search.py tests/test_tools_compile.py tests/test_experiments.py` pass. `node --test extensions/*.test.ts` passes 40/40. Ruff clean. The remaining failures in `tests/test_text.py`, `tests/test_tools_reply.py` and `tests/test_text_lint.py` predate ticket 19's tip and are queued for the pre-E2E pass.
 
 ## Verify
 
