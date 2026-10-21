@@ -4,7 +4,7 @@
 
 **Blocked by:** None (no additional logical prerequisite).
 
-**Status:** ready-for-agent
+**Status:** needs-review
 
 **Branch:** `v8/18-context-correctness`
 
@@ -26,12 +26,12 @@
 
 ## What to build and acceptance
 
-- [ ] 1. Select the actual target proof when a binder contains an earlier by block. Collect target-statement definitions before auxiliary-generated declarations and relevance/count limits.
-- [ ] 2. Preserve Core goal conclusions, retain the ninth Fiberwise target predicate, and replace repeated unavailable states with explicit coverage and retrieval.
-- [ ] 3. Recognize public imports. Keep source identity and original external coordinates; never turn preceding declaration positions into negative target-relative lines.
-- [ ] 4. Protect useful earlier lemmas during packet fitting. Separate extraction completion, usable context coverage and display omissions.
-- [ ] 5. Use the one assigned fast smoke for this slice. Retain the stated behavior requirements; actual-Pi/real-Lean journeys and the broader race matrix are final E2E coverage, not this ticket's gate.
-- [ ] 6. Do not redesign worker/session schema here; expose corrected evidence through existing context/retrieval surfaces so this slice can land independently.
+- [x] 1. Select the actual target proof when a binder contains an earlier by block. Collect target-statement definitions before auxiliary-generated declarations and relevance/count limits.
+- [x] 2. Preserve Core goal conclusions, retain the ninth Fiberwise target predicate, and replace repeated unavailable states with explicit coverage and retrieval.
+- [x] 3. Recognize public imports. Keep source identity and original external coordinates; never turn preceding declaration positions into negative target-relative lines.
+- [x] 4. Protect useful earlier lemmas during packet fitting. Separate extraction completion, usable context coverage and display omissions.
+- [x] 5. Use the one assigned fast smoke for this slice. Retain the stated behavior requirements; actual-Pi/real-Lean journeys and the broader race matrix are final E2E coverage, not this ticket's gate.
+- [x] 6. Do not redesign worker/session schema here; expose corrected evidence through existing context/retrieval surfaces so this slice can land independently.
 
 ## Verify
 

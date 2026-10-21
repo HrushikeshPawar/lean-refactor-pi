@@ -261,6 +261,139 @@ class ParseTests(unittest.TestCase):
             )["complete"]
         )
 
+    def test_v8_context_retains_target_facts(self):
+        """One fixture packet keeps the conclusion, the ninth statement predicate, and truthful coordinates."""
+        from arena.engine import problem
+
+        base = problem(NAME)
+        proof = "theorem t (h : Nat := by omega) : Close := by\n  exact a\n  exact b\n  exact c\n"
+        row = {
+            **base,
+            "file_path": "",
+            "header": "public import Public.Mod\nprivate import Secret.Mod\n",
+            "statement": "theorem t (h : Nat := by omega) : Close",
+            "src": proof,
+            "proof_length": 4,
+        }
+        conclusion = "⊢ hammingClose target"
+        raw = "\n".join(
+            [
+                "ARENA_CTX "
+                + json.dumps(
+                    {
+                        "kind": "goal",
+                        "line": 101,
+                        "endLine": 101,
+                        "text": "h : "
+                        + ("H " * 500)
+                        + "\n"
+                        + conclusion
+                        + "\n\ncase other\nh : "
+                        + ("H " * 500)
+                        + "\n⊢ otherCase",
+                    }
+                ),
+                "ARENA_CTX "
+                + json.dumps(
+                    {
+                        "kind": "source",
+                        "line": 12,
+                        "column": 4,
+                        "name": "Ext.pred",
+                        "decl": "def",
+                        "module": "Other.File",
+                        "tag": "helper",
+                        "sig": "Ext.pred : Prop",
+                    }
+                ),
+                "ARENA_CTX " + json.dumps({"kind": "end"}),
+            ]
+        )
+        parsed = context.parse_context(raw, shift=0, start_line=100, proof_boundary=(2, 0))
+        external = parsed["source"][0]
+        self.assertEqual(external["origin"], "external")
+        self.assertEqual(external["source_line"], 12)
+        self.assertNotIn("proof_line", external)
+        parsed["complete"] = True
+        parsed["target"] = [{"consts": ["Proj.hammingClose"], "core_consts": [], "concl_head": "Close"}]
+        parsed["type"] = [
+            {
+                "name": f"Aux.gen{i}",
+                "decl": "def",
+                "sig": f"Aux.gen{i} : Unit",
+                "value": "()",
+                "role": "auxiliary",
+            }
+            for i in range(8)
+        ] + [
+            {
+                "name": f"Proj.pred{i}",
+                "decl": "def",
+                "sig": f"Proj.pred{i} : Prop",
+                "value": "true",
+                "role": "statement",
+            }
+            for i in range(8)
+        ] + [
+            {
+                "name": "Proj.hammingClose",
+                "decl": "def",
+                "sig": "Proj.hammingClose : Prop",
+                "value": "true",
+                "role": "statement",
+            }
+        ]
+        parsed["earlier"] = [
+            {
+                "name": "Proj.reuseLemma",
+                "decl": "theorem",
+                "line": 90,
+                "sig": "Proj.reuseLemma : Close",
+                "consts": ["Proj.hammingClose"],
+                "core_consts": [],
+                "concl_head": "Proj.hammingClose",
+                "lhs_head": "",
+                "rhs_head": "",
+                "rel": "",
+                "uses": [],
+            }
+        ]
+        parsed["local"] = [
+            {
+                "name": f"noise{i}",
+                "type": "Unit " * 40,
+                "scope": "theorem proof context",
+                "proof_line": 2,
+            }
+            for i in range(220)
+        ]
+        profile = {"ok": True, "measured_total": 1, "profiled_total": 1, "unattributed": 0, "line_profile": []}
+        with (
+            patch.object(context, "problem", lambda _name: row),
+            patch.object(context, "cached_context", return_value=parsed),
+            patch.object(context, "reference_profile", return_value=profile),
+        ):
+            packet = context.render_packet(NAME, cache_only=True)
+        self.assertIn(conclusion, packet)
+        self.assertIn("⊢ otherCase", packet)
+        self.assertIn("case other", packet)
+        self.assertIn("decl:Proj.hammingClose", packet)
+        self.assertIn("public import Public.Mod", packet)
+        self.assertNotIn("private import", packet)
+        self.assertIn("file line 12", packet)
+        self.assertNotRegex(packet, r"S:-\d+")
+        self.assertIn("decl:Proj.reuseLemma", packet)
+        self.assertIn("goal:s1", packet)
+        self.assertIn("1 captured of 3", packet)
+        self.assertIn("Extraction complete", packet)
+        self.assertLess(packet.count("(unavailable)"), 2)
+        self.assertLess(packet.count("noise"), 220)
+        coverage = context.context_coverage(parsed, proof)
+        self.assertTrue(parsed["complete"])
+        self.assertEqual(coverage["goals_captured"], 1)
+        self.assertEqual(coverage["goals_expected"], 3)
+        self.assertGreater(coverage["display_clipped"], 0)
+
 
 class RankingTests(unittest.TestCase):
     @staticmethod

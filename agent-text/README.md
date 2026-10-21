@@ -149,8 +149,8 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `packet/sections.fixed.earlier_reason` | 2 | Initial theorem packet | once per run |
 | `packet/sections.fixed.earlier_rewrite` | 2 | Initial theorem packet | once per run |
 | `packet/sections.fixed.earlier_usage` | 4 | Initial theorem packet | once per run |
-| `packet/sections.fixed.goal` | 3 | Initial theorem packet | once per run |
-| `packet/sections.fixed.goal_unavailable` | 1 | Initial theorem packet | once per run |
+| `packet/sections.fixed.goal` | 7 | Initial theorem packet | once per run |
+| `packet/sections.fixed.goal_coverage` | 22 | Initial theorem packet | once per run |
 | `packet/sections.fixed.imports` | 3 | Initial theorem packet | once per run |
 | `packet/sections.fixed.library_line` | 6 | Initial theorem packet | once per run |
 | `packet/sections.fixed.local_intro` | 15 | Initial theorem packet | once per run |
@@ -168,6 +168,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `packet/sections.fixed.source` | 2 | Initial theorem packet | once per run |
 | `packet/sections.fixed.standalone_source` | 11 | Initial theorem packet | once per run |
 | `packet/sections.fixed.type_construct` | 4 | Initial theorem packet | once per run |
+| `packet/sections.fixed.type_coverage` | 6 | Initial theorem packet | once per run |
 | `packet/sections.fixed.type_definition` | 5 | Initial theorem packet | once per run |
 | `packet/sections.fixed.used_intro` | 24 | Initial theorem packet | once per run |
 | `packet/sections.fixed.used_line` | 4 | Initial theorem packet | once per run |

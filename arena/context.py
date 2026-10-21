@@ -106,14 +106,28 @@ def parse_context(output: str, shift: int, start_line: int, proof_boundary: tupl
             complete = True
         elif kind in groups:
             groups[kind].append(record)
+    def place(item: dict, *, end: bool = False) -> str:
+        """`inside` the target span, or `external` with the original file line. Never a negative target-relative line."""
+        file_line = item["line"] - shift
+        relative = file_line - start_line + 1
+        if relative < 1:
+            item["source_line"] = file_line
+            item.pop("proof_line", None)
+            return "external"
+        item["proof_line"] = relative
+        if end:
+            item["end_proof_line"] = item["endLine"] - shift - start_line + 1
+        return "inside"
+
     for item in groups["goal"]:
-        item["proof_line"] = item["line"] - shift - start_line + 1
-        item["end_proof_line"] = item["endLine"] - shift - start_line + 1
+        place(item, end=True)
     for item in groups["used"]:
-        item["proof_line"] = item["line"] - shift - start_line + 1
+        place(item)
     for item in groups["source"]:
-        item["proof_line"] = item["line"] - shift - start_line + 1
-        if proof_boundary is None:
+        where = place(item)
+        if where == "external":
+            item["origin"] = "external"
+        elif proof_boundary is None:
             item.setdefault("origin", "unknown")  # no top-level `:=` (e.g. equation-compiler proofs): do not guess
         else:
             item["origin"] = "proof" if (item["proof_line"], item.get("column", 0)) >= proof_boundary else "statement"
@@ -122,7 +136,8 @@ def parse_context(output: str, shift: int, start_line: int, proof_boundary: tupl
     for item in groups["constant"]:
         item["kind"] = item.pop("decl", "generated/other")
     for item in groups["local"]:
-        item["proof_line"] = item["line"] - shift - start_line + 1
+        if place(item) == "external":
+            item["origin"] = "external"
     return {"complete": complete and not groups["failure"], **groups}
 
 
@@ -332,9 +347,23 @@ def scope_lines(source: str) -> list[str]:
     return [_clip(line, LIMITS["scope_chars"]) for line in body][: LIMITS["scope"]]
 
 
+def _type_items(context: dict) -> tuple[list[dict], list[dict]]:
+    """Statement predicates first. The count limit applies only after those are kept."""
+    items = list(context.get("type", []))
+    if not any("role" in item for item in items):
+        return items[: LIMITS["types"]], items[LIMITS["types"] :]
+    statement = [item for item in items if item.get("role") == "statement"]
+    auxiliary = [item for item in items if item.get("role") != "statement"]
+    if len(statement) >= LIMITS["types"]:
+        return statement, auxiliary
+    room = LIMITS["types"] - len(statement)
+    return statement + auxiliary[:room], auxiliary[room:]
+
+
 def _types_section(context: dict) -> list[str]:
+    chosen, omitted = _type_items(context)
     lines = []
-    for item in context.get("type", [])[: LIMITS["types"]]:
+    for item in chosen:
         if item["decl"] in ("inductive", "structure"):
             body = "\n".join(f"  | {_clip(c, LIMITS['type_chars'])}" for c in item["ctors"])
             lines.append(
@@ -351,10 +380,19 @@ def _types_section(context: dict) -> list[str]:
                 render_text(
                     "packet/sections.fixed.type_definition",
                     name=item["name"],
+                    kind=item["decl"],
                     signature=_clip(item["sig"], LIMITS["type_chars"]),
                     value=_clip(item.get("value", ""), LIMITS["type_chars"]),
                 )
             )
+    if chosen or omitted:
+        lines.append(
+            render_text(
+                "packet/sections.fixed.type_coverage",
+                shown=len(chosen),
+                omitted=len(omitted),
+            )
+        )
     return lines
 
 
@@ -393,20 +431,112 @@ def _profile_section(prof: dict, src: str, name: str) -> list[str]:
     return body
 
 
-def _goal_section(context: dict, proof: str) -> list[str]:
-    lines = []
-    goals = {item["proof_line"]: item for item in context.get("goal", [])}
-    for step in split_steps(proof)[: LIMITS["goals"]]:
+def _goal_blocks(text: str) -> list[tuple[str, list[str], str]]:
+    """Each `⊢` is one case: its name, the hypotheses above it, and that conclusion."""
+    blocks: list[tuple[str, list[str], str]] = []
+    case = ""
+    hypotheses: list[str] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("case ") and "⊢" not in line:
+            case = line
+            continue
+        if "⊢" in line:
+            before, _, after = line.partition("⊢")
+            if before.strip():
+                hypotheses.append(before.strip())
+            blocks.append((case, hypotheses, "⊢ " + " ".join(after.split())))
+            case, hypotheses = "", []
+        else:
+            hypotheses.append(line)
+    return blocks
+
+
+def _show_goal(text: str, limit: int) -> tuple[str, bool]:
+    """Keep every case conclusion. Clip only the shared hypothesis prefix."""
+    raw = text.strip()
+    blocks = _goal_blocks(raw)
+    if not blocks:
+        return (_clip(raw, limit), len(raw) > limit)
+    shared: list[str] = []
+    if len(blocks) > 1:
+        shared = [line for line in blocks[0][1] if all(line in hypotheses for _, hypotheses, _ in blocks)]
+    parts: list[str] = []
+    if shared:
+        parts.append("shared: " + " ; ".join(shared))
+    elif len(blocks) == 1 and blocks[0][1]:
+        parts.append(" ; ".join(blocks[0][1]))
+    for case, hypotheses, conclusion in blocks:
+        label = f"{case}: " if case else ""
+        own = [line for line in hypotheses if line not in shared]
+        local = ("; ".join(own) + " ") if own else ""
+        parts.append(f"{label}{local}{conclusion}")
+    shown = " | ".join(parts)
+    if len(shown) <= limit:
+        return shown, False
+    conclusions = " | ".join(
+        f"{case}: {conclusion}" if case else conclusion for case, _hypotheses, conclusion in blocks
+    )
+    prefix = parts[0] if shared or (len(blocks) == 1 and blocks[0][1]) else ""
+    room = limit - len(conclusions) - 3
+    if prefix and room > 1:
+        prefix = prefix[: room - 1].rstrip() + "…"
+        return f"{prefix} | {conclusions}", True
+    return conclusions, True
+
+
+def _goal_facts(context: dict, proof: str) -> tuple[list, list[tuple | None], int]:
+    """One pass: rendered goal text per step, and how many displays were clipped."""
+    steps = split_steps(proof)[: LIMITS["goals"]]
+    goals = {item["proof_line"]: item for item in context.get("goal", []) if "proof_line" in item}
+    rendered: list[tuple | None] = []
+    clipped = 0
+    for step in steps:
         item = goals.get(step.first_line)
-        lines.append(
-            render_text(
-                "packet/sections.fixed.goal",
-                step=step.id,
-                text=_clip(item["text"], LIMITS["goal_chars"])
-                if item
-                else template("packet/sections.fixed.goal_unavailable").strip(),
-            )
+        if not item:
+            rendered.append(None)
+            continue
+        text, was_clipped = _show_goal(item.get("text", ""), LIMITS["goal_chars"])
+        clipped += int(was_clipped)
+        rendered.append((step, text))
+    return steps, rendered, clipped
+
+
+def context_coverage(context: dict, proof: str) -> dict:
+    """Usable context coverage. Separate from extraction `complete`."""
+    steps, rendered, clipped = _goal_facts(context, proof)
+    captured = sum(item is not None for item in rendered)
+    _shown, omitted_types = _type_items(context)
+    return {
+        "extraction_complete": bool(context.get("complete")),
+        "goals_captured": captured,
+        "goals_expected": len(steps),
+        "goals_omitted": len(steps) - captured,
+        "display_clipped": clipped,
+        "definitions_omitted": len(omitted_types),
+    }
+
+
+def _goal_section(context: dict, proof: str) -> list[str]:
+    steps, rendered, clipped = _goal_facts(context, proof)
+    captured = sum(item is not None for item in rendered)
+    shown = [item for item in rendered if item is not None]
+    lines = [
+        render_text("packet/sections.fixed.goal", step=step.id, line=step.first_line, text=text) for step, text in shown
+    ]
+    lines.append(
+        render_text(
+            "packet/sections.fixed.goal_coverage",
+            captured=captured,
+            expected=len(steps),
+            omitted=len(steps) - captured,
+            extraction="complete" if context.get("complete") else "incomplete",
+            clipped=clipped,
+            line=shown[0][0].first_line if shown else 0,
         )
+    )
     return lines
 
 
@@ -452,6 +582,7 @@ def _used_section(context: dict) -> list[str]:
         statement = ",".join(str(i["proof_line"]) for i in items if i.get("origin") == "statement")
         proof = ",".join(str(i["proof_line"]) for i in items if i.get("origin") == "proof")
         unknown = ",".join(str(i["proof_line"]) for i in items if i.get("origin") == "unknown")
+        external = ",".join(str(i["source_line"]) for i in items if i.get("origin") == "external")
         lines.append(
             render_text(
                 "packet/sections.fixed.used_line",
@@ -460,6 +591,7 @@ def _used_section(context: dict) -> list[str]:
                 statement=statement or "-",
                 proof=proof or "-",
                 unknown=f" U:{unknown}" if unknown else "",
+                external=f" file line {external}" if external else "",
             )
         )
     preview = _preview([items[0] for _, items in ordered], context.get("root", ""))
@@ -526,22 +658,34 @@ def _dependency_section(context: dict) -> list[str]:
 
 
 def _local_section(context: dict) -> list[str]:
-    scopes: dict[tuple[str, str, str], set[int]] = {}
+    proof_lines: dict[tuple[str, str, str], set[int]] = {}
+    file_lines: dict[tuple[str, str, str], set[int]] = {}
     for item in context.get("local", []):
-        scopes.setdefault((item["name"], item["type"], item["scope"]), set()).add(item["proof_line"])
-    if not scopes:
+        key = (item["name"], item["type"], item["scope"])
+        if "proof_line" in item:
+            proof_lines.setdefault(key, set()).add(item["proof_line"])
+        elif item.get("origin") == "external" and item.get("source_line") is not None:
+            file_lines.setdefault(key, set()).add(item["source_line"])
+    keys = sorted(set(proof_lines) | set(file_lines))
+    if not keys:
         return []
     lines = [template("packet/sections.fixed.local_intro").strip()]
-    lines.extend(
-        render_text(
-            "packet/sections.fixed.local_line",
-            name=name,
-            type=_clip(_one_line(ty), LIMITS["local_type_chars"]),
-            scope=scope,
-            lines=",".join(map(str, sorted(locations))),
+    rendered = []
+    for name, ty, scope in keys:
+        places = [str(line) for line in sorted(proof_lines.get((name, ty, scope), ()))]
+        files = [str(line) for line in sorted(file_lines.get((name, ty, scope), ()))]
+        if files:
+            places.append("file " + ",".join(files))
+        rendered.append(
+            render_text(
+                "packet/sections.fixed.local_line",
+                name=name,
+                type=_clip(_one_line(ty), LIMITS["local_type_chars"]),
+                scope=scope,
+                lines=",".join(places),
+            )
         )
-        for (name, ty, scope), locations in sorted(scopes.items())
-    )
+    lines.extend(rendered)
     return lines
 
 
@@ -551,7 +695,10 @@ def _imports(row: dict) -> list[str]:
     else:
         built = candidate_file(row, row["src"], *measure_version(row))
         source = built["text"][: built["head"]]
-    return [match.group(0).strip() for match in re.finditer(r"(?m)^\s*import\s+[^\n]+", source)]
+    return [
+        match.group(0).strip()
+        for match in re.finditer(r"(?m)^[ \t]*(?:public[ \t]+)?import\s+[^\n]+", source)
+    ]
 
 
 def packet_manifest(parts: list[tuple[str, list[str]]], inventory: dict) -> dict:
@@ -765,9 +912,9 @@ def _fit_sections(parts: list[tuple[str, list[str]]], limit: int) -> list[tuple[
     """Shed entries from the end of the lowest-priority sections."""
     sections = [(title, list(body)) for title, body in parts]
 
-    # Earlier declarations, excess goals, all locals, library entries, then remaining goals.
+    # Shed low-value bulk before useful earlier lemmas. Goals keep a floor, then a last line.
     goals = template("packet/sections.titles.goals").strip()
-    stages = [(EARLIER_TITLE, 0), (goals, GOALS_FLOOR), (LOCAL_TITLE, 0), (LIBRARY_TITLE, 0), (goals, 1)]
+    stages = [(LOCAL_TITLE, 0), (LIBRARY_TITLE, 0), (goals, GOALS_FLOOR), (EARLIER_TITLE, 0), (goals, 1)]
     while len(_join_sections(sections)) > limit:
         for title, floor in stages:
             target = next((body for t, body in sections if t.startswith(title)), None)
@@ -882,6 +1029,7 @@ def packet_sections(name: str, *, cache_only: bool = False) -> list[tuple[str, s
     if note:
         parts.append(("", [note]))
     manifest = packet_manifest(parts, context)
+    manifest["coverage"] = context_coverage(context, row["src"])
     result = certify_manifest(manifest)
     if not result["certified"]:
         raise ValueError(
