@@ -293,8 +293,8 @@ class CompileToolTests(CascadeCase):
         )
         raw_history = campaign.events(directory)
         without_receipts = Graph.from_history(raw_history, campaign._proof_reader(directory))
-        hidden_node = next(node for node in without_receipts.nodes if node.proof_id == proof_id)
-        self.assertTrue(all(item["operation_id"] is None for item in hidden_node.attempts))
+        # Candidate rows are committed under an operation; without receipts the proof is not a canonical node.
+        self.assertEqual([node for node in without_receipts.nodes if node.proof_id == proof_id], [])
         checked = Graph.from_history(
             raw_history,
             campaign._proof_reader(directory),

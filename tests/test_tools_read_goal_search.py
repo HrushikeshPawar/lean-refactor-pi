@@ -405,12 +405,13 @@ class ReadGoalSearchTests(CascadeToolCase):
 
     def test_prices_of_an_unmeasured_node_say_n_a_not_none(self):
         node = self.sketch()
-        total = {"tokens": 290, "heartbeats": None, "versions": "0/3"}
-        with patch.object(campaign, "price_table", return_value={"total": total}):
+        table = {"total": {"tokens": 290, "heartbeats": None, "versions": "0/3"}}
+        table["text"] = campaign.render_price_table(table)
+        with patch.object(campaign, "price_table", return_value=table):
             result = tools.read_tool("T", "logic", {"node": node, "view": "prices"})
-        line = result["items"][0]["lines"][1]  # [0] is the result section header
-        self.assertIn("heartbeats n/a", line)
-        self.assertNotIn("None", line)
+        lines = "\n".join(result["items"][0]["lines"])
+        self.assertIn("local heartbeats missing", lines)  # missing is not zero (decision 51)
+        self.assertNotIn("None", lines)
 
     def test_read_map_needs_no_target(self):
         node = self.sketch()
@@ -517,7 +518,7 @@ class ToolReplyTextTests(CascadeToolCase):
         bare = tools.read_tool("T", "logic", {"node": node, "view": "outline"})["items"][0]["lines"]
         self.assertEqual(bare[0], RESULT)
         self.assertTrue(bare[1].startswith("| step |"))
-        self.assertRegex(bare[2], r"^\| s1 \| 2-2 \| \S+ \| - \| - \| `skip` \|$")  # unmeasured: no heartbeats, no pts
+        self.assertRegex(bare[2], r"^\| s1 \| 2-2 \| \S+ \| - \| `skip` \|$")  # unmeasured: no heartbeats
         proof_id = campaign.resolve_node_ref(campaign.events(self.directory), node)
         hypotheses = "a : ℕ\nb : ℕ\n"
         goals = [
