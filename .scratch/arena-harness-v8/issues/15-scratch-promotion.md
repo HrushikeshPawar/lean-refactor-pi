@@ -4,7 +4,7 @@
 
 **Blocked by:** 14: Retain and retrieve isolated scratch experiments
 
-**Status:** needs-review
+**Status:** done
 
 **Branch:** `v8/15-scratch-promotion`
 
@@ -44,6 +44,12 @@ uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_tools_read_g
 Expected: the named behavior check passes with no actual provider, Pi or Lean process. Aim for seconds and at most 60 seconds. No per-ticket full suite or slow suite.
 
 **Deferred to final E2E:** Actual Lean helper embedding, context fidelity and all-pin promotion. See the shared [final E2E checklist](../final-e2e.md).
+
+## Review closure
+
+The review completed code-only target promotion using the exact benchmark statement as the body boundary, wired both request forms into Pi, and retained the submitted code and extraction range. Caller metadata cannot bypass canonical anchors. Recorded job anchors and explicit parents preserve lineage; transitive helpers are checked for proof-local embedding and cancellation is observed before submission. Current-operation receipts identify the exact attempt/construction/evaluation, including failed compiles and duplicate proofs; hole derivations retain the experiment link. Replay retrieves the original invocation before resolving mutable focus. Promotion and verification fields participate in outcome idempotency. Incomplete proofs, inconclusive execution, failed full checks and unconfirmed cold checks cannot appear as certified success. Experiment validity/compatibility/cold remain distinct from promotion verification. Available token and matching-pin heartbeat deltas are returned.
+
+Verified: `UV_CACHE_DIR=/tmp/arena-uv-cache uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_scratch_promotion.py tests/test_experiments.py tests/test_tools_read_goal_search.py::ScratchResultTests` — **8 passed, 12 subtests passed in 0.49s**. Touched-file Ruff and `arena.ts` syntax passed. Independent review found and prompted fixes for fill-lineage retention and target-lookup failure retention; the latter is covered by the final focused journey. No actual provider, Pi or Lean process ran. Real helper embedding/context fidelity and all-pin/cold journeys remain final E2E coverage. Strict concurrent stop-boundary ordering belongs to ticket 16, which was not started.
 
 ---
 
