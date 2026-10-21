@@ -32,7 +32,10 @@ TOOL_FORMS = {
 
 
 def _history(run_id: str) -> list[dict]:
-    return campaign.events(campaign.run_dir(run_id))
+    from arena.run_control import published_history
+
+    directory = campaign.run_dir(run_id)
+    return published_history(directory, campaign.events(directory))
 
 
 def _nodes(run_id: str) -> tuple[list[dict], graph.Graph]:
@@ -598,6 +601,11 @@ def _flat_splice(request: object) -> object:
 
 
 def compile_tool(theorem: str, run_id: str, request: dict) -> dict:
+    with campaign.compile_authorization():
+        return _compile_tool(theorem, run_id, request)
+
+
+def _compile_tool(theorem: str, run_id: str, request: dict) -> dict:
     valid = ["drafts", "splice", "fill", "merge", "base", "from", "note", "check"]
     request = _flat_splice(request)
     if _is_empty(request, "compile"):
@@ -1922,7 +1930,8 @@ def _scratch_promote(
         return close(reason, {"state": "not_promoted", "reason": reason},
                      [_render("scratch_not_promoted", reason=reason)], ok=False, diagnostic=reason)
     try:
-        result = campaign.compile_operation(theorem, run_id, operation, named_parent=anchor["proof_id"])
+        with campaign.compile_authorization():
+            result = campaign.compile_operation(theorem, run_id, operation, named_parent=anchor["proof_id"])
     except Exception as error:
         reason = "run_stopped" if read_state(campaign.run_dir(run_id)).get("stopped") else "invalid_operation"
         evidence = getattr(error, "operation_evidence", {})

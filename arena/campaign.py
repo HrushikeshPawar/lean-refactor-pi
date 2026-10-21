@@ -16,8 +16,9 @@ import time
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from contextvars import ContextVar
+from functools import wraps
 from pathlib import Path
 
 from arena import goalstate, lean_health, lean_session, routes, text
@@ -87,6 +88,129 @@ _BATCH_FOCUS: ContextVar[tuple[bool, str | None]] = ContextVar("arena_batch_focu
 _BATCH_NEWLY_FILED: ContextVar[set[str] | None] = ContextVar("arena_batch_newly_filed", default=None)
 _OPERATION_RECEIPTS: ContextVar[list[dict] | None] = ContextVar("arena_operation_receipts", default=None)
 _SALVAGE_DIRECTORY: ContextVar[Path | None] = ContextVar("arena_salvage_directory", default=None)
+_SUBMISSION_ADMISSIONS: ContextVar[dict | None] = ContextVar("arena_submission_admissions", default=None)
+_SELECT_COMPILED: ContextVar[bool] = ContextVar("arena_select_compiled", default=False)
+
+
+@contextmanager
+def compile_authorization():
+    """An agent compile selects the exact submitted proof in its admission."""
+    token = _SELECT_COMPILED.set(True)
+    try:
+        yield
+    finally:
+        _SELECT_COMPILED.reset(token)
+
+
+def _submission_scope(function):
+    """Keep exact admission receipts within one tool/background invocation."""
+
+    @wraps(function)
+    def invoke(*args, **kwargs):
+        if _SUBMISSION_ADMISSIONS.get() is not None:
+            return function(*args, **kwargs)
+        token = _SUBMISSION_ADMISSIONS.set({})
+        try:
+            return function(*args, **kwargs)
+        finally:
+            _SUBMISSION_ADMISSIONS.reset(token)
+
+    return invoke
+
+
+def _submission_key(directory: Path, proof_id: str, proof: str, inputs) -> str:
+    from arena.run_control import actor_ids
+
+    identity = actor_ids(directory.name)
+    return json.dumps(
+        [
+            str(directory),
+            proof_id,
+            hashlib.sha256(proof.encode()).hexdigest(),
+            inputs,
+            {key: identity.get(key) for key in ("actor_id", "session_id", "job_id", "activation_id")},
+        ],
+        sort_keys=True,
+    )
+
+
+def _submission_attempt(directory: Path, proof_id: str, proof: str, inputs) -> dict | None:
+    return (_SUBMISSION_ADMISSIONS.get() or {}).get(_submission_key(directory, proof_id, proof, inputs))
+
+
+def _published_events(directory: Path) -> list[dict]:
+    from arena.run_control import published_history
+
+    return published_history(directory, events(directory))
+
+
+def _submit_proof(directory: Path, proof_id: str, proof: str, inputs, *, evaluation=None, candidate=None) -> dict:
+    from arena.run_control import SubmissionRefused, actor_ids, submit_candidate
+
+    attempt = _submission_attempt(directory, proof_id, proof, inputs)
+    if attempt is None:
+        identity = actor_ids(directory.name)
+        attempt = {
+            "operation_id": uuid.uuid4().hex,
+            "run_id": directory.name,
+            "actor_id": identity["actor_id"],
+            "session_id": identity["session_id"],
+            **{key: identity[key] for key in ("job_id", "activation_id", "generation") if identity.get(key)},
+            "proof_id": proof_id,
+            "proof_sha256": hashlib.sha256(proof.encode()).hexdigest(),
+            "authorization": "candidate",
+            "inputs": inputs,
+            **({"evaluation": evaluation} if evaluation is not None else {}),
+            **({"candidate": candidate} if candidate is not None else {}),
+        }
+        if _SELECT_COMPILED.get():
+            attempt["ledger_events"] = [{"kind": "proof_selection", "proof_id": proof_id, "candidate_id": proof_id}]
+    decision = submit_candidate(directory, attempt)
+    if not decision["ok"]:
+        raise SubmissionRefused(decision.get("operation_id") or "")
+    admissions = _SUBMISSION_ADMISSIONS.get()
+    if admissions is not None:
+        admissions[_submission_key(directory, proof_id, proof, inputs)] = attempt
+    return attempt
+
+
+def _append_submitted(directory: Path, attempt: dict, event: dict) -> None:
+    """Publish an outcome only under the receipt that admitted its exact input."""
+    from arena.run_control import SubmissionRefused, _apply_locked, _submit_locked, control_lock
+
+    arguments = {"submission_id": attempt["operation_id"], "event": event}
+    operation_id = hashlib.sha256(json.dumps(arguments, sort_keys=True).encode()).hexdigest()
+    with control_lock(directory):
+        if not _submit_locked(directory, attempt)["ok"]:
+            raise SubmissionRefused(attempt["operation_id"])
+
+        def publish(ctx):
+            ctx.append_ledger(
+                {
+                    **event,
+                    "submission_id": attempt["operation_id"],
+                    **({"generation": attempt["generation"]} if attempt.get("generation") else {}),
+                }
+            )
+            return ctx.evidence
+
+        receipt = _apply_locked(
+            directory,
+            {
+                "operation_id": operation_id,
+                "kind": "submission_outcome",
+                "arguments": arguments,
+                **{
+                    key: attempt[key]
+                    for key in ("run_id", "actor_id", "session_id", "job_id", "activation_id")
+                    if key in attempt
+                },
+            },
+            publish,
+        )
+    receipts = _OPERATION_RECEIPTS.get()
+    if receipts is not None:
+        receipts.append(receipt)
 
 
 class _Session:
@@ -1076,9 +1200,9 @@ def _admit_graph_submission(
     from arena.run_control import _submit_locked, actor_ids
 
     identity = actor_ids(directory.name)
-    decision = _submit_locked(
-        directory,
-        {
+    attempt = _submission_attempt(directory, proof_id, proof, operation)
+    if attempt is None:
+        attempt = {
             "operation_id": uuid.uuid4().hex,
             "run_id": directory.name,
             "actor_id": identity["actor_id"],
@@ -1087,8 +1211,8 @@ def _admit_graph_submission(
             "proof_sha256": hashlib.sha256(proof.encode()).hexdigest(),
             "authorization": "duplicate" if duplicate else "candidate",
             "inputs": operation,
-        },
-    )
+        }
+    decision = _submit_locked(directory, attempt)
     return bool(decision["ok"])
 
 
@@ -1213,7 +1337,7 @@ def _file_node(
     directory.mkdir(parents=True, exist_ok=True)
     with control_lock(directory), (directory / "graph.lock").open("a") as handle:
         fcntl.flock(handle, fcntl.LOCK_EX)
-        history = events(directory)
+        history = _published_events(directory)
         existing = next(
             (event for event in history if event.get("kind") == "edge" and event.get("proof_id") == proof_id), None
         )
@@ -2011,6 +2135,7 @@ def _queue_full_check(directory: Path, run_id: str, proof_id: str) -> list[dict]
         return checks
 
 
+@_submission_scope
 def record_evaluation(
     name: str,
     run_id: str,
@@ -2047,7 +2172,7 @@ def record_evaluation(
     lean_lock_wait_seconds = 0.0
     with _candidate_lock(directory, candidate_id):
         lock_wait_seconds = round(time.monotonic() - lock_wait_started, 3)
-        history = events(directory)
+        history = _published_events(directory)
         if not history or history[0].get("theorem") != name:
             raise ValueError(text.render("messages/errors.run_theorem_mismatch"))
         if history[0].get("versions") and history[0]["versions"] != [list(pair) for pair in versions(row)]:
@@ -2069,38 +2194,31 @@ def record_evaluation(
             hypothesis = ""
         _snapshot(directory, candidate_id, proof)
         if candidate_id not in known:
-            from arena.run_control import SubmissionRefused, actor_ids, submit_candidate
-
-            identity = actor_ids(directory.name)
             key = _evaluation_key(candidate_id, mode, row)
-            decision = submit_candidate(
-                directory,
-                {
-                    "operation_id": uuid.uuid4().hex,
-                    "run_id": run_id,
-                    "actor_id": identity["actor_id"],
-                    "session_id": identity["session_id"],
-                    "proof_id": candidate_id,
-                    "proof_sha256": hashlib.sha256(proof.encode()).hexdigest(),
-                    "authorization": "candidate",
-                    "inputs": operation,
-                    "evaluation": {"mode": mode, "key": key, "state": "queued"},
-                    "candidate": {
-                        "kind": "candidate",
-                        "candidate_id": candidate_id,
-                        "parents": lineage,
-                        "hypothesis": hypothesis,
-                        "hypothesis_ref": hypothesis_ref,
-                        "origin": origin,
-                        "merge": merge,
-                        "source_versions": versions(row),
-                        "evaluator_sha256": _evaluator_sha(),
-                    },
-                },
+            candidate = {
+                "kind": "candidate",
+                "candidate_id": candidate_id,
+                "parents": lineage,
+                "hypothesis": hypothesis,
+                "hypothesis_ref": hypothesis_ref,
+                "origin": origin,
+                "merge": merge,
+                "source_versions": versions(row),
+                "evaluator_sha256": _evaluator_sha(),
+            }
+            prior_admission = _submission_attempt(directory, candidate_id, proof, operation)
+            attempt = _submit_proof(
+                directory, candidate_id, proof, operation,
+                evaluation={"mode": mode, "key": key, "state": "queued"}, candidate=candidate,
             )
-            if not decision["ok"]:
-                raise SubmissionRefused(decision.get("operation_id") or "")
-            history = events(directory)
+            if prior_admission is not None and not any(
+                event.get("kind") == "candidate" and event.get("candidate_id") == candidate_id
+                for event in _published_events(directory)
+            ):
+                # A complete probe was admitted before its result was known. Its
+                # successful outcome can publish the candidate under that receipt.
+                _append_submitted(directory, attempt, candidate)
+            history = _published_events(directory)
         elif explicit and not any(
             item.get("kind") == "derivation"
             and item.get("candidate_id") == candidate_id
@@ -2114,7 +2232,7 @@ def record_evaluation(
                 from arena.run_control import actor_ids, submit_candidate
 
                 identity = actor_ids(directory.name)
-                decision = submit_candidate(
+                submit_candidate(
                     directory,
                     {
                         "operation_id": uuid.uuid4().hex,
@@ -2125,20 +2243,20 @@ def record_evaluation(
                         "proof_sha256": hashlib.sha256(proof.encode()).hexdigest(),
                         "authorization": "duplicate",
                         "inputs": {"parents": explicit, "origin": origin},
+                        "ledger_events": [{"kind": "derivation", "candidate_id": candidate_id,
+                                           "parents": explicit, "origin": origin, "merge": merge}],
                     },
                 )
-                if decision["ok"]:
-                    _append(
-                        directory,
-                        {
-                            "kind": "derivation",
-                            "candidate_id": candidate_id,
-                            "parents": explicit,
-                            "origin": origin,
-                            "merge": merge,
-                        },
-                    )
         key = _evaluation_key(candidate_id, mode, row)
+        if candidate_id in known and _SELECT_COMPILED.get():
+            from arena.run_control import SubmissionRefused
+
+            # Already-published candidates can finish verification even if this
+            # fresh selection is refused; no new construction is authorized.
+            with suppress(SubmissionRefused):
+                _submit_proof(directory, candidate_id, proof, operation, evaluation={
+                    "mode": mode, "key": key, "state": "queued",
+                })
         prior = next(
             (item for item in reversed(history) if item.get("kind") == "evaluation" and item["key"] == key), None
         )
@@ -2219,7 +2337,7 @@ def record_evaluation(
     location = materialize(name, run_id, proof) if materialize_live and result.get("tokens") is not None else {}
     if location:
         _append(directory, {"kind": "current", "candidate_id": candidate_id})
-    filing_history = events(directory)
+    filing_history = _published_events(directory)
     in_batch, _ = _BATCH_FOCUS.get()
     projection_out: list[Graph] = []
     _, newly_filed = _file_node(
@@ -2242,7 +2360,7 @@ def record_evaluation(
             actor_local=origin == "model" and trigger == "model",
         )
         _check_stall(directory, graph, {candidate_id} if newly_filed else set())
-    history = events(directory)
+    history = _published_events(directory)
     rows = _summaries(history)
     me = next((r for r in rows if r["id"] == candidate_id), None)
     result.setdefault("metrics", None)
@@ -2409,7 +2527,7 @@ def _compile_probes(name: str, directory: Path, drafts: list[str]) -> dict[str, 
     parents match sequential execution. Drafts that cannot be prepared are left for `probe` to
     reject with its usual error.
     """
-    history = events(directory)
+    history = _published_events(directory)
     row = problem(name)
     known = set(_candidate_ids(history)) | {item["proof_id"] for item in history if item.get("kind") == "probe"}
     pending: dict[str, str] = {}
@@ -2419,7 +2537,18 @@ def _compile_probes(name: str, directory: Path, drafts: list[str]) -> dict[str, 
             validate_proof(row, proof, allow_sorry=True)
         except ValueError:
             continue
-        if hashlib.sha256((name + "\0" + proof).encode()).hexdigest() not in known:
+        proof_id = hashlib.sha256((name + "\0" + proof).encode()).hexdigest()
+        if proof_id not in known:
+            from arena.run_control import SubmissionRefused
+
+            try:
+                _snapshot(directory, proof_id, proof)
+                check_mode = "probe" if _has_hole(row, proof) else "fast"
+                _submit_proof(directory, proof_id, proof, None, evaluation={
+                    "mode": check_mode, "key": _evaluation_key(proof_id, check_mode, row), "state": "queued",
+                })
+            except SubmissionRefused:
+                continue
             pending.setdefault(proof, proof)
     if not pending:
         return {}
@@ -2434,6 +2563,7 @@ def _compile_probes(name: str, directory: Path, drafts: list[str]) -> dict[str, 
     return compiled
 
 
+@_submission_scope
 def probe(
     name: str,
     run_id: str,
@@ -2448,7 +2578,7 @@ def probe(
     proof = normalize_draft(name, proof)
     directory = run_dir(run_id)
     _refuse_if_tripped(directory)
-    history = events(directory)
+    history = _published_events(directory)
     row = problem(name)
     notes: list[str] = []
     parent_id = None
@@ -2478,6 +2608,11 @@ def probe(
     else:
         validate_proof(row, proof, allow_sorry=True)
         complete = not _has_hole(row, proof)
+        _snapshot(directory, proof_id, proof)
+        check_mode = "fast" if complete else "probe"
+        attempt = _submit_proof(directory, proof_id, proof, operation, evaluation={
+            "mode": check_mode, "key": _evaluation_key(proof_id, check_mode, row), "state": "queued",
+        })
         result = (_PRECOMPILED.get() or {}).get(proof)
         if result is None:
             with lean_lock(directory):
@@ -2504,8 +2639,9 @@ def probe(
         result = {**result, "mode": "probe", "scored": False}
         _externalize_output(directory, proof_id, result)
         _snapshot(directory, proof_id, proof)
-        _append(
+        _append_submitted(
             directory,
+            attempt,
             {
                 "kind": "probe",
                 "proof_id": proof_id,
@@ -2516,7 +2652,7 @@ def probe(
                 "result": result,
             },
         )
-        filing_history = events(directory)
+        filing_history = _published_events(directory)
         in_batch, _ = _BATCH_FOCUS.get()
         projection_out: list[Graph] = []
         _, new_node = _file_node(
@@ -2535,7 +2671,7 @@ def probe(
     if earlier:
         # A repeat leaves its own row, so the reply can say how often this text has been tried.
         _append(directory, {"kind": "repeat", "proof_id": proof_id})
-        filing_history = events(directory)
+        filing_history = _published_events(directory)
         in_batch, _ = _BATCH_FOCUS.get()
         projection_out = []
         _, new_node = _file_node(
@@ -2585,6 +2721,7 @@ def normalize_draft(name: str, draft: str) -> str:
     return statement + " := by\n" + block
 
 
+@_submission_scope
 def probe_batch(
     name: str,
     run_id: str,
@@ -2637,6 +2774,7 @@ def probe_batch(
     return {"ok": True, "drafts": outcomes}
 
 
+@_submission_scope
 def compile_operation(
     name: str,
     run_id: str,
@@ -3707,6 +3845,7 @@ def _salvage_compile(name: str, text_value: str) -> dict:
 SALVAGE_SOFT_CAP_SECONDS = 60
 
 
+@_submission_scope
 def _run_salvage(name: str, run_id: str, node: Node, drain_deadline: float | None = None) -> dict:
     directory = run_dir(run_id)
     from arena.run_control import read_state, submission_barrier
@@ -3721,7 +3860,7 @@ def _run_salvage(name: str, run_id: str, node: Node, drain_deadline: float | Non
         return {"status": "run_stopped", "compiles": 0, "rounds": [], "text": None, "result": None, "kept": None}
     started = time.monotonic()
     proof = node.proof_text
-    history = events(directory)
+    history = _published_events(directory)
     prior = next(
         (
             item
@@ -3747,12 +3886,31 @@ def _run_salvage(name: str, run_id: str, node: Node, drain_deadline: float | Non
             return "full_check_arrived"
         return None
 
+    submission_refused = False
+    operation = {"type": "salvaged_from", "from": [node.proof_id]}
+
+    def compile_salvage(candidate):
+        nonlocal submission_refused
+        from arena.run_control import SubmissionRefused
+
+        proof_id = hashlib.sha256((name + "\0" + candidate).encode()).hexdigest()
+        _snapshot(directory, proof_id, candidate)
+        try:
+            _submit_proof(directory, proof_id, candidate, operation, evaluation={
+                "mode": "probe", "key": _evaluation_key(proof_id, "probe", problem(name)), "state": "queued",
+            })
+        except SubmissionRefused:
+            submission_refused = True
+            raise
+        submission_barrier("during_lean", directory)
+        return _salvage_compile(name, candidate)
+
     token = _SALVAGE_DIRECTORY.set(directory)
     try:
         outcome = salvage_proof(
             name,
             proof,
-            lambda candidate: _salvage_compile(name, candidate),
+            compile_salvage,
             should_yield=should_yield,
             resume=(prior or {}).get("continuation"),
         )
@@ -3760,12 +3918,14 @@ def _run_salvage(name: str, run_id: str, node: Node, drain_deadline: float | Non
         outcome = {"status": "unavailable", "compiles": 0, "rounds": [], "text": None, "result": None, "kept": None}
     finally:
         _SALVAGE_DIRECTORY.reset(token)
+    if submission_refused or outcome.get("reason") == "run_stopped":
+        outcome = {**outcome, "status": "run_stopped"}
     sketch_id = None
     if outcome["status"] == "salvaged":
         sketch_text = outcome["text"]
         sketch_id = hashlib.sha256((name + "\0" + sketch_text).encode()).hexdigest()
         _snapshot(directory, sketch_id, sketch_text)
-        history = events(directory)
+        history = _published_events(directory)
         has_node = any(
             item.get("proof_id") == sketch_id and item.get("kind") in ("probe", "candidate") for item in history
         )
@@ -3774,13 +3934,26 @@ def _run_salvage(name: str, run_id: str, node: Node, drain_deadline: float | Non
             result["mode"] = "probe"
             result["scored"] = False
             result["salvaged"] = True
-            _append(directory, {"kind": "probe", "proof_id": sketch_id, "parent": node.proof_id, "result": result})
+            from arena.run_control import SubmissionRefused
+
+            try:
+                attempt = _submit_proof(directory, sketch_id, sketch_text, operation, evaluation={
+                    "mode": "probe", "key": _evaluation_key(sketch_id, "probe", problem(name)), "state": "queued",
+                })
+            except SubmissionRefused:
+                outcome = {**outcome, "status": "run_stopped", "text": None}
+                sketch_id = None
+            else:
+                _append_submitted(directory, attempt, {
+                    "kind": "probe", "proof_id": sketch_id, "parent": node.proof_id, "result": result,
+                })
+        if sketch_id is not None:
             _file_node(
                 directory,
                 events(directory),
                 sketch_id,
                 sketch_text,
-                operation={"type": "salvaged_from", "from": [node.proof_id]},
+                operation=operation,
             )
     event = {
         "kind": "salvage",
@@ -4592,6 +4765,9 @@ def select_proof(run_id: str, proof_id: str) -> dict:
             "proof_sha256": hashlib.sha256(proof_bytes).hexdigest(),
             "authorization": "exact_selection",
             "inputs": {"proof_id": proof_id},
+            "ledger_events": [{"kind": "proof_selection", "proof_id": proof_id,
+                               "candidate_id": proof_id, "actor_id": identity["actor_id"],
+                               "session_id": identity["session_id"]}],
         },
     )
     if not decision["ok"]:
@@ -4600,18 +4776,8 @@ def select_proof(run_id: str, proof_id: str) -> dict:
             "status": "run_stopped",
             "category": "run_stopped",
             "proof_id": proof_id,
-            "eligibility": proof_eligibility(events(directory), proof_id),
+            "eligibility": proof_eligibility(_published_events(directory), proof_id),
         }
-    _append(
-        directory,
-        {
-            "kind": "proof_selection",
-            "proof_id": proof_id,
-            "candidate_id": proof_id,
-            "actor_id": identity["actor_id"],
-            "session_id": identity["session_id"],
-        },
-    )
     return {"ok": True, "proof_id": proof_id, "eligibility": "eligible", "actor_id": identity["actor_id"]}
 
 

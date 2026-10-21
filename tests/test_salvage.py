@@ -339,7 +339,8 @@ class FillAndMapTests(FakeRunCase):
         )
         with patch.object(campaign, "problem", return_value={"name": "T", "statement": "theorem t := by"}):
             projection = graph.Graph.from_history(
-                campaign.events(self.directory), campaign._proof_reader(self.directory)
+                campaign.events(self.directory), campaign._proof_reader(self.directory),
+                committed_operations=campaign.committed_operation_ids(self.directory)
             )
         hole_id = f"{projection.nodes[-1].id}.h1"
         with self.assertRaisesRegex(ValueError, "n999.h1.*line"):
@@ -367,7 +368,8 @@ class FillAndMapTests(FakeRunCase):
             ("filled_from", [sketch_id], {"hole": hole_id, "text": "exact True.intro"}),
         )
         self.assertIn("node", result)
-        graph_after = graph.Graph.from_history(campaign.events(self.directory), campaign._proof_reader(self.directory))
+        graph_after = graph.Graph.from_history(campaign.events(self.directory), campaign._proof_reader(self.directory),
+                committed_operations=campaign.committed_operation_ids(self.directory))
         sketch = next(node for node in graph_after.nodes if node.proof_id == sketch_id)
         self.assertEqual(
             (sketch.holes[0]["status"], sketch.holes[0]["filled_by"]), ("filled", graph_after.nodes[-1].id)
@@ -389,7 +391,8 @@ class FillAndMapTests(FakeRunCase):
             proof,
             operation={"type": "salvaged_from", "from": ["failed"]},
         )
-        before = graph.Graph.from_history(campaign.events(self.directory), campaign._proof_reader(self.directory))
+        before = graph.Graph.from_history(campaign.events(self.directory), campaign._proof_reader(self.directory),
+                committed_operations=campaign.committed_operation_ids(self.directory))
         sketch = next(node for node in before.nodes if node.proof_id == sketch_id)
         fill_id = "d" * 64
         fill_proof = proof.replace("    sorry", "    sorry\n    exact True.intro")
@@ -444,7 +447,8 @@ class FillAndMapTests(FakeRunCase):
                 "operation": {"hole": f"{sketch.id}.h1", "text": "exact True.intro"},
             },
         )
-        after = graph.Graph.from_history(campaign.events(self.directory), campaign._proof_reader(self.directory))
+        after = graph.Graph.from_history(campaign.events(self.directory), campaign._proof_reader(self.directory),
+                committed_operations=campaign.committed_operation_ids(self.directory))
         sketch_after = next(node for node in after.nodes if node.proof_id == sketch_id)
         self.assertEqual(sketch_after.holes[0]["status"], "open")
 
@@ -471,7 +475,8 @@ class FillAndMapTests(FakeRunCase):
             operation={"type": "salvaged_from", "from": ["failed"]},
         )
         with patch.object(campaign, "problem", return_value={"name": "T", "statement": "theorem t := by"}):
-            current = graph.Graph.from_history(campaign.events(self.directory), campaign._proof_reader(self.directory))
+            current = graph.Graph.from_history(campaign.events(self.directory), campaign._proof_reader(self.directory),
+                committed_operations=campaign.committed_operation_ids(self.directory))
             sketch = next(node for node in current.nodes if node.proof_id == sketch_id)
             self.assertEqual(graph.map_view(current)["open"][0]["hole"], f"{sketch.id}.h1")
             campaign.compile_operation(
@@ -530,7 +535,8 @@ class FillAndMapTests(FakeRunCase):
             operation={"type": "salvaged_from", "from": ["failed"]},
         )
         with patch.object(campaign, "problem", return_value={"name": "T", "statement": "theorem t := by"}):
-            current = graph.Graph.from_history(campaign.events(self.directory), campaign._proof_reader(self.directory))
+            current = graph.Graph.from_history(campaign.events(self.directory), campaign._proof_reader(self.directory),
+                committed_operations=campaign.committed_operation_ids(self.directory))
             sketch = next(node for node in current.nodes if node.proof_id == sketch_id)
             fill_proof = proof.replace("    sorry", "    exact True.intro")
             fill_id = "1" * 64
@@ -562,7 +568,8 @@ class FillAndMapTests(FakeRunCase):
                 },
             )
             after_fill = graph.Graph.from_history(
-                campaign.events(self.directory), campaign._proof_reader(self.directory)
+                campaign.events(self.directory), campaign._proof_reader(self.directory),
+                committed_operations=campaign.committed_operation_ids(self.directory)
             )
             filled_sketch = next(node for node in after_fill.nodes if node.proof_id == sketch_id)
             self.assertTrue(filled_sketch.holes[0]["fills"])
@@ -575,7 +582,8 @@ class FillAndMapTests(FakeRunCase):
             broken_node = next(
                 node
                 for node in graph.Graph.from_history(
-                    campaign.events(self.directory), campaign._proof_reader(self.directory)
+                    campaign.events(self.directory), campaign._proof_reader(self.directory),
+                committed_operations=campaign.committed_operation_ids(self.directory)
                 ).nodes
                 if node.proof_id == assembly["node"]
             )
