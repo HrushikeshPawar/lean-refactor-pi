@@ -4,7 +4,7 @@
 
 **Blocked by:** 11: Wait without polling or no-event deadlocks; 22: Inspect every concurrent attempt and exact derivation
 
-**Status:** needs-review
+**Status:** changes-requested
 
 **Branch:** `v8/23-compaction-resume`
 
@@ -32,6 +32,22 @@
 - [x] 4. Keep actual shared-cost and no-voluntary-finish wording consistent; do not reintroduce raw pin hashes, transcript dumps or paid waiting polls.
 - [x] 5. Combine compacted/resumed session evidence with jobs/no-event waiting so a settled or cancelled assignment is not restarted accidentally.
 - [x] 6. Use the one assigned fast smoke for this slice. Retain the stated behavior requirements; actual-Pi/real-Lean journeys and the broader race matrix are final E2E coverage, not this ticket's gate.
+
+## Review findings (Claude, 2026-10-21)
+
+Commit `nxl` writes nothing to the ledger, keeps strategy Sol-only, reuses `orchestration.jobs` and reply focus state, and adds no finish, island or restart wording. The items below are reopened. Tickets 20 and 22 had the same failure as the first two, so fix them through the shared paths, not new filters.
+
+**Blockers**
+1. **Raw history in the summary and in retrieval.** `memory.memory` (memory.py:202) and `memory.original_evidence` (:181) read `campaign.events()`. Only the Graph gets `committed_operation_ids`; strategy, findings, evidence, reads, library, holes and `_recovery` all use the raw rows. An aborted or unreceipted attempt, derivation or scratch row therefore appears in the compaction summary and is returned by retrieval, and ticket 16 says it must not exist. Use `run_control.published_history(directory, history)` once, as `experiments._scratch` and `orchestration._history` do, and pass that one history everywhere.
+2. **The summary is not actor-local** (decisions 26, 32; contract "actor-local focus/jobs"). `memory(run_id)` takes no actor. It lists every actor's focus (`reply.actor_focuses`), every actor's hypothesis notes and findings, and every job, so a resumed worker can adopt another worker's focus or notes as its own. Pass the compacting actor (`current_actor()`). Show Sol's plan to everyone and attributed shared observations to everyone, but only that actor's focus and hypothesis-local notes. Sol sees all jobs; a worker sees its own job.
+
+**Should-fix**
+3. **Path traversal in `original_evidence`.** `_proof_reader` builds `proofs/{ref}.lean` from the ref without validation, so `../../../x` reads any `.lean` file. A proof file is also returned without checking that its attempt committed. Accept only proof ids in the stored id format, reject anything else as missing, and require a committed attempt.
+4. **Every emitted ref must resolve.** `_event_ref` falls back to `experiment_id`, then `operation_id`, but `original_evidence` matches only `event_id`, `experiment_id`, code hash and proof id. A row listed as `derivation <operation_id>` then retrieves nothing. Emit only ref forms the retriever accepts, or accept `operation_id`.
+5. **Retrieval is not reachable by the model** (acceptance 3). `original_evidence` has no caller outside tests: it is in neither `arena/cli/protocol.py` nor any Pi tool. After compaction the model sees references it cannot follow. Expose it through an existing read path (for example `read` with a `ref`, or the experiment retrieval that already exists) without changing other tools' public forms. If that needs a schema change, record it in ticket 21's schema file and help.
+6. **Unbounded summary.** Findings and Evidence have no cap, unlike `memory_read_entries` and `memory_library_lines`, so every attempt and derivation is relisted at every compaction. Cap them with a template-owned number and say how many were omitted; the references stay retrievable.
+
+Extend the smoke with one uncommitted row (excluded from the summary and from retrieval), two workers (each sees only its own focus and notes), and one traversal ref (returns missing). Run the whole touched test files. Older failures that are not this ticket's and predate ticket 19's tip: `tests/test_context.py::ProfileSectionTests` (2), `tests/test_text_lint.py::test_model_facing_modules_have_no_inline_prose`, `tests/test_tools_reply.py::test_an_update_names_its_source_node_only_once_the_model_has_seen_it`, plus the known `tests/test_text.py` ones.
 
 ## Verify
 
