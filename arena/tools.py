@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import difflib
 import hashlib
+import json
 import os
 import re
 import time
@@ -23,6 +24,7 @@ TOOL_FORMS = {
         "node:nN",
         "hole:nN.hK",
         "experiment:eN",
+        "ref:<evidence>",
         "view:source|prices|diff|outline|map",
         "step:sN",
     ],
@@ -80,7 +82,7 @@ def _empty_error(tool: str) -> dict:
         "compile": ["drafts", "splice", "fill", "merge", "base", "from", "note", "check"],
         "goal": ["node", "hole", "line", "try"],
         "search": ["queries", "kind", "after"],
-        "read": ["handle", "node", "hole", "experiment", "view", "against", "step"],
+        "read": ["handle", "node", "hole", "experiment", "ref", "view", "against", "step"],
         "finish": [],
         "scratch": ["code", "replacement", "at", "helpers"],
     }[tool]
@@ -96,7 +98,7 @@ def _is_empty(request: object, tool: str) -> bool:
         "compile": ("drafts", "splice", "fill", "merge", "base", "from", "note", "check"),
         "goal": ("node", "hole", "line", "try"),
         "search": ("queries", "kind", "after"),
-        "read": ("handle", "node", "hole", "experiment", "view", "against", "step"),
+        "read": ("handle", "node", "hole", "experiment", "ref", "view", "against", "step"),
         "finish": (),
         "scratch": ("code", "replacement", "at", "helpers"),
     }[tool]
@@ -1601,10 +1603,15 @@ def _handle_as_target(request: dict) -> dict:
 def read_tool(theorem: str, run_id: str, request: dict) -> dict:
     if _is_empty(request, "read"):
         return _empty_error("read")
-    valid = ["handle", "node", "hole", "experiment", "view", "against", "step"]
+    valid = ["handle", "node", "hole", "experiment", "ref", "view", "against", "step"]
     unknown = sorted(set(request) - set(valid))
     if unknown:
         return _invalid("unknown_argument", unknown[0], valid, TOOL_FORMS["read"])
+    if request.get("ref"):
+        others = [key for key in ("handle", "node", "hole", "experiment") if request.get(key)]
+        if others:
+            return _invalid("bad_target", "ref", ["ref alone"], TOOL_FORMS["read"])
+        return _read_evidence(run_id, request["ref"])
     if request.get("experiment"):
         others = [key for key in ("handle", "node", "hole") if request.get(key)]
         if others:
@@ -1772,6 +1779,30 @@ def read_tool(theorem: str, run_id: str, request: dict) -> dict:
     return reply.attach_context(
         run_id,
         reply.reply(items=[{"ref": node.id, "ok": True, "lines": lines, "error": None, **data}]),
+        include_map=False,
+    )
+
+
+def _read_evidence(run_id: str, reference: str) -> dict:
+    """Follow one compaction reference. Missing and uncommitted references are not found."""
+    from arena.memory import original_evidence
+
+    found = original_evidence(run_id, reference)
+    if found is None:
+        return _invalid("unknown_argument", reference, [], TOOL_FORMS["read"])
+    if found.get("experiment_id") and "code" in found:
+        return _read_experiment(run_id, found["experiment_id"])
+    if found.get("kind") == "proof":
+        lines = [found["text"]]
+        return reply.attach_context(
+            run_id,
+            reply.reply(items=[{"ref": reference, "ok": True, "lines": lines, "error": None, "source": found["text"]}]),
+            include_map=False,
+        )
+    lines = [json.dumps(found, ensure_ascii=False, sort_keys=True)]
+    return reply.attach_context(
+        run_id,
+        reply.reply(items=[{"ref": reference, "ok": True, "lines": lines, "error": None, "record": found}]),
         include_map=False,
     )
 

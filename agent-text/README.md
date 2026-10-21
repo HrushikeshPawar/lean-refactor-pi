@@ -39,6 +39,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `messages/compaction-memory.no_best` | 3 | Agent messages and notices | when the matching event occurs |
 | `messages/compaction-memory.no_strategy` | 3 | Agent messages and notices | when the matching event occurs |
 | `messages/compaction-memory.note` | 6 | Agent messages and notices | when the matching event occurs |
+| `messages/compaction-memory.omitted` | 2 | Agent messages and notices | when the matching event occurs |
 | `messages/compaction-memory.read` | 3 | Agent messages and notices | when the matching event occurs |
 | `messages/compaction-memory.read_heading` | 3 | Agent messages and notices | when the matching event occurs |
 | `messages/compaction-memory.seed_header` | 8 | Agent messages and notices | when the matching event occurs |
@@ -433,6 +434,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `tools/read.params.handle` | 13 | Model tool definitions | every request |
 | `tools/read.params.hole` | 6 | Model tool definitions | every request |
 | `tools/read.params.node` | 5 | Model tool definitions | every request |
+| `tools/read.params.ref` | 3 | Model tool definitions | every request |
 | `tools/read.params.step` | 7 | Model tool definitions | every request |
 | `tools/read.params.view` | 17 | Model tool definitions | every request |
 | `tools/scratch.description` | 67 | Model tool definitions | every request |

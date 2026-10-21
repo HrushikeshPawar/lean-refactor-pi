@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import re
 
-from arena.run_control import committed_operation_ids
+from arena.run_control import published_history
 from arena.text import numbers, render
+
+_PROOF_ID = re.compile(r"[0-9a-f]{64}")
 
 
 def _read_lines(events: list[dict]) -> list[str]:
@@ -99,11 +101,15 @@ def memory_text(state: dict, seed: bool = False) -> str:
             lines.append(
                 render("messages/compaction-memory.finding", actor=row["actor"], text=row["text"], ref=row["ref"])
             )
+    if state.get("findings_omitted"):
+        lines.append(render("messages/compaction-memory.omitted", count=state["findings_omitted"]))
     lines.append(render("messages/compaction-memory.evidence_heading"))
     lines.extend(
         render("messages/compaction-memory.evidence", kind=row["kind"], ref=row["ref"])
         for row in state.get("evidence", [])
     )
+    if state.get("evidence_omitted"):
+        lines.append(render("messages/compaction-memory.omitted", count=state["evidence_omitted"]))
     return "\n".join(lines)
 
 
@@ -130,8 +136,33 @@ def _finding(event: dict, ref: str, text: str, hypothesis: str | None = None) ->
     return row
 
 
-def _recovery(history: list[dict], jobs: list[dict], focus: list[tuple[str, str]]) -> dict:
-    """References into the stored history. This projection does not write or start work."""
+def _visible(actor: str, event: dict, *, note: bool) -> bool:
+    """Shared observations are for every actor. Hypothesis notes stay with their author."""
+    if not note:
+        return True
+    return event.get("actor_id") == actor
+
+
+def _cap(rows: list[dict]) -> tuple[list[dict], int]:
+    limit = int(numbers()["memory_recovery_entries"])
+    if len(rows) <= limit:
+        return rows, 0
+    return rows[-limit:], len(rows) - limit
+
+
+def _jobs_for(actor: str, jobs: list[dict], history: list[dict]) -> list[dict]:
+    if actor == "sol":
+        return jobs
+    owned = {
+        row.get("job_id")
+        for row in history
+        if row.get("type") == "delegation" and row.get("worker_actor_id") == actor
+    }
+    return [job for job in jobs if job["job_id"] in owned]
+
+
+def _recovery(history: list[dict], jobs: list[dict], focus: list[tuple[str, str]], actor: str) -> dict:
+    """References into published history. This projection does not write or start work."""
     from arena.campaign import current_strategy
 
     evidence = []
@@ -145,7 +176,7 @@ def _recovery(history: list[dict], jobs: list[dict], focus: list[tuple[str, str]
             outcome = event.get("outcome")
             promotion = event.get("promotion") if isinstance(event.get("promotion"), dict) else {}
             failed = outcome in _FAILED_OUTCOMES and promotion.get("state") != "promoted"
-            if failed:
+            if failed and _visible(actor, event, note=False):
                 evidence.append({"kind": "experiment", "ref": event.get("experiment_id") or ref})
                 reason = promotion.get("reason") or event.get("diagnostic") or outcome
                 row = _finding(
@@ -156,30 +187,67 @@ def _recovery(history: list[dict], jobs: list[dict], focus: list[tuple[str, str]
                 if row:
                     findings.append(row)
         elif kind == "observation" and ref:
-            hypothesis = event.get("hypothesis_ref")
-            row = _finding(event, ref, event.get("text") or "", hypothesis if isinstance(hypothesis, str) else None)
+            hypothesis = event.get("hypothesis_ref") if isinstance(event.get("hypothesis_ref"), str) else None
+            if not _visible(actor, event, note=bool(hypothesis)):
+                continue
+            row = _finding(event, ref, event.get("text") or "", hypothesis)
             if row:
                 findings.append(row)
         elif kind == "candidate" and ref and isinstance(event.get("hypothesis"), str) and event["hypothesis"]:
+            if not _visible(actor, event, note=True):
+                continue
             row = _finding(event, ref, event["hypothesis"], event.get("hypothesis_ref"))
             if row:
                 findings.append(row)
+    shown_findings, findings_omitted = _cap(findings)
+    shown_evidence, evidence_omitted = _cap(evidence)
+    own_focus = [(name, proof) for name, proof in focus if name == actor]
     return {
         "strategy": current_strategy(history),
-        "jobs": [{"job_id": job["job_id"], "state": job["state"]} for job in jobs],
-        "focus": focus,
-        "findings": findings,
-        "evidence": evidence,
+        "jobs": [{"job_id": job["job_id"], "state": job["state"]} for job in _jobs_for(actor, jobs, history)],
+        "focus": own_focus,
+        "findings": shown_findings,
+        "findings_omitted": findings_omitted,
+        "evidence": shown_evidence,
+        "evidence_omitted": evidence_omitted,
     }
 
 
-def original_evidence(run_id: str, ref: str) -> dict | None:
-    """The stored record or artifact named by a summary reference. The summary is not a substitute."""
-    from arena import campaign, experiments
+def _published(run_id: str) -> tuple[object, list[dict]]:
+    from arena import campaign
 
     directory = campaign.run_dir(run_id)
-    history = campaign.events(directory)
-    matches = [event for event in history if event.get("event_id") == ref]
+    return directory, published_history(directory, campaign.events(directory))
+
+
+def _proof_file(directory, ref: str, history: list[dict]) -> str | None:
+    if not _PROOF_ID.fullmatch(ref):
+        return None
+    committed = any(
+        event.get("kind") == "attempt" and ref in (event.get("proof_id"), event.get("candidate_id"))
+        for event in history
+    )
+    if not committed:
+        return None
+    root = (directory / "proofs").resolve()
+    path = (root / f"{ref}.lean").resolve()
+    if path.parent != root or not path.is_file():
+        return None
+    return path.read_text()
+
+
+def original_evidence(run_id: str, ref: str) -> dict | None:
+    """The published record or artifact named by a summary reference. The summary is not a substitute."""
+    from arena import experiments
+
+    directory, history = _published(run_id)
+    if any(event.get("experiment_id") == ref for event in history):
+        experiment = experiments.retrieve(run_id, ref)
+        if experiment is not None:
+            return experiment
+    matches = [
+        event for event in history if ref in (event.get("event_id"), event.get("operation_id"))
+    ]
     if len(matches) == 1:
         return matches[0]
     if len(matches) > 1:
@@ -187,24 +255,22 @@ def original_evidence(run_id: str, ref: str) -> dict | None:
     experiment = experiments.retrieve(run_id, ref)
     if experiment is not None:
         return experiment
-    proof = campaign._proof_reader(directory)(ref)
+    proof = _proof_file(directory, ref, history)
     if proof is not None:
         return {"kind": "proof", "proof_id": ref, "text": proof}
     return None
 
 
-def memory(run_id: str, spent_usd: float | None = None, cap_usd: float | None = None) -> dict:
-    """Build compaction state from stored run records; spend is shown by the footer."""
+def memory(run_id: str, spent_usd: float | None = None, cap_usd: float | None = None, actor: str | None = None) -> dict:
+    """Build one actor's compaction state from published records. Spend is shown by the footer."""
     from arena import campaign, context, orchestration, reply
     from arena.graph import Graph
 
-    directory = campaign.run_dir(run_id)
-    history = campaign.events(directory)
-    graph = Graph.from_history(
-        history, campaign._proof_reader(directory), committed_operations=committed_operation_ids(directory)
-    )
+    actor = actor or reply.current_actor()
+    directory, history = _published(run_id)
+    graph = Graph.from_history(history, campaign._proof_reader(directory))
     theorem = history[0].get("theorem") if history else None
-    graph_map = campaign.map_view(run_id) if theorem else {"best": None, "open": []}
+    graph_map = campaign.map_view_from(history, directory) if theorem else {"best": None, "open": []}
     best_id = (graph_map.get("best") or {}).get("node")
     best_node = next((node for node in graph.nodes if node.id == best_id), None)
     best = None
@@ -257,6 +323,6 @@ def memory(run_id: str, spent_usd: float | None = None, cap_usd: float | None = 
         "reads": history,
         "holes": graph_map.get("open", []),
     }
-    recovered = _recovery(history, orchestration.jobs(directory)["jobs"], reply.actor_focuses(run_id))
+    recovered = _recovery(history, orchestration.jobs(directory)["jobs"], reply.actor_focuses(run_id), actor)
     state.update(recovered)
     return {"ok": True, "text": memory_text(state), "jobs": recovered["jobs"], "evidence": recovered["evidence"]}

@@ -4,7 +4,7 @@
 
 **Blocked by:** 11: Wait without polling or no-event deadlocks; 22: Inspect every concurrent attempt and exact derivation
 
-**Status:** changes-requested
+**Status:** needs-review
 
 **Branch:** `v8/23-compaction-resume`
 

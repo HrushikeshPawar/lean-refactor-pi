@@ -43,6 +43,7 @@ packet_library_chars: 340
 packet_local_type_chars: 320
 memory_library_lines: 15
 memory_read_entries: 30
+memory_recovery_entries: 8
 budget:
   static_words: 800
   packet_words: 290

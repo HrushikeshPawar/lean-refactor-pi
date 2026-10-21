@@ -75,6 +75,7 @@
       "handler": true,
       "properties": {
         "experiment": {"type": "string", "description": "experiment"},
+        "ref": {"type": "string", "description": "ref"},
         "handle": {"type": "string", "description": "handle"},
         "node": {"type": "string", "description": "node"},
         "hole": {"type": "string", "description": "hole"},
