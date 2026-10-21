@@ -808,36 +808,70 @@ _CALL_KEYS = ("tool_call_id", "name", "args", "delivered", "untrimmed", "trimmed
 
 def node_calls(directory: Path, node: str) -> dict:
     """Journal call for `node`, plus retained attempts and derivations when this run recorded them."""
-    found = _node_calls(directory, node)
-    extra = _served_lineage(directory, node)
+    from arena.run_control import published_history
+
+    raw = read_jsonl(directory / "ledger.jsonl") if (directory / "ledger.jsonl").is_file() else []
+    history = published_history(directory, raw)
+    proof_id = _proof_of(history, node)
+    found = _node_calls(directory, node, history, proof_id)
+    extra = _served_lineage(directory, history, proof_id)
     if extra:
         found.update(extra)
-        found["call_refs"] = [
-            {
-                "tool_call_id": item.get("tool_call_id"),
-                "actor_id": item.get("actor_id"),
-                "session_id": item.get("session_id"),
-            }
-            for item in extra.get("attempts") or []
-            if item.get("attempt_id")
-        ]
-        proof_id = _proof_of(read_jsonl(directory / "ledger.jsonl"), node)
-        found["records"] = _lineage_records(directory, proof_id or "")
-        if proof_id:
-            artifact = directory / "proofs" / f"{proof_id}.lean"
-            if artifact.is_file():
-                data = artifact.read_bytes()
-                found["artifact"] = {
-                    "path": f"proofs/{proof_id}.lean",
-                    "sha256": hashlib.sha256(data).hexdigest(),
-                    "bytes": data.decode(),
-                }
-            else:
-                found["artifact"] = {"path": f"proofs/{proof_id}.lean", "missing": True}
+    found["records"] = _lineage_records(directory, proof_id) if proof_id else []
+    found["artifact"] = _artifact(directory, proof_id)
+    found["call_refs"] = _call_refs(found.get("attempts") or [], _journal_calls(directory))
+    recorded = any(item.get("attempt_id") for item in found.get("attempts") or [])
+    found["lineage"] = "recorded" if recorded else "missing"
     return found
 
 
-def _lineage_records(directory: Path, proof_id: str) -> list[dict]:
+def _journal_calls(directory: Path) -> list[dict]:
+    if not (directory / "trace-journal.jsonl").is_file():
+        return []
+    return _journal_index(directory)["calls"]
+
+
+def _call_refs(attempts: list[dict], calls: list[dict]) -> list[dict]:
+    by_id = {call.get("tool_call_id"): {key: call[key] for key in _CALL_KEYS} for call in calls}
+    refs = []
+    for item in attempts:
+        if not item.get("attempt_id"):
+            continue
+        ident = item.get("tool_call_id")
+        refs.append(
+            {
+                "tool_call_id": ident,
+                "actor_id": item.get("actor_id"),
+                "session_id": item.get("session_id"),
+                "job_id": item.get("job_id"),
+                "request_id": item.get("request_id"),
+                "evaluation_id": item.get("evaluation_id"),
+                "call": by_id.get(ident) or {"missing": True},
+            }
+        )
+    return refs
+
+
+def _artifact(directory: Path, proof_id: str | None) -> dict:
+    if not proof_id:
+        return {"missing": True}
+    path = directory / "proofs" / f"{proof_id}.lean"
+    if not path.is_file():
+        return {"path": f"proofs/{proof_id}.lean", "missing": True}
+    data = path.read_bytes()
+    try:
+        text = data.decode()
+    except UnicodeDecodeError:
+        return {
+            "path": f"proofs/{proof_id}.lean",
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "bytes": None,
+            "encoding": "invalid",
+        }
+    return {"path": f"proofs/{proof_id}.lean", "sha256": hashlib.sha256(data).hexdigest(), "bytes": text}
+
+
+def _lineage_records(directory: Path, proof_id: str | None) -> list[dict]:
     from arena.experiments import original_lines
 
     return original_lines(
@@ -847,14 +881,7 @@ def _lineage_records(directory: Path, proof_id: str) -> list[dict]:
     )
 
 
-def _served_lineage(directory: Path, node: str) -> dict:
-    ledger = directory / "ledger.jsonl"
-    if not ledger.is_file():
-        return {}
-    from arena.run_control import published_history
-
-    history = published_history(directory, read_jsonl(ledger))
-    proof_id = _proof_of(history, node)
+def _served_lineage(directory: Path, history: list[dict], proof_id: str | None) -> dict:
     if proof_id is None:
         return {}
     if not any(
@@ -867,7 +894,9 @@ def _served_lineage(directory: Path, node: str) -> dict:
 
     def read(ident: str) -> str | None:
         path = directory / "proofs" / f"{ident}.lean"
-        return path.read_text() if path.is_file() else None
+        if not path.is_file():
+            return None
+        return path.read_bytes().decode("utf-8", errors="replace")
 
     projection = Graph.from_history(history, read, committed_operations=committed_operation_ids(directory))
     found = next((item for item in projection.nodes if item.proof_id == proof_id), None)
@@ -876,7 +905,7 @@ def _served_lineage(directory: Path, node: str) -> dict:
     return {"attempts": found.attempts, "derivations": found.derivations}
 
 
-def _node_calls(directory: Path, node: str) -> dict:
+def _node_calls(directory: Path, node: str, history: list[dict], proof_id: str | None) -> dict:
     """The journal turn that created `node`: its call, as delivered and untrimmed, and its reasoning.
 
     v7 nodes join on `tool_call_id`. Older nodes join when one tool-call window encloses the
@@ -888,10 +917,9 @@ def _node_calls(directory: Path, node: str) -> dict:
 
     index = _journal_index(directory)
     run, calls = index["run"], index["calls"]
-    proof_id = _proof_of(run.ledger, node)
     if proof_id is None:
         return _no_call(node, "no call matched")
-    event = _creator(run.ledger, proof_id)
+    event = _creator(history, proof_id)
     if event is None:
         return _no_call(node, "no call matched")
     if event.get("origin") in _HARNESS_ORIGINS:
@@ -900,7 +928,9 @@ def _node_calls(directory: Path, node: str) -> dict:
     reason = None
     if tool_call:
         try:
-            turn = node_turn(run, node)
+            from dataclasses import replace
+
+            turn = node_turn(replace(run, ledger=history), node)
         except ReplayError:
             return _no_call(node, "no call matched")
         chosen = next((call for call in calls if call["tool_call_id"] == tool_call and call["turn"] == turn), None)
@@ -924,11 +954,11 @@ def _node_calls(directory: Path, node: str) -> dict:
         "turn": chosen["turn"],
         "call": {key: chosen[key] for key in _CALL_KEYS},
         "reasoning": index["reasoning"].get(chosen["turn"], []),
-        "siblings": _siblings(run.ledger, chosen, proof_id),
+        "siblings": _siblings(history, chosen, proof_id),
     }
     if reason:
         found["reason"] = reason
-    found.update(_step_origin(directory, run.ledger, proof_id))
+    found.update(_step_origin(directory, history, proof_id))
     return found
 
 

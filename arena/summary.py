@@ -174,6 +174,26 @@ def session_spend(directory: Path) -> dict | None:
     return {"usd": usd, "compaction_usd": compaction_usd, "compactions": compactions}
 
 
+def counted_settles(cost_events: list[dict]) -> tuple[list[dict], bool]:
+    """One row per request. Unknown usage is incomplete, not a zero charge."""
+    seen: set[str] = set()
+    kept: list[dict] = []
+    unknown = False
+    for event in cost_events:
+        if event.get("kind") != "settle":
+            continue
+        if event.get("usage_known") is False:
+            unknown = True
+            continue
+        request_id = event.get("request_id")
+        if request_id:
+            if request_id in seen:
+                continue
+            seen.add(request_id)
+        kept.append(event)
+    return kept, unknown
+
+
 def ledger_spend(cost_events: list[dict], session_usd: float | None = None) -> dict:
     """The run's spend: the sum of the cost ledger's settle rows, each one call's actual cost.
 
@@ -181,12 +201,11 @@ def ledger_spend(cost_events: list[dict], session_usd: float | None = None) -> d
     cannot lower it, and `gap_usd` exposes the difference."""
     settled = compaction_settled = 0.0
     compaction_settles = 0
-    for event in cost_events:
-        if event.get("kind") == "settle" and event.get("usage_known") is not False:
-            settled += float(event.get("usd") or 0.0)
-            if event.get("source") in COMPACTION_SOURCES:
-                compaction_settled += float(event.get("usd") or 0.0)
-                compaction_settles += 1
+    for event in counted_settles(cost_events)[0]:
+        settled += float(event.get("usd") or 0.0)
+        if event.get("source") in COMPACTION_SOURCES:
+            compaction_settled += float(event.get("usd") or 0.0)
+            compaction_settles += 1
     gap = max(0.0, session_usd - settled) if session_usd is not None else 0.0
     gap = gap if gap > 1e-9 else 0.0
     return {

@@ -105,31 +105,46 @@ def memo_json(kind: str, run_id: str, build) -> bytes:
         return body
 
 
-def _attributed_spend(directory: Path, charged: Decimal, by_actor: dict[str, Decimal], by_job: dict[str, Decimal]) -> dict:
-    """One actual total. Control state wins; a repeated request id is not charged again."""
-    if (directory / "control.jsonl").is_file():
-        from arena.run_control import read_state
-
-        state = read_state(directory)
-        return {
-            "total": state["total"],
-            "by_actor": state["by_actor"],
-            "by_job": state["by_job"],
-            "accounting": state["accounting"],
-        }
-    return {
-        "total": format(charged, "f"),
-        "by_actor": {key: format(value, "f") for key, value in by_actor.items()},
-        "by_job": {key: format(value, "f") for key, value in by_job.items()},
-        "accounting": "known",
-    }
-
-
 def _request_amount(event: dict) -> Decimal:
     amount = event.get("usd")
     if isinstance(amount, str):
         return Decimal(amount)
     return Decimal(str(amount))
+
+
+def _read_spend(directory: Path, events: list[dict]) -> dict:
+    """One total. Control rows are read, never repaired or rewritten."""
+    if (directory / "control.jsonl").is_file():
+        from arena.run_control import _control_rows, _spend_view
+
+        state = _spend_view(_control_rows(directory))
+        return {
+            "total": state["total"],
+            "by_actor": state["by_actor"],
+            "by_job": state["by_job"],
+            "accounting": state["accounting"],
+            "authority": "control.jsonl",
+        }
+    from arena.summary import counted_settles
+
+    rows, unknown = counted_settles(events)
+    charged = Decimal("0")
+    by_actor: dict[str, Decimal] = {}
+    by_job: dict[str, Decimal] = {}
+    for event in rows:
+        amount = _request_amount(event)
+        charged += amount
+        if event.get("actor_id"):
+            by_actor[event["actor_id"]] = by_actor.get(event["actor_id"], Decimal("0")) + amount
+        if event.get("job_id"):
+            by_job[event["job_id"]] = by_job.get(event["job_id"], Decimal("0")) + amount
+    return {
+        "total": format(charged, "f"),
+        "by_actor": {key: format(value, "f") for key, value in by_actor.items()},
+        "by_job": {key: format(value, "f") for key, value in by_job.items()},
+        "accounting": "unknown" if unknown else "known",
+        "authority": "cost-ledger.jsonl",
+    }
 
 
 def graph_payload(run_id: str) -> dict:
@@ -139,56 +154,54 @@ def graph_payload(run_id: str) -> dict:
     status = directory / "merge-worker.json"
     payload["worker"] = json.loads(status.read_text()) if status.exists() else None
     charged = 0.0
-    charged_money = Decimal("0")
-    by_actor: dict[str, Decimal] = {}
-    by_job: dict[str, Decimal] = {}
     pi_embedded = 0.0
     parts = {"input": 0.0, "output": 0.0, "cache_read": 0.0, "cache_write": 0.0}
     names = {"input": "input", "output": "output", "cacheRead": "cache_read", "cacheWrite": "cache_write"}
     costs = []
-    seen_requests: set[str] = set()
     journal = directory / "cost-ledger.jsonl"
+    cost_events: list[dict] = []
     if journal.exists():
         for line in journal.read_text().splitlines():
-            event = json.loads(line)
-            if event.get("kind") != "settle" or event.get("usage_known") is False:
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
                 continue
-            request_id = event.get("request_id")
-            if request_id:
-                if request_id in seen_requests:
-                    continue
-                seen_requests.add(request_id)
-            usd = float(event["usd"])
-            charged += usd
-            amount = _request_amount(event)
-            charged_money += amount
-            if event.get("actor_id"):
-                by_actor[event["actor_id"]] = by_actor.get(event["actor_id"], Decimal("0")) + amount
-            if event.get("job_id"):
-                by_job[event["job_id"]] = by_job.get(event["job_id"], Decimal("0")) + amount
-            pi_embedded += float(event.get("pi_embedded_cost_usd") or 0)
-            for key, value in (event.get("ledger_components_usd") or {}).items():
-                if key in names:
-                    parts[names[key]] += float(value)
-            tokens = event.get("tokens") or {}
-            # Cache hit rate: cache_read over every prompt token (input + cache_read + cache_write).
-            prompt = tokens.get("input", 0) + tokens.get("cache_read", 0) + tokens.get("cache_write", 0)
-            ts = event.get("ts")
-            costs.append(
-                {
-                    "number": len(costs) + 1,
-                    "spent_usd": charged,
-                    "request_usd": usd,
-                    "parts": dict(parts),
-                    "tokens": tokens,
-                    "reuse_pct": 100 * tokens.get("cache_read", 0) / prompt if prompt else None,
-                    # The cost journal stamps milliseconds; the candidate ledger uses seconds.
-                    "ts": ts / 1000 if ts and ts > 1e11 else ts,
-                }
-            )
+            if isinstance(event, dict):
+                cost_events.append(event)
+    from arena.summary import counted_settles
+
+    for event in counted_settles(cost_events)[0]:
+        usd = float(event["usd"])
+        charged += usd
+        pi_embedded += float(event.get("pi_embedded_cost_usd") or 0)
+        for key, value in (event.get("ledger_components_usd") or {}).items():
+            if key in names:
+                parts[names[key]] += float(value)
+        tokens = event.get("tokens") or {}
+        # Cache hit rate: cache_read over every prompt token (input + cache_read + cache_write).
+        prompt = tokens.get("input", 0) + tokens.get("cache_read", 0) + tokens.get("cache_write", 0)
+        ts = event.get("ts")
+        costs.append(
+            {
+                "number": len(costs) + 1,
+                "spent_usd": charged,
+                "request_usd": usd,
+                "parts": dict(parts),
+                "tokens": tokens,
+                "reuse_pct": 100 * tokens.get("cache_read", 0) / prompt if prompt else None,
+                # The cost journal stamps milliseconds; the candidate ledger uses seconds.
+                "ts": ts / 1000 if ts and ts > 1e11 else ts,
+            }
+        )
     payload["cost_timeline"] = costs
-    payload["cost"] = {"spent_usd": charged, "pi_embedded_usd": pi_embedded}
-    payload["spend"] = _attributed_spend(directory, charged_money, by_actor, by_job)
+    payload["spend"] = _read_spend(directory, cost_events)
+    spent = float(Decimal(payload["spend"]["total"]))
+    payload["cost"] = {
+        "spent_usd": spent,
+        "pi_embedded_usd": pi_embedded,
+        "authority": payload["spend"]["authority"],
+    }
+    payload["cost_timeline_authority"] = "cost-ledger.jsonl"
     payload["baseline"] = baseline_point(payload)
     give_reference_its_numbers(payload)
     config = directory / "run-config.json"

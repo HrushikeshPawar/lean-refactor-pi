@@ -588,10 +588,11 @@ class NodeCallTests(unittest.TestCase):
     def test_a_run_without_a_journal_does_not_raise(self):
         write(self.directory / "ledger.jsonl", [_candidate(1.0, "ref", "reference")])
         found = viewer_data.node_calls(self.directory, "n1")
-        self.assertEqual(
-            found,
-            {"node": "n1", "turn": None, "call": None, "reasoning": [], "siblings": [], "reason": "no journal"},
-        )
+        self.assertEqual(found["reason"], "no journal")
+        self.assertIsNone(found["call"])
+        self.assertEqual(found["lineage"], "missing")
+        self.assertEqual(found["records"], [])
+        self.assertEqual(found["artifact"]["missing"], True)
 
     def test_reference_and_unknown_nodes_have_no_call(self):
         self._write(
@@ -665,7 +666,25 @@ class NodeCallTests(unittest.TestCase):
             [
                 {"kind": "init", "theorem": "T", "ts": 0.1, "versions": ["v1"]},
                 _candidate(1.0, "ref", "reference"),
+                {
+                    "kind": "candidate",
+                    "ts": 1.5,
+                    "candidate_id": "ghost",
+                    "origin": "model",
+                    "operation_id": "uncommitted-op",
+                    "parents": ["ref"],
+                },
                 _candidate(2.5, "c2", "model", parents=["ref"], tool_call_id="call-sol"),
+                {
+                    "kind": "attempt",
+                    "proof_id": "c2",
+                    "operation_id": "uncommitted-op",
+                    "actor_id": "ghost",
+                    "session_id": "ghost-session",
+                    "event_id": "try-ghost",
+                    "tool_call_id": "call-ghost",
+                    "data": {"relation": "exact"},
+                },
                 {
                     "kind": "attempt",
                     "proof_id": "c2",
@@ -704,6 +723,8 @@ class NodeCallTests(unittest.TestCase):
         (self.directory / "cost-ledger.jsonl").write_text(
             '{"kind":"settle","request_id":"req-1","usd":0.2,"actor_id":"sol","job_id":"j-fail"}\n'
             '{"kind":"settle","request_id":"req-1","usd":0.2,"actor_id":"sol","job_id":"j-fail","candidate_ids":["c2","c2b"]}\n'
+            '{"kind":"settle","request_id":"req-unknown","usd":9,"usage_known":false}\n'
+            '{"kind":"settle","usd":1\n'
         )
         found = viewer_data.node_calls(self.directory, "n2")
         self.assertEqual(sorted(item["actor_id"] for item in found["attempts"]), ["sol", "worker-a"])
@@ -719,10 +740,15 @@ class NodeCallTests(unittest.TestCase):
         self.assertIn(json.dumps(sol) + "\n", stored)
         self.assertIn(json.dumps(worker) + "\n", stored)
         self.assertTrue(all(line in ledger for line in stored))
-        self.assertEqual(found["call_refs"], [
-            {"tool_call_id": "call-sol", "actor_id": "sol", "session_id": "sol-session"},
-            {"tool_call_id": "call-worker", "actor_id": "worker-a", "session_id": "worker-session"},
-        ])
+        self.assertEqual([item["actor_id"] for item in found["attempts"]], ["sol", "worker-a"])
+        self.assertFalse(any("ghost" in line for line in stored))
+        self.assertEqual(
+            [(item["tool_call_id"], item["call"]["delivered"]) for item in found["call_refs"]],
+            [("call-sol", "sol body"), ("call-worker", "worker body")],
+        )
+        self.assertIn("job_id", found["call_refs"][0])
+        self.assertIn("request_id", found["call_refs"][0])
+        self.assertIn("evaluation_id", found["call_refs"][0])
         with patch("arena.campaign.run_dir", return_value=self.directory), patch(
             "arena.cli.serve.run_dir", return_value=self.directory
         ):
@@ -738,7 +764,9 @@ class NodeCallTests(unittest.TestCase):
         self.assertEqual(payload["spend"]["total"], "0.2")
         self.assertEqual(payload["spend"]["by_actor"], {"sol": "0.2"})
         self.assertEqual(payload["spend"]["by_job"], {"j-fail": "0.2"})
+        self.assertEqual(payload["spend"]["accounting"], "unknown")
         self.assertEqual(payload["cost"]["spent_usd"], 0.2)
+        self.assertEqual(payload["cost"]["authority"], payload["spend"]["authority"])
 
     def test_v7_edge_rebuilds_the_filing_line_and_holes(self):
         proof = "theorem t : True := by\n  have h : True := sorry\n"

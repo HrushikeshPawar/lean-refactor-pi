@@ -229,6 +229,9 @@ def original_lines(directory: Path, match) -> list[dict]:
     path = directory / "ledger.jsonl"
     if not path.is_file():
         return []
+    from arena.run_control import committed_operation_ids
+
+    committed = committed_operation_ids(directory)
     raw = path.read_bytes()
     found = []
     offset = 0
@@ -238,6 +241,9 @@ def original_lines(directory: Path, match) -> list[dict]:
         try:
             event = json.loads(line)
         except ValueError:
+            continue
+        operation_id = event.get("operation_id") if isinstance(event, dict) else None
+        if operation_id and operation_id not in committed:
             continue
         if isinstance(event, dict) and match(event):
             found.append(

@@ -4,7 +4,7 @@
 
 **Blocked by:** 04: Isolate actor state and enforce exact ownership; 09: Publish early results and resume the same hypothesis; 15: Promote an anchored replacement inside scratch
 
-**Status:** changes-requested
+**Status:** needs-review
 
 **Branch:** `v8/22-served-evidence`
 

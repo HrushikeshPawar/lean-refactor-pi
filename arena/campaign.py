@@ -3536,23 +3536,36 @@ def graph_state(run_id: str) -> dict:
 def _served_jobs(history: list[dict]) -> list[dict]:
     rows = []
     for event in history:
-        if event.get("kind") not in ("job", "wait") and event.get("type") not in (
-            "delegation",
-            "assignment_state",
-            "verification",
-        ):
+        source = _job_source(event)
+        if source is None:
             continue
         rows.append(
             {
+                "source": source,
                 "job_id": event.get("job_id"),
                 "status": event.get("status") or event.get("state"),
                 "actor_id": event.get("actor_id"),
                 "session_id": event.get("session_id"),
                 "candidate_id": event.get("candidate_id") or event.get("proof_id"),
                 "queue": event.get("queue_depths"),
+                "activation_id": event.get("activation_id"),
+                "operation_id": event.get("operation_id"),
+                "event_id": event.get("event_id"),
+                "phase": event.get("phase"),
+                "check": event.get("job") if source == "runtime" else None,
             }
         )
     return rows
+
+
+def _job_source(event: dict) -> str | None:
+    if event.get("type") in ("delegation", "assignment_state"):
+        return "orchestration"
+    if event.get("type") == "verification":
+        return "check"
+    if event.get("kind") == "job":
+        return "runtime"
+    return None
 
 
 def _served_experiments(history: list[dict]) -> list[dict]:
@@ -3571,12 +3584,25 @@ def _served_experiments(history: list[dict]) -> list[dict]:
 
 
 def _served_actors(history: list[dict]) -> list[dict]:
-    found: dict[str, dict] = {}
+    sessions: dict[str, set[str]] = {}
     for event in history:
         actor = event.get("actor_id")
-        if actor and actor not in found:
-            found[actor] = {"actor_id": actor, "session_id": event.get("session_id")}
-    return list(found.values())
+        session = event.get("session_id")
+        if not actor or not session:
+            continue
+        sessions.setdefault(actor, set()).add(session)
+    rows = []
+    for actor, found in sessions.items():
+        ordered = sorted(found)
+        rows.append(
+            {
+                "actor_id": actor,
+                "session_id": ordered[0] if len(ordered) == 1 else None,
+                "sessions": ordered,
+                "session_status": "recorded" if len(ordered) == 1 else "ambiguous",
+            }
+        )
+    return rows
 
 
 def merge_once(run_id: str, graph: dict | None = None) -> dict | None:
