@@ -113,6 +113,42 @@ class CompileToolTests(CascadeCase):
         nodes = tools._nodes("logic")[1].nodes
         expected = hashlib.sha256(("T\0" + ROW["statement"] + " := by\n  trivial").encode()).hexdigest()
         self.assertEqual(sum(node.proof_id == expected for node in nodes), 1)
+        first, repeated = result["items"]
+        self.assertNotEqual(first["attempt_id"], repeated["attempt_id"])
+        self.assertNotEqual(first["construction_operation_id"], repeated["construction_operation_id"])
+        self.assertEqual(first["evaluation_id"], repeated["evaluation_id"])
+        self.assertEqual(first["verification"], {"primary": "passed", "full": "pending", "cold": "not_checked"})
+        self.assertEqual(first["inputs"], [])
+        self.assertIsNone(first["best"])  # The existing reference is shorter.
+        self.assertIn("primary passed; full pending; cold not_checked", "\n".join(first["lines"]))
+        for item in (first, repeated):
+            self.assertIn(item["attempt_id"], "\n".join(item["lines"]))
+        base = tools.compile_tool("T", "logic", {"drafts": ["by\n  sorry"]})["items"][0]["node"]
+        replacement = tools.compile_tool("T", "logic", {"base": base, "drafts": ["by\n  trivial"], "from": "n1"})["items"][0]
+        self.assertEqual(replacement["node"], first["node"])
+        self.assertEqual([(source["role"], source["node"]) for source in replacement["inputs"]],
+                         [("base", base), ("named_parent", "n1")])
+        self.assertIn(f"made from {base} as a new draft", "\n".join(replacement["lines"]))
+        self.assertIn("tokens", replacement["comparisons"][0]["deltas"])
+        self.assertNotEqual(first["attempt_id"], replacement["attempt_id"])
+        failed = tools.compile_tool("T", "logic", {"splice": {"base": base, "steps": "s1", "text": "bad"}})["items"][0]
+        self.assertEqual(failed["verification"]["primary"], "proof_error")
+        self.assertEqual(failed["inputs"][0]["node"], base)
+        self.assertTrue(failed["attempt_id"])
+        self.assertIsNone(failed["best"])
+        self.assertNotIn("heartbeats", failed["comparisons"][0]["deltas"])
+        independent = tools.compile_tool("T", "logic", {"drafts": ["by\n  trivial"], "from": base})["items"][0]
+        self.assertEqual(independent["inputs"], [{"role": "named_parent", "proof_id": tools._node("logic", base).proof_id,
+                                                 "node": base}])
+        self.assertNotEqual(independent["attempt_id"], replacement["attempt_id"])
+        self.assertNotEqual(independent["derivation_id"], replacement["derivation_id"])
+        self.assertEqual(tools._node("logic", first["node"]).edge["type"], "root")
+        campaign.record_evaluation("T", "logic", tools._node("logic", first["node"]).proof_text, "full")
+        certified = tools.compile_tool("T", "logic", {"drafts": ["by\n  trivial"]})["items"][0]
+        self.assertEqual(certified["verification"]["full"], "passed")
+        self.assertEqual(certified["best"], "all-pin verified best")
+        worse = tools.compile_tool("T", "logic", {"drafts": ["by\n  trivial\n  trivial"]})["items"][0]
+        self.assertIsNone(worse["best"])
 
     def test_more_errors_than_pass_limit_are_reported_as_incomplete(self):
         result = tools.compile_tool("T", "logic", {"drafts": ["by\n" + "\n".join(["  bad"] * 5)]})
@@ -159,6 +195,10 @@ class CompileToolTests(CascadeCase):
         self.assertEqual(merge_edge["type"], "merged_from")
         self.assertEqual(merge_edge["operation"]["take"][0]["step"], "s1")
         self.assertEqual(donor.id, base)
+        self.assertEqual([(source["role"], source["node"]) for source in merged["items"][0]["inputs"]],
+                         [("base", merge_base), ("donor", base)])
+        self.assertEqual(merged["items"][0]["inputs"][1]["step"], "s1")
+        self.assertTrue(merged["items"][0]["attempt_id"])
 
     def test_v8_duplicate_attempt_roundtrip(self):
         from arena import run_control

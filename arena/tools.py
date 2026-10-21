@@ -138,7 +138,7 @@ def _node_result(run_id: str, proof_id: str) -> dict:
 
 def _filing_line(node, projection, result: dict) -> str:
     """How a node was filed, without its id: the operation and the node it came from."""
-    edge = node.edge or {}
+    edge = result.get("edge") or node.edge or {}
     sources = edge.get("from") or []
 
     def node_id(source: str) -> str:
@@ -392,6 +392,136 @@ def _mark_ineligible(item: dict, projection) -> None:
         closed, failed = reply.outcome("closed"), reply.outcome("ineligible")
         item["lines"][0] = item["lines"][0].replace(f" {closed} ", f" {failed} ", 1)
         item["status"] = "ineligible"
+
+
+def _best_label(history: list[dict], proof_id: str) -> str | None:
+    rows = [row for row in campaign._summaries(history)
+            if row.get("score") is not None and row.get("status") in ("primary", "full")
+            and campaign.proof_eligibility(history, row["id"]) == "eligible"]
+    verified = max((row for row in rows if row["verified"]), key=lambda row: row["score"], default=None)
+    if verified and verified["id"] == proof_id:
+        return _render("best_all_pin")
+    provisional = max(rows, key=lambda row: row["score"], default=None)
+    if provisional and not provisional["verified"] and provisional["id"] == proof_id:
+        return _render("best_provisional")
+    return None
+
+
+def _invocation_evidence(name: str, run_id: str, proof_id: str, result: dict, attempt: dict | None) -> dict:
+    """Join one invocation-owned attempt, never the node's most recent construction."""
+    history = _history(run_id)
+    data = (attempt or {}).get("data") or {}
+    derivation = next((event for event in history if event.get("kind") == "derivation"
+                       and event.get("proof_id") == proof_id
+                       and data.get("construction_digest") is not None
+                       and (event.get("data") or {}).get("construction_digest") == data.get("construction_digest")), None)
+    key = campaign._evaluation_key(proof_id, "fast", campaign.problem(name))
+    evaluation = next((event for event in reversed(history) if event.get("kind") == "evaluation"
+                       and event.get("key") == key), None)
+    if evaluation is None:
+        evaluation = next((event for event in reversed(history) if event.get("kind") == "probe"
+                           and event.get("proof_id") == proof_id), None)
+    inputs = data.get("inputs") or []
+    roles = {source["role"] for source in inputs}
+    kind = ("merged_from" if "donor" in roles else "edited_from" if "base" in roles else
+            "filled_from" if "sketch" in roles else "filed_under_focus" if "focus" in roles else "root")
+    return {**result, "edge": {"type": kind, "from": [source["proof_id"] for source in inputs],
+                              "operation": data.get("operation")},
+            "attempt_id": (attempt or {}).get("event_id"),
+            "derivation_id": (derivation or {}).get("event_id"),
+            "construction_operation_id": (attempt or {}).get("operation_id"),
+            "evaluation_id": (evaluation or {}).get("key") or (evaluation or {}).get("evaluation_id"),
+            "evaluation_ref": None if evaluation is None else {
+                "record": "ledger.jsonl",
+                "row": next(index for index, event in enumerate(campaign.events(campaign.run_dir(run_id)), 1)
+                            if event == evaluation),
+            },
+            "raw_result": (evaluation or {}).get("result") or {}}
+
+
+def _compile_evidence(name: str, run_id: str, item: dict, history: list[dict], projection, result: dict) -> None:
+    node = next(node for node in projection.nodes if node.id == item["node"])
+    attempt = next((event for event in history if event.get("kind") == "attempt"
+                    and event.get("event_id") == result.get("attempt_id")), None)
+    data = (attempt or {}).get("data") or {}
+    inputs = [dict(source) for source in data.get("inputs") or []]
+    if (data.get("operation") or {}).get("steps"):
+        for source in inputs:
+            if source["role"] == "base":
+                source["steps"] = data["operation"]["steps"]
+    if data.get("named_parent"):
+        inputs.append({"role": "named_parent", "proof_id": data["named_parent"]})
+    labels = {node.proof_id: node.id for node in projection.nodes}
+    for source in inputs:
+        source["node"] = labels.get(source["proof_id"])
+    raw = result.get("raw_result") or {}
+    primary = campaign._verification_outcome(raw) if raw else result.get("outcome", "not_checked")
+    if campaign._has_hole(campaign.problem(name), node.proof_text):
+        primary = "incomplete"
+    full_key = campaign._evaluation_key(node.proof_id, "full", campaign.problem(name))
+    full = next((event.get("result") for event in reversed(history)
+                 if event.get("kind") == "evaluation" and event.get("key") == full_key), None)
+    full_status = campaign._verification_outcome(full) if full else "not_checked"
+    if full_status == "passed" and len(full.get("compat") or {}) != len(history[0].get("versions") or []):
+        full_status = "inconclusive"
+    if full is None and any(job["id"] == node.proof_id
+                            for job in campaign._autocheck_jobs(campaign._summaries(history))):
+        full_status = "pending"
+    cold = next((event for event in reversed(history) if event.get("kind") == "cold_verification"
+                 and event.get("candidate_id") == node.proof_id), None)
+    cold = campaign._cold_view(campaign.run_dir(run_id), history, cold) if cold else None
+    verification = {"primary": primary, "full": full_status,
+                    "cold": (cold or {}).get("outcome", "not_checked")}
+    comparisons = []
+    for source in inputs:
+        parent = next((other for other in projection.nodes if other.proof_id == source["proof_id"]), None)
+        if parent is None:
+            continue
+        previous = next((event.get("result") for event in reversed(history)
+                         if (event.get("proof_id") or event.get("candidate_id")) == parent.proof_id
+                         and event.get("kind") in ("evaluation", "probe")
+                         and next(iter((event.get("result", {}).get("compat") or {}).keys()), None)
+                         == next(iter((raw.get("compat") or {}).keys()), None)), None)
+        deltas = {}
+        if raw.get("tokens") is not None and previous and previous.get("tokens") is not None:
+            deltas["tokens"] = raw["tokens"] - previous["tokens"]
+        if primary == "passed" and previous and campaign._verification_outcome(previous) == "passed":
+            heartbeat_deltas = {
+                version: current["heartbeats"] - previous["compat"][version]["heartbeats"]
+                for version, current in (raw.get("compat") or {}).items()
+                if version in (previous.get("compat") or {}) and current.get("heartbeats") is not None
+                and previous["compat"][version].get("heartbeats") is not None
+            }
+            if heartbeat_deltas:
+                deltas["heartbeats_by_version"] = heartbeat_deltas
+            elif (raw.get("heartbeat") is not None and previous.get("heartbeat") is not None
+                  and len(raw.get("compat") or {}) == len(previous.get("compat") or {}) == 1):
+                deltas["heartbeats"] = raw["heartbeat"] - previous["heartbeat"]
+        comparisons.append({**source, "deltas": deltas})
+    refs = {key: result.get(key) for key in
+            ("attempt_id", "derivation_id", "construction_operation_id", "evaluation_id", "evaluation_ref")}
+    item.update(**refs, operation=data.get("operation"), inputs=inputs, comparisons=comparisons,
+                verification=verification, best=_best_label(history, node.proof_id))
+    if not item.get("same_as"):
+        item["lines"][0] = _render("compile_filed", node=node.id,
+                                   outcome=reply.outcome(item["status"], node.holes),
+                                   filing=_filing_line(node, projection, result))
+    item["lines"].append(_render("compile_verification", **verification))
+    if item["best"]:
+        item["lines"].append(_render("compile_best", best=item["best"], node=node.id))
+    for source in comparisons:
+        changes = []
+        for metric, delta in source["deltas"].items():
+            if isinstance(delta, dict):
+                changes.extend(_render("compile_heartbeat_delta", version=version, delta=f"{change:+}")
+                               for version, change in delta.items())
+            else:
+                changes.append(_render("compile_delta", metric=metric, delta=f"{delta:+}"))
+        item["lines"].append(_render("compile_input", role=source["role"], node=source["node"] or "?",
+                                    detail=source.get("step") or source.get("steps") or source.get("hole") or "",
+                                    deltas=", ".join(changes) or _render("compile_not_comparable")))
+    item["lines"].extend(_render("compile_reference", name=key, value=value)
+                         for key, value in refs.items() if value and key != "evaluation_ref")
 
 
 def _compile_item(name: str, run_id: str, node_ref: str, result: dict, filing: str) -> dict:
@@ -660,6 +790,7 @@ def _compile_tool(theorem: str, run_id: str, request: dict) -> dict:
             )
 
     outcomes: list[tuple[str, dict, str]] = []
+    evidence_by_ref = {}
     if op is None and not request.get("base"):
         raw_drafts = request["drafts"]
         good_drafts = []
@@ -676,17 +807,31 @@ def _compile_tool(theorem: str, run_id: str, request: dict) -> dict:
                 normalized_drafts.append(campaign.normalize_draft(theorem, draft))
                 indexes.append(index)
         if good_drafts:
-            batch = campaign.probe_batch(
-                theorem,
-                run_id,
-                good_drafts,
-                note=request.get("note"),
-                named_parent=request.get("from"),
-            )
+            receipts = []
+            token = campaign._OPERATION_RECEIPTS.set(receipts)
+            try:
+                batch = campaign.probe_batch(
+                    theorem,
+                    run_id,
+                    good_drafts,
+                    note=request.get("note"),
+                    named_parent=request.get("from"),
+                )
+            finally:
+                campaign._OPERATION_RECEIPTS.reset(token)
+            invocation_ids = {reference["event_id"] for receipt in receipts
+                              for reference in receipt.get("evidence_refs", [])}
+            invocation_attempts = [event for event in _history(run_id)
+                                   if event.get("kind") == "attempt" and event.get("event_id") in invocation_ids]
             projection = _nodes(run_id)[1]
             for original_index, proof, row in zip(indexes, normalized_drafts, batch.get("drafts", []), strict=False):
                 outcome = {key: value for key, value in row.items() if key != "index"}
                 proof_id = hashlib.sha256((theorem + "\0" + proof).encode()).hexdigest()
+                attempt = next((event for event in invocation_attempts if event.get("proof_id") == proof_id), None)
+                if attempt is not None:
+                    invocation_attempts.remove(attempt)
+                outcome = _invocation_evidence(theorem, run_id, proof_id, outcome, attempt)
+                evidence_by_ref[f"d{original_index}"] = outcome
                 node = next((item for item in projection.nodes if item.proof_id == proof_id), None)
                 if node is not None and campaign.proof_eligibility(_history(run_id), node.proof_id) != "eligible":
                     campaign.select_proof(run_id, node.proof_id)
@@ -754,6 +899,7 @@ def _compile_tool(theorem: str, run_id: str, request: dict) -> dict:
                     note=request.get("note"),
                     named_parent=request.get("from"),
                 )
+                evidence_by_ref[ref] = result
                 node = _node(run_id, result["node"])
                 if campaign.proof_eligibility(_history(run_id), node.proof_id) != "eligible":
                     campaign.select_proof(run_id, node.proof_id)
@@ -765,15 +911,24 @@ def _compile_tool(theorem: str, run_id: str, request: dict) -> dict:
                 facts.extend(item_result["facts"])
                 handles.append(node.id)
             except (OSError, KeyError, StopIteration, ValueError, RuntimeError) as error:
-                items.append(
-                    _item_error(
+                evidence = getattr(error, "operation_evidence", None)
+                if evidence and evidence.get("node"):
+                    evidence_by_ref[ref] = evidence
+                    node = _node(run_id, evidence["node"])
+                    item_result = _compile_item(theorem, run_id, node.id, evidence,
+                                                _filing_line(node, _nodes(run_id)[1], evidence))
+                    item_result["item"]["ref"] = ref
+                    items.append(item_result["item"])
+                    facts.extend(item_result["facts"])
+                    handles.append(node.id)
+                else:
+                    items.append(_item_error(
                         ref,
                         "invalid_operation",
                         error,
                         ["existing node id", "existing hole id", "existing step id"],
                         TOOL_FORMS["compile"],
-                    )
-                )
+                    ))
     closed_nodes = [item.get("node") for item in items if item.get("status") == "closed"]
     if closed_nodes:
         seconds = float(text.numbers().get("cross_version_wait_seconds", 10))
@@ -786,6 +941,8 @@ def _compile_tool(theorem: str, run_id: str, request: dict) -> dict:
         if item.get("status") == "closed" and item.get("node"):
             _refresh_versions(item, history, projection)
             _mark_ineligible(item, projection)
+        if item.get("node") and item.get("ref") in evidence_by_ref:
+            _compile_evidence(theorem, run_id, item, history, projection, evidence_by_ref[item["ref"]])
     for left, right, parent, steps in graph.merge_offers(projection, set(handles)):
         if reply.first_time(run_id, f"merge:{left},{right}"):
             facts.append(_render("merge_offer", left=left, right=right, parent=parent, steps=", ".join(steps)))
@@ -830,10 +987,14 @@ def _goal_cases(goals: list[str], cap: int) -> str:
 
 
 def _target_lines(lines: list[str]) -> set[int]:
-    """A conclusion line and the indented lines that continue it."""
+    """Goal identities, conclusion lines, and their indented continuations."""
     protected: set[int] = set()
+    untagged = re.escape(text.template("replies/tools.goal_untagged").strip())
+    untagged = untagged.replace(re.escape("{index}"), r"\d+").replace(re.escape("{count}"), r"\d+")
     active = False
     for index, line in enumerate(lines):
+        if (line.startswith("case ") and ":" not in line) or re.fullmatch(untagged, line):
+            protected.add(index)
         if line.startswith("⊢"):
             active = True
             protected.add(index)
@@ -869,8 +1030,12 @@ def _try_goals(item: dict) -> str:
     if not goals:
         return ""
     blocks = [block.strip() for block in re.split(r"\n\s*\n", goals) if block.strip()]
-    shown = _goal_cases(blocks, int(text.numbers().get("goal_cases_max", 12)))
-    return _preview_keeping_targets(shown, int(text.numbers().get("goal_try_chars", 1500)))
+    cap = int(text.numbers().get("goal_cases_max", 12))
+    shown = _goal_cases(blocks, cap)
+    preview = _preview_keeping_targets(shown, int(text.numbers().get("goal_try_chars", 1500)))
+    if len(blocks) > cap:
+        preview += "\n" + _render("goal_cases_omitted", count=len(blocks) - cap, cap=cap)
+    return preview
 
 
 def goal_tool(theorem: str, run_id: str, request: dict) -> dict:
@@ -957,7 +1122,8 @@ def goal_tool(theorem: str, run_id: str, request: dict) -> dict:
                 ]
             )
         goals = [str(goal).strip() for goal in (answer or {}).get("goals") or [] if str(goal).strip()]
-        rendered = (answer or {}).get("rendered") or "\n".join(goals)
+        raw_goal = (answer or {}).get("rendered") or "\n".join(goals)
+        rendered = raw_goal
         extra = [_render("try_replaces")] if tries else []
         if len(goals) > 1:
             cap = int(text.numbers().get("goal_cases_max", 12))
@@ -972,7 +1138,8 @@ def goal_tool(theorem: str, run_id: str, request: dict) -> dict:
                 "ok": True,
                 "lines": [_render("goal_item", node=node.id, line=proof_line, goal=rendered), *extra],
                 "error": None,
-                "goal": rendered,
+                "goal": raw_goal,
+                "goals": goals,
             }
         ]
         if tries:
@@ -1069,13 +1236,13 @@ def _try_verdict(item: dict) -> str:
     """One snippet's outcome: timed out, open goals, its first error, or closed."""
     if item.get("timeout"):
         return _render("try_timeout")
+    output = str(item.get("output") or "")
+    found = re.search(r"\berror: (.*)", output) if item.get("returncode") != 0 else None
     goals = _open_goal_text(item)
-    if goals:
+    if goals and (found is None or found.group(1).startswith("unsolved goals")):
         count = len(re.findall(r"^⊢", goals, re.M)) or 1
         return _render("try_open", count=count)
     if item.get("returncode") != 0:
-        output = str(item.get("output") or "")
-        found = re.search(r"\berror: (.*)", output)
         if found:
             rest = output[found.start(1) :].splitlines()
             message = " ".join(
@@ -1111,9 +1278,14 @@ def _capped_hits(hits: list[dict]) -> list[dict]:
 
 def _signature_preview(signature: str, limit: int) -> str:
     """Keep the end of a long signature, where the conclusion sits. Backticks stay out of the cell."""
-    if len(signature) <= limit:
-        return reply.cell(signature, limit)
-    return reply.cell("…" + signature[-(limit - 1) :].lstrip(), limit)
+    flat = reply.cell(signature, max(len(signature) * 2, 1))
+    if len(flat) <= limit:
+        return flat
+    available = max(1, limit - len(_render("signature_clipped", signature="")))
+    start = len(flat) - available
+    if start > 0 and flat[start] == "|" and flat[start - 1] == "\\":
+        start -= 1
+    return _render("signature_clipped", signature=flat[start:].lstrip())
 
 
 def _relevant_suggestion(query: str, suggestion: str) -> bool:
@@ -1766,6 +1938,8 @@ def _error_text(message: str, known: set[str], limit: int) -> str:
     """An error with its goal state reduced to the hypotheses the theorem does not already have; notes dropped."""
     kept = [line for line in _STRIKE.sub("", message).splitlines() if not line.startswith("Note:")]
     compact = reply.compact_message("\n".join(kept), known, int(text.numbers().get("goal_hyp_chars", 1000)))
+    if any(line.startswith("⊢") for line in compact.splitlines()):
+        return _preview_keeping_targets(compact, limit)
     return compact if len(compact) <= limit else compact[: limit - 1] + "…"
 
 
@@ -2077,18 +2251,20 @@ def _scratch_promote(
                 cold=verification["cold"],
             ),
         ]
-        if passed:
+        best = _best_label(history, node.proof_id) if passed else None
+        promotion["best"] = best
+        if best:
             lines.append(
                 _render(
                     "scratch_best",
-                    best="all-pin verified best" if verification["full"] == "passed" else "provisional best",
+                    best=best,
                     node=node.id,
                 )
             )
         for name, delta in deltas.items():
             if name == "heartbeats_by_version" and isinstance(delta, dict):
                 for version, change in delta.items():
-                    lines.append(_render("scratch_delta", name=f"heartbeats {version}", delta=change))
+                    lines.append(_render("compile_heartbeat_delta", version=version, delta=change))
             else:
                 lines.append(_render("scratch_delta", name=name, delta=delta))
         for key in ("attempt_id", "derivation_id", "construction_operation_id"):

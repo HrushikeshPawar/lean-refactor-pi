@@ -462,14 +462,17 @@ class ToolReplyTextTests(CascadeToolCase):
                 {"returncode": 0, "goals_after": "case a\n⊢ True\n\ncase b\nh : True\n⊢ True"},
                 {"returncode": 1, "output": "T.lean:2:2: error: unknown tactic\n  near x\nT.lean:3:2: error: later"},
                 {"timeout": True},
+                {"returncode": 1, "goals_after": "⊢ True",
+                 "output": "T.lean:2:2: error: unknown identifier 'x'\nT.lean:1:0: error: unsolved goals\n⊢ True"},
             ],
-            {"hole": f"{node}.h1", "try": ["trivial", "constructor", "bogus x", "skip"]},
+            {"hole": f"{node}.h1", "try": ["trivial", "constructor", "bogus x", "skip", "exact x"]},
         )
         lines = [line for item in result["items"][1:] for line in item["lines"]]
         verdicts = [line for line in lines if line.startswith("t")]
         self.assertEqual(
             [line.split(", tokens")[0] for line in verdicts],
-            ["t1 compiles", "t2 open goals 2", "t3 error: unknown tactic near x", "t4 timed out"],
+            ["t1 compiles", "t2 open goals 2", "t3 error: unknown tactic near x", "t4 timed out",
+             "t5 error: unknown identifier 'x'"],
         )
         self.assertTrue(all(", tokens " in line for line in verdicts))
         # An open snippet shows the goals it leaves, with each case's hypothesis names.
@@ -579,6 +582,47 @@ class ToolReplyTextTests(CascadeToolCase):
         self.assertNotIn("error:", body)
         self.assertIn(conclusion, body)
         self.assertEqual(tried["items"][1]["goals"], goals)
+        pipe_signature = "A|" * 150 + "FINAL_CONCLUSION"
+        preview = tools._signature_preview(pipe_signature, 200)
+        self.assertIn("FINAL_CONCLUSION", preview)
+        self.assertIn("(clipped)", preview)
+        self.assertNotIn("|", preview.replace("\\|", ""))
+        diagnostic = "unsolved goals\nh : Nat\n⊢ " + "A " * 1600 + "\n  FINAL_CONCLUSION"
+        error_preview = tools._error_text(diagnostic, set(), 120)
+        self.assertIn("FINAL_CONCLUSION", error_preview)
+        self.assertIn("not shown", error_preview)
+        case_goals = [
+            "case left\nh : " + "Nat " * 100 + "\n⊢ Left\n  LEFT_CONTINUATION",
+            "case right\nh : " + "Nat " * 100 + "\n⊢ Right\n  RIGHT_CONTINUATION",
+            "h : " + "Nat " * 100 + "\n⊢ Untagged\n  UNTAGGED_CONTINUATION",
+        ]
+        clipped_cases = tools._preview_keeping_targets(tools._goal_cases(case_goals, 12), 100)
+        for identity in ("case left", "case right", "goal 3 of 3 (no case tag)"):
+            self.assertIn(identity, clipped_cases)
+        for conclusion in ("LEFT_CONTINUATION", "RIGHT_CONTINUATION", "UNTAGGED_CONTINUATION"):
+            self.assertIn(conclusion, clipped_cases)
+        self.assertNotIn("case left:", clipped_cases)
+        self.assertIn("not shown", clipped_cases)
+        many_goals = [f"case c{index}\nh : Nat\n⊢ Goal{index}" for index in range(13)]
+        raw_goals = "\n\n".join(many_goals)
+        trial = self.goal_with_tries(
+            [{"returncode": 1, "goals_after": raw_goals, "output": diagnostic}],
+            {"hole": f"{node}.h1", "try": ["sorry"]},
+        )
+        self.assertIn("1 more goals not shown", "\n".join(trial["items"][1]["lines"]))
+        self.assertEqual(trial["items"][1]["goals"], raw_goals)
+        self.assertEqual(trial["items"][1]["output"], diagnostic)
+        with (
+            patch(
+                "arena.tools.engine.candidate_file",
+                return_value={"path": "T.lean", "text": ROW["src"], "head": 0, "start_line": 1},
+            ),
+            patch("arena.tools.engine.lean_goals", return_value={"goals": many_goals, "rendered": raw_goals}),
+        ):
+            current = tools.goal_tool("T", "logic", {"hole": f"{node}.h1"})["items"][0]
+        self.assertEqual(current["goal"], raw_goals)
+        self.assertEqual(current["goals"], many_goals)
+        self.assertIn("1 more goals not shown", "\n".join(current["lines"]))
 
 
 class ReadHandleForgivingTests(CascadeToolCase):
