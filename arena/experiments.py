@@ -1,6 +1,7 @@
 """Durable scratch experiments: exact input, then a retrievable outcome.
 
-Promotion is a later slice. A local outcome is not target validity, compatibility, or cold status.
+A local outcome is not target validity, compatibility, or cold status. Promotion is recorded
+on the outcome when an anchored replacement files a candidate.
 """
 
 from __future__ import annotations
@@ -87,6 +88,10 @@ def finish(
     input_ref: dict | None = None,
     diagnostic: str | None = None,
     context: dict | None = None,
+    promotion: dict | None = None,
+    validity: str = "not_a_target_candidate",
+    compatibility: str = "not_checked",
+    cold: str = "not_checked",
 ) -> None:
     """Commit one immutable outcome using the accepted input's ownership."""
     directory = campaign.run_dir(run_id)
@@ -134,10 +139,10 @@ def finish(
                     "code_sha256": digest,
                     "code": code,
                     **data,
-                    "promotion": {"state": "not_promoted", "reason": "promotion_not_in_slice"},
-                    "validity": "not_a_target_candidate",
-                    "compatibility": "not_checked",
-                    "cold": "not_checked",
+                    "promotion": promotion or {"state": "not_promoted", "reason": "promotion_not_in_slice"},
+                    "validity": validity,
+                    "compatibility": compatibility,
+                    "cold": cold,
                 }
             )
         ],

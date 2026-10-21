@@ -155,6 +155,57 @@ class ScratchResultTests(ToolCase):
         self.assertTrue(warnings[0].endswith("(also lines 3)"))
         self.assertFalse([line for line in lines if "line ?" in line])
 
+    def test_v8_scratch_promotes_exact_replacement(self):
+        filed = tools.compile_tool("T", "logic", {"drafts": ["by\n  sorry"]})
+        parent = filed["items"][0]["node"]
+        parent_node = next(node for node in tools._nodes("logic")[1].nodes if node.id == parent)
+        expected = parent_node.proof_text.replace("sorry", "trivial")
+        compiles = len(type(self).calls)
+        with patch.object(tools.engine, "run_lean", side_effect=AssertionError("scratch must not compile itself")):
+            result = tools.scratch_tool(
+                "T", "logic", {"replacement": "trivial", "at": {"node": parent, "steps": [1, 1]}}
+            )
+        self.assertEqual(len(type(self).calls) - compiles, 1)
+        item = result["items"][0]
+        self.assertEqual(item["promotion"]["state"], "promoted")
+        self.assertEqual(item["promotion"]["verification"]["cold"], "not_checked")
+        child = next(node for node in tools._nodes("logic")[1].nodes if node.id == item["promotion"]["node"])
+        self.assertEqual(child.proof_text, expected)
+        self.assertEqual(item["promotion"]["derivation"]["from"], [parent_node.proof_id])
+        saved = tools.experiments.retrieve("logic", item["experiment_id"])
+        self.assertEqual(saved["promotion"]["node"], child.id)
+        self.assertEqual(saved["context"]["anchor"]["node"], parent)
+        mixed = tools.scratch_tool("T", "logic", {"code": "#check Nat", "replacement": "trivial"})
+        self.assertFalse(mixed["ok"])
+        self.assertEqual(mixed["error"]["code"], "mixed_form")
+        built = {"path": "p", "text": "", "head": 0, "start_line": 1}
+        with (
+            patch.object(tools.engine, "versions", return_value=[("v", "c")]),
+            patch.object(tools.engine, "candidate_file", return_value=built),
+            patch.object(tools.engine, "run_lean", return_value=(0, "")),
+        ):
+            check = tools.scratch_tool("T", "logic", {"code": "#check Nat"})["items"][0]
+            example = tools.scratch_tool("T", "logic", {"code": "example : True := trivial"})["items"][0]
+            snippet = tools.scratch_tool("T", "logic", {"code": "exact ?_"})["items"][0]
+        self.assertEqual(check["promotion"]["reason"], "general_check")
+        self.assertEqual(example["promotion"]["reason"], "unrelated_example")
+        self.assertEqual(snippet["promotion"]["reason"], "ambiguous_snippet")
+        helper = tools.experiments.accept("logic", "def scratch_helper : Nat := 1", [])
+        refused = tools.scratch_tool(
+            "T",
+            "logic",
+            {"replacement": "trivial", "at": {"node": parent, "steps": [1, 1]}, "helpers": [helper["experiment_id"]]},
+        )["items"][0]
+        self.assertEqual(refused["promotion"]["reason"], "helper_not_embeddable")
+        self.assertEqual(len(type(self).calls) - compiles, 1)
+        failed = tools.scratch_tool(
+            "T", "logic", {"replacement": "bad", "at": {"node": parent, "steps": [1, 1]}}
+        )["items"][0]
+        self.assertEqual(failed["promotion"]["state"], "failed")
+        self.assertEqual(failed["promotion"]["reason"], "proof_error")
+        self.assertTrue(failed["experiment_id"])
+        self.assertTrue(failed["promotion"]["node"])
+
 
 class CascadeToolCase(ToolCase):
     cascade_errors = True

@@ -4,7 +4,7 @@
 
 **Blocked by:** 14: Retain and retrieve isolated scratch experiments
 
-**Status:** ready-for-agent
+**Status:** needs-review
 
 **Branch:** `v8/15-scratch-promotion`
 
@@ -26,12 +26,12 @@
 
 ## What to build and acceptance
 
-- [ ] 1. Resolve immutable parent/step/range/hole and which code is the replacement before execution; record inherited job anchors rather than rereading mutable focus.
-- [ ] 2. Construct the exact legal target candidate with all explicit helper dependencies through the normal attempt/derivation/compile route.
-- [ ] 3. Do not make the agent retype code or call promotion separately. The invocation authorizes only the recorded replacement, not unrelated combinations.
-- [ ] 4. Return experiment outcome, promotion outcome, candidate/derivation/evaluation references, measured deltas and pending/full/cold state.
-- [ ] 5. General checks, unrelated examples, ambiguous snippets and unavailable helpers get concrete non-promotion reasons. Failed promotion preserves both experiment and attempt.
-- [ ] 6. Use the one assigned fast smoke for this slice. Retain the stated behavior requirements; actual-Pi/real-Lean journeys and the broader race matrix are final E2E coverage, not this ticket's gate.
+- [x] 1. Resolve immutable parent/step/range/hole and which code is the replacement before execution; record inherited job anchors rather than rereading mutable focus.
+- [x] 2. Construct the exact legal target candidate with all explicit helper dependencies through the normal attempt/derivation/compile route.
+- [x] 3. Do not make the agent retype code or call promotion separately. The invocation authorizes only the recorded replacement, not unrelated combinations.
+- [x] 4. Return experiment outcome, promotion outcome, candidate/derivation/evaluation references, measured deltas and pending/full/cold state.
+- [x] 5. General checks, unrelated examples, ambiguous snippets and unavailable helpers get concrete non-promotion reasons. Failed promotion preserves both experiment and attempt.
+- [x] 6. Use the one assigned fast smoke for this slice. Retain the stated behavior requirements; actual-Pi/real-Lean journeys and the broader race matrix are final E2E coverage, not this ticket's gate.
 
 ## Verify
 

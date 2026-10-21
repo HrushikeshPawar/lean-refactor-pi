@@ -27,7 +27,7 @@ TOOL_FORMS = {
         "step:sN",
     ],
     "finish": ["{}"],
-    "scratch": ["code:<lean commands>", "helpers:[experiment ids]"],
+    "scratch": ["code:<lean commands>", "replacement+at", "helpers:[experiment ids]"],
 }
 
 
@@ -79,7 +79,7 @@ def _empty_error(tool: str) -> dict:
         "search": ["queries", "kind", "after"],
         "read": ["handle", "node", "hole", "experiment", "view", "against", "step"],
         "finish": [],
-        "scratch": ["code", "helpers"],
+        "scratch": ["code", "replacement", "at", "helpers"],
     }[tool]
     return reply.error_reply("empty_arguments", "{}", valid, TOOL_FORMS[tool])
 
@@ -95,7 +95,7 @@ def _is_empty(request: object, tool: str) -> bool:
         "search": ("queries", "kind", "after"),
         "read": ("handle", "node", "hole", "experiment", "view", "against", "step"),
         "finish": (),
-        "scratch": ("code", "helpers"),
+        "scratch": ("code", "replacement", "at", "helpers"),
     }[tool]
     return not any(key in request and request[key] not in (None, "", [], {}) for key in keys)
 
@@ -1695,14 +1695,237 @@ def _error_text(message: str, known: set[str], limit: int) -> str:
     return compact if len(compact) <= limit else compact[: limit - 1] + "…"
 
 
+_TOPLEVEL = re.compile(r"(?m)^(def|theorem|lemma|abbrev|axiom|instance|class|structure|inductive|import)\b")
+_COMMAND = re.compile(r"#(?:check|print|eval|reduce)\b")
+
+
+def _scratch_form(request: dict) -> str:
+    has_code = "code" in request
+    anchored = "replacement" in request or "at" in request
+    if has_code and anchored:
+        return "mixed"
+    return "anchored" if anchored else "general"
+
+
+def _nonpromotion_reason(code: str) -> str:
+    stripped = code.lstrip()
+    if _COMMAND.match(stripped):
+        return "general_check"
+    if stripped.startswith("example"):
+        return "unrelated_example"
+    return "ambiguous_snippet"
+
+
+def _proof_local(code: str) -> bool:
+    return _TOPLEVEL.search(code) is None
+
+
+def _frozen_anchor(run_id: str, anchor: dict) -> dict | str:
+    path = campaign.run_dir(run_id) / str(anchor.get("path") or "")
+    digest = anchor.get("proof_sha256")
+    if not path.is_file() or not isinstance(digest, str):
+        return "node"
+    if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+        return "anchor_changed"
+    if "hole" not in anchor and "steps" not in anchor:
+        return "anchor"
+    return anchor
+
+
+def _scratch_anchor(run_id: str, request: dict) -> dict | str:
+    """Resolve the invocation anchor once. A job anchor is the recorded snapshot, not the live focus."""
+    from arena.orchestration import _resolve_anchor, jobs
+
+    supplied = request.get("at")
+    inherited = None
+    job_id = os.environ.get("ARENA_JOB_ID")
+    if job_id:
+        snapshot = next(
+            (job for job in jobs(campaign.run_dir(run_id), [job_id])["jobs"] if job.get("job_id") == job_id),
+            None,
+        )
+        if snapshot is not None:
+            inherited = snapshot.get("anchor")
+    if supplied is None:
+        if not isinstance(inherited, dict):
+            return "anchor"
+        return _frozen_anchor(run_id, inherited)
+    if not isinstance(supplied, dict):
+        return "anchor"
+    if isinstance(inherited, dict):
+        same_node = supplied.get("node") in {inherited.get("node"), inherited.get("proof_id")}
+        same_target = (
+            supplied.get("hole") == inherited.get("hole")
+            if "hole" in supplied or "hole" in inherited
+            else list(supplied.get("steps") or []) == list(inherited.get("steps") or [])
+        )
+        if not same_node or not same_target:
+            return "ambiguous_anchor"
+        return _frozen_anchor(run_id, inherited)
+    if isinstance(supplied.get("proof_sha256"), str):
+        return _frozen_anchor(run_id, supplied)
+    return _resolve_anchor(campaign.run_dir(run_id), "step", supplied)
+
+
+def _promotion_item(experiment_id: str, code: str, outcome: str, lines: list[str], promotion: dict, *, ok: bool = True):
+    return {
+        "ref": experiment_id,
+        "ok": ok,
+        "lines": lines,
+        "error": None,
+        "experiment_id": experiment_id,
+        "outcome": outcome,
+        "code": code,
+        "promotion": promotion,
+        "validity": "not_a_target_candidate",
+        "compatibility": promotion.get("verification", {}).get("full", "not_checked"),
+        "cold": promotion.get("verification", {}).get("cold", "not_checked"),
+    }
+
+
+def _scratch_promote(theorem: str, run_id: str, request: dict, helpers: list[str]) -> dict:
+    limit = int(text.numbers().get("scratch_max_chars", 4000))
+    replacement = request.get("replacement")
+    if not isinstance(replacement, str) or not replacement.strip():
+        return _invalid("bad_replacement", "empty", [f"1..{limit} characters"], TOOL_FORMS["scratch"])
+    if len(replacement) > limit:
+        return _invalid(
+            "bad_replacement", f"{len(replacement)} characters", [f"1..{limit} characters"], TOOL_FORMS["scratch"]
+        )
+    if re.search(r"(?m)^\s*import\b", replacement):
+        return _invalid("bad_replacement", "import", ["no import lines"], TOOL_FORMS["scratch"])
+    label = official_filter()(re.sub(r"\bsorry\b", "trivial", replacement))
+    if label:
+        return _invalid("forbidden", label, ["no forbidden constructs"], TOOL_FORMS["scratch"])
+    anchor = _scratch_anchor(run_id, request)
+    if isinstance(anchor, str):
+        return _invalid("bad_anchor", anchor, ["node + one step range or hole"], TOOL_FORMS["scratch"])
+    accepted = experiments.accept(
+        run_id, replacement, helpers, context={"form": "anchored", "anchor": anchor}
+    )
+    experiment_id = accepted["experiment_id"]
+    if accepted.get("replayed"):
+        return _read_experiment(run_id, experiment_id)
+    started = time.perf_counter()
+    digest = accepted["code_sha256"]
+
+    def close(outcome: str, promotion: dict, lines: list[str], *, ok: bool = True, diagnostic: str | None = None):
+        experiments.finish(
+            run_id,
+            experiment_id,
+            code=replacement,
+            digest=digest,
+            outcome=outcome,
+            raw=None,
+            rendered=lines,
+            elapsed_ms=experiments.elapsed_since(started),
+            input_ref=accepted["input_ref"],
+            diagnostic=diagnostic,
+            context={"form": "anchored", "anchor": anchor},
+            promotion=promotion,
+            compatibility=promotion.get("verification", {}).get("full", "not_checked"),
+            cold=promotion.get("verification", {}).get("cold", "not_checked"),
+        )
+        evidence = experiments.retrieve(run_id, experiment_id)
+        item = _promotion_item(experiment_id, replacement, outcome, lines, evidence["promotion"], ok=ok)
+        return reply.reply(ok=ok, items=[{**item, **{k: evidence[k] for k in evidence if k not in item}}])
+
+    from arena.run_control import read_state
+
+    if read_state(campaign.run_dir(run_id)).get("stopped"):
+        promotion = {"state": "not_promoted", "reason": "run_stopped"}
+        lines = [_render("scratch_not_promoted", reason="run_stopped")]
+        closed = close("recorded", promotion, lines, ok=False, diagnostic="run_stopped")
+        closed["ok"] = False
+        closed["error"] = reply.request_error("run_stopped", run_id, [], TOOL_FORMS["scratch"])
+        return closed
+    prefix, missing = _scratch_helpers(run_id, helpers)
+    if missing:
+        promotion = {"state": "not_promoted", "reason": "dependency_missing", "helpers": missing}
+        lines = [_render("scratch_not_promoted", reason="dependency_missing")]
+        closed = close("dependency_missing", promotion, lines, ok=False, diagnostic="dependency_missing")
+        closed["error"] = reply.request_error("dependency_missing", ",".join(missing), [], TOOL_FORMS["scratch"])
+        return closed
+    retained = [experiments.retrieve(run_id, reference) for reference in helpers]
+    if any(found is None or not _proof_local(found["code"]) for found in retained):
+        promotion = {"state": "not_promoted", "reason": "helper_not_embeddable"}
+        lines = [_render("scratch_not_promoted", reason="helper_not_embeddable")]
+        return close("recorded", promotion, lines, ok=False, diagnostic="helper_not_embeddable")
+    embedded = prefix + replacement
+    if "hole" in anchor:
+        operation = {"type": "fill", "hole": anchor["hole"], "text": embedded}
+    else:
+        step_ids = anchor.get("step_ids") or []
+        if not step_ids:
+            promotion = {"state": "not_promoted", "reason": "anchor"}
+            return close("recorded", promotion, [_render("scratch_not_promoted", reason="anchor")], ok=False)
+        spec = step_ids[0] if len(step_ids) == 1 else f"{step_ids[0]}-{step_ids[-1]}"
+        operation = {"type": "splice", "base": anchor["node"], "steps": spec, "text": embedded}
+    try:
+        result = campaign.compile_operation(theorem, run_id, operation)
+    except (OSError, KeyError, StopIteration, ValueError, RuntimeError) as error:
+        promotion = {"state": "not_promoted", "reason": "invalid_operation"}
+        return close("recorded", promotion, [str(error)], ok=False, diagnostic=str(error))
+    passed = bool(next(iter((result.get("compat") or {}).values()), {}).get("passed"))
+    parent_tokens = next(
+        (
+            event["result"]["tokens"]
+            for event in reversed(_history(run_id))
+            if event.get("proof_id") == anchor.get("proof_id")
+            and isinstance(event.get("result"), dict)
+            and isinstance(event["result"].get("tokens"), int)
+        ),
+        None,
+    )
+    deltas = {}
+    if isinstance(parent_tokens, int) and isinstance(result.get("tokens"), int):
+        deltas["tokens"] = result["tokens"] - parent_tokens
+    verification = {
+        "fast": "passed" if passed else "proof_error",
+        "full": "pending" if passed else "not_checked",
+        "cold": "not_checked",
+    }
+    promotion = {
+        "state": "promoted" if passed else "failed",
+        "node": result.get("node"),
+        "derivation": result.get("edge"),
+        "evaluation_id": result.get("evaluation_id"),
+        "deltas": deltas,
+        "verification": verification,
+    }
+    if not passed:
+        promotion["reason"] = "proof_error"
+    node = _node(run_id, result["node"])
+    promotion["proof_id"] = node.proof_id
+    outcome = "success" if passed else "failure"
+    lines = [
+        _render("scratch_experiment", experiment=experiment_id, outcome=outcome),
+        _render(
+            "scratch_promoted",
+            node=node.id,
+            fast=verification["fast"],
+            full=verification["full"],
+            cold=verification["cold"],
+        ),
+    ]
+    return close(outcome, promotion, lines, ok=True)
+
+
 def scratch_tool(theorem: str, run_id: str, request: dict) -> dict:
     """Lean commands run in the target's environment in place of its declaration. Never a node, never scored."""
     if _is_empty(request, "scratch"):
         return _empty_error("scratch")
-    valid = ["code", "helpers"]
+    valid = ["code", "replacement", "at", "helpers"]
     unknown = sorted(set(request) - set(valid))
     if unknown:
         return _invalid("unknown_argument", unknown[0], valid, TOOL_FORMS["scratch"])
+    if _scratch_form(request) == "mixed":
+        return _invalid("mixed_form", "code+replacement", ["code", "replacement+at"], TOOL_FORMS["scratch"])
+    if _scratch_form(request) == "anchored":
+        helpers = request.get("helpers", [])
+        if not isinstance(helpers, list) or any(not isinstance(item, str) or not item for item in helpers):
+            return _invalid("bad_helpers", helpers, ["experiment ids"], TOOL_FORMS["scratch"])
+        return _scratch_promote(theorem, run_id, request, helpers)
     helpers = request.get("helpers", [])
     if not isinstance(helpers, list) or any(not isinstance(item, str) or not item for item in helpers):
         return _invalid("bad_helpers", helpers, ["experiment ids"], TOOL_FORMS["scratch"])
@@ -1757,6 +1980,10 @@ def scratch_tool(theorem: str, run_id: str, request: dict) -> dict:
             input_ref=accepted["input_ref"],
             diagnostic=str(error),
             context=execution["context"],
+            promotion={
+                "state": "not_promoted",
+                "reason": outcome if outcome in {"cancelled", "dependency_missing"} else _nonpromotion_reason(code),
+            },
         )
         evidence = experiments.retrieve(run_id, experiment_id)
         return reply.reply(
@@ -1829,6 +2056,7 @@ def _scratch_check(theorem, run_id, code, helpers, accepted, earlier, started, e
             elapsed_ms=experiments.elapsed_since(started),
             input_ref=accepted["input_ref"],
             diagnostic=outcome if missing else None,
+            promotion={"state": "not_promoted", "reason": outcome},
         )
         evidence = experiments.retrieve(run_id, experiment_id)
         return reply.reply(
@@ -1880,6 +2108,7 @@ def _scratch_check(theorem, run_id, code, helpers, accepted, earlier, started, e
             elapsed_ms=experiments.elapsed_since(started),
             input_ref=accepted["input_ref"],
             context=context,
+            promotion={"state": "not_promoted", "reason": "cancelled"},
         )
         return _read_experiment(run_id, experiment_id)
     execution["stage"] = "execution"
@@ -1998,7 +2227,7 @@ def _scratch_check(theorem, run_id, code, helpers, accepted, earlier, started, e
         else "success"
     )
     lines.append(_render("scratch_experiment", experiment=experiment_id, outcome=outcome))
-    lines.append(_render("scratch_not_promoted", reason=_render("scratch_general_only")))
+    lines.append(_render("scratch_not_promoted", reason=_nonpromotion_reason(code)))
     raw = None if output is None else output[1]
     experiments.finish(
         run_id,
@@ -2011,6 +2240,7 @@ def _scratch_check(theorem, run_id, code, helpers, accepted, earlier, started, e
         elapsed_ms=experiments.elapsed_since(started),
         input_ref=accepted["input_ref"],
         context=context,
+        promotion={"state": "not_promoted", "reason": _nonpromotion_reason(code)},
     )
     item = {
         "ref": experiment_id,
@@ -2021,7 +2251,7 @@ def _scratch_check(theorem, run_id, code, helpers, accepted, earlier, started, e
         "experiment_id": experiment_id,
         "outcome": outcome,
         "code": code,
-        "promotion": {"state": "not_promoted", "reason": "promotion_not_in_slice"},
+        "promotion": {"state": "not_promoted", "reason": _nonpromotion_reason(code)},
         "validity": "not_a_target_candidate",
         "compatibility": "not_checked",
         "cold": "not_checked",
