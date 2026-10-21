@@ -7,6 +7,7 @@ on the outcome when an anchored replacement files a candidate.
 from __future__ import annotations
 
 import hashlib
+import json
 import time
 import uuid
 from pathlib import Path
@@ -223,12 +224,45 @@ def _identity(accepted: dict) -> dict:
     }
 
 
+def original_lines(directory: Path, match) -> list[dict]:
+    """Exact ledger lines, with byte offsets, for records the caller selects."""
+    path = directory / "ledger.jsonl"
+    if not path.is_file():
+        return []
+    raw = path.read_bytes()
+    found = []
+    offset = 0
+    for line in raw.splitlines(keepends=True):
+        start = offset
+        offset += len(line)
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict) and match(event):
+            found.append(
+                {
+                    "kind": event.get("kind"),
+                    "start": start,
+                    "end": offset,
+                    "sha256": hashlib.sha256(line).hexdigest(),
+                    "line": line.decode(),
+                }
+            )
+    return found
+
+
 def retrieve(run_id: str, reference: str) -> dict | None:
     """Return one experiment, or an explicit missing-code record for a hash-only row."""
     rows = _scratch(campaign.run_dir(run_id))
     matched = [row for row in rows if row.get("experiment_id") == reference]
     if matched:
-        return _joined(matched)
+        found = _joined(matched)
+        directory = campaign.run_dir(run_id)
+        found["original_lines"] = original_lines(
+            directory, lambda row: row.get("experiment_id") == reference
+        )
+        return found
     hashed = [row for row in rows if row.get("code_sha256") == reference and not row.get("experiment_id")]
     if not hashed:
         return None

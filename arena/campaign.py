@@ -3505,6 +3505,10 @@ def graph_state(run_id: str) -> dict:
         graph_node = projected.get(node["id"])
         node["node"] = graph_node.id if graph_node else None
         node["edge"] = graph_node.edge if graph_node else None
+        node["attempts"] = graph_node.attempts if graph_node else []
+        node["alternate_derivations"] = (
+            [item for item in graph_node.derivations if item.get("source") == "derivation"] if graph_node else []
+        )
     for probe_row in probes:
         graph_node = projected.get(probe_row["proof_id"])
         probe_row["node"] = graph_node.id if graph_node else None
@@ -3523,7 +3527,56 @@ def graph_state(run_id: str) -> dict:
         "routes": (route_rows := route_table(history)),
         "route_progress": _route_progress(route_rows),
         "focus": projection.focus,
+        "job_log": _served_jobs(history),
+        "experiments": _served_experiments(history),
+        "actors": _served_actors(history),
     }
+
+
+def _served_jobs(history: list[dict]) -> list[dict]:
+    rows = []
+    for event in history:
+        if event.get("kind") not in ("job", "wait") and event.get("type") not in (
+            "delegation",
+            "assignment_state",
+            "verification",
+        ):
+            continue
+        rows.append(
+            {
+                "job_id": event.get("job_id"),
+                "status": event.get("status") or event.get("state"),
+                "actor_id": event.get("actor_id"),
+                "session_id": event.get("session_id"),
+                "candidate_id": event.get("candidate_id") or event.get("proof_id"),
+                "queue": event.get("queue_depths"),
+            }
+        )
+    return rows
+
+
+def _served_experiments(history: list[dict]) -> list[dict]:
+    return [
+        {
+            "experiment_id": event.get("experiment_id"),
+            "phase": event.get("phase"),
+            "outcome": event.get("outcome"),
+            "actor_id": event.get("actor_id"),
+            "proof_id": event.get("proof_id") or event.get("candidate_id"),
+            "job_id": event.get("job_id"),
+        }
+        for event in history
+        if event.get("kind") == "scratch"
+    ]
+
+
+def _served_actors(history: list[dict]) -> list[dict]:
+    found: dict[str, dict] = {}
+    for event in history:
+        actor = event.get("actor_id")
+        if actor and actor not in found:
+            found[actor] = {"actor_id": actor, "session_id": event.get("session_id")}
+    return list(found.values())
 
 
 def merge_once(run_id: str, graph: dict | None = None) -> dict | None:

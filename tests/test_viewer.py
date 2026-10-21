@@ -628,6 +628,118 @@ class NodeCallTests(unittest.TestCase):
         self.assertEqual(found["call"]["tool_call_id"], "early")
         self.assertEqual(found["call"]["name"], "compile")
 
+    def test_v8_node_retains_alternate_actor_attempts(self):
+        proof = "theorem t : True := by\n  trivial\n"
+        (self.directory / "proofs").mkdir()
+        (self.directory / "proofs" / "ref.lean").write_text("theorem t : True := by\n  sorry\n")
+        (self.directory / "proofs" / "c2.lean").write_text(proof)
+        sol = {
+            "kind": "derivation",
+            "proof_id": "c2",
+            "candidate_id": "c2",
+            "actor_id": "sol",
+            "session_id": "sol-session",
+            "parents": ["ref"],
+            "event_id": "der-sol",
+            "data": {"relation": "exact", "operation": {"type": "edited_from"}, "inputs": [{"role": "parent", "id": "ref"}]},
+        }
+        worker = {
+            "kind": "derivation",
+            "proof_id": "c2",
+            "candidate_id": "c2",
+            "actor_id": "worker-a",
+            "session_id": "worker-session",
+            "parents": ["ref"],
+            "event_id": "der-worker",
+            "data": {"relation": "exact", "operation": {"type": "filled_from"}, "inputs": [{"role": "parent", "id": "ref"}]},
+        }
+        self._write(
+            [
+                _request("r1", 1000),
+                *_call("r1", "call-sol", 2000, 4000, delivered="sol body", untrimmed="sol body\nfull"),
+                _response("r1", 4500),
+                _request("r2", 5000),
+                *_call("r2", "call-worker", 6000, 8000, delivered="worker body", untrimmed="worker body\nfull"),
+                _response("r2", 8500),
+            ],
+            [
+                {"kind": "init", "theorem": "T", "ts": 0.1, "versions": ["v1"]},
+                _candidate(1.0, "ref", "reference"),
+                _candidate(2.5, "c2", "model", parents=["ref"], tool_call_id="call-sol"),
+                {
+                    "kind": "attempt",
+                    "proof_id": "c2",
+                    "candidate_id": "c2",
+                    "actor_id": "sol",
+                    "session_id": "sol-session",
+                    "event_id": "try-sol",
+                    "tool_call_id": "call-sol",
+                    "data": {"relation": "exact"},
+                },
+                sol,
+                {
+                    "kind": "attempt",
+                    "proof_id": "c2",
+                    "candidate_id": "c2",
+                    "actor_id": "worker-a",
+                    "session_id": "worker-session",
+                    "event_id": "try-worker",
+                    "tool_call_id": "call-worker",
+                    "data": {"relation": "exact"},
+                },
+                worker,
+                {"kind": "job", "job_id": "j-cancel", "status": "cancelled", "actor_id": "worker-a", "candidate_id": "c2"},
+                {"kind": "job", "job_id": "j-fail", "status": "failed", "actor_id": "sol", "candidate_id": "c2"},
+                {"kind": "job", "job_id": "j-dup", "status": "duplicate", "actor_id": "worker-a", "candidate_id": "c2"},
+                {
+                    "kind": "scratch",
+                    "experiment_id": "ex1",
+                    "phase": "input",
+                    "actor_id": "sol",
+                    "proof_id": "c2",
+                    "code": "exact scratch\n",
+                },
+            ],
+        )
+        (self.directory / "cost-ledger.jsonl").write_text(
+            '{"kind":"settle","request_id":"req-1","usd":0.2,"actor_id":"sol","job_id":"j-fail"}\n'
+            '{"kind":"settle","request_id":"req-1","usd":0.2,"actor_id":"sol","job_id":"j-fail","candidate_ids":["c2","c2b"]}\n'
+        )
+        found = viewer_data.node_calls(self.directory, "n2")
+        self.assertEqual(sorted(item["actor_id"] for item in found["attempts"]), ["sol", "worker-a"])
+        self.assertEqual(
+            sorted(item["actor_id"] for item in found["derivations"] if item.get("source") == "derivation"),
+            ["sol", "worker-a"],
+        )
+        self.assertEqual(found["call"]["delivered"], "sol body")
+        self.assertEqual(found["call"]["untrimmed"], "sol body\nfull")
+        self.assertEqual(found["artifact"]["bytes"], proof)
+        stored = {item["line"] for item in found["records"]}
+        ledger = (self.directory / "ledger.jsonl").read_text()
+        self.assertIn(json.dumps(sol) + "\n", stored)
+        self.assertIn(json.dumps(worker) + "\n", stored)
+        self.assertTrue(all(line in ledger for line in stored))
+        self.assertEqual(found["call_refs"], [
+            {"tool_call_id": "call-sol", "actor_id": "sol", "session_id": "sol-session"},
+            {"tool_call_id": "call-worker", "actor_id": "worker-a", "session_id": "worker-session"},
+        ])
+        with patch("arena.campaign.run_dir", return_value=self.directory), patch(
+            "arena.cli.serve.run_dir", return_value=self.directory
+        ):
+            payload = server.graph_payload("served")
+        proofs = [node for node in payload["nodes"] if node["id"] == "c2"]
+        self.assertEqual(len(proofs), 1)
+        self.assertEqual(sorted(item["actor_id"] for item in proofs[0]["attempts"]), ["sol", "worker-a"])
+        self.assertEqual(
+            [row["status"] for row in payload["job_log"]],
+            ["cancelled", "failed", "duplicate"],
+        )
+        self.assertEqual(payload["experiments"][0]["experiment_id"], "ex1")
+        self.assertEqual(payload["spend"]["total"], "0.2")
+        self.assertEqual(payload["spend"]["by_actor"], {"sol": "0.2"})
+        self.assertEqual(payload["spend"]["by_job"], {"j-fail": "0.2"})
+        self.assertEqual(payload["cost"]["spent_usd"], 0.2)
+
     def test_v7_edge_rebuilds_the_filing_line_and_holes(self):
         proof = "theorem t : True := by\n  have h : True := sorry\n"
         (self.directory / "proofs").mkdir()

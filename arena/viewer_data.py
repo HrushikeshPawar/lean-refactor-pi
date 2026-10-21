@@ -7,6 +7,7 @@ run. Langfuse is read server-side only: the keys never reach a response, a log l
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import re
 import threading
@@ -811,7 +812,39 @@ def node_calls(directory: Path, node: str) -> dict:
     extra = _served_lineage(directory, node)
     if extra:
         found.update(extra)
+        found["call_refs"] = [
+            {
+                "tool_call_id": item.get("tool_call_id"),
+                "actor_id": item.get("actor_id"),
+                "session_id": item.get("session_id"),
+            }
+            for item in extra.get("attempts") or []
+            if item.get("attempt_id")
+        ]
+        proof_id = _proof_of(read_jsonl(directory / "ledger.jsonl"), node)
+        found["records"] = _lineage_records(directory, proof_id or "")
+        if proof_id:
+            artifact = directory / "proofs" / f"{proof_id}.lean"
+            if artifact.is_file():
+                data = artifact.read_bytes()
+                found["artifact"] = {
+                    "path": f"proofs/{proof_id}.lean",
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                    "bytes": data.decode(),
+                }
+            else:
+                found["artifact"] = {"path": f"proofs/{proof_id}.lean", "missing": True}
     return found
+
+
+def _lineage_records(directory: Path, proof_id: str) -> list[dict]:
+    from arena.experiments import original_lines
+
+    return original_lines(
+        directory,
+        lambda event: event.get("kind") in ("attempt", "derivation")
+        and (event.get("proof_id") or event.get("candidate_id")) == proof_id,
+    )
 
 
 def _served_lineage(directory: Path, node: str) -> dict:

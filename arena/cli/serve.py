@@ -20,6 +20,7 @@ import signal
 import sys
 import threading
 import time
+from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -104,6 +105,33 @@ def memo_json(kind: str, run_id: str, build) -> bytes:
         return body
 
 
+def _attributed_spend(directory: Path, charged: Decimal, by_actor: dict[str, Decimal], by_job: dict[str, Decimal]) -> dict:
+    """One actual total. Control state wins; a repeated request id is not charged again."""
+    if (directory / "control.jsonl").is_file():
+        from arena.run_control import read_state
+
+        state = read_state(directory)
+        return {
+            "total": state["total"],
+            "by_actor": state["by_actor"],
+            "by_job": state["by_job"],
+            "accounting": state["accounting"],
+        }
+    return {
+        "total": format(charged, "f"),
+        "by_actor": {key: format(value, "f") for key, value in by_actor.items()},
+        "by_job": {key: format(value, "f") for key, value in by_job.items()},
+        "accounting": "known",
+    }
+
+
+def _request_amount(event: dict) -> Decimal:
+    amount = event.get("usd")
+    if isinstance(amount, str):
+        return Decimal(amount)
+    return Decimal(str(amount))
+
+
 def graph_payload(run_id: str) -> dict:
     payload = graph_state(run_id)
     directory = run_dir(run_id)
@@ -111,18 +139,33 @@ def graph_payload(run_id: str) -> dict:
     status = directory / "merge-worker.json"
     payload["worker"] = json.loads(status.read_text()) if status.exists() else None
     charged = 0.0
+    charged_money = Decimal("0")
+    by_actor: dict[str, Decimal] = {}
+    by_job: dict[str, Decimal] = {}
     pi_embedded = 0.0
     parts = {"input": 0.0, "output": 0.0, "cache_read": 0.0, "cache_write": 0.0}
     names = {"input": "input", "output": "output", "cacheRead": "cache_read", "cacheWrite": "cache_write"}
     costs = []
+    seen_requests: set[str] = set()
     journal = directory / "cost-ledger.jsonl"
     if journal.exists():
         for line in journal.read_text().splitlines():
             event = json.loads(line)
             if event.get("kind") != "settle" or event.get("usage_known") is False:
                 continue
+            request_id = event.get("request_id")
+            if request_id:
+                if request_id in seen_requests:
+                    continue
+                seen_requests.add(request_id)
             usd = float(event["usd"])
             charged += usd
+            amount = _request_amount(event)
+            charged_money += amount
+            if event.get("actor_id"):
+                by_actor[event["actor_id"]] = by_actor.get(event["actor_id"], Decimal("0")) + amount
+            if event.get("job_id"):
+                by_job[event["job_id"]] = by_job.get(event["job_id"], Decimal("0")) + amount
             pi_embedded += float(event.get("pi_embedded_cost_usd") or 0)
             for key, value in (event.get("ledger_components_usd") or {}).items():
                 if key in names:
@@ -145,6 +188,7 @@ def graph_payload(run_id: str) -> dict:
             )
     payload["cost_timeline"] = costs
     payload["cost"] = {"spent_usd": charged, "pi_embedded_usd": pi_embedded}
+    payload["spend"] = _attributed_spend(directory, charged_money, by_actor, by_job)
     payload["baseline"] = baseline_point(payload)
     give_reference_its_numbers(payload)
     config = directory / "run-config.json"

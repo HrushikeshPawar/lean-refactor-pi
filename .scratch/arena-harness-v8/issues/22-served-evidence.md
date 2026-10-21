@@ -4,7 +4,7 @@
 
 **Blocked by:** 04: Isolate actor state and enforce exact ownership; 09: Publish early results and resume the same hypothesis; 15: Promote an anchored replacement inside scratch
 
-**Status:** ready-for-agent
+**Status:** needs-review
 
 **Branch:** `v8/22-served-evidence`
 
@@ -26,12 +26,12 @@
 
 ## What to build and acceptance
 
-- [ ] 1. Show canonical proof nodes with expandable attempts/alternate derivations and a complete job/experiment log, including failed, duplicate and cancelled work.
-- [ ] 2. Expose all actors and queue/check/wait/cancellation states, one actual spend total and attributed costs without double-charging candidates.
-- [ ] 3. Preserve lazy reasoning/calls, delivered versus untrimmed results, exact new identity joins and explicit historical ambiguity/missing artifacts.
-- [ ] 4. Retrieve original serialized lineage/artifact bytes and every alternate derivation through node/experiment detail without generated replacements.
-- [ ] 5. Use existing viewer/replay fixtures with multi-actor histories, including duplicate proofs and historical ambiguity. Preserve lazy loading and escaped text.
-- [ ] 6. Compaction memory is not part of this slice; prove complete original evidence access first.
+- [x] 1. Show canonical proof nodes with expandable attempts/alternate derivations and a complete job/experiment log, including failed, duplicate and cancelled work.
+- [x] 2. Expose all actors and queue/check/wait/cancellation states, one actual spend total and attributed costs without double-charging candidates.
+- [x] 3. Preserve lazy reasoning/calls, delivered versus untrimmed results, exact new identity joins and explicit historical ambiguity/missing artifacts.
+- [x] 4. Retrieve original serialized lineage/artifact bytes and every alternate derivation through node/experiment detail without generated replacements.
+- [x] 5. Use existing viewer/replay fixtures with multi-actor histories, including duplicate proofs and historical ambiguity. Preserve lazy loading and escaped text.
+- [x] 6. Compaction memory is not part of this slice; prove complete original evidence access first.
 
 ## Verify
 
