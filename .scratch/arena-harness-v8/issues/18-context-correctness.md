@@ -4,7 +4,7 @@
 
 **Blocked by:** None (no additional logical prerequisite).
 
-**Status:** needs-review
+**Status:** done
 
 **Branch:** `v8/18-context-correctness`
 
@@ -44,6 +44,14 @@ uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_context.py::
 Expected: the named behavior check passes with no actual provider, Pi or Lean process. Aim for seconds and at most 60 seconds. No per-ticket full suite or slow suite.
 
 **Deferred to final E2E:** Actual Lean traversal with binder by before target proof; cache fixtures do not validate Lean instrumentation. See the shared [final E2E checklist](../final-e2e.md).
+
+## Review closure
+
+Review fixed declaration-body selection before searching for `by`, multiline goal conclusions, duplicate single-case hypotheses, all-step coverage, empty cached states, retained coverage during fitting, and whole-goal shedding in restart packets. Unsupported `goal:s1` handles are removed. Legacy untagged definitions remain visible with unknown roles reported. Source mapping uses the actual wrapper insertion point, preserves preceding file coordinates, and leaves instrumentation positions unknown. Strict implicit binder defaults no longer confuse the source boundary.
+
+Validation: `uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_context.py::ParseTests tests/test_context.py::LocalSheddingTests tests/test_context.py::TruncationTests` passed with **19 tests and 6 subtests in 0.12s**, including the assigned smoke. Ruff passed on `arena/context.py`, `arena/campaign.py`, and `tests/test_context.py`. The README budget was regenerated and checked with the existing CLI helper functions without installing CLI dependencies. Independent read-only review found no remaining concrete blocker.
+
+No actual Lean, Pi, or provider process ran. Pinned Lean syntax/traversal, the seven-field ranking metadata, and refreshed production caches remain final E2E coverage. Worker/session schema is unchanged. Ticket 19 was not started.
 
 ---
 
