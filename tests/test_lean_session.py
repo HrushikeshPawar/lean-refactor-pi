@@ -91,14 +91,14 @@ class FallbackTests(unittest.TestCase):
     def setUp(self):
         self.row = {"name": "T", "file_path": "A/B.lean"}
 
-    def run_lean(self, reply, **env):
+    def run_lean(self, reply, request_class="full_check", **env):
         with (
             patch.dict(os.environ, {lean_session.ENV: "/nonexistent.sock", **env}, clear=False),
             patch.object(lean_session, "request", return_value=reply),
             patch.object(engine, "_fingerprint", return_value={"code": "x"}),
             patch.object(engine, "_run_cold", return_value=(0, "cold output")),
         ):
-            return engine.run_lean(self.row, Path("/p"), "text"), last_lean_run()
+            return engine.run_lean(self.row, Path("/p"), "text", request_class=request_class), last_lean_run()
 
     def test_unconfigured_runs_are_cold_without_a_reason(self):
         with patch.dict(os.environ, {}, clear=False), patch.object(engine, "_run_cold", return_value=(0, "x")):
@@ -112,11 +112,23 @@ class FallbackTests(unittest.TestCase):
             "session unreachable: FileNotFoundError",
             "stale session: toolchain changed",
             "Lean server crashed",
-            "no room for a Lean worker: memory (2.0 GB available)",
         ):
             result, info = self.run_lean({"ok": False, "reason": reason})
             self.assertEqual(result, (0, "cold output"))
             self.assertEqual((info["path"], info["reason"]), ("cold-fallback", reason))
+
+    def test_a_denied_or_queued_admission_is_inconclusive_and_never_cold(self):
+        for admission in ("denied", "queued"):
+            reply = {"ok": False, "reason": "no room", "outcome": "inconclusive", "cause": "resource",
+                     "admission": admission}
+            with (
+                patch.object(engine, "_run_cold", side_effect=AssertionError("ran cold")),
+                self.assertRaises(engine.LeanInconclusive) as caught,
+            ):
+                self.run_lean(reply)
+            self.assertEqual((caught.exception.cause, caught.exception.admission), ("resource", admission))
+        with self.assertRaises(engine.LeanInconclusive):
+            self.run_lean({}, request_class="ds_experiment")
 
     def test_a_session_timeout_is_a_timeout(self):
         result, info = self.run_lean({"ok": True, "timeout": True})

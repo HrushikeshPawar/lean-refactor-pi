@@ -471,6 +471,38 @@ def extract_goals(output: str, start_line: int) -> tuple[list[dict], str]:
     )
 
 
+class LeanInconclusive(ValueError):
+    """Lean was not run or not completed for infrastructure reasons (admission denied or queued, worker lost).
+    Never a proof verdict; `cause` and `admission` say why. A ValueError so callers that already refuse on a
+    Lean timeout refuse here too."""
+
+    def __init__(self, cause: str, admission: str, reason: str = ""):
+        super().__init__(reason or f"Lean was not run: {cause}")
+        self.cause, self.admission, self.reason = cause, admission, reason
+
+
+def actor_request_class() -> str:
+    """Class of a Lean request an agent's own tool call makes: the worker's DeepSeek class or Sol's."""
+    return "ds_experiment" if (os.environ.get("ARENA_ACTOR_ID") or "sol") != "sol" else "sol_foreground"
+
+
+COLD_ADMISSION_SECONDS = {"full_check": 300.0, "sol_foreground": 60.0}  # other classes are refused at once
+
+
+def _cold_admission(request_class: str) -> None:
+    """The machine-wide memory admission every Lean worker passes (5 GB reserve, one loader at a time) before a
+    cold process is spawned, with the call's class. Raises LeanInconclusive when it is refused."""
+    from arena import lean_session
+
+    wait = COLD_ADMISSION_SECONDS.get(request_class, 0.0)
+    try:
+        with lean_session.WorkerBudget().opening(lean_session.WORKER_GB, wait):
+            pass
+    except lean_session.SessionError as error:
+        reason = str(error)
+        raise LeanInconclusive("resource" if "memory" in reason else "worker", "denied", reason) from error
+
+
 _FORCE_COLD: ContextVar[bool] = ContextVar("arena_force_cold", default=False)
 _LAST = threading.local()
 
@@ -590,7 +622,9 @@ def run_lean(
     lane: str = "model",
     request_class: str | None = None,
 ) -> tuple[int, str] | None:
-    """Compile `text` as the target's file inside the pinned project; None on timeout.
+    """Compile `text` as the target's file inside the pinned project; None on timeout. Raises LeanInconclusive
+    when admission is denied or queued out: a configured session that refuses is never bypassed by a cold run.
+    An omitted `request_class` is "opportunistic".
 
     With a per-run Lean session configured, only the changed part of the file is
     re-elaborated by the session's server. If the session cannot answer, the file is
@@ -605,6 +639,7 @@ def run_lean(
     timeout = lean_timeout() if timeout is None else timeout
     started = time.monotonic()
     info: dict = {"path": "cold"}
+    request_class = request_class or "opportunistic"
     if lean_session.configured() and not _FORCE_COLD.get():
         payload = {
             **_session_request(row, project, text, prefix_end),
@@ -619,10 +654,6 @@ def run_lean(
             else "",
             "measure": "arena_measure_heartbeats" in text,
         }
-        if request_class is None:
-            actor = os.environ.get("ARENA_ACTOR_ID") or "sol"
-            request_class = "ds_experiment" if actor != "sol" else "sol_foreground"
-        payload["request_class"] = request_class
         if payload["toolchain"].startswith("leanprover/lean4:"):
             payload["toolchain"] = payload["toolchain"].removeprefix("leanprover/lean4:")
         if run_id := os.environ.get(lean_session.RUN_ID_ENV):
@@ -655,7 +686,15 @@ def run_lean(
             if reply.get("fallback"):
                 _LAST.info["fallback"] = reply["fallback"]
             return None if reply.get("timeout") else (reply["returncode"], reply["output"])
-        info = {"path": "cold-fallback", "reason": str(reply.get("reason") or "session unavailable")[:200]}
+        reason = str(reply.get("reason") or "session unavailable")[:200]
+        if reply.get("admission") or reply.get("outcome") == "inconclusive":
+            _LAST.info = {"path": "denied", "reason": reason, "seconds": round(time.monotonic() - started, 2)}
+            raise LeanInconclusive(str(reply.get("cause") or "worker"), str(reply.get("admission") or "denied"), reason)
+        if request_class in ("ds_experiment", "opportunistic"):
+            _LAST.info = {"path": "denied", "reason": reason, "seconds": round(time.monotonic() - started, 2)}
+            raise LeanInconclusive("worker", "denied", reason)
+        info = {"path": "cold-fallback", "reason": reason}
+    _cold_admission(request_class)
     done = _run_cold(row, project, text, timeout)
     _LAST.info = {**info, "seconds": round(time.monotonic() - started, 2)}
     return done
@@ -680,6 +719,7 @@ def warm_session(
         "timeout": lean_session.OPEN_TIMEOUT,
         "lane": lane,
         "wait": wait,
+        "request_class": "opportunistic",
     }
     if run_id := os.environ.get(lean_session.RUN_ID_ENV):
         payload["run_id"] = run_id
@@ -701,7 +741,7 @@ def lean_goals(
         "position": {"line": line, "column": column},
         "timeout": lean_timeout() if timeout is None else timeout,
         "lane": "model",
-        "request_class": "ds_experiment" if os.environ.get("ARENA_ACTOR_ID", "sol") not in ("", "sol") else "sol_foreground",
+        "request_class": actor_request_class(),
     }
     if run_id := os.environ.get(lean_session.RUN_ID_ENV):
         payload["run_id"] = run_id
@@ -726,7 +766,7 @@ def lean_try(
         "snippets": snippets,
         "timeout": lean_timeout() if timeout is None else timeout,
         "lane": "model",
-        "request_class": "ds_experiment" if os.environ.get("ARENA_ACTOR_ID", "sol") not in ("", "sol") else "sol_foreground",
+        "request_class": actor_request_class(),
     }
     if run_id := os.environ.get(lean_session.RUN_ID_ENV):
         payload["run_id"] = run_id
@@ -762,14 +802,25 @@ def compile_version(
 
     wrapper_start = built["text"][: built["head"]].count("\n") + 1 if measure else None
     timeout = lean_timeout()
-    output = run_lean(
-        row, built["path"], assemble(True), timeout=timeout, prefix_end=built["head"], lane=lane, request_class=request_class
-    )
-    if output is not None and probe and output[0] != 0 and _HARNESS_ERROR.search(output[1]):
-        # Harness-origin error: the model must see only the plain draft's own result.
+    try:
         output = run_lean(
-            row, built["path"], assemble(False), timeout=timeout, prefix_end=built["head"], lane=lane, request_class=request_class
+            row, built["path"], assemble(True), timeout=timeout, prefix_end=built["head"], lane=lane, request_class=request_class
         )
+        if output is not None and probe and output[0] != 0 and _HARNESS_ERROR.search(output[1]):
+            # Harness-origin error: the model must see only the plain draft's own result.
+            output = run_lean(
+                row, built["path"], assemble(False), timeout=timeout, prefix_end=built["head"], lane=lane, request_class=request_class
+            )
+    except LeanInconclusive as error:
+        return {
+            "passed": False,
+            "outcome": "inconclusive",
+            "cause": error.cause,
+            "admission": error.admission,
+            "retryable": True,
+            "error": agent_text.render("messages/errors.lean_admission", cause=error.cause, admission=error.admission),
+            "lean": {**last_lean_run(), "candidate_prepare_seconds": preparation_seconds},
+        }
     lean_run = last_lean_run()
     lean_run["candidate_prepare_seconds"] = preparation_seconds
     if output is None:
@@ -857,14 +908,7 @@ def evaluate(
     targets = versions(row)
     if not targets:
         raise ValueError(text.render("messages/errors.toolchains_missing"))
-    if request_class is None:
-        actor = os.environ.get("ARENA_ACTOR_ID") or "sol"
-        if mode == "full":
-            request_class = "full_check"
-        elif actor != "sol":
-            request_class = "ds_experiment"
-        else:
-            request_class = "sol_foreground"
+    request_class = request_class or "opportunistic"
     measured_on = measure_version(row)
     checked = targets if mode == "full" else targets[:1]
     if mode == "fast" and measured_on != targets[0]:

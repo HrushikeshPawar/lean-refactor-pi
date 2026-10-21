@@ -69,6 +69,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `messages/errors.goal_position` | 14 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.invalid_declaration` | 3 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.invalid_run_id` | 3 | Agent messages and notices | when the matching event occurs |
+| `messages/errors.lean_admission` | 15 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.lean_context_timeout` | 6 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.lean_timeout` | 6 | Agent messages and notices | when the matching event occurs |
 | `messages/errors.library_file_missing` | 9 | Agent messages and notices | when the matching event occurs |
@@ -349,6 +350,8 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/tools.scratch_failed` | 1 | Tool replies | when the matching tool result occurs |
 | `replies/tools.scratch_general_only` | 8 | Tool replies | when the matching tool result occurs |
 | `replies/tools.scratch_helper_lines` | 15 | Tool replies | when the matching tool result occurs |
+| `replies/tools.scratch_inconclusive` | 15 | Tool replies | when the matching tool result occurs |
+| `replies/tools.scratch_inconclusive_status` | 1 | Tool replies | when the matching tool result occurs |
 | `replies/tools.scratch_info_cols` | 8 | Tool replies | when the matching tool result occurs |
 | `replies/tools.scratch_info_row` | 7 | Tool replies | when the matching tool result occurs |
 | `replies/tools.scratch_message` | 4 | Tool replies | when the matching tool result occurs |

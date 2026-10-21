@@ -323,7 +323,7 @@ class _Doc:
         self.busy = False
         self.used = time.monotonic()
         self.lane = "model"
-        self.request_class = "full_check"
+        self.request_class = "opportunistic"
         self.queue_reason: str | None = None
         self.header: str | None = None  # the text of the imports and prefix this document was opened with
         self.display: str | None = None
@@ -791,13 +791,17 @@ def _admission_reply(error: SessionError) -> dict:
         reply.update(outcome="inconclusive", cause="worker", admission="denied")
         return reply
     memory = "memory" in reason
-    queued = reason.startswith("queued")
+    queued = reason.startswith("queued") or reason.endswith("busy for too long")
     reply.update(
         outcome="inconclusive",
         cause="resource" if memory else "worker",
         admission="queued" if queued else "denied",
     )
     return reply
+
+
+def _denied(reason: str, cause: str = "worker") -> dict:
+    return {"ok": False, "reason": reason, "outcome": "inconclusive", "cause": cause, "admission": "denied"}
 
 
 def running(pid: int) -> bool:
@@ -809,7 +813,7 @@ def running(pid: int) -> bool:
 
 
 REQUEST_CLASSES = ("sol_foreground", "full_check", "ds_experiment", "opportunistic")
-DS_LEAN_LIMIT = 1
+DS_LEAN_LIMIT = 1  # one DeepSeek Lean compilation at a time, global across every worker of every project
 
 
 class _Waiter:
@@ -824,10 +828,10 @@ class _Waiter:
 
 
 def normalize_request_class(value: object) -> str:
-    """Lane labels do not assign priority. An omitted class stays in the existing FIFO class."""
+    """Lane labels do not assign priority. An omitted or unknown class is the lowest one."""
     if isinstance(value, str) and value in REQUEST_CLASSES:
         return value
-    return "full_check"
+    return "opportunistic"
 
 
 def select_waiter(waiters: list[_Waiter], *, ds_compiling: int, lane: str) -> _Waiter | None:
@@ -1161,7 +1165,7 @@ class Session:
             return f"machine workers ({self.budget.limit} open across runs)"
         return None
 
-    def _new_slot(self, entry: _Entry, lane: str, request_class: str = "full_check") -> tuple[_Doc | None, str | None]:
+    def _new_slot(self, entry: _Entry, lane: str, request_class: str = "opportunistic") -> tuple[_Doc | None, str | None]:
         """A new busy slot in `lane`, or (None, why not). Caller holds `entry.condition` and `self.lock`."""
         if request_class == "ds_experiment" and self._ds_compiling_locked() >= DS_LEAN_LIMIT:
             return None, "one DeepSeek Lean compilation"
@@ -1212,7 +1216,7 @@ class Session:
         timeout: float,
         lane: str = "model",
         header: str | None = None,
-        request_class: str = "full_check",
+        request_class: str = "opportunistic",
     ) -> _Doc:
         """A worker of `lane` for `request_class`. The highest queued class runs next, FIFO inside that class.
         An executing check is left to finish; this only chooses the next admission."""
@@ -1257,7 +1261,7 @@ class Session:
                             if claimed is not None:
                                 return claimed
                             slot.busy = False
-                            slot.request_class = "full_check"
+                            slot.request_class = "opportunistic"
                             with suppress(SessionError, OSError):
                                 entry.server.close_doc(slot)
                             if slot in entry.slots:
@@ -1591,8 +1595,10 @@ class Session:
                 )
             self._measure(entry)
             return {"ok": True, "results": results, "lane": lane, "new_worker": fresh, "header_seconds": header_seconds}
-        except (SessionError, OSError) as error:
-            return {"ok": False, "stale": str(error).startswith("stale"), "reason": str(error)}
+        except SessionError as error:
+            return _admission_reply(error)
+        except OSError as error:
+            return _denied(f"cannot start Lean: {error}")
         finally:
             self._release(entry, slot)
 
@@ -1628,9 +1634,9 @@ class Session:
             entry = self._entry(project, key)
             self._guard_prefix(entry, request)
         except SessionError as error:
-            return {"ok": False, "stale": str(error).startswith("stale"), "reason": str(error)}
+            return _admission_reply(error)
         except OSError as error:
-            return {"ok": False, "reason": f"cannot start Lean: {error}"}
+            return _denied(f"cannot start Lean: {error}")
         lane = self._lane(project, entry, request.get("lane", "model"))
         allowed = OTHER_WORKERS if lane == "background" else PRIMARY_MAX_WORKERS
         wanted = max(0, min(int(request.get("slots", 1)), allowed))
@@ -1679,13 +1685,17 @@ class Session:
         for thread in threads:
             thread.join()
         self._measure(entry)
-        return {
+        reply = {
             "ok": True,
             "workers": ready + len(seconds),
             "seconds": sorted(seconds),
             "failed": failed,
             "allowed": allowed,
         }
+        if failed:
+            memory = any("memory" in item for item in failed)
+            reply.update(outcome="inconclusive", cause="resource" if memory else "worker", admission="denied")
+        return reply
 
     def _measure(self, entry: _Entry) -> None:
         with entry.condition:

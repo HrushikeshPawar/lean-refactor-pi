@@ -46,6 +46,7 @@ profile_proof_compile: "The proof does not compile, so it has no profile: {headl
 profile_instrumentation_failed: "The proof could not be instrumented for profiling: {detail}"
 cold_verification_paused: "Lean is unhealthy; cold verification is paused."
 lean_timeout: "Lean timed out after {timeout} seconds"
+lean_admission: "Lean was not run ({cause}, {admission}); this is not a proof error. Try again later."
 parent_ignored: "Parent {reference} ignored: {error}"
 source_search_failed: "The pinned source search failed."
 lean_context_timeout: "Lean timed out while collecting context."

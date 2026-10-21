@@ -258,6 +258,7 @@ def compare_engines(engine_choice: str = "both", timeout: float = 180) -> dict:
                         "header_end": len(header),
                         "timeout": timeout,
                         "lane": "background",
+                        "request_class": "opportunistic",
                     }
                     started = time.monotonic()
                     lsp = session.check(request)

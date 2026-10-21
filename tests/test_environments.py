@@ -141,7 +141,7 @@ class MeasurementVersionTests(unittest.TestCase):
     def test_fast_mode_also_compiles_the_measurement_version_and_records_it(self):
         calls = []
 
-        def compile_stub(row, proof, version, commit, measure=False, probe=False, report_start_line=None, lane="model"):
+        def compile_stub(row, proof, version, commit, measure=False, probe=False, report_start_line=None, lane="model", **_kwargs):
             calls.append((version, measure))
             return {
                 "passed": True,

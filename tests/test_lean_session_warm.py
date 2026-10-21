@@ -1043,7 +1043,7 @@ class ColdPathTests(unittest.TestCase):
         built = {"path": Path("/p"), "text": "t", "offset": 0, "head": 0, "start_line": 1, "end_line": 1}
         seen = {}
 
-        def fake(row, project, text, timeout=None, prefix_end=None, lane="model"):
+        def fake(row, project, text, timeout=None, prefix_end=None, lane="model", **_kwargs):
             seen["timeout"] = timeout
             return None
 

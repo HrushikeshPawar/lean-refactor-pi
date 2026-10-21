@@ -2537,7 +2537,13 @@ def _scratch_check(theorem, run_id, code, helpers, accepted, earlier, started, e
         )
         return _read_experiment(run_id, experiment_id)
     execution["stage"] = "execution"
-    output = engine.run_lean(row, built["path"], lean_text, prefix_end=built["head"])
+    denied = None
+    try:
+        output = engine.run_lean(
+            row, built["path"], lean_text, prefix_end=built["head"], request_class=engine.actor_request_class()
+        )
+    except engine.LeanInconclusive as error:
+        output, denied = None, error
     execution["stage"] = "processing"
     execution["raw"] = None if output is None else output[1]
     experiments.record_raw(run_id, experiment_id, output, context=context)
@@ -2550,7 +2556,9 @@ def _scratch_check(theorem, run_id, code, helpers, accepted, earlier, started, e
     info_rows: list[str] = []
     warning_lines: dict[str, list[int]] = {}
     body: list[str] = []
-    if output is None:
+    if denied is not None:
+        body.append(_render("scratch_inconclusive", cause=denied.cause, admission=denied.admission))
+    elif output is None:
         body.append(_render("scratch_timeout"))
     else:
         measured_values, kept = [], []
@@ -2637,6 +2645,8 @@ def _scratch_check(theorem, run_id, code, helpers, accepted, earlier, started, e
         errors = 1
         body.append(_render("scratch_process_failed", returncode=output[0]))
     status = _render("scratch_ok" if output is not None and not errors else "scratch_failed")
+    if denied is not None:
+        status = _render("scratch_inconclusive_status")
     if declarations:
         lines.append(_render("scratch_result_body", status=status, errors=errors, warnings=warnings, tokens=body_total))
     else:
@@ -2645,6 +2655,8 @@ def _scratch_check(theorem, run_id, code, helpers, accepted, earlier, started, e
     outcome = (
         "cancelled"
         if _scratch_cancelled(run_id)
+        else "inconclusive"
+        if denied is not None
         else "timeout"
         if output is None
         else "failure"

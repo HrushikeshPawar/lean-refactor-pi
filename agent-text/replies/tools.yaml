@@ -136,6 +136,8 @@ scratch_result_body: "{status}: errors {errors}, warnings {warnings}, body token
 scratch_also: "(also lines {lines})"
 scratch_info_cols: "| line | command | output |\n|---|---|---|"
 scratch_info_row: "| {line} | `{command}` | {output} |"
+scratch_inconclusive: "Lean was not run ({cause}, {admission}); this is not a proof error. Try again later."
+scratch_inconclusive_status: "INCONCLUSIVE"
 scratch_timeout: "The scratch run timed out; no messages are shown."
 scratch_cancelled: "The scratch run was cancelled."
 scratch_experiment: "experiment {experiment}; local outcome {outcome}; not a target candidate"

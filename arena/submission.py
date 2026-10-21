@@ -129,7 +129,7 @@ def _cold_check(name: str, proof: str, expected: float) -> None:
     from arena import engine
 
     with engine.force_cold():
-        result = engine.evaluate(name, proof, "full")
+        result = engine.evaluate(name, proof, "full", request_class="full_check")
     failed = [v for v, info in result.get("compat", {}).items() if not info.get("passed")]
     if failed:
         raise SubmissionError(f"cold compile failed for {name} on {', '.join(failed)}")

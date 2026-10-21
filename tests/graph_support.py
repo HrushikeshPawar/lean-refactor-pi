@@ -41,7 +41,7 @@ class FakeRunCase(unittest.TestCase):
     calls: ClassVar[list] = []
 
     @classmethod
-    def fake_eval(cls, _name, proof, mode, known=None):
+    def fake_eval(cls, _name, proof, mode, known=None, **_kwargs):
         cls.calls.append((proof, mode, sorted(known or {})))
         tokens = len(proof)
         bad_lines = [index for index, line in enumerate(proof.splitlines(), 1) if "bad" in line.split()]

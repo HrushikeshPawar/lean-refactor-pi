@@ -1961,7 +1961,8 @@ class V8AdmissionSmokeTests(unittest.TestCase):
                 [name for name, _reason in order],
                 ["sol_foreground", "full_check", "ds_experiment", "opportunistic"],
             )
-            self.assertEqual(order[1][1], "queued behind sol_foreground")
+            # Before the Sol waiter registers, full_check can be first in line with no free worker.
+            self.assertIn(order[1][1], ("queued behind sol_foreground", "queued: no free worker"))
             self.assertTrue(all(not thread.is_alive() for thread in threads))
 
             busy = entry.slots[0]
@@ -2011,5 +2012,41 @@ class V8AdmissionSmokeTests(unittest.TestCase):
             self.assertEqual(denied["outcome"], "inconclusive")
             self.assertEqual(denied["cause"], "resource")
             self.assertEqual(denied["admission"], "denied")
-            self.assertEqual(lean_session.normalize_request_class("background"), "full_check")
+            self.assertEqual(lean_session.normalize_request_class("background"), "opportunistic")
+
+    def test_v8_denied_request_is_inconclusive_and_never_runs_cold(self):
+        from arena import engine, lean_session
+
+        built = {"path": Path("/p"), "text": "t", "offset": 0, "head": 0, "start_line": 1, "end_line": 1}
+        denied = {
+            "ok": False,
+            "reason": "no room for a Lean worker: memory (1.0 GB available)",
+            "outcome": "inconclusive",
+            "cause": "resource",
+            "admission": "denied",
+        }
+        ok = {"ok": True, "returncode": 0, "output": ""}
+        sent = []
+
+        def request(payload, _wait):
+            sent.append(payload)
+            return ok if len(sent) == 3 else denied
+
+        with (
+            patch.object(lean_session, "configured", return_value=True),
+            patch.object(lean_session, "request", request),
+            patch.object(engine, "_session_request", return_value={}),
+            patch.object(engine, "_run_cold") as cold,
+            patch.object(engine, "candidate_file", return_value=built),
+        ):
+            result = engine.compile_version({}, "proof", "v", "c", request_class="ds_experiment")
+            self.assertEqual(sent[0]["request_class"], "ds_experiment")
+            self.assertEqual((result["outcome"], result["cause"], result["admission"]), ("inconclusive", "resource", "denied"))
+            self.assertFalse(result["passed"])
+            with self.assertRaises(engine.LeanInconclusive):
+                engine.run_lean({}, Path("/p"), "t", request_class="opportunistic")
+            cold.assert_not_called()
+            engine.run_lean({}, Path("/p"), "t")
+            self.assertEqual(sent[-1]["request_class"], "opportunistic")
+            cold.assert_not_called()
 

@@ -473,6 +473,7 @@ class SimRun:
             "fingerprint": engine._fingerprint(str(built["path"])),
             "text": built["text"],
             "display": engine.source_path(self.row),
+            "request_class": "opportunistic",
             "timeout": timeout,
             "header_end": built["head"],
             "prefix_sha": hashlib.sha256(built["text"][: built["head"]].encode()).hexdigest()[:16],

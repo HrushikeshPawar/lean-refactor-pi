@@ -25,6 +25,7 @@ from arena import goalstate, lean_health, lean_session, routes, text
 from arena import text as agent_text
 from arena.engine import (
     ROOT,
+    actor_request_class,
     candidate_file,
     evaluate,
     force_cold,
@@ -2017,11 +2018,12 @@ def record_evaluation(
                             known=_compiled_versions(history, candidate_id, row) if mode == "full" else None,
                             lane=lane,
                             request_class=(
-                                "full_check"
-                                if mode == "full"
-                                else "opportunistic"
+                                ("full_check" if mode == "full" else "opportunistic")
                                 if origin in {"assembly", "golf"} or trigger == "golf"
-                                else None
+                                # a harness-submitted check is promising; a worker's own tool call stays its own class
+                                else "full_check"
+                                if trigger == "auto"
+                                else actor_request_class()
                             ),
                         )
                 except (ValueError, FileNotFoundError) as error:
@@ -2237,7 +2239,7 @@ def _compile_probe(name: str, row: dict, proof: str) -> dict:
     submission_barrier("during_lean", None)
     complete = not _has_hole(row, proof)
     try:
-        return evaluate(name, proof, "fast" if complete else "probe")
+        return evaluate(name, proof, "fast" if complete else "probe", request_class=actor_request_class())
     except (ValueError, FileNotFoundError) as error:
         return {
             "ok": False,
