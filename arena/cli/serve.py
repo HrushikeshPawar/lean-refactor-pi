@@ -64,6 +64,7 @@ def slim_probes(payload: dict, history: list[dict]) -> list[dict]:
         rows.append(
             {
                 "proof_id": identifier,
+                "node": probe.get("node"),
                 "parent": probe.get("parent"),
                 "ts": probe.get("ts"),
                 "route": routes.get(identifier),

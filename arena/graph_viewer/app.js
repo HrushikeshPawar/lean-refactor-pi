@@ -21,8 +21,9 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
 
   function status(node) { return node.status || 'fail'; }
   function best(node) { return node.evaluations.findLast(e => e.mode === 'full' && Object.keys(e.result.compat || {}).length === 3 && Object.values(e.result.compat).every(v => v.passed)) || node.evaluations.at(-1); }
-  function nodeLabel(node) { return `#${node.index} ${node.id.slice(0,8)}`; }
-  function numberForId(id) { return byId.has(id) ? `#${byId.get(id).index}` : pById.has(id) ? `probe ${id.slice(0,6)}` : String(id ?? '?').slice(0,8); }
+  const shortLabel = node => node.node || `#${node.index}`;
+  function nodeLabel(node) { return `${node.node || `#${node.index}`} ${node.id.slice(0,8)}`; }
+  function numberForId(id) { return byId.has(id) ? (byId.get(id).node || `#${byId.get(id).index}`) : pById.has(id) ? (pById.get(id).node || `probe ${id.slice(0,6)}`) : String(id ?? '?').slice(0,8); }
   const isProbe = it => it.kind === 'probe';
   const isScratch = it => it.kind === 'scratch';
   const itemOf = id => byId.get(id) || pById.get(id) || sById.get(id);
@@ -320,7 +321,7 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
       const fill = fillOf(it);
       if (scratch) boxes.push(`<g class="${cls}" ${data_} transform="translate(${p.x},${p.y})"><circle class="hit" r="14"/>${colorBy === 'actor' ? `<path class="actor-ring" fill="none" stroke="${actorColor(actorOf(it))}" d="M0,${-R - 4} L${R + 4},0 L0,${R + 4} L${-R - 4},0Z"/>` : ''}<path class="node-body" fill="${fill}" d="M0,${-R} L${R},0 L0,${R} L${-R},0Z"/></g>`);
       else if (probe) boxes.push(`<g class="${cls}" ${data_} transform="translate(${p.x},${p.y})"><circle class="hit" r="15"/><path class="node-body" fill="${fill}" d="M0,${-R} L${R},0 L0,${R} L${-R},0Z"/></g>`);
-      else boxes.push(`<g class="${cls}" ${data_} transform="translate(${p.x},${p.y})"><circle class="hit" r="${R + 4}"/>${it.origin === 'auto_merge' ? `<circle class="merge-ring" r="${R + 6}"/><text class="merge-badge" x="${R - 1}" y="${-R + 2}">⊕</text>` : ''}<circle class="node-body" r="${R}" fill="${fill}"/><text class="node-number${String(it.index).length > 2 ? ' small' : ''}" text-anchor="middle" dominant-baseline="central">#${esc(it.index)}</text>${it.id === topBest ? `<text class="best-star" x="${-R + 2}" y="${-R + 4}">★</text>` : ''}</g>`);
+      else boxes.push(`<g class="${cls}" ${data_} transform="translate(${p.x},${p.y})"><circle class="hit" r="${R + 4}"/>${it.origin === 'auto_merge' ? `<circle class="merge-ring" r="${R + 6}"/><text class="merge-badge" x="${R - 1}" y="${-R + 2}">⊕</text>` : ''}<circle class="node-body" r="${R}" fill="${fill}"/><text class="node-number${shortLabel(it).length > 3 ? ' small' : ''}" text-anchor="middle" dominant-baseline="central">${esc(shortLabel(it))}</text>${it.id === topBest ? `<text class="best-star" x="${-R + 2}" y="${-R + 4}">★</text>` : ''}</g>`);
     }
     graph.innerHTML = edges.join('') + boxes.join(''); applyView();
     renderChips();
@@ -407,7 +408,7 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
     const root=reference||[...ancestry.nodes].map(id=>byId.get(id)).sort((a,b)=>a.index-b.index)[0];
     return {evaluated,derived,ancestry,reference,root};
   }
-  const goBtn=p=>`<button data-go="${esc(p)}">${esc(byId.get(p)?nodeLabel(byId.get(p)):pById.has(p)?`probe ${p.slice(0,6)}`:p.slice(0,8))}</button>`;
+  const goBtn=p=>`<button data-go="${esc(p)}">${esc(byId.get(p)?nodeLabel(byId.get(p)):pById.has(p)?(pById.get(p).node||`probe ${p.slice(0,6)}`):p.slice(0,8))}</button>`;
   const actorBadge=it=>{const own=actorOf(it),others=[...new Set((it.attempts||[]).map(a=>a.actor_id).filter(a=>a&&a!==own))];return `<span class="route-badge"><i class="sw" data-bg="${actorColor(own)}"></i><b>${esc(actorLabel(own))}</b>${others.length?` <span class="muted">also ${others.map(esc).join(', ')}</span>`:''}</span>`;};
   const routeBadge=id=>{const r=routeById.get(id);return `<span class="route-badge"><i class="sw" data-bg="${routeColor(id)}"></i><b>${esc(id)}</b> ${r?esc(clip(r.label,60)):''}${r?.credited?' <span class="tag good">credited</span>':r?.explored?' <span class="tag">explored</span>':''}</span>`;};
   // Nothing selected: the run at a glance (best path, routes) instead of an empty panel.
@@ -464,7 +465,7 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
       ${node.hypothesis||node.origin==='auto_merge'?`<div class="card hypcard"><h3>Note</h3><p class="hyp">${esc(node.hypothesis||'Deterministic combination of disjoint edits')}</p></div>`:''}
       <div class="card"><h3>Evaluations (${node.evaluations.length})</h3><div class="evals">${evals||'<p class="muted">None yet.</p>'}</div></div>
       <div class="card"><h3>Verification</h3><div class="tags">${verificationHtml(node)}</div>${attemptsHtml(node.attempts,node.evaluations)}${derivationsHtml(node.alternate_derivations,'Alternate derivations')}${experimentsHtml(nodeExperiments(node),'Scratch experiments on this proof')}</div>
-      <div class="card ancard"><h3>Ancestry (${chain.length})</h3><div class="evals">${chain.map(n=>`<div class="eval-line"><button data-go="${esc(n.id)}" class="${n.id===node.id?'primary':''}">#${esc(n.index)}</button><span class="tag ${n.status==='full'?'good':n.status==='fail'?'bad':''}">${esc(status(n))}</span><span>${esc(n.tokens ?? '?')} tok · ${esc(n.heartbeat ?? '?')} hb · ${esc(n.local_proxy?.toFixed?.(2) ?? '—')}</span></div>`).join('')}</div></div></div>`;
+      <div class="card ancard"><h3>Ancestry (${chain.length})</h3><div class="evals">${chain.map(n=>`<div class="eval-line"><button data-go="${esc(n.id)}" class="${n.id===node.id?'primary':''}">${esc(shortLabel(n))}</button><span class="tag ${n.status==='full'?'good':n.status==='fail'?'bad':''}">${esc(status(n))}</span><span>${esc(n.tokens ?? '?')} tok · ${esc(n.heartbeat ?? '?')} hb · ${esc(n.local_proxy?.toFixed?.(2) ?? '—')}</span></div>`).join('')}</div></div></div>`;
     bindExperiments($('detail'));
     $('detail').querySelectorAll('[data-go]').forEach(el=>el.onclick=()=>select(el.dataset.go));
     paintSwatches($('detail'));
@@ -475,7 +476,7 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
     const probe=pById.get(selected),node=byId.get(selected)||probe;if(!node)return;
     if(probe)tab='calls'; // a probe has only its creating call; the other tabs need candidate fields
     const dialog=$('code-dialog');
-    $('code-dialog-body').innerHTML=`<div class="modal-head"><h2>${probe?`Probe ${esc(probe.id.slice(0,8))}`:`${esc(nodeLabel(node))} ${node.origin==='auto_merge'?'⊕ automatic merge':''}`}<span class="muted dsub"> · ${esc(probe?stat(probe):status(node))} · ${esc(node.tokens ?? '?')} tokens · ${esc(node.heartbeat ?? '?')} heartbeats</span></h2><button id="close-code" type="button" aria-label="Close details">✕</button></div>
+    $('code-dialog-body').innerHTML=`<div class="modal-head"><h2>${probe?`${esc(probe.node || 'Probe')} ${esc(probe.id.slice(0,8))}`:`${esc(nodeLabel(node))} ${node.origin==='auto_merge'?'⊕ automatic merge':''}`}<span class="muted dsub"> · ${esc(probe?stat(probe):status(node))} · ${esc(node.tokens ?? '?')} tokens · ${esc(node.heartbeat ?? '?')} heartbeats</span></h2><button id="close-code" type="button" aria-label="Close details">✕</button></div>
       <nav class="dtabs">${(probe?DETAIL_TABS.filter(([id])=>id==='calls'):DETAIL_TABS).map(([id,label])=>`<button type="button" data-dtab="${id}" aria-selected="${id===tab}">${label}</button>`).join('')}</nav><div id="dtab"></div>`;
     $('close-code').onclick=()=>dialog.close();
     $('code-dialog-body').querySelectorAll('[data-dtab]').forEach(b=>b.onclick=()=>openDetail(b.dataset.dtab));
@@ -680,7 +681,7 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
       const rows=points.map(p=>{const t=p.tokens||{};return `<tr><td>${esc(p.number)}</td><td>${esc(money(p.request_usd))}</td><td>${esc(money(p.spent_usd))}</td>${COST_PARTS.map(([k])=>`<td>${esc(t[k] ?? '—')}</td>`).join('')}<td>${p.reuse_pct==null?'—':esc(p.reuse_pct.toFixed(1))+'%'}</td><td>${p.ts?esc(new Date(p.ts*1000).toLocaleTimeString()):'—'}</td></tr>`;}).join('');
       return `<thead><tr><th>Request</th><th>Request $</th><th>Cumulative $</th>${COST_PARTS.map(([,label])=>`<th>${esc(label)} tok</th>`).join('')}<th>Cache hit rate</th><th>Time</th></tr></thead><tbody>${rows}</tbody>`;
     }
-    const rows=points.map((p,i)=>`<tr ${p.candidate_id?`data-candidate="${esc(p.candidate_id)}"`:''}><td>${p.is_reference?'0 (original)':esc(p.number ?? i+1)}</td><td>${p.candidate_id?`#${esc(byId.get(p.candidate_id)?.index ?? '?')} ${p.is_reference?'original proof':esc(p.candidate_id.slice(0,8))}`:'—'}</td><td>${esc(p[spec.key].toFixed(spec.key==='local_proxy'?2:0))}</td><td>${esc(p.status ?? p.mode ?? '—')}</td><td>${esc(p.tokens ?? '—')}</td><td>${esc(p.heartbeat ?? '—')}</td><td>${esc(p.local_proxy?.toFixed?.(2) ?? '—')}</td><td>${p.ts?esc(new Date(p.ts*1000).toLocaleString()):'—'}</td></tr>`).join('');
+    const rows=points.map((p,i)=>`<tr ${p.candidate_id?`data-candidate="${esc(p.candidate_id)}"`:''}><td>${p.is_reference?'0 (original)':esc(p.number ?? i+1)}</td><td>${p.candidate_id?`${esc(byId.has(p.candidate_id) ? shortLabel(byId.get(p.candidate_id)) : '?')} ${p.is_reference?'original proof':esc(p.candidate_id.slice(0,8))}`:'—'}</td><td>${esc(p[spec.key].toFixed(spec.key==='local_proxy'?2:0))}</td><td>${esc(p.status ?? p.mode ?? '—')}</td><td>${esc(p.tokens ?? '—')}</td><td>${esc(p.heartbeat ?? '—')}</td><td>${esc(p.local_proxy?.toFixed?.(2) ?? '—')}</td><td>${p.ts?esc(new Date(p.ts*1000).toLocaleString()):'—'}</td></tr>`).join('');
     return `<thead><tr><th>${esc(spec.xLabel)}</th><th>Candidate</th><th>Value</th><th>Status / mode</th><th>Tokens</th><th>Heartbeats</th><th>Proxy</th><th>Time</th></tr></thead><tbody>${rows}</tbody>`;
   }
   function openChart(index) {
@@ -747,7 +748,7 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
   function nodeByRef(ref) {
     if (typeof ref !== 'string' || !ref) return null;
     for (const key of [ref, ref.split('.')[0]]) {
-      const n = data.nodes.find(x => x.node === key || x.id === key || x.proof_id === key || `#${x.index}` === key || `n${x.index}` === key);
+      const n = data.nodes.find(x => x.node === key || x.id === key || x.proof_id === key || `#${x.index}` === key);
       if (n) return n;
     }
     return null;
