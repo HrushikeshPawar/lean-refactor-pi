@@ -6,6 +6,7 @@ import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promi
 import { tmpdir } from "node:os";
 import { dirname, resolve, relative, sep } from "node:path";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
+import { carriesProgress, StreamWatchdog } from "./watchdog.ts";
 import { RawArguments, repairMalformedToolArguments } from "./rawargs.ts";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { nearestToolName, normalizeToolArguments, requireToolArguments } from "./toolnames.ts";
@@ -17,7 +18,7 @@ import { cacheAlarm, cacheHitPct, callCost, limitReached, limitUsd, spendFooter 
 import { numbers as textNumbers, render as renderText } from "./text.ts";
 import { classifyFailure, nextWait } from "./outage.ts";
 import { applyToolTurnEffort, requestDetailedSummary } from "./thinking.ts";
-import { installDispatchGate, pythonDispatch, readSharedSpend, settleProviderUsage, type SharedSpend } from "./provider_gate.ts";
+import { abortActiveStream, installDispatchGate, pythonDispatch, readSharedSpend, settleProviderUsage, type SharedSpend } from "./provider_gate.ts";
 import { renderReply } from "./reply.ts";
 import { executableTools, loadToolSchemas, parametersFor } from "./tool_schema.ts";
 
@@ -91,6 +92,15 @@ export default async function arenaExtension(pi: ExtensionAPI) {
   let limitToolsLeft = 0;
   // The provider request currently open: opened in before_provider_request, closed by the call's settle row.
   let pendingRequest: string | undefined;
+  // Aborts a request whose stream shows no assistant progress for ARENA_STREAM_IDLE_S (0 disables). Armed per
+  // request, not for compaction summaries (they emit no message events). Aborting the HTTP stream ends the turn
+  // with a retryable provider error, which message_end settles as unknown usage.
+  const watchdog = new StreamWatchdog(Number(process.env.ARENA_STREAM_IDLE_S ?? 180) * 1000, idleSeconds => {
+    console.error(`[arena-stream] provider stream idle ${idleSeconds}s; aborted`); // not-model-facing: operator diagnostic log.
+    appendTrace({ kind: "stream_idle", id: pendingRequest ?? null, idle_s: idleSeconds });
+    // Abort the HTTP stream, not the agent run: an agent abort skips agent_before_settle, so Sol would never continue.
+    if (!abortActiveStream(`provider stream timed out: no tokens for ${idleSeconds}s`)) console.error("[arena-stream] no open provider stream to abort"); // not-model-facing: operator diagnostic log.
+  });
   let compactionRequests: string[] | undefined;
   let openAttempt: string | undefined;
   let previousFailed: string | undefined;
@@ -267,6 +277,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     limitHit = sharedStopped || limitReached(spentUsd, limit);
     limitToolsLeft = 0;
     pendingRequest = undefined;
+    watchdog.clear();
     compactionRequests = undefined;
     previousFailed = undefined;
     const latest = costEvents().filter(item => item.kind === "control").at(-1);
@@ -312,8 +323,10 @@ export default async function arenaExtension(pi: ExtensionAPI) {
 
   // Every provider request is journaled here. Pi runs extension hook errors to completion without failing
   // the request. The captured provider fetch enforces dispatch ordering instead.
-  pi.on("before_provider_request", (event, ctx) => {
+  pi.on("before_provider_request", async (event, ctx) => {
     if (!active || !runDirectory) return;
+    // A request still open that is not a compaction summary never got its message_end: its cost is unknown.
+    if (pendingRequest && !compactionRequests) await settleOrphan(ctx, "superseded", "no message_end");
     let payload = event.payload;
     const configuredModel = configuredModels.models?.[process.env.ARENA_MODEL ?? ""];
     payload = requestDetailedSummary(applyToolTurnEffort(payload, configuredModel?.toolTurnReasoningEffort));
@@ -330,6 +343,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     pendingRequest = id;
     compactionRequests?.push(id);
+    if (!compactionRequests) watchdog.arm();
     openAttempt = id;
     turn += 1;
     requestId = id;
@@ -415,9 +429,23 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     }
   }
 
-  pi.on("message_start", event => { if (event.message.role === "assistant") rawArguments.reset(); });
+  // Close the open request when its message_end will never arrive. The usage is unknown, never $0.
+  async function settleOrphan(ctx: ExtensionContext, stopReason: string, errorMessage: string) {
+    const id = pendingRequest;
+    if (!id || !runDirectory || !runId) return;
+    const covered = compactionRequests ?? [id];
+    pendingRequest = undefined;
+    watchdog.clear();
+    compactionRequests = undefined;
+    await settle(id, undefined, { response_id: null }, ctx, 0, covered);
+    appendTrace({ kind: "response", id, stop_reason: stopReason, error_message: errorMessage });
+    previousFailed = id;
+  }
+
+  pi.on("message_start", event => { if (event.message.role === "assistant") { rawArguments.reset(); watchdog.touch(); } });
   pi.on("message_update", event => {
     const update = event.assistantMessageEvent;
+    if (carriesProgress(update)) watchdog.touch();
     if (update.type === "toolcall_start") {
       rawArguments.start(update.contentIndex, (update.partial.content[update.contentIndex] as unknown as { partialJson?: string } | undefined)?.partialJson);
     } else if (update.type === "toolcall_delta") rawArguments.delta(update.contentIndex, update.delta);
@@ -429,6 +457,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     rawArguments.reset();
     const id = pendingRequest ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     pendingRequest = undefined;
+    watchdog.clear();
     const blocks = deliveredBlocks(message.content);
     const delivered = { kind: "response", id, content: blocks,
       text: blocks.filter(block => block.type === "text").map(block => String(block.text ?? "")).join(""),
@@ -458,6 +487,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
       { source: "compaction", session_entry_id: event.compactionEntry.id }, ctx, 0, covered);
     compactionRequests = undefined;
     pendingRequest = undefined;
+    watchdog.clear();
     if (active && runId) await campaign("reset_delivered");
     trimmer.forget();
     void injectMemory();
@@ -468,6 +498,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     if (last !== undefined) await settle(last, undefined, { source: "compaction_failed" }, ctx, 0, covered);
     compactionRequests = undefined;
     pendingRequest = undefined;
+    watchdog.clear();
     // A cancelled compaction (the empty-history skip in session_before_compact, or an abort) is not a failure.
     if (event.aborted) return;
     if (costJournal) appendCost({ kind: "compaction_failed" });
@@ -513,6 +544,8 @@ export default async function arenaExtension(pi: ExtensionAPI) {
   }
 
   pi.on("session_shutdown", async (_event, ctx) => {
+    watchdog.clear();
+    await settleOrphan(ctx, "shutdown", "no message_end");
     const reportPath = process.env.ARENA_BUDGET_REPORT_PATH;
     if (!reportPath) return;
     if (runDirectory) {

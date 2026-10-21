@@ -8,6 +8,7 @@ import queue
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -426,6 +427,80 @@ class _HeldChild:
 
     def process_identity(self):
         return {"pid": id(self), "pgid": id(self), "start_id": f"fixture-{id(self)}"}
+
+
+class AwaitTimeoutTests(unittest.TestCase):
+    def test_await_returns_a_timeout_with_quiet_job_info_and_a_wait_end_row(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _seed_parent(directory)
+            child = _HeldChild()
+            fresh = orchestration.delegate(
+                directory, operation_id="timeout-worker", run_id="run-1", actor_id="sol",
+                session_id="sol-session", task="try a route", scope="proof", anchor={"node": "n1"},
+                open_child=lambda _launch: child,
+            )
+            try:
+                with patch.dict("os.environ", {"ARENA_AWAIT_TIMEOUT_S": "0.3"}), \
+                        patch.object(orchestration, "reconcile", return_value={"status": "running", "generation": "fixture"}):
+                    started = time.monotonic()
+                    reply = orchestration.await_results(directory, actor_id="sol")
+                    elapsed = time.monotonic() - started
+                self.assertGreaterEqual(elapsed, 0.25)
+                self.assertLess(elapsed, 5)
+                self.assertTrue(reply["ok"])
+                self.assertEqual(reply["wake_reason"], "timeout")
+                self.assertEqual(reply["events"], [])
+                self.assertEqual([item["job_id"] for item in reply["quiet_jobs"]], [fresh["job_id"]])
+                self.assertIn("No findings in 0 minutes", reply["message"])
+                self.assertIn(fresh["job_id"], reply["message"])
+                history = orchestration._history(directory)
+                started_rows = [row for row in history if row.get("kind") == "wait"]
+                ended = [row for row in history if row.get("kind") == "wait_end"]
+                self.assertEqual([(row["wait_id"], row["wake_reason"]) for row in ended],
+                                 [(started_rows[0]["wait_id"], "timeout")])
+            finally:
+                child._chunks.put(None)
+                orchestration.join_activation(fresh["activation_id"], timeout=2)
+
+
+class V8OrphanSettlementTests(unittest.TestCase):
+    def test_absent_worker_open_request_settles_unknown_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _seed_parent(directory)
+            child = _HeldChild()
+            child.shutdown = lambda: None
+            child.write = lambda data: child.written.extend(data)
+            launches = []
+
+            def open_child(launch):
+                launches.append(launch)
+                return child
+
+            started = orchestration.delegate(
+                directory, operation_id="op-orphan", run_id="run-1", actor_id="sol", session_id="sol-session",
+                task="hang", scope="proof", anchor={"node": "n1"}, open_child=open_child,
+            )
+            session = launches[0]["env"]["ARENA_SESSION_ID"]
+            attempt = {"request_id": "req-hung", "attempt_id": "att-hung", "run_id": "run-1",
+                       "actor_id": launches[0]["env"]["ARENA_ACTOR_ID"], "session_id": session,
+                       "job_id": started["job_id"], "generation": orchestration._control_generation(directory)}
+            dispatched = run_control.begin_dispatch(directory, attempt, lambda: None)
+            self.assertTrue(dispatched["admitted"], dispatched)
+            self.assertTrue(orchestration._request_uncertain(directory, session))
+            orchestration.cancel(directory, operation_id="op-cancel-orphan", run_id="run-1", actor_id="sol",
+                                 session_id="sol-session", job_id=started["job_id"])
+            child.exit_on_eof = False
+            child.absent = True
+            orchestration.observe_exit(directory, started["activation_id"])
+            self.assertFalse(orchestration._request_uncertain(directory, session))
+            settlements = [r for r in run_control._control_rows(directory) if r.get("kind") == "settlement"]
+            self.assertEqual([(r["covered_request_ids"], r["state"]) for r in settlements], [(["req-hung"], "unknown")])
+            delegation = next(d for d in orchestration._delegations(directory) if d["activation_id"] == started["activation_id"])
+            orchestration._settle_orphans(directory, delegation)
+            again = [r for r in run_control._control_rows(directory) if r.get("kind") == "settlement"]
+            self.assertEqual(len(again), 1)
 
 
 class V8WorkerSmokeTests(unittest.TestCase):
@@ -1250,9 +1325,9 @@ class V8WorkerSmokeTests(unittest.TestCase):
             replies = []
             real_wait = orchestration._interest.wait
 
-            def on_wait():
+            def on_wait(*args):
                 registered.set()
-                return real_wait()
+                return real_wait(*args)
 
             with patch.object(orchestration._interest, "wait", side_effect=on_wait):
                 waiter = threading.Thread(target=lambda: replies.append(await_actor("sol", sol["next_cursor"])), daemon=True)
@@ -1330,9 +1405,9 @@ class V8WorkerSmokeTests(unittest.TestCase):
                 target=lambda: check_replies.append(await_actor("sol", finished["next_cursor"])),
                 daemon=True,
             )
-            def on_check_wait():
+            def on_check_wait(*args):
                 check_registered.set()
-                return real_wait()
+                return real_wait(*args)
 
             with patch.object(orchestration._interest, "wait", side_effect=on_check_wait):
                 check_waiter.start()

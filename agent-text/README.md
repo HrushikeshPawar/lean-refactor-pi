@@ -228,6 +228,8 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/await_results.cursor` | 13 | Tool replies | when the matching tool result occurs |
 | `replies/await_results.identity` | 7 | Tool replies | when the matching tool result occurs |
 | `replies/await_results.job_ids` | 17 | Tool replies | when the matching tool result occurs |
+| `replies/await_results.timeout` | 18 | Tool replies | when the matching tool result occurs |
+| `replies/await_results.timeout_job` | 11 | Tool replies | when the matching tool result occurs |
 | `replies/cancel.actor` | 6 | Tool replies | when the matching tool result occurs |
 | `replies/cancel.identity` | 13 | Tool replies | when the matching tool result occurs |
 | `replies/cancel.job` | 5 | Tool replies | when the matching tool result occurs |
@@ -430,7 +432,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/tools.try_timeout` | 2 | Tool replies | when the matching tool result occurs |
 | `skill/SKILL` | 155 | Agent skill instructions | once per run |
 | `skill/lean-facts` | 137 | Agent skill instructions | once per run |
-| `tools/await_results.description` | 20 | Model tool definitions | every request |
+| `tools/await_results.description` | 30 | Model tool definitions | every request |
 | `tools/await_results.params.cursor` | 16 | Model tool definitions | every request |
 | `tools/await_results.params.job_ids` | 12 | Model tool definitions | every request |
 | `tools/cancel.description` | 13 | Model tool definitions | every request |

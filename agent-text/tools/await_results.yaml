@@ -1,4 +1,4 @@
-description: "Wait for retained worker or verification evidence without a model request. Returns events and a wake_reason. no_pending_work means continue reasoning."
+description: "Wait for retained worker or verification evidence without a model request. Returns events and a wake_reason, after at most {await_timeout_minutes} minutes. no_pending_work means continue reasoning; timeout means nothing new arrived."
 params:
   cursor: "Use only the next_cursor returned by a previous await_results; never the one from jobs. Normally omit."
   job_ids: "Optional jobs to wait for. Omit to receive all your delegated jobs."

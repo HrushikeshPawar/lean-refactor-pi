@@ -123,6 +123,8 @@ def validate(config: dict) -> dict:
             raise ModelConfigError(f"models.yaml: missing {key}")
     _number("", "provider_timeout_ms", config["provider_timeout_ms"], integer=True)
     _number("", "outage_limit_ms", config["outage_limit_ms"], integer=True)
+    if "stream_idle_s" in config:
+        _number("", "stream_idle_s", config["stream_idle_s"])
     retry = config["retry"]
     if not isinstance(retry, dict):
         raise ModelConfigError("models.yaml: retry must be a map")

@@ -11,7 +11,9 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import os
 import threading
+import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
@@ -27,6 +29,8 @@ _owned: dict[str, object] = {}
 _live: dict[str, dict] = {}
 _openers: dict[str, object] = {}
 _stop_sent: set[str] = set()
+# Bound on waiting for an aborted worker's own settlement before its pipe is closed.
+_ABORT_SETTLE_SECONDS = 3.0
 _io_locks: dict[str, threading.RLock] = {}
 _launch_gates = threading.local()
 _readers_guard = threading.Lock()
@@ -309,7 +313,7 @@ def _append_ownership(directory: Path, delegation: dict, **fields) -> None:
     )
 
 
-def _request_uncertain(directory: Path, session_id: str | None = None) -> bool:
+def _uncertain_requests(directory: Path, session_id: str | None = None) -> list[dict]:
     rows = run_control._control_rows(directory)
     coverage = run_control._apply_coverage(rows)
     settled = coverage["covered"]
@@ -320,12 +324,43 @@ def _request_uncertain(directory: Path, session_id: str | None = None) -> bool:
         if session_id is not None and row.get("session_id") != session_id:
             continue
         latest[row["attempt_id"]] = row
-    return any(
-        row.get("request_id") not in settled
+    return [
+        row for row in latest.values()
+        if row.get("request_id") not in settled
         and row.get("status") not in ("rejected_before_dispatch", "failed_before_start")
         and row.get("sent") is not False
-        for row in latest.values()
-    )
+    ]
+
+
+def _request_uncertain(directory: Path, session_id: str | None = None) -> bool:
+    return bool(_uncertain_requests(directory, session_id))
+
+
+def _settle_orphans(directory: Path, delegation: dict) -> None:
+    """A confirmed-absent worker will never write its message_end: settle its open requests as unknown.
+
+    Runs outside the control lock (settle_usage takes it). A request that already has a settlement is skipped,
+    and settle_usage rejects a second one, so a late settlement from the child cannot be double counted.
+    """
+    session_id = delegation.get("worker_session_id")
+    if not session_id:
+        return
+    for row in _uncertain_requests(directory, session_id):
+        request_id = row["request_id"]
+        try:
+            run_control.settle_usage(directory, {
+                "settlement_id": f"settle:{request_id}",
+                "covered_request_ids": [request_id],
+                "state": "unknown",
+                "usage": None,
+                "run_id": row.get("run_id"),
+                "actor_id": row.get("actor_id"),
+                "session_id": session_id,
+                **({"job_id": row["job_id"]} if row.get("job_id") else {}),
+                "transport": "absent_without_message_end",
+            })
+        except OperationRejected:
+            continue
 
 
 def _set_run(directory: Path, status: str, generation: str | None = None) -> None:
@@ -717,6 +752,7 @@ def reconcile(directory: Path, *, inspect, signal, open_child) -> dict:
                 else:
                     _append_state(directory, delegation, "recovering", occupies_slot=True,
                                   recovery_state=original, reason="child_absent")
+            _settle_orphans(directory, delegation)
         open_sessions = set()
         for delegation, _original in pending:
             if _live_ownership(_ownership_rows(directory, delegation["activation_id"])) is None:
@@ -828,6 +864,7 @@ def observe_exit(directory: Path, activation_id: str, *, expected_transport=None
         _append_state(directory, delegation, state, occupies_slot=False, reason="confirmed_absent")
         if activation_id in _live:
             _live[activation_id]["state"] = state
+    _settle_orphans(directory, delegation)
     _fill_slots(directory)
     return True
 
@@ -847,6 +884,13 @@ def _stop_activation(directory: Path, delegation: dict, *, expected_transport=No
                 snapshot = _activation_view(directory, delegation)
                 if snapshot["state"] == "cancelling":
                     _write_prompt(transport, cancel_lines(snapshot["command_id"] or activation_id))
+                    # Pi's aborted message_end settles the open request; give it a moment before the pipe closes.
+                    deadline = time.monotonic() + _ABORT_SETTLE_SECONDS
+                    session_id = delegation.get("worker_session_id")
+                    absent = getattr(transport, "confirmed_absent", None)
+                    while (time.monotonic() < deadline and _request_uncertain(directory, session_id)
+                           and not (absent is not None and absent())):
+                        time.sleep(0.05)
                 shutdown = getattr(transport, "shutdown", None)
                 if shutdown is not None:
                     shutdown()
@@ -1525,6 +1569,36 @@ def await_results(
                                 "wake_reason": result.get("wake_reason") or result.get("reason") or "interrupted"})
 
 
+def await_timeout_s() -> float:
+    """The longest one await_results blocks. ARENA_AWAIT_TIMEOUT_S overrides numbers.yaml."""
+    override = os.environ.get("ARENA_AWAIT_TIMEOUT_S")
+    return float(override) if override else float(text.numbers()["await_timeout_minutes"]) * 60
+
+
+def _timeout_reply(directory: Path, actor_id: str, acked: set[str], job_ids: list[str] | None) -> dict:
+    """Nothing arrived within the limit: an ok result naming each live job and how long it has been quiet."""
+    result = _commit_delivery(directory, actor_id, [], acked, wake_reason="timeout", job_ids=job_ids)
+    if not result.get("ok"):
+        return result
+    now = time.time()
+    history = _history(directory)
+    quiet = []
+    for job in _selected_jobs(directory, job_ids):
+        if job["state"] not in _live_states:
+            continue
+        stamps = [row.get("ts") for row in history
+                  if row.get("job_id") == job["job_id"] and isinstance(row.get("ts"), (int, float))]
+        stamps += [row["ts"] for row in _job_rows(directory, job["job_id"]) if isinstance(row.get("ts"), (int, float))]
+        idle_s = round(max(0.0, now - max(stamps))) if stamps else None
+        quiet.append({"job_id": job["job_id"], "state": job["state"], "quiet_s": idle_s})
+    result["quiet_jobs"] = quiet
+    items = [text.render("replies/await_results.timeout_job", job_id=item["job_id"], state=item["state"],
+                         quiet=round((item["quiet_s"] or 0) / 60)) for item in quiet]
+    result["message"] = text.render("replies/await_results.timeout", minutes=round(await_timeout_s() / 60),
+                                    jobs="; ".join(items) or "none")
+    return result
+
+
 def _await_results(directory, actor_id, cursor, job_ids, cancel_event, blocked) -> dict:
     if not actor_id:
         return _reject("", "identity", hint="replies/await_results.identity")
@@ -1532,6 +1606,7 @@ def _await_results(directory, actor_id, cursor, job_ids, cancel_event, blocked) 
         not isinstance(job_ids, list) or not all(isinstance(item, str) and item for item in job_ids)
     ):
         return _reject("", "job_ids", hint="replies/await_results.job_ids")
+    deadline = time.monotonic() + await_timeout_s()
     with run_control.watch_directory(directory) as watch:
         while True:
             with run_control.control_lock(directory):
@@ -1554,6 +1629,8 @@ def _await_results(directory, actor_id, cursor, job_ids, cancel_event, blocked) 
                     stale = any(job["state"] in _live_states for job in _selected_jobs(directory, job_ids))
                     return _commit_delivery(directory, actor_id, [], acked, wake_reason="no_pending_work",
                                             job_ids=job_ids, reason="recovery_required" if stale else None)
+                if time.monotonic() >= deadline:
+                    return _timeout_reply(directory, actor_id, acked, job_ids)
                 with _interest:
                     if not watch.available:
                         return {**_reject("", "notification_unavailable", "notification_unavailable"),
@@ -1565,7 +1642,7 @@ def _await_results(directory, actor_id, cursor, job_ids, cancel_event, blocked) 
             with _interest:
                 if _epoch != seen:
                     continue
-                _interest.wait()
+                _interest.wait(max(0.0, deadline - time.monotonic()))
 
 
 def _journal_charges(journals: list[dict], sessions: list[dict]) -> list[dict]:

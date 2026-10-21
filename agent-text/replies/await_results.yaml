@@ -1,3 +1,5 @@
 cursor: "Unknown cursor. Use only the next_cursor of a previous await_results, or omit it."
 job_ids: "job_ids must be a list of job id strings; omit it to wait for all your jobs."
 identity: "The call had no usable actor identity."
+timeout: "No findings in {minutes} minutes. Still running: {jobs}. Wait again, or cancel a job that has gone quiet."
+timeout_job: "{job_id} ({state}, {quiet} min since its last finding or state change)"

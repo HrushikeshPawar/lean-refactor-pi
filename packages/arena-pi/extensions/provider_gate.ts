@@ -52,6 +52,17 @@ export type DispatchOpen = (
   invoke: () => Promise<unknown>,
 ) => Promise<unknown>;
 
+let activeStream: AbortController | undefined;
+
+// Abort the provider stream opened most recently in this process; true when one was open.
+export function abortActiveStream(reason: string): boolean {
+  const controller = activeStream;
+  activeStream = undefined;
+  if (!controller || controller.signal.aborted) return false;
+  controller.abort(new Error(reason));
+  return true;
+}
+
 export function guardProvider(input: {
   providerId: string;
   api: string;
@@ -81,7 +92,13 @@ export function guardProvider(input: {
           sessionId: current.sessionId,
           ...(current.jobId ? { jobId: current.jobId } : {}),
           ...(current.generation ? { generation: current.generation } : {}),
-        }, () => inner(request, init));
+        }, () => {
+          // The stream watchdog aborts only this HTTP stream: Pi then sees a provider error and retries.
+          const controller = new AbortController();
+          activeStream = controller;
+          const signal = init?.signal ? AbortSignal.any([init.signal, controller.signal]) : controller.signal;
+          return inner(request, { ...init, signal });
+        });
       };
       return input.stream(model, context, { ...options, fetch });
     },
