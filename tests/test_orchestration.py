@@ -1419,6 +1419,26 @@ class _OwnedChild:
 
 
 class V8RecoverySmokeTests(unittest.TestCase):
+    def test_unknown_settlement_ends_request_uncertainty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _seed_parent(directory)
+            _request(directory, "req-u", "sol", "job-1")
+            run_control._append_control(directory, {
+                "schema_version": run_control.SCHEMA_VERSION, "kind": "dispatch_intent", "event_id": "e1",
+                "attempt_id": "att-u", "request_id": "req-u", "run_id": "run-1", "actor_id": "sol",
+                "session_id": "sol-session", "status": "dispatch_uncertain", "sent": "uncertain",
+            })
+            self.assertTrue(orchestration._request_uncertain(directory, "sol-session"))
+            run_control.settle_usage(directory, {
+                "settlement_id": "unknown:req-u", "run_id": "run-1", "actor_id": "sol",
+                "session_id": "sol-session", "covered_request_ids": ["req-u"],
+                "state": "unknown", "irreconcilable": True,
+            })
+            self.assertEqual(run_control.read_state(directory)["unknown_requests"], ["req-u"])
+            self.assertFalse(orchestration._request_uncertain(directory, "sol-session"))
+            self.assertFalse(orchestration._request_uncertain(directory))
+
     def test_v8_owned_child_reconciliation(self):
         with tempfile.TemporaryDirectory() as tmp:
             ambiguous = Path(tmp)
@@ -1638,28 +1658,12 @@ class V8RecoverySmokeTests(unittest.TestCase):
             }
             finished = orchestration.reconcile(directory, inspect=inspect, signal=signal, open_child=open_child)
             self.assertEqual(signalled, [second_id["pgid"]])
-            self.assertEqual(finished["replacements"], 0)
-            self.assertEqual(len(launches), 2)
-            self.assertEqual(finished["status"], "recovering")
-            released = orchestration.jobs(directory)
-            gone = next(
-                item for job in released["jobs"] for item in job["activations"] if item["activation_id"] == activation_b
-            )
-            self.assertIn(gone["state"], ("recovering", "failed"))
-            self.assertNotEqual(gone["state"], "completed")
-            self.assertTrue(gone["occupies_slot"])
-
-            self.assertIn("req-b", run_control.read_state(directory)["unknown_requests"])
-            self.assertTrue(orchestration._request_uncertain(directory, session_b))
-            run_control.settle_usage(directory, {
-                "settlement_id": "known-b", "reconciles": "unknown:req-b", "run_id": "run-1",
-                "actor_id": worker_b, "session_id": session_b, "covered_request_ids": ["req-b"],
-                "state": "known", "amount": "0.01", "usage": {"cost": {"total": "0.01"}},
-            })
-            resumed = orchestration.reconcile(directory, inspect=inspect, signal=signal, open_child=open_child)
-            self.assertEqual(resumed["status"], "running")
-            self.assertEqual(resumed["replacements"], 1)
+            self.assertEqual(finished["replacements"], 1)
             self.assertEqual(len(launches), 3)
+            self.assertEqual(finished["status"], "running")
+            self.assertIn("req-b", run_control.read_state(directory)["unknown_requests"])
+            self.assertFalse(orchestration._request_uncertain(directory, session_b))
+            resumed = finished
             self.assertIsNone(run_control._fence_reason(
                 run_control._control_rows(directory), {"generation": resumed["generation"]},
             ))

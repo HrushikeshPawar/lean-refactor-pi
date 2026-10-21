@@ -599,9 +599,9 @@ def _fence_reason(rows: list[dict], attempt: dict) -> str | None:
         if row.get("kind") in ("dispatch_intent", "dispatch"):
             attempts[row["attempt_id"]] = row
     coverage = _apply_coverage(rows)
-    known = coverage["covered"] - set(coverage["unknown"])
     if any(
-        row.get("status") == "dispatch_uncertain" and row.get("request_id") not in known for row in attempts.values()
+        row.get("status") == "dispatch_uncertain" and row.get("request_id") not in coverage["covered"]
+        for row in attempts.values()
     ):
         return "recovery_required"
     generation = next(

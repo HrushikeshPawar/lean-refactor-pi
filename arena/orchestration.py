@@ -304,14 +304,7 @@ def _append_ownership(directory: Path, delegation: dict, **fields) -> None:
 def _request_uncertain(directory: Path, session_id: str | None = None) -> bool:
     rows = run_control._control_rows(directory)
     coverage = run_control._apply_coverage(rows)
-    known = coverage["covered"] - set(coverage["unknown"])
-    if any(
-        row.get("kind") == "settlement"
-        and (session_id is None or row.get("session_id") == session_id)
-        and set(row.get("covered_request_ids") or []).intersection(coverage["unknown"])
-        for row in rows
-    ):
-        return True
+    settled = coverage["covered"]
     latest: dict[str, dict] = {}
     for row in rows:
         if row.get("kind") not in ("dispatch_intent", "dispatch") or not row.get("attempt_id"):
@@ -320,7 +313,7 @@ def _request_uncertain(directory: Path, session_id: str | None = None) -> bool:
             continue
         latest[row["attempt_id"]] = row
     return any(
-        row.get("request_id") not in known
+        row.get("request_id") not in settled
         and row.get("status") not in ("rejected_before_dispatch", "failed_before_start")
         and row.get("sent") is not False
         for row in latest.values()
