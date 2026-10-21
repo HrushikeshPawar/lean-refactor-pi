@@ -4,7 +4,7 @@
 
 **Blocked by:** 16: Order candidate submission against the shared stop
 
-**Status:** needs-review
+**Status:** done
 
 **Branch:** `v8/17-cold-outcomes`
 
@@ -38,12 +38,20 @@
 Use one focused smoke. This selector is **proposed**, not an already-passing test. Reuse or extend the named existing case when possible; if the module/class is new, add only the boundary smoke needed for this journey. No tests collected is not a pass.
 
 ```bash
-uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_campaign.py::ColdVerificationTests::test_v8_inconclusive_cold_uses_certified_fallback
+uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_cold_outcomes.py tests/test_cold_evidence.py
 ```
 
 Expected: the named behavior check passes with no actual provider, Pi or Lean process. Aim for seconds and at most 60 seconds. No per-ticket full suite or slow suite.
 
 **Deferred to final E2E:** Actual cold compiler failure, timeout and all-pin acceptance. See the shared [final E2E checklist](../final-e2e.md).
+
+## Review closure
+
+Every submitted candidate now requires independent all-pin cold acceptance, including non-session candidates. Cold cache/check identity binds exact submitted bytes, required version/commit pins, evaluator and benchmark context, and the recorded measurement. Snapshot bytes must match their committed admission hash or legacy content-derived proof identity. Stale bytes/context cannot inherit certification. Same-candidate locking serializes retry decisions; durable starts and terminal records share attempt identity, so an interrupted checker consumes its original attempt before the bounded retry. Health trips, missing snapshots and context failures retain inconclusive evidence. Fallback uses only an eligible matching certified proof; no-certified results remove stale submission output. Export retains the exact certified bytes.
+
+Engine classification now distinguishes target proof/validity errors from wrapper measurement, prefix context, timeout, memory denial and worker failure. Resource exhaustion does not mask an independent genuine proof diagnostic. Graph, tool and dashboard projections retain inconclusive outcomes and causes rather than reporting an unconfirmed check as a failed proof. General provider/evaluation transport lifecycle remains outside this cold-check slice.
+
+Final focused check included the two dependency-light cold modules, `tests/test_campaign.py::ColdVerificationTests`, and `tests/test_scratch_promotion.py`: **6 passed, 18 subtests passed in 0.58s**. The legacy campaign module needed the already-installed UV tool environment on `PYTHONPATH` because the project environment lacks Rich/Cyclopts; no dependencies were installed. Verify above maps the fast gate to standalone cold modules that collect directly in the existing project environment. Ruff passed for changed runtime modules/new tests, and dashboard JavaScript syntax passed. The existing unrelated mutable class-attribute warning in `tests/test_campaign.py` remains unchanged. Independent review prompted the snapshot-identity and positioned-resource corrections; both are covered by the focused evidence checks. No actual provider, Pi or Lean process ran. Real cold compilation/all-pin acceptance and the broad suite remain final E2E coverage. Ticket 18 was not started.
 
 ---
 
