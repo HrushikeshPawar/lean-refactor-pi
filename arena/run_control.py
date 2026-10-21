@@ -1041,117 +1041,132 @@ def settle_usage(directory: Path, settlement: dict) -> dict:
 
 
 def _submission_identity(attempt: dict) -> dict:
-    return {
-        "proof_id": attempt.get("proof_id"),
-        "proof_sha256": attempt.get("proof_sha256"),
-        "authorization": attempt.get("authorization"),
-        "inputs": attempt.get("inputs"),
-    }
+    # Every authorization field, owner and check intent belongs to this invocation.
+    return {key: value for key, value in attempt.items() if key != "operation_id"}
 
 
 def _submitted_match(rows: list[dict], attempt: dict) -> dict | None:
-    identity = _submission_identity(attempt)
-    found = None
-    for row in rows:
-        if row.get("kind") != "candidate_submission" or row.get("status") != "submitted":
-            continue
-        if _submission_identity(row) == identity:
-            found = row
-    return found
+    receipt = _receipt(rows, attempt["operation_id"])
+    if receipt is None or receipt.get("status") != "committed":
+        return None
+    return next(
+        (
+            row
+            for row in rows
+            if row.get("kind") == "candidate_submission" and row.get("operation_id") == attempt["operation_id"]
+        ),
+        None,
+    )
 
 
 def _submit_locked(directory: Path, attempt: dict) -> dict:
-    """Admit one exact candidate while the caller holds the control lock.
-
-    Construction stays outside this section. The stop check and the candidate
-    record commit together. A matching submission stays admitted after a later stop.
-    """
+    """Commit exact submission and check intent before stop, or replay that invocation."""
     required = ("operation_id", "run_id", "actor_id", "session_id", "proof_id", "proof_sha256", "authorization")
-    missing = [key for key in required if not attempt.get(key)]
-    if missing:
+    if any(not attempt.get(key) for key in required):
         raise OperationRejected("invalid_input", str(attempt.get("operation_id") or ""))
     submission_barrier("before_submission", directory)
-    rows = _control_rows(directory)
+    rows = _ensure_threshold_stop(directory, _control_rows(directory))
+    rows = _ensure_accounting_failures(directory, rows)
     identity = _submission_identity(attempt)
     digest = argument_digest(identity)
-    prior = _submitted_match(rows, attempt)
-    if prior is not None:
-        submission_barrier("after_submission", directory)
+    receipt = _receipt(rows, attempt["operation_id"])
+    if receipt is not None:
+        if receipt.get("argument_digest") != digest:
+            return {
+                "ok": False,
+                "status": "operation_conflict",
+                "category": "operation_conflict",
+                "operation_id": attempt["operation_id"],
+            }
+        prior = _submitted_match(rows, attempt)
+        if prior is None:
+            refused = receipt.get("status") == "committed" and any(
+                row.get("kind") == "candidate_unsubmitted" and row.get("operation_id") == attempt["operation_id"]
+                for row in rows
+            )
+            return {
+                "ok": False,
+                "status": "run_stopped" if refused else "submission_incomplete",
+                "category": "run_stopped" if refused else "submission_incomplete",
+                "operation_id": attempt["operation_id"],
+            }
         return {
             "ok": True,
             "status": "submitted",
             "reused": True,
-            "operation_id": prior.get("operation_id"),
+            "operation_id": attempt["operation_id"],
             "proof_id": attempt["proof_id"],
             "evaluation": prior.get("evaluation"),
+            "receipt": receipt,
         }
     if any(row.get("kind") == "run_stop" for row in rows):
-        if not any(
-            row.get("kind") == "candidate_unsubmitted" and _submission_identity(row) == identity for row in rows
-        ):
-            _append_control(
-                directory,
+        def refuse(writer):
+            writer.evidence.append(_append_control(directory,
                 {
                     "schema_version": SCHEMA_VERSION,
                     "kind": "candidate_unsubmitted",
                     "event_id": uuid.uuid4().hex,
                     "operation_id": attempt["operation_id"],
-                    "run_id": attempt["run_id"],
-                    "actor_id": attempt["actor_id"],
-                    "session_id": attempt["session_id"],
                     "status": "run_stopped",
                     "argument_digest": digest,
                     **identity,
                 },
-            )
+            ))
+
+        refused = _apply_locked(directory, {**attempt, "kind": "candidate_unsubmitted", "arguments": identity}, refuse)
         return {
             "ok": False,
             "status": "run_stopped",
             "category": "run_stopped",
             "operation_id": attempt["operation_id"],
             "proof_id": attempt["proof_id"],
+            "receipt": refused,
         }
-    evaluation = attempt.get("evaluation")
-    _append_control(
-        directory,
-        {
+
+    def commit(writer):
+        event = {
             "schema_version": SCHEMA_VERSION,
             "kind": "candidate_submission",
             "event_id": uuid.uuid4().hex,
             "operation_id": attempt["operation_id"],
-            "run_id": attempt["run_id"],
-            "actor_id": attempt["actor_id"],
-            "session_id": attempt["session_id"],
             "status": "submitted",
             "argument_digest": digest,
-            "evaluation": evaluation,
             **identity,
-        },
-    )
-    if evaluation:
-        _append_control(
-            directory,
-            {
-                "schema_version": SCHEMA_VERSION,
-                "kind": "evaluation_request",
-                "event_id": uuid.uuid4().hex,
-                "operation_id": attempt["operation_id"],
-                "run_id": attempt["run_id"],
-                "proof_id": attempt["proof_id"],
-                "state": "queued",
-                "mode": evaluation.get("mode"),
-                "key": evaluation.get("key"),
-            },
-        )
-    candidate = attempt.get("candidate")
-    if isinstance(candidate, dict):
-        from arena.campaign import _append, events
+        }
+        writer.evidence.append(_append_control(directory, event))
+        evaluation = attempt.get("evaluation")
+        if evaluation:
+            writer.evidence.append(
+                _append_control(
+                    directory,
+                    {
+                        "schema_version": SCHEMA_VERSION,
+                        "kind": "evaluation_request",
+                        "event_id": uuid.uuid4().hex,
+                        "operation_id": attempt["operation_id"],
+                        "run_id": attempt["run_id"],
+                        "proof_id": attempt["proof_id"],
+                        "state": "queued",
+                        **evaluation,
+                    },
+                )
+            )
+        candidate = attempt.get("candidate")
+        if isinstance(candidate, dict):
+            from arena.campaign import events
 
-        if not any(
-            row.get("kind") == "candidate" and row.get("candidate_id") == attempt["proof_id"]
-            for row in events(directory)
-        ):
-            _append(directory, candidate)
+            history = published_history(directory, events(directory))
+            if not any(
+                row.get("kind") == "candidate" and row.get("candidate_id") == attempt["proof_id"] for row in history
+            ):
+                writer.append_ledger(candidate)
+        for event in attempt.get("ledger_events") or []:
+            writer.append_ledger(event)
+        return writer.evidence
+
+    committed = _apply_locked(directory, {**attempt, "kind": "candidate_submission", "arguments": identity}, commit)
+    if not committed.get("ok") or committed.get("status") != "committed":
+        return {**committed, "ok": False}
     submission_barrier("after_submission", directory)
     return {
         "ok": True,
@@ -1159,7 +1174,8 @@ def _submit_locked(directory: Path, attempt: dict) -> dict:
         "reused": False,
         "operation_id": attempt["operation_id"],
         "proof_id": attempt["proof_id"],
-        "evaluation": evaluation,
+        "evaluation": attempt.get("evaluation"),
+        "receipt": committed,
     }
 
 
