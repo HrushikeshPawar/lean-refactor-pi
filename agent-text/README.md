@@ -124,19 +124,21 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `messages/salvage.salvaged_unseen` | 11 | Agent messages and notices | when the matching event occurs |
 | `messages/trim.result_stub` | 9 | Agent messages and notices | when a repeat is shortened |
 | `packet/price-table` | 12 | Prices action replies | when the table is requested |
+| `packet/price-table.clipped` | 2 | Prices action replies | when the table is requested |
+| `packet/price-table.coordinates` | 19 | Prices action replies | when the table is requested |
 | `packet/price-table.detail` | 9 | Prices action replies | when the table is requested |
 | `packet/price-table.detail_assumption` | 20 | Prices action replies | when the table is requested |
-| `packet/price-table.detail_head` | 14 | Prices action replies | when the table is requested |
-| `packet/price-table.detail_row` | 9 | Prices action replies | when the table is requested |
+| `packet/price-table.detail_head` | 17 | Prices action replies | when the table is requested |
+| `packet/price-table.detail_row` | 11 | Prices action replies | when the table is requested |
 | `packet/price-table.hotspot` | 21 | Prices action replies | when the table is requested |
 | `packet/price-table.hotspot_omitted` | 8 | Prices action replies | when the table is requested |
 | `packet/price-table.legend` | 14 | Prices action replies | when the table is requested |
 | `packet/price-table.missing_hb` | 18 | Prices action replies | when the table is requested |
+| `packet/price-table.next` | 4 | Prices action replies | when the table is requested |
 | `packet/price-table.no_hb` | 10 | Prices action replies | when the table is requested |
 | `packet/price-table.row` | 11 | Prices action replies | when the table is requested |
 | `packet/price-table.row_no_hb` | 9 | Prices action replies | when the table is requested |
 | `packet/price-table.summary` | 28 | Prices action replies | when the table is requested |
-| `packet/price-table.zero` | 10 | Prices action replies | when the table is requested |
 | `packet/restart.island_blank` | 29 | Initial theorem packet | once per run |
 | `packet/restart.island_start` | 22 | Initial theorem packet | once per run |
 | `packet/restart.island_statement` | 6 | Initial theorem packet | once per run |
@@ -149,7 +151,14 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `packet/scoring` | 144 | Initial theorem packet | once per run |
 | `packet/search` | 103 | Initial theorem packet | once per run |
 | `packet/sections.fixed.budget_certification_failed` | 8 | Initial theorem packet | once per run |
+| `packet/sections.fixed.catalog_external` | 5 | Initial theorem packet | once per run |
 | `packet/sections.fixed.catalog_line` | 4 | Initial theorem packet | once per run |
+| `packet/sections.fixed.catalog_location_missing` | 2 | Initial theorem packet | once per run |
+| `packet/sections.fixed.catalog_proof` | 3 | Initial theorem packet | once per run |
+| `packet/sections.fixed.catalog_signature_missing` | 2 | Initial theorem packet | once per run |
+| `packet/sections.fixed.catalog_signatures_omitted` | 13 | Initial theorem packet | once per run |
+| `packet/sections.fixed.catalog_statement` | 4 | Initial theorem packet | once per run |
+| `packet/sections.fixed.catalog_unknown` | 4 | Initial theorem packet | once per run |
 | `packet/sections.fixed.context_missing` | 4 | Initial theorem packet | once per run |
 | `packet/sections.fixed.dependency_intro` | 13 | Initial theorem packet | once per run |
 | `packet/sections.fixed.dependency_name` | 1 | Initial theorem packet | once per run |
@@ -171,12 +180,13 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `packet/sections.fixed.local_line` | 7 | Initial theorem packet | once per run |
 | `packet/sections.fixed.namespace` | 2 | Initial theorem packet | once per run |
 | `packet/sections.fixed.none` | 1 | Initial theorem packet | once per run |
+| `packet/sections.fixed.numbered_source` | 8 | Initial theorem packet | once per run |
 | `packet/sections.fixed.packet_not_certifiable` | 6 | Initial theorem packet | once per run |
 | `packet/sections.fixed.pin` | 2 | Initial theorem packet | once per run |
 | `packet/sections.fixed.pins` | 17 | Initial theorem packet | once per run |
 | `packet/sections.fixed.profile_line` | 11 | Initial theorem packet | once per run |
 | `packet/sections.fixed.profile_selfref` | 33 | Initial theorem packet | once per run |
-| `packet/sections.fixed.profile_total` | 22 | Initial theorem packet | once per run |
+| `packet/sections.fixed.profile_total` | 16 | Initial theorem packet | once per run |
 | `packet/sections.fixed.root_namespace` | 2 | Initial theorem packet | once per run |
 | `packet/sections.fixed.signature` | 6 | Initial theorem packet | once per run |
 | `packet/sections.fixed.source` | 2 | Initial theorem packet | once per run |
@@ -184,9 +194,9 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `packet/sections.fixed.type_construct` | 4 | Initial theorem packet | once per run |
 | `packet/sections.fixed.type_coverage` | 10 | Initial theorem packet | once per run |
 | `packet/sections.fixed.type_definition` | 5 | Initial theorem packet | once per run |
-| `packet/sections.fixed.used_intro` | 18 | Initial theorem packet | once per run |
+| `packet/sections.fixed.used_intro` | 21 | Initial theorem packet | once per run |
 | `packet/sections.fixed.used_line` | 4 | Initial theorem packet | once per run |
-| `packet/sections.fixed.used_preview` | 11 | Initial theorem packet | once per run |
+| `packet/sections.fixed.used_preview` | 9 | Initial theorem packet | once per run |
 | `packet/sections.required.dependencies` | 3 | Initial theorem packet | once per run |
 | `packet/sections.required.environment` | 2 | Initial theorem packet | once per run |
 | `packet/sections.required.reference` | 5 | Initial theorem packet | once per run |
@@ -310,12 +320,12 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/tools.read_step_after` | 2 | Tool replies | when the matching tool result occurs |
 | `replies/tools.read_step_before` | 2 | Tool replies | when the matching tool result occurs |
 | `replies/tools.read_tree_cols` | 15 | Tool replies | when the matching tool result occurs |
-| `replies/tools.read_tree_head` | 26 | Tool replies | when the matching tool result occurs |
-| `replies/tools.read_tree_more` | 10 | Tool replies | when the matching tool result occurs |
-| `replies/tools.read_tree_pending` | 15 | Tool replies | when the matching tool result occurs |
+| `replies/tools.read_tree_head` | 28 | Tool replies | when the matching tool result occurs |
+| `replies/tools.read_tree_more` | 9 | Tool replies | when the matching tool result occurs |
+| `replies/tools.read_tree_pending` | 10 | Tool replies | when the matching tool result occurs |
 | `replies/tools.read_tree_row` | 13 | Tool replies | when the matching tool result occurs |
-| `replies/tools.read_tree_total` | 23 | Tool replies | when the matching tool result occurs |
-| `replies/tools.read_tree_total_floor` | 22 | Tool replies | when the matching tool result occurs |
+| `replies/tools.read_tree_total` | 17 | Tool replies | when the matching tool result occurs |
+| `replies/tools.read_tree_total_floor` | 26 | Tool replies | when the matching tool result occurs |
 | `replies/tools.refresh_tail` | 6 | Tool replies | when the matching tool result occurs |
 | `replies/tools.repeat_fact` | 16 | Tool replies | when the matching tool result occurs |
 | `replies/tools.same_diagnostic` | 4 | Tool replies | when the matching tool result occurs |
@@ -399,7 +409,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `tools/read.params.hole` | 6 | Model tool definitions | every request |
 | `tools/read.params.node` | 5 | Model tool definitions | every request |
 | `tools/read.params.step` | 7 | Model tool definitions | every request |
-| `tools/read.params.view` | 14 | Model tool definitions | every request |
+| `tools/read.params.view` | 17 | Model tool definitions | every request |
 | `tools/scratch.description` | 67 | Model tool definitions | every request |
 | `tools/scratch.params.at` | 18 | Model tool definitions | every request |
 | `tools/scratch.params.code` | 22 | Model tool definitions | every request |

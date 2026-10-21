@@ -4,7 +4,7 @@
 
 **Blocked by:** 04: Isolate actor state and enforce exact ownership; 18: Recover usable target goals and definitions
 
-**Status:** needs-review
+**Status:** done
 
 **Branch:** `v8/19-packet-cost-views`
 
@@ -44,6 +44,16 @@ uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_context.py::
 Expected: the named behavior check passes with no actual provider, Pi or Lean process. Aim for seconds and at most 60 seconds. No per-ticket full suite or slow suite.
 
 **Deferred to final E2E:** All three full packets, worker-role context and search-efficacy comparison. See the shared [final E2E checklist](../final-e2e.md).
+
+## Review closure
+
+Review fixed column-aware span token counts and ranges, omitted detail tokens, skipped first-page navigation, reference price reads that discarded profile context, duplicate legends, false pending states, and the Pi schema rejection of advertised tree pages. Detailed reads retain proof identity and coordinate conventions; attribution totals describe the full tree on every page. Default packets keep self-heartbeat attribution in detail. The catalog preserves source roles and external coordinates, avoids repeated signatures, and exposes numbered proof retrieval. If signatures cannot fit, declaration handles and locations remain, with explicit preview omissions and full-declaration retrieval.
+
+The cache-only comparison exposed and fixed a Fiberwise budget refusal. Final SKI/Core/Fiberwise packets are **17,094 / 35,285 / 39,738 characters**, with exact statements and proof bytes retained. Their catalogs contain **7 / 30 / 115 distinct handles**; all **53 / 26 / 60 profile rows** are accessible across **2 / 1 / 2 pages**. Fiberwise retains all nine definitions, including `hammingClose`. These renders use preserved October 18 context and current native cached profiles because current-wrapper context caches are absent. They validate rendering of saved evidence, not refreshed Lean extraction. Review artifacts are under `/tmp/v8-19-review`, including `report.json` and the complete packets.
+
+Validation: `uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_context.py::FixturePacketTests::test_v8_packet_nested_hotspot_and_retrieval tests/test_context.py::ParseTests tests/test_context.py::LocalSheddingTests tests/test_context.py::TruncationTests` passed with **20 tests and 6 subtests in 0.17s**. Scoped Ruff passed. The actual installed Pi 1.3.0 TypeBox read-view schema passed **12 offline cases**. Template inventory and regenerated README budgets match. Independent read-only review found no remaining blocker.
+
+The baseline named smoke passed before review but missed the defects above. The exact-column reproduction counted six tokens before the fix and two afterward. No live Lean, Pi, provider, or paid call ran. Refreshed caches, worker-role context, live tool delivery, and search efficacy remain final E2E work. Ticket 20 was not started.
 
 ---
 
