@@ -4,7 +4,7 @@
 
 **Blocked by:** 11: Wait without polling or no-event deadlocks; 15: Promote an anchored replacement inside scratch
 
-**Status:** changes-requested
+**Status:** done
 
 **Branch:** `v8/21-schema-help`
 
@@ -27,11 +27,11 @@
 ## What to build and acceptance
 
 - [x] 1. Generate help from actual registered schemas and shared descriptions, retaining nesting, field types, limits, defaults and exclusive input alternatives.
-- [ ] 2. Cover five proof-search tools and Sol management tools; workers cannot see delegation or strategic-board replacement powers.
+- [x] 2. Cover five proof-search tools and Sol management tools; workers cannot see delegation or strategic-board replacement powers.
 - [x] 3. Remove obsolete finish help and drift such as flattened fill/splice parameter descriptions.
-- [ ] 4. Verify a documented request is accepted at the public tool boundary and malformed/over-limit inputs return the documented error class.
+- [x] 4. Verify a documented request is accepted at the public tool boundary and malformed/over-limit inputs return the documented error class.
 - [x] 5. Cache-only inspection starts neither Lean nor a provider; fixture output and schema shape agree across actor roles.
-- [ ] 6. Update text budgets/goldens deliberately without duplicating rules or prose into a second schema catalog.
+- [x] 6. Update text budgets/goldens deliberately without duplicating rules or prose into a second schema catalog.
 
 ## Review findings (Claude, 2026-10-21)
 
@@ -43,6 +43,14 @@ Commit `564fc1b` gets the core design right: Pi TypeBox parameters and inspectio
 4. **Nit:** the worker allowlist is five tools because arena.ts registers the proof tools unconditionally, not because `roles` is consulted. Gate all registrations through `executableTools(toolSchemas, actorRole)`.
 
 Check for the rework: the named smoke plus whole `tests/test_text.py`. That file has older failures that are not this ticket's (v7 over-limit packet; ticket 11 `await_results` text naming finish; ticket 17 long literals in `campaign.py`/`context.py`; ticket 18/19 packet goal rows). The README budget and word-budget tests must pass after this rework. Report the rest unchanged.
+
+## Review closure
+
+The rework resolved the review items. Sol's help matched registration at this commit (21b then registered the management tools). `jobs.cursor` was removed so the schema matches `orchestration.jobs(directory, job_ids)`. The parallel validator `accept_tool_input` was deleted, and the boundary test now asserts `empty_arguments` and `bad_drafts` against the real `tools.*_tool` entry points. The README budget table was regenerated. `budget.static_words` was raised from 685 to 800 deliberately: v8's scratch experiments, scratch promotion and the management tools need more help text. The 794-word total first exceeded 685 at ticket 14.
+
+Remaining notes, not blockers: arena.ts registers the five proof tools unconditionally rather than through `executableTools`, so the worker allowlist holds by construction of the list, not by consulting `roles` (no behavior difference today). Python handlers still validate by hand, so TypeBox (from the JSON) and Python are two enforcement points over one schema. Delegate's scope/anchor rules live in `coordinator._rejected_delegate` and orchestration, not in the schema. `jobs()` returns `next_cursor`/`events` that are undocumented.
+
+Checks (whole touched files, main checkout): `tests/test_text.py` has 5 older failures, none from this ticket (v7 over-limit packet; v8-11 `await_results` text naming finish; v8-17 long literals; v8-18/19 packet goal rows); the README budget and word-budget tests pass. The tool, coordinator and orchestration files pass. 45/45 `node --test` extension tests pass.
 
 ## Verify
 
