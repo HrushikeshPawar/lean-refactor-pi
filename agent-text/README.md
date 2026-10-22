@@ -270,6 +270,32 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/price-row.versions_pending` | 4 | Compile replies | when a scored proof is compiled |
 | `replies/price-row.vs_best` | 3 | Compile replies | when a scored proof is compiled |
 | `replies/price-row.vs_node` | 3 | Compile replies | when a scored proof is compiled |
+| `replies/team.anchor_hole` | 1 | Tool replies | when the matching tool result occurs |
+| `replies/team.anchor_node` | 1 | Tool replies | when the matching tool result occurs |
+| `replies/team.anchor_steps` | 3 | Tool replies | when the matching tool result occurs |
+| `replies/team.await_check` | 5 | Tool replies | when the matching tool result occurs |
+| `replies/team.await_finding` | 3 | Tool replies | when the matching tool result occurs |
+| `replies/team.await_head` | 4 | Tool replies | when the matching tool result occurs |
+| `replies/team.await_no_work` | 12 | Tool replies | when the matching tool result occurs |
+| `replies/team.await_report` | 3 | Tool replies | when the matching tool result occurs |
+| `replies/team.await_running` | 3 | Tool replies | when the matching tool result occurs |
+| `replies/team.await_settled` | 2 | Tool replies | when the matching tool result occurs |
+| `replies/team.await_settled_reason` | 3 | Tool replies | when the matching tool result occurs |
+| `replies/team.await_stopped` | 4 | Tool replies | when the matching tool result occurs |
+| `replies/team.cancel_done` | 3 | Tool replies | when the matching tool result occurs |
+| `replies/team.delegate_resumed` | 11 | Tool replies | when the matching tool result occurs |
+| `replies/team.delegate_reused` | 7 | Tool replies | when the matching tool result occurs |
+| `replies/team.delegate_started` | 13 | Tool replies | when the matching tool result occurs |
+| `replies/team.job_line` | 9 | Tool replies | when the matching tool result occurs |
+| `replies/team.job_report` | 3 | Tool replies | when the matching tool result occurs |
+| `replies/team.job_task` | 2 | Tool replies | when the matching tool result occurs |
+| `replies/team.jobs_head` | 9 | Tool replies | when the matching tool result occurs |
+| `replies/team.jobs_none` | 6 | Tool replies | when the matching tool result occurs |
+| `replies/team.node_scored` | 3 | Tool replies | when the matching tool result occurs |
+| `replies/team.node_unscored` | 5 | Tool replies | when the matching tool result occurs |
+| `replies/team.nodes_none` | 4 | Tool replies | when the matching tool result occurs |
+| `replies/team.reject` | 3 | Tool replies | when the matching tool result occurs |
+| `replies/team.reject_bare` | 3 | Tool replies | when the matching tool result occurs |
 | `replies/tools.best_all_pin` | 3 | Tool replies | when the matching tool result occurs |
 | `replies/tools.best_provisional` | 2 | Tool replies | when the matching tool result occurs |
 | `replies/tools.compile_best` | 2 | Tool replies | when the matching tool result occurs |
@@ -432,11 +458,11 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/tools.try_timeout` | 2 | Tool replies | when the matching tool result occurs |
 | `skill/SKILL` | 155 | Agent skill instructions | once per run |
 | `skill/lean-facts` | 137 | Agent skill instructions | once per run |
-| `tools/await_results.description` | 30 | Model tool definitions | every request |
-| `tools/await_results.params.cursor` | 16 | Model tool definitions | every request |
-| `tools/await_results.params.job_ids` | 12 | Model tool definitions | every request |
+| `tools/await_results.description` | 29 | Model tool definitions | every request |
+| `tools/await_results.params.cursor` | 9 | Model tool definitions | every request |
+| `tools/await_results.params.job_ids` | 15 | Model tool definitions | every request |
 | `tools/cancel.description` | 13 | Model tool definitions | every request |
-| `tools/cancel.params.job_id` | 3 | Model tool definitions | every request |
+| `tools/cancel.params.job_id` | 6 | Model tool definitions | every request |
 | `tools/compile.description` | 29 | Model tool definitions | every request |
 | `tools/compile.params.base` | 13 | Model tool definitions | every request |
 | `tools/compile.params.check` | 11 | Model tool definitions | every request |
@@ -461,7 +487,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `tools/delegate.params.at_hole` | 12 | Model tool definitions | every request |
 | `tools/delegate.params.at_node` | 4 | Model tool definitions | every request |
 | `tools/delegate.params.at_steps` | 13 | Model tool definitions | every request |
-| `tools/delegate.params.job_id` | 10 | Model tool definitions | every request |
+| `tools/delegate.params.job_id` | 13 | Model tool definitions | every request |
 | `tools/delegate.params.scope` | 39 | Model tool definitions | every request |
 | `tools/delegate.params.task` | 5 | Model tool definitions | every request |
 | `tools/goal.description` | 41 | Model tool definitions | every request |

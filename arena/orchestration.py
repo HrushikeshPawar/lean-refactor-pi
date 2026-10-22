@@ -12,6 +12,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import threading
 import time
 import uuid
@@ -1428,11 +1429,8 @@ def _public_event(row: dict) -> dict:
     return event
 
 
-def _delivered_events(directory: Path, rows: list[dict]) -> list[dict]:
-    """Public events, with each finding's graph node and score so the orchestrator need not re-read the map."""
-    delivered = [_public_event(row) for row in rows]
-    if not any(event["type"] == "worker_finding" for event in delivered):
-        return delivered
+def proof_nodes(directory: Path) -> dict:
+    """Saved proof id to its graph node, for naming a worker's results by the ids the orchestrator sees."""
     from arena.campaign import _proof_reader
     from arena.graph import Graph
 
@@ -1440,9 +1438,33 @@ def _delivered_events(directory: Path, rows: list[dict]) -> list[dict]:
         events(directory), _proof_reader(directory),
         committed_operations=run_control.committed_operation_ids(directory),
     )
-    nodes = {node.proof_id: node for node in graph.nodes}
+    return {node.proof_id: node for node in graph.nodes}
+
+
+def job_labels(directory: Path) -> dict[str, str]:
+    """Job id to `jobN`, numbered in delegation order."""
+    labels: dict[str, str] = {}
+    for row in _delegations(directory):
+        if row.get("job_id") and row["job_id"] not in labels:
+            labels[row["job_id"]] = f"job{len(labels) + 1}"
+    return labels
+
+
+def resolve_job(directory: Path, ref):
+    """Accept a `jobN` label wherever a job id is taken; anything else passes through unchanged."""
+    if not isinstance(ref, str) or not re.fullmatch(r"job[0-9]+", ref):
+        return ref
+    return next((job_id for job_id, label in job_labels(directory).items() if label == ref), ref)
+
+
+def _delivered_events(directory: Path, rows: list[dict]) -> list[dict]:
+    """Public events, with each result's graph node and score so the orchestrator need not re-read the map."""
+    delivered = [_public_event(row) for row in rows]
+    if not any(event.get("proof_id") for event in delivered):
+        return delivered
+    nodes = proof_nodes(directory)
     for event in delivered:
-        node = nodes.get(event.get("proof_id")) if event["type"] == "worker_finding" else None
+        node = nodes.get(event.get("proof_id"))
         if node is not None:
             event["node"] = node.id
             event["score"] = node.score

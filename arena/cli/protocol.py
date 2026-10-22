@@ -13,7 +13,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
-from arena import coordinator, orchestration, text
+from arena import coordinator, orchestration, team_reply, text
 from arena import reply as tool_reply
 from arena import tools as v7_tools
 from arena.campaign import (
@@ -85,15 +85,27 @@ def run(args: SimpleNamespace) -> dict:
             if not isinstance(request, dict):
                 raise ValueError("request-file must contain an object")
         # A normal tool result. no_pending_work continues the turn; it does not finish or delegate.
-        return coordinator.await_results(
+        result = coordinator.await_results(
             run_dir(args.run_id),
             actor_id=os.environ.get("ARENA_ACTOR_ID") or request.get("actor_id") or "sol",
             cursor=request.get("cursor"),
-            job_ids=request.get("job_ids"),
+            job_ids=_resolve_jobs(args.run_id, request.get("job_ids")),
         )
+        return _with_text("await_results", result, args.run_id)
     if args.action in ("delegate", "jobs", "cancel"):
-        return _management(args)
+        return _with_text(args.action, _management(args), args.run_id)
     raise ValueError(f"Unsupported action: {args.action}")
+
+
+def _resolve_jobs(run_id: str, job_ids):
+    if not isinstance(job_ids, list):
+        return job_ids
+    return [orchestration.resolve_job(run_dir(run_id), item) for item in job_ids]
+
+
+def _with_text(action: str, result: dict, run_id: str) -> dict:
+    """The model reads `text`; the rest stays in the tool details."""
+    return {**result, "text": team_reply.render(action, result, run_dir(run_id))}
 
 
 def _harness_actor() -> str:
@@ -114,7 +126,7 @@ def _management(args: SimpleNamespace) -> dict:
         if job_ids is not None and (not isinstance(job_ids, list) or any(not isinstance(item, str) for item in job_ids)):
             return {"ok": False, "category": "invalid_input", "reason": "job_ids",
                     "hint": text.render("replies/jobs.job_ids")}
-        return orchestration.jobs(run_dir(args.run_id), job_ids)
+        return orchestration.jobs(run_dir(args.run_id), _resolve_jobs(args.run_id, job_ids))
     identity = {
         "actor_id": _harness_actor(),
         "session_id": os.environ.get("ARENA_SESSION_ID") or args.run_id,
@@ -122,12 +134,14 @@ def _management(args: SimpleNamespace) -> dict:
         "run_id": args.run_id,
     }
     if args.action == "cancel":
-        return coordinator.submit(run_dir(args.run_id), {"action": "cancel", "job_id": request.get("job_id"), **identity})
+        return coordinator.submit(run_dir(args.run_id), {
+            "action": "cancel", "job_id": orchestration.resolve_job(run_dir(args.run_id), request.get("job_id")), **identity,
+        })
     return coordinator.submit(run_dir(args.run_id), {
         "action": "delegate",
         "task": request.get("task"),
         "scope": request.get("scope"),
-        "job_id": request.get("job_id"),
+        "job_id": orchestration.resolve_job(run_dir(args.run_id), request.get("job_id")),
         "at": request.get("at"),
         **identity,
     })

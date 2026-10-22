@@ -790,7 +790,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
           const file = resolve(directory, "request.json");
           await writeFile(file, JSON.stringify(toolParams), "utf8");
           const result = await campaign(name, ["--request-file", file], signal);
-          return { isError: result.ok === false, content: [{ type: "text", text: JSON.stringify(result) }], details: result };
+          return { isError: result.ok === false, content: [{ type: "text", text: typeof result.text === "string" ? result.text : JSON.stringify(result) }], details: result };
         } finally {
           await rm(directory, { recursive: true, force: true });
         }
@@ -808,7 +808,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
           const file = resolve(directory, "request.json");
           await writeFile(file, JSON.stringify(params), "utf8");
           const result = await campaign("await_results", ["--request-file", file], signal);
-          return { isError: result.ok === false, content: [{ type: "text", text: JSON.stringify(result) }], details: result };
+          return { isError: result.ok === false, content: [{ type: "text", text: typeof result.text === "string" ? result.text : JSON.stringify(result) }], details: result };
         } finally {
           await rm(directory, { recursive: true, force: true });
         }

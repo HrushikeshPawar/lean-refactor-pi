@@ -14,7 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from arena import orchestration, pi_rpc, run_control
+from arena import orchestration, pi_rpc, run_control, team_reply
 from arena import reply as proof_reply
 from arena.steps import split_steps
 from tests.graph_support import FakeRunCase
@@ -878,6 +878,12 @@ class V8WorkerSmokeTests(unittest.TestCase):
                 settled = orchestration.await_results(directory, actor_id="sol")
             self.assertEqual([event["report"] for event in settled["events"] if event.get("report")],
                              ["Held: step 2 closes by simp."])
+            shown = team_reply.render("await_results", settled, directory)
+            self.assertIn("job1 completed.", shown)
+            self.assertIn("job1 report: Held: step 2 closes by simp.", shown)
+            self.assertNotIn(fresh["job_id"], shown)
+            self.assertIn("job1", team_reply.render("delegate", fresh, directory))
+            self.assertEqual(orchestration.resolve_job(directory, "job1"), fresh["job_id"])
             self.assertEqual(released["session_id"], fresh["session_id"])
             self.assertEqual(released["findings"][0]["attempt_id"], "attempt-1")
             self.assertFalse(orchestration.awaits_settlement(directory, fresh["activation_id"]))

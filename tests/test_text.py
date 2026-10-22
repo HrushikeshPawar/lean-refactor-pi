@@ -20,6 +20,7 @@ LINT_PYTHON = (
     "arena/tools.py",
     "arena/campaign.py",
     "arena/summary.py",
+    "arena/team_reply.py",
 )
 LINT_TYPESCRIPT = ("arena.ts", "rules.ts", "trim.ts", "reply.ts", "spend.ts")
 LOG_CALLS = {"logging", "logger", "log", "LOG"}
