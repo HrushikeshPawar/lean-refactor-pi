@@ -80,6 +80,18 @@ def _jobs(result: dict, directory: Path, job) -> str:
     return "\n".join(lines)
 
 
+def _saved_summary(result: dict, directory: Path, event: dict, job) -> str:
+    snapshot = next((item for item in result.get("jobs") or [] if item.get("job_id") == event.get("job_id")), {})
+    nodes = orchestration.proof_nodes(directory)
+    saved = [nodes[f["proof_id"]] for f in snapshot.get("findings") or [] if f.get("proof_id") in nodes]
+    if not saved:
+        return _render("await_cancel_empty", job=job(event.get("job_id")), state=event["state"])
+    scored = [node for node in saved if node.score is not None]
+    best = _node(max(scored, key=lambda node: node.score)) if scored else _node(saved[0])
+    return _render("await_cancel_summary", job=job(event.get("job_id")), state=event["state"],
+                   count=len(saved), best=best)
+
+
 def _await(result: dict, directory: Path, job) -> str:
     reason = result.get("wake_reason")
     if reason == "timeout":
@@ -89,22 +101,44 @@ def _await(result: dict, directory: Path, job) -> str:
         return text.render("replies/await_results.timeout", minutes=round(orchestration.await_timeout_s() / 60),
                            jobs="; ".join(items) or "none")
     lines = [_render("await_head")] if result.get("events") else []
-    for event in result.get("events") or []:
+    events = result.get("events") or []
+    per_node = {}
+    for event in events:
+        if event.get("type") in ("worker_finding", "verification"):
+            per_node.setdefault((event.get("job_id"), event.get("node")), []).append(event)
+    done = set()
+    for event in events:
         kind = event.get("type")
         node = event.get("node") or "n?"
         if event.get("score") is not None:
             node = _render("node_scored", node=node, score=round(event["score"], 2))
-        if kind == "run_stop":
+        if kind in ("worker_finding", "verification"):
+            key = (event.get("job_id"), event.get("node"))
+            if key in done:
+                continue
+            done.add(key)
+            group = per_node[key]
+            score = next((e["score"] for e in group if e.get("score") is not None), None)
+            if score is not None:
+                node = _render("node_scored", node=event.get("node") or "n?", score=round(score, 2))
+            checks = [e for e in group if e.get("type") == "verification"]
+            saved = any(e.get("type") == "worker_finding" for e in group)
+            args = {"job": job(event.get("job_id")), "node": node}
+            if saved and checks:
+                lines.append(_render("await_finding_checked", state=checks[-1].get("state"), **args))
+            elif saved:
+                lines.append(_render("await_finding", **args))
+            else:
+                lines.append(_render("await_check", state=checks[-1].get("state"), **args))
+        elif kind == "run_stop":
             lines.append(_render("await_stopped"))
-        elif kind == "worker_finding":
-            lines.append(_render("await_finding", job=job(event.get("job_id")), node=node))
-        elif kind == "verification":
-            lines.append(_render("await_check", job=job(event.get("job_id")), node=node, state=event.get("state")))
         elif event.get("state"):
             key = "await_settled_reason" if event.get("reason") else "await_settled"
             lines.append(_render(key, job=job(event.get("job_id")), state=event["state"],
                                  **({"reason": event["reason"]} if event.get("reason") else {})))
-            if event.get("report"):
+            if event["state"] == "cancelled" or (event["state"] == "failed" and not event.get("report")):
+                lines.append(_saved_summary(result, directory, event, job))
+            elif event.get("report"):
                 lines.append(_render("await_report", job=job(event.get("job_id")), report=" ".join(event["report"].split())))
     if reason == "run_stopped" and not any(event.get("type") == "run_stop" for event in result.get("events") or []):
         lines.append(_render("await_stopped"))

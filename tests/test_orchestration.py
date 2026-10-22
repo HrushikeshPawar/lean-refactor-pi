@@ -1997,6 +1997,29 @@ class V8RecoverySmokeTests(unittest.TestCase):
             self.assertEqual(run_control.read_state(directory)["stop_reason"], "operator_interrupt")
 
 
+class TeamReplyAwaitTests(unittest.TestCase):
+    def render(self, events, jobs=(), nodes=None):
+        from types import SimpleNamespace
+
+        found = {key: SimpleNamespace(id=key, score=score) for key, score in (nodes or {}).items()}
+        with patch.object(orchestration, "job_labels", return_value={"j2": "job2"}), \
+                patch.object(orchestration, "proof_nodes", return_value={f"p-{k}": v for k, v in found.items()}):
+            return team_reply.render("await_results", {"events": events, "jobs": list(jobs)}, Path("."))
+
+    def test_one_line_per_node_per_job_and_cancel_summary(self):
+        check = {"type": "verification", "job_id": "j2", "node": "n49", "score": 70.12, "state": "passed"}
+        shown = self.render([check, {**check}, {"type": "worker_finding", "job_id": "j2", "node": "n49", "score": 70.12}])
+        self.assertEqual(shown.count("n49"), 1)
+        self.assertIn("job2 saved n49 score 70.12 (check passed)", shown)
+        self.assertEqual(self.render([check, {**check}]).count("n49"), 1)
+        cancelled = {"type": "settled", "job_id": "j2", "state": "cancelled", "report": "mid-thought text"}
+        jobs = [{"job_id": "j2", "findings": [{"proof_id": "p-n3"}, {"proof_id": "p-n49"}]}]
+        shown = self.render([cancelled], jobs, {"n3": 60.0, "n49": 70.12})
+        self.assertIn("saved 2 nodes, best n49 score 70.12", shown)
+        self.assertNotIn("mid-thought", shown)
+        self.assertIn("saved no nodes", self.render([cancelled]))
+
+
 class V8VerificationSmokeTests(FakeRunCase):
     def test_v8_verification_outcomes(self):
         from arena import campaign, orchestration
@@ -2012,6 +2035,12 @@ class V8VerificationSmokeTests(FakeRunCase):
         self.assertEqual(completed["state"], "proof_error")
         evidence = next(row for row in history if row.get("kind") == "evaluation" and row["key"] == completed["evaluation_id"])
         self.assertLess(history.index(evidence), history.index(completed))
+
+        with patch.dict("os.environ", {"ARENA_JOB_ID": "job-auto"}), patch.object(
+            campaign, "_evaluate", return_value=outcome,
+        ):
+            campaign.record_evaluation("T", "logic", proof + " ", "full", materialize_live=False, trigger="auto")
+        self.assertFalse([row for row in campaign.events(self.directory) if row.get("type") == "verification" and row.get("job_id") == "job-auto"])
 
         other = "theorem t : True := by\n  exact (True.intro)"
         with patch.dict("os.environ", {"ARENA_JOB_ID": "job-transport"}), patch.object(

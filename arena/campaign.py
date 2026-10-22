@@ -1989,7 +1989,7 @@ def record_evaluation(
         if prior and _verification_outcome(prior["result"]) == "inconclusive":
             prior = None
         checks = list(verification_checks or [])
-        if not prior and not checks:
+        if not prior and not checks and trigger != "auto":
             job_id = operation.get("job_id") if isinstance(operation, dict) else None
             job_id = job_id or os.environ.get("ARENA_JOB_ID")
             if job_id:
