@@ -156,3 +156,19 @@ def test_rpc_child_launch_uses_current_generation(tmp_path):
     ):
         RpcChild(launch, spawn=failed_spawn, inspect=inspector)
     assert never_spawned.value.not_spawned
+
+
+def test_jsonl_cache_sees_appends_and_waits_for_a_complete_line(tmp_path):
+    from arena import campaign
+
+    ledger = tmp_path / "ledger.jsonl"
+    ledger.write_bytes(b'{"a":1}\n')
+    assert campaign.events(tmp_path) == [{"a": 1}]
+    with ledger.open("ab") as handle:
+        handle.write(b'{"a":2}\n{"a":')
+    assert campaign.events(tmp_path) == [{"a": 1}, {"a": 2}]
+    with ledger.open("ab") as handle:
+        handle.write(b"3}\n")
+    assert campaign.events(tmp_path) == [{"a": 1}, {"a": 2}, {"a": 3}]
+    ledger.write_bytes(b'{"b":9}\n{"b":8}\n{"b":7}\n')  # rewritten in place: no stale rows
+    assert campaign.events(tmp_path) == [{"b": 9}, {"b": 8}, {"b": 7}]

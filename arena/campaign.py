@@ -57,7 +57,7 @@ from arena.graph import map_view as graph_map_view
 from arena.prices import changed_steps, fmt_hb, fmt_signed, rates, snippet_tokens, step_table
 from arena.prices import price_row as build_price_row
 from arena.profile import profile
-from arena.run_control import committed_operation_ids
+from arena.run_control import cached_jsonl_rows, committed_operation_ids
 from arena.salvage import fill_cost, fill_text
 from arena.salvage import holes as find_holes
 from arena.salvage import salvage as salvage_proof
@@ -829,16 +829,7 @@ def events(directory: Path) -> list[dict]:
     file = directory / "ledger.jsonl"
     if not file.exists():
         return []
-    with file.open("rb") as handle:
-        fcntl.flock(handle, fcntl.LOCK_SH)
-        data = handle.read().decode()
-    rows = []
-    for line in data.split("\n"):
-        try:
-            rows.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue  # a torn final line from a killed writer must not make the run unreadable
-    return rows
+    return cached_jsonl_rows(file, dicts_only=False, lock_shared=True)
 
 
 @contextmanager
@@ -963,13 +954,19 @@ def init(name: str, run_id: str, extra: str = "", seed: Path | None = None, mode
 
 def _externalize_output(directory: Path, key: str, result: dict) -> dict:
     """Keep full Lean output beside the ledger; results carry only a reference."""
-    for version, item in (result.get("compat") or {}).items():
+    if not result.get("compat"):
+        return result
+    compat = {}
+    for version, item in result["compat"].items():
+        item = dict(item)  # a reused result's versions can be ledger rows shared with other readers
         raw = item.pop("raw_output", None)
         if raw:
             path = directory / "diagnostics" / f"{key[:16]}-{result.get('mode', 'eval')}-{version}.txt"
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(raw + "\n")
             item["full_diagnostics_ref"] = str(path.relative_to(directory))
+        compat[version] = item
+    result["compat"] = compat
     return result
 
 

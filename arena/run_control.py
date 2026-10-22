@@ -196,19 +196,119 @@ def control_lock(directory: Path):
         os.close(fd)
 
 
+_JSONL_CACHE: dict[str, tuple] = {}
+_JSONL_CACHE_LOCK = threading.Lock()
+_FINGERPRINT = 32
+# Tests set ARENA_FROZEN_ROWS=1 (tests/conftest.py): cached rows are shared, so a reader that edits one fails there.
+_FREEZE_ROWS = os.environ.get("ARENA_FROZEN_ROWS") == "1"
+
+
+def _refuse(self, *args, **kwargs):
+    raise TypeError("cached JSONL rows are shared between readers; copy before editing")
+
+
+def _thaw(value):
+    if isinstance(value, dict):
+        return {key: _thaw(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_thaw(item) for item in value]
+    return value
+
+
+class _FrozenDict(dict):
+    __setitem__ = __delitem__ = update = pop = popitem = setdefault = clear = __ior__ = _refuse
+
+    def __copy__(self):
+        return dict(self)
+
+    def __deepcopy__(self, memo):
+        return _thaw(self)
+
+
+class _FrozenList(list):
+    __setitem__ = __delitem__ = append = extend = insert = pop = remove = clear = sort = reverse = __iadd__ = _refuse
+
+    def __copy__(self):
+        return list(self)
+
+    def __deepcopy__(self, memo):
+        return _thaw(self)
+
+
+def _freeze(value):
+    if isinstance(value, dict):
+        return _FrozenDict((key, _freeze(item)) for key, item in value.items())
+    if isinstance(value, list):
+        return _FrozenList(_freeze(item) for item in value)
+    return value
+
+
+def cached_jsonl_rows(path: Path, *, dicts_only: bool, lock_shared: bool = False) -> list:
+    """Parsed rows of an append-only JSONL file, memoized per process.
+
+    Only complete lines (ending in a newline) are parsed; a partial tail waits for the next call. A file that
+    shrank, changed inode, or no longer matches the bytes already consumed is re-parsed from the start. Rows
+    are shared between callers (treat them as read-only); the list itself is a fresh copy.
+    """
+    key = f"{path}|{int(dicts_only)}"
+    with _JSONL_CACHE_LOCK:
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            if lock_shared:
+                fcntl.flock(fd, fcntl.LOCK_SH)
+            stat = os.fstat(fd)
+            head = os.pread(fd, _FINGERPRINT, 0)
+            entry = _JSONL_CACHE.get(key)
+            if entry is not None:
+                ino, consumed, rows, size, mtime, h, tail = entry
+                if ino == stat.st_ino and size == stat.st_size and mtime == stat.st_mtime_ns and h == head:
+                    return list(rows)
+                valid = (
+                    ino == stat.st_ino
+                    and stat.st_size >= consumed
+                    and h == head
+                    and os.pread(fd, len(tail), consumed - len(tail)) == tail
+                )
+                if not valid:
+                    entry = None
+            if entry is None:
+                consumed, rows = 0, []
+            data = _pread_all(fd, consumed, stat.st_size - consumed)
+            keep = min(_FINGERPRINT, consumed + data.rfind(b"\n") + 1)
+            end = data.rfind(b"\n") + 1
+            tail_start = consumed + end - keep
+            tail = (os.pread(fd, keep, tail_start) if keep else b"")
+        finally:
+            os.close(fd)
+        for line in data[:end].split(b"\n"):
+            try:
+                row = json.loads(line)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue  # a torn line from a killed writer must not make the run unreadable
+            if not dicts_only or isinstance(row, dict):
+                rows.append(_freeze(row) if _FREEZE_ROWS else row)
+        consumed += end
+        _JSONL_CACHE[key] = (stat.st_ino, consumed, rows, stat.st_size, stat.st_mtime_ns, head, tail)
+        return list(rows)
+
+
+def _pread_all(fd: int, offset: int, length: int) -> bytes:
+    chunks = []
+    while length > 0:
+        chunk = os.pread(fd, length, offset)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        offset += len(chunk)
+        length -= len(chunk)
+    return b"".join(chunks)
+
+
 def _control_rows(directory: Path) -> list[dict]:
     path = directory / "control.jsonl"
     if not path.is_file():
         return []
-    rows = []
-    for line in path.read_bytes().splitlines():
-        try:
-            row = json.loads(line)
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            continue
-        if isinstance(row, dict):
-            rows.append(row)
-    return rows
+    return cached_jsonl_rows(path, dicts_only=True)
 
 
 def _append_control(directory: Path, event: dict) -> dict:

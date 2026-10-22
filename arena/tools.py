@@ -268,7 +268,7 @@ def all_errors(name: str, run_id: str, node, result: dict) -> tuple[list[dict], 
         return diagnostics, False
     proof = node.proof_text
     max_passes = int(text.numbers().get("error_passes_max", 3))
-    revealed = list(diagnostics)
+    revealed = [dict(item) for item in diagnostics]
     goal_by_line: dict[int, str] = {}
     for goals in [primary.get("goals") or [], result.get("goals") or []]:
         for item in goals:
