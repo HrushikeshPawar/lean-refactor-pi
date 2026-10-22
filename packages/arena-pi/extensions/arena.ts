@@ -59,9 +59,10 @@ export default async function arenaExtension(pi: ExtensionAPI) {
   const registerTool = async (tool: any) => {
     const validKeys = Object.keys(tool.parameters.properties ?? {});
     const missingError = await renderText("messages/errors.empty_arguments", { valid: validKeys.join(", ") || "none" });
+    const allOptional = !((tool.parameters.required ?? []) as unknown[]).length;
     // Normalized before Pi's schema validation, so an empty optional enum ("view": "") or a stringified list passes.
     return pi.registerTool({ ...tool,
-    prepareArguments: (args: unknown) => normalizeToolArguments(requireToolArguments(args, missingError), tool.parameters),
+    prepareArguments: (args: unknown) => normalizeToolArguments(requireToolArguments(args, missingError, allOptional), tool.parameters),
     execute: (id: string, params: any, ...rest: any[]) => toolContext.run(
       { toolCallId: id, requestId, turn },
       () => tool.execute(id, normalizeToolArguments(params, tool.parameters), ...rest)) });
