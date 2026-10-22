@@ -46,8 +46,8 @@ memory_read_entries: 30
 memory_recovery_entries: 8
 budget:
   static_words: 860
-  # 640: the team paragraph explains the three delegate scopes (proof, step, island) and the card protocol.
-  packet_words: 640
+  # 670: the team paragraph explains the three delegate scopes, the card protocol, and that islands are not wrapped up by steers.
+  packet_words: 670
   # 215: the worker packet explains the card (what to write, what arrives in replies).
   worker_words: 215
   reply_words: 40
@@ -66,3 +66,6 @@ island_family_lines: 4
 idle_note_after_minutes: 5
 untried_step_max_tries: 2
 untried_step_min_pts: 0.5
+# The orchestrator is told of a plateau when the run best gains less than plateau_points in plateau_minutes.
+plateau_points: 0.5
+plateau_minutes: 10

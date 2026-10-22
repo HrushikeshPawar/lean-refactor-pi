@@ -225,7 +225,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `packet/sections.titles.worker` | 1 | Initial theorem packet | once per run |
 | `packet/sections.titles.worker_goals` | 6 | Initial theorem packet | once per run |
 | `packet/task` | 10 | Initial theorem packet | once per run |
-| `packet/team` | 251 | Initial theorem packet | once per run |
+| `packet/team` | 282 | Initial theorem packet | once per run |
 | `packet/team-cost` | 10 | Initial theorem packet | once per run |
 | `packet/worker` | 149 | Initial theorem packet | once per run |
 | `replies/await_results.cursor` | 13 | Tool replies | when the matching tool result occurs |
@@ -324,6 +324,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/tools.best_all_pin` | 3 | Tool replies | when the matching tool result occurs |
 | `replies/tools.best_provisional` | 2 | Tool replies | when the matching tool result occurs |
 | `replies/tools.by_author` | 3 | Tool replies | when the matching tool result occurs |
+| `replies/tools.card_stale` | 12 | Tool replies | when the matching tool result occurs |
 | `replies/tools.compile_best` | 2 | Tool replies | when the matching tool result occurs |
 | `replies/tools.compile_delta` | 2 | Tool replies | when the matching tool result occurs |
 | `replies/tools.compile_filed` | 4 | Tool replies | when the matching tool result occurs |
@@ -400,6 +401,9 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/tools.outcome_sketch_open` | 4 | Tool replies | when the matching tool result occurs |
 | `replies/tools.outcome_timeout` | 2 | Tool replies | when the matching tool result occurs |
 | `replies/tools.own_theorem` | 12 | Tool replies | when the matching tool result occurs |
+| `replies/tools.plateau` | 13 | Tool replies | when the matching tool result occurs |
+| `replies/tools.plateau_families` | 6 | Tool replies | when the matching tool result occurs |
+| `replies/tools.plateau_family` | 8 | Tool replies | when the matching tool result occurs |
 | `replies/tools.price` | 7 | Tool replies | when the matching tool result occurs |
 | `replies/tools.read_diff` | 4 | Tool replies | when the matching tool result occurs |
 | `replies/tools.read_experiment` | 5 | Tool replies | when the matching tool result occurs |

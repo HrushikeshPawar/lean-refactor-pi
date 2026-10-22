@@ -1432,11 +1432,11 @@ def _wait_rows(directory: Path) -> list[dict]:
 
 def _selectable(row: dict, job_ids: list[str] | None) -> bool:
     kind = row.get("type") or row.get("kind")
-    if kind == "run_stop":
+    if kind in ("run_stop", "card"):
         return True
     if job_ids is not None and row.get("job_id") not in job_ids:
         return False
-    if kind in ("worker_finding", "card"):
+    if kind == "worker_finding":
         return True
     if kind == "verification" and row.get("state") in _terminal_checks:
         return True
@@ -1776,16 +1776,17 @@ def _island_families(directory: Path) -> list[str]:
 
 
 def island_status(directory: Path, job_id: str) -> dict | None:
-    """An island job's family: the route of its first closed node it authored (first attempt, not a re-check), that route's best closed node, closed count."""
-    nodes = list(proof_nodes(directory).values())
-    first = next((node for node in nodes if _closed(node) and node_author_job(node) == job_id), None)
-    if first is None:
+    """An island job's own proof work: the closed nodes it authored (first attempt, not a re-check), in any route.
+
+    `score` and `node` are the best of those nodes, `closed` their count. `route` is the route of that best node,
+    or of its first closed node when none scored. None when the job has no closed node of its own yet."""
+    own = [node for node in proof_nodes(directory).values() if _closed(node) and node_author_job(node) == job_id]
+    if not own:
         return None
-    closed = [node for node in nodes if _closed(node) and node.route == first.route]
-    scored = [node for node in closed if node.score is not None]
+    scored = [node for node in own if node.score is not None]
     top = max(scored, key=lambda node: node.score) if scored else None
-    return {"route": first.route, "node": top.id if top else None, "score": top.score if top else None,
-            "closed": len(closed)}
+    return {"route": (top or own[0]).route, "node": top.id if top else None,
+            "score": top.score if top else None, "closed": len(own)}
 
 
 def island_line(directory: Path, job_id: str, label: str, state: str) -> str:
@@ -1816,8 +1817,8 @@ def _stale_streak(rows: list[dict]) -> int:
 def island_turn(directory: Path, job_id: str, activation_id: str) -> dict:
     """An island worker's turn ended. Say whether it continues, and with what message.
 
-    Stops when the run has stopped, the job is being cancelled, the island best has not improved for
-    `island_stale_turns` consecutive turns. Spend is bounded only by the run limit."""
+    Stops when the run has stopped, the job is being cancelled, the job's own best (see island_status) has not
+    improved for `island_stale_turns` consecutive turns. Spend is bounded only by the run limit."""
     limits = text.numbers()
     status = island_status(directory, job_id)
     best = None if status is None else status["score"]
@@ -1939,6 +1940,7 @@ def _await_results(directory, actor_id, cursor, job_ids, cancel_event, blocked) 
                 fresh = [
                     row for row in _wait_rows(directory)
                     if row.get("event_id") and row["event_id"] not in acked and _selectable(row, job_ids)
+                    and not ((row.get("type") or row.get("kind")) == "card" and row.get("actor_id") == actor_id)
                 ]
                 if fresh:
                     return _commit_delivery(directory, actor_id, fresh, acked, job_ids=job_ids,

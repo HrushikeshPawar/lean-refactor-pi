@@ -2326,7 +2326,24 @@ class SteerAndNoteTests(unittest.TestCase):
             self.assertIn("  card: focus: s4 route | best: n7 at 70",
                           team_reply.render("jobs", orchestration.jobs(directory), directory))
 
-    def test_cards_are_pushed_once_and_a_worker_sees_only_the_orchestrators(self):
+    def test_card_from_another_job_wakes_an_await_filtered_to_other_jobs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _seed_parent(directory)
+            card_job, _child = self._active_job(directory, "op-card-wake-a")
+            waited_job, _other = self._active_job(directory, "op-card-wake-b")
+            self._save(directory, "worker-actor", card_job["job_id"], "c1", focus="n9 beats the run best")
+            with patch.object(orchestration, "await_timeout_s", return_value=0.05):
+                reply = orchestration.await_results(directory, actor_id="sol", job_ids=[waited_job["job_id"]])
+                again = orchestration.await_results(directory, actor_id="sol", job_ids=[waited_job["job_id"]])
+            self.assertEqual(reply["wake_reason"], "card")
+            self.assertEqual([(event["type"], event["job_id"]) for event in reply["events"]],
+                             [("card", card_job["job_id"])])
+            self.assertIn("job1 updated its card", team_reply.render("await_results", reply, directory))
+            self.assertEqual(again["wake_reason"], "timeout")
+            self.assertEqual(again["events"], [])
+
+    def test_cards_are_pushed_once_and_a_worker_never_sees_its_own(self):
         from arena import campaign
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -2460,6 +2477,20 @@ class IslandTests(unittest.TestCase):
                 self.assertEqual(orchestration.island_status(directory, job_id),
                                  {"route": "r4", "node": "n57", "score": 68.21, "closed": 1})
 
+    def test_island_status_credits_the_jobs_own_best_across_routes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _seed_parent(directory)
+            started, _child = self._island(directory)
+            job_id = started["job_id"]
+            first = _closed_node("n57", "r4", 68.21, job_id)
+            own_best = _closed_node("n58", "r1", 71.0, job_id)
+            other_actor = _closed_node("n3", "r4", 90.0, "job-other")
+            nodes = {"p1": first, "p2": own_best, "p3": other_actor}
+            with patch.object(orchestration, "proof_nodes", lambda _directory: nodes):
+                self.assertEqual(orchestration.island_status(directory, job_id),
+                                 {"route": "r1", "node": "n58", "score": 71.0, "closed": 2})
+
     def test_island_status_is_rendered_in_jobs_and_await(self):
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
@@ -2470,13 +2501,13 @@ class IslandTests(unittest.TestCase):
                      "p3": _closed_node("n3", "r1", 90.0)}
             with patch.object(orchestration, "proof_nodes", lambda _directory: nodes):
                 self.assertEqual(orchestration.island_status(directory, job_id),
-                                 {"route": "r4", "node": "n57", "score": 68.21, "closed": 2})
+                                 {"route": "r4", "node": "n57", "score": 68.21, "closed": 1})
                 listing = team_reply.render("jobs", orchestration.jobs(directory), directory)
                 waited = team_reply.render(
                     "await_results", {"wake_reason": "note", "events": [], "jobs": orchestration.jobs(directory)["jobs"]},
                     directory)
-                self.assertIn("job1 active · island r4: best n57 68.21 (2 closed)", listing)
-                self.assertIn("job1 active · island r4: best n57 68.21 (2 closed)", waited)
+                self.assertIn("job1 active · island r4: best n57 68.21 (1 closed)", listing)
+                self.assertIn("job1 active · island r4: best n57 68.21 (1 closed)", waited)
             with patch.object(orchestration, "proof_nodes", lambda _directory: {}):
                 self.assertIn("island: no closed proof yet", orchestration.island_line(directory, job_id, "job1", "active"))
 
