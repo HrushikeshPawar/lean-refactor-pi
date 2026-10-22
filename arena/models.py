@@ -296,8 +296,9 @@ def catalog_price_problems(config: dict | None = None, home: Path | None = None)
 # Offline readiness only. These figures describe the shared stop; this module never charges or edits caps.
 SPEND_STOP_USD = Decimal("2.50")
 HEADROOM_USD = Decimal("0.50")
-# Decision 13: one Sol session and two active DeepSeek sessions. Not a measured concurrency.
-_SESSION_CONCURRENCY = {"gpt-6.1-sol": 1, "deepseek-v4.1-flash": 2}
+# One Sol session and four active DeepSeek sessions (the worker slots). Not a measured concurrency; Lean checks beyond
+# the session's Lean workers queue (lean_session.MODEL_QUEUE_TIMEOUT).
+_SESSION_CONCURRENCY = {"gpt-6.1-sol": 1, "deepseek-v4.1-flash": 4}
 _SOL = "gpt-6.1-sol"
 _DEEPSEEK = "deepseek-v4.1-flash"
 _MILLION = Decimal(1_000_000)

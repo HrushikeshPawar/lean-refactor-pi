@@ -1,6 +1,6 @@
 """Worker assignments. A receipt is durable before the child is opened.
 
-At most two model activations own a slot. A queued job waits for a real exit.
+At most `_MODEL_SLOTS` (the worker model's session concurrency) model activations own a slot. A queued job waits for a real exit.
 Cancellation clears queued prompts, then aborts, and keeps the slot until the child is gone.
 A passing tool result is published while the activation is still active.
 A follow-up reuses the hypothesis session; a follow-up to an active job is steered into its running turn.
@@ -21,10 +21,11 @@ from pathlib import Path
 
 from arena import run_control, text
 from arena.campaign import _append, events
-from arena.pi_rpc import WORKER_TOOLS, FrameReader, cancel_lines, prompt_line, steer_line, worker_launch
+from arena.models import _SESSION_CONCURRENCY
+from arena.pi_rpc import WORKER_MODEL, WORKER_TOOLS, FrameReader, cancel_lines, prompt_line, steer_line, worker_launch
 from arena.run_control import OperationRejected
 
-_MODEL_SLOTS = 2
+_MODEL_SLOTS = _SESSION_CONCURRENCY[WORKER_MODEL]
 _readers: dict[str, threading.Thread] = {}
 _owned: dict[str, object] = {}
 _live: dict[str, dict] = {}

@@ -1013,6 +1013,7 @@ class V8WorkerSmokeTests(unittest.TestCase):
             children[2][1]._chunks.put(None)
             orchestration.join_activation(other["activation_id"])
 
+    @patch.object(orchestration, "_MODEL_SLOTS", 2)  # the queue behaviour under test needs a small pool
     def test_v8_cancel_releases_after_exit(self):
         """Two live workers hold the slots. Cancel keeps its slot until that child exits."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -1547,6 +1548,7 @@ class V8RecoverySmokeTests(unittest.TestCase):
             self.assertFalse(orchestration._request_uncertain(directory, "sol-session"))
             self.assertFalse(orchestration._request_uncertain(directory))
 
+    @patch.object(orchestration, "_MODEL_SLOTS", 2)  # the queue behaviour under test needs a small pool
     def test_v8_owned_child_reconciliation(self):
         with tempfile.TemporaryDirectory() as tmp:
             ambiguous = Path(tmp)

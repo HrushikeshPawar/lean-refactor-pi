@@ -52,6 +52,7 @@ def _json_lines(*rows: dict) -> bytes:
 class V8E2ETests(unittest.TestCase):
     # ------------------------------------------------------------------ journey 1
     @slow
+    @patch.object(orchestration, "_MODEL_SLOTS", 2)  # the queue lifecycle under test needs a pool smaller than three jobs
     def test_parallel_run_stop_and_resume(self):
         """Real orchestration/run_control/coordinator; INJECTED child transport and Lean (no real Pi child)."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -115,7 +116,7 @@ class V8E2ETests(unittest.TestCase):
                 child._chunks.put(None)
                 orchestration.join_activation(activation_id)
 
-            # --- delegation receipts return before any held worker response; a third job queues
+            # --- delegation receipts return before any held worker response; a third job queues (two slots)
             a = delegate("op-a", "hypothesis a")
             b = delegate("op-b", "hypothesis b")
             c = delegate("op-c", "hypothesis c")
