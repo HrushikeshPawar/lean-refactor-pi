@@ -397,8 +397,12 @@ def _fill_slots(directory: Path) -> None:
         with run_control.control_lock(directory):
             if _recovering(directory) or _slot_count(directory) >= _MODEL_SLOTS:
                 return
+            rows = _delegations(directory)
+            # A follow-up waits for its own job's previous process to exit: one process per worker session.
             queued = next(
-                (row for row in _delegations(directory) if _activation_view(directory, row)["state"] == "queued"),
+                (row for row in rows if _activation_view(directory, row)["state"] == "queued" and not any(
+                    other["job_id"] == row["job_id"] and _activation_view(directory, other)["occupies_slot"]
+                    for other in rows)),
                 None,
             )
             if queued is None:
@@ -515,6 +519,16 @@ def _assistant_text(message: dict | None) -> str | None:
     return text[:REPORT_CHARS] or None
 
 
+def _settled(current: dict) -> None:
+    """A worker whose last assistant message ended in a provider error failed; it did not complete."""
+    if current.get("stop_reason") == "error":
+        current["state"] = "failed"
+        current["reason"] = (current.get("error") or "model error").replace("_", " ")[:200]
+        current.pop("report", None)
+    else:
+        current["state"] = "completed"
+
+
 def _apply_record(record: dict, command_id: str, current: dict) -> dict:
     if current["state"] in _terminal_states or current["state"] == "cancelling":
         return current
@@ -530,7 +544,10 @@ def _apply_record(record: dict, command_id: str, current: dict) -> dict:
             current["outcome"] = "no_run"
         elif disposition in ("started", "queued"):
             current["disposition"] = disposition
-            current["state"] = "completed" if current.get("saw_settlement") else "active"
+            if current.get("saw_settlement"):
+                _settled(current)
+            else:
+                current["state"] = "active"
         else:
             current["state"] = "failed"
             current["reason"] = "invalid_prompt_disposition"
@@ -540,7 +557,7 @@ def _apply_record(record: dict, command_id: str, current: dict) -> dict:
         return current
     if kind == "agent_settled" and current.get("state") != "handled":
         if current.get("state") == "active":
-            current["state"] = "completed"
+            _settled(current)
         else:
             current["saw_settlement"] = True
     return current
@@ -549,7 +566,11 @@ def _apply_record(record: dict, command_id: str, current: dict) -> dict:
 def _take(directory: Path, delegation: dict, command_id: str, current: dict, records: list[dict]) -> None:
     for record in records:
         if record.get("type") == "message_end":
-            current["report"] = _assistant_text(record.get("message")) or current.get("report")
+            message = record.get("message")
+            current["report"] = _assistant_text(message) or current.get("report")
+            if isinstance(message, dict) and message.get("role") == "assistant":
+                current["stop_reason"] = message.get("stopReason")
+                current["error"] = message.get("errorMessage")
             continue
         # Stream deltas change nothing here; locking and re-reading the logs for each one stalled workers on stdout.
         if record.get("type") not in _state_records:
@@ -1090,7 +1111,7 @@ def _follow_up(
             existing = run_control._receipt(control_rows, operation_id)
             if existing is None and _recovering(directory):
                 return _reject(operation_id, "recovering", "recovery_required", "replies/delegate.recovering")
-            if existing is None and (current["state"] in _active_states | {"cancelling"} or current["occupies_slot"]):
+            if existing is None and (current["state"] in _active_states | {"cancelling"}):
                 return _reject(operation_id, "active", "busy", "replies/delegate.active")
             delegation = {
                 "operation_id": operation_id,
@@ -1106,7 +1127,8 @@ def _follow_up(
                 "scope": source["scope"],
                 "anchor": source["anchor"],
                 "tools": list(source["tools"]),
-                "state": "launching" if _can_admit_directly(directory) else "queued",
+                # A settled job whose process has not exited yet keeps its slot: queue behind it.
+                "state": "launching" if not current["occupies_slot"] and _can_admit_directly(directory) else "queued",
                 "resumed": True,
             }
             applied = run_control._apply_locked(

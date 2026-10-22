@@ -2020,6 +2020,56 @@ class TeamReplyAwaitTests(unittest.TestCase):
         self.assertIn("saved no nodes", self.render([cancelled]))
 
 
+class SettledJobTests(unittest.TestCase):
+    def test_provider_error_fails_job_and_settled_job_accepts_queued_followup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _seed_parent(directory)
+            children = []
+
+            def open_child(launch):
+                child = _HeldChild()
+                child.exit_on_eof = False
+                children.append(child)
+                return child
+
+            fresh = orchestration.delegate(
+                directory, operation_id="op-fresh", run_id="run-1", actor_id="sol", session_id="sol-session",
+                task="try", scope="step", anchor={"node": "n1", "steps": [1, 2]}, open_child=open_child,
+            )
+            command_id = orchestration.jobs(directory)["jobs"][0]["command_id"]
+            frames = [
+                {"type": "response", "id": command_id, "success": True, "data": {"disposition": "started"}},
+                {"type": "message_end", "message": {"role": "assistant", "stopReason": "error",
+                                                    "errorMessage": "upstream_unavailable",
+                                                    "content": [{"type": "text", "text": "Let me try"}]}},
+                {"type": "agent_settled"},
+            ]
+            children[0]._chunks.put("".join(json.dumps(frame) + "\n" for frame in frames).encode())
+            orchestration.join_activation(fresh["activation_id"])
+            view = orchestration.jobs(directory)["jobs"][0]
+            self.assertEqual(view["state"], "failed")
+            self.assertTrue(view["occupies_slot"])
+            shown = team_reply.render("jobs", orchestration.jobs(directory), directory)
+            self.assertIn("job1 failed", shown)
+            self.assertNotIn("Let me try", shown)
+            with patch.object(orchestration, "reconcile", return_value={"status": "running", "generation": "fixture"}):
+                awaited = orchestration.await_results(directory, actor_id="sol")
+            self.assertIn("job1 failed (upstream unavailable).", team_reply.render("await_results", awaited, directory))
+
+            follow = orchestration.delegate(
+                directory, operation_id="op-follow", run_id="run-1", actor_id="sol", session_id="sol-session",
+                task="again", job_id=fresh["job_id"], open_child=open_child,
+            )
+            self.assertTrue(follow["ok"])
+            self.assertEqual(follow["state"], "queued")
+            self.assertEqual(len(children), 1)
+            children[0].absent = True
+            self.assertTrue(orchestration.observe_exit(directory, fresh["activation_id"]))
+            self.assertEqual(len(children), 2)
+            orchestration.join_activation(fresh["activation_id"])
+
+
 class V8VerificationSmokeTests(FakeRunCase):
     def test_v8_verification_outcomes(self):
         from arena import campaign, orchestration
