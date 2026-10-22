@@ -227,7 +227,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `packet/sections.titles.worker` | 1 | Initial theorem packet | once per run |
 | `packet/sections.titles.worker_goals` | 6 | Initial theorem packet | once per run |
 | `packet/task` | 10 | Initial theorem packet | once per run |
-| `packet/team` | 475 | Initial theorem packet | once per run |
+| `packet/team` | 525 | Initial theorem packet | once per run |
 | `packet/team-cost` | 10 | Initial theorem packet | once per run |
 | `packet/trim` | 86 | Initial theorem packet | once per run |
 | `packet/worker` | 149 | Initial theorem packet | once per run |
@@ -306,6 +306,9 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/team.delegate_resumed` | 11 | Tool replies | when the matching tool result occurs |
 | `replies/team.delegate_reused` | 7 | Tool replies | when the matching tool result occurs |
 | `replies/team.delegate_started` | 13 | Tool replies | when the matching tool result occurs |
+| `replies/team.idle_ended` | 5 | Tool replies | when the matching tool result occurs |
+| `replies/team.idle_ended_job` | 2 | Tool replies | when the matching tool result occurs |
+| `replies/team.idle_fill` | 35 | Tool replies | when the matching tool result occurs |
 | `replies/team.idle_slots` | 6 | Tool replies | when the matching tool result occurs |
 | `replies/team.island_best` | 2 | Tool replies | when the matching tool result occurs |
 | `replies/team.island_best_heartbeats` | 3 | Tool replies | when the matching tool result occurs |
@@ -329,6 +332,9 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/team.nodes_summary` | 4 | Tool replies | when the matching tool result occurs |
 | `replies/team.reject` | 3 | Tool replies | when the matching tool result occurs |
 | `replies/team.reject_bare` | 3 | Tool replies | when the matching tool result occurs |
+| `replies/team.role_family` | 2 | Tool replies | when the matching tool result occurs |
+| `replies/team.role_heartbeats` | 2 | Tool replies | when the matching tool result occurs |
+| `replies/team.role_tokens` | 2 | Tool replies | when the matching tool result occurs |
 | `replies/team.steer_best` | 9 | Tool replies | when the matching tool result occurs |
 | `replies/team.steer_task` | 4 | Tool replies | when the matching tool result occurs |
 | `replies/team.trim_continue` | 20 | Tool replies | when the matching tool result occurs |

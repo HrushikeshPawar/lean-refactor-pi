@@ -702,7 +702,9 @@ def redeliver(run_id: str, actor: str | None = None) -> dict:
 
 
 def _idle_note(run_id: str, actor: str, bucket: dict) -> list[str]:
-    """The orchestrator's note of idle worker slots, once per change in the idle count."""
+    """The orchestrator's note of idle worker slots: on each change in the idle count, and again every
+    `idle_note_repeat_minutes` while slots stay idle (r14 left three slots idle for 17 minutes after one note).
+    It names the islands that ended for not improving."""
     from arena import orchestration
 
     if actor != "sol":
@@ -710,12 +712,21 @@ def _idle_note(run_id: str, actor: str, bucket: dict) -> list[str]:
     try:
         directory = campaign.run_dir(run_id)
         idle = orchestration.idle_slots(directory) if (directory / "ledger.jsonl").exists() else 0
+        ended = orchestration.ended_islands(directory) if idle else []
     except (OSError, ValueError, KeyError):
         return []
-    if idle == bucket.get("idle_noted", 0):
+    now = time.time()
+    repeat = text.numbers()["idle_note_repeat_minutes"] * 60
+    if idle == bucket.get("idle_noted", 0) and (not idle or now - bucket.get("idle_noted_at", 0) < repeat):
         return []
     bucket["idle_noted"] = idle
-    return [text.render("replies/team.idle_slots", idle=idle, slots=orchestration._MODEL_SLOTS)] if idle else []
+    bucket["idle_noted_at"] = now
+    if not idle:
+        return []
+    note = text.render("replies/team.idle_slots", idle=idle, slots=orchestration._MODEL_SLOTS)
+    if ended:
+        note += " " + text.render("replies/team.idle_ended", jobs=", ".join(ended))
+    return [note + " " + text.render("replies/team.idle_fill")]
 
 
 def _best_note(run_id: str, actor: str, bucket: dict, changed: bool) -> list[str]:

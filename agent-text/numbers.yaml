@@ -47,7 +47,8 @@ memory_recovery_entries: 8
 budget:
   static_words: 860
   # 870: the team paragraph adds Sol's default stance (keep hill climbing) and a per-role guide (r12b analysis).
-  packet_words: 870
+  # 920: keep every slot busy, refill ended islands, no best is final, combine axis extremes (r14 stall analysis).
+  packet_words: 920
   # 215: the worker packet explains the card (what to write, what arrives in replies).
   worker_words: 215
   reply_words: 40
@@ -64,6 +65,8 @@ island_families: 6
 island_family_lines: 4
 # The orchestrator is told about idle worker slots once the run is this many minutes old.
 idle_note_after_minutes: 5
+# While slots stay idle the note repeats this often; r14's orchestrator ignored a single note for 17 minutes.
+idle_note_repeat_minutes: 5
 untried_step_max_tries: 2
 untried_step_min_pts: 0.5
 # The orchestrator is told of a plateau when the run best gains less than plateau_points in plateau_minutes.

@@ -1881,7 +1881,8 @@ def island_turn(directory: Path, job_id: str, activation_id: str) -> dict:
 
     Stops when the run has stopped, the job is being cancelled, the job's own best (see island_status, on its
     axis when it has an objective) has not improved for `island_stale_turns` consecutive turns. Spend is bounded
-    only by the run limit. A trim job continues on the run best, so its message names that node."""
+    only by the run limit. A trim job continues on the run best, so its message names that node, and it is never
+    stale: it runs for the whole run (r14 lost its trim job to staleness while budget remained)."""
     limits = text.numbers()
     original = _job_original(directory, job_id)
     objective = original.get("objective")
@@ -1899,7 +1900,7 @@ def island_turn(directory: Path, job_id: str, activation_id: str) -> dict:
     reason = (
         "run_stopped" if spend["stopped"]
         else "cancelled" if snapshot is None or snapshot["state"] not in ("active", "launching")
-        else "stale" if streak >= limits["island_stale_turns"]
+        else "stale" if not trim and streak >= limits["island_stale_turns"]
         else None
     )
     _append(directory, {**new, "stale": streak, "stop": reason})
@@ -1924,6 +1925,19 @@ def idle_slots(directory: Path) -> int:
     if not isinstance(started, (int, float)) or time.time() - started < text.numbers()["idle_note_after_minutes"] * 60:
         return 0
     return max(0, _MODEL_SLOTS - _slot_count(directory))
+
+
+def ended_islands(directory: Path) -> list[str]:
+    """`jobN` and role of each island the harness ended because it stopped improving, in end order."""
+    labels = job_labels(directory)
+    ended: dict[str, str] = {}
+    for row in events(directory):
+        if row.get("type") == "island_turn" and row.get("stop") == "stale" and row["job_id"] not in ended:
+            objective = _job_original(directory, row["job_id"]).get("objective")
+            role = text.render(f"replies/team.role_{objective or 'family'}")
+            ended[row["job_id"]] = text.render("replies/team.idle_ended_job",
+                                               job=labels.get(row["job_id"], row["job_id"]), role=role)
+    return list(ended.values())
 
 
 def wake_waiters() -> None:

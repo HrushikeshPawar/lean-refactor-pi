@@ -2612,6 +2612,21 @@ class IslandTests(unittest.TestCase):
                 self.assertTrue(turn["continue"], i)
             self.assertIn(f"the run best is now n{stale + 3} {80.0 + stale}", turn["text"])
 
+    def test_trim_job_is_never_stale_and_ended_islands_are_named(self):
+        stale = text.numbers()["island_stale_turns"]
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _seed_parent(directory)
+            flat = {"p1": _closed_node("n1", "r1", 70.0)}
+            with patch.object(orchestration, "proof_nodes", lambda _d: flat):
+                trim, _child = self._island(directory, operation_id="op-trim", scope="trim")
+                family, _other = self._island(directory, operation_id="op-family")
+                for _ in range(stale + 2):
+                    self.assertTrue(orchestration.island_turn(directory, trim["job_id"], trim["activation_id"])["continue"])
+                    orchestration.island_turn(directory, family["job_id"], family["activation_id"])
+            labels = orchestration.job_labels(directory)
+            self.assertEqual(orchestration.ended_islands(directory), [f"{labels[family['job_id']]} (family island)"])
+
     def test_objective_is_rejected_outside_a_fresh_island(self):
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
@@ -2639,12 +2654,19 @@ class IslandTests(unittest.TestCase):
                                                           f'"ts": {time.time()}'))
             self.assertEqual(orchestration.idle_slots(directory), 0)
             bucket = {}
-            counts = iter([2, 2, 1, 1, 0, 2])
+            counts = iter([2, 2, 1, 1, 0, 2, 2])
+            clock = iter([0, 60, 120, 180, 240, 300, 300 + text.numbers()["idle_note_repeat_minutes"] * 60])
+            fill = " " + text.render("replies/team.idle_fill")
             with patch.object(campaign, "run_dir", return_value=directory), \
-                    patch.object(orchestration, "idle_slots", lambda _directory: next(counts)):
-                notes = [proof_reply._idle_note("run-1", "sol", bucket) for _ in range(6)]
-            self.assertEqual(notes, [["2 of 4 worker slots idle."], [], ["1 of 4 worker slots idle."], [], [],
-                                     ["2 of 4 worker slots idle."]])
+                    patch.object(orchestration, "idle_slots", lambda _directory: next(counts)), \
+                    patch.object(orchestration, "ended_islands", lambda _directory: ["job3 (family island)"]), \
+                    patch.object(proof_reply.time, "time", lambda: next(clock)):
+                notes = [proof_reply._idle_note("run-1", "sol", bucket) for _ in range(7)]
+            ended = " Ended for not improving: job3 (family island)."
+            self.assertEqual(notes, [[f"2 of 4 worker slots idle.{ended}{fill}"], [],
+                                     [f"1 of 4 worker slots idle.{ended}{fill}"], [], [],
+                                     [f"2 of 4 worker slots idle.{ended}{fill}"],
+                                     [f"2 of 4 worker slots idle.{ended}{fill}"]])
             self.assertEqual(proof_reply._idle_note("run-1", "worker-1", {}), [])
 
     def test_four_worker_slots_admit_four_jobs_and_queue_the_fifth(self):
