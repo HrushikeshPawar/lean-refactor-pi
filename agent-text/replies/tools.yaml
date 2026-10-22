@@ -169,3 +169,6 @@ card_stale: "Your card predates your nodes {nodes}; update it with what they sho
 plateau: "The run best {node} {score} has not gained {points} points in {minutes} minutes."
 plateau_families: "Other families with closed proofs: {families}."
 plateau_family: "{route} best {node} {score} ({tokens} tok, {hb} HB)"
+plateau_axes: "Shortest closed proof: {token_node} {tokens} tokens ({token_hb} HB); cheapest: {hb_node} {heartbeats} HB ({hb_tokens} tokens)."
+plateau_costly: "Costliest steps of {node}: {steps}."
+plateau_step: "{step} {tokens} tok {heartbeats} HB"

@@ -77,7 +77,7 @@ def _jobs(result: dict, directory: Path, job) -> str:
         scored = [node for node in saved if node.score is not None]
         top = max(scored, key=lambda node: node.score) if scored else (saved[-1] if saved else None)
         listed = _render("nodes_summary", count=len(saved), best=_node(top)) if top else _render("nodes_none")
-        if item.get("scope") == "island":
+        if item.get("scope") in ("island", "trim"):
             lines.append(orchestration.island_line(directory, item["job_id"], job(item["job_id"]), item.get("state", "?")))
         else:
             lines.append(_render("job_line", job=job(item["job_id"]), state=item.get("state", "?"),
@@ -161,5 +161,5 @@ def _await(result: dict, directory: Path, job) -> str:
     if live and reason != "no_pending_work":
         lines.append(_render("await_running", jobs=", ".join(job(item["job_id"]) for item in live)))
         lines += [orchestration.island_line(directory, item["job_id"], job(item["job_id"]), item["state"])
-                  for item in live if item.get("scope") == "island"]
+                  for item in live if item.get("scope") in ("island", "trim")]
     return "\n".join(lines) or _render("await_no_work")

@@ -60,6 +60,9 @@ def _reject(operation_id: str, reason: str, category: str = "invalid_input", hin
 
 
 _ANCHOR_HINTS = {"node": "node", "hole": "hole", "steps": "steps", "scope": "scope"}
+_OBJECTIVES = ("tokens", "heartbeats")
+# Jobs that keep a worker turning over for the rest of the run: an island (a family, or an axis with an objective) or a trim job.
+_PERSISTENT = ("island", "trim")
 
 
 def _resolve_anchor(directory: Path, scope: str, anchor: object) -> dict | str:
@@ -140,6 +143,12 @@ def _states(directory: Path) -> list[dict]:
 
 def _job_rows(directory: Path, job_id: str) -> list[dict]:
     return [row for row in _delegations(directory) if row.get("job_id") == job_id]
+
+
+def _job_original(directory: Path, job_id: str) -> dict:
+    """The job's first delegation row (its scope, anchor and objective); {} when unknown."""
+    rows = _job_rows(directory, job_id)
+    return rows[0] if rows else {}
 
 
 def _activation_view(directory: Path, delegation: dict) -> dict:
@@ -963,7 +972,8 @@ def _worker_packet(directory: Path, stored: dict) -> str:
     node = next(item for item in graph.nodes if item.id == stored["anchor"]["node"])
     theorem = json.loads((directory / "run-config.json").read_text())["theorem"]
     families = _island_families(directory) if stored["scope"] == "island" else None
-    return context.worker_packet(theorem, task=stored["task"], anchor=stored["anchor"], node=node, families=families)
+    return context.worker_packet(theorem, task=stored["task"], anchor=stored["anchor"], node=node, families=families,
+                                 objective=stored.get("objective"), trim=stored["scope"] == "trim")
 
 
 def _open_activation(directory: Path, stored: dict, open_child, command_id: str,
@@ -1002,7 +1012,7 @@ def _open_activation(directory: Path, stored: dict, open_child, command_id: str,
                 directory, run_id=stored["run_id"], worker_actor_id=stored["worker_actor_id"],
                 worker_session_id=stored["worker_session_id"], job_id=stored["job_id"],
                 activation_id=activation_id, anchor=stored["anchor"], generation=generation,
-                island=stored["scope"] == "island",
+                island=stored["scope"] in _PERSISTENT,
             )
             with run_control.control_lock(directory):
                 _append_ownership(directory, stored, phase="intent", generation=generation,
@@ -1175,6 +1185,7 @@ def _follow_up(
                 "hypothesis": source.get("hypothesis", source["task"]),
                 "scope": source["scope"],
                 "anchor": source["anchor"],
+                "objective": source.get("objective"),
                 "tools": list(source["tools"]),
                 # A settled job whose process has not exited yet keeps its slot: queue behind it.
                 "state": "launching" if not current["occupies_slot"] and _can_admit_directly(directory) else "queued",
@@ -1229,10 +1240,13 @@ def delegate(
     scope: str | None = None,
     anchor: object = None,
     job_id: str | None = None,
+    objective: str | None = None,
 ) -> dict:
     """Accept one hypothesis, or resume its saved session, and return before the worker settles."""
     if not operation_id or not run_id or not actor_id or not session_id or not isinstance(task, str) or not task:
         return _reject(operation_id, "identity", hint="replies/delegate.identity")
+    if objective is not None and (job_id or scope != "island" or objective not in _OBJECTIVES):
+        return _reject(operation_id, "objective", hint="replies/delegate.objective")
     if job_id:
         return _follow_up(
             directory,
@@ -1246,9 +1260,14 @@ def delegate(
             job_id=job_id,
             open_child=open_child,
         )
-    if scope is None or (anchor is None and scope != "island"):
+    if scope == "trim" and anchor is not None:
+        return _reject(operation_id, "anchor", hint="replies/delegate.anchor_trim")
+    if scope is None or (anchor is None and scope not in _PERSISTENT):
         return _reject(operation_id, "scope", hint="replies/delegate.scope")
-    resolved = _resolve_anchor(directory, scope, anchor)
+    if scope == "trim":
+        best = run_best(directory)
+        anchor = None if best is None else {"node": best.id}
+    resolved = _resolve_anchor(directory, "island" if scope == "trim" else scope, anchor)
     if isinstance(resolved, str):
         key = _ANCHOR_HINTS.get(resolved) or ("anchor_step" if scope == "step" else "anchor_proof")
         return _reject(operation_id, resolved, hint=f"replies/delegate.{key}")
@@ -1260,6 +1279,7 @@ def delegate(
         "task": task,
         "scope": scope,
         "anchor": resolved,
+        "objective": objective,
         "actor_id": actor_id,
         "session_id": session_id,
     }
@@ -1276,6 +1296,7 @@ def delegate(
         "hypothesis": task,
         "scope": scope,
         "anchor": resolved,
+        "objective": objective,
         "tools": list(WORKER_TOOLS),
         "state": "queued",
         "resumed": False,
@@ -1732,15 +1753,19 @@ def best_author(directory: Path, node) -> str:
 
 
 def card_comparison(directory: Path, row: dict) -> str | None:
-    """One line setting a worker's own best node beside the run best; None when the worker has no scored node."""
+    """One line setting a worker's own best node beside the run best; None when the worker has no scored node.
+
+    An axis island's own best is its fewest-tokens (or fewest-heartbeats) node, and the run best is still the best score."""
     if not row.get("job_id"):
         return None
     top = run_best(directory)
+    objective = _job_original(directory, row["job_id"]).get("objective")
     own = [node for node in proof_nodes(directory).values()
-           if node.score is not None and node_author_job(node) == row["job_id"]]
+           if node.score is not None and node_author_job(node) == row["job_id"]
+           and (objective is None or getattr(node, objective) is not None)]
     if top is None or not own:
         return None
-    mine = max(own, key=lambda node: node.score)
+    mine = min(own, key=lambda node: getattr(node, objective)) if objective else max(own, key=lambda node: node.score)
 
     def show(node) -> str:
         return text.render("replies/team.card_compare_node", node=node.id, score=round(node.score, 2),
@@ -1779,29 +1804,63 @@ def island_status(directory: Path, job_id: str) -> dict | None:
     """An island job's own proof work: the closed nodes it authored (first attempt, not a re-check), in any route.
 
     `score` and `node` are the best of those nodes, `closed` their count. `route` is the route of that best node,
-    or of its first closed node when none scored. None when the job has no closed node of its own yet."""
+    or of its first closed node when none scored. None when the job has no closed node of its own yet.
+    An axis island (objective tokens or heartbeats) takes its best as the node with the fewest of that measure,
+    ignoring score, and also returns `tokens` and `heartbeats` of that node."""
     own = [node for node in proof_nodes(directory).values() if _closed(node) and node_author_job(node) == job_id]
     if not own:
         return None
+    objective = _job_original(directory, job_id).get("objective")
+    if objective is not None:
+        measured = [node for node in own if getattr(node, objective) is not None]
+        top = min(measured, key=lambda node: getattr(node, objective)) if measured else None
+        return {"route": (top or own[0]).route, "node": top.id if top else None,
+                "score": top.score if top else None, "closed": len(own),
+                "tokens": top.tokens if top else None, "heartbeats": top.heartbeats if top else None}
     scored = [node for node in own if node.score is not None]
     top = max(scored, key=lambda node: node.score) if scored else None
     return {"route": (top or own[0]).route, "node": top.id if top else None,
             "score": top.score if top else None, "closed": len(own)}
 
 
+def _shown_best(status: dict | None, objective: str | None) -> str:
+    """The job's best node as text: `n57 68.21`, `n57 120 tokens` or `n57 900 heartbeats` for an axis island."""
+    if status is None or status["node"] is None:
+        return text.render("replies/team.island_none")
+    if objective is not None:
+        return text.render(f"replies/team.island_best_{objective}", node=status["node"], **{objective: status[objective]})
+    return text.render("replies/team.island_best", node=status["node"], score=round(status["score"], 2))
+
+
+def _merit(status: dict | None, objective: str | None) -> float | None:
+    """Higher is better: the score, or the negated tokens or heartbeats of an axis island's best node."""
+    if status is None:
+        return None
+    if objective is None:
+        return status["score"]
+    value = status[objective]
+    return None if value is None else -value
+
+
 def island_line(directory: Path, job_id: str, label: str, state: str) -> str:
     """`job3 active · island r4: best n57 68.21 (5 closed)`, or the line for an island with no closed proof yet."""
+    original = _job_original(directory, job_id)
     status = island_status(directory, job_id)
+    objective = original.get("objective")
+    if original.get("scope") == "trim":
+        return text.render("replies/team.trim_line", job=label, state=state, best=_shown_best(status, None),
+                           closed=0 if status is None else status["closed"])
     if status is None:
         return text.render("replies/team.island_open", job=label, state=state)
-    best = (text.render("replies/team.island_best", node=status["node"], score=round(status["score"], 2))
-            if status["score"] is not None else text.render("replies/team.island_none"))
+    if objective is not None:
+        return text.render("replies/team.island_line_axis", job=label, state=state, objective=objective,
+                           best=_shown_best(status, objective), closed=status["closed"])
     return text.render("replies/team.island_line", job=label, state=state, route=status["route"],
-                       best=best, closed=status["closed"])
+                       best=_shown_best(status, None), closed=status["closed"])
 
 
 def _stale_streak(rows: list[dict]) -> int:
-    """Consecutive trailing turns of the current activation that did not beat the job's best so far."""
+    """Consecutive trailing turns of the current activation that did not beat the job's best so far (see _merit)."""
     top, streak, activation = None, 0, None
     for row in rows:
         if row.get("activation_id") != activation:
@@ -1817,11 +1876,14 @@ def _stale_streak(rows: list[dict]) -> int:
 def island_turn(directory: Path, job_id: str, activation_id: str) -> dict:
     """An island worker's turn ended. Say whether it continues, and with what message.
 
-    Stops when the run has stopped, the job is being cancelled, the job's own best (see island_status) has not
-    improved for `island_stale_turns` consecutive turns. Spend is bounded only by the run limit."""
+    Stops when the run has stopped, the job is being cancelled, the job's own best (see island_status, on its
+    axis when it has an objective) has not improved for `island_stale_turns` consecutive turns. Spend is bounded
+    only by the run limit. A trim job continues on the run best, so its message names that node."""
     limits = text.numbers()
+    original = _job_original(directory, job_id)
+    objective = original.get("objective")
     status = island_status(directory, job_id)
-    best = None if status is None else status["score"]
+    best = _merit(status, objective)
     rows = [row for row in events(directory) if row.get("type") == "island_turn" and row.get("job_id") == job_id]
     new = {"event_id": uuid.uuid4().hex, "type": "island_turn", "job_id": job_id,
            "activation_id": activation_id, "best": best}
@@ -1837,9 +1899,13 @@ def island_turn(directory: Path, job_id: str, activation_id: str) -> dict:
     _append(directory, {**new, "stale": streak, "stop": reason})
     if reason is not None:
         return {"ok": True, "continue": False, "reason": reason}
-    shown = (text.render("replies/team.island_best", node=status["node"], score=round(best, 2))
-             if best is not None else text.render("replies/team.island_none"))
-    return {"ok": True, "continue": True, "text": text.render("replies/team.island_continue", best=shown)}
+    if original.get("scope") == "trim":
+        top = run_best(directory)
+        shown = (text.render("replies/team.island_best", node=top.id, score=round(top.score, 2))
+                 if top is not None else text.render("replies/team.island_none"))
+        return {"ok": True, "continue": True, "text": text.render("replies/team.trim_continue", best=shown)}
+    key = {"tokens": "island_continue_tokens", "heartbeats": "island_continue_heartbeats"}.get(objective, "island_continue")
+    return {"ok": True, "continue": True, "text": text.render(f"replies/team.{key}", best=_shown_best(status, objective))}
 
 
 def idle_slots(directory: Path) -> int:

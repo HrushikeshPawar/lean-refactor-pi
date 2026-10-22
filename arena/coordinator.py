@@ -191,6 +191,7 @@ class Coordinator:
             scope=request.get("scope"),
             anchor=request.get("at"),
             job_id=request.get("job_id"),
+            objective=request.get("objective"),
         )
 
     def _cancel(self, request: dict) -> dict:
@@ -242,6 +243,8 @@ def _rejected_delegate(request: dict) -> dict | None:
         return None
     if scope == "island" and anchor is None:
         return None
+    if scope == "trim":
+        return None  # orchestration.delegate rejects an anchor on trim
     if scope not in ("proof", "step", "island") or not isinstance(anchor, dict) or not isinstance(anchor.get("node"), str) or not anchor.get("node"):
         return _delegate_invalid("scope", operation_id)
     steps = anchor.get("steps")

@@ -2400,13 +2400,18 @@ def _closed_node(node_id, route, score, job_id=None, proof="theorem t : True := 
 
 
 class IslandTests(unittest.TestCase):
-    def _island(self, directory, operation_id="op-island"):
+    def _island(self, directory, operation_id="op-island", **extra):
         child = _HeldChild()
         child.shutdown = lambda: None
         child.write = lambda data: child.written.extend(data)
+
+        def open_child(launch):
+            child.launch = launch
+            return child
+
         started = orchestration.delegate(
             directory, operation_id=operation_id, run_id="run-1", actor_id="sol", session_id="sol-session",
-            task="a structure unlike the others", scope="island", open_child=lambda _launch: child,
+            task="a structure unlike the others", open_child=open_child, **({"scope": "island"} | extra),
         )
         command_id = orchestration.jobs(directory, [started["job_id"]])["jobs"][0]["command_id"]
         child._chunks.put((json.dumps({"type": "response", "id": command_id, "success": True,
@@ -2510,6 +2515,70 @@ class IslandTests(unittest.TestCase):
                 self.assertIn("job1 active · island r4: best n57 68.21 (1 closed)", waited)
             with patch.object(orchestration, "proof_nodes", lambda _directory: {}):
                 self.assertIn("island: no closed proof yet", orchestration.island_line(directory, job_id, "job1", "active"))
+
+    def test_axis_island_keeps_the_fewest_tokens_and_stops_only_when_tokens_stop_dropping(self):
+        stale = text.numbers()["island_stale_turns"]
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _seed_parent(directory)
+            started, child = self._island(directory, objective="tokens")
+            job_id = started["job_id"]
+            self.assertEqual(child.launch["env"].get("ARENA_ISLAND"), "1")
+            heavy = _closed_node("n57", "r4", 68.0, job_id)
+            light = _closed_node("n58", "r1", 40.0, job_id)
+            heavy.tokens, light.tokens, heavy.heartbeats, light.heartbeats = 900, 600, 100, 300
+            with patch.object(orchestration, "proof_nodes", lambda _d: {"p1": heavy, "p2": light}):
+                self.assertEqual(orchestration.island_status(directory, job_id),
+                                 {"route": "r1", "node": "n58", "score": 40.0, "closed": 2,
+                                  "tokens": 600, "heartbeats": 300})
+
+            def turn(tokens, score, activation=started["activation_id"]):
+                node = _closed_node("n57", "r4", score, job_id)
+                node.tokens, node.heartbeats = tokens, 100
+                with patch.object(orchestration, "proof_nodes", lambda _d: {"p1": node}):
+                    return orchestration.island_turn(directory, job_id, activation)
+
+            first = turn(900, 68.0)
+            self.assertTrue(first["continue"])
+            self.assertIn("Your token island stays open", first["text"])
+            self.assertIn("n57 900 tokens", first["text"])
+            # A higher score does not count: only fewer tokens do.
+            for _ in range(stale - 1):
+                self.assertTrue(turn(900, 99.0)["continue"])
+            self.assertEqual(turn(900, 99.0), {"ok": True, "continue": False, "reason": "stale"})
+            self.assertTrue(turn(800, 60.0, activation="again")["continue"])
+
+    def test_trim_job_delegates_without_an_anchor_and_continues_on_the_run_best(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _seed_parent(directory)
+            with patch.object(orchestration, "proof_nodes", lambda _d: {"p1": _closed_node("n1", "r1", 70.0)}):
+                started, child = self._island(directory, operation_id="op-trim", scope="trim")
+            job = orchestration.jobs(directory, [started["job_id"]])["jobs"][0]
+            self.assertEqual((job["scope"], job["anchor"]["node"]), ("trim", "n1"))
+            self.assertEqual(child.launch["env"].get("ARENA_ISLAND"), "1")
+            own = _closed_node("n57", "r4", 60.0, started["job_id"])
+            other = _closed_node("n3", "r1", 80.0, "job-other")
+            with patch.object(orchestration, "proof_nodes", lambda _d: {"p1": own, "p2": other}):
+                turn = orchestration.island_turn(directory, started["job_id"], started["activation_id"])
+                self.assertIn("trim job: best n57 60.0 (1 closed)",
+                              orchestration.island_line(directory, started["job_id"], "job1", "active"))
+            self.assertTrue(turn["continue"])
+            self.assertIn("The trim job continues: the run best is now n3 80.0.", turn["text"])
+
+    def test_objective_is_rejected_outside_a_fresh_island(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _seed_parent(directory)
+            for scope, anchor, reason in (("proof", {"node": "n1"}, "objective"), ("trim", None, "objective"),
+                                          ("trim", {"node": "n1"}, "anchor")):
+                rejected = orchestration.delegate(
+                    directory, operation_id=f"op-{scope}-{reason}", run_id="run-1", actor_id="sol",
+                    session_id="sol-session", task="x", scope=scope, anchor=anchor,
+                    objective="tokens" if reason == "objective" else None,
+                    open_child=lambda _launch: self.fail("a rejected delegation opened a worker"),
+                )
+                self.assertEqual((rejected["ok"], rejected["reason"]), (False, reason))
 
     def test_idle_slots_are_noted_once_per_change_after_the_first_minutes(self):
         from arena import campaign

@@ -1,7 +1,8 @@
 description: "Give one hypothesis to a worker. A fresh job needs scope and an anchor. A follow-up sends task and job_id and keeps that job's anchor. A follow-up to a running job is delivered after its current step; a follow-up to a settled job resumes its session."
 params:
   task: "What the worker should do."
-  scope: "Required for a fresh job; rejected on a follow-up. proof: the worker searches the whole proof from the node; at has node only. step: the worker edits one part of the node; at has node plus steps or hole. island: the worker owns one distinct proof family for the rest of the run; at is optional (default the original proof, reference only) and has node only."
+  scope: "Required for a fresh job; rejected on a follow-up. proof: the worker searches the whole proof from the node; at has node only. step: the worker edits one part of the node; at has node plus steps or hole. island: the worker owns one distinct proof family for the rest of the run; at is optional (default the original proof, reference only) and has node only. trim: the worker keeps tightening the current run best for the rest of the run; omit at."
+  objective: "Scope island only. tokens or heartbeats makes an axis island judged only on that measure; omit for a family island judged on score."
   job_id: "Existing job to message or resume, such as job1. Omit when starting a fresh job."
   at: "Saved parent node; with scope step, also exactly one of steps or hole. Fresh jobs only; optional for island."
   at_node: "Immutable parent proof node."

@@ -794,6 +794,12 @@ def _card_stale_note(run_id: str, actor: str, bucket: dict) -> list[str]:
         fresh = [node.id for node in stale if node.id not in mentioned]
         if not fresh:
             return []
+        # Unnamed nodes wait for the next reminder window, so they are named then rather than dropped.
+        now = time.time()
+        last = bucket.get("card_stale_at")
+        if last is not None and now - float(last) < text.numbers()["card_stale_minutes"] * 60:
+            return []
+        bucket["card_stale_at"] = now
         bucket["card_nudged"] = sorted(mentioned | set(fresh))
         return [text.render("replies/tools.card_stale", nodes=", ".join(fresh))]
     except (OSError, ValueError, KeyError, TypeError):
@@ -828,6 +834,55 @@ def _plateau_families(nodes: list, best_route: str | None) -> list[str]:
         )
         for node in ranked
     ]
+
+
+def _plateau_axes(nodes: list) -> str | None:
+    """The run's shortest and cheapest closed proofs, as one sentence."""
+    closed = [node for node in nodes if node.status == "closed" and node.route is not None]
+    with_tokens = [node for node in closed if node.tokens is not None]
+    with_hb = [node for node in closed if node.heartbeats is not None]
+    if not with_tokens or not with_hb:
+        return None
+    short = min(with_tokens, key=lambda node: node.tokens)
+    cheap = min(with_hb, key=lambda node: node.heartbeats)
+    return text.render(
+        "replies/tools.plateau_axes",
+        token_node=short.id,
+        tokens=short.tokens,
+        token_hb=shown(short.heartbeats),
+        hb_node=cheap.id,
+        heartbeats=cheap.heartbeats,
+        hb_tokens=shown(cheap.tokens),
+    )
+
+
+def _plateau_costly(history: list, best) -> str | None:
+    """The run best's three costliest top-level steps, from cached profiles only (never Lean)."""
+    from arena import campaign
+    from arena.context import reference_profile
+    from arena.prices import step_table
+
+    name = history[0].get("theorem")
+    profile = campaign._cached_profiles(name, history).get(best.proof_id)
+    if profile is None and best.origin == "reference":
+        try:
+            profile = reference_profile(name, cache_only=True) or None
+        except (ValueError, OSError):
+            profile = None
+    if profile is None or not best.proof_text:
+        return None
+    no_points = {"points_per_token": 0.0, "points_per_1k_hb": 0.0, "points_per_version": 0.0}
+    rows = step_table(best.proof_text, profile, no_points, best.tokens or 0, best.heartbeats, "")["rows"]
+    # A step's cost in tokens plus heartbeats, with the same 3.4 heartbeats-per-token exchange the report uses.
+    rows.sort(key=lambda row: -((row["tokens"] or 0) + (row["incl_hb"] or 0) / 3.4))
+    if not rows:
+        return None
+    steps = "; ".join(
+        text.render("replies/tools.plateau_step", step=row["id"], tokens=row["tokens"],
+                    heartbeats=shown(row["incl_hb"]))
+        for row in rows[:3]
+    )
+    return text.render("replies/tools.plateau_costly", node=best.id, steps=steps)
 
 
 def _plateau_note(run_id: str, actor: str, bucket: dict) -> list[str]:
@@ -876,6 +931,12 @@ def _plateau_note(run_id: str, actor: str, bucket: dict) -> list[str]:
         families = _plateau_families(list(nodes.values()), best.route)
         if families:
             line += " " + text.render("replies/tools.plateau_families", families="; ".join(families))
+        axes = _plateau_axes(list(nodes.values()))
+        if axes:
+            line += " " + axes
+        costly = _plateau_costly(history, best)
+        if costly:
+            line += " " + costly
         return [line]
     except (OSError, ValueError, KeyError, TypeError):
         return []

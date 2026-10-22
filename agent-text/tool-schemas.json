@@ -116,7 +116,8 @@
       "handler": true,
       "properties": {
         "task": {"type": "string", "required": true, "description": "task"},
-        "scope": {"type": "string", "enum": ["proof", "step", "island"], "description": "scope"},
+        "scope": {"type": "string", "enum": ["proof", "step", "island", "trim"], "description": "scope"},
+        "objective": {"type": "string", "enum": ["tokens", "heartbeats"], "description": "objective"},
         "job_id": {"type": "string", "description": "job_id"},
         "at": {
           "type": "object",

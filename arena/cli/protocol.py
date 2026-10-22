@@ -156,6 +156,7 @@ def _management(args: SimpleNamespace) -> dict:
         "scope": request.get("scope"),
         "job_id": orchestration.resolve_job(run_dir(args.run_id), request.get("job_id")),
         "at": request.get("at"),
+        "objective": request.get("objective"),
         **identity,
     })
 

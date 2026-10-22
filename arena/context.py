@@ -1109,12 +1109,18 @@ def _anchor_lines(anchor: dict, node, *, island: bool = False) -> list[str]:
     return [head, *lines]
 
 
-def worker_packet(name: str, *, task: str, anchor: dict, node, families: list[str] | None = None) -> str:
+_ISLAND_PACKETS = {None: "packet/island", "tokens": "packet/island_tokens", "heartbeats": "packet/island_heartbeats"}
+
+
+def worker_packet(name: str, *, task: str, anchor: dict, node, families: list[str] | None = None,
+                  objective: str | None = None, trim: bool = False) -> str:
     """First prompt of a delegated worker: the shared startup contract plus its anchor. No Sol-only sections.
 
     `node` is the graph node the anchor resolved to, so the proof text and goals are the saved ones.
-    `families` (island jobs only) are the existing proof families, one `island_family` entry each.
+    `families` (island jobs only) are the existing proof families, one `island_family` entry each; `objective`
+    picks the axis packet. `trim` (trim jobs) gets the trim packet instead, with no island title.
     """
+    island = families is not None
     row = problem(name)
     targets = versions(row)
     rates = exchange_rates(name, len(targets))
@@ -1122,7 +1128,7 @@ def worker_packet(name: str, *, task: str, anchor: dict, node, families: list[st
         render_text("replies/tools.source_line", line=number, text=line)
         for number, line in enumerate(node.proof_text.splitlines(), 1)
     ]
-    anchored = _anchor_lines(anchor, node, island=families is not None)
+    anchored = _anchor_lines(anchor, node, island=island)
     parts: list[tuple[str, list[str]]] = [
         ("", render_text("packet/task", name=name, statement=row["statement"]).strip().splitlines()),
         ("", _scoring_lines(rates)),
@@ -1130,8 +1136,9 @@ def worker_packet(name: str, *, task: str, anchor: dict, node, families: list[st
         (template("packet/sections.titles.scope").strip(), _scope_section(row)),
         (template("packet/sections.titles.worker").strip(), template("packet/worker").strip().splitlines()),
         *([(template("packet/sections.titles.island").strip(),
-            render_text("packet/island", families="\n".join(families)).strip().splitlines())]
-          if families is not None else []),
+            render_text(_ISLAND_PACKETS[objective], families="\n".join(families or [])).strip().splitlines())]
+          if island else []),
+        *([("", template("packet/trim").strip().splitlines())] if trim else []),
         ("", template("packet/search").strip().splitlines()),
         (render_text("packet/sections.titles.anchored", node=node.id), numbered),
         ("", anchored[:1]),
