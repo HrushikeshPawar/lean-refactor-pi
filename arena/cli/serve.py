@@ -247,6 +247,11 @@ def graph_payload(run_id: str) -> dict:
     config = directory / "run-config.json"
     payload["limit_usd"] = configured_cap(json.loads(config.read_text())) if config.exists() else None
     payload["models"] = run_models(directory)
+    from arena.orchestration import worker_job_labels
+
+    jobs = worker_job_labels(directory)
+    for actor in payload.get("actors") or []:
+        actor["job"] = jobs.get(actor["actor_id"])
     payload["target"] = target_to_beat(payload.get("theorem"), directory.parent)
     report = directory / "cost.json"
     payload["cost_report"] = json.loads(report.read_text()) if report.exists() else {}

@@ -170,10 +170,11 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
   const actorColor = id => id === 'sol' ? '#e0a030' : id === UNKNOWN_ACTOR ? GREY : `hsl(${Math.round((190 + 47 * Math.max(0, actorIds.indexOf(id))) % 360)} 60% 52%)`;
   // Roles with the real model: the orchestrator is actor "sol" internally whatever model it runs.
   const actorLabel = id => {
-    const m = data?.models || {}, own = (data?.actors || []).find(a => a.actor_id === id)?.model;
+    const m = data?.models || {}, actor = (data?.actors || []).find(a => a.actor_id === id), own = actor?.model;
     if (id === 'sol') return m.orchestrator ? `orchestrator · ${m.orchestrator}` : 'orchestrator';
     if (id === UNKNOWN_ACTOR) return id;
-    return own || m.worker ? `${id} · ${own || m.worker}` : id;
+    const name = actor?.job || id;
+    return own || m.worker ? `${name} · ${own || m.worker}` : name;
   };
   const probeLabel = p => p.node || p.index;
   const tagWidth = (label, pad) => Math.round(Math.max(30, 7.5 * String(label).length + pad));

@@ -521,6 +521,18 @@ class RecordedLineageTests(unittest.TestCase):
         self.assertIsNone(payload["probes"][1]["actor_id"])
 
 
+class WorkerLabelTests(unittest.TestCase):
+    def test_worker_actors_map_to_their_job_label(self):
+        from arena import orchestration
+
+        rows = [{"job_id": "j-a", "worker_actor_id": "aa"}, {"job_id": "j-b", "worker_actor_id": "bb"},
+                {"job_id": "j-a", "worker_actor_id": "aa"}]
+        with patch.object(orchestration, "_delegations", return_value=rows):
+            self.assertEqual(orchestration.worker_job_labels(Path(".")), {"aa": "job1", "bb": "job2"})
+        source = (Path(__file__).parents[1] / "arena" / "graph_viewer" / "app.js").read_text()
+        self.assertIn("actor?.job || id", source)
+
+
 class NodeCallTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

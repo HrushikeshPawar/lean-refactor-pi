@@ -1450,6 +1450,13 @@ def job_labels(directory: Path) -> dict[str, str]:
     return labels
 
 
+def worker_job_labels(directory: Path) -> dict[str, str]:
+    """Worker actor id to the `jobN` it runs."""
+    labels = job_labels(directory)
+    return {row["worker_actor_id"]: labels[row["job_id"]] for row in _delegations(directory)
+            if row.get("worker_actor_id") and row.get("job_id") in labels}
+
+
 def resolve_job(directory: Path, ref):
     """Accept a `jobN` label wherever a job id is taken; anything else passes through unchanged."""
     if not isinstance(ref, str) or not re.fullmatch(r"job[0-9]+", ref):
