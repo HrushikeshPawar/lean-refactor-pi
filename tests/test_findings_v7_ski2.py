@@ -91,7 +91,7 @@ class MapDeliveryTests(unittest.TestCase):
         first = self.attach(self.view("n1", "n1"))
         self.assertEqual(first["map"][0], text.render("replies/tools.section_map"))
         quiet = self.attach(self.view("n1", "n2"))
-        self.assertEqual(quiet["map"], [text.render("replies/tools.map_unchanged")])
+        self.assertIsNone(quiet["map"])
         unchanged = self.attach(self.view("n1", "n2"))
         self.assertIsNone(unchanged["map"])
         best = self.attach(self.view("n3", "n3"))

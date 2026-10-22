@@ -1,2 +1,1 @@
 stall_focus: "Focus set to {label}: archive cell {letter}, score {score}, {visits} nodes in the cell."
-route_tally: "{label}: {variants} variants, none above the best."

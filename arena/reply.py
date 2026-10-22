@@ -288,6 +288,23 @@ def compact_goal(goal: str, known: set[str] | frozenset[str] = frozenset(), hypo
     return "\n".join(out)
 
 
+def goal_blocks(goal: str) -> list[str]:
+    """A goal text as its separate goals (case tag, hypotheses, `⊢` target), each one string."""
+    lines = goal.strip("\n").split("\n")
+    targets = [index for index, line in enumerate(lines) if line.startswith("⊢")]
+    blocks: list[str] = []
+    cursor = 0
+    for target in targets:
+        if target < cursor:
+            continue
+        parsed = _parse_goal(lines, max(cursor, _goal_start(lines, target)), target)
+        blocks.append("\n".join(lines[cursor : parsed["end"]]))
+        cursor = parsed["end"]
+    if cursor < len(lines) and "\n".join(lines[cursor:]).strip():
+        blocks.append("\n".join(lines[cursor:]))
+    return blocks or [goal.strip()]
+
+
 def compact_message(
     message: str, known: set[str] | frozenset[str] = frozenset(), hypothesis_chars: int | None = None
 ) -> str:
@@ -388,7 +405,7 @@ def _signed(value: object) -> object:
     return f"{value:+d}" if isinstance(value, int) else shown(value)
 
 
-def _effort_lines(data: dict) -> list[str]:
+def _effort_lines(data: dict, compact: bool = False) -> list[str]:
     """The best node's steps ranked by points at stake, with units the model can act on."""
     rows = sorted(data.get("effort", []), key=lambda item: (-(item.get("at_stake") or 0), -(item.get("tokens") or 0)))
     if not rows:
@@ -396,7 +413,7 @@ def _effort_lines(data: dict) -> list[str]:
     best = data.get("best") or {}
     lines = [
         text.render("replies/tools.map_steps_head", node=shown(best.get("node"))),
-        text.render("replies/tools.map_steps_legend"),
+        *([] if compact else [text.render("replies/tools.map_steps_legend")]),
         text.render("replies/tools.map_steps_cols"),
     ]
     for item in rows[:EFFORT_SHOWN]:
@@ -457,7 +474,7 @@ def cell(value: object, limit: int = LINE_TEXT_CHARS) -> str:
     return flat if len(flat) <= limit else flat[: limit - 1] + "…"
 
 
-def _line_cost_lines(data: dict) -> list[str]:
+def _line_cost_lines(data: dict, compact: bool = False) -> list[str]:
     """The best node's costliest tactic lines and its longest lines that run nothing of their own."""
     costs = data.get("line_costs") or {}
     node = shown((data.get("best") or {}).get("node"))
@@ -476,7 +493,8 @@ def _line_cost_lines(data: dict) -> list[str]:
         )
     if costs.get("quiet"):
         lines.append(text.render("replies/tools.map_quiet_lines_head", node=node))
-        lines.append(text.render("replies/tools.map_quiet_lines_note"))
+        if not compact:
+            lines.append(text.render("replies/tools.map_quiet_lines_note"))
         lines.append(text.render("replies/tools.map_quiet_lines_cols"))
         lines.extend(
             text.render(
@@ -501,12 +519,14 @@ def _line_cost_lines(data: dict) -> list[str]:
             )
             for row in costs["repeated"]
         )
-    if costs.get("tactic") or costs.get("quiet"):
+    if not compact and (costs.get("tactic") or costs.get("quiet")):
         lines.append(text.render("replies/tools.map_lines_note"))
     return lines
 
 
-def _map_lines(data: dict) -> list[str]:
+def _map_lines(data: dict, compact: bool = False) -> list[str]:
+    """The search map. `compact` (the copy a compile reply carries for a new best) keeps the best, its ranked
+    steps, its costly lines and the open holes; `read` with view "map" shows everything."""
     lines: list[str] = []
     best = data.get("best")
     if best or data.get("reference"):
@@ -531,7 +551,7 @@ def _map_lines(data: dict) -> list[str]:
                 heartbeats=shown(original.get("heartbeats")),
             )
         )
-    archive = data.get("archive", [])
+    archive = [] if compact else data.get("archive", [])
     if archive:
         lines.append(text.render("replies/tools.map_shapes"))
     lines.extend(
@@ -550,7 +570,8 @@ def _map_lines(data: dict) -> list[str]:
             ]
         ]
     )
-    if data.get("recent"):
+    recent = [] if compact else data.get("recent", [])
+    if recent:
         lines.append(text.render("replies/tools.map_recent_head"))
     lines.extend(
         [
@@ -563,13 +584,13 @@ def _map_lines(data: dict) -> list[str]:
                 heartbeats=_node_hb(item),
                 score=shown(item.get("score")),
             )
-            for item in data.get("recent", [])
+            for item in recent
         ]
     )
-    if any(item.get("status") == "sketch" for item in data.get("recent", [])):
+    if any(item.get("status") == "sketch" for item in recent):
         lines.append(text.render("replies/tools.map_recent_salvage"))
-    lines.extend(_effort_lines(data))
-    lines.extend(_line_cost_lines(data))
+    lines.extend(_effort_lines(data, compact))
+    lines.extend(_line_cost_lines(data, compact))
     holes = data.get("open", [])
     if holes:
         lines.append(text.render("replies/tools.map_holes_head"))
@@ -586,9 +607,8 @@ def _map_lines(data: dict) -> list[str]:
 
 
 def _map_key(data: dict) -> list:
-    """What makes a map worth showing in full again: the best node and the set of shapes (route letter, node)."""
-    best = (data.get("best") or {}).get("node")
-    return [best, sorted([str(item.get("letter")), str(item.get("node"))] for item in data.get("archive", []))]
+    """What makes a map worth showing again: the best node."""
+    return [(data.get("best") or {}).get("node")]
 
 
 def _commit_delivery(run_id: str, actor: str, fresh: list[dict]) -> dict:
@@ -674,24 +694,21 @@ def attach_context(
         data = campaign.map_view(run_id)
         if holes is not None:
             data["open"] = holes
-        lines = _map_lines(data)
-        digest = hashlib.sha256("\n".join(lines).encode()).hexdigest()
-        # The full map only when it matters: first one after a (re)start, a new best, or a new shape/route.
         key = _map_key(data)
-        matters = force_map or "map_hash" not in bucket or key != bucket.get("map_key")
-        if matters and (force_map or digest != bucket.get("map_hash") or key != bucket.get("map_key")):
+        # A compile reply carries the map only for a first or new best; `read` with view "map" shows all of it.
+        if force_map or "map_hash" not in bucket or key != bucket.get("map_key"):
+            lines = _map_lines(data, compact=not force_map)
             result["map"] = [text.render("replies/tools.section_map"), *lines] if lines else lines
-        elif digest != bucket.get("map_hash"):
-            result["map"] = [text.render("replies/tools.map_unchanged")]
-        bucket["map_hash"], bucket["map_key"] = digest, key
+        bucket["map_hash"], bucket["map_key"] = "shown", key
     # Node ids the model has been shown; an update never names a node outside them.
     seen = set(bucket.get("seen_nodes", [])) | _node_ids(result)
     authors = node_authors(run_id) if fresh else {}
-    facts = [_tag_authors(_update_text(item, seen), authors) for item in fresh if isinstance(item.get("text"), str)]
+    facts = [
+        _tag_authors(_update_text(item, seen), authors)
+        for item in fresh
+        if isinstance(item.get("text"), str) and not item.get("quiet")
+    ]
     facts += result.get("facts", [])
-    tally = campaign.route_tally(run_id) if result.get("handles") else None
-    if tally:
-        facts.append(tally)
     if fresh:
         receipt = _commit_delivery(run_id, actor, fresh)
         bucket["delivered_seq"] = max(int(item.get("seq", -1)) for item in fresh)

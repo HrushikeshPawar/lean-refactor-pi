@@ -539,6 +539,10 @@ def _error_lines(name: str, run_id: str, node, projection, result: dict) -> tupl
     if groups:
         lines.append(_render("lean_messages"))
     main_line = _statement_by_line(node.proof_text)
+    # A syntax or elaboration error comes before open goals: it is usually the cause.
+    groups = sorted(groups, key=lambda group: group[0].get("message", "").startswith("unsolved goals"))
+    shown_goals: dict[str, str] = {}
+    cap = int(text.numbers().get("error_goals_max", 3))
     for item, branches, same in groups:
         lines.append(
             _render(
@@ -553,8 +557,23 @@ def _error_lines(name: str, run_id: str, node, projection, result: dict) -> tupl
         if branches:
             lines.append(_render("error_branches", count=branches))
         if item.get("goal"):
-            goal = reply.compact_goal(item["goal"], known, int(text.numbers().get("goal_hyp_chars", 1000)))
-            lines.append(_render("error_goal", goal=goal))
+            hyp_chars = int(text.numbers().get("goal_hyp_chars", 1000))
+            fresh, repeated = [], {}
+            for block in reply.goal_blocks(item["goal"]):
+                key = " ".join(block.split())
+                if key in shown_goals:
+                    repeated[shown_goals[key]] = repeated.get(shown_goals[key], 0) + 1
+                elif key not in {k for k, _ in fresh}:
+                    fresh.append((key, block))
+            for key, _ in fresh:
+                shown_goals[key] = item["id"]
+            if fresh:
+                kept = [reply.compact_goal(block, known, hyp_chars) for _, block in fresh[:cap]]
+                lines.append(_render("error_goal", goal="\n".join(kept)))
+                if len(fresh) > cap:
+                    lines.append(_render("error_goals_more", count=len(fresh) - cap))
+            for ref in repeated:
+                lines.append(_render("error_goals_same", ref=ref))
         if same:
             lines.append(_render("error_same", count=len(same), ids=", ".join(same)))
     return lines, errors, incomplete

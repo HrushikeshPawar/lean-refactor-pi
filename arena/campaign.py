@@ -1551,30 +1551,6 @@ def _check_stall(directory: Path, graph: Graph, newly_filed: set[str]) -> None:
         )
 
 
-ROUTE_TALLY_MIN = 8  # variants on one route, none above the best, before compile replies show the tally
-
-
-def route_tally(run_id: str) -> str | None:
-    """One line when the route of the newest node has ROUTE_TALLY_MIN or more variants and none beats
-    the best node overall."""
-    directory = run_dir(run_id)
-    graph = Graph.from_history(
-        events(directory), _proof_reader(directory), committed_operations=committed_operation_ids(directory)
-    )
-    route = next((node.route for node in reversed(graph.nodes) if node.route), None)
-    if route is None:
-        return None
-    scored = [node for node in graph.nodes if node.score is not None]
-    if not scored:
-        return None
-    best = max(scored, key=lambda node: node.score)
-    start = graph.nodes.index(best) + 1 if best.route == route else 0
-    members = [node for node in graph.nodes[start:] if node.route == route]
-    if len(members) < ROUTE_TALLY_MIN:
-        return None
-    return text.render("messages/phase.route_tally", label=route, variants=len(members))
-
-
 def _kickoff_within(sections: list[tuple[str, str]], limit: int) -> str:
     """The kickoff packet fitted to `limit` characters, shedding entries in the packet's own priority order."""
     from arena import context
@@ -4412,6 +4388,7 @@ def state(run_id: str) -> dict:
                         "messages/salvage.salvaged", sketch=sketch, sources=_compact_ids(sources), fill=fill
                     ),
                     "source": sources,
+                    "quiet": True,  # bookkeeping for a draft that does not compile; stays in state, not in replies
                     "unseen_text": text.render("messages/salvage.salvaged_unseen", sketch=sketch, fill=fill),
                 }
             )

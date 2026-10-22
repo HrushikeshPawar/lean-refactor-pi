@@ -1,5 +1,5 @@
 request_failed: "The request failed{cause_clause}.\n{facts}"
-turn_ended_with_text: "That turn made no tool call and did no work. The run is not over: proof structures you have not tried remain. Keep hill climbing: rework the best proof a new way, check it, keep what scores higher.\n{facts}"
+turn_ended_with_text: "That turn made no tool call and did no work. The run is not over: proof structures you have not tried remain. Keep hill climbing: rework the best proof a new way, check it, keep what scores higher. The harness submits the best node, so do not paste proofs as text.\n{facts}"
 turn_cut: "{cut}\n{facts}"
 cause_clause: ": {cause}"
 skeleton: "The last {attempts} attempts all keep the best proof's skeleton; step {top_step} is {top_share_pct}% of its cost."

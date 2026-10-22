@@ -275,7 +275,8 @@ class TextRendererTests(unittest.TestCase):
         self.assertLessEqual(packet_words, numbers["budget.packet_words"])
         for key in text.keys():  # noqa: SIM118
             if key.startswith(("replies/", "messages/")):
-                self.assertLessEqual(len(text.template(key).split()), numbers["budget.reply_words"], key)
+                limit = numbers["budget.nudge_words" if key.startswith("messages/continuation.") else "budget.reply_words"]
+                self.assertLessEqual(len(text.template(key).split()), limit, key)
 
     def test_shared_renderer_cases(self):
         cases = json.loads((Path(__file__).parent / "fixtures" / "text-cases.json").read_text())

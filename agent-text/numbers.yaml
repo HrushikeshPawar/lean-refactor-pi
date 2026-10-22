@@ -15,6 +15,7 @@ scratch_max_chars: 8000
 scratch_message_chars: 3000
 scratch_output_chars: 300
 goal_hyp_chars: 1000
+error_goals_max: 3
 outline_max_chars: 6000
 read_source_lines: 400
 source_lines_per_call: 400
@@ -46,9 +47,11 @@ memory_read_entries: 30
 memory_recovery_entries: 8
 budget:
   static_words: 860
-  packet_words: 365
-  worker_words: 165
+  packet_words: 470
+  worker_words: 185
   reply_words: 40
+  # Continuation nudges are sent only after a turn with no tool call, a few times a run.
+  nudge_words: 60
 # Steps below the step table are named when tried at most this often and still worth at least this many points.
 untried_step_max_tries: 2
 untried_step_min_pts: 0.5
