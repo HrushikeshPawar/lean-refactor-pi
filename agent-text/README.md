@@ -224,7 +224,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `packet/task` | 10 | Initial theorem packet | once per run |
 | `packet/team` | 63 | Initial theorem packet | once per run |
 | `packet/team-cost` | 10 | Initial theorem packet | once per run |
-| `packet/worker` | 62 | Initial theorem packet | once per run |
+| `packet/worker` | 97 | Initial theorem packet | once per run |
 | `replies/await_results.cursor` | 13 | Tool replies | when the matching tool result occurs |
 | `replies/await_results.identity` | 7 | Tool replies | when the matching tool result occurs |
 | `replies/await_results.job_ids` | 17 | Tool replies | when the matching tool result occurs |
@@ -299,8 +299,10 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/team.nodes_none` | 4 | Tool replies | when the matching tool result occurs |
 | `replies/team.reject` | 3 | Tool replies | when the matching tool result occurs |
 | `replies/team.reject_bare` | 3 | Tool replies | when the matching tool result occurs |
+| `replies/tools.base_defaulted` | 13 | Tool replies | when the matching tool result occurs |
 | `replies/tools.best_all_pin` | 3 | Tool replies | when the matching tool result occurs |
 | `replies/tools.best_provisional` | 2 | Tool replies | when the matching tool result occurs |
+| `replies/tools.by_author` | 3 | Tool replies | when the matching tool result occurs |
 | `replies/tools.compile_best` | 2 | Tool replies | when the matching tool result occurs |
 | `replies/tools.compile_delta` | 2 | Tool replies | when the matching tool result occurs |
 | `replies/tools.compile_filed` | 4 | Tool replies | when the matching tool result occurs |
@@ -403,6 +405,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/tools.read_tree_total_floor` | 26 | Tool replies | when the matching tool result occurs |
 | `replies/tools.refresh_tail` | 6 | Tool replies | when the matching tool result occurs |
 | `replies/tools.repeat_fact` | 16 | Tool replies | when the matching tool result occurs |
+| `replies/tools.same_as_author` | 5 | Tool replies | when the matching tool result occurs |
 | `replies/tools.same_diagnostic` | 4 | Tool replies | when the matching tool result occurs |
 | `replies/tools.same_goal` | 4 | Tool replies | when the matching tool result occurs |
 | `replies/tools.scratch_also` | 3 | Tool replies | when the matching tool result occurs |

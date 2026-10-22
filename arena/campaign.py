@@ -1119,6 +1119,21 @@ def _graph_proof_ids(history: list[dict]) -> list[str]:
     return found
 
 
+def worker_anchor_proof(run_id: str, history: list[dict]) -> str | None:
+    """The proof id of the anchor node of the job this process works for; None for any other actor."""
+    job_id = os.environ.get("ARENA_JOB_ID")
+    if not job_id:
+        return None
+    from arena.orchestration import jobs
+
+    snapshot = next((job for job in jobs(run_dir(run_id), [job_id])["jobs"] if job.get("job_id") == job_id), None)
+    node = ((snapshot or {}).get("anchor") or {}).get("node")
+    try:
+        return resolve_node_ref(history, node) if node else None
+    except (ValueError, KeyError):
+        return None
+
+
 def resolve_node_ref(history: list[dict], reference: str) -> str:
     value = reference.strip()
     proof_ids = _graph_proof_ids(history)
@@ -2476,6 +2491,9 @@ def probe_batch(
     from arena.reply import actor_focus_proof, set_actor_focus
 
     actor_focus = actor_focus_proof(run_id)
+    if actor_focus is None and (anchored := worker_anchor_proof(run_id, history)):
+        set_actor_focus(run_id, anchored)  # a worker files under its job's anchor, never the run's moving focus
+        actor_focus = anchored
     fixed_parent = resolve_parent_ref(history, parent) if parent else actor_focus or _current(history)
     starting_focus = actor_focus or next(
         (item["proof_id"] for item in reversed(history) if item.get("kind") == "focus"), None

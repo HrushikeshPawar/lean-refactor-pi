@@ -343,6 +343,26 @@ class CompileToolTests(CascadeCase):
             len(next(node for node in reloaded_graph.nodes if node.proof_id == proof_id).derivations), 2
         )
 
+    def test_worker_drafts_default_to_job_anchor_and_name_other_authors(self):
+        import os
+
+        run_id = "logic"
+        first = tools.compile_tool("T", run_id, {"drafts": ["by\n  trivial"]})
+        anchor = first["items"][0]["node"]
+        anchor_proof = tools._node(run_id, anchor).proof_id
+        tools.compile_tool("T", run_id, {"drafts": ["by\n  sorry"]})  # the orchestrator's focus moves on
+        env = {"ARENA_ACTOR_ID": "worker", "ARENA_JOB_ID": "job-x"}
+        view = {"jobs": [{"job_id": "job-x", "anchor": {"node": anchor}}]}
+        with patch.dict(os.environ, env), patch("arena.orchestration.jobs", return_value=view):
+            made = tools.compile_tool("T", run_id, {"drafts": ["by\n  simp"]})
+            same = tools.compile_tool("T", run_id, {"drafts": ["by\n  trivial"]})
+        self.assertIn(anchor, made["items"][0]["lines"][1])
+        self.assertIn("No base given", made["items"][0]["lines"][1])
+        edge = next(e for e in campaign.events(self.directory) if e.get("kind") == "edge"
+                    and e.get("proof_id") == tools._node(run_id, made["items"][0]["node"]).proof_id)
+        self.assertIn(anchor_proof, edge.get("from") or [])
+        self.assertIn(f"Same as {anchor} by orchestrator.", "\n".join(same["facts"]))
+
     def test_v8_actor_focus_delivery_eligibility(self):
         import os
 
@@ -422,7 +442,8 @@ class CompileToolTests(CascadeCase):
         with patch.dict(os.environ, {"ARENA_ACTOR_ID": "worker"}):
             worker_reply = reply.attach_context(run_id, reply.reply())
         self.assertTrue(sol_reply["facts"])
-        self.assertEqual(sol_reply["facts"], worker_reply["facts"])
+        self.assertEqual(sol_reply["facts"][1:], [line.replace(" by orchestrator", "") for line in worker_reply["facts"][1:]])
+        self.assertIn("n2 by orchestrator compiles", worker_reply["facts"][1])
         with patch.dict(os.environ, {"ARENA_ACTOR_ID": "sol"}):
             again = reply.attach_context(run_id, reply.reply())
             repeated = reply.redeliver(run_id)

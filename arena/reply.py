@@ -686,7 +686,9 @@ def attach_context(
         bucket["map_hash"], bucket["map_key"] = digest, key
     # Node ids the model has been shown; an update never names a node outside them.
     seen = set(bucket.get("seen_nodes", [])) | _node_ids(result)
-    facts = [_update_text(item, seen) for item in fresh if isinstance(item.get("text"), str)] + result.get("facts", [])
+    authors = node_authors(run_id) if fresh else {}
+    facts = [_tag_authors(_update_text(item, seen), authors) for item in fresh if isinstance(item.get("text"), str)]
+    facts += result.get("facts", [])
     tally = campaign.route_tally(run_id) if result.get("handles") else None
     if tally:
         facts.append(tally)
@@ -725,6 +727,43 @@ def attach_context(
     bucket["seen_nodes"] = sorted(seen | _node_ids(result))
     _write_actor(run_id, actor, bucket, state)
     return result
+
+
+def node_authors(run_id: str) -> dict[str, str]:
+    """Node id to the author label, for nodes first saved by an actor other than the caller's."""
+    from arena import orchestration
+    from arena.run_control import published_history
+
+    try:
+        directory = campaign.run_dir(run_id)
+        history = published_history(directory, campaign.events(directory))
+        first: dict[str, str] = {}
+        for event in history:
+            if event.get("kind") == "attempt" and event.get("proof_id") and event.get("actor_id"):
+                first.setdefault(event["proof_id"], event["actor_id"])
+        labels = orchestration.worker_job_labels(directory)
+        me = current_actor()
+        return {
+            f"n{index}": labels.get(first[proof_id]) or ("orchestrator" if first[proof_id] == "sol" else first[proof_id])
+            for index, proof_id in enumerate(campaign._graph_proof_ids(history), 1)
+            if first.get(proof_id) not in (None, me)
+        }
+    except (OSError, ValueError, KeyError):
+        return {}
+
+
+def _tag_authors(line: str, authors: dict[str, str]) -> str:
+    """Name the author at the first mention of each node another actor saved."""
+    named: set[str] = set()
+
+    def tag(match: re.Match) -> str:
+        node = match.group(0)
+        if node not in authors or node in named:
+            return node
+        named.add(node)
+        return text.render("replies/tools.by_author", node=node, author=authors[node])
+
+    return re.sub(r"\bn[1-9][0-9]*\b", tag, line)
 
 
 def _node_ids(result: dict) -> set[str]:

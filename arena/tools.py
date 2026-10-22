@@ -60,7 +60,7 @@ def _actor_focus_id(run_id: str):
     proof_id = reply.actor_focus_proof(run_id)
     _history_rows, projection = _nodes(run_id)
     if proof_id is None:
-        proof_id = projection.focus
+        proof_id = campaign.worker_anchor_proof(run_id, _history_rows) or projection.focus
         if proof_id is not None:
             reply.set_actor_focus(run_id, proof_id)
     return next((item for item in projection.nodes if item.proof_id == proof_id), None)
@@ -619,6 +619,10 @@ def _compile_item(name: str, run_id: str, node_ref: str, result: dict, filing: s
     repeat = attempts > 1
     if repeat:
         facts.append(_render("repeat_fact", node=node.id, count=attempts))
+    # A node first saved by another actor means this text duplicates their work.
+    author = reply.node_authors(run_id).get(node.id) if len(node.attempts) > 1 else None
+    if author:
+        facts.append(_render("same_as_author", node=node.id, author=author))
     return {
         "item": {
             "ref": node.id,
@@ -809,7 +813,10 @@ def _compile_tool(theorem: str, run_id: str, request: dict) -> dict:
 
     outcomes: list[tuple[str, dict, str]] = []
     evidence_by_ref = {}
+    defaulted_base = None
     if op is None and not request.get("base"):
+        if os.environ.get("ARENA_JOB_ID"):
+            defaulted_base = _focus_ref(run_id)
         raw_drafts = request["drafts"]
         good_drafts = []
         normalized_drafts = []
@@ -967,6 +974,9 @@ def _compile_tool(theorem: str, run_id: str, request: dict) -> dict:
     focus = next((node.id for node in projection.nodes if node.proof_id == projection.focus), None)
     lineage = _lineage(projection, handles or ([focus] if focus else []))
     result = reply.reply(facts=facts, items=items, handles=handles)
+    first = next((item for item in items if item.get("lines")), None)
+    if defaulted_base and first is not None:
+        first["lines"] = [_render("base_defaulted", base=defaulted_base), *first["lines"]]
     return reply.attach_context(run_id, result, include_map=True, holes=_open_holes(projection, lineage))
 
 
