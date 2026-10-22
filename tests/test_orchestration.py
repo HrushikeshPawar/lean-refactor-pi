@@ -2566,6 +2566,52 @@ class IslandTests(unittest.TestCase):
             self.assertTrue(turn["continue"])
             self.assertIn("The trim job continues: the run best is now n3 80.0.", turn["text"])
 
+    def test_axis_island_is_told_when_the_run_best_moves_to_a_new_route(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _seed_parent(directory)
+
+            def best_node(node_id, route, score, tokens):
+                node = _closed_node(node_id, route, score)
+                node.tokens, node.heartbeats = tokens, 40
+                return node
+
+            r4_best = best_node("n9", "r4", 80.0, 500)
+            with patch.object(orchestration, "proof_nodes", lambda _d: {"p0": r4_best}):
+                started, _child = self._island(directory, objective="tokens")
+            job_id = started["job_id"]
+
+            def turn(tokens, run_best_node, activation=started["activation_id"]):
+                own = _closed_node("n57", "r4", 60.0, job_id)
+                own.tokens, own.heartbeats = tokens, 100
+                with patch.object(orchestration, "proof_nodes", lambda _d: {"p0": run_best_node, "p1": own}):
+                    return orchestration.island_turn(directory, job_id, activation)
+
+            unchanged = turn(900, r4_best)
+            self.assertTrue(unchanged["continue"])
+            self.assertNotIn("a new structure", unchanged["text"])
+            r2_best = best_node("n4", "r2", 90.0, 400)
+            moved = turn(800, r2_best)
+            self.assertTrue(moved["continue"])
+            self.assertIn("\nThe run best is now n4 (400 tokens, 40 HB), a new structure;", moved["text"])
+            self.assertNotIn("a new structure", turn(700, r2_best)["text"])
+
+    def test_trim_job_is_not_stale_while_the_run_best_keeps_improving(self):
+        stale = text.numbers()["island_stale_turns"]
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _seed_parent(directory)
+            with patch.object(orchestration, "proof_nodes", lambda _d: {"p1": _closed_node("n1", "r1", 70.0)}):
+                started, _child = self._island(directory, operation_id="op-trim", scope="trim")
+            job_id = started["job_id"]
+            own = _closed_node("n57", "r4", 60.0, job_id)
+            for i in range(stale + 1):
+                others = {"p1": own, "p2": _closed_node(f"n{i + 3}", "r1", 80.0 + i, "job-other")}
+                with patch.object(orchestration, "proof_nodes", lambda _d, nodes=others: nodes):
+                    turn = orchestration.island_turn(directory, job_id, started["activation_id"])
+                self.assertTrue(turn["continue"], i)
+            self.assertIn(f"the run best is now n{stale + 3} {80.0 + stale}", turn["text"])
+
     def test_objective_is_rejected_outside_a_fresh_island(self):
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)

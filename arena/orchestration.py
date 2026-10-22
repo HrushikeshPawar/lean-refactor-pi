@@ -1301,6 +1301,9 @@ def delegate(
         "state": "queued",
         "resumed": False,
     }
+    if objective is not None:
+        best_now = run_best(directory)
+        delegation["best_route"] = None if best_now is None else best_now.route
 
     def mutate(writer) -> list:
         writer.append_ledger({"type": "delegation", **delegation})
@@ -1882,11 +1885,14 @@ def island_turn(directory: Path, job_id: str, activation_id: str) -> dict:
     limits = text.numbers()
     original = _job_original(directory, job_id)
     objective = original.get("objective")
+    trim = original.get("scope") == "trim"
+    top = run_best(directory)
     status = island_status(directory, job_id)
-    best = _merit(status, objective)
+    best = (None if top is None else top.score) if trim else _merit(status, objective)
     rows = [row for row in events(directory) if row.get("type") == "island_turn" and row.get("job_id") == job_id]
+    previous_route = rows[-1].get("best_route") if rows else original.get("best_route")
     new = {"event_id": uuid.uuid4().hex, "type": "island_turn", "job_id": job_id,
-           "activation_id": activation_id, "best": best}
+           "activation_id": activation_id, "best": best, "best_route": None if top is None else top.route}
     streak = _stale_streak([*rows, new])
     spend = run_control.read_state(directory)
     snapshot = _job_snapshot(directory, job_id)
@@ -1899,13 +1905,16 @@ def island_turn(directory: Path, job_id: str, activation_id: str) -> dict:
     _append(directory, {**new, "stale": streak, "stop": reason})
     if reason is not None:
         return {"ok": True, "continue": False, "reason": reason}
-    if original.get("scope") == "trim":
-        top = run_best(directory)
+    if trim:
         shown = (text.render("replies/team.island_best", node=top.id, score=round(top.score, 2))
                  if top is not None else text.render("replies/team.island_none"))
         return {"ok": True, "continue": True, "text": text.render("replies/team.trim_continue", best=shown)}
     key = {"tokens": "island_continue_tokens", "heartbeats": "island_continue_heartbeats"}.get(objective, "island_continue")
-    return {"ok": True, "continue": True, "text": text.render(f"replies/team.{key}", best=_shown_best(status, objective))}
+    message = text.render(f"replies/team.{key}", best=_shown_best(status, objective))
+    if objective is not None and top is not None and top.route != previous_route:
+        message += "\n" + text.render("replies/team.island_new_structure", node=top.id,
+                                       tokens=top.tokens, heartbeats=top.heartbeats)
+    return {"ok": True, "continue": True, "text": message}
 
 
 def idle_slots(directory: Path) -> int:

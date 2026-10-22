@@ -754,21 +754,61 @@ def _first_saved_times(directory: Path) -> dict[str, float]:
     return times
 
 
-def _card_stale_note(run_id: str, actor: str, bucket: dict) -> list[str]:
-    """A worker whose own best improved after its card was saved is told once per node to update the card.
-    With no card yet, every closed node it authored counts."""
+def _measure(objective: str | None):
+    """A node's standing for a job, higher is better: its score, or minus its tokens or heartbeats on an axis island."""
+    if objective in ("tokens", "heartbeats"):
+        return lambda node: None if getattr(node, objective) is None else -getattr(node, objective)
+    return lambda node: node.score
+
+
+def _card_nudge(bucket: dict, candidates: list[str]) -> list[str]:
+    """Names the candidate nodes not yet named, the three most recent, at most once per `card_stale_minutes`.
+    Unnamed candidates wait for the next reminder window rather than being dropped."""
+    mentioned = set(bucket.get("card_nudged", []))
+    fresh = [node_id for node_id in candidates if node_id not in mentioned]
+    if not fresh:
+        return []
+    now = time.time()
+    last = bucket.get("card_stale_at")
+    if last is not None and now - float(last) < text.numbers()["card_stale_minutes"] * 60:
+        return []
+    named = fresh[-3:]
+    bucket["card_stale_at"] = now
+    bucket["card_nudged"] = sorted(mentioned | set(named))
+    return [text.render("replies/tools.card_stale", nodes=", ".join(named))]
+
+
+def _orchestrator_card_note(directory: Path, bucket: dict) -> list[str]:
+    """The orchestrator is reminded when the run best is a node saved after its own latest card (any author)."""
     from arena import orchestration
 
-    if actor == "sol":
+    best = orchestration.run_best(directory)
+    if best is None:
         return []
+    card = orchestration.current_cards(directory).get("sol")
+    if card is None:
+        newer = best.origin != "reference"
+    else:
+        newer = _first_saved_times(directory).get(best.proof_id, 0.0) > float(card.get("ts", 0.0))
+    return _card_nudge(bucket, [best.id] if newer else [])
+
+
+def _card_stale_note(run_id: str, actor: str, bucket: dict) -> list[str]:
+    """A worker whose own best improved after its card was saved is told once per node to update the card.
+    An axis island's best is its fewest tokens or heartbeats. With no card yet, every improving node counts."""
+    from arena import orchestration
+
     try:
         directory = campaign.run_dir(run_id)
+        if actor == "sol":
+            return _orchestrator_card_note(directory, bucket)
         label = orchestration.worker_job_labels(directory).get(actor)
         if label is None:
             return []
         job = orchestration.resolve_job(directory, label)
         card = orchestration.current_cards(directory).get(actor)
         times = _first_saved_times(directory)
+        measure = _measure(orchestration._job_original(directory, job).get("objective"))
         own = sorted(
             (
                 node
@@ -777,31 +817,19 @@ def _card_stale_note(run_id: str, actor: str, bucket: dict) -> list[str]:
             ),
             key=lambda node: times.get(node.proof_id, 0.0),
         )
-        if card is None:
-            stale = own
-        else:
-            saved = float(card.get("ts", 0.0))
-            before = [node.score for node in own if times.get(node.proof_id, 0.0) <= saved and node.score is not None]
-            best = max(before, default=None)
-            stale = []
-            for node in own:
-                if node.score is None or times.get(node.proof_id, 0.0) <= saved:
-                    continue
-                if best is None or node.score > best:
-                    stale.append(node)
-                best = node.score if best is None else max(best, node.score)
-        mentioned = set(bucket.get("card_nudged", []))
-        fresh = [node.id for node in stale if node.id not in mentioned]
-        if not fresh:
-            return []
-        # Unnamed nodes wait for the next reminder window, so they are named then rather than dropped.
-        now = time.time()
-        last = bucket.get("card_stale_at")
-        if last is not None and now - float(last) < text.numbers()["card_stale_minutes"] * 60:
-            return []
-        bucket["card_stale_at"] = now
-        bucket["card_nudged"] = sorted(mentioned | set(fresh))
-        return [text.render("replies/tools.card_stale", nodes=", ".join(fresh))]
+        # Nodes saved before the card set the bar; later nodes that beat the bar are stale. No card: every node is later.
+        saved = float(card.get("ts", 0.0)) if card is not None else float("-inf")
+        before = [measure(node) for node in own if times.get(node.proof_id, 0.0) <= saved]
+        best = max((value for value in before if value is not None), default=None)
+        stale: list[str] = []
+        for node in own:
+            value = measure(node)
+            if value is None or times.get(node.proof_id, 0.0) <= saved:
+                continue
+            if best is None or value > best:
+                stale.append(node.id)
+            best = value if best is None else max(best, value)
+        return _card_nudge(bucket, stale)
     except (OSError, ValueError, KeyError, TypeError):
         return []
 
@@ -937,6 +965,7 @@ def _plateau_note(run_id: str, actor: str, bucket: dict) -> list[str]:
         costly = _plateau_costly(history, best)
         if costly:
             line += " " + costly
+        line += " " + text.render("replies/tools.plateau_push")
         return [line]
     except (OSError, ValueError, KeyError, TypeError):
         return []

@@ -477,6 +477,36 @@ class LeanStatsTests(unittest.TestCase):
         turns = summary._turns([call("f", "read", {"view": "source"}), call("g", "read", {"view": "map"})], [])
         self.assertEqual([turn["kind"] for turn in turns], ["context", "bookkeeping"])
 
+    def test_worker_tool_errors_are_counted_apart_and_unknown_settlements_are_shown(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.dir = Path(temp.name) / "run-1"
+        self.dir.mkdir()
+        write(self.dir / "ledger.jsonl", [{"kind": "init", "ts": 100.0, "theorem": "T"}])
+        write(self.dir / "cost-ledger.jsonl", [
+            {"kind": "settle", "id": "1", "usd": 0.01, "usage_known": True},
+            {"kind": "settle", "id": "4", "usd": 0, "usage_known": False},
+        ])
+        worker = self.dir / "sessions" / "w1"
+        worker.mkdir(parents=True)
+        message = lambda name, error, text: {  # noqa: E731 - one row shape, three variants
+            "type": "message",
+            "message": {"role": "toolResult", "toolName": name, "isError": error,
+                        "content": [{"type": "text", "text": text}]},
+        }
+        write(worker / "s.jsonl", [
+            message("report", True, "Not done: too long."),
+            message("read", False, '{"ok": true}'),
+            message("compile", False, '{"ok": false, "error": "bad"}'),
+        ])
+        data = summary.build_summary(self.dir)
+        self.assertEqual(data["tools"]["worker_errors"], {"report": 1, "compile": 1})
+        self.assertEqual(data["tools"]["worker_error_total"], 2)
+        self.assertEqual(data["tools"]["error_total"], 0)  # no orchestrator events here: its count stays its own
+        self.assertEqual(data["cost"]["unknown_settlements"], 1)  # settle id 4 never had a known amount
+        self.assertIn("tool errors 0 (orchestrator) / 2 (workers):", summary.render_text(data))
+        self.assertIn("unknown-cost settlements 1", summary.render_text(data))
+
 
 if __name__ == "__main__":
     unittest.main()

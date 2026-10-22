@@ -196,6 +196,25 @@ def counted_settles(cost_events: list[dict]) -> tuple[list[dict], bool]:
     return kept, unknown
 
 
+def unknown_settlements(directory: Path, cost_events: list[dict], shared: bool) -> int:
+    """Settlements whose cost was never known and never reconciled to an amount. Spend leaves them out."""
+    if shared:
+        rows = [row for row in _jsonl(directory / "control.jsonl") if row.get("kind") == "settlement"]
+        resolved = {row.get("reconciles") for row in rows if row.get("reconciles") and row.get("state") == "known"}
+        return len({
+            row.get("settlement_id") for row in rows
+            if not row.get("reconciles") and row.get("state") == "unknown" and row.get("settlement_id") not in resolved
+        })
+    settles = [event for event in cost_events if event.get("kind") == "settle"]
+    resolved = {str(event["id"]) for event in settles if event.get("usage_known") is not False and event.get("id")}
+    unknown = {
+        str(event.get("id") or f"row-{index}")
+        for index, event in enumerate(settles)
+        if event.get("usage_known") is False and str(event.get("id") or "") not in resolved
+    }
+    return len(unknown)
+
+
 def ledger_spend(cost_events: list[dict], session_usd: float | None = None) -> dict:
     """The run's spend: the sum of the cost ledger's settle rows, each one call's actual cost.
 
@@ -449,6 +468,19 @@ def _progress(ledger: list[dict]) -> dict:
     return {"best": best, "best_verified_candidate": best_verified_candidate, "timeline": timeline}
 
 
+def _worker_tool_errors(directory: Path) -> Counter:
+    """Failed tool results in the worker sessions, judged by the same rule as the orchestrator's."""
+    errors: Counter = Counter()
+    for file in sorted((directory / "sessions").glob("*/*.jsonl")):
+        for row in _jsonl(file):
+            message = row.get("message") or {}
+            if row.get("type") != "message" or message.get("role") != "toolResult":
+                continue
+            if not _result_ok({"isError": message.get("isError"), "result": {"content": message.get("content") or []}}):
+                errors[message.get("toolName") or "unknown"] += 1
+    return errors
+
+
 def build_summary(directory: Path) -> dict:
     ledger = _jsonl(directory / "ledger.jsonl")
     events = read_events(directory / "events.jsonl")
@@ -499,6 +531,7 @@ def build_summary(directory: Path) -> dict:
     uncached, recent_uncached = sum(t["input"] for t in turns), sum(t["input"] for t in recent)
     alarms = [e for e in cost_events if e.get("kind") == "cache_alarm"]
     calls, errors = Counter(), Counter()
+    worker_errors = _worker_tool_errors(directory)
     result_ok = {str(e.get("toolCallId")): _result_ok(e) for e in events if e.get("type") == "tool_execution_end"}
     for event in events:
         message = event.get("message") or {}
@@ -564,6 +597,7 @@ def build_summary(directory: Path) -> dict:
             "spent_after_best_usd": round(sum(float(event["usd"]) for event in later_settles), 6),
             "by_turn_type": by_kind,
             "reconciliation": recon,
+            "unknown_settlements": unknown_settlements(directory, cost_events, shared_accounting),
             "bookkeeping_and_rejected_pct": round(
                 100 * sum(by_kind.get(k, {"usd": 0})["usd"] for k in ("bookkeeping", "rejected")) / spent, 1
             )
@@ -594,6 +628,8 @@ def build_summary(directory: Path) -> dict:
             "results": sum(event.get("type") == "tool_execution_end" for event in events),
             "errors": dict(errors),
             "error_total": sum(errors.values()),
+            "worker_errors": dict(worker_errors),
+            "worker_error_total": sum(worker_errors.values()),
             **_compile_counters(events),
         },
         "routes": route_rows,
@@ -709,7 +745,8 @@ def render_text(summary: dict) -> str:
                     f"cost ${cost['spent_usd']:.4f} of ${cost['limit_usd']} limit "  # log: operator run summary
                     f"(remaining ${cost['remaining_usd']:.4f}; overshoot ${cost['overshoot_usd']:.4f}) over "
                     f"{cost['requests']} requests / {summary['tools']['results']} tool results "
-                    f"({cost['retries']} retries); {kinds}; bookkeeping+rejected {cost['bookkeeping_and_rejected_pct']}%"
+                    f"({cost['retries']} retries); {kinds}; bookkeeping+rejected {cost['bookkeeping_and_rejected_pct']}%; "
+                    f"unknown-cost settlements {cost.get('unknown_settlements', 0)}"
                 ),
                 *(
                     [
@@ -730,7 +767,8 @@ def render_text(summary: dict) -> str:
                 "routes tried: " + routes_detail_text(summary.get("routes") or []),
                 route_depth_text(summary.get("route_progress")),
                 "harness merge check: " + merge_text(summary.get("merge_report") or []),
-                f"tool errors {summary['tools']['error_total']}: {summary['tools']['errors']}",
+                f"tool errors {summary['tools']['error_total']} (orchestrator) / {summary['tools'].get('worker_error_total', 0)} (workers): "
+                f"{summary['tools']['errors']} / {summary['tools'].get('worker_errors', {})}",  # log: operator run summary
                 f"submission: {(summary.get('submission') or {}).get('candidate') or 'none'}",
             ]
         )

@@ -135,7 +135,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `messages/trim.result_stub` | 9 | Agent messages and notices | when a repeat is shortened |
 | `packet/island` | 109 | Initial theorem packet | once per run |
 | `packet/island_heartbeats` | 97 | Initial theorem packet | once per run |
-| `packet/island_tokens` | 104 | Initial theorem packet | once per run |
+| `packet/island_tokens` | 127 | Initial theorem packet | once per run |
 | `packet/price-table` | 12 | Prices action replies | when the table is requested |
 | `packet/price-table.clipped` | 2 | Prices action replies | when the table is requested |
 | `packet/price-table.coordinates` | 19 | Prices action replies | when the table is requested |
@@ -227,7 +227,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `packet/sections.titles.worker` | 1 | Initial theorem packet | once per run |
 | `packet/sections.titles.worker_goals` | 6 | Initial theorem packet | once per run |
 | `packet/task` | 10 | Initial theorem packet | once per run |
-| `packet/team` | 385 | Initial theorem packet | once per run |
+| `packet/team` | 475 | Initial theorem packet | once per run |
 | `packet/team-cost` | 10 | Initial theorem packet | once per run |
 | `packet/trim` | 86 | Initial theorem packet | once per run |
 | `packet/worker` | 149 | Initial theorem packet | once per run |
@@ -315,6 +315,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/team.island_continue_tokens` | 24 | Tool replies | when the matching tool result occurs |
 | `replies/team.island_line` | 9 | Tool replies | when the matching tool result occurs |
 | `replies/team.island_line_axis` | 9 | Tool replies | when the matching tool result occurs |
+| `replies/team.island_new_structure` | 19 | Tool replies | when the matching tool result occurs |
 | `replies/team.island_none` | 2 | Tool replies | when the matching tool result occurs |
 | `replies/team.island_open` | 8 | Tool replies | when the matching tool result occurs |
 | `replies/team.job_card` | 2 | Tool replies | when the matching tool result occurs |
@@ -418,6 +419,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/tools.plateau_costly` | 5 | Tool replies | when the matching tool result occurs |
 | `replies/tools.plateau_families` | 6 | Tool replies | when the matching tool result occurs |
 | `replies/tools.plateau_family` | 8 | Tool replies | when the matching tool result occurs |
+| `replies/tools.plateau_push` | 19 | Tool replies | when the matching tool result occurs |
 | `replies/tools.plateau_step` | 5 | Tool replies | when the matching tool result occurs |
 | `replies/tools.price` | 7 | Tool replies | when the matching tool result occurs |
 | `replies/tools.read_diff` | 4 | Tool replies | when the matching tool result occurs |

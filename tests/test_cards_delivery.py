@@ -148,7 +148,8 @@ class CardDeliveryTests(unittest.TestCase):
             self.assertEqual(first, [
                 "The run best n1 80.0 has not gained 1.0 points in 10 minutes. "
                 "Other families with closed proofs: r2 best n2 70.0 (500 tok, 9 HB); r3 best n3 60.0 (900 tok, 2 HB). "
-                "Shortest closed proof: n1 100 tokens (5 HB); cheapest: n3 2 HB (900 tokens)."
+                "Shortest closed proof: n1 100 tokens (5 HB); cheapest: n3 2 HB (900 tokens). "
+                "Proof structures you have not tried remain: rework the best proof a new way, starting from its costliest step."
             ])
             self.assertEqual(again, [])
             self.assertEqual(worker, [])
@@ -166,6 +167,49 @@ class CardDeliveryTests(unittest.TestCase):
         line = proof_reply._plateau_costly(history, node)
         self.assertEqual(line, "Costliest steps of n1: s2 1 tok 200 HB; s3 1 tok 90 HB; s1 1 tok 10 HB.")
         self.assertIsNone(proof_reply._plateau_costly([{"kind": "candidate", "theorem": "demo"}], node))
+
+    def test_the_orchestrator_is_reminded_once_when_the_run_best_is_newer_than_its_card(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _seed_parent(directory)
+            _save(directory, "sol", "c1", ideas="try the n7 shape")
+            best = _node("n9", "s4", 90.0)
+            bucket: dict = {}
+            with patch.object(campaign, "run_dir", return_value=directory), \
+                    patch.object(orchestration, "run_best", return_value=best), \
+                    patch.object(proof_reply, "_first_saved_times", return_value={best.proof_id: time.time() + 3600}):
+                first = proof_reply._card_stale_note("run-1", "sol", bucket)
+                again = proof_reply._card_stale_note("run-1", "sol", bucket)
+            with patch.object(campaign, "run_dir", return_value=directory), \
+                    patch.object(orchestration, "run_best", return_value=best), \
+                    patch.object(proof_reply, "_first_saved_times", return_value={best.proof_id: 1.0}):
+                older = proof_reply._card_stale_note("run-1", "sol", {})
+            self.assertEqual(first, ["Your card predates your nodes n9; update it with what they showed."])
+            self.assertEqual(again, [])
+            self.assertEqual(older, [])
+
+    def test_an_axis_island_is_named_its_three_most_recent_fewest_token_nodes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _seed_parent(directory)
+            _save(directory, "worker-a", "c1", focus="shorten the proof")
+            # Token counts fall at n1, n2, n4, n5; n3 and n6 do not lower the island's best.
+            specs = [("n1", 900, 80.0), ("n2", 500, 60.0), ("n3", 700, 95.0), ("n4", 400, 10.0),
+                     ("n5", 300, 20.0), ("n6", 350, 99.0)]
+            nodes = {}
+            times = {}
+            for index, (node_id, tokens, score) in enumerate(specs):
+                node = _node(node_id, "s4", score, job_id="job-a", tokens=tokens)
+                nodes[node.proof_id] = node
+                times[node.proof_id] = time.time() + 3600 + index
+            with patch.object(campaign, "run_dir", return_value=directory), \
+                    patch.object(orchestration, "worker_job_labels", return_value={"worker-a": "job1"}), \
+                    patch.object(orchestration, "resolve_job", return_value="job-a"), \
+                    patch.object(orchestration, "_job_original", return_value={"objective": "tokens"}), \
+                    patch.object(orchestration, "proof_nodes", return_value=nodes), \
+                    patch.object(proof_reply, "_first_saved_times", return_value=times):
+                lines = proof_reply._card_stale_note("run-1", "worker-a", {})
+            self.assertEqual(lines, ["Your card predates your nodes n2, n4, n5; update it with what they showed."])
 
 
 if __name__ == "__main__":

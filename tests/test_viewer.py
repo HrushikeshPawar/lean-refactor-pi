@@ -529,8 +529,13 @@ class WorkerLabelTests(unittest.TestCase):
                 {"job_id": "j-a", "worker_actor_id": "aa"}]
         with patch.object(orchestration, "_delegations", return_value=rows):
             self.assertEqual(orchestration.worker_job_labels(Path(".")), {"aa": "job1", "bb": "job2"})
-        source = (Path(__file__).parents[1] / "arena" / "graph_viewer" / "app.js").read_text()
-        self.assertIn("actor?.job || id", source)
+        from arena.cli.serve import job_roles
+
+        roles = job_roles([{"worker_actor_id": "aa", "scope": "trim", "task": "t"},
+                           {"worker_actor_id": "bb", "scope": "island", "objective": "tokens"},
+                           {"worker_actor_id": "cc", "scope": "island"}])
+        self.assertEqual({actor: row["role"] for actor, row in roles.items()},
+                         {"aa": "trim", "bb": "token island", "cc": "family island"})
 
 
 class NodeCallTests(unittest.TestCase):
