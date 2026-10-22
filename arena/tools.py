@@ -732,8 +732,13 @@ def compile_tool(theorem: str, run_id: str, request: dict) -> dict:
 
 
 def _compile_tool(theorem: str, run_id: str, request: dict) -> dict:
-    valid = ["drafts", "splice", "fill", "merge", "base", "from", "note", "check"]
+    valid = ["drafts", "splice", "fill", "merge", "base", "node", "from", "note", "check"]
     shown = [*valid[:4], "steps", "text", *valid[4:]]
+    if isinstance(request, dict) and "node" in request:
+        # `node` is an alias of `base`; both given and different is a conflict.
+        if request.get("base") and request["base"] != request["node"]:
+            return _invalid("base_conflict", f"{request['base']} / {request['node']}", ["one base"], TOOL_FORMS["compile"])
+        request = {**{k: v for k, v in request.items() if k != "node"}, "base": request.get("base") or request["node"]}
     request = _flat_splice(request)
     if _is_empty(request, "compile"):
         return _empty_error("compile")
@@ -2337,7 +2342,7 @@ def scratch_tool(theorem: str, run_id: str, request: dict) -> dict:
     """Retain isolated experiments and submit exact target proofs through normal compile."""
     if _is_empty(request, "scratch"):
         return _empty_error("scratch")
-    valid = ["code", "replacement", "at", "helpers"]
+    valid = ["code", "replacement", "at", "helpers", "note"]
     unknown = sorted(set(request) - set(valid))
     if unknown:
         return _invalid("unknown_argument", unknown[0], valid, TOOL_FORMS["scratch"])

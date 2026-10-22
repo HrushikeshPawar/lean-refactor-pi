@@ -1,5 +1,5 @@
-// Stream idle watchdog: a provider request that shows no streamed progress for idleMs is aborted once.
-// Pi's own idle timeout can be defeated by proxy keepalive bytes, so progress is counted by assistant events.
+// Stream idle watchdog: a provider request whose assistant message does not grow for idleMs is aborted once.
+// Pi's own idle timeout can be defeated by proxy keepalive bytes, so progress is growth of the accumulated assistant message.
 export interface WatchdogTimers {
   now: () => number;
   setTimeout: (fn: () => void, ms: number) => unknown;
@@ -12,10 +12,19 @@ const realTimers: WatchdogTimers = {
   clearTimeout: handle => clearTimeout(handle as ReturnType<typeof setTimeout>),
 };
 
-// An assistant stream event counts as progress when it carries content: a block start or end, or a delta with
-// visible characters. Empty or whitespace deltas (a proxy padding the stream) do not reset the idle window.
-export function carriesProgress(update: { type: string; delta?: unknown }): boolean {
-  return typeof update.delta !== "string" || update.delta.trim().length > 0;
+// Size of an accumulated assistant message: characters of text, thinking and tool-call arguments. Proxy
+// keepalives and no-op chunks leave it unchanged, so only real growth counts as progress.
+export function messageSize(message: unknown): number {
+  const content = (message as { content?: unknown } | undefined)?.content;
+  if (!Array.isArray(content)) return 0;
+  let size = 0;
+  for (const block of content) {
+    if (!block || typeof block !== "object") continue;
+    const b = block as Record<string, unknown>;
+    for (const value of [b.text, b.thinking, b.partialJson]) if (typeof value === "string") size += value.length;
+    if (b.arguments !== undefined && b.partialJson === undefined) size += JSON.stringify(b.arguments)?.length ?? 0;
+  }
+  return size;
 }
 
 export class StreamWatchdog {

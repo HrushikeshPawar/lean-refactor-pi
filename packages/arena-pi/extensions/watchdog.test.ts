@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { carriesProgress, StreamWatchdog } from "./watchdog.ts";
+import { messageSize, StreamWatchdog } from "./watchdog.ts";
 
-test("empty and whitespace deltas are not progress; starts, ends and visible deltas are", () => {
-  assert.equal(carriesProgress({ type: "toolcall_delta", delta: "" }), false);
-  assert.equal(carriesProgress({ type: "thinking_delta", delta: " \n" }), false);
-  assert.equal(carriesProgress({ type: "text_delta", delta: "a" }), true);
-  assert.equal(carriesProgress({ type: "text_start" }), true);
-  assert.equal(carriesProgress({ type: "toolcall_end" }), true);
+test("messageSize sums text, thinking and tool arguments and survives odd shapes", () => {
+  assert.equal(messageSize(undefined), 0);
+  assert.equal(messageSize({ content: "x" }), 0);
+  assert.equal(messageSize({ content: [null, 3, { type: "text", text: "abc" }, { thinking: "de" }] }), 5);
+  assert.equal(messageSize({ content: [{ type: "toolCall", partialJson: '{"a":', arguments: {} }] }), 5);
+  assert.equal(messageSize({ content: [{ type: "toolCall", arguments: { a: 1 } }] }), 7);
+  assert.ok(messageSize({ content: [{ text: "abcd" }] }) > messageSize({ content: [{ text: "abc" }] }));
 });
 
 function fake() {

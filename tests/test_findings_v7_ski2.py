@@ -143,6 +143,14 @@ class CompileCase(CascadeCase):
         same = tools.compile_tool("T", "logic", {"base": a, "splice": {"base": a, "steps": "s1", "text": "bad"}})
         self.assertTrue(same["ok"])
 
+    def test_node_is_an_alias_of_base(self):
+        a = tools.compile_tool("T", "logic", {"drafts": ["by\n  trivial"]})["items"][0]["node"]
+        b = tools.compile_tool("T", "logic", {"drafts": ["by\n  trivial\n  trivial"]})["items"][0]["node"]
+        self.assertTrue(tools.compile_tool("T", "logic", {"node": a, "steps": "s1", "text": "bad"})["ok"])
+        self.assertTrue(tools.compile_tool("T", "logic", {"node": a, "base": a, "steps": "s1", "text": "bad"})["ok"])
+        result = tools.compile_tool("T", "logic", {"node": a, "base": b, "steps": "s1", "text": "bad"})
+        self.assertEqual(result["error"]["code"], "base_conflict")
+
 
 if __name__ == "__main__":
     unittest.main()

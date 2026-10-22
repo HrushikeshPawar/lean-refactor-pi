@@ -6,7 +6,7 @@ import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promi
 import { tmpdir } from "node:os";
 import { dirname, resolve, relative, sep } from "node:path";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { carriesProgress, StreamWatchdog } from "./watchdog.ts";
+import { messageSize, StreamWatchdog } from "./watchdog.ts";
 import { RawArguments, repairMalformedToolArguments } from "./rawargs.ts";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { nearestToolName, normalizeToolArguments, requireToolArguments } from "./toolnames.ts";
@@ -92,15 +92,16 @@ export default async function arenaExtension(pi: ExtensionAPI) {
   let limitToolsLeft = 0;
   // The provider request currently open: opened in before_provider_request, closed by the call's settle row.
   let pendingRequest: string | undefined;
-  // Aborts a request whose stream shows no assistant progress for ARENA_STREAM_IDLE_S (0 disables). Armed per
+  // Aborts a request whose stream has no assistant message growth for ARENA_STREAM_IDLE_S (0 disables). Armed per
   // request, not for compaction summaries (they emit no message events). Aborting the HTTP stream ends the turn
   // with a retryable provider error, which message_end settles as unknown usage.
-  const watchdog = new StreamWatchdog(Number(process.env.ARENA_STREAM_IDLE_S ?? 180) * 1000, idleSeconds => {
+  const watchdog = new StreamWatchdog(Number(process.env.ARENA_STREAM_IDLE_S ?? 600) * 1000, idleSeconds => {
     console.error(`[arena-stream] provider stream idle ${idleSeconds}s; aborted`); // not-model-facing: operator diagnostic log.
     appendTrace({ kind: "stream_idle", id: pendingRequest ?? null, idle_s: idleSeconds });
     // Abort the HTTP stream, not the agent run: an agent abort skips agent_before_settle, so Sol would never continue.
     if (!abortActiveStream(`provider stream timed out: no tokens for ${idleSeconds}s`)) console.error("[arena-stream] no open provider stream to abort"); // not-model-facing: operator diagnostic log.
   });
+  let lastSize = 0; // size of the assistant message when the watchdog last saw it grow
   let compactionRequests: string[] | undefined;
   let openAttempt: string | undefined;
   let previousFailed: string | undefined;
@@ -343,7 +344,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     pendingRequest = id;
     compactionRequests?.push(id);
-    if (!compactionRequests) watchdog.arm();
+    if (!compactionRequests) { lastSize = 0; watchdog.arm(); }
     openAttempt = id;
     turn += 1;
     requestId = id;
@@ -442,10 +443,11 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     previousFailed = id;
   }
 
-  pi.on("message_start", event => { if (event.message.role === "assistant") { rawArguments.reset(); watchdog.touch(); } });
+  pi.on("message_start", event => { if (event.message.role === "assistant") { rawArguments.reset(); lastSize = 0; watchdog.touch(); } });
   pi.on("message_update", event => {
     const update = event.assistantMessageEvent;
-    if (carriesProgress(update)) watchdog.touch();
+    const size = messageSize(update.partial);
+    if (size > lastSize) { lastSize = size; watchdog.touch(); }
     if (update.type === "toolcall_start") {
       rawArguments.start(update.contentIndex, (update.partial.content[update.contentIndex] as unknown as { partialJson?: string } | undefined)?.partialJson);
     } else if (update.type === "toolcall_delta") rawArguments.delta(update.contentIndex, update.delta);

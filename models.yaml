@@ -7,7 +7,7 @@
 provider: opencode-go          # default provider: a Pi catalog provider (Pi prices its models from its own catalog)
 provider_timeout_ms: 120000    # a silent request is cut after this; Pi's own default is 300 s
 outage_limit_ms: 600000
-stream_idle_s: 180             # a request whose stream shows no assistant progress this long is aborted (Pi's own idle timeout can be reset by proxy keepalives)
+stream_idle_s: 600             # a request whose assistant message has not grown this long is aborted (buffering providers send nothing for minutes; proxy keepalives do not count)
 retry: {max_retries: 3, base_delay_ms: 2000, max_delay_ms: 60000}
 
 thinking:

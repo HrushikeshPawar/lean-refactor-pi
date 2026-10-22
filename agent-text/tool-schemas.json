@@ -49,6 +49,7 @@
           }
         },
         "base": {"type": "string", "description": "base"},
+        "node": {"type": "string", "description": "node"},
         "from": {"type": "string", "description": "from"},
         "note": {"type": "string", "description": "note"},
         "check": {"type": "string", "enum": ["tokens", "lean"], "description": "check", "default": "lean"}
@@ -107,7 +108,8 @@
           "exclusive": ["steps", "hole"],
           "requireOne": true
         },
-        "helpers": {"type": "array", "items": {"type": "string"}, "description": "helpers"}
+        "helpers": {"type": "array", "items": {"type": "string"}, "description": "helpers"},
+        "note": {"type": "string", "description": "note"}
       }
     },
     "delegate": {

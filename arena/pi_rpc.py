@@ -115,7 +115,7 @@ def worker_launch(
             "ARENA_PI_MODEL_ID": model_config.get("id", model),
             "ARENA_MODELS_JSON": pi_json(config),
             "ARENA_REQUEST_OUTPUT_TOKENS": str(model_config["request_output_tokens"]),
-            "ARENA_STREAM_IDLE_S": str(config.get("stream_idle_s", 180)),
+            "ARENA_STREAM_IDLE_S": str(config.get("stream_idle_s", 600)),
             "ARENA_BUDGET_REQUIRED": "1",
             "ARENA_AUTOCONTINUE": "0",
             "ARENA_BUDGET_REPORT_PATH": str(directory / "cost.json"),

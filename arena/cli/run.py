@@ -722,7 +722,7 @@ def run(options: RunOptions) -> int:
     env["ARENA_LIMIT_USD"] = str(args.limit_usd)
     env["ARENA_REQUEST_OUTPUT_TOKENS"] = str(CONFIG["models"][args.model]["request_output_tokens"])
     env.setdefault("ARENA_OUTAGE_LIMIT_MS", str(CONFIG["outage_limit_ms"]))
-    env.setdefault("ARENA_STREAM_IDLE_S", str(CONFIG.get("stream_idle_s", 180)))
+    env.setdefault("ARENA_STREAM_IDLE_S", str(CONFIG.get("stream_idle_s", 600)))
     env["ARENA_BUDGET_REPORT_PATH"] = str(directory / "cost.json")
     if plugin is not None:
         try:

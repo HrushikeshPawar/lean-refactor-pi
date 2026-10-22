@@ -438,7 +438,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `tools/cancel.description` | 13 | Model tool definitions | every request |
 | `tools/cancel.params.job_id` | 3 | Model tool definitions | every request |
 | `tools/compile.description` | 29 | Model tool definitions | every request |
-| `tools/compile.params.base` | 20 | Model tool definitions | every request |
+| `tools/compile.params.base` | 13 | Model tool definitions | every request |
 | `tools/compile.params.check` | 11 | Model tool definitions | every request |
 | `tools/compile.params.drafts` | 16 | Model tool definitions | every request |
 | `tools/compile.params.fill` | 7 | Model tool definitions | every request |
@@ -450,6 +450,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `tools/compile.params.merge_from` | 5 | Model tool definitions | every request |
 | `tools/compile.params.merge_step` | 5 | Model tool definitions | every request |
 | `tools/compile.params.merge_take` | 6 | Model tool definitions | every request |
+| `tools/compile.params.node` | 3 | Model tool definitions | every request |
 | `tools/compile.params.note` | 5 | Model tool definitions | every request |
 | `tools/compile.params.splice` | 8 | Model tool definitions | every request |
 | `tools/compile.params.splice_base` | 8 | Model tool definitions | every request |
@@ -484,6 +485,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `tools/scratch.params.at_hole` | 12 | Model tool definitions | every request |
 | `tools/scratch.params.code` | 22 | Model tool definitions | every request |
 | `tools/scratch.params.helpers` | 25 | Model tool definitions | every request |
+| `tools/scratch.params.note` | 3 | Model tool definitions | every request |
 | `tools/scratch.params.replacement` | 13 | Model tool definitions | every request |
 | `tools/search.description` | 12 | Model tool definitions | every request |
 | `tools/search.params.after` | 6 | Model tool definitions | every request |

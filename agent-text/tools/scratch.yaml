@@ -5,3 +5,4 @@ params:
   at: "Saved parent node plus steps [first,last] counted from 1 (s2-s3 is [2,3]), or hole. Omit only when the job's anchor is a step range or hole. For a whole-proof anchor send code with the full theorem, or use compile drafts."
   helpers: "Optional experiment ids whose recorded snippets this call depends on. Only named helpers and their recorded dependencies are included. Diagnostic lines use that combined source."
   at_hole: "Open hole id of that node, such as n3.h1. Exclusive with steps."
+  note: "Optional short label."
