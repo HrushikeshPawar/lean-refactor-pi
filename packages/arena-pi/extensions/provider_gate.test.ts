@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { DispatchDenied, guardProvider, installDispatchGate, pythonDispatch, readSharedSpend, settleProviderUsage, type SharedSpend } from "./provider_gate.ts";
+import { abortActiveStream, callRunControl, DispatchDenied, guardProvider, installDispatchGate, pythonDispatch, readSharedSpend, settleProviderUsage, type SharedSpend } from "./provider_gate.ts";
 
 const identity = {
   runId: "run-1",
@@ -159,5 +159,45 @@ test("v8_dispatch_stop", async () => {
   } finally {
     globalThis.fetch = originalFetch;
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("abortActiveStream aborts every open guarded stream and forgets finished ones", async () => {
+  const signals: AbortSignal[] = [];
+  const hang = () => new Response(new ReadableStream({ start() {} }));
+  const bodies = [() => new Response("done"), hang, hang];
+  const guarded = guardProvider({
+    providerId: "stub", api: "x", config: {},
+    stream: (_m, _c, options) => (options as { fetch: typeof fetch }).fetch("u"),
+    open: async (_attempt, invoke) => invoke(),
+    identity: () => identity,
+  }) as { streamSimple: (m: unknown, c: unknown, o?: Record<string, unknown>) => Promise<Response> };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = ((_r: unknown, init?: RequestInit) => { signals.push(init!.signal!); return Promise.resolve(bodies.shift()!()); }) as typeof fetch;
+  try {
+    const finished = await guarded.streamSimple("m", {});
+    await finished.text();
+    await guarded.streamSimple("m", {});
+    await guarded.streamSimple("m", {});
+    assert.equal(abortActiveStream("t"), true);
+    assert.deepEqual(signals.map((s) => s.aborted), [false, true, true]);
+    assert.equal(abortActiveStream("t"), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("callRunControl kills a hung child and rejects on timeout", async () => {
+  const bin = mkdtempSync(join(tmpdir(), "hang-"));
+  const path = process.env.PATH;
+  writeFileSync(join(bin, "uv"), "#!/bin/sh\nsleep 30\n", { mode: 0o755 });
+  process.env.PATH = `${bin}:${path}`;
+  try {
+    const started = Date.now();
+    await assert.rejects(callRunControl("/tmp", "read_state", undefined, undefined, 200), /timed out after 0.2s/);
+    assert.ok(Date.now() - started < 5000);
+  } finally {
+    process.env.PATH = path;
+    rmSync(bin, { recursive: true });
   }
 });

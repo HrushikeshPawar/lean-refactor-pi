@@ -52,15 +52,37 @@ export type DispatchOpen = (
   invoke: () => Promise<unknown>,
 ) => Promise<unknown>;
 
-let activeStream: AbortController | undefined;
+const openStreams = new Set<AbortController>();
 
-// Abort the provider stream opened most recently in this process; true when one was open.
+// Abort every guarded provider stream still open in this process (a retry or compaction may have opened a newer one); true when any was open.
 export function abortActiveStream(reason: string): boolean {
-  const controller = activeStream;
-  activeStream = undefined;
-  if (!controller || controller.signal.aborted) return false;
-  controller.abort(new Error(reason));
-  return true;
+  let aborted = false;
+  for (const controller of [...openStreams]) {
+    openStreams.delete(controller);
+    if (controller.signal.aborted) continue;
+    controller.abort(new Error(reason));
+    aborted = true;
+  }
+  return aborted;
+}
+
+// Drop the controller once the response body finishes, errors or is cancelled.
+function track(controller: AbortController, response: Response): Response {
+  if (!response.body) { openStreams.delete(controller); return response; }
+  const reader = response.body.getReader();
+  const body = new ReadableStream<Uint8Array>({
+    async pull(out) {
+      try {
+        const { done, value } = await reader.read();
+        if (done) { openStreams.delete(controller); out.close(); } else out.enqueue(value);
+      } catch (error) {
+        openStreams.delete(controller);
+        out.error(error);
+      }
+    },
+    cancel(reason) { openStreams.delete(controller); return reader.cancel(reason); },
+  });
+  return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
 }
 
 export function guardProvider(input: {
@@ -95,9 +117,12 @@ export function guardProvider(input: {
         }, () => {
           // The stream watchdog aborts only this HTTP stream: Pi then sees a provider error and retries.
           const controller = new AbortController();
-          activeStream = controller;
+          openStreams.add(controller);
           const signal = init?.signal ? AbortSignal.any([init.signal, controller.signal]) : controller.signal;
-          return inner(request, { ...init, signal });
+          return Promise.resolve(inner(request, { ...init, signal })).then(
+            response => track(controller, response),
+            error => { openStreams.delete(controller); throw error; },
+          );
         });
       };
       return input.stream(model, context, { ...options, fetch });
@@ -132,7 +157,9 @@ export function installDispatchGate(input: {
   }
 }
 
-export function callRunControl(directory: string, fn: string, payload?: Record<string, unknown>, cwd = root): Promise<Record<string, unknown>> {
+const RUN_CONTROL_TIMEOUT_MS = 60_000;
+
+export function callRunControl(directory: string, fn: string, payload?: Record<string, unknown>, cwd = root, timeoutMs = RUN_CONTROL_TIMEOUT_MS): Promise<Record<string, unknown>> {
   const code = [
     "import json, sys",
     "from pathlib import Path",
@@ -144,10 +171,19 @@ export function callRunControl(directory: string, fn: string, payload?: Record<s
     const child = spawn("uv", ["run", "--no-sync", "python", "-c", code, fn, directory, ...(payload === undefined ? [] : [JSON.stringify(payload)])], { cwd });
     let stdout = "";
     let stderr = "";
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+      console.error(`[arena-settle] run_control ${fn} timed out after ${timeoutMs / 1000}s`); // not-model-facing: operator diagnostic log.
+      reject(new Error(`run_control ${fn} timed out after ${timeoutMs / 1000}s`));
+    }, timeoutMs);
     child.stdout.on("data", (chunk) => { stdout += chunk; });
     child.stderr.on("data", (chunk) => { stderr += chunk; });
-    child.on("error", reject);
+    child.on("error", (error) => { clearTimeout(timer); reject(error); });
     child.on("close", (code) => {
+      clearTimeout(timer);
+      if (timedOut) return;
       if (code !== 0) {
         reject(new Error(stderr || stdout || `run_control ${fn} exited ${code}`));
         return;

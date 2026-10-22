@@ -96,10 +96,10 @@ export default async function arenaExtension(pi: ExtensionAPI) {
   // request, not for compaction summaries (they emit no message events). Aborting the HTTP stream ends the turn
   // with a retryable provider error, which message_end settles as unknown usage.
   const watchdog = new StreamWatchdog(Number(process.env.ARENA_STREAM_IDLE_S ?? 600) * 1000, idleSeconds => {
-    console.error(`[arena-stream] provider stream idle ${idleSeconds}s; aborted`); // not-model-facing: operator diagnostic log.
+    console.error(`[arena-stream] provider stream idle ${idleSeconds}s; aborting open streams (request ${pendingRequest ?? "none"})`); // not-model-facing: operator diagnostic log.
     appendTrace({ kind: "stream_idle", id: pendingRequest ?? null, idle_s: idleSeconds });
     // Abort the HTTP stream, not the agent run: an agent abort skips agent_before_settle, so Sol would never continue.
-    if (!abortActiveStream(`provider stream timed out: no tokens for ${idleSeconds}s`)) console.error("[arena-stream] no open provider stream to abort"); // not-model-facing: operator diagnostic log.
+    console.error(abortActiveStream(`provider stream timed out: no tokens for ${idleSeconds}s`) ? "[arena-stream] abort sent" : "[arena-stream] no open provider stream to abort"); // not-model-facing: operator diagnostic log.
   });
   let lastSize = 0; // size of the assistant message when the watchdog last saw it grow
   let compactionRequests: string[] | undefined;
