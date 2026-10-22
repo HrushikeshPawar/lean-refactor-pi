@@ -227,7 +227,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `packet/sections.titles.worker` | 1 | Initial theorem packet | once per run |
 | `packet/sections.titles.worker_goals` | 6 | Initial theorem packet | once per run |
 | `packet/task` | 10 | Initial theorem packet | once per run |
-| `packet/team` | 339 | Initial theorem packet | once per run |
+| `packet/team` | 385 | Initial theorem packet | once per run |
 | `packet/team-cost` | 10 | Initial theorem packet | once per run |
 | `packet/trim` | 86 | Initial theorem packet | once per run |
 | `packet/worker` | 149 | Initial theorem packet | once per run |

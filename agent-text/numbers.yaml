@@ -46,8 +46,8 @@ memory_read_entries: 30
 memory_recovery_entries: 8
 budget:
   static_words: 860
-  # 730: the team paragraph also explains the trim scope and the objective islands (lead's new text, 339 words).
-  packet_words: 730
+  # 780: the team paragraph explains trim and objective islands, and that Sol keeps compiling and guides workers before it waits (r12 RCA).
+  packet_words: 780
   # 215: the worker packet explains the card (what to write, what arrives in replies).
   worker_words: 215
   reply_words: 40
