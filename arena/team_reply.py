@@ -45,12 +45,16 @@ def render(action: str, result: dict, directory: Path) -> str:
 
     if action == "delegate":
         state = result.get("state", "?")
+        if result.get("messaged") and not result.get("reused"):
+            return _render("delegate_messaged", job=job(result.get("job_id")))
         if result.get("reused"):
             return _render("delegate_reused", job=job(result.get("job_id")), state=state)
         if result.get("resumed"):
             return _render("delegate_resumed", job=job(result.get("job_id")), state=state)
         return _render("delegate_started", job=job(result.get("job_id")), state=state,
                        scope=result.get("scope", "?"), anchor=_anchor(result.get("anchor")))
+    if action == "report":
+        return _render("report_sent")
     if action == "cancel":
         return _render("cancel_done", job=job(result.get("job_id")), state=result.get("state", "?"))
     if action == "jobs":
@@ -130,6 +134,8 @@ def _await(result: dict, directory: Path, job) -> str:
                 lines.append(_render("await_finding", **args))
             else:
                 lines.append(_render("await_check", state=checks[-1].get("state"), **args))
+        elif kind == "worker_note":
+            lines.append(_render("await_note", job=job(event.get("job_id")), note=" ".join(str(event.get("note", "")).split())))
         elif kind == "run_stop":
             lines.append(_render("await_stopped"))
         elif event.get("state"):

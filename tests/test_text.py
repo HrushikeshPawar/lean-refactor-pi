@@ -336,7 +336,7 @@ class TextRendererTests(unittest.TestCase):
 
         sol = [tool["name"] for tool in registered_tools("sol")]
         worker = [tool["name"] for tool in registered_tools("worker")]
-        self.assertEqual(worker, ["compile", "goal", "search", "read", "scratch"])
+        self.assertEqual(worker, ["compile", "goal", "search", "read", "scratch", "report"])
         self.assertEqual(
             sol, ["compile", "goal", "search", "read", "scratch", "delegate", "jobs", "await_results", "cancel"]
         )
@@ -380,7 +380,7 @@ class TextRendererTests(unittest.TestCase):
         parts = json.loads(output.getvalue())["parts"]
         self.assertEqual(
             [part["part"] for part in parts if part["part"].startswith("tools/")],
-            ["tools/compile", "tools/goal", "tools/search", "tools/read", "tools/scratch"],
+            ["tools/compile", "tools/goal", "tools/search", "tools/read", "tools/scratch", "tools/report"],
         )
         compile = next(part["text"] for part in parts if part["part"] == "tools/compile")
         self.assertIn("  hole: string, required", compile)

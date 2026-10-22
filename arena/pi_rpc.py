@@ -7,7 +7,7 @@ from codecs import getincrementaldecoder
 from pathlib import Path
 
 WORKER_MODEL = "deepseek-v4.1-flash"
-WORKER_TOOLS = ("compile", "goal", "search", "read", "scratch")
+WORKER_TOOLS = ("compile", "goal", "search", "read", "scratch", "report")
 
 
 class FrameReader:
@@ -44,6 +44,12 @@ def cancel_lines(command_id: str) -> bytes:
     return b"".join(
         (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode() for record in records
     )
+
+
+def steer_line(command_id: str, message: str) -> bytes:
+    """Pi 1.4.0 steer: the message enters after the worker's current assistant turn and its tool calls."""
+    record = {"type": "steer", "id": command_id, "message": message}
+    return (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
 
 
 def prompt_line(command_id: str, task: str, anchor: dict, packet: str | None = None) -> bytes:

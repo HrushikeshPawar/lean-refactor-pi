@@ -1,0 +1,3 @@
+description: "Post a short progress note to the orchestrator without ending your job. Use it for a finding worth acting on now, such as a dead end or a trap."
+params:
+  text: "The note, at most {report_max_chars} characters."

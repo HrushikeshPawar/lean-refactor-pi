@@ -510,9 +510,10 @@ class V8E2ETests(unittest.TestCase):
         # -- five proof tools plus management tools, against the registered schema
         worker_names = [t["name"] for t in tool_schema.registered_tools("worker")]
         sol_names = [t["name"] for t in tool_schema.registered_tools("sol")]
-        self.assertEqual(worker_names, ["compile", "goal", "search", "read", "scratch"])
-        self.assertEqual(sol_names[:5], worker_names)
+        self.assertEqual(worker_names, ["compile", "goal", "search", "read", "scratch", "report"])
+        self.assertEqual(sol_names[:5], worker_names[:5])
         self.assertEqual(set(sol_names) - set(worker_names), {"delegate", "jobs", "await_results", "cancel"})
+        self.assertEqual(set(worker_names) - set(sol_names), {"report"})
 
         def walk(properties, depth=0):
             for key, field in properties.items():

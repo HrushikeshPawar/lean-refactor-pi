@@ -6,7 +6,7 @@ anchor_step: "scope step needs at with node plus exactly one of steps [first, la
 node: "at.node must be a saved node id such as n3."
 hole: "at.hole must be an open hole of that node, such as n3.h1."
 steps: "at.steps must be [first,last] within the node's steps, counted from 1, first <= last."
-active: "That job is still running; await_results, or cancel it."
+active: "That job is starting or stopping and cannot read a message now; try again after await_results."
 job: "Unknown job_id; jobs lists yours."
 ownership: "That job belongs to another actor; jobs lists yours."
 actor: "Only the lead actor may delegate."

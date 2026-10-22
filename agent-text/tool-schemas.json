@@ -1,6 +1,6 @@
 {
   "roles": {
-    "worker": ["compile", "goal", "search", "read", "scratch"],
+    "worker": ["compile", "goal", "search", "read", "scratch", "report"],
     "sol": ["compile", "goal", "search", "read", "scratch", "delegate", "jobs", "await_results", "cancel"]
   },
   "tools": {
@@ -147,6 +147,12 @@
       "handler": true,
       "properties": {
         "job_id": {"type": "string", "required": true, "description": "job_id"}
+      }
+    },
+    "report": {
+      "handler": true,
+      "properties": {
+        "text": {"type": "string", "required": true, "description": "text", "maxLengthFrom": "report_max_chars"}
       }
     }
   }

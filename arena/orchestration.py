@@ -3,7 +3,7 @@
 At most two model activations own a slot. A queued job waits for a real exit.
 Cancellation clears queued prompts, then aborts, and keeps the slot until the child is gone.
 A passing tool result is published while the activation is still active.
-A follow-up reuses the hypothesis session; a second prompt to an active job is busy.
+A follow-up reuses the hypothesis session; a follow-up to an active job is steered into its running turn.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from pathlib import Path
 
 from arena import run_control, text
 from arena.campaign import _append, events
-from arena.pi_rpc import WORKER_TOOLS, FrameReader, cancel_lines, prompt_line, worker_launch
+from arena.pi_rpc import WORKER_TOOLS, FrameReader, cancel_lines, prompt_line, steer_line, worker_launch
 from arena.run_control import OperationRejected
 
 _MODEL_SLOTS = 2
@@ -1069,6 +1069,43 @@ def _same_anchor(directory: Path, stored: dict, scope: str | None, anchor: objec
     return False if isinstance(resolved, str) else resolved == stored["anchor"]
 
 
+def _steer(directory: Path, activation_id: str, command_id: str, message: str) -> None:
+    """Write one Pi steer record to the live worker. Raises OSError when it cannot be sent."""
+    with _io_lock(activation_id):
+        transport = _owned.get(activation_id)
+        if transport is None:
+            raise OSError("worker not owned")
+        _write_prompt(transport, steer_line(command_id, message))
+
+
+def _steer_job(directory: Path, current: dict, arguments: dict, operation_id: str, task: str) -> dict:
+    """The orchestrator's message to a running job. Caller holds the control lock."""
+    activation_id = current["activation_id"]
+
+    def mutate(writer) -> list:
+        message = text.render("replies/team.steer_task", task=task)
+        _steer(directory, activation_id, f"{operation_id}:steer", message)
+        writer.append_ledger({"type": "job_message", "job_id": current["job_id"], "text": task,
+                              "disposition": "sent"})
+        return []
+
+    try:
+        applied = run_control._apply_locked(
+            directory,
+            {"operation_id": operation_id, "kind": "delegate", "arguments": arguments,
+             "run_id": arguments["run_id"], "actor_id": arguments["actor_id"],
+             "session_id": arguments["session_id"], "job_id": current["job_id"],
+             "activation_id": activation_id},
+            mutate,
+        )
+    except (OSError, ValueError):
+        return _reject(operation_id, "unreachable", "busy", "replies/delegate.active")
+    if not applied.get("ok"):
+        return applied
+    return {"ok": True, "operation_id": operation_id, "job_id": current["job_id"], "state": current["state"],
+            "messaged": True}
+
+
 def _follow_up(
     directory: Path,
     *,
@@ -1111,6 +1148,13 @@ def _follow_up(
             existing = run_control._receipt(control_rows, operation_id)
             if existing is None and _recovering(directory):
                 return _reject(operation_id, "recovering", "recovery_required", "replies/delegate.recovering")
+            sent = next((row for row in _history(directory)
+                         if row.get("type") == "job_message" and row.get("operation_id") == operation_id), None)
+            if sent is not None:
+                return {"ok": True, "operation_id": operation_id, "job_id": job_id, "state": current["state"],
+                        "messaged": True, "reused": True}
+            if existing is None and current["state"] == "active":
+                return _steer_job(directory, current, arguments, operation_id, task)
             if existing is None and (current["state"] in _active_states | {"cancelling"}):
                 return _reject(operation_id, "active", "busy", "replies/delegate.active")
             delegation = {
@@ -1387,7 +1431,7 @@ def _selectable(row: dict, job_ids: list[str] | None) -> bool:
         return True
     if job_ids is not None and row.get("job_id") not in job_ids:
         return False
-    if kind == "worker_finding":
+    if kind in ("worker_finding", "worker_note"):
         return True
     if kind == "verification" and row.get("state") in _terminal_checks:
         return True
@@ -1443,7 +1487,7 @@ def _public_event(row: dict) -> dict:
         for key in (
             "event_id", "job_id", "activation_id", "state", "attempt_id", "proof_id",
             "evaluation_id", "request_id", "run_id", "actor_id", "session_id",
-            "operation_id", "reason", "outcome", "check_id", "attempt_ids", "recovery_of", "report",
+            "operation_id", "reason", "outcome", "check_id", "attempt_ids", "recovery_of", "report", "note",
         )
         if row.get(key) is not None
     }
@@ -1505,6 +1549,8 @@ def _wake_reason(events: list[dict]) -> str:
         return "run_stopped"
     if any(event["type"] in ("worker_finding", "verification") for event in events):
         return "result"
+    if any(event["type"] == "worker_note" for event in events):
+        return "note"
     last = events[-1]
     if last.get("state") == "cancelled":
         return "cancelled"
@@ -1620,6 +1666,64 @@ def note_verification(
     )
     _wake()
     return applied
+
+
+def note_worker_report(
+    directory: Path, *, operation_id: str, job_id: str, run_id: str, actor_id: str, session_id: str, note: str,
+) -> dict:
+    """A worker's progress note: a ledger event the orchestrator's await_results delivers. The job keeps running."""
+    if not operation_id or not job_id or not run_id or not actor_id or not session_id or not note:
+        return _reject(operation_id, "identity")
+    arguments = {"job_id": job_id, "note": note}
+    applied = run_control.apply_operation(
+        directory,
+        {"operation_id": operation_id, "kind": "worker_note", "arguments": arguments, "run_id": run_id,
+         "actor_id": actor_id, "session_id": session_id, "job_id": job_id},
+        lambda ctx: [ctx.append_ledger({"type": "worker_note", "note": note})],
+    )
+    _wake()
+    return applied
+
+
+def announce_best(directory: Path) -> dict:
+    """Steer each active worker once when the run's best verified score has improved. Best effort.
+
+    Runs in the coordinator, which owns the worker pipes. A closed pipe is skipped, never an error."""
+    try:
+        return _announce_best(directory)
+    except Exception as error:
+        return {"ok": False, "reason": type(error).__name__}
+
+
+def _announce_best(directory: Path) -> dict:
+    scored = [node for node in proof_nodes(directory).values() if node.verified and node.score is not None]
+    if not scored:
+        return {"ok": True, "announced": False}
+    best = max(scored, key=lambda node: node.score)
+    with run_control.control_lock(directory):
+        notices = [row for row in events(directory) if row.get("type") == "best_notice"]
+        reference = [node.score for node in scored if node.origin == "reference"]
+        floor = notices[-1]["score"] if notices else max(reference, default=float("-inf"))
+        if best.score <= floor + 1e-9:
+            return {"ok": True, "announced": False}
+        labels = job_labels(directory)
+        authors = {attempt.get("job_id") for attempt in best.attempts if attempt.get("job_id")}
+        author = next((labels.get(job) for job in authors if labels.get(job)), None) \
+            or text.render("replies/team.author_sol")
+        message = text.render("replies/team.steer_best", node=best.id, score=round(best.score, 2), author=author)
+        steered, unreachable = [], []
+        for job_id in labels:
+            snapshot = _job_snapshot(directory, job_id)
+            if snapshot is None or snapshot["state"] != "active" or job_id in authors:
+                continue
+            try:
+                _steer(directory, snapshot["activation_id"], f"best-{uuid.uuid4().hex}:steer", message)
+                steered.append(job_id)
+            except Exception:
+                unreachable.append(job_id)
+        _append(directory, {"event_id": uuid.uuid4().hex, "type": "best_notice", "proof_id": best.proof_id,
+                            "node": best.id, "score": best.score, "steered": steered, "unreachable": unreachable})
+    return {"ok": True, "announced": True, "steered": steered, "unreachable": unreachable}
 
 
 def wake_waiters() -> None:

@@ -592,7 +592,7 @@ class V8WorkerSmokeTests(unittest.TestCase):
             launch = opened["launch"]
             self.assertEqual(launch["model"], "deepseek-v4.1-flash")
             self.assertEqual(launch["provider"], "opencode-go")
-            self.assertEqual(launch["tools"], ["compile", "goal", "search", "read", "scratch"])
+            self.assertEqual(launch["tools"], ["compile", "goal", "search", "read", "scratch", "report"])
             self.assertEqual(launch["argv"][launch["argv"].index("--mode") + 1], "rpc")
             self.assertIn("--no-builtin-tools", launch["argv"])
             extension = Path(launch["argv"][launch["argv"].index("--extension") + 1])
@@ -601,7 +601,7 @@ class V8WorkerSmokeTests(unittest.TestCase):
             self.assertIn("--no-extensions", launch["argv"])
             self.assertEqual(
                 launch["argv"][launch["argv"].index("--tools") + 1],
-                "compile,goal,search,read,scratch",
+                "compile,goal,search,read,scratch,report",
             )
             self.assertTrue(launch["session_dir"].endswith(receipt["session_id"]))
             self.assertEqual(launch["env"]["ARENA_RUN_ID"], "run-1")
@@ -618,7 +618,7 @@ class V8WorkerSmokeTests(unittest.TestCase):
             prompt = json.loads(child.written)
             self.assertNotIn("tools", prompt)
             self.assertIn(receipt["anchor"]["proof_sha256"], prompt["message"])
-            self.assertEqual(receipt["tools"], ["compile", "goal", "search", "read", "scratch"])
+            self.assertEqual(receipt["tools"], ["compile", "goal", "search", "read", "scratch", "report"])
             self.assertNotEqual(receipt["job_id"], receipt["activation_id"])
             self.assertTrue(orchestration.awaits_settlement(directory, receipt["activation_id"]))
             again = orchestration.delegate(directory, **call)
@@ -2255,3 +2255,79 @@ class V8AdmissionSmokeTests(unittest.TestCase):
             self.assertEqual(sent[-1]["request_class"], "opportunistic")
             cold.assert_not_called()
 
+
+
+class SteerAndNoteTests(unittest.TestCase):
+    def _active_job(self, directory, operation_id):
+        child = _HeldChild()
+        child.shutdown = lambda: None
+        child.write = lambda data: child.written.extend(data)
+        started = orchestration.delegate(
+            directory, operation_id=operation_id, run_id="run-1", actor_id="sol", session_id="sol-session",
+            task="try a route", scope="proof", anchor={"node": "n1"}, open_child=lambda _launch: child,
+        )
+        command_id = orchestration.jobs(directory, [started["job_id"]])["jobs"][0]["command_id"]
+        child._chunks.put((json.dumps({"type": "response", "id": command_id, "success": True,
+                                       "data": {"disposition": "started"}}) + "\n").encode())
+        for _ in range(500):
+            if orchestration.jobs(directory, [started["job_id"]])["jobs"][0]["state"] == "active":
+                break
+            time.sleep(0.01)
+        return started, child
+
+    def _steers(self, child):
+        return [json.loads(line) for line in bytes(child.written).splitlines() if b'"steer"' in line]
+
+    def test_follow_up_to_a_running_job_is_steered_and_recorded_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _seed_parent(directory)
+            started, child = self._active_job(directory, "op-steer-start")
+            call = dict(operation_id="op-steer", run_id="run-1", actor_id="sol", session_id="sol-session",
+                        task="new best is n9", job_id=started["job_id"], open_child=lambda _launch: None)
+            reply = orchestration.delegate(directory, **call)
+            again = orchestration.delegate(directory, **call)
+            self.assertTrue(reply["ok"] and reply["messaged"])
+            self.assertTrue(again["reused"])
+            steers = self._steers(child)
+            self.assertEqual(len(steers), 1)
+            self.assertIn("new best is n9", steers[0]["message"])
+            rows = [row for row in orchestration._history(directory) if row.get("type") == "job_message"]
+            self.assertEqual([(row["job_id"], row["text"]) for row in rows], [(started["job_id"], "new best is n9")])
+            self.assertIn("will read this after its current step", team_reply.render("delegate", reply, directory))
+
+    def test_best_improvement_steers_active_workers_once_and_skips_the_author(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _seed_parent(directory)
+            first, child_a = self._active_job(directory, "op-a")
+            second, child_b = self._active_job(directory, "op-b")
+            best = {"score": 75.5}
+
+            def nodes(_directory):
+                node = SimpleNamespace(id="n154", proof_id="p154", score=best["score"], verified=True,
+                                       origin="model", attempts=[{"job_id": second["job_id"]}])
+                return {"p154": node}
+
+            with patch.object(orchestration, "proof_nodes", nodes):
+                self.assertTrue(orchestration.announce_best(directory)["announced"])
+                self.assertFalse(orchestration.announce_best(directory)["announced"])
+                best["score"] = 76.0
+                self.assertTrue(orchestration.announce_best(directory)["announced"])
+            self.assertEqual(len(self._steers(child_a)), 2)
+            self.assertIn("n154 score 75.5", self._steers(child_a)[0]["message"])
+            self.assertEqual(self._steers(child_b), [])
+
+    def test_worker_report_note_is_delivered_by_await_results_and_rendered(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _seed_parent(directory)
+            started, _child = self._active_job(directory, "op-note-start")
+            sent = orchestration.note_worker_report(
+                directory, operation_id="note-1", job_id=started["job_id"], run_id="run-1",
+                actor_id="worker-actor", session_id="worker-session", note="s4 route is dead")
+            self.assertTrue(sent["ok"])
+            reply = orchestration.await_results(directory, actor_id="sol")
+            self.assertEqual(reply["wake_reason"], "note")
+            self.assertEqual([event["note"] for event in reply["events"]], ["s4 route is dead"])
+            self.assertIn("job1 note: s4 route is dead", team_reply.render("await_results", reply, directory))

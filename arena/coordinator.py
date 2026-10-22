@@ -114,6 +114,9 @@ class Coordinator:
                     result = {**_failure(type(error).__name__), "operation_id": request.get("operation_id")}
                 connection.sendall(json.dumps(result).encode() + b"\n")
                 return
+            if action == "best_moved":
+                connection.sendall(json.dumps(orchestration.announce_best(self.directory)).encode() + b"\n")
+                return
             if action != "await_results":
                 raise ValueError("invalid management request")
 
@@ -253,12 +256,13 @@ def _rejected_delegate(request: dict) -> dict | None:
     return None
 
 
-def submit(directory: Path, request: dict) -> dict:
+def submit(directory: Path, request: dict, timeout: float | None = None) -> dict:
     """Send one management request to the live coordinator. The caller does not open workers."""
     try:
         endpoint = json.loads((directory / "coordinator.json").read_text())
         payload = {**request, "generation": endpoint["generation"]}
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(timeout)
             connection.connect(endpoint["address"])
             connection.sendall(json.dumps(payload).encode() + b"\n")
             with connection.makefile("rb") as stream:
@@ -273,3 +277,8 @@ def submit(directory: Path, request: dict) -> dict:
 def await_results(directory: Path, *, actor_id: str, cursor=None, job_ids=None) -> dict:
     """Call the run owner. Missing ownership never falls back to local worker tables."""
     return submit(directory, {"action": "await_results", "actor_id": actor_id, "cursor": cursor, "job_ids": job_ids})
+
+
+def announce_best(directory: Path) -> None:
+    """Tell the coordinator the graph may have a new best, so it can steer its active workers. Best effort."""
+    submit(directory, {"action": "best_moved", "actor_id": "harness"}, timeout=10)
