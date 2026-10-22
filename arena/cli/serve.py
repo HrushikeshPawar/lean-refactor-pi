@@ -28,7 +28,7 @@ from typing import Any
 
 from arena.campaign import graph_state, run_dir
 from arena.summary import configured_cap
-from arena.viewer_data import Langfuse, campaign_of, hub_row, node_calls, read_jsonl, run_dashboard
+from arena.viewer_data import Langfuse, campaign_of, card_payload, hub_row, node_calls, read_jsonl, run_dashboard
 
 ASSETS = Path(__file__).resolve().parents[1] / "graph_viewer"
 
@@ -193,6 +193,7 @@ def graph_payload(run_id: str) -> dict:
     recorded_lineage(payload, directory, ledger)
     status = directory / "merge-worker.json"
     payload["worker"] = json.loads(status.read_text()) if status.exists() else None
+    payload["cards"] = card_payload(directory)
     charged = 0.0
     pi_embedded = 0.0
     parts = {"input": 0.0, "output": 0.0, "cache_read": 0.0, "cache_write": 0.0}

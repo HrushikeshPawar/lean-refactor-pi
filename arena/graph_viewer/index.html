@@ -28,7 +28,11 @@
         </div>
         <div id="graph-wrap"><svg id="graph" role="img" aria-label="Candidate ancestry graph"></svg><div class="view-ctrl"><button id="best-path" type="button" class="toggle" aria-pressed="true" title="Highlight the path from the original proof to the best verified candidate">★ Best path</button><button id="clear-sel" type="button" title="Clear the selection (Esc)" disabled>Clear selection</button><button id="fit" type="button">Fit</button><button id="zoom-in" type="button" aria-label="Zoom in">+</button><button id="zoom-out" type="button" aria-label="Zoom out">−</button></div><div id="legend" class="legend-panel"></div><div id="node-tip" class="node-tip" hidden></div><svg id="minimap" role="img" aria-label="Graph minimap"></svg></div>
       </div>
-      <aside id="detail"><p class="empty">Select a graph node, chart point, or frontier item.</p></aside>
+      <div class="side">
+        <div class="side-tabs" role="tablist"><button type="button" class="toggle" data-side="detail" aria-pressed="true">Node</button><button type="button" class="toggle" data-side="cards" aria-pressed="false">Cards <span id="cards-count"></span></button></div>
+        <aside id="detail"><p class="empty">Select a graph node, chart point, or frontier item.</p></aside>
+        <div id="cards" hidden></div>
+      </div>
     </section>
     <section class="lower">
       <div class="panel"><h2>Frontier</h2><div id="frontier"></div></div>

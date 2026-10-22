@@ -1249,3 +1249,46 @@ def _step_origin(directory: Path, history: list[dict], proof_id: str) -> dict:
     if ids:
         fields["ids"] = ids
     return fields
+
+
+# ---------------------------------------------------------------------------------------------
+# Actor cards: every `card` save is a ledger row; the viewer shows the latest card and its history
+# ---------------------------------------------------------------------------------------------
+
+
+def _card_order(card: dict) -> tuple[int, int, str]:
+    label = str(card.get("label") or "")
+    if label == "orchestrator":
+        return (0, 0, label)
+    digits = re.sub(r"\D", "", label)
+    return (1, int(digits) if digits else 10**6, label)
+
+
+def card_payload(directory: Path) -> dict:
+    """Per actor (orchestrator first, then jobs numerically): latest card plus every saved version."""
+    ledger = read_jsonl(directory / "ledger.jsonl")
+    start = _start_end(directory)[0]
+    actors: dict[str, dict] = {}
+    for row in ledger:
+        if row.get("type") != "card" or not isinstance(row.get("fields"), dict):
+            continue
+        ts = row.get("ts") if isinstance(row.get("ts"), (int, float)) else None
+        actor = actors.setdefault(
+            str(row.get("actor_id") or row.get("label") or "unknown"),
+            {"actor_id": row.get("actor_id"), "job_id": row.get("job_id"), "label": row.get("label"), "versions": []},
+        )
+        actor["label"] = row.get("label") or actor["label"]
+        actor["versions"].append(
+            {
+                "version": row.get("version"),
+                "ts": ts,
+                "minutes": round((ts - start) / 60, 2) if ts is not None and start is not None else None,
+                "fields": row["fields"],
+                "changed": row.get("changed") or [],
+            }
+        )
+    ordered = sorted(actors.values(), key=_card_order)
+    for actor in ordered:
+        actor["versions"].sort(key=lambda v: (v["version"] is None, v["version"] or 0, v["ts"] or 0))
+        actor["latest"] = actor["versions"][-1]
+    return {"run_start": start, "actors": ordered}

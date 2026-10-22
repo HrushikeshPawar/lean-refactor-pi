@@ -573,8 +573,18 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
   }
   $('code-dialog').addEventListener('click',e=>{if(e.target===$('code-dialog'))e.target.close()});
   // focus:false keeps the camera still (clicks on the graph); everything else (charts, buttons) recentres.
+  // Right column: node detail or the actors' cards. Selecting a node shows its detail.
+  let sideTab = store.get('arena-side') === 'cards' ? 'cards' : 'detail';
+  function showSide(tab) {
+    sideTab = tab; store.set('arena-side', tab);
+    document.querySelectorAll('[data-side]').forEach(el => el.setAttribute('aria-pressed', String(el.dataset.side === tab)));
+    $('detail').hidden = tab !== 'detail'; $('cards').hidden = tab !== 'cards';
+  }
+  document.querySelectorAll('[data-side]').forEach(el => el.onclick = () => showSide(el.dataset.side));
+  showSide(sideTab);
   function select(id,{focus=true}={}) {
     if(!itemOf(id))return;
+    showSide('detail');
     if(isProbe(itemOf(id))&&!showProbes){showProbes=true;store.set('arena-probes','1');layout();}
     if(isScratch(itemOf(id))&&!showScratch){showScratch=true;store.set('arena-scratch','1');layout();}
     selected=id; store.set('arena-selected',id); if(focus&&coords.has(id))focusOn(id); renderGraph(); detail(); renderCharts();
@@ -848,18 +858,54 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
     tokenRange = tokens.length ? [Math.min(...tokens), Math.max(...tokens)] : [0, 1];
     computeBestPath();
   }
+  // ---- actor cards: each actor's current notes card plus every saved version -------------------
+  const CARD_FIELDS = [['focus','Focus'],['best','Best'],['held','Held'],['failed','Failed'],['ideas','Ideas'],['asks','Asks']];
+  const cardOpen = new Set(); let cardsKey = null;
+  const runClock = m => m == null ? '' : `${Math.floor(m)}:${String(Math.floor((m % 1) * 60)).padStart(2, '0')} into run`;
+  const ago = ts => { if (ts == null) return ''; const m = Math.max(0, (Date.now() / 1000 - ts) / 60); return m < 1 ? 'just now' : m < 90 ? `${Math.round(m)} min ago` : `${(m / 60).toFixed(1)} h ago`; };
+  // Escaped text with line breaks kept (CSS pre-wrap) and node ids such as n134 turned into buttons when the graph has that node.
+  function cardText(text) {
+    const names = new Map(); for (const it of [...(data.nodes || []), ...probeItems]) if (it.node) names.set(it.node, it.id);
+    return String(text ?? '').split(/(\bn\d+\b)/).map((part, i) => i % 2 && names.has(part) ? `<button type="button" class="node-ref" data-go="${esc(names.get(part))}">${esc(part)}</button>` : esc(part)).join('');
+  }
+  const fieldBlock = (name, label, text, changed) => `<div class="card-field${changed ? ' changed' : ''}"><div class="card-field-name">${esc(label)}${changed ? ' <span class="tag good">changed</span>' : ''}</div><div class="card-text">${cardText(text)}</div></div>`;
+  function renderCards() {
+    const box = $('cards'), cards = data.cards?.actors || [];
+    $('cards-count').textContent = cards.length ? `(${cards.length})` : '';
+    const key = JSON.stringify(cards.map(c => [c.actor_id, c.versions.length, c.latest.ts])) + [...cardOpen].join();
+    if (key === cardsKey) { box.querySelectorAll('.card-time').forEach(el => { el.textContent = cardTime(Number(el.dataset.ts), el.dataset.min === '' ? null : Number(el.dataset.min)); }); return; }
+    cardsKey = key;
+    if (!cards.length) { box.innerHTML = '<p class="muted">No cards yet. Each actor saves one with the card tool.</p>'; return; }
+    const known = new Set(CARD_FIELDS.map(f => f[0]));
+    box.innerHTML = '<div class="cards-grid">' + cards.map(c => {
+      const id = c.actor_id || (c.label === 'orchestrator' ? 'sol' : c.label), latest = c.latest, open = cardOpen.has(id);
+      const fields = CARD_FIELDS.concat(Object.keys(latest.fields).filter(k => !known.has(k)).map(k => [k, k]));
+      const body = fields.filter(([k]) => latest.fields[k]).map(([k, label]) => fieldBlock(k, label, latest.fields[k], (latest.changed || []).includes(k))).join('') || '<p class="muted">Empty card.</p>';
+      const history = c.versions.map((v, i) => {
+        const prev = i ? c.versions[i - 1].fields : {};
+        const names = (v.changed?.length ? v.changed : Object.keys({...prev, ...v.fields}).filter(k => prev[k] !== v.fields[k]));
+        const diffs = names.map(k => `<div class="card-diff"><div class="card-field-name">${esc(k)}</div><div class="card-before"><span class="muted small">before</span><div class="card-text">${prev[k] ? cardText(prev[k]) : '<span class="muted">(empty)</span>'}</div></div><div class="card-after"><span class="muted small">after</span><div class="card-text">${v.fields[k] ? cardText(v.fields[k]) : '<span class="muted">(cleared)</span>'}</div></div></div>`).join('');
+        return `<div class="card-version"><div class="card-version-head"><b>v${esc(v.version)}</b> <span class="muted">${esc(runClock(v.minutes))}</span> <span class="muted">· changed ${esc(names.join(', ') || 'nothing')}</span></div>${diffs}</div>`;
+      }).reverse().join('');
+      return `<article class="actor-card"><div class="card-head"><i class="sw" data-bg="${actorColor(id)}"></i><b>${esc(c.label || id)}</b><span class="tag">v${esc(latest.version)}</span><span class="muted card-time" data-ts="${latest.ts ?? ''}" data-min="${latest.minutes ?? ''}">${esc(cardTime(latest.ts, latest.minutes))}</span></div>${body}<button type="button" class="linkish card-history-toggle" data-actor="${esc(id)}" aria-expanded="${open}">${open ? '▾' : '▸'} History (${c.versions.length})</button><div class="card-history"${open ? '' : ' hidden'}>${history}</div></article>`;
+    }).join('') + '</div>';
+    paintSwatches(box);
+    box.querySelectorAll('[data-go]').forEach(el => el.onclick = () => select(el.dataset.go));
+    box.querySelectorAll('.card-history-toggle').forEach(el => el.onclick = () => { cardOpen.has(el.dataset.actor) ? cardOpen.delete(el.dataset.actor) : cardOpen.add(el.dataset.actor); renderCards(); });
+  }
+  const cardTime = (ts, min) => `updated ${ago(ts)}${min == null ? '' : ` · ${runClock(min)}`}`;
   async function refresh() {
     try {
       const response=window.GRAPH_SNAPSHOT ? {ok:true,json:async()=>window.GRAPH_SNAPSHOT} : await fetch('graph.json',{cache:'no-store'});
       if(!response.ok)throw new Error(`HTTP ${response.status}`);
-      const next=await response.json(),revision=`${next.ledger_events}:${next.cost_timeline?.length}:${next.worker?.updated_at}`;
+      const next=await response.json(),revision=`${next.ledger_events}:${next.cost_timeline?.length}:${next.worker?.updated_at}:${(next.cards?.actors||[]).map(c=>c.versions.length).join('.')}`;
       $('live').textContent=window.GRAPH_SNAPSHOT?'Saved snapshot':`Live · ${new Date().toLocaleTimeString()}`;$('live').classList.add('ok');
       if(revision===lastRevision)return;
       lastRevision=revision;data=next;byId=new Map(data.nodes.map(n=>[n.id,n]));prepare();
       // First visit only: open on the latest milestone. After that an empty selection stays empty.
       if(!hadStored){hadStored=true;selected=data.milestones.at(-1)?.candidate_id??null;if(selected)store.set('arena-selected',selected);}
       if(selected&&!itemOf(selected)){selected=null;}
-      layout();renderGraph();renderLegend();detail();renderCharts();renderMeta();
+      layout();renderGraph();renderLegend();detail();renderCharts();renderMeta();renderCards();
     } catch(error) {$('live').textContent=`Disconnected · ${error.message}`;$('live').classList.remove('ok')}
   }
   refresh(); if(!window.GRAPH_SNAPSHOT)setInterval(refresh,2500);
