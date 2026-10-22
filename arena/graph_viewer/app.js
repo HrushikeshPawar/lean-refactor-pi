@@ -44,14 +44,25 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
     const t = it.tokens; if (t == null) return 16;
     const [lo, hi] = tokenRange; return 15 + 11 * Math.sqrt(Math.max(0, Math.min(1, (t - lo) / Math.max(1, hi - lo))));
   }
+  const placeParents = it => it.parents.length ? it.parents : it.filed_under ? [it.filed_under] : [];
   function layout() {
     const depths = new Map(), layers = new Map(), hide = new Set();
     const visit = id => { for (const child of kidsOf(id)) if (!hide.has(child)) { hide.add(child); visit(child); } };
     for (const id of collapsed) visit(id);
-    for (const node of allItems()) {
-      if (hide.has(node.id)) continue;
-      const depth = node.parents.length ? 1 + Math.max(...node.parents.map(p => depths.get(p) ?? -1)) : 0;
-      depths.set(node.id, depth);
+    // Placement follows real parents, else the focus a draft was filed under (drawn dotted, not as lineage).
+    // Depth is computed recursively so a node whose parent is a probe sits below it whatever the item order.
+    const shown = new Map(allItems().filter(it => !hide.has(it.id)).map(it => [it.id, it]));
+    const depthOf = (id, seen = new Set()) => {
+      if (depths.has(id)) return depths.get(id);
+      const it = shown.get(id); if (!it || seen.has(id)) return -1;
+      seen.add(id);
+      const ups = placeParents(it).filter(p => shown.has(p));
+      const depth = ups.length ? 1 + Math.max(...ups.map(p => depthOf(p, seen))) : 0;
+      depths.set(id, depth);
+      return depth;
+    };
+    for (const node of shown.values()) {
+      const depth = depthOf(node.id);
       if (!layers.has(depth)) layers.set(depth, []);
       layers.get(depth).push(node);
     }
@@ -59,7 +70,7 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
     const widest=Math.max(1,...[...layers.values()].map(nodes=>nodes.length));
     for (const [depth, nodes] of layers) {
       nodes.sort((a,b) => {
-        const bary = n => n.parents.length ? n.parents.reduce((s,p) => s + (coords.get(p)?.x ?? 0), 0) / n.parents.length : n.order * STEP_X;
+        const bary = n => { const ups = placeParents(n); return ups.length ? ups.reduce((s,p) => s + (coords.get(p)?.x ?? 0), 0) / ups.length : n.order * STEP_X; };
         return bary(a) - bary(b) || a.order - b.order;
       });
       const offset=(widest-nodes.length)*STEP_X/2;
