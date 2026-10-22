@@ -313,11 +313,15 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
   // The route from the original proof to the best verified candidate (first-parent chain).
   function computeBestPath() {
     bestPath = {nodes: new Set(), edges: new Set()};
+    // Every item the best proof came through: real parents, else the focus it was filed under; probes and a
+    // scratch experiment promoted into a node on the path count too.
     let current = data.milestones.at(-1)?.candidate_id;
-    while (current && byId.has(current) && !bestPath.nodes.has(current)) {
+    while (current && itemOf(current) && !bestPath.nodes.has(current)) {
       bestPath.nodes.add(current);
-      const parent = byId.get(current).parents[0];
-      if (parent && byId.has(parent)) bestPath.edges.add(`${parent}:${current}`);
+      const promoted = scratchItems.find(x => x.promotedTo === current);
+      if (promoted) { bestPath.nodes.add(promoted.id); bestPath.edges.add(`${promoted.id}>${current}`); }
+      const parent = placeParents(itemOf(current))[0];
+      if (parent && itemOf(parent)) bestPath.edges.add(`${parent}:${current}`);
       current = parent;
     }
     if (bestPath.nodes.size < 2) bestPath = {nodes: new Set(), edges: new Set()};
@@ -341,11 +345,13 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
       }));
       if (it.filed_under && coords.has(it.filed_under)) {
         const a = coords.get(it.filed_under), ay = a.y + radius(itemOf(it.filed_under)), cy = p.y - radius(it), bend = Math.max(18, (cy - ay) * .48);
-        edges.push(`<path class="edge filed-edge${selected && selected !== it.id ? ' unrelated' : ''}${dim}" d="M${a.x},${ay} C${a.x},${ay + bend} ${p.x},${cy - bend} ${p.x},${cy}"/>`);
+        const onBest = showBest && bestPath.edges.has(`${it.filed_under}:${it.id}`) ? ' bestpath' : '';
+        edges.push(`<path class="edge filed-edge${onBest}${selected && selected !== it.id && !onBest ? ' unrelated' : ''}${dim}" d="M${a.x},${ay} C${a.x},${ay + bend} ${p.x},${cy - bend} ${p.x},${cy}"/>`);
       }
       if (scratch && it.promotedTo && coords.has(it.promotedTo) && (showScratch)) {
         const b = coords.get(it.promotedTo), top = Math.min(p.y, b.y) - 38;
-        edges.push(`<path class="edge scratch-edge promotes${selected && selected !== it.id && selected !== it.promotedTo ? ' unrelated' : ''}${dim}" d="M${p.x},${p.y} Q${(p.x + b.x) / 2},${top} ${b.x},${b.y}"/>`);
+        const onBest = showBest && bestPath.edges.has(`${it.id}>${it.promotedTo}`) ? ' bestpath' : '';
+        edges.push(`<path class="edge scratch-edge promotes${onBest}${selected && selected !== it.id && selected !== it.promotedTo && !onBest ? ' unrelated' : ''}${dim}" d="M${p.x},${p.y} Q${(p.x + b.x) / 2},${top} ${b.x},${b.y}"/>`);
       }
       const R = radius(it), st = stat(it);
       const cls = `node k-${probe ? 'probe' : scratch ? 'scratch res-' + scratchResult(it) + (it.promotedTo ? ' promoted' : '') : 'candidate'} st-${st}${it.origin === 'auto_merge' ? ' auto_merge' : ''}${milestone.has(it.id) ? ' best' : ''}${showBest && bestPath.nodes.has(it.id) ? ' onbest' : ''}${lineage.nodes.has(it.id) && selected !== it.id ? ' ancestor' : ''}${selected === it.id ? ' selected' : ''}${selected && !lineage.nodes.has(it.id) ? ' unrelated' : ''}${dim}${hoverGroup && groupKey(hoverGroup.group, it) !== hoverGroup.key ? ' spot-off' : ''}`;
