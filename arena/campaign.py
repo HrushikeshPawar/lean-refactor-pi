@@ -1426,11 +1426,16 @@ def _file_node(
         graph_nodes = {node.proof_id: node for node in graph.nodes}
         for node in graph.nodes:
             if node.route is not None:
-                earlier.setdefault(node.route, []).append(node.signature)
+                # Only closed proofs are members; drafts and sketches keep their route name but are never matched against.
+                members = earlier.setdefault(node.route, [])
+                if node.status == "closed":
+                    members.append(node.signature)
         parent = sources[0] if sources else None
         parent_node = graph_nodes.get(parent)
-        if routes.is_draft(proof):
-            # Harness and test sketches never open a route; they belong to their base's route.
+        compile_result = routes.attempt_results(history).get(proof_id, (None, None))[1]
+        if routes.is_draft(proof) or (compile_result is not None and not goalstate.closed(compile_result)):
+            # Sketches, test drafts and proofs that did not compile never open a route or become members; they carry
+            # their base's route.
             assignment = routes.attach(earlier, routes.signature(proof), parent_node.route if parent_node else None)
         else:
             assignment = routes.assign(

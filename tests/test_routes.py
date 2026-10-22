@@ -16,7 +16,7 @@ class SignatureTests(unittest.TestCase):
     def test_different_tactic_heads_and_steps_open_distance(self):
         left = routes.signature("theorem t : True := by\n  intro h\n  exact h\n")
         right = routes.signature("theorem t : True := by\n  omega\n  simp_all\n")
-        self.assertLess(routes.similarity(left, right), routes.OPEN_BELOW)
+        self.assertLess(routes.similarity(left, right), routes.JOIN)
 
     def test_empty_proof_has_a_valid_signature(self):
         self.assertEqual(routes.signature("theorem t : True := by\n"), {"skeleton": [], "steps": []})
@@ -43,18 +43,22 @@ class AssignmentTests(unittest.TestCase):
         kept = routes.assign(members, self.far, "r1", routes.SMALL_EDIT_LINES)
         self.assertEqual((kept["route"], kept["new"]), ("r1", False))
 
-    def test_grey_band_prefers_margin_then_parent_hysteresis(self):
+    def test_dissimilar_complete_proof_opens_a_route_even_in_the_old_grey_band(self):
         sig = {"skeleton": ["a", "b", "c", "d"], "steps": ["a", "b"]}
-        route_a = {"skeleton": ["a", "b", "x", "y"], "steps": ["a", "c"]}
-        route_b = {"skeleton": ["w", "x", "y", "z"], "steps": ["d", "e"]}
-        members = {"r1": [route_a], "r2": [route_b]}
-        chosen = routes.assign(members, sig, "r2", None)
-        self.assertEqual(chosen["route"], "r1")
-        self.assertEqual(chosen["runner_up"]["route"], "r2")
+        member = {"skeleton": ["a", "b", "x", "y"], "steps": ["a", "c"]}  # similarity about 0.4
+        self.assertLess(routes.similarity(sig, member), routes.JOIN)
+        result = routes.assign({"r1": [member]}, sig, None, None)
+        self.assertEqual((result["route"], result["new"]), ("r2", True))
 
-        tied = {"r1": [route_a], "r2": [route_a]}
-        sticky = routes.assign(tied, sig, "r2", None)
-        self.assertEqual(sticky["route"], "r2")
+    def test_drafts_are_labelled_but_never_members(self):
+        members = {"r1": [self.base], "r2": []}  # r2 has only drafts so far
+        draft = routes.attach(members, self.far, "r2")
+        self.assertEqual((draft["route"], draft["new"]), ("r2", False))
+        # the first complete proof settles the draft-only route instead of opening r3
+        settled = routes.assign(members, self.far, "r2", None)
+        self.assertEqual(settled["route"], "r2")
+        opened = routes.assign({"r1": [self.base], "r2": [self.near]}, self.far, None, None)
+        self.assertEqual(opened["route"], "r3")
 
     def test_route_cap_joins_the_closest_route(self):
         members = {f"r{index}": [{"skeleton": [str(index), "route"], "steps": [str(index)]}] for index in range(1, 13)}

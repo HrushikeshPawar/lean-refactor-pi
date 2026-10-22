@@ -1,8 +1,10 @@
 """Internal routes from proof-shape signatures.
 
 Each signature mixes top-level tactic heads with hashes of normalized proof steps. Assignment uses maximum
-similarity to any existing route member and a parent-sensitive margin, keeping nearby edits together while
-opening distinct routes for distant shapes. Routes are computed synchronously from text and frozen in the ledger.
+similarity to any existing route member: at or above JOIN the proof joins that route, below it a new route opens
+(unless a small edit keeps the parent's route, or MAX_ROUTES is reached). Only closed proofs are route members;
+drafts and sketches are labelled with their base's route but never matched against. Routes are computed
+synchronously from text and frozen in the ledger.
 """
 
 from __future__ import annotations
@@ -15,8 +17,6 @@ ROUTE_DEPTH = 3  # distinct goal states that make a route explored
 STALE_STREAK = 5  # consecutive attempts leaving an already seen goal state
 MAX_SKELETON = 24
 JOIN = 0.60
-OPEN_BELOW = 0.35
-MARGIN = 0.10
 SMALL_EDIT_LINES = 3
 MAX_ROUTES = 12
 _NAME = re.compile(r"\b(h[A-Za-z0-9_'₀-₉]*|this|H[A-Za-z0-9_'₀-₉]*|ih[A-Za-z0-9_']*)\b")
@@ -93,11 +93,15 @@ def is_draft(proof: str) -> bool:
 def attach(members: dict[str, list[dict]], sig: dict, base_route: str | None) -> dict:
     """Route for a draft: its base's route, else the most similar existing route. Never a new route."""
     if base_route is None and members:
-        base_route = max(members, key=lambda route: max(similarity(sig, member) for member in members[route]))
+        base_route = max(members, key=lambda route: _best(sig, members[route]))
     if base_route is None:
         return assign(members, sig, None, None)
     scores = [similarity(sig, member) for member in members.get(base_route, [])]
     return {"route": base_route, "new": False, "similarity": max(scores, default=1.0), "runner_up": None}
+
+
+def _best(sig: dict, route_members: list[dict]) -> float:
+    return max((similarity(sig, member) for member in route_members), default=0.0)
 
 
 def similarity(a: dict, b: dict) -> float:
@@ -128,13 +132,12 @@ def assign(
     parent_route: str | None,
     parent_line_diff: int | None,
 ) -> dict:
-    """Assign a signature to the best existing route, respecting edit hysteresis and the route cap."""
+    """Join the best route at similarity >= JOIN, else open a new one. `members` maps every route name (also
+    routes with no closed member yet, as empty lists) to its closed proofs' signatures."""
     if not members:
         return {"route": "r1", "new": True, "similarity": 1.0, "runner_up": None}
 
-    scores = {
-        route: max(similarity(sig, member) for member in route_members) for route, route_members in members.items()
-    }
+    scores = {route: _best(sig, route_members) for route, route_members in members.items()}
     ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
     best_route, top = ranked[0]
     runner_up = {"route": ranked[1][0], "similarity": ranked[1][1]} if len(ranked) > 1 else None
@@ -147,16 +150,13 @@ def assign(
             "runner_up": runner_up,
         }
 
-    if top >= JOIN:
-        route = best_route
-    elif top < OPEN_BELOW:
-        route = best_route if len(members) >= MAX_ROUTES else f"r{len(members) + 1}"
-    elif (
-        top - (ranked[1][1] if len(ranked) > 1 else 0.0) >= MARGIN or best_route == parent_route or parent_route is None
-    ):
+    empty = [name for name, route_members in members.items() if not route_members]
+    if empty and top == 0.0:  # a route only drafts have reached: its first complete proof settles it
+        route = parent_route if parent_route in empty else empty[0]
+    elif top >= JOIN or len(members) >= MAX_ROUTES:
         route = best_route
     else:
-        route = parent_route
+        route = next(f"r{index}" for index in range(1, len(members) + 2) if f"r{index}" not in members)
     return {"route": route, "new": route not in members, "similarity": scores.get(route, top), "runner_up": runner_up}
 
 
