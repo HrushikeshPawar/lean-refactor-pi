@@ -117,3 +117,13 @@ class ScratchPromotionBoundaryTests(ToolCase):
                 item = tools.scratch_tool("T", "logic", {"replacement": "exact ?_", "at": anchor})["items"][0]
             self.assertEqual(item["promotion"]["verification"]["fast"], "inconclusive")
             self.assertEqual(item["promotion"]["reason"], "inconclusive")
+        with self.subTest("a failed promotion shows the Lean error in the reply and in read experiment"):
+            raw = {"ok": True, "compat": {"v1": {"passed": False, "exit_code": 1, "diagnostics": [
+                {"severity": "error", "line": 2, "column": 2, "message": "scratch marker mismatch"},
+            ]}}}
+            with patch.object(campaign, "_compile_probe", return_value=raw):
+                item = tools.scratch_tool("T", "logic", {"replacement": "exact wrong", "at": anchor})["items"][0]
+            self.assertEqual(item["promotion"]["state"], "failed")
+            self.assertIn("scratch marker mismatch", str(item["lines"]))
+            stored = tools.experiments.retrieve("logic", item["experiment_id"])
+            self.assertIn("scratch marker mismatch", str(stored["rendered"]))

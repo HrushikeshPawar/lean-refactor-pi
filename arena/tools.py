@@ -529,27 +529,11 @@ def _compile_evidence(name: str, run_id: str, item: dict, history: list[dict], p
                                     deltas=", ".join(changes) or _render("compile_not_comparable")))
 
 
-def _compile_item(name: str, run_id: str, node_ref: str, result: dict, filing: str) -> dict:
-    _history_rows, projection = _nodes(run_id)
-    node = next((item for item in projection.nodes if item.id == node_ref), None)
-    if node is None:
-        return {
-            "ref": node_ref,
-            "ok": False,
-            "lines": [],
-            "error": reply.request_error("internal_error", node_ref, [], TOOL_FORMS["compile"]),
-        }
-    primary = _primary(result)
-    # `compat[v]["lean"]` is the model view's Lean-path string ("session" or a fallback note), not a dict.
-    timeout = bool(result.get("timeout") or primary.get("timeout") or _timed_out(primary))
+def _error_lines(name: str, run_id: str, node, projection, result: dict) -> tuple[list[str], list[dict], bool]:
     errors, incomplete = all_errors(name, run_id, node, result)
     if errors:
         errors = reply.deduplicate_diagnostics(run_id, node.id, errors)
-    holes = node.holes
-    status = "timeout" if timeout else node.status
-    lines = [_render("compile_filed", node=node.id, outcome=reply.outcome(status, holes), filing=filing)]
-    if timeout:
-        lines.append(_render("timeout", seconds=engine.lean_timeout()))
+    lines: list[str] = []
     groups = _same_message_groups(_branch_groups(errors))
     known = _statement_context(projection) | _binder_hypotheses(name, errors) if groups else set()
     if groups:
@@ -573,6 +557,29 @@ def _compile_item(name: str, run_id: str, node_ref: str, result: dict, filing: s
             lines.append(_render("error_goal", goal=goal))
         if same:
             lines.append(_render("error_same", count=len(same), ids=", ".join(same)))
+    return lines, errors, incomplete
+
+
+def _compile_item(name: str, run_id: str, node_ref: str, result: dict, filing: str) -> dict:
+    _history_rows, projection = _nodes(run_id)
+    node = next((item for item in projection.nodes if item.id == node_ref), None)
+    if node is None:
+        return {
+            "ref": node_ref,
+            "ok": False,
+            "lines": [],
+            "error": reply.request_error("internal_error", node_ref, [], TOOL_FORMS["compile"]),
+        }
+    primary = _primary(result)
+    # `compat[v]["lean"]` is the model view's Lean-path string ("session" or a fallback note), not a dict.
+    timeout = bool(result.get("timeout") or primary.get("timeout") or _timed_out(primary))
+    holes = node.holes
+    status = "timeout" if timeout else node.status
+    lines = [_render("compile_filed", node=node.id, outcome=reply.outcome(status, holes), filing=filing)]
+    if timeout:
+        lines.append(_render("timeout", seconds=engine.lean_timeout()))
+    error_lines, errors, incomplete = _error_lines(name, run_id, node, projection, result)
+    lines.extend(error_lines)
     if holes:
         lines.append(_render("open_holes"))
     lines.extend(
@@ -2319,6 +2326,8 @@ def _scratch_promote(
                 **({} if passed else {"reason": promotion["reason"]}),
             ),
         ]
+        if status == "proof_error" and not passed:
+            lines.extend(_error_lines(theorem, run_id, node, _nodes(run_id)[1], raw_result)[0])
         best = _best_label(history, node.proof_id) if passed else None
         promotion["best"] = best
         if best:
