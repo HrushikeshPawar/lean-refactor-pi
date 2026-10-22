@@ -2,7 +2,7 @@ description: "Return pinned source, a node's prices, diff, outline, tree, or gra
 params:
   experiment: "Scratch experiment id. Returns the exact submitted code and outcome without running Lean again. A hash-only historical row is reported as missing code."
   ref: "Stored evidence reference."
-  handle: "Declaration handle from search, e.g. decl:Nat.add_comm, or file lines, e.g. ArkLib/Foo.lean:120-150; or decl:Nat.add_comm:20-50."
+  handle: "Declaration handle from search, e.g. decl:Nat.add_comm, or file lines, e.g. cslib:Cslib/Foo.lean:120-150; or decl:Nat.add_comm:20-50."
   node: "Node id. Required for every view except map."
   hole: "Open hole id in full form, such as n2.h1. Do not send node with it."
   view: "Choose source, prices, diff, outline, tree or tree:<positive page> (cost per tactic and stated term), or map."

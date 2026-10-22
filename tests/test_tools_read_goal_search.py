@@ -1,6 +1,7 @@
 import hashlib
 import os
 import shutil
+from pathlib import Path
 from unittest.mock import patch
 
 from arena import campaign, tools
@@ -43,6 +44,11 @@ class ScratchResultTests(ToolCase):
         ):
             result = tools.scratch_tool("T", "logic", {"code": code})
         return (result.get("details") or result)["items"][0]["lines"]
+
+    def test_read_handle_example_is_neutral(self):
+        text = (Path(__file__).parents[1] / "agent-text" / "tools" / "read.yaml").read_text()
+        self.assertNotIn("ArkLib", text)
+        self.assertIn("cslib:Cslib/Foo.lean:120-150", text)
 
     def test_scratch_retains_exact_original_code_for_success_failure_and_timeout(self):
         code = "-- original λ context\r\n#check Nat.add_comm\r\n  \r\n"
