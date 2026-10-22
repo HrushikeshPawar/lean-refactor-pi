@@ -45,7 +45,7 @@ ACTIONS = (
     "delegate",
     "jobs",
     "cancel",
-    "report",
+    "card",
     "island_turn",
 )
 
@@ -97,8 +97,8 @@ def run(args: SimpleNamespace) -> dict:
         return _with_text("await_results", result, args.run_id)
     if args.action in ("delegate", "jobs", "cancel"):
         return _with_text(args.action, _management(args), args.run_id)
-    if args.action == "report":
-        return _with_text("report", _report(args), args.run_id)
+    if args.action == "card":
+        return _with_text("card", _card(args), args.run_id)
     if args.action == "island_turn":
         # A worker's turn ended: the island extension asks whether to continue. The job comes from the environment.
         job_id, activation_id = os.environ.get("ARENA_JOB_ID"), os.environ.get("ARENA_ACTIVATION_ID")
@@ -115,8 +115,10 @@ def _resolve_jobs(run_id: str, job_ids):
 
 
 def _with_text(action: str, result: dict, run_id: str) -> dict:
-    """The model reads `text`; the rest stays in the tool details."""
-    return {**result, "text": team_reply.render(action, result, run_dir(run_id))}
+    """The model reads `text`; the rest stays in the tool details. Cards the caller has not seen follow it."""
+    shown = team_reply.render(action, result, run_dir(run_id))
+    cards = tool_reply.card_lines(run_id) if result.get("ok") is not False else []
+    return {**result, "text": "\n".join([shown, *cards])}
 
 
 def _harness_actor() -> str:
@@ -158,26 +160,19 @@ def _management(args: SimpleNamespace) -> dict:
     })
 
 
-def _report(args: SimpleNamespace) -> dict:
-    """A worker's progress note. The job comes from the harness environment, never from the request."""
+def _card(args: SimpleNamespace) -> dict:
+    """An actor's card save. Identity comes from the harness environment, never from the request."""
     request = json.loads(args.request_file.read_text()) if args.request_file is not None else {}
-    job_id = os.environ.get("ARENA_JOB_ID")
-    if not isinstance(request, dict) or not job_id or _harness_actor() == "sol":
-        return {"ok": False, "category": "invalid_input", "reason": "worker_only",
-                "hint": text.render("replies/team.report_worker_only")}
-    note = request.get("text")
-    note = " ".join(note.split()) if isinstance(note, str) else ""
-    if not note:
-        return {"ok": False, "category": "invalid_input", "reason": "text",
-                "hint": text.render("replies/team.report_empty")}
-    limit = text.numbers()["report_max_chars"]
-    if len(note) > limit:
-        return {"ok": False, "category": "invalid_input", "reason": "text",
-                "hint": text.render("replies/team.report_long")}
-    return orchestration.note_worker_report(
+    fields = {name: request[name].strip() for name in orchestration.CARD_FIELDS if isinstance(request.get(name), str)} \
+        if isinstance(request, dict) else {}
+    if not fields:
+        return {"ok": False, "category": "invalid_input", "reason": "fields",
+                "hint": text.render("replies/team.card_empty")}
+    actor = _harness_actor()
+    return orchestration.save_card(
         run_dir(args.run_id), operation_id=os.environ.get("ARENA_TOOL_CALL_ID") or uuid.uuid4().hex,
-        job_id=job_id, run_id=args.run_id, actor_id=_harness_actor(),
-        session_id=os.environ.get("ARENA_SESSION_ID") or args.run_id, note=note,
+        job_id=os.environ.get("ARENA_JOB_ID") if actor != "sol" else None, run_id=args.run_id, actor_id=actor,
+        session_id=os.environ.get("ARENA_SESSION_ID") or args.run_id, fields=fields,
     )
 
 

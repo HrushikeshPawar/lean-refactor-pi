@@ -7,7 +7,7 @@ from codecs import getincrementaldecoder
 from pathlib import Path
 
 WORKER_MODEL = "deepseek-v4.1-flash"
-WORKER_TOOLS = ("compile", "goal", "search", "read", "scratch", "report")
+WORKER_TOOLS = ("compile", "goal", "search", "read", "scratch", "card")
 
 
 class FrameReader:

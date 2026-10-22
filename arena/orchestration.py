@@ -1436,7 +1436,7 @@ def _selectable(row: dict, job_ids: list[str] | None) -> bool:
         return True
     if job_ids is not None and row.get("job_id") not in job_ids:
         return False
-    if kind in ("worker_finding", "worker_note"):
+    if kind in ("worker_finding", "card"):
         return True
     if kind == "verification" and row.get("state") in _terminal_checks:
         return True
@@ -1492,7 +1492,7 @@ def _public_event(row: dict) -> dict:
         for key in (
             "event_id", "job_id", "activation_id", "state", "attempt_id", "proof_id",
             "evaluation_id", "request_id", "run_id", "actor_id", "session_id",
-            "operation_id", "reason", "outcome", "check_id", "attempt_ids", "recovery_of", "report", "note",
+            "operation_id", "reason", "outcome", "check_id", "attempt_ids", "recovery_of", "report", "version",
         )
         if row.get(key) is not None
     }
@@ -1554,8 +1554,8 @@ def _wake_reason(events: list[dict]) -> str:
         return "run_stopped"
     if any(event["type"] in ("worker_finding", "verification") for event in events):
         return "result"
-    if any(event["type"] == "worker_note" for event in events):
-        return "note"
+    if any(event["type"] == "card" for event in events):
+        return "card"
     last = events[-1]
     if last.get("state") == "cancelled":
         return "cancelled"
@@ -1673,65 +1673,80 @@ def note_verification(
     return applied
 
 
-def note_worker_report(
-    directory: Path, *, operation_id: str, job_id: str, run_id: str, actor_id: str, session_id: str, note: str,
+CARD_FIELDS = ("focus", "best", "held", "failed", "ideas", "asks")
+
+
+def card_rows(directory: Path) -> list[dict]:
+    """Every saved card, oldest first."""
+    return [row for row in _history(directory) if row.get("type") == "card"]
+
+
+def current_cards(directory: Path) -> dict[str, dict]:
+    """Actor id to that actor's latest card row."""
+    return {row["actor_id"]: row for row in card_rows(directory)}
+
+
+def save_card(
+    directory: Path, *, operation_id: str, job_id: str | None, run_id: str, actor_id: str, session_id: str,
+    fields: dict[str, str],
 ) -> dict:
-    """A worker's progress note: a ledger event the orchestrator's await_results delivers. The job keeps running."""
-    if not operation_id or not job_id or not run_id or not actor_id or not session_id or not note:
+    """Merge sent fields into the actor's card (empty clears one) and append the new version as a ledger row."""
+    if not operation_id or not run_id or not actor_id or not session_id or not fields:
         return _reject(operation_id, "identity")
-    arguments = {"job_id": job_id, "note": note}
+    previous = current_cards(directory).get(actor_id)
+    merged = {**(previous or {}).get("fields", {}), **fields}
+    merged = {name: value for name, value in merged.items() if value}
+    before = (previous or {}).get("fields", {})
+    changed = [name for name in fields if merged.get(name, "") != before.get(name, "")]
+    if not changed:
+        return {"ok": True, "version": (previous or {}).get("version", 0)}
+    version = (previous or {}).get("version", 0) + 1
+    label = (text.render("replies/team.author_sol") if actor_id == "sol" and not job_id
+             else job_labels(directory).get(job_id) or worker_job_labels(directory).get(actor_id) or actor_id)
+    row = {"type": "card", "actor_id": actor_id, "job_id": job_id, "label": label,
+           "version": version, "fields": merged, "changed": changed}
     applied = run_control.apply_operation(
         directory,
-        {"operation_id": operation_id, "kind": "worker_note", "arguments": arguments, "run_id": run_id,
+        {"operation_id": operation_id, "kind": "card", "arguments": {"fields": fields}, "run_id": run_id,
          "actor_id": actor_id, "session_id": session_id, "job_id": job_id},
-        lambda ctx: [ctx.append_ledger({"type": "worker_note", "note": note})],
+        lambda ctx: [ctx.append_ledger(row)],
     )
     _wake()
-    return applied
+    return {**applied, "version": version}
 
 
-def announce_best(directory: Path) -> dict:
-    """Steer each active worker once when the run's best verified score has improved. Best effort.
-
-    Runs in the coordinator, which owns the worker pipes. A closed pipe is skipped, never an error."""
-    try:
-        return _announce_best(directory)
-    except Exception as error:
-        return {"ok": False, "reason": type(error).__name__}
+def node_author_job(node) -> str | None:
+    """The job whose attempt first saved the node; None for the orchestrator or when unknown."""
+    return node.attempts[0].get("job_id") if node.attempts else None
 
 
-def _announce_best(directory: Path) -> dict:
+def run_best(directory: Path):
+    """The run's best verified scored node, or None."""
     scored = [node for node in proof_nodes(directory).values() if node.verified and node.score is not None]
-    if not scored:
-        return {"ok": True, "announced": False}
-    best = max(scored, key=lambda node: node.score)
-    with run_control.control_lock(directory):
-        notices = [row for row in events(directory) if row.get("type") == "best_notice"]
-        reference = [node.score for node in scored if node.origin == "reference"]
-        floor = notices[-1]["score"] if notices else max(reference, default=float("-inf"))
-        if best.score <= floor + 1e-9:
-            return {"ok": True, "announced": False}
-        labels = job_labels(directory)
-        authors = {attempt.get("job_id") for attempt in best.attempts if attempt.get("job_id")}
-        author = next((labels.get(job) for job in authors if labels.get(job)), None) \
-            or text.render("replies/team.author_sol")
-        shown = {"node": best.id, "score": round(best.score, 2), "author": author}
-        message = text.render("replies/team.steer_best", **shown)
-        island_message = text.render("replies/team.steer_best_island", **shown)
-        steered, unreachable = [], []
-        for job_id in labels:
-            snapshot = _job_snapshot(directory, job_id)
-            if snapshot is None or snapshot["state"] != "active" or job_id in authors:
-                continue
-            try:
-                _steer(directory, snapshot["activation_id"], f"best-{uuid.uuid4().hex}:steer",
-                       island_message if snapshot["scope"] == "island" else message)
-                steered.append(job_id)
-            except Exception:
-                unreachable.append(job_id)
-        _append(directory, {"event_id": uuid.uuid4().hex, "type": "best_notice", "proof_id": best.proof_id,
-                            "node": best.id, "score": best.score, "steered": steered, "unreachable": unreachable})
-    return {"ok": True, "announced": True, "steered": steered, "unreachable": unreachable}
+    return max(scored, key=lambda node: node.score) if scored else None
+
+
+def best_author(directory: Path, node) -> str:
+    """`jobN` for a node a worker first saved, else the orchestrator."""
+    return job_labels(directory).get(node_author_job(node)) or text.render("replies/team.author_sol")
+
+
+def card_comparison(directory: Path, row: dict) -> str | None:
+    """One line setting a worker's own best node beside the run best; None when the worker has no scored node."""
+    if not row.get("job_id"):
+        return None
+    top = run_best(directory)
+    own = [node for node in proof_nodes(directory).values()
+           if node.score is not None and node_author_job(node) == row["job_id"]]
+    if top is None or not own:
+        return None
+    mine = max(own, key=lambda node: node.score)
+
+    def show(node) -> str:
+        return text.render("replies/team.card_compare_node", node=node.id, score=round(node.score, 2),
+                           tokens=node.tokens, heartbeats=node.heartbeats)
+
+    return text.render("replies/team.card_compare", label=row["label"], mine=show(mine), top=show(top))
 
 
 def _closed(node) -> bool:
@@ -1761,10 +1776,9 @@ def _island_families(directory: Path) -> list[str]:
 
 
 def island_status(directory: Path, job_id: str) -> dict | None:
-    """An island job's family: the route of its first closed node, that route's best closed node, closed count."""
+    """An island job's family: the route of its first closed node it authored (first attempt, not a re-check), that route's best closed node, closed count."""
     nodes = list(proof_nodes(directory).values())
-    first = next((node for node in nodes
-                  if _closed(node) and any(item.get("job_id") == job_id for item in node.attempts)), None)
+    first = next((node for node in nodes if _closed(node) and node_author_job(node) == job_id), None)
     if first is None:
         return None
     closed = [node for node in nodes if _closed(node) and node.route == first.route]

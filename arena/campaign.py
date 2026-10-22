@@ -2087,9 +2087,6 @@ def record_evaluation(
             actor_local=origin == "model" and trigger == "model",
         )
         _check_stall(directory, graph, {candidate_id} if newly_filed else set())
-    from arena import coordinator
-
-    coordinator.announce_best(directory)  # best effort: steers active workers once per improvement
     history = _published_events(directory)
     rows = _summaries(history)
     me = next((r for r in rows if r["id"] == candidate_id), None)

@@ -114,9 +114,6 @@ class Coordinator:
                     result = {**_failure(type(error).__name__), "operation_id": request.get("operation_id")}
                 connection.sendall(json.dumps(result).encode() + b"\n")
                 return
-            if action == "best_moved":
-                connection.sendall(json.dumps(orchestration.announce_best(self.directory)).encode() + b"\n")
-                return
             if action != "await_results":
                 raise ValueError("invalid management request")
 
@@ -279,8 +276,3 @@ def submit(directory: Path, request: dict, timeout: float | None = None) -> dict
 def await_results(directory: Path, *, actor_id: str, cursor=None, job_ids=None) -> dict:
     """Call the run owner. Missing ownership never falls back to local worker tables."""
     return submit(directory, {"action": "await_results", "actor_id": actor_id, "cursor": cursor, "job_ids": job_ids})
-
-
-def announce_best(directory: Path) -> None:
-    """Tell the coordinator the graph may have a new best, so it can steer its active workers. Best effort."""
-    submit(directory, {"action": "best_moved", "actor_id": "harness"}, timeout=10)

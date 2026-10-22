@@ -688,6 +688,67 @@ def _idle_note(run_id: str, actor: str, bucket: dict) -> list[str]:
     return [text.render("replies/team.idle_slots", idle=idle, slots=orchestration._MODEL_SLOTS)] if idle else []
 
 
+def _best_note(run_id: str, actor: str, bucket: dict, changed: bool) -> list[str]:
+    """Say once, per actor, when the run's best verified node changed since this actor last saw it.
+
+    Nothing is said to the node's own author, or on first sight when the best is still the original proof."""
+    if "best_seen" in bucket and not changed:
+        return []
+    from arena import orchestration
+
+    try:
+        directory = campaign.run_dir(run_id)
+        best = orchestration.run_best(directory)
+        if best is None:
+            return []
+        seen = bucket.get("best_seen")
+        known = seen is not None and best.score <= seen["score"] + 1e-9
+        first_sight = seen is None and best.origin == "reference"
+        bucket["best_seen"] = {"node": best.id, "score": max(best.score, seen["score"] if seen else best.score)}
+        author = node_authors(run_id).get(best.id)
+        if known or first_sight or author is None:
+            return []
+        return [text.render("replies/team.steer_best", node=best.id, score=round(best.score, 2), author=author)]
+    except (OSError, ValueError, KeyError):
+        return []
+
+
+def _card_lines(run_id: str, actor: str, bucket: dict) -> list[str]:
+    """Cards this actor has not seen at their current version: Sol sees every worker's, a worker sees Sol's."""
+    from arena import orchestration
+
+    try:
+        directory = campaign.run_dir(run_id)
+        seen = bucket.setdefault("cards_seen", {})
+        fresh = [
+            row for owner, row in orchestration.current_cards(directory).items()
+            if (owner != "sol" if actor == "sol" else owner == "sol") and row["version"] > seen.get(owner, 0)
+        ]
+        lines = []
+        for row in fresh:
+            seen[row["actor_id"]] = row["version"]
+            lines.append(text.render("replies/team.card_head", label=row["label"], version=row["version"],
+                                     changed=", ".join(row["changed"])))
+            lines += [text.render("replies/team.card_field", name=name, value=row["fields"][name])
+                      for name in orchestration.CARD_FIELDS if row["fields"].get(name)]
+            if actor == "sol" and (compared := orchestration.card_comparison(directory, row)):
+                lines.append(compared)
+        return [text.render("replies/tools.section_cards"), *lines] if lines else []
+    except (OSError, ValueError, KeyError):
+        return []
+
+
+def card_lines(run_id: str) -> list[str]:
+    """The current actor's unseen cards, persisting what it has now seen. For replies outside attach_context."""
+    actor = current_actor()
+    state = _load(run_id)
+    bucket = _bucket(state, actor)
+    lines = _card_lines(run_id, actor, bucket)
+    if lines:
+        _write_actor(run_id, actor, bucket, state)
+    return lines
+
+
 def attach_context(
     run_id: str,
     result: dict,
@@ -725,8 +786,14 @@ def attach_context(
         for item in fresh
         if isinstance(item.get("text"), str) and not item.get("quiet")
     ]
-    facts += result.get("facts", [])
+    # A reply that already passed through here keeps its card section apart from the update facts.
+    earlier = result.get("facts", [])
+    cards_head = text.render("replies/tools.section_cards")
+    split = earlier.index(cards_head) if cards_head in earlier else len(earlier)
+    facts += earlier[:split]
     facts += _idle_note(run_id, actor, bucket)
+    facts += _best_note(run_id, actor, bucket, bool(fresh))
+    cards = earlier[split:] + [line for line in _card_lines(run_id, actor, bucket) if not earlier[split:] or line != cards_head]
     if fresh:
         receipt = _commit_delivery(run_id, actor, fresh)
         bucket["delivered_seq"] = max(int(item.get("seq", -1)) for item in fresh)
@@ -756,6 +823,7 @@ def attach_context(
     if first is not None and mine:
         facts = [line for line in facts if line not in mine]
     result["facts"] = [updates_head, *facts] if facts else facts
+    result["facts"] = [*result["facts"], *cards]
     if first is not None:
         body = first["lines"][1:] if first["lines"][0] == result_head else first["lines"]
         first["lines"] = [result_head, *[line for line in mine if line not in body], *body]

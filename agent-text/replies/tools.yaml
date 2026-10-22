@@ -36,6 +36,7 @@ map_recent_head: "### Latest nodes\n| node | made from | status | tokens | heart
 map_recent_salvage: "A node with open holes is the compiling part of a draft that does not compile; it has no score."
 map_holes_head: "### Open holes (the goal each must prove)"
 section_updates: "## Updates"
+section_cards: "## Cards"
 section_result: "## Result"
 hb_pending: "pending"
 section_map: "## Search map"

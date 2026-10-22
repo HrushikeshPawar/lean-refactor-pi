@@ -1,7 +1,7 @@
 {
   "roles": {
-    "worker": ["compile", "goal", "search", "read", "scratch", "report"],
-    "sol": ["compile", "goal", "search", "read", "scratch", "delegate", "jobs", "await_results", "cancel"]
+    "worker": ["compile", "goal", "search", "read", "scratch", "card"],
+    "sol": ["compile", "goal", "search", "read", "scratch", "card", "delegate", "jobs", "await_results", "cancel"]
   },
   "tools": {
     "compile": {
@@ -149,10 +149,15 @@
         "job_id": {"type": "string", "required": true, "description": "job_id"}
       }
     },
-    "report": {
+    "card": {
       "handler": true,
       "properties": {
-        "text": {"type": "string", "required": true, "description": "text", "maxLengthFrom": "report_max_chars"}
+        "focus": {"type": "string", "description": "focus"},
+        "best": {"type": "string", "description": "best"},
+        "held": {"type": "string", "description": "held"},
+        "failed": {"type": "string", "description": "failed"},
+        "ideas": {"type": "string", "description": "ideas"},
+        "asks": {"type": "string", "description": "asks"}
       }
     }
   }

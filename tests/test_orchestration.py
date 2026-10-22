@@ -592,7 +592,7 @@ class V8WorkerSmokeTests(unittest.TestCase):
             launch = opened["launch"]
             self.assertEqual(launch["model"], "deepseek-v4.1-flash")
             self.assertEqual(launch["provider"], "opencode-go")
-            self.assertEqual(launch["tools"], ["compile", "goal", "search", "read", "scratch", "report"])
+            self.assertEqual(launch["tools"], ["compile", "goal", "search", "read", "scratch", "card"])
             self.assertEqual(launch["argv"][launch["argv"].index("--mode") + 1], "rpc")
             self.assertIn("--no-builtin-tools", launch["argv"])
             extension = Path(launch["argv"][launch["argv"].index("--extension") + 1])
@@ -601,7 +601,7 @@ class V8WorkerSmokeTests(unittest.TestCase):
             self.assertIn("--no-extensions", launch["argv"])
             self.assertEqual(
                 launch["argv"][launch["argv"].index("--tools") + 1],
-                "compile,goal,search,read,scratch,report",
+                "compile,goal,search,read,scratch,card",
             )
             self.assertTrue(launch["session_dir"].endswith(receipt["session_id"]))
             self.assertEqual(launch["env"]["ARENA_RUN_ID"], "run-1")
@@ -618,7 +618,7 @@ class V8WorkerSmokeTests(unittest.TestCase):
             prompt = json.loads(child.written)
             self.assertNotIn("tools", prompt)
             self.assertIn(receipt["anchor"]["proof_sha256"], prompt["message"])
-            self.assertEqual(receipt["tools"], ["compile", "goal", "search", "read", "scratch", "report"])
+            self.assertEqual(receipt["tools"], ["compile", "goal", "search", "read", "scratch", "card"])
             self.assertNotEqual(receipt["job_id"], receipt["activation_id"])
             self.assertTrue(orchestration.awaits_settlement(directory, receipt["activation_id"]))
             again = orchestration.delegate(directory, **call)
@@ -2298,41 +2298,82 @@ class SteerAndNoteTests(unittest.TestCase):
             self.assertEqual([(row["job_id"], row["text"]) for row in rows], [(started["job_id"], "new best is n9")])
             self.assertIn("will read this after its current step", team_reply.render("delegate", reply, directory))
 
-    def test_best_improvement_steers_active_workers_once_and_skips_the_author(self):
+    def _save(self, directory, actor, job_id, op, **fields):
+        return orchestration.save_card(directory, operation_id=op, job_id=job_id, run_id="run-1", actor_id=actor,
+                                       session_id="session", fields=fields)
+
+    def test_card_save_merges_versions_clears_and_wakes_await_results(self):
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
             _seed_parent(directory)
-            first, child_a = self._active_job(directory, "op-a")
-            second, child_b = self._active_job(directory, "op-b")
+            started, _child = self._active_job(directory, "op-card-start")
+            job = started["job_id"]
+            first = self._save(directory, "worker-actor", job, "c1", focus="s4 route", failed="grind loops " + "x" * 900)
+            second = self._save(directory, "worker-actor", job, "c2", focus="", held="n7 closes s1")
+            self.assertEqual((first["version"], second["version"]), (1, 2))
+            row = orchestration.current_cards(directory)["worker-actor"]
+            self.assertEqual(row["fields"].keys(), {"failed", "held"})
+            self.assertEqual((row["job_id"], row["label"], row["version"], row["changed"]),
+                             (job, "job1", 2, ["focus", "held"]))
+            sol = self._save(directory, "sol", None, "c3", focus="trunk")
+            self.assertEqual(orchestration.current_cards(directory)["sol"]["label"], "orchestrator")
+            self.assertIsNone(orchestration.current_cards(directory)["sol"]["job_id"])
+            self.assertEqual(sol["version"], 1)
+            reply = orchestration.await_results(directory, actor_id="sol")
+            self.assertEqual(reply["wake_reason"], "card")
+            self.assertIn("job1 updated its card (v", team_reply.render("await_results", reply, directory))
+            self._save(directory, "worker-actor", job, "c4", focus="s4 route", best="n7 at 70")
+            self.assertIn("  card: focus: s4 route | best: n7 at 70",
+                          team_reply.render("jobs", orchestration.jobs(directory), directory))
+
+    def test_cards_are_pushed_once_and_a_worker_sees_only_the_orchestrators(self):
+        from arena import campaign
+
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _seed_parent(directory)
+            started, _child = self._active_job(directory, "op-card-push")
+            self._save(directory, "worker-actor", started["job_id"], "c1", focus="s4 route", best="n7")
+            self._save(directory, "sol", None, "c2", ideas="try the n7 shape elsewhere")
+            sol_bucket, worker_bucket = {}, {}
+            with patch.object(campaign, "run_dir", return_value=directory):
+                shown = proof_reply._card_lines("run-1", "sol", sol_bucket)
+                self.assertEqual(shown[0], "## Cards")
+                self.assertIn("job1 card v1 (changed: focus, best)", shown)
+                self.assertIn("  focus: s4 route", shown)
+                self.assertFalse(any("orchestrator card" in line for line in shown))
+                self.assertEqual(proof_reply._card_lines("run-1", "sol", sol_bucket), [])
+                seen = proof_reply._card_lines("run-1", "worker-actor", worker_bucket)
+                self.assertIn("orchestrator card v1 (changed: ideas)", seen)
+                self.assertFalse(any("job1 card" in line for line in seen))
+                self.assertEqual(proof_reply._card_lines("run-1", "worker-actor", worker_bucket), [])
+                self._save(directory, "worker-actor", started["job_id"], "c3", best="n9")
+                again = proof_reply._card_lines("run-1", "sol", sol_bucket)
+                self.assertIn("job1 card v2 (changed: best)", again)
+
+    def test_run_best_fact_is_said_once_per_actor_and_never_to_its_author(self):
+        from arena import campaign
+
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
             best = {"score": 75.5}
 
-            def nodes(_directory):
-                node = SimpleNamespace(id="n154", proof_id="p154", score=best["score"], verified=True,
-                                       origin="model", attempts=[{"job_id": second["job_id"]}])
-                return {"p154": node}
+            def run_best(_directory):
+                return SimpleNamespace(id="n154", score=best["score"], origin="model")
 
-            with patch.object(orchestration, "proof_nodes", nodes):
-                self.assertTrue(orchestration.announce_best(directory)["announced"])
-                self.assertFalse(orchestration.announce_best(directory)["announced"])
+            bucket = {}
+            with patch.object(campaign, "run_dir", return_value=directory), \
+                    patch.object(orchestration, "run_best", run_best), \
+                    patch.object(proof_reply, "node_authors", lambda _run: {"n154": "job2"}):
+                self.assertEqual(proof_reply._best_note("run-1", "sol", bucket, True),
+                                 ["Run best is now n154 score 75.5 (by job2)."])
+                self.assertEqual(proof_reply._best_note("run-1", "sol", bucket, True), [])
                 best["score"] = 76.0
-                self.assertTrue(orchestration.announce_best(directory)["announced"])
-            self.assertEqual(len(self._steers(child_a)), 2)
-            self.assertIn("n154 score 75.5", self._steers(child_a)[0]["message"])
-            self.assertEqual(self._steers(child_b), [])
-
-    def test_worker_report_note_is_delivered_by_await_results_and_rendered(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp)
-            _seed_parent(directory)
-            started, _child = self._active_job(directory, "op-note-start")
-            sent = orchestration.note_worker_report(
-                directory, operation_id="note-1", job_id=started["job_id"], run_id="run-1",
-                actor_id="worker-actor", session_id="worker-session", note="s4 route is dead")
-            self.assertTrue(sent["ok"])
-            reply = orchestration.await_results(directory, actor_id="sol")
-            self.assertEqual(reply["wake_reason"], "note")
-            self.assertEqual([event["note"] for event in reply["events"]], ["s4 route is dead"])
-            self.assertIn("job1 note: s4 route is dead", team_reply.render("await_results", reply, directory))
+                self.assertEqual(len(proof_reply._best_note("run-1", "sol", bucket, True)), 1)
+            with patch.object(campaign, "run_dir", return_value=directory), \
+                    patch.object(orchestration, "run_best", run_best), \
+                    patch.object(proof_reply, "node_authors", lambda _run: {}):
+                self.assertEqual(proof_reply._best_note("run-1", "job2", {}, True), [])
 
 
 def _closed_node(node_id, route, score, job_id=None, proof="theorem t : True := by\n  intro h\n  simp\n  exact h"):
@@ -2406,7 +2447,20 @@ class IslandTests(unittest.TestCase):
             with patch.object(run_control, "read_state", return_value={"stopped": True, "limit_usd": "0.50", "by_job": {}}):
                 self.assertEqual(self._turn(directory, started, 61.0)["reason"], "run_stopped")
 
-    def test_island_status_is_rendered_in_jobs_and_await_and_best_notice_keeps_the_family(self):
+    def test_island_status_credits_only_the_job_that_first_saved_a_node(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _seed_parent(directory)
+            started, _child = self._island(directory)
+            job_id = started["job_id"]
+            rechecked = _closed_node("n3", "r1", 90.0)
+            rechecked.attempts = [{"job_id": None}, {"job_id": job_id}]
+            nodes = {"p1": rechecked, "p2": _closed_node("n57", "r4", 68.21, job_id)}
+            with patch.object(orchestration, "proof_nodes", lambda _directory: nodes):
+                self.assertEqual(orchestration.island_status(directory, job_id),
+                                 {"route": "r4", "node": "n57", "score": 68.21, "closed": 1})
+
+    def test_island_status_is_rendered_in_jobs_and_await(self):
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
             _seed_parent(directory)
@@ -2423,11 +2477,6 @@ class IslandTests(unittest.TestCase):
                     directory)
                 self.assertIn("job1 active · island r4: best n57 68.21 (2 closed)", listing)
                 self.assertIn("job1 active · island r4: best n57 68.21 (2 closed)", waited)
-                self.assertTrue(orchestration.announce_best(directory)["announced"])
-            steers = [json.loads(line) for line in bytes(child.written).splitlines() if b'"steer"' in line]
-            self.assertEqual(len(steers), 1)
-            self.assertIn("n3 score 90.0", steers[0]["message"])
-            self.assertIn("keep your own family", steers[0]["message"])
             with patch.object(orchestration, "proof_nodes", lambda _directory: {}):
                 self.assertIn("island: no closed proof yet", orchestration.island_line(directory, job_id, "job1", "active"))
 

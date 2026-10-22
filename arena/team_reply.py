@@ -53,8 +53,8 @@ def render(action: str, result: dict, directory: Path) -> str:
             return _render("delegate_resumed", job=job(result.get("job_id")), state=state)
         return _render("delegate_started", job=job(result.get("job_id")), state=state,
                        scope=result.get("scope", "?"), anchor=_anchor(result.get("anchor")))
-    if action == "report":
-        return _render("report_sent")
+    if action == "card":
+        return _render("card_saved", version=result.get("version"))
     if action == "cancel":
         return _render("cancel_done", job=job(result.get("job_id")), state=result.get("state", "?"))
     if action == "jobs":
@@ -71,19 +71,23 @@ def _jobs(result: dict, directory: Path, job) -> str:
     nodes = orchestration.proof_nodes(directory)
     used = sum(1 for item in found if item.get("occupies_slot"))
     lines = [_render("jobs_head", used=used, slots=orchestration._MODEL_SLOTS)]
+    cards = {row["job_id"]: row for row in orchestration.current_cards(directory).values() if row.get("job_id")}
     for item in found:
         saved = [nodes[f["proof_id"]] for f in item.get("findings") or [] if f.get("proof_id") in nodes]
-        listed = ", ".join(_node(node) for node in saved) or _render("nodes_none")
+        scored = [node for node in saved if node.score is not None]
+        top = max(scored, key=lambda node: node.score) if scored else (saved[-1] if saved else None)
+        listed = _render("nodes_summary", count=len(saved), best=_node(top)) if top else _render("nodes_none")
         if item.get("scope") == "island":
             lines.append(orchestration.island_line(directory, item["job_id"], job(item["job_id"]), item.get("state", "?")))
         else:
             lines.append(_render("job_line", job=job(item["job_id"]), state=item.get("state", "?"),
                                  scope=item.get("scope", "?"), anchor=_anchor(item.get("anchor")), nodes=listed))
         lines.append(_render("job_task", task=" ".join(str(item.get("task", "")).split())))
-        report = next((row.get("report") for row in reversed(result.get("events") or [])
-                       if row.get("job_id") == item["job_id"] and row.get("report")), None)
-        if report:
-            lines.append(_render("job_report", report=" ".join(report.split())))
+        card = cards.get(item["job_id"])
+        shown = [f"{name}: {' '.join(card['fields'][name].split())}" for name in ("focus", "best")
+                 if card and card["fields"].get(name)]
+        if shown:
+            lines.append(_render("job_card", fields=" | ".join(shown)))
     return "\n".join(lines)
 
 
@@ -137,8 +141,8 @@ def _await(result: dict, directory: Path, job) -> str:
                 lines.append(_render("await_finding", **args))
             else:
                 lines.append(_render("await_check", state=checks[-1].get("state"), **args))
-        elif kind == "worker_note":
-            lines.append(_render("await_note", job=job(event.get("job_id")), note=" ".join(str(event.get("note", "")).split())))
+        elif kind == "card":
+            lines.append(_render("await_card", job=job(event.get("job_id")), version=event.get("version")))
         elif kind == "run_stop":
             lines.append(_render("await_stopped"))
         elif event.get("state"):
