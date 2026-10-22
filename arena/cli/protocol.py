@@ -46,6 +46,7 @@ ACTIONS = (
     "jobs",
     "cancel",
     "report",
+    "island_turn",
 )
 
 
@@ -98,6 +99,12 @@ def run(args: SimpleNamespace) -> dict:
         return _with_text(args.action, _management(args), args.run_id)
     if args.action == "report":
         return _with_text("report", _report(args), args.run_id)
+    if args.action == "island_turn":
+        # A worker's turn ended: the island extension asks whether to continue. The job comes from the environment.
+        job_id, activation_id = os.environ.get("ARENA_JOB_ID"), os.environ.get("ARENA_ACTIVATION_ID")
+        if not job_id or not activation_id:
+            return {"ok": False, "category": "invalid_input", "reason": "worker_only"}
+        return orchestration.island_turn(run_dir(args.run_id), job_id, activation_id)
     raise ValueError(f"Unsupported action: {args.action}")
 
 

@@ -770,6 +770,33 @@ class PacketBehaviourTests(unittest.TestCase):
             "packet/sections.fixed.worker_goal_omitted"))
         self.assertLessEqual(own, text.numbers()["budget.worker_words"])
 
+    def test_island_worker_packet_lists_existing_families_within_its_own_budget(self):
+        from types import SimpleNamespace
+
+        from arena import context
+
+        proof = "theorem t : True := by\n  intro h\n  trivial"
+        node = SimpleNamespace(id="n1", proof_text=proof, steps=[], holes=[])
+        families = ["r1: best n1 score 70.0\n  intro h", "r2: best n7 score 66.5\n  omega"]
+        cached, measured = _fixture("ski")
+        with (
+            patch.object(context, "cached_context", return_value=cached),
+            patch.object(context, "reference_profile", return_value=measured),
+        ):
+            packet = context.worker_packet(
+                ROWS["ski"], task="a different structure", anchor={"node": "n1"}, node=node, families=families
+            )
+            plain = context.worker_packet(ROWS["ski"], task="try symmetry", anchor={"node": "n1"}, node=node)
+        self.assertIn("Your island\n", packet)
+        self.assertIn("judged against your island's best", packet)
+        self.assertIn("r2: best n7 score 66.5\n  omega", packet)
+        self.assertIn("Reference: node n1, the original proof (3 lines)", packet)
+        self.assertNotIn("Your island", plain)
+        own = sum(len(text.template(key).split()) for key in (
+            "packet/island", "packet/sections.titles.island", "packet/sections.fixed.anchor_island",
+            "packet/sections.fixed.island_family"))
+        self.assertLessEqual(own, text.numbers()["budget.island_words"])
+
     def test_packet_order_rates_price_rows_goals_and_library_format(self):
         from arena import context
 

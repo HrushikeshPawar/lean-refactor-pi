@@ -1079,8 +1079,11 @@ def render_packet(name: str, *, cache_only: bool = False, model: str | None = No
     return "\n\n".join(content for _title, content in sections) + "\n"
 
 
-def _anchor_lines(anchor: dict, node) -> list[str]:
+def _anchor_lines(anchor: dict, node, *, island: bool = False) -> list[str]:
     """Anchor description, then the recorded goal states it covers, from the saved node."""
+    if island:
+        return [render_text("packet/sections.fixed.anchor_island", node=node.id,
+                            count=len(node.proof_text.splitlines()))]
     if "hole" in anchor:
         hole = next((item for item in node.holes if f"{node.id}.h{item['index']}" == anchor["hole"]), None)
         head = render_text("packet/sections.fixed.anchor_hole", node=node.id, hole=anchor["hole"],
@@ -1106,10 +1109,11 @@ def _anchor_lines(anchor: dict, node) -> list[str]:
     return [head, *lines]
 
 
-def worker_packet(name: str, *, task: str, anchor: dict, node) -> str:
+def worker_packet(name: str, *, task: str, anchor: dict, node, families: list[str] | None = None) -> str:
     """First prompt of a delegated worker: the shared startup contract plus its anchor. No Sol-only sections.
 
     `node` is the graph node the anchor resolved to, so the proof text and goals are the saved ones.
+    `families` (island jobs only) are the existing proof families, one `island_family` entry each.
     """
     row = problem(name)
     targets = versions(row)
@@ -1118,13 +1122,16 @@ def worker_packet(name: str, *, task: str, anchor: dict, node) -> str:
         render_text("replies/tools.source_line", line=number, text=line)
         for number, line in enumerate(node.proof_text.splitlines(), 1)
     ]
-    anchored = _anchor_lines(anchor, node)
+    anchored = _anchor_lines(anchor, node, island=families is not None)
     parts: list[tuple[str, list[str]]] = [
         ("", render_text("packet/task", name=name, statement=row["statement"]).strip().splitlines()),
         ("", _scoring_lines(rates)),
         _pinned_part(row, targets),
         (template("packet/sections.titles.scope").strip(), _scope_section(row)),
         (template("packet/sections.titles.worker").strip(), template("packet/worker").strip().splitlines()),
+        *([(template("packet/sections.titles.island").strip(),
+            render_text("packet/island", families="\n".join(families)).strip().splitlines())]
+          if families is not None else []),
         ("", template("packet/search").strip().splitlines()),
         (render_text("packet/sections.titles.anchored", node=node.id), numbered),
         ("", anchored[:1]),

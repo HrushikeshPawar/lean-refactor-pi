@@ -14,7 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from arena import orchestration, pi_rpc, run_control, team_reply
+from arena import orchestration, pi_rpc, run_control, team_reply, text
 from arena import reply as proof_reply
 from arena.steps import split_steps
 from tests.graph_support import FakeRunCase
@@ -2333,3 +2333,139 @@ class SteerAndNoteTests(unittest.TestCase):
             self.assertEqual(reply["wake_reason"], "note")
             self.assertEqual([event["note"] for event in reply["events"]], ["s4 route is dead"])
             self.assertIn("job1 note: s4 route is dead", team_reply.render("await_results", reply, directory))
+
+
+def _closed_node(node_id, route, score, job_id=None, proof="theorem t : True := by\n  intro h\n  simp\n  exact h"):
+    return SimpleNamespace(id=node_id, proof_id=f"p-{node_id}", status="closed", route=route, score=score,
+                           verified=True, origin="model", proof_text=proof,
+                           attempts=[{"job_id": job_id}] if job_id else [])
+
+
+class IslandTests(unittest.TestCase):
+    def _island(self, directory, operation_id="op-island"):
+        child = _HeldChild()
+        child.shutdown = lambda: None
+        child.write = lambda data: child.written.extend(data)
+        started = orchestration.delegate(
+            directory, operation_id=operation_id, run_id="run-1", actor_id="sol", session_id="sol-session",
+            task="a structure unlike the others", scope="island", open_child=lambda _launch: child,
+        )
+        command_id = orchestration.jobs(directory, [started["job_id"]])["jobs"][0]["command_id"]
+        child._chunks.put((json.dumps({"type": "response", "id": command_id, "success": True,
+                                       "data": {"disposition": "started"}}) + "\n").encode())
+        for _ in range(500):
+            if orchestration.jobs(directory, [started["job_id"]])["jobs"][0]["state"] == "active":
+                break
+            time.sleep(0.01)
+        return started, child
+
+    def _turn(self, directory, started, best):
+        nodes = {} if best is None else {"p1": _closed_node("n57", "r4", best, started["job_id"])}
+        with patch.object(orchestration, "proof_nodes", lambda _directory: nodes):
+            return orchestration.island_turn(directory, started["job_id"], started["activation_id"])
+
+    def test_island_scope_defaults_to_the_original_proof_and_lists_existing_families(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _seed_parent(directory)
+            started, _child = self._island(directory)
+            job = orchestration.jobs(directory)["jobs"][0]
+            self.assertEqual((job["scope"], job["anchor"]["node"]), ("island", "n1"))
+            nodes = {"a": _closed_node("n1", "r1", 70.0), "b": _closed_node("n9", "r1", 71.5),
+                     "c": _closed_node("n12", "r2", 66.0, proof="theorem t : True := by\n  omega")}
+            with patch.object(orchestration, "proof_nodes", lambda _directory: nodes):
+                families = orchestration._island_families(directory)
+            self.assertEqual(len(families), 2)
+            self.assertIn("r1: best n9 score 71.5\n  intro h\n  simp\n  exact h", families[0])
+            self.assertIn("r2: best n12 score 66.0\n  omega", families[1])
+
+    def test_island_worker_continues_after_a_turn_and_settles_after_stale_turns(self):
+        stale = text.numbers()["island_stale_turns"]
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _seed_parent(directory)
+            started, child = self._island(directory)
+            first = self._turn(directory, started, 60.0)
+            self.assertTrue(first["continue"])
+            self.assertIn("n57 60.0", first["text"])
+            for _ in range(stale - 1):
+                self.assertTrue(self._turn(directory, started, 60.0)["continue"])
+            self.assertEqual(self._turn(directory, started, 60.0), {"ok": True, "continue": False, "reason": "stale"})
+            # An improvement resets the count on the next activation of the same job.
+            self.assertTrue(self._turn(directory, {**started, "activation_id": "again"}, 61.0)["continue"])
+            self.assertTrue(child.written)
+
+    def test_island_turn_ignores_its_own_spend_and_stops_on_run_stop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _seed_parent(directory)
+            started, _child = self._island(directory)
+            with patch.object(run_control, "read_state", return_value={
+                    "stopped": False, "limit_usd": "0.50", "by_job": {started["job_id"]: "0.45"}}):
+                self.assertTrue(self._turn(directory, started, 60.0)["continue"])
+            with patch.object(run_control, "read_state", return_value={"stopped": True, "limit_usd": "0.50", "by_job": {}}):
+                self.assertEqual(self._turn(directory, started, 61.0)["reason"], "run_stopped")
+
+    def test_island_status_is_rendered_in_jobs_and_await_and_best_notice_keeps_the_family(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _seed_parent(directory)
+            started, child = self._island(directory)
+            job_id = started["job_id"]
+            nodes = {"p1": _closed_node("n57", "r4", 68.21, job_id), "p2": _closed_node("n60", "r4", 60.0),
+                     "p3": _closed_node("n3", "r1", 90.0)}
+            with patch.object(orchestration, "proof_nodes", lambda _directory: nodes):
+                self.assertEqual(orchestration.island_status(directory, job_id),
+                                 {"route": "r4", "node": "n57", "score": 68.21, "closed": 2})
+                listing = team_reply.render("jobs", orchestration.jobs(directory), directory)
+                waited = team_reply.render(
+                    "await_results", {"wake_reason": "note", "events": [], "jobs": orchestration.jobs(directory)["jobs"]},
+                    directory)
+                self.assertIn("job1 active · island r4: best n57 68.21 (2 closed)", listing)
+                self.assertIn("job1 active · island r4: best n57 68.21 (2 closed)", waited)
+                self.assertTrue(orchestration.announce_best(directory)["announced"])
+            steers = [json.loads(line) for line in bytes(child.written).splitlines() if b'"steer"' in line]
+            self.assertEqual(len(steers), 1)
+            self.assertIn("n3 score 90.0", steers[0]["message"])
+            self.assertIn("keep your own family", steers[0]["message"])
+            with patch.object(orchestration, "proof_nodes", lambda _directory: {}):
+                self.assertIn("island: no closed proof yet", orchestration.island_line(directory, job_id, "job1", "active"))
+
+    def test_idle_slots_are_noted_once_per_change_after_the_first_minutes(self):
+        from arena import campaign
+
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _seed_parent(directory)
+            ledger = directory / "ledger.jsonl"
+            ledger.write_text(json.dumps({"kind": "init", "ts": time.time() - 3600}) + "\n" + ledger.read_text())
+            self.assertEqual(orchestration.idle_slots(directory), orchestration._MODEL_SLOTS)
+            ledger.write_text(ledger.read_text().replace(f'"ts": {json.loads(ledger.read_text().splitlines()[0])["ts"]}',
+                                                          f'"ts": {time.time()}'))
+            self.assertEqual(orchestration.idle_slots(directory), 0)
+            bucket = {}
+            counts = iter([2, 2, 1, 1, 0, 2])
+            with patch.object(campaign, "run_dir", return_value=directory), \
+                    patch.object(orchestration, "idle_slots", lambda _directory: next(counts)):
+                notes = [proof_reply._idle_note("run-1", "sol", bucket) for _ in range(6)]
+            self.assertEqual(notes, [["2 of 4 worker slots idle."], [], ["1 of 4 worker slots idle."], [], [],
+                                     ["2 of 4 worker slots idle."]])
+            self.assertEqual(proof_reply._idle_note("run-1", "worker-1", {}), [])
+
+    def test_four_worker_slots_admit_four_jobs_and_queue_the_fifth(self):
+        self.assertEqual(orchestration._MODEL_SLOTS, 4)
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:  # held children stay open
+            directory = Path(tmp)
+            _seed_parent(directory)
+            children = []
+
+            def open_child(_launch):
+                children.append(_HeldChild())
+                return children[-1]
+
+            states = [orchestration.delegate(
+                directory, operation_id=f"op-{index}", run_id="run-1", actor_id="sol", session_id="sol-session",
+                task=f"hypothesis {index}", scope="proof", anchor={"node": "n1"}, open_child=open_child,
+            )["state"] for index in range(5)]
+            self.assertEqual(states, ["launching"] * 4 + ["queued"])
+            self.assertEqual(len(children), 4)

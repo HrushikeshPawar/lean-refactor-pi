@@ -64,12 +64,14 @@ _ANCHOR_HINTS = {"node": "node", "hole": "hole", "steps": "steps", "scope": "sco
 
 def _resolve_anchor(directory: Path, scope: str, anchor: object) -> dict | str:
     """Resolve a caller reference against the saved proof. Caller hashes are not copied."""
-    if scope not in ("proof", "step") or not isinstance(anchor, dict):
+    if scope == "island" and anchor is None:
+        anchor = {"node": next((n.id for n in proof_nodes(directory).values() if n.origin == "reference"), "n1")}
+    if scope not in ("proof", "step", "island") or not isinstance(anchor, dict):
         return "scope"
     ref = anchor.get("node")
     if not isinstance(ref, str) or not ref:
         return "node"
-    if scope == "proof" and ("steps" in anchor or "hole" in anchor):
+    if scope in ("proof", "island") and ("steps" in anchor or "hole" in anchor):
         return "anchor"
     if scope == "step" and ("steps" in anchor) == ("hole" in anchor):
         return "anchor"
@@ -91,7 +93,7 @@ def _resolve_anchor(directory: Path, scope: str, anchor: object) -> dict | str:
         "proof_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         "path": f"proofs/{node.proof_id}.lean",
     }
-    if scope == "proof":
+    if scope in ("proof", "island"):
         return resolved
     if "hole" in anchor:
         hole_ref = anchor.get("hole")
@@ -960,7 +962,8 @@ def _worker_packet(directory: Path, stored: dict) -> str:
     )
     node = next(item for item in graph.nodes if item.id == stored["anchor"]["node"])
     theorem = json.loads((directory / "run-config.json").read_text())["theorem"]
-    return context.worker_packet(theorem, task=stored["task"], anchor=stored["anchor"], node=node)
+    families = _island_families(directory) if stored["scope"] == "island" else None
+    return context.worker_packet(theorem, task=stored["task"], anchor=stored["anchor"], node=node, families=families)
 
 
 def _open_activation(directory: Path, stored: dict, open_child, command_id: str,
@@ -999,6 +1002,7 @@ def _open_activation(directory: Path, stored: dict, open_child, command_id: str,
                 directory, run_id=stored["run_id"], worker_actor_id=stored["worker_actor_id"],
                 worker_session_id=stored["worker_session_id"], job_id=stored["job_id"],
                 activation_id=activation_id, anchor=stored["anchor"], generation=generation,
+                island=stored["scope"] == "island",
             )
             with run_control.control_lock(directory):
                 _append_ownership(directory, stored, phase="intent", generation=generation,
@@ -1242,7 +1246,7 @@ def delegate(
             job_id=job_id,
             open_child=open_child,
         )
-    if scope is None or anchor is None:
+    if scope is None or (anchor is None and scope != "island"):
         return _reject(operation_id, "scope", hint="replies/delegate.scope")
     resolved = _resolve_anchor(directory, scope, anchor)
     if isinstance(resolved, str):
@@ -1711,20 +1715,125 @@ def _announce_best(directory: Path) -> dict:
         authors = {attempt.get("job_id") for attempt in best.attempts if attempt.get("job_id")}
         author = next((labels.get(job) for job in authors if labels.get(job)), None) \
             or text.render("replies/team.author_sol")
-        message = text.render("replies/team.steer_best", node=best.id, score=round(best.score, 2), author=author)
+        shown = {"node": best.id, "score": round(best.score, 2), "author": author}
+        message = text.render("replies/team.steer_best", **shown)
+        island_message = text.render("replies/team.steer_best_island", **shown)
         steered, unreachable = [], []
         for job_id in labels:
             snapshot = _job_snapshot(directory, job_id)
             if snapshot is None or snapshot["state"] != "active" or job_id in authors:
                 continue
             try:
-                _steer(directory, snapshot["activation_id"], f"best-{uuid.uuid4().hex}:steer", message)
+                _steer(directory, snapshot["activation_id"], f"best-{uuid.uuid4().hex}:steer",
+                       island_message if snapshot["scope"] == "island" else message)
                 steered.append(job_id)
             except Exception:
                 unreachable.append(job_id)
         _append(directory, {"event_id": uuid.uuid4().hex, "type": "best_notice", "proof_id": best.proof_id,
                             "node": best.id, "score": best.score, "steered": steered, "unreachable": unreachable})
     return {"ok": True, "announced": True, "steered": steered, "unreachable": unreachable}
+
+
+def _closed(node) -> bool:
+    return node.status == "closed" and node.route is not None
+
+
+def _island_families(directory: Path) -> list[str]:
+    """Each existing family for an island's startup packet: route, its best closed node and score, first tactic lines."""
+    from arena.routes import proof_body
+
+    limits = text.numbers()
+    best: dict[str, object] = {}
+    for node in proof_nodes(directory).values():
+        if _closed(node) and (node.route not in best or (node.score or 0.0) > (best[node.route].score or 0.0)):
+            best[node.route] = node
+    order = sorted(best, key=lambda route: int(route[1:]) if route[1:].isdigit() else 0)
+    return [
+        text.render(
+            "packet/sections.fixed.island_family", route=route, node=best[route].id,
+            score=round(best[route].score or 0.0, 2),
+            lines="\n".join("  " + line.strip() for line in
+                            [item for item in proof_body(best[route].proof_text).splitlines() if item.strip() not in ("", "by")]
+                            [: limits["island_family_lines"]]),
+        )
+        for route in order[: limits["island_families"]]
+    ]
+
+
+def island_status(directory: Path, job_id: str) -> dict | None:
+    """An island job's family: the route of its first closed node, that route's best closed node, closed count."""
+    nodes = list(proof_nodes(directory).values())
+    first = next((node for node in nodes
+                  if _closed(node) and any(item.get("job_id") == job_id for item in node.attempts)), None)
+    if first is None:
+        return None
+    closed = [node for node in nodes if _closed(node) and node.route == first.route]
+    scored = [node for node in closed if node.score is not None]
+    top = max(scored, key=lambda node: node.score) if scored else None
+    return {"route": first.route, "node": top.id if top else None, "score": top.score if top else None,
+            "closed": len(closed)}
+
+
+def island_line(directory: Path, job_id: str, label: str, state: str) -> str:
+    """`job3 active · island r4: best n57 68.21 (5 closed)`, or the line for an island with no closed proof yet."""
+    status = island_status(directory, job_id)
+    if status is None:
+        return text.render("replies/team.island_open", job=label, state=state)
+    best = (text.render("replies/team.island_best", node=status["node"], score=round(status["score"], 2))
+            if status["score"] is not None else text.render("replies/team.island_none"))
+    return text.render("replies/team.island_line", job=label, state=state, route=status["route"],
+                       best=best, closed=status["closed"])
+
+
+def _stale_streak(rows: list[dict]) -> int:
+    """Consecutive trailing turns of the current activation that did not beat the job's best so far."""
+    top, streak, activation = None, 0, None
+    for row in rows:
+        if row.get("activation_id") != activation:
+            activation, streak = row.get("activation_id"), 0
+        best = row.get("best")
+        if best is not None and (top is None or best > top + 1e-9):
+            top, streak = best, 0
+        else:
+            streak += 1
+    return streak
+
+
+def island_turn(directory: Path, job_id: str, activation_id: str) -> dict:
+    """An island worker's turn ended. Say whether it continues, and with what message.
+
+    Stops when the run has stopped, the job is being cancelled, the island best has not improved for
+    `island_stale_turns` consecutive turns. Spend is bounded only by the run limit."""
+    limits = text.numbers()
+    status = island_status(directory, job_id)
+    best = None if status is None else status["score"]
+    rows = [row for row in events(directory) if row.get("type") == "island_turn" and row.get("job_id") == job_id]
+    new = {"event_id": uuid.uuid4().hex, "type": "island_turn", "job_id": job_id,
+           "activation_id": activation_id, "best": best}
+    streak = _stale_streak([*rows, new])
+    spend = run_control.read_state(directory)
+    snapshot = _job_snapshot(directory, job_id)
+    reason = (
+        "run_stopped" if spend["stopped"]
+        else "cancelled" if snapshot is None or snapshot["state"] not in ("active", "launching")
+        else "stale" if streak >= limits["island_stale_turns"]
+        else None
+    )
+    _append(directory, {**new, "stale": streak, "stop": reason})
+    if reason is not None:
+        return {"ok": True, "continue": False, "reason": reason}
+    shown = (text.render("replies/team.island_best", node=status["node"], score=round(best, 2))
+             if best is not None else text.render("replies/team.island_none"))
+    return {"ok": True, "continue": True, "text": text.render("replies/team.island_continue", best=shown)}
+
+
+def idle_slots(directory: Path) -> int:
+    """Worker slots with no job, once the run is past its first minutes; 0 before that."""
+    first = next(iter(events(directory)), None)
+    started = (first or {}).get("ts")
+    if not isinstance(started, (int, float)) or time.time() - started < text.numbers()["idle_note_after_minutes"] * 60:
+        return 0
+    return max(0, _MODEL_SLOTS - _slot_count(directory))
 
 
 def wake_waiters() -> None:

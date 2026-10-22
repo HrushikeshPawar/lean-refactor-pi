@@ -1,0 +1,3 @@
+Your job is an island: you own one proof family for the rest of the run. Build a complete proof whose structure differs from the existing families listed here, then keep improving your own family. You are judged against your island's best, not the run best, so a score below the run best is fine while your family improves. The anchored proof below is the original proof, shown for reference only.
+Existing families (id, best node and score, first tactic lines):
+{families}

@@ -74,8 +74,11 @@ def _jobs(result: dict, directory: Path, job) -> str:
     for item in found:
         saved = [nodes[f["proof_id"]] for f in item.get("findings") or [] if f.get("proof_id") in nodes]
         listed = ", ".join(_node(node) for node in saved) or _render("nodes_none")
-        lines.append(_render("job_line", job=job(item["job_id"]), state=item.get("state", "?"),
-                             scope=item.get("scope", "?"), anchor=_anchor(item.get("anchor")), nodes=listed))
+        if item.get("scope") == "island":
+            lines.append(orchestration.island_line(directory, item["job_id"], job(item["job_id"]), item.get("state", "?")))
+        else:
+            lines.append(_render("job_line", job=job(item["job_id"]), state=item.get("state", "?"),
+                                 scope=item.get("scope", "?"), anchor=_anchor(item.get("anchor")), nodes=listed))
         lines.append(_render("job_task", task=" ".join(str(item.get("task", "")).split())))
         report = next((row.get("report") for row in reversed(result.get("events") or [])
                        if row.get("job_id") == item["job_id"] and row.get("report")), None)
@@ -150,7 +153,9 @@ def _await(result: dict, directory: Path, job) -> str:
         lines.append(_render("await_stopped"))
     if reason == "no_pending_work":
         lines.append(_render("await_no_work"))
-    running = [job(item["job_id"]) for item in result.get("jobs") or [] if item.get("state") in orchestration._live_states]
-    if running and reason != "no_pending_work":
-        lines.append(_render("await_running", jobs=", ".join(running)))
+    live = [item for item in result.get("jobs") or [] if item.get("state") in orchestration._live_states]
+    if live and reason != "no_pending_work":
+        lines.append(_render("await_running", jobs=", ".join(job(item["job_id"]) for item in live)))
+        lines += [orchestration.island_line(directory, item["job_id"], job(item["job_id"]), item["state"])
+                  for item in live if item.get("scope") == "island"]
     return "\n".join(lines) or _render("await_no_work")

@@ -72,6 +72,7 @@ def worker_launch(
     anchor: dict,
     model: str = WORKER_MODEL,
     generation: str | None = None,
+    island: bool = False,
 ) -> dict:
     """Fresh RPC launch. The adapter merges env overrides over os.environ to retain provider auth."""
     from arena.models import load, pi_json, pi_model, provider
@@ -110,6 +111,7 @@ def worker_launch(
         ],
         "env": {
             **({"ARENA_GENERATION": generation} if generation is not None else {}),
+            **({"ARENA_ISLAND": "1"} if island else {}),
             "ARENA_RUN_ID": run_id,
             "ARENA_ACTOR_ID": worker_actor_id,
             "ARENA_SESSION_ID": worker_session_id,

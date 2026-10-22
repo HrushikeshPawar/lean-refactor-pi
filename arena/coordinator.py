@@ -243,7 +243,9 @@ def _rejected_delegate(request: dict) -> dict | None:
         if not isinstance(job_id, str) or not job_id or scope is not None or anchor is not None:
             return _delegate_invalid("follow-up", operation_id, "follow_up")
         return None
-    if scope not in ("proof", "step") or not isinstance(anchor, dict) or not isinstance(anchor.get("node"), str) or not anchor.get("node"):
+    if scope == "island" and anchor is None:
+        return None
+    if scope not in ("proof", "step", "island") or not isinstance(anchor, dict) or not isinstance(anchor.get("node"), str) or not anchor.get("node"):
         return _delegate_invalid("scope", operation_id)
     steps = anchor.get("steps")
     hole = anchor.get("hole")
@@ -251,7 +253,7 @@ def _rejected_delegate(request: dict) -> dict | None:
     has_hole = isinstance(hole, str) and bool(hole)
     if scope == "step" and has_steps == has_hole:
         return _delegate_invalid("anchor", operation_id, "anchor_step")
-    if scope == "proof" and ("steps" in anchor or "hole" in anchor):
+    if scope in ("proof", "island") and ("steps" in anchor or "hole" in anchor):
         return _delegate_invalid("anchor", operation_id, "anchor_proof")
     return None
 

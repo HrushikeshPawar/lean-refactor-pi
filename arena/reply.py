@@ -671,6 +671,23 @@ def redeliver(run_id: str, actor: str | None = None) -> dict:
     return {"ok": True, "event_ids": last.get("event_ids") or [], "repeated": True, "receipt": receipt}
 
 
+def _idle_note(run_id: str, actor: str, bucket: dict) -> list[str]:
+    """The orchestrator's note of idle worker slots, once per change in the idle count."""
+    from arena import orchestration
+
+    if actor != "sol":
+        return []
+    try:
+        directory = campaign.run_dir(run_id)
+        idle = orchestration.idle_slots(directory) if (directory / "ledger.jsonl").exists() else 0
+    except (OSError, ValueError, KeyError):
+        return []
+    if idle == bucket.get("idle_noted", 0):
+        return []
+    bucket["idle_noted"] = idle
+    return [text.render("replies/team.idle_slots", idle=idle, slots=orchestration._MODEL_SLOTS)] if idle else []
+
+
 def attach_context(
     run_id: str,
     result: dict,
@@ -709,6 +726,7 @@ def attach_context(
         if isinstance(item.get("text"), str) and not item.get("quiet")
     ]
     facts += result.get("facts", [])
+    facts += _idle_note(run_id, actor, bucket)
     if fresh:
         receipt = _commit_delivery(run_id, actor, fresh)
         bucket["delivered_seq"] = max(int(item.get("seq", -1)) for item in fresh)

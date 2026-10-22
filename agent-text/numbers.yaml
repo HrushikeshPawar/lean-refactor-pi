@@ -47,11 +47,21 @@ memory_read_entries: 30
 memory_recovery_entries: 8
 budget:
   static_words: 860
-  packet_words: 470
+  # 510: the team paragraph now explains the three delegate scopes (proof, step, island), +37 words.
+  packet_words: 510
   worker_words: 185
   reply_words: 40
   # Continuation nudges are sent only after a turn with no tool call, a few times a run.
   nudge_words: 60
+  # The island packet section and its family lines exist only for island workers; they are not in the shared worker packet.
+  island_words: 130
 # Steps below the step table are named when tried at most this often and still worth at least this many points.
+# An island worker settles after this many consecutive full turns without improving its island best.
+island_stale_turns: 4
+# The island startup packet lists at most this many existing families, each with this many tactic lines.
+island_families: 6
+island_family_lines: 4
+# The orchestrator is told about idle worker slots once the run is this many minutes old.
+idle_note_after_minutes: 5
 untried_step_max_tries: 2
 untried_step_min_pts: 0.5

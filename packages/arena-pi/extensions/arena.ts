@@ -817,6 +817,15 @@ export default async function arenaExtension(pi: ExtensionAPI) {
   }
 
   pi.on("agent_before_settle", async event => {
+    // An island worker owns a proof family for the rest of the run: the harness decides, from the island's best,
+    // whether this finished turn is followed by another (arena protocol island_turn). A failed turn settles as usual.
+    if (process.env.ARENA_ISLAND === "1" && workerTheorem && active && runId) {
+      if (event.outcome !== "completed") return;
+      const turn = await campaign("island_turn");
+      if (turn.ok !== true || turn.continue !== true || typeof turn.text !== "string") return;
+      return { entries: [...event.entries, { type: "custom_message" as const, customType: "arena-island",
+        content: turn.text, display: false }], continue: true };
+    }
     if (process.env.ARENA_AUTOCONTINUE !== "1" || !active || !runId) return;
     const state = await campaign("frontier");
     const progress = JSON.stringify(state.best ?? null);
