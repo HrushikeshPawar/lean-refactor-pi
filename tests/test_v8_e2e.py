@@ -32,7 +32,7 @@ def setUpModule():
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ELAN_HOME = "/mnt/SharedDrive/Ubuntu-SymLinks/.elan/.elan"
+ELAN_HOME = os.environ.get("ELAN_HOME") or str(Path.home() / ".elan")
 
 
 def _until(predicate, what: str, timeout: float = 10.0):
