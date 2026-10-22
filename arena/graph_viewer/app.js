@@ -173,9 +173,11 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
     const m = data?.models || {}, actor = (data?.actors || []).find(a => a.actor_id === id), own = actor?.model;
     if (id === 'sol') return m.orchestrator ? `orchestrator · ${m.orchestrator}` : 'orchestrator';
     if (id === UNKNOWN_ACTOR) return id;
-    const name = actor?.job || id;
+    const name = actor?.job ? (actor.role ? `${actor.job} ${actor.role}` : actor.job) : id;
     return own || m.worker ? `${name} · ${own || m.worker}` : name;
   };
+  // The job's first task, shown as the legend tooltip.
+  const actorTask = id => (data?.actors || []).find(a => a.actor_id === id)?.task || '';
   const probeLabel = p => p.node || p.index;
   const tagWidth = (label, pad) => Math.round(Math.max(30, 7.5 * String(label).length + pad));
   const hexPath = (w, h) => `M${-w / 2},0 L${-w / 2 + h / 2},${-h / 2} L${w / 2 - h / 2},${-h / 2} L${w / 2},0 L${w / 2 - h / 2},${h / 2} L${-w / 2 + h / 2},${h / 2}Z`;
@@ -258,7 +260,7 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
         return `<button type="button" class="lp-item${off.route.has(key) ? ' off' : ''}" data-group="route" data-key="${esc(key)}" aria-pressed="${!off.route.has(key)}" title="${esc(r.label || '')}"><i class="sw" data-bg="${routeColor(r.route === 'none' ? null : r.route)}"></i><span class="lp-name"><b>${esc(key)}</b> ${esc(clip(r.short_label || r.label, 44))}</span><span class="lp-stats">${tags}${esc(stats)} · ${n.get(key) ?? 0} nodes</span></button>`;
       }).join('');
     } else if (colorBy === 'actor') {
-      rows = actorIds.map(key => `<button type="button" class="lp-item${off.actor.has(key) ? ' off' : ''}" data-group="actor" data-key="${esc(key)}" aria-pressed="${!off.actor.has(key)}"><i class="sw" data-bg="${actorColor(key)}"></i><span class="lp-name"><b>${esc(actorLabel(key))}</b></span><span class="lp-stats">${esc(actorStats(key))}</span></button>`).join('');
+      rows = actorIds.map(key => `<button type="button" class="lp-item${off.actor.has(key) ? ' off' : ''}" title="${esc(actorTask(key))}" data-group="actor" data-key="${esc(key)}" aria-pressed="${!off.actor.has(key)}"><i class="sw" data-bg="${actorColor(key)}"></i><span class="lp-name"><b>${esc(actorLabel(key))}</b></span><span class="lp-stats">${esc(actorStats(key))}</span></button>`).join('');
     } else {
       rows = STATUSES.map(([key, label]) => `<button type="button" class="lp-item${off.status.has(key) ? ' off' : ''}" data-group="status" data-key="${key}" aria-pressed="${!off.status.has(key)}"><i class="sw" data-bg="${STATUS_FILL[key]}"></i><span class="lp-name">${esc(label)}</span><span class="lp-stats">${n.get(key) ?? 0} nodes</span></button>`).join('');
     }
@@ -450,7 +452,7 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
     return {evaluated,derived,ancestry,reference,root};
   }
   const goBtn=p=>`<button data-go="${esc(p)}">${esc(byId.get(p)?nodeLabel(byId.get(p)):pById.has(p)?(pById.get(p).node||`probe ${p.slice(0,6)}`):p.slice(0,8))}</button>`;
-  const actorBadge=it=>{const own=actorOf(it),others=[...new Set((it.attempts||[]).map(a=>a.actor_id).filter(a=>a&&a!==own))];return `<span class="route-badge"><i class="sw" data-bg="${actorColor(own)}"></i><b>${esc(actorLabel(own))}</b>${others.length?` <span class="muted">also ${others.map(esc).join(', ')}</span>`:''}</span>`;};
+  const actorBadge=it=>{const own=actorOf(it),others=[...new Set((it.attempts||[]).map(a=>a.actor_id).filter(a=>a&&a!==own))];return `<span class="route-badge"><i class="sw" data-bg="${actorColor(own)}"></i><b>${esc(actorLabel(own))}</b>${others.length?` <span class="muted">also ${others.map(a=>esc((data?.actors||[]).find(x=>x.actor_id===a)?.job||actorLabel(a))).join(', ')}</span>`:''}</span>`;};
   const routeBadge=id=>{const r=routeById.get(id);return `<span class="route-badge"><i class="sw" data-bg="${routeColor(id)}"></i><b>${esc(id)}</b> ${r?esc(clip(r.label,60)):''}${r?.credited?' <span class="tag good">credited</span>':r?.explored?' <span class="tag">explored</span>':''}</span>`;};
   // Nothing selected: the run at a glance (best path, routes) instead of an empty panel.
   function overview() {
@@ -869,6 +871,7 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
     return String(text ?? '').split(/(\bn\d+\b)/).map((part, i) => i % 2 && names.has(part) ? `<button type="button" class="node-ref" data-go="${esc(names.get(part))}">${esc(part)}</button>` : esc(part)).join('');
   }
   const fieldBlock = (name, label, text, changed) => `<div class="card-field${changed ? ' changed' : ''}"><div class="card-field-name">${esc(label)}${changed ? ' <span class="tag good">changed</span>' : ''}</div><div class="card-text">${cardText(text)}</div></div>`;
+  const roleOf = id => (data?.actors || []).find(a => a.actor_id === id)?.role;
   function renderCards() {
     const box = $('cards'), cards = data.cards?.actors || [];
     $('cards-count').textContent = cards.length ? `(${cards.length})` : '';
@@ -887,7 +890,7 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
         const diffs = names.map(k => `<div class="card-diff"><div class="card-field-name">${esc(k)}</div><div class="card-before"><span class="muted small">before</span><div class="card-text">${prev[k] ? cardText(prev[k]) : '<span class="muted">(empty)</span>'}</div></div><div class="card-after"><span class="muted small">after</span><div class="card-text">${v.fields[k] ? cardText(v.fields[k]) : '<span class="muted">(cleared)</span>'}</div></div></div>`).join('');
         return `<div class="card-version"><div class="card-version-head"><b>v${esc(v.version)}</b> <span class="muted">${esc(runClock(v.minutes))}</span> <span class="muted">· changed ${esc(names.join(', ') || 'nothing')}</span></div>${diffs}</div>`;
       }).reverse().join('');
-      return `<article class="actor-card"><div class="card-head"><i class="sw" data-bg="${actorColor(id)}"></i><b>${esc(c.label || id)}</b><span class="tag">v${esc(latest.version)}</span><span class="muted card-time" data-ts="${latest.ts ?? ''}" data-min="${latest.minutes ?? ''}">${esc(cardTime(latest.ts, latest.minutes))}</span></div>${body}<button type="button" class="linkish card-history-toggle" data-actor="${esc(id)}" aria-expanded="${open}">${open ? '▾' : '▸'} History (${c.versions.length})</button><div class="card-history"${open ? '' : ' hidden'}>${history}</div></article>`;
+      return `<article class="actor-card"><div class="card-head"><i class="sw" data-bg="${actorColor(id)}"></i><b>${esc(c.label || id)}</b>${roleOf(c.actor_id) ? `<span class="tag">${esc(roleOf(c.actor_id))}</span>` : ''}<span class="tag">v${esc(latest.version)}</span><span class="muted card-time" data-ts="${latest.ts ?? ''}" data-min="${latest.minutes ?? ''}">${esc(cardTime(latest.ts, latest.minutes))}</span></div>${body}<button type="button" class="linkish card-history-toggle" data-actor="${esc(id)}" aria-expanded="${open}">${open ? '▾' : '▸'} History (${c.versions.length})</button><div class="card-history"${open ? '' : ' hidden'}>${history}</div></article>`;
     }).join('') + '</div>';
     paintSwatches(box);
     box.querySelectorAll('[data-go]').forEach(el => el.onclick = () => select(el.dataset.go));

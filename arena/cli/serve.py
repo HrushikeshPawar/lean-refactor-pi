@@ -130,6 +130,20 @@ _MEMO_LOCKS: dict[tuple[str, str], threading.Lock] = {}
 _MEMO_GUARD = threading.Lock()
 
 
+def job_roles(delegations: list[dict]) -> dict[str, dict]:
+    """Worker actor id to its job's role (trim, token island, HB island, family island, proof, step) and first task."""
+    names = {"tokens": "token island", "heartbeats": "HB island"}
+    roles: dict[str, dict] = {}
+    for row in delegations:
+        actor = row.get("worker_actor_id")
+        if not actor or actor in roles or not row.get("scope"):
+            continue
+        scope = row["scope"]
+        role = names.get(row.get("objective"), "family island") if scope == "island" else scope
+        roles[actor] = {"role": role, "task": row.get("task")}
+    return roles
+
+
 def memo_json(kind: str, run_id: str, build) -> bytes:
     key = (kind, run_id)
     with _MEMO_GUARD:
@@ -248,11 +262,13 @@ def graph_payload(run_id: str) -> dict:
     config = directory / "run-config.json"
     payload["limit_usd"] = configured_cap(json.loads(config.read_text())) if config.exists() else None
     payload["models"] = run_models(directory)
-    from arena.orchestration import worker_job_labels
+    from arena.orchestration import _delegations, worker_job_labels
 
     jobs = worker_job_labels(directory)
+    roles = job_roles(_delegations(directory))
     for actor in payload.get("actors") or []:
         actor["job"] = jobs.get(actor["actor_id"])
+        actor.update(roles.get(actor["actor_id"], {}))
     payload["target"] = target_to_beat(payload.get("theorem"), directory.parent)
     report = directory / "cost.json"
     payload["cost_report"] = json.loads(report.read_text()) if report.exists() else {}
