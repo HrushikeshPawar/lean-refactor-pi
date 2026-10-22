@@ -85,6 +85,42 @@ def slim_probes(payload: dict, history: list[dict]) -> list[dict]:
     return rows
 
 
+LINEAGE_EDGES = frozenset({"edited_from", "filled_from", "merged_from", "salvaged_from"})
+
+
+def recorded_lineage(payload: dict, directory: Path, history: list[dict]) -> None:
+    """Parents as the graph recorded them. The ledger names the best node as parent of a draft compiled without one;
+    here such a draft is a root, a draft filed under the focus keeps that link as `filed_under`, and every probe names
+    the actor whose attempt made it."""
+    from arena.orchestration import proof_nodes
+
+    graph = proof_nodes(directory)
+    actors: dict[str, str] = {}
+    for row in history:
+        if row.get("kind") == "attempt" and row.get("proof_id") and row.get("actor_id"):
+            actors.setdefault(row["proof_id"], row["actor_id"])
+
+    def lineage(edge: dict | None) -> tuple[list[str], str | None]:
+        edge = edge or {}
+        sources = list(edge.get("from") or edge.get("parents") or [])
+        if edge.get("type") in LINEAGE_EDGES:
+            return sources, None
+        return [], sources[0] if edge.get("type") == "filed_under_focus" and sources else None
+
+    for item in payload.get("nodes", []):
+        node = graph.get(item["id"])
+        if node is None:
+            continue
+        item["parents"], item["filed_under"] = lineage(node.edge)
+        item["derivations"] = [{**d, "parents": lineage(d)[0]} for d in node.derivations] or [{"parents": item["parents"]}]
+    for probe in payload.get("probes", []):
+        node = graph.get(probe["proof_id"])
+        if node is not None:
+            parents, probe["filed_under"] = lineage(node.edge)
+            probe["parent"] = parents[0] if parents else None
+        probe["actor_id"] = actors.get(probe["proof_id"])
+
+
 # A live run's ledger changes every few seconds, so file stamps never let a cache hit, and rebuilding a large graph
 # takes seconds (v7-check4 Binius: graph 5.8 s, dashboard 4.8 s, polled by every open tab). Each run's payloads are
 # rebuilt at most once per MEMO_SECONDS; concurrent requests for the same payload wait for one build.
@@ -152,7 +188,9 @@ def _read_spend(directory: Path, events: list[dict]) -> dict:
 def graph_payload(run_id: str) -> dict:
     payload = graph_state(run_id)
     directory = run_dir(run_id)
-    payload["probes"] = slim_probes(payload, read_jsonl(directory / "ledger.jsonl"))
+    ledger = read_jsonl(directory / "ledger.jsonl")
+    payload["probes"] = slim_probes(payload, ledger)
+    recorded_lineage(payload, directory, ledger)
     status = directory / "merge-worker.json"
     payload["worker"] = json.loads(status.read_text()) if status.exists() else None
     charged = 0.0

@@ -147,7 +147,7 @@
     const pctOf = (v, base) => base ? `${v <= base ? '−' : '+'}${Math.abs(100 * (v - base) / base).toFixed(0)}%` : '';
     if (k === 'score') {
       const full = rows.filter(r => r.mode === 'full' && r.proxy != null), best = Math.max(data.baseline_proxy ?? 0, ...full.map(r => r.proxy));
-      return {title: 'Score', value: String(best), sub: `${signed(best - data.baseline_proxy)} vs original ${data.baseline_proxy} · ${rows.length} evaluations`, good: best > data.baseline_proxy, spark: scoreHtml(true), full: scoreHtml(false),
+      return {title: 'Score', value: String(best), sub: `${signed(best - data.baseline_proxy)} vs original ${data.baseline_proxy} · ${rows.length} candidates evaluated`, good: best > data.baseline_proxy, spark: scoreHtml(true), full: scoreHtml(false),
               sup: 'best so far', modalSub: 'proxy 0 to 100, higher is better; evaluation 0 is the original proof. Click a point or row to select that candidate in the graph.', table: evalTable('proxy')};
     }
     if (k === 'tokens' || k === 'hb') {

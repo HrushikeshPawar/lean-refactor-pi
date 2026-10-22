@@ -11,6 +11,7 @@ import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from arena import campaign, viewer_data
@@ -249,6 +250,19 @@ class DataTests(unittest.TestCase):
         self.assertFalse(idle_row["full_check_stale"])
         self.assertTrue(active_row["full_check_stale"])
 
+    def test_score_timeline_merges_fast_and_full_into_one_row(self):
+        ledger = [
+            evaluation(T0 + 1, "a", "fast", 50.0),
+            evaluation(T0 + 2, "b", "fast", 55.0),
+            evaluation(T0 + 3, "a", "full", 52.0),
+            evaluation(T0 + 4, "c", "full", 58.0),
+        ]
+        rows = viewer_data.score_timeline(ledger, T0)
+        self.assertEqual(
+            [(r["n"], r["candidate_id"], r["mode"], r["proxy"], r["best_verified"]) for r in rows],
+            [(1, "a", "full", 52.0, 52.0), (2, "b", "fast", None, None), (3, "c", "full", 58.0, 58.0)],
+        )
+
     def test_hub_row_survives_empty_run_dir(self):
         directory = self.root / "runs" / "pi-budget" / "empty"
         directory.mkdir(parents=True)
@@ -260,11 +274,9 @@ class DataTests(unittest.TestCase):
         board = run_dashboard("r1", directory)
         self.assertEqual(
             [(r["mode"], r["proxy"], r["estimated_proxy"], r["best_verified"]) for r in board["scores"]],
-            [("fast", None, 60.0, None), ("full", 60.5, None, 60.5)],
+            [("full", 60.5, None, 60.5)],
         )
-        self.assertEqual(
-            [(r["n"], r["candidate"], r["candidate_id"]) for r in board["scores"]], [(1, "#2", "c2"), (2, "#2", "c2")]
-        )
+        self.assertEqual([(r["n"], r["candidate"], r["candidate_id"]) for r in board["scores"]], [(1, "#2", "c2")])
         self.assertEqual(board["reference"], None)
         points = board["spend"]["points"]
         self.assertEqual([p["n"] for p in points], [1, 2])
@@ -482,6 +494,31 @@ def _response(request_id: str, ts_ms: int) -> dict:
 
 def _candidate(ts: float, ident: str, origin: str, **extra) -> dict:
     return {"kind": "candidate", "ts": ts, "candidate_id": ident, "origin": origin, "parents": [], **extra}
+
+
+class RecordedLineageTests(unittest.TestCase):
+    def test_parents_come_from_the_recorded_edge_and_probes_name_their_actor(self):
+        def node(edge):
+            return SimpleNamespace(edge=edge, derivations=[])
+
+        graph = {
+            "p1": node(None),
+            "p2": node({"type": "edited_from", "from": ["p1"]}),
+            "p3": node({"type": "filed_under_focus", "from": ["p2"]}),
+        }
+        payload = {
+            "nodes": [{"id": "p1"}, {"id": "p2"}, {"id": "p3"}],
+            "probes": [{"proof_id": "p3"}, {"proof_id": "p9"}],
+        }
+        history = [{"kind": "attempt", "proof_id": "p3", "actor_id": "a1"}]
+        with patch("arena.orchestration.proof_nodes", return_value=graph):
+            server.recorded_lineage(payload, Path("."), history)
+        root, edited, filed = payload["nodes"]
+        self.assertEqual((root["parents"], root["filed_under"]), ([], None))
+        self.assertEqual((edited["parents"], edited["filed_under"]), (["p1"], None))
+        self.assertEqual((filed["parents"], filed["filed_under"]), ([], "p2"))
+        self.assertEqual([(p["parent"], p.get("filed_under"), p["actor_id"]) for p in payload["probes"][:1]], [(None, "p2", "a1")])
+        self.assertIsNone(payload["probes"][1]["actor_id"])
 
 
 class NodeCallTests(unittest.TestCase):

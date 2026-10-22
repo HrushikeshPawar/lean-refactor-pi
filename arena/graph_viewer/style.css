@@ -256,11 +256,13 @@ body.embed .workspace{height:100vh}
 .node.k-scratch.promoted .node-body{stroke-width:4}
 .node.k-scratch .actor-ring{stroke-width:2.5;opacity:.9;pointer-events:none}
 .edge.scratch-edge{stroke-width:1.3;stroke-dasharray:4 3;opacity:.5}
+.edge.filed-edge{stroke-width:1.1;stroke-dasharray:1 4;stroke-linecap:round;opacity:.45}
 .edge.scratch-edge.promotes{stroke:var(--st-verified);stroke-dasharray:none;opacity:.8}
 .chip .scratch-dot{display:inline-block;width:12px;height:9px;border:2px solid var(--st-verified);border-radius:3px;clip-path:polygon(0 50%,25% 0,75% 0,100% 50%,75% 100%,25% 100%)}
 .lp-key .k-scratch{fill:#44505f;stroke-width:2}
 .lp-key .k-scratch.ok{stroke:var(--st-verified)}.lp-key .k-scratch.failed{stroke:var(--st-failed)}
 .lp-key .k-scratch-edge{stroke:#8da6bd;stroke-width:1.5;stroke-dasharray:4 3;fill:none}
+.lp-key .k-filed-edge{stroke:#8da6bd;stroke-width:1.5;stroke-dasharray:1 4;stroke-linecap:round;fill:none}
 #minimap .mm-node.scratch{fill:#8da6bd}#minimap .mm-node.scratch.ok{fill:#3ddc97}#minimap .mm-node.scratch.failed{fill:#ff5d52}
 
 .init-toggle{margin-left:auto;font-size:12px;color:var(--muted);display:inline-flex;gap:6px;align-items:center;cursor:pointer}

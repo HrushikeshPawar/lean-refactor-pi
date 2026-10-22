@@ -202,6 +202,12 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
     for (const it of data.nodes.concat(probeItems, group === 'kind' || group === 'actor' ? scratchItems : [])) { const k = groupKey(group, it); out.set(k, (out.get(k) || 0) + 1); }
     return out;
   }
+  // An actor's legend line: all its canvas items, then how many are compiled nodes, probes and scratch experiments.
+  function actorStats(actor) {
+    const mine = data.nodes.concat(probeItems, scratchItems).filter(it => actorOf(it) === actor);
+    const of = kind => mine.filter(it => kind === 'scratch' ? isScratch(it) : kind === 'probe' ? isProbe(it) : !isScratch(it) && !isProbe(it)).length;
+    return `${mine.length} total · ${of('node')} compiled · ${of('probe')} probes · ${of('scratch')} scratch`;
+  }
   function paintSwatches(root) { root.querySelectorAll('[data-bg]').forEach(el => { el.style.background = el.dataset.bg; }); }
   // Chips: kind and status filters. The Probes chip shows or hides the probe nodes and re-lays out the graph.
   function renderChips() {
@@ -240,7 +246,7 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
         return `<button type="button" class="lp-item${off.route.has(key) ? ' off' : ''}" data-group="route" data-key="${esc(key)}" aria-pressed="${!off.route.has(key)}" title="${esc(r.label || '')}"><i class="sw" data-bg="${routeColor(r.route === 'none' ? null : r.route)}"></i><span class="lp-name"><b>${esc(key)}</b> ${esc(clip(r.short_label || r.label, 44))}</span><span class="lp-stats">${tags}${esc(stats)} · ${n.get(key) ?? 0} nodes</span></button>`;
       }).join('');
     } else if (colorBy === 'actor') {
-      rows = actorIds.map(key => `<button type="button" class="lp-item${off.actor.has(key) ? ' off' : ''}" data-group="actor" data-key="${esc(key)}" aria-pressed="${!off.actor.has(key)}"><i class="sw" data-bg="${actorColor(key)}"></i><span class="lp-name"><b>${esc(actorLabel(key))}</b></span><span class="lp-stats">${n.get(key) ?? 0} nodes</span></button>`).join('');
+      rows = actorIds.map(key => `<button type="button" class="lp-item${off.actor.has(key) ? ' off' : ''}" data-group="actor" data-key="${esc(key)}" aria-pressed="${!off.actor.has(key)}"><i class="sw" data-bg="${actorColor(key)}"></i><span class="lp-name"><b>${esc(actorLabel(key))}</b></span><span class="lp-stats">${esc(actorStats(key))}</span></button>`).join('');
     } else {
       rows = STATUSES.map(([key, label]) => `<button type="button" class="lp-item${off.status.has(key) ? ' off' : ''}" data-group="status" data-key="${key}" aria-pressed="${!off.status.has(key)}"><i class="sw" data-bg="${STATUS_FILL[key]}"></i><span class="lp-name">${esc(label)}</span><span class="lp-stats">${n.get(key) ?? 0} nodes</span></button>`).join('');
     }
@@ -251,6 +257,7 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
       <span><svg width="34" height="16"><rect x="3" y="2" width="28" height="12" rx="4" class="k-probe"/></svg>probe (label = model node id)</span>
       <span><svg width="64" height="16"><path d="M2,8 L6,2 L24,2 L28,8 L24,14 L6,14Z" class="k-scratch ok"/><path d="M36,8 L40,2 L58,2 L62,8 L58,14 L40,14Z" class="k-scratch failed"/></svg>scratch experiment e1, e2… (ok / failed)</span>
       <span><svg width="34" height="14"><path d="M1,7H33" class="k-scratch-edge"/></svg>scratch link (dashed; thick border = promoted)</span>
+      <span><svg width="34" height="14"><path d="M1,7H33" class="k-filed-edge"/></svg>filed under focus (no parent)</span>
       <span><svg width="34" height="14"><path d="M1,7H33" class="k-best"/></svg>best path</span></div></div>`;
     paintSwatches(panel);
   }
@@ -321,6 +328,10 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
         const ay = a.y + radius(itemOf(parent)), cy = p.y - radius(it), bend = Math.max(18, (cy - ay) * .48);
         edges.push(`<path class="edge${probe ? ' probe-edge' : ''}${scratch ? ' scratch-edge' : ''}${i ? ' alternate' : ''}${onBest}${focus}${faded}${dim}" d="M${a.x},${ay} C${a.x},${ay + bend} ${p.x},${cy - bend} ${p.x},${cy}"/>`);
       }));
+      if (it.filed_under && coords.has(it.filed_under)) {
+        const a = coords.get(it.filed_under), ay = a.y + radius(itemOf(it.filed_under)), cy = p.y - radius(it), bend = Math.max(18, (cy - ay) * .48);
+        edges.push(`<path class="edge filed-edge${selected && selected !== it.id ? ' unrelated' : ''}${dim}" d="M${a.x},${ay} C${a.x},${ay + bend} ${p.x},${cy - bend} ${p.x},${cy}"/>`);
+      }
       if (scratch && it.promotedTo && coords.has(it.promotedTo) && (showScratch)) {
         const b = coords.get(it.promotedTo), top = Math.min(p.y, b.y) - 38;
         edges.push(`<path class="edge scratch-edge promotes${selected && selected !== it.id && selected !== it.promotedTo ? ' unrelated' : ''}${dim}" d="M${p.x},${p.y} Q${(p.x + b.x) / 2},${top} ${b.x},${b.y}"/>`);
@@ -357,14 +368,14 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
     if (isProbe(it)) {
       return `<div class="tip-head">Probe ${esc(probeLabel(it))} · ${esc(it.id.slice(0, 8))} ${stTag(stat(it))}</div>${row('Tokens', it.tokens != null ? esc(it.tokens) : null)}${row('Heartbeats', it.heartbeat != null ? esc(it.heartbeat) : null)}
         ${row('Open goals', it.status === 'skeleton' ? `${esc(it.goals)} ${it.goals === 1 ? 'hole' : 'holes'}` : it.status === 'fail' ? `${esc(it.errors ?? '?')} error${it.errors === 1 ? '' : 's'}` : 'none')}
-        ${row('Route', route)}${row('Route state', esc(routeState))}${row('Parent', it.parent ? esc(numberForId(it.parent)) : null)}
+        ${row('Route', route)}${row('Route state', esc(routeState))}${row('Parent', it.parent ? esc(numberForId(it.parent)) : it.filed_under ? `none · filed under ${esc(numberForId(it.filed_under))}` : 'root')}
         ${it.headlines?.[0] ? `<div class="tip-note">${esc(clip(it.headlines[0], 160))}</div>` : it.first_goal ? `<div class="tip-note mono">${esc(clip(it.first_goal, 160))}</div>` : ''}`;
     }
     const proxy = it.local_proxy?.toFixed?.(2);
     return `<div class="tip-head">${esc(nodeLabel(it))} ${stTag(stat(it))}${it.origin === 'auto_merge' ? ' <span class="merge-mark">⊕ merge</span>' : ''}${data.milestones.at(-1)?.candidate_id === it.id ? ' <span class="tag good">best verified</span>' : ''}</div>
       ${row('Tokens', it.tokens != null ? esc(it.tokens) : null)}${row('Heartbeats', it.heartbeat != null ? esc(it.heartbeat) : null)}${row('Proxy', proxy ? esc(proxy) : null)}
       ${row('Actor', `<i class="sw" data-bg="${actorColor(actorOf(it))}"></i>${esc(actorLabel(actorOf(it)))}`)}
-      ${row('Route', route)}${row('Route state', esc(routeState))}${row('Parents', it.parents.length ? it.parents.map(x => esc(numberForId(x))).join(', ') : 'root')}
+      ${row('Route', route)}${row('Route state', esc(routeState))}${row('Parents', it.parents.length ? it.parents.map(x => esc(numberForId(x))).join(', ') : it.filed_under ? `none · filed under ${esc(numberForId(it.filed_under))}` : 'root')}
       ${it.hypothesis ? `<div class="tip-note">${esc(clip(it.hypothesis, 170))}</div>` : ''}`;
   }
   graph.addEventListener('mousemove', e => {
@@ -471,7 +482,7 @@ const money=v=>'$'+(v>=0.1?v.toFixed(3):v.toFixed(4));
     $('detail').innerHTML=`<div class="side">
       <div class="card sumcard"><h2>${esc(nodeLabel(node))} ${node.origin==='auto_merge'?'<span class="merge-mark">⊕ merge</span>':''}</h2>
         ${facts([['Status',tag(status(node),node.status==='full'?'good':node.status==='fail'?'bad':'')],['Tokens',esc(node.tokens ?? '?')],['Heartbeats',esc(node.heartbeat ?? '?')],['Score',esc(proxy ?? '—')],
-                 ['Actor',actorBadge(node)],['Route',node.route?routeBadge(node.route):'<span class="muted">none</span>'],['Parent',parents.length?parents.map(goBtn).join(' '):'<span class="muted">root</span>'],
+                 ['Actor',actorBadge(node)],['Route',node.route?routeBadge(node.route):'<span class="muted">none</span>'],['Parent',parents.length?parents.map(goBtn).join(' '):node.filed_under?`<span class="muted">none · filed under</span> ${goBtn(node.filed_under)}`:'<span class="muted">root</span>'],
                  ['Children',node.children.length?node.children.map(goBtn).join(' '):'<span class="muted">none</span>'],...((probeKids.get(node.id)||[]).length?[['Probes',(probeKids.get(node.id)).map(goBtn).join(' ')]]:[])])}
         <div class="actions"><button type="button" data-open="overview" class="primary">Details ↗</button><button type="button" data-open="diff">Diff ↗</button><button type="button" data-open="proof">Proof ↗</button><button type="button" data-open="lineage">Lineage ↗</button></div></div>
       ${node.hypothesis||node.origin==='auto_merge'?`<div class="card hypcard"><h3>Note</h3><p class="hyp">${esc(node.hypothesis||'Deterministic combination of disjoint edits')}</p></div>`:''}

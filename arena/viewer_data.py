@@ -360,30 +360,37 @@ def node_labels(directory: Path, ledger: list[dict]) -> dict[str, str]:
 def score_timeline(ledger: list[dict], start: float | None) -> list[dict]:
     labels = _candidate_labels(ledger)
     rows, best = [], None
+    fast_rows: dict[str, int] = {}  # candidate id -> index of its fast (primary-only) row, replaced by its full row
     for event in ledger:
         if event.get("kind") != "evaluation":
             continue
-        number = len(rows) + 1  # evaluation 0 is the original proof; the charts' x axis is this number
+        candidate_id = event.get("candidate_id")
+        replaced = fast_rows.pop(candidate_id, None) if event.get("mode") == "full" else None
+        number = rows[replaced]["n"] if replaced is not None else len(rows) + 1  # one chart point per candidate
         result = event.get("result") or {}
         metrics = result.get("metrics") or {}
         proxy = metrics.get("proxy")
         if event.get("mode") == "full" and metrics.get("compiled") and proxy is not None:
             best = proxy if best is None else max(best, proxy)
-        rows.append(
-            {
-                "n": number,
-                "t": round(event["ts"] - start, 1) if start else None,
-                "candidate": labels.get(event.get("candidate_id")),
-                "candidate_id": event.get("candidate_id"),
-                "mode": event.get("mode"),
-                "proxy": proxy,
-                "estimated_proxy": metrics.get("estimated_proxy"),
-                "tokens": result.get("tokens"),
-                "heartbeats": result.get("heartbeat"),
-                "compiled": bool(metrics.get("compiled")),
-                "best_verified": best,
-            }
-        )
+        if event.get("mode") != "full" and candidate_id:
+            fast_rows[candidate_id] = len(rows)
+        row = {
+            "n": number,
+            "t": round(event["ts"] - start, 1) if start else None,
+            "candidate": labels.get(event.get("candidate_id")),
+            "candidate_id": event.get("candidate_id"),
+            "mode": event.get("mode"),
+            "proxy": proxy,
+            "estimated_proxy": metrics.get("estimated_proxy"),
+            "tokens": result.get("tokens"),
+            "heartbeats": result.get("heartbeat"),
+            "compiled": bool(metrics.get("compiled")),
+            "best_verified": best,
+        }
+        if replaced is not None:
+            rows[replaced] = row
+        else:
+            rows.append(row)
     return rows
 
 
