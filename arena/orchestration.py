@@ -243,6 +243,9 @@ def _can_admit_directly(directory: Path) -> bool:
 
 
 def _append_state(directory: Path, delegation: dict, state: str, **extra) -> None:
+    live = _live.get(delegation["activation_id"])
+    if state in _terminal_states and live and live.get("report"):
+        extra["report"] = live.pop("report")
     _append(
         directory,
         {
@@ -499,6 +502,18 @@ def _observe_tool(directory: Path, delegation: dict, record: dict) -> bool:
     return True
 
 
+_state_records = frozenset({"response", "assignment_exhausted", "agent_settled", "tool_execution_end"})
+REPORT_CHARS = 1200  # a settled worker's last message, as delivered to the orchestrator
+
+
+def _assistant_text(message: dict | None) -> str | None:
+    if not isinstance(message, dict) or message.get("role") != "assistant":
+        return None
+    text = "\n".join(block.get("text", "") for block in message.get("content") or []
+                     if isinstance(block, dict) and block.get("type") == "text").strip()
+    return text[:REPORT_CHARS] or None
+
+
 def _apply_record(record: dict, command_id: str, current: dict) -> dict:
     if current["state"] in _terminal_states or current["state"] == "cancelling":
         return current
@@ -532,6 +547,12 @@ def _apply_record(record: dict, command_id: str, current: dict) -> dict:
 
 def _take(directory: Path, delegation: dict, command_id: str, current: dict, records: list[dict]) -> None:
     for record in records:
+        if record.get("type") == "message_end":
+            current["report"] = _assistant_text(record.get("message")) or current.get("report")
+            continue
+        # Stream deltas change nothing here; locking and re-reading the logs for each one stalled workers on stdout.
+        if record.get("type") not in _state_records:
+            continue
         with run_control.control_lock(directory):
             if (
                 _recovering(directory)
@@ -1399,12 +1420,33 @@ def _public_event(row: dict) -> dict:
         for key in (
             "event_id", "job_id", "activation_id", "state", "attempt_id", "proof_id",
             "evaluation_id", "request_id", "run_id", "actor_id", "session_id",
-            "operation_id", "reason", "outcome", "check_id", "attempt_ids", "recovery_of",
+            "operation_id", "reason", "outcome", "check_id", "attempt_ids", "recovery_of", "report",
         )
         if row.get(key) is not None
     }
     event["type"] = row.get("type") or row.get("kind")
     return event
+
+
+def _delivered_events(directory: Path, rows: list[dict]) -> list[dict]:
+    """Public events, with each finding's graph node and score so the orchestrator need not re-read the map."""
+    delivered = [_public_event(row) for row in rows]
+    if not any(event["type"] == "worker_finding" for event in delivered):
+        return delivered
+    from arena.campaign import _proof_reader
+    from arena.graph import Graph
+
+    graph = Graph.from_history(
+        events(directory), _proof_reader(directory),
+        committed_operations=run_control.committed_operation_ids(directory),
+    )
+    nodes = {node.proof_id: node for node in graph.nodes}
+    for event in delivered:
+        node = nodes.get(event.get("proof_id")) if event["type"] == "worker_finding" else None
+        if node is not None:
+            event["node"] = node.id
+            event["score"] = node.score
+    return delivered
 
 
 def _wake_reason(events: list[dict]) -> str:
@@ -1481,7 +1523,7 @@ def _commit_delivery(
         "operation_id": operation_id,
         "wake_reason": wake_reason,
         **({"reason": reason} if reason else {}),
-        "events": [_public_event(row) for row in fresh],
+        "events": _delivered_events(directory, fresh),
         "jobs": selected,
         "evidence_refs": applied.get("evidence_refs") or [],
         "next_cursor": token,

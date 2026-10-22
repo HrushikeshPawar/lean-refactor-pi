@@ -464,6 +464,15 @@ class AwaitTimeoutTests(unittest.TestCase):
                 orchestration.join_activation(fresh["activation_id"], timeout=2)
 
 
+class StreamDeltaTests(unittest.TestCase):
+    def test_stream_deltas_never_take_the_control_lock(self):
+        locks = []
+        with patch.object(run_control, "control_lock", lambda _directory: locks.append(1) or contextlib.nullcontext()):
+            orchestration._take(Path("."), {"activation_id": "a"}, "c", {"state": "active"},
+                                [{"type": "message_update"}] * 500 + [{"type": "message_start"}])
+        self.assertEqual(locks, [])
+
+
 class V8OrphanSettlementTests(unittest.TestCase):
     def test_absent_worker_open_request_settles_unknown_once(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -858,11 +867,17 @@ class V8WorkerSmokeTests(unittest.TestCase):
             self.assertEqual(delivered["results"][0]["session_id"], fresh["session_id"])
             self.assertFalse(delivered["stopped"])
 
-            child._chunks.put((json.dumps({"type": "agent_settled"}) + "\n").encode())
+            report = {"type": "message_end", "message": {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "hidden"}, {"type": "text", "text": "Held: step 2 closes by simp."}]}}
+            child._chunks.put((json.dumps(report) + "\n" + json.dumps({"type": "agent_settled"}) + "\n").encode())
             child._chunks.put(None)
             orchestration.join_activation(fresh["activation_id"])
             released = orchestration.jobs(directory, [fresh["job_id"]])["jobs"][0]
             self.assertEqual(released["state"], "completed")
+            with patch.object(orchestration, "reconcile", return_value={"status": "running", "generation": "fixture"}):
+                settled = orchestration.await_results(directory, actor_id="sol")
+            self.assertEqual([event["report"] for event in settled["events"] if event.get("report")],
+                             ["Held: step 2 closes by simp."])
             self.assertEqual(released["session_id"], fresh["session_id"])
             self.assertEqual(released["findings"][0]["attempt_id"], "attempt-1")
             self.assertFalse(orchestration.awaits_settlement(directory, fresh["activation_id"]))
