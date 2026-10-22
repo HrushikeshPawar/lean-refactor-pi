@@ -1,5 +1,6 @@
 import hashlib
 import os
+import shutil
 from unittest.mock import patch
 
 from arena import campaign, tools
@@ -91,7 +92,7 @@ class ScratchResultTests(ToolCase):
         self.assertIsNone(missing["items"][0]["code"])
         self.assertIn("missing code", "\n".join(missing["items"][0]["lines"]))
         self.assertFalse(legacy["ok"])
-        built = {"path": "p", "text": "", "head": 0, "start_line": 1}
+        built = {"path": "p", "text": "", "head": 0, "offset": 0, "start_line": 1}
         with (
             patch.object(tools.engine, "versions", return_value=[("v", "c")]),
             patch.object(tools.engine, "candidate_file", return_value=built) as build,
@@ -178,7 +179,7 @@ class ScratchResultTests(ToolCase):
         mixed = tools.scratch_tool("T", "logic", {"code": "#check Nat", "replacement": "trivial"})
         self.assertFalse(mixed["ok"])
         self.assertEqual(mixed["error"]["code"], "mixed_form")
-        built = {"path": "p", "text": "", "head": 0, "start_line": 1}
+        built = {"path": "p", "text": "", "head": 0, "offset": 0, "start_line": 1}
         with (
             patch.object(tools.engine, "versions", return_value=[("v", "c")]),
             patch.object(tools.engine, "candidate_file", return_value=built),
@@ -675,3 +676,54 @@ class ActionableRejectionTests(CascadeToolCase):
         self.assertIn("outside the proof", line["input"])
         cancel = coordinator.Coordinator._cancel(object(), {"actor_id": "sol"})
         self.assertEqual((cancel["reason"], cancel["hint"]), ("job_id", "cancel needs job_id, one string."))
+
+
+class ScratchRealLeanTests(ToolCase):
+    """Real `lean` through the real scratch path; the snippet replaces the declaration under a doc comment."""
+
+    SOURCE = "import Lean\n\n/-- doc -/\ntheorem t : True := by\n  trivial\n"
+
+    def run_scratch(self, code):
+        import subprocess
+        import tempfile
+        from pathlib import Path
+
+        if shutil.which("lean") is None:
+            self.skipTest("lean is not installed")
+        directory = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, directory)
+        offset = self.SOURCE.index("theorem t")
+        start = self.SOURCE[:offset].count("\n") + 1
+
+        def candidate(row, proof, *args, **kwargs):
+            text = self.SOURCE[:offset] + proof.rstrip("\n") + "\n"
+            return {"path": directory, "text": text, "head": self.SOURCE.index("/--"), "offset": offset,
+                    "start_line": start, "end_line": start + proof.count("\n")}
+
+        def run(row, path, lean_text, **kwargs):
+            (directory / "T.lean").write_text(lean_text)
+            done = subprocess.run(["lean", "T.lean"], capture_output=True, text=True, cwd=directory)
+            return done.returncode, done.stdout + done.stderr
+
+        with (
+            patch.object(tools.engine, "versions", return_value=[("v", "c")]),
+            patch("arena.scoring.reference", return_value=(1000, 10000)),
+            patch.object(tools.engine, "candidate_file", side_effect=candidate),
+            patch.object(tools.engine, "run_lean", side_effect=run),
+            patch.object(tools, "_history", return_value=[]),
+            patch.object(campaign, "run_dir", return_value=self.directory),
+        ):
+            result = tools.scratch_tool("T", "logic", {"code": code})
+        return (result.get("details") or result)["items"][0]["lines"]
+
+    def test_check_under_a_doc_comment_is_not_a_failure(self):
+        self.assertEqual(self.run_scratch("#check Nat\n")[0], "OK: errors 0, warnings 0")
+
+    def test_case_tag_hint_lists_the_real_tags(self):
+        code = "example (h : p \u2228 q) : True := by\n  cases h\n  case' x.inl => trivial\n"
+        result = self.run_scratch(code)
+        lines = "\n".join(result)
+        self.assertIn("Case tag `x.inl` not found", lines)
+        self.assertIn("`inl`: inl", lines)
+        self.assertNotIn("x.inlinl", lines)
+        self.assertNotIn("\u0335", lines)

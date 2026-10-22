@@ -113,8 +113,11 @@ class ErrorGroupTests(unittest.TestCase):
         merged = tools._same_message_groups(tools._branch_groups(errors))
         self.assertEqual([(item["id"], same) for item, _, same in merged], [("e1", ["e2"]), ("e3", []), ("e4", []), ("e5", [])])
 
-    def test_combining_marks_are_stripped(self):
-        self.assertEqual(tools.error_message("unknown c̲o̵nstant"), "unknown constant")
+    def test_hint_diff_keeps_the_new_text(self):
+        # Lean draws a suggested edit as a diff: U+0335 strikes removed characters, U+0332 underlines added ones.
+        self.assertEqual(tools.error_message("Case tag: par.red_̲K̲S̵"), "Case tag: par.red_K")
+        # Strikethrough alone (no added text) is styling, not a diff: keep the characters.
+        self.assertEqual(tools.error_message("unknown c̵onstant"), "unknown constant")
 
 
 class CompileCase(CascadeCase):

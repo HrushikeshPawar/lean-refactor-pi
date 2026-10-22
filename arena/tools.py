@@ -178,7 +178,16 @@ def _rewrite_parts(message: str) -> tuple[str, list[str]] | None:
 _GOAL_BLOCK_START = re.compile(r"^(?:case\s|⊢|\S[^:]*? : |\[)")
 
 
-_COMBINING = re.compile("[\u0332\u0335]")
+_COMBINING = re.compile("[\u0332\u0335\u0336]")
+_DIFF_REMOVED = re.compile(".\u0335")
+
+
+def plain_diff(message: str) -> str:
+    """Lean draws a hint's suggested edit as a diff: removed characters carry U+0335, added ones U+0332. Keep the new
+    text only; dropping just the marks would run the old and new text together (`par.red_KS`)."""
+    if "\u0332" in message:
+        message = _DIFF_REMOVED.sub("", message)
+    return _COMBINING.sub("", message)
 _HYP_NAME = re.compile(r"\w+✝[⁰¹²³⁴⁵⁶⁷⁸⁹]*")
 
 
@@ -204,7 +213,7 @@ def _same_message_groups(groups: list[tuple[dict, int]]) -> list[tuple[dict, int
 def error_message(message: str) -> str:
     """A diagnostic's text up to its goal block: the headline and the lines under it, joined into one line and capped
     at `error_message_chars`. A failed rewrite names the pattern it did not find instead."""
-    message = _COMBINING.sub("", message)
+    message = plain_diff(message)
     parts = _rewrite_parts(message)
     lines = message.split("\n")
     if parts:
@@ -1867,7 +1876,6 @@ def _read_experiment(run_id: str, reference: str) -> dict:
 
 _MARK = re.compile(r"(?:.*:\sinfo:\s)?ARENA_MARK\s(\d+)")
 _INFO_COMMAND = re.compile(r"#(?:check_failure|check|print|eval|reduce|synth|where|help)\b")
-_STRIKE = re.compile("[\u0335\u0336]")
 
 
 def _scratch_messages(output: str) -> list[dict]:
@@ -1989,13 +1997,13 @@ def _body_tokens(span: str) -> int:
 
 def _warning_text(message: str) -> str:
     """A warning on one line: its first line, without notes and strikethrough marks."""
-    first = next((line for line in _STRIKE.sub("", message).splitlines() if line.strip()), "")
+    first = next((line for line in plain_diff(message).splitlines() if line.strip()), "")
     return " ".join(first.split())
 
 
 def _error_text(message: str, known: set[str], limit: int) -> str:
     """An error with its goal state reduced to the hypotheses the theorem does not already have; notes dropped."""
-    kept = [line for line in _STRIKE.sub("", message).splitlines() if not line.startswith("Note:")]
+    kept = [line for line in plain_diff(message).splitlines() if not line.startswith("Note:")]
     compact = reply.compact_message("\n".join(kept), known, int(text.numbers().get("goal_hyp_chars", 1000)))
     if any(line.startswith("⊢") for line in compact.splitlines()):
         return _preview_keeping_targets(compact, limit)
@@ -2545,7 +2553,12 @@ def _scratch_check(theorem, run_id, code, helpers, accepted, earlier, started, e
     # The prefix goes in front of the snippet as compile's measure does; its lines are mapped back below.
     inserted = _SNIPPET_PREFIX + (_MEASURE_DEFINITION if measured_starts else "")
     wrapper_start = built["text"][: built["head"]].count("\n") + 1
-    lean_text = built["text"][: built["head"]] + inserted + built["text"][built["head"] :]
+    # The doc comment and attributes in front of the replaced declaration would attach to the snippet's first
+    # command (`#check` then fails to parse); blank them, keeping the line count.
+    orphans = built["text"][built["head"] : built["offset"]]
+    lean_text = (
+        built["text"][: built["head"]] + inserted + "\n" * orphans.count("\n") + built["text"][built["offset"] :]
+    )
     context.update(
         {
             "project": str(built["path"]),
@@ -2588,6 +2601,7 @@ def _scratch_check(theorem, run_id, code, helpers, accepted, earlier, started, e
     info_rows: list[str] = []
     warning_lines: dict[str, list[int]] = {}
     body: list[str] = []
+    hidden: list[dict] = []
     if denied is not None:
         body.append(_render("scratch_inconclusive", cause=denied.cause, admission=denied.admission))
     elif output is None:
@@ -2609,10 +2623,14 @@ def _scratch_check(theorem, run_id, code, helpers, accepted, earlier, started, e
                     candidate_line, wrapper_start, inserted.count("\n")
                 )
                 if in_wrapper:
+                    if message["severity"] == "error":
+                        hidden.append(message)
                     continue
             snippet_line = candidate_line - built["start_line"] + 1 if candidate_line else None
             # Messages before the snippet come from the harness wrapper; sorry warnings are the allowed sorry itself.
             if snippet_line is not None and snippet_line < 1:
+                if message["severity"] == "error":
+                    hidden.append(message)
                 continue
             if (
                 message["severity"] == "warning"
@@ -2674,8 +2692,20 @@ def _scratch_check(theorem, run_id, code, helpers, accepted, earlier, started, e
             points = tokens * price_rates["points_per_token"] + hb / 1000 * price_rates["points_per_1k_hb"]
             body.append(_render("scratch_decl_cost", line=start, tokens=tokens, heartbeats=hb, points=round(points, 1)))
     if output is not None and output[0] != 0 and not errors:
-        errors = 1
-        body.append(_render("scratch_process_failed", returncode=output[0]))
+        # Errors outside the snippet (the wrapper) still fail the run; show their text, never a bare count.
+        for message in hidden:
+            errors += 1
+            body.append(
+                _render(
+                    "scratch_message",
+                    line="-",
+                    severity="error",
+                    message=_error_text(message["message"], known, message_chars),
+                )
+            )
+        if not errors:
+            errors = 1
+            body.append(_render("scratch_process_failed", returncode=output[0]))
     status = _render("scratch_ok" if output is not None and not errors else "scratch_failed")
     if denied is not None:
         status = _render("scratch_inconclusive_status")
