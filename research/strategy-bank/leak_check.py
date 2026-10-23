@@ -81,8 +81,8 @@ allow_tail = {i for i in bench_ids if LEAN_NS_LEMMA.match(i) and i.split("_")[0]
 # these are Mathlib-shaped; still flagged if they appear in cards AND are not part of the generic lemma allowlist below.
 GENERIC_LEMMAS = set(re.findall(r"[A-Za-z_][\w'.]*", ""))
 
-code_lines = [l for l in CARDS.splitlines() if not re.match(r"\s+(when|how|title|version_notes|id|move_class):", l)]
-prose_lines = [l for l in CARDS.splitlines() if re.match(r"\s+(when|how|title|version_notes|id|move_class):", l)]
+code_lines = [l for l in CARDS.splitlines() if not re.match(r"\s+(when|how|title|version_notes|id|move_class|opening|middle|closing):", l)]
+prose_lines = [l for l in CARDS.splitlines() if re.match(r"\s+(when|how|title|version_notes|id|move_class|opening|middle|closing):", l)]
 cards_ids = set(ID.findall("\n".join(code_lines)))
 cards_ids |= {i for l in prose_lines for i in ID.findall(l) if re.search(r"[_.'!?]|[a-z][A-Z]", i) or i[0].isupper()}
 flagged_ids = sorted(i for i in cards_ids if i in bench_ids and i not in allow_tail and not generic(i))

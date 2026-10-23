@@ -9,6 +9,8 @@
     "cases",
     "anonymous-constructor"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "A hypothesis of type A ∧ B, A ↔ B or ∃ is destructured, and each component is used once.",
    "how": "Use h.1 / h.2 / h.mp / h.mpr / h.left directly where the component is needed. For ∃, keep one obtain only if the witness is used several times.",
    "before": "example (p q : Prop) (h : p ∧ q) : q ∧ p := by\n  obtain ⟨hp, hq⟩ := h\n  exact ⟨hq, hp⟩",
@@ -24,9 +26,9 @@
     "note": "Heartbeat direction is the same at every position with data."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Stable across 4.25-4.33 as far as known.",
    "move_class": "obtain_to_projection",
@@ -40,6 +42,8 @@
     "rintro",
     "rcases"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "Goal starts with intro followed by rcases/obtain on the introduced hypothesis.",
    "how": "Use rintro with the pattern. rintro ⟨a, rfl⟩ also substitutes equalities on the spot.",
    "before": "example (p q r : Prop) : p ∧ q → r ∨ p := by\n  intro h\n  obtain ⟨hp, _⟩ := h\n  exact Or.inr hp",
@@ -55,9 +59,9 @@
     "note": "Too little mined evidence; measure with the profiler."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Stable across 4.25-4.33 as far as known.",
    "move_class": "rcases_to_rintro",
@@ -71,6 +75,8 @@
     "exact",
     "by"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "have h : T := by tac, then exactly one later use as an argument.",
    "how": "Pass (by tac) in the argument position; the expected type is then known, so T is not written.",
    "before": "example (a b : ℕ) (f : a < b → a ≤ b) (h0 : a + 1 ≤ b) : a ≤ b := by\n  have h : a < b := by omega\n  exact f h",
@@ -86,9 +92,9 @@
     "note": "Heartbeat direction is the same at every position with data."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Do not inline a have used 3 or more times; the term is then copied each time.",
    "move_class": "inline_have_into_term",
@@ -102,6 +108,8 @@
     "rw",
     "show"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "have h : a = b := by tac; rw [h] with no other use of h.",
    "how": "rw [show a = b by tac] (or from term). The statement can often be partly elided: show _ = b.",
    "before": "example (x y : ℕ) (hy : y = 2 * x) : x + y = 3 * x := by\n  have h : x + y = x + 2 * x := by rw [hy]\n  rw [h]; ring",
@@ -117,9 +125,9 @@
     "note": "Heartbeat direction is the same at every position with data."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Often the whole have dissolves once the hypothesis is rewritten directly; check whether the closing tactic works without it.",
    "move_class": "inline_have_show",
@@ -132,6 +140,8 @@
     "have",
     "omega"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "Several consecutive have lines each feed only the next one or the final close.",
    "how": "Fold them into the final call: pass them as terms, give them to simp/omega/linarith as arguments, or let a closer find them from context.",
    "before": "example (a b c : ℤ) (h1 : a ≤ b) (h2 : b ≤ c) : a ≤ c + 1 := by\n  have h3 : a ≤ c := le_trans h1 h2\n  have h4 : c ≤ c + 1 := by omega\n  exact le_trans h3 h4",
@@ -147,9 +157,9 @@
     "note": "Heartbeat direction is the same at every position with data."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Stable across 4.25-4.33 as far as known.",
    "move_class": "drop_have_chain",
@@ -163,6 +173,8 @@
     "let",
     "generalize"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "A local abbreviation is introduced to shorten text, but is used fewer than about three times.",
    "how": "Substitute the definition back, or delete the abbreviation if the closing tactic does not need it. Names count as one token, so an abbreviation only pays when it replaces a long expression used often.",
    "before": "example (a b : ℕ) (h : a < b) : a + 1 ≤ b := by\n  set d := b - a with hd\n  omega",
@@ -178,9 +190,9 @@
     "note": "Heartbeat effect depends on where in the proof the edit sits; profile before deciding."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Stable across 4.25-4.33 as far as known.",
    "move_class": "drop_set_let",
@@ -193,6 +205,11 @@
     "simp",
     "heartbeats"
    ],
+   "goal_tags": [
+    "List.length",
+    "List.append"
+   ],
+   "at": {},
    "when": "A non-terminal simp or simp [..] is expensive (the profiler shows it) and runs on a big context.",
    "how": "Run simp? once, paste the simp only list. The list adds tokens but removes simp's search. Use when heartbeat weight dominates.",
    "before": "example (xs ys : List ℕ) : (xs ++ ys).length = ys.length + xs.length := by\n  simp [Nat.add_comm]",
@@ -208,9 +225,9 @@
     "note": "Heartbeat direction is the same at every position with data."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Lemma lists break on renames across Lean 4.25-4.33; keep a bare simp as fallback if versions matter more than heartbeats. 4.33 transparency change can stop listed lemmas from firing.",
    "move_class": "simp_to_simp_only",
@@ -222,6 +239,10 @@
    "tags": [
     "simp"
    ],
+   "goal_tags": [
+    "List.length"
+   ],
+   "at": {},
    "when": "simp only [long list] where bare simp closes the goal; the list costs many tokens.",
    "how": "Try plain simp (or simp with one or two lemmas). Keep it only if heartbeats do not rise by more than the token gain is worth.",
    "before": "example (xs : List ℕ) : (xs.map (· + 1)).length = xs.length := by\n  simp only [List.length_map]",
@@ -237,9 +258,9 @@
     "note": "Heartbeat effect depends on where in the proof the edit sits; profile before deciding."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Bare simp is the most version-stable form.",
    "move_class": "simp_only_to_simp",
@@ -251,6 +272,8 @@
    "tags": [
     "grind"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "Goal after intros is first-order with equalities, linear arithmetic, or constructor injectivity; the manual proof is several lines.",
    "how": "Try grind, then grind only [lemmas] from grind? to bound cost. Tokens fall, but grind can cost much more search than the steps it replaces; check the profile before and after.",
    "before": "example (a b : ℕ) (h : a = b + 1) (h2 : b > 3) : a > 4 ∧ a ≠ 0 := by\n  constructor <;> omega",
@@ -266,9 +289,9 @@
     "note": "Heartbeat effect depends on where in the proof the edit sits; profile before deciding."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "grind behaviour changed in 4.26 (cutsat to lia), 4.30 (canonicalizer), 4.32, 4.33; a bare grind can flip between versions. Fallback: first | omega | grind.",
    "move_class": "grind_replaces",
@@ -281,6 +304,10 @@
     "grind",
     "heartbeats"
    ],
+   "goal_tags": [
+    "List.length"
+   ],
+   "at": {},
    "when": "grind closes a goal but costs many heartbeats or fails on another toolchain.",
    "how": "Read grind? output; use grind only [..] or replace with omega/simp_all/exact of the lemma it used.",
    "before": "example (xs : List ℕ) (h : xs = []) : xs.length = 0 := by grind",
@@ -296,9 +323,9 @@
     "note": "Heartbeat direction is the same at every position with data."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Library names can change between versions; keep grind as the fallback if the explicit term breaks.",
    "move_class": "grind_removed",
@@ -311,6 +338,8 @@
     "omega",
     "arith"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "A chain of le_trans / add_lt_add / Nat.* lemma steps or calc over linear arithmetic with +, -, *const, /const, %const, min, max.",
    "how": "One omega. If context is large, clear unrelated hypotheses first, since omega reads all of them.",
    "before": "example (n m : ℕ) (h : n < m) : n + 2 ≤ m + 1 := by\n  have := Nat.succ_le_of_lt h\n  exact Nat.succ_le_succ this",
@@ -326,9 +355,9 @@
     "note": "Too little mined evidence; measure with the profiler."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "From 4.33, lia is a stronger sibling; omega stays stable across 4.25-4.33.",
    "move_class": "omega_replaces",
@@ -342,6 +371,8 @@
     "nlinarith",
     "positivity"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "linarith or nlinarith on a goal that is linear over ℕ/ℤ, or a positivity/monotonicity claim.",
    "how": "Use omega for linear integer goals; positivity for 0 < / 0 ≤ of products, sums, powers; gcongr for monotone shapes.",
    "before": "example (x y : ℤ) (h : 0 ≤ x) (h' : 0 ≤ y) : 0 ≤ x + 2 * y := by linarith",
@@ -357,9 +388,9 @@
     "note": "Too little mined evidence; measure with the profiler."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Stable across 4.25-4.33 as far as known.",
    "move_class": "linarith_to_omega",
@@ -372,6 +403,8 @@
     "aesop",
     "heartbeats"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "aesop closes a goal but is slow or its search is opaque.",
    "how": "Use aesop? and paste the Try this script, then shorten with simp_all or exact.",
    "before": "example (p q : Prop) (hp : p) (hq : q) : p ∧ q := by aesop",
@@ -387,9 +420,9 @@
     "note": "Too little mined evidence; measure with the profiler."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Stable across 4.25-4.33 as far as known.",
    "move_class": "aesop_replaced",
@@ -401,6 +434,8 @@
    "tags": [
     "rw"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "Several rw lines in a row on the same goal or hypothesis.",
    "how": "One rw [a, b, c]. Add at h ⊢ to hit several locations at once.",
    "before": "example (a b : ℕ) (h1 : a = b) (h2 : b = 3) : a + 0 = 3 := by\n  rw [Nat.add_zero]\n  rw [h1]\n  rw [h2]",
@@ -416,9 +451,9 @@
     "note": "Heartbeat effect depends on where in the proof the edit sits; profile before deciding."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Stable across 4.25-4.33 as far as known.",
    "move_class": "rw_chain_merge",
@@ -432,6 +467,8 @@
     "simp only",
     "binders"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "A rw chain repeats one rewrite across many occurrences, or needs conv / nth_rewrite.",
    "how": "simp only [lemma] rewrites all instances and goes under binders.",
    "before": "example (f : ℕ → ℕ) (h : ∀ x, f x = x) : f 1 + f 2 = 3 := by\n  rw [h 1, h 2]",
@@ -447,9 +484,9 @@
     "note": "Heartbeat direction is the same at every position with data."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "rw is cheaper than simp when it works; use this only when rw fails or needs several lines.",
    "move_class": "rw_to_simp_only",
@@ -462,6 +499,8 @@
     "rw",
     "transport"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "rw [h]; exact t where the rewrite only changes the goal's type.",
    "how": "h ▸ t, or (h ▸ t : T). Test the motive; if it fails, use rwa [h].",
    "before": "example (a b : ℕ) (h : a = b) (p : ℕ → Prop) (ha : p a) : p b := by\n  rw [← h]\n  exact ha",
@@ -477,9 +516,9 @@
     "note": "Heartbeat effect depends on where in the proof the edit sits; profile before deciding."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Stable across 4.25-4.33 as far as known.",
    "move_class": "rw_to_term",
@@ -492,6 +531,8 @@
     "rwa",
     "simpa"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "rw/simp at h followed by exact h, or rw then assumption.",
    "how": "rwa [..] at h, or simpa [..] using h.",
    "before": "example (a b : ℕ) (h : a + 0 = b) : a = b := by\n  rw [Nat.add_zero] at h\n  exact h",
@@ -507,9 +548,9 @@
     "note": "Heartbeat direction is the same at every position with data."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "simpa is brittle if a linter-fired simp set changes; rwa is stable.",
    "move_class": "rwa_simpa",
@@ -522,6 +563,8 @@
     "intro",
     "fun"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "Goal is ∀ / → and the proof is intro x y followed by one exact.",
    "how": "Write fun x y => term, or fun ⟨a, b⟩ => .. for patterns.",
    "before": "example (p q : Prop) : p → q → p := by\n  intro hp _\n  exact hp",
@@ -537,9 +580,9 @@
     "note": "Heartbeat effect depends on where in the proof the edit sits; profile before deciding."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Stable across 4.25-4.33 as far as known.",
    "move_class": "intro_exact_to_fun",
@@ -552,6 +595,8 @@
     "constructor",
     "anonymous-constructor"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "Goal is a structure, ∧, ↔ or ∃ and every field has a one-line proof.",
    "how": "⟨a, b⟩ in term mode; (by tac) per field if needed. For ↔ use ⟨fun h => .., fun h => ..⟩.",
    "before": "example (p q : Prop) (hp : p) (hq : q) : p ∧ q := by\n  constructor\n  · exact hp\n  · exact hq",
@@ -567,9 +612,9 @@
     "note": "Heartbeat direction is the same at every position with data."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Stable across 4.25-4.33 as far as known.",
    "move_class": "constructor_to_anon",
@@ -584,6 +629,8 @@
     "all_goals",
     "exacts"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "Several sibling goals are closed by the same tactic or by one-line exacts.",
    "how": "t <;> s runs s on every goal from t; exacts [a, b]; all_goals s for leftover goals.",
    "before": "example (p q : Prop) (hp : p) (hq : q) : (p ∧ q) ∧ (q ∧ p) := by\n  refine ⟨⟨?_, ?_⟩, ⟨?_, ?_⟩⟩\n  · exact hp\n  · exact hq\n  · exact hq\n  · exact hp",
@@ -599,9 +646,9 @@
     "note": "Too little mined evidence; measure with the profiler."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "<;> reruns elaboration per goal; fine for cheap closers, wasteful for simp_all on big contexts.",
    "move_class": "bullets_to_comb",
@@ -614,6 +661,8 @@
     "bullets",
     "exacts"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "Bullet blocks with a single short tactic each.",
    "how": "exacts [..], or a flat sequence of exact with focusing handled by the tactic (case _ or no focus) when only one goal remains each time.",
    "before": "example (p q : Prop) (hp : p) (hq : q) : p ∧ q := by\n  refine ⟨?_, ?_⟩\n  · exact hp\n  · exact hq",
@@ -629,9 +678,9 @@
     "note": "Heartbeat direction is the same at every position with data."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Stable across 4.25-4.33 as far as known.",
    "move_class": "bullets_removed",
@@ -645,6 +694,8 @@
     "underscore",
     "unification"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "A lemma application spells arguments the unifier can infer from hypotheses or the goal.",
    "how": "Use _ for them, or drop (x := ..) named args. Keep the ones the unifier cannot solve (compile to check).",
    "before": "example (a b c : ℕ) (h : a ≤ b) : a + c ≤ b + c :=\n  Nat.add_le_add_right h c",
@@ -660,9 +711,9 @@
     "note": "Heartbeat direction is the same at every position with data."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Underscores can make elaboration slower if unification postpones; check heartbeats.",
    "move_class": "explicit_args_to_underscore",
@@ -675,6 +726,8 @@
     "ascription",
     "binder"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "(x : T) casts, (f : A → B) annotations, binder types in fun/∀ that follow from the expected type.",
    "how": "Delete, recompile. Keep numerals ascribed only when elaboration becomes ambiguous (ℕ vs ℤ vs ℝ).",
    "before": "example : ∀ n : ℕ, n + 0 = n := fun (n : ℕ) => rfl",
@@ -690,9 +743,9 @@
     "note": "Heartbeat direction is the same at every position with data."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Stable across 4.25-4.33 as far as known.",
    "move_class": "drop_type_ascription",
@@ -705,6 +758,8 @@
     "show",
     "change"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "show T or change T followed by tactics that work on the original goal form.",
    "how": "Delete. Keep when the later tactic depends on the unfolded form; then prefer a term ascription (h : T).",
    "before": "example (n : ℕ) : n * 1 = n := by\n  show n * 1 = n\n  simp",
@@ -720,9 +775,9 @@
     "note": "Heartbeat direction is the same at every position with data."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "The change ... with syntax was removed in Lean 4.30; avoid it.",
    "move_class": "drop_show_change",
@@ -736,6 +791,8 @@
     "by",
     "rfl"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "exact (by tac), by exact t, by rfl, `by simpa using h` where h already has the type.",
    "how": "Write tac directly, or the bare term t / rfl / h.",
    "before": "example (n : ℕ) : n + 0 = n := by exact (by simp)",
@@ -751,9 +808,9 @@
     "note": "Too little mined evidence; measure with the profiler."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Stable across 4.25-4.33 as far as known.",
    "move_class": "exact_by_unwrap",
@@ -766,6 +823,8 @@
     "refine",
     "apply"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "exact f a b (by tac1) (by tac2) or apply f followed by a goal-by-goal rewrite.",
    "how": "refine f a b ?_ ?_ <;> tac, or refine f (?_ : T) when the type of a middle step needs naming once.",
    "before": "example (p q r : Prop) (h : p → q) (g : q → r) (hp : p) : r := by\n  apply g\n  apply h\n  exact hp",
@@ -781,9 +840,9 @@
     "note": "Heartbeat direction is the same at every position with data."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Stable across 4.25-4.33 as far as known.",
    "move_class": "refine_qmark",
@@ -796,6 +855,8 @@
     "apply",
     "exact"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "apply followed by one exact (or assumption).",
    "how": "exact f h (or exact f ‹_›).",
    "before": "example (p q : Prop) (f : p → q) (hp : p) : q := by\n  apply f\n  exact hp",
@@ -811,9 +872,9 @@
     "note": "Heartbeat direction is the same at every position with data."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Stable across 4.25-4.33 as far as known.",
    "move_class": "apply_exact_merge",
@@ -828,6 +889,8 @@
     "match",
     "rcases"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "Nested cases / induction / bullets, each case short.",
    "how": "match n with | 0 => .. | k + 1 => .. ; rcases n with _ | _ | n ; or induction n <;> simp_all for uniform cases.",
    "before": "example (n : ℕ) : n = 0 ∨ 0 < n := by\n  cases n with\n  | zero => exact Or.inl rfl\n  | succ k => exact Or.inr (Nat.succ_pos k)",
@@ -843,9 +906,9 @@
     "note": "Heartbeat direction is the same at every position with data."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Goal order after cases/induction on match-defined functions changed in 4.26; avoid relying on case tags and rename_i.",
    "move_class": "induction_to_match_or_rec",
@@ -857,6 +920,8 @@
    "tags": [
     "induction"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "induction/cases whose branches are all closed by the same decision procedure.",
    "how": "Delete induction, call the closer on the whole goal; or use a library recursion principle.",
    "before": "example (n : ℕ) : n < n + 1 := by\n  induction n with\n  | zero => decide\n  | succ k ih => omega",
@@ -872,9 +937,9 @@
     "note": "Heartbeat effect depends on where in the proof the edit sits; profile before deciding."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Heartbeats can rise on this move when the closer must do real search; verify.",
    "move_class": "drop_induction",
@@ -888,6 +953,8 @@
     "push_neg",
     "contrapose"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "by_contra h; push_neg at h, or by_contra then simp at h.",
    "how": "by_contra! h (and contrapose! for contrapositive).",
    "before": "example (a b : ℕ) (h : ¬ b < a) : a ≤ b := by\n  by_contra h2\n  push_neg at h2\n  omega",
@@ -903,9 +970,9 @@
     "note": "Too little mined evidence; measure with the profiler."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Stable across 4.25-4.33 as far as known.",
    "move_class": "by_contra_push_neg",
@@ -918,6 +985,8 @@
     "calc",
     "trans"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "calc with two or three steps, or steps that are each closed by a one-line lemma.",
    "how": "Use .trans / le_trans / lt_of_lt_of_le chains, or one omega/nlinarith/positivity for the whole inequality. Heartbeats can fall because calc rechecks every _ line.",
    "before": "example (a b c : ℕ) (h1 : a ≤ b) (h2 : b ≤ c) : a ≤ c := by\n  calc a ≤ b := h1\n    _ ≤ c := h2",
@@ -933,9 +1002,9 @@
     "note": "Too little mined evidence; measure with the profiler."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Stable across 4.25-4.33 as far as known.",
    "move_class": "calc_to_chain",
@@ -948,6 +1017,8 @@
     "calc",
     "ring"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "Two adjacent calc steps use the same relation and the first is by rfl/simp/ring.",
    "how": "Merge them into one step whose proof is one tactic (ring, omega, simp).",
    "before": "example (a b : ℕ) : a * 2 + b = b + a + a := by\n  calc a * 2 + b = a + a + b := by ring\n    _ = b + a + a := by ring",
@@ -963,9 +1034,9 @@
     "note": "Heartbeat effect depends on where in the proof the edit sits; profile before deciding."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Stable across 4.25-4.33 as far as known.",
    "move_class": "calc_shortened",
@@ -978,6 +1049,8 @@
     "norm_num",
     "decide"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "Goals about literals, small bounded Finset/Fin/Nat facts, divisibility of numerals.",
    "how": "norm_num [defs] in one call; decide for tiny decidable props; omega for linear.",
    "before": "example : (12 : ℕ) % 5 = 2 ∧ 2 ^ 5 = 32 := by\n  constructor\n  · rfl\n  · rfl",
@@ -993,9 +1066,9 @@
     "note": "Too little mined evidence; measure with the profiler."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "decide cost explodes on big Nat/Finset terms; bound the range first.",
    "move_class": "norm_num_replaces",
@@ -1008,6 +1081,8 @@
     "cast",
     "norm_cast"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "Goal mixes ↑n casts and chains of Nat.cast_add / Int.natCast_* rewrites.",
    "how": "exact_mod_cast h; push_cast; norm_cast at h ⊢.",
    "before": "example (a b : ℕ) (h : a ≤ b) : (a : ℤ) ≤ b := by\n  rw [Int.ofNat_le]\n  exact h",
@@ -1023,9 +1098,9 @@
     "note": "Too little mined evidence; measure with the profiler."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Library cast lemma names (Int.ofNat_*, Int.natCast_*) were renamed repeatedly; cast tactics are stable.",
    "move_class": "cast_tactics",
@@ -1039,6 +1114,8 @@
     "congr",
     "gcongr"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "Goal differs from a known fact only in a subterm.",
    "how": "convert h using 2 leaves just the differing subgoals; congr! and gcongr for function applications and monotone shapes.",
    "before": "example (f : ℕ → ℕ) (a b : ℕ) (h : a = b) : f (a + 0) = f b := by\n  rw [Nat.add_zero, h]",
@@ -1054,9 +1131,9 @@
     "note": "Too little mined evidence; measure with the profiler."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Stable across 4.25-4.33 as far as known.",
    "move_class": "convert_congr",
@@ -1069,6 +1146,8 @@
     "exists",
     "use"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "refine ⟨w, ?_⟩ then a closing tactic, or exists w.",
    "how": "use w closes trivial residual goals automatically (rfl, trivial).",
    "before": "example : ∃ n : ℕ, n + 2 = 5 := by\n  refine ⟨3, ?_⟩\n  rfl",
@@ -1084,9 +1163,9 @@
     "note": "Heartbeat direction is the same at every position with data."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Stable across 4.25-4.33 as far as known.",
    "move_class": "use_witness",
@@ -1099,6 +1178,8 @@
     "ext",
     "funext"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "ext x followed by rfl/simp, or Subtype.ext/Fin.ext before simp.",
    "how": "Delete the ext and call simp/rfl on the equation, or use funext _ <;> exact.",
    "before": "example (f : ℕ → ℕ) : (fun x => f x) = f := by\n  funext x\n  rfl",
@@ -1114,9 +1195,9 @@
     "note": "Heartbeat direction is the same at every position with data."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Stable across 4.25-4.33 as far as known.",
    "move_class": "ext_funext_removed",
@@ -1128,6 +1209,11 @@
    "tags": [
     "simp"
    ],
+   "goal_tags": [
+    "List.length",
+    "List.append"
+   ],
+   "at": {},
    "when": "simp [a, b, c, d] where some lemmas are already simp lemmas or unused.",
    "how": "Remove one lemma at a time and recompile (a linter flags unused simp args). Fewer tokens, usually fewer heartbeats.",
    "before": "example (xs : List ℕ) : (xs ++ []).length = xs.length := by\n  simp [List.length_append, List.append_nil]",
@@ -1143,9 +1229,9 @@
     "note": "Heartbeat effect depends on where in the proof the edit sits; profile before deciding."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Stable across 4.25-4.33 as far as known.",
    "move_class": "simp_arg_trim",
@@ -1158,6 +1244,8 @@
     "simp_all",
     "simp [*]"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "Many residual goals each closed by a short simp or assumption.",
    "how": "all_goals simp [*] once at the end, or simp_all.",
    "before": "example (a b : ℕ) (h : a = b) : a + 1 = b + 1 ∧ b = a := by\n  refine ⟨?_, ?_⟩\n  · rw [h]\n  · rw [h]",
@@ -1173,9 +1261,9 @@
     "note": "Heartbeat direction is the same at every position with data."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Quadratic on big contexts; clear unrelated hypotheses first.",
    "move_class": "simp_star",
@@ -1188,6 +1276,8 @@
     "positivity",
     "gcongr"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "0 < e, 0 ≤ e, or f x ≤ f y with the same outer shape.",
    "how": "positivity; gcongr (then side goals ?_ are usually assumptions).",
    "before": "example (x : ℝ) (h : 0 < x) : 0 < x ^ 2 + x := by\n  have := sq_nonneg x\n  linarith",
@@ -1203,9 +1293,9 @@
     "note": "Too little mined evidence; measure with the profiler."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Stable across 4.25-4.33 as far as known.",
    "move_class": "positivity_gcongr",
@@ -1218,6 +1308,8 @@
     "lambda",
     "eta"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "fun x => f x, fun x => x + 1, fun x => g (h x).",
    "how": "f, (· + 1), g ∘ h.",
    "before": "example (xs : List ℕ) : (xs.map (fun x => x + 1)).length = xs.length := by simp",
@@ -1233,9 +1325,9 @@
     "note": "Heartbeat effect depends on where in the proof the edit sits; profile before deciding."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Stable across 4.25-4.33 as far as known.",
    "move_class": "term_mode_lambda",
@@ -1248,6 +1340,8 @@
     "parens",
     "<|"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "Nested applications ending in a long argument; each paren pair costs 2 tokens.",
    "how": "f <| g <| x, or x |> f. Do not mix with dot-notation chains.",
    "before": "example (a b : ℕ) (h : a ≤ b) : a ≤ b + 1 :=\n  Nat.le_succ_of_le (Nat.le_trans h (Nat.le_refl b))",
@@ -1263,9 +1357,9 @@
     "note": "Heartbeat direction is the same at every position with data."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Stable across 4.25-4.33 as far as known.",
    "move_class": "pipe_paren_removal",
@@ -1278,6 +1372,11 @@
     "library",
     "exact?"
    ],
+   "goal_tags": [
+    "List.append",
+    "∈"
+   ],
+   "at": {},
    "when": "Several steps recompute a fact (monotonicity, membership, cardinality, sum) that has a named lemma.",
    "how": "Search with exact? / apply? / rw? on the sub-goal, or grep the lemma namespace; use the lemma directly. Prefer short, stable names.",
    "before": "example (xs : List ℕ) (a : ℕ) (h : a ∈ xs) : a ∈ xs ++ [0] := by\n  simp [h]",
@@ -1293,9 +1392,9 @@
     "note": "Heartbeat effect depends on where in the proof the edit sits; profile before deciding."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Check the name on Lean 4.25 and 4.33: standard-library List lemma names churn.",
    "move_class": "lemma_swap",
@@ -1308,6 +1407,8 @@
     "dead",
     "linter"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "A step is unused (have never referenced, tactic after goals are closed, simp that made no progress, redundant clear or intro).",
    "how": "Delete it and recompile; use unused-variable and unusedTactic linters, or bisect the steps.",
    "before": "example (a b : ℕ) (h : a < b) : a ≤ b := by\n  have h2 : a + 1 ≤ b := h\n  omega",
@@ -1323,9 +1424,9 @@
     "note": "Heartbeat direction is the same at every position with data."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Stable across 4.25-4.33 as far as known.",
    "move_class": "step_deleted",
@@ -1338,6 +1439,8 @@
     "first",
     "compat"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "A proof that is fragile across Lean 4.25-4.33 (grind, simp lists, renamed lemmas).",
    "how": "first | omega | simp | grind, cheapest first (failed branches still cost heartbeats).",
    "before": "example (a b : ℕ) (h : a < b) : a + 1 ≤ b := by grind",
@@ -1353,9 +1456,9 @@
     "note": "Too little mined evidence; measure with the profiler."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Adds a few tokens; only when a cross-version gate fails.",
    "move_class": "",
@@ -1369,6 +1472,8 @@
     "clear",
     "heartbeats"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "omega or simp_all is slow because the context is large.",
    "how": "clear h1 h2 .. or use simp only [h]; omega only reads relevant facts when the context is small.",
    "before": "example (a b : ℕ) (big : ∀ x : ℕ, x * 0 = 0) (h : a < b) : a + 1 ≤ b := by\n  simp_all <;> omega",
@@ -1384,9 +1489,9 @@
     "note": "Too little mined evidence; measure with the profiler."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Stable across 4.25-4.33 as far as known.",
    "move_class": "",
@@ -1400,6 +1505,8 @@
     "heartbeats",
     "defeq"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "rfl or exact is slow because defeq checking unfolds definitions.",
    "how": "with_reducible rfl / with_reducible exact h; if it fails, the unfolding was needed.",
    "before": "example (a : ℕ) : a + 0 = a := by rfl",
@@ -1415,9 +1522,9 @@
     "note": "Too little mined evidence; measure with the profiler."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "4.28 added with_unfolding_none; 4.32 with_implicit.",
    "move_class": "",
@@ -1430,6 +1537,10 @@
     "decide",
     "heartbeats"
    ],
+   "goal_tags": [
+    "Finset.range"
+   ],
+   "at": {},
    "when": "decide on Nat/Finset/Fin goals blows up the kernel.",
    "how": "Use norm_num / simp with simprocs, or reduce to a smaller range before decide.",
    "before": "example : ∀ x ∈ Finset.range 4, x * x < 16 := by decide",
@@ -1445,9 +1556,9 @@
     "note": "Too little mined evidence; measure with the profiler."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Avoid native_decide and kernel-trust options.",
    "move_class": "",
@@ -1460,6 +1571,8 @@
     "names",
     "compat"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "A proof opens a namespace or relies on short ambiguous names.",
    "how": "Use Nat.lt_irrefl rather than lt_irrefl guessed from open; 4.33 made some Nat.* lemmas protected.",
    "before": "open Nat in\nexample (a : ℕ) : ¬ a < a := lt_irrefl a",
@@ -1475,9 +1588,9 @@
     "note": "Too little mined evidence; measure with the profiler."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Costs a few tokens; wins on version compatibility.",
    "move_class": "",
@@ -1490,6 +1603,8 @@
     "rename_i",
     "compat"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "rename_i, a✝ names, case tags after induction or cases.",
    "how": "Use rcases/obtain with explicit patterns or ‹T› / assumption.",
    "before": "example (p q : Prop) (h : p ∧ q) : p := by\n  cases h\n  rename_i hp _\n  exact hp",
@@ -1505,9 +1620,9 @@
     "note": "Too little mined evidence; measure with the profiler."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Case order after match compilation changed in 4.26.",
    "move_class": "",
@@ -1519,6 +1634,8 @@
    "tags": [
     "assumption"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "A named hypothesis is used once and its name was introduced only for that.",
    "how": "‹T› or assumption; naming in intro becomes _.",
    "before": "example (p q : Prop) (hp : p) (hq : q) : q := by\n  exact hq",
@@ -1534,9 +1651,9 @@
     "note": "Too little mined evidence; measure with the profiler."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Stable across 4.25-4.33 as far as known.",
    "move_class": "",
@@ -1548,6 +1665,8 @@
    "tags": [
     "dot-notation"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "Expected type is known and constructor names are namespaced.",
    "how": ".inl .inr .intro .refl .symm .trans instead of Or.inl, Exists.intro, Eq.refl.",
    "before": "example (p q : Prop) (hp : p) : p ∨ q := Or.inl hp",
@@ -1563,9 +1682,9 @@
     "note": "Too little mined evidence; measure with the profiler."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Stable across 4.25-4.33 as far as known.",
    "move_class": "",
@@ -1578,6 +1697,8 @@
     "Or.imp",
     "Exists.imp"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "Goal maps a disjunction/conjunction/existential to another with a per-case function.",
    "how": "Or.imp, And.imp, Exists.imp, Or.elim, Iff.trans, Function.comp.",
    "before": "example (p q r s : Prop) (f : p → r) (g : q → s) : p ∨ q → r ∨ s := by\n  intro h\n  cases h with\n  | inl hp => exact Or.inl (f hp)\n  | inr hq => exact Or.inr (g hq)",
@@ -1593,9 +1714,9 @@
     "note": "Too little mined evidence; measure with the profiler."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Mined as a repeated winning rewrite in earlier runs (see plan learnings).",
    "move_class": "",
@@ -1607,6 +1728,8 @@
    "tags": [
     "induction"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "Induction starts at a base other than 0, or over a well-founded order, or needs strong hypotheses.",
    "how": "Nat.le_induction, Nat.strong_induction_on, Nat.twoStepInduction, List.rec-style via induction ... generalizing.",
    "before": "example (n : ℕ) (h : 3 ≤ n) : 3 ≤ n * n := by\n  induction n with\n  | zero => omega\n  | succ k ih => nlinarith",
@@ -1622,9 +1745,9 @@
     "note": "Too little mined evidence; measure with the profiler."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Renames: Nat.le_induction argument order differs across Mathlib releases.",
    "move_class": "",
@@ -1637,6 +1760,8 @@
     "rw",
     "show"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "A rewrite needs a one-off equation proved by a short tactic.",
    "how": "rw [show _ = _ by tac] or rw [h (by omega)].",
    "before": "example (a b : ℕ) (h : b = 2 * a) : a + b = 3 * a := by\n  have e : a + b = a + 2 * a := by rw [h]\n  rw [e]; ring",
@@ -1652,9 +1777,9 @@
     "note": "Too little mined evidence; measure with the profiler."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Stable across 4.25-4.33 as far as known.",
    "move_class": "",
@@ -1667,6 +1792,8 @@
     "if",
     "by_cases"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "by_cases c followed by rw [if_pos]/[if_neg] in each branch.",
    "how": "split_ifs <;> omega, or simp [h] with the decision in context.",
    "before": "example (a b : ℕ) : (if a ≤ b then b else a) ≥ a := by\n  by_cases h : a ≤ b\n  · rw [if_pos h]; exact h\n  · rw [if_neg h]",
@@ -1682,9 +1809,9 @@
     "note": "Too little mined evidence; measure with the profiler."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Stable across 4.25-4.33 as far as known.",
    "move_class": "",
@@ -1697,6 +1824,8 @@
     "rcases",
     "Nat"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "Nested cases on n for 0, 1, 2, n+3.",
    "how": "rcases n with _ | _ | _ | n, then all_goals omega / simp, or match with | 0 | 1 => .. .",
    "before": "example (n : ℕ) : n ≤ 2 ∨ 3 ≤ n := by\n  cases n with\n  | zero => left; omega\n  | succ k =>\n    cases k with\n    | zero => left; omega\n    | succ j =>\n      cases j with\n      | zero => left; omega\n      | succ m => right; omega",
@@ -1712,9 +1841,9 @@
     "note": "Too little mined evidence; measure with the profiler."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Stable; omega reads the numerals produced by rcases.",
    "move_class": "",
@@ -1727,6 +1856,12 @@
     "Finset",
     "sum"
    ],
+   "goal_tags": [
+    "Finset.sum",
+    "Finset.range",
+    "∑"
+   ],
+   "at": {},
    "when": "A Finset sum identity is proved by induction on the index set.",
    "how": "simp [Finset.sum_range_succ] for small concrete ranges; Finset.sum_comm / Finset.sum_congr / Finset.sum_le_sum for structure.",
    "before": "example : ∑ i ∈ Finset.range 4, i = 6 := by\n  decide",
@@ -1742,9 +1877,9 @@
     "note": "Too little mined evidence; measure with the profiler."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "BigOperators notation ∑ i ∈ s differs from ∑ i in s on older Mathlib; check on the oldest toolchain.",
    "move_class": "",
@@ -1757,6 +1892,8 @@
     "fun_prop",
     "continuity"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "Continuity / measurability / differentiability / monotonicity side goals proved by lemma threading.",
    "how": "fun_prop, continuity, measurability, positivity, bound.",
    "before": "example : Continuous (fun x : ℝ => x ^ 2 + 1) :=\n  (continuous_pow 2).add continuous_const",
@@ -1772,9 +1909,9 @@
     "note": "Too little mined evidence; measure with the profiler."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Stable across 4.25-4.33 as far as known.",
    "move_class": "",
@@ -1786,6 +1923,8 @@
    "tags": [
     "simpa"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "have h := ..; simp at h; exact h",
    "how": "simpa using term.",
    "before": "example (xs : List ℕ) (h : 0 < (xs ++ []).length) : 0 < xs.length := by\n  have h' := h\n  simp at h'\n  exact h'",
@@ -1801,9 +1940,9 @@
     "note": "Too little mined evidence; measure with the profiler."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Stable across 4.25-4.33 as far as known.",
    "move_class": "",
@@ -1816,6 +1955,8 @@
     "at",
     "location"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "The same simp/rw/norm_num is applied to several hypotheses in turn.",
    "how": "simp at h1 h2 ⊢, rw [e] at *, norm_num at h ⊢.",
    "before": "example (a b : ℕ) (h1 : a + 0 = 1) (h2 : b + 0 = 2) : a + b = 3 := by\n  simp at h1\n  simp at h2\n  omega",
@@ -1831,9 +1972,9 @@
     "note": "Too little mined evidence; measure with the profiler."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Stable across 4.25-4.33 as far as known.",
    "move_class": "",
@@ -1845,6 +1986,8 @@
    "tags": [
     "subst"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "An equation x = e is used only to rewrite everywhere.",
    "how": "subst or rintro rfl; then every later mention disappears.",
    "before": "example (a b : ℕ) (h : a = b + 1) (p : ℕ → Prop) (hp : p (b + 1)) : p a := by\n  rw [h]\n  exact hp",
@@ -1860,9 +2003,9 @@
     "note": "Too little mined evidence; measure with the profiler."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Stable across 4.25-4.33 as far as known.",
    "move_class": "",
@@ -1875,6 +2018,10 @@
     "rfl",
     "heartbeats"
    ],
+   "goal_tags": [
+    "List.length"
+   ],
+   "at": {},
    "when": "Goal is a unfolding of a definition or a computation on literals.",
    "how": "rfl, or exact of the term; cheaper than simp/unfold.",
    "before": "example (xs : List ℕ) : (0 :: xs).length = xs.length + 1 := by simp",
@@ -1890,9 +2037,9 @@
     "note": "Too little mined evidence; measure with the profiler."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Library List.length structure changes can break rfl; test on all toolchains.",
    "move_class": "",
@@ -1905,6 +2052,8 @@
     "heartbeats",
     "ladder"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "Any slow step; use the profiler to locate it.",
    "how": "Try in order: exact/rfl, rw, simp only, omega, simp, norm_num, nlinarith, aesop, grind. Use the cheapest that closes it.",
    "before": "example (a b : ℕ) (h : a = b) : b = a := by\n  grind",
@@ -1920,9 +2069,9 @@
     "note": "Too little mined evidence; measure with the profiler."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Stable across 4.25-4.33 as far as known.",
    "move_class": "",
@@ -1934,6 +2083,8 @@
    "tags": [
     "symm"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "rw [← h] then exact, or exact h.symm after rewriting.",
    "how": "Pass h.symm to the term that needs it.",
    "before": "example (a b : ℕ) (h : a = b) : b = a := by\n  rw [h]",
@@ -1949,9 +2100,9 @@
     "note": "Too little mined evidence; measure with the profiler."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Stable across 4.25-4.33 as far as known.",
    "move_class": "",
@@ -1964,6 +2115,8 @@
     "interval_cases",
     "fin_cases"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "A bounded variable is split by repeated cases.",
    "how": "interval_cases x <;> simp_all, fin_cases i <;> simp, or decide.",
    "before": "example (x : ℕ) (h : x < 3) : x * x < 5 := by\n  cases x with\n  | zero => decide\n  | succ y =>\n    cases y with\n    | zero => decide\n    | succ z =>\n      cases z with\n      | zero => decide\n      | succ w => omega",
@@ -1979,9 +2132,9 @@
     "note": "Too little mined evidence; measure with the profiler."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Stable across 4.25-4.33 as far as known.",
    "move_class": "",
@@ -1995,6 +2148,8 @@
     "simp_all",
     "omega"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "The final 2-4 lines of a proof all do arithmetic or logic simplification of the same shape.",
    "how": "Delete from the bottom up, replace by omega / simp_all / grind / tauto and recompile; stop at the first failure.",
    "before": "example (p q : Prop) (hp : p) (hq : q) (h : p ∧ q → ¬ ¬ p) : ¬ ¬ p := by\n  apply h\n  constructor\n  · exact hp\n  · exact hq",
@@ -2010,9 +2165,9 @@
     "note": "Too little mined evidence; measure with the profiler."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Stable across 4.25-4.33 as far as known.",
    "move_class": "",
@@ -2025,6 +2180,8 @@
     "induction",
     "generalizing"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "An induction fails or needs an extra have in each step.",
    "how": "induction n generalizing m, so the hypothesis covers all m; delete side lemmas.",
    "before": "example (n m : ℕ) : n + m = m + n := by\n  induction n with\n  | zero => omega\n  | succ k ih => omega",
@@ -2040,9 +2197,9 @@
     "note": "Too little mined evidence; measure with the profiler."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Stable across 4.25-4.33 as far as known.",
    "move_class": "",
@@ -2054,6 +2211,8 @@
    "tags": [
     "hoist"
    ],
+   "goal_tags": [],
+   "at": {},
    "when": "Each case branch starts with the same rw/simp.",
    "how": "Run the shared tactic before the split (or t <;> s), so it appears once.",
    "before": "example (a b : ℕ) (h : a = b) : (a = 0 → b = 0) ∧ (b = 0 → a = 0) := by\n  constructor\n  · intro h0; rw [← h]; exact h0\n  · intro h0; rw [h]; exact h0",
@@ -2069,9 +2228,9 @@
     "note": "Too little mined evidence; measure with the profiler."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Stable across 4.25-4.33 as far as known.",
    "move_class": "",
@@ -2084,6 +2243,11 @@
     "exists",
     "library"
    ],
+   "goal_tags": [
+    "List.head",
+    "∈"
+   ],
+   "at": {},
    "when": "refine ⟨_, ?_⟩ followed by providing the witness from a lemma statement.",
    "how": "exact lemma_name args (anonymous ∃ is a structure) or obtain from the lemma and pass on.",
    "before": "example (xs : List ℕ) (h : xs ≠ []) : ∃ a, a ∈ xs := by\n  obtain ⟨a, t, rfl⟩ := List.exists_cons_of_ne_nil h\n  exact ⟨a, List.mem_cons_self⟩",
@@ -2099,13 +2263,121 @@
     "note": "Too little mined evidence; measure with the profiler."
    },
    "verified": {
-    "v4.25.0": "pass",
+    "v4.27.0": "pass",
     "v4.26.0": "pass",
-    "v4.27.0": "pass"
+    "v4.25.0": "pass"
    },
    "version_notes": "Lemma names on lists are renamed often; verify on 4.25 and 4.33 before keeping.",
    "move_class": "",
    "source": "both"
+  },
+  {
+   "id": "S71-drop-helper-reclose-dependents",
+   "title": "Drop a helper fact and re-close its dependents another way",
+   "tags": [
+    "have",
+    "bullets"
+   ],
+   "goal_tags": [],
+   "at": {
+    "opening": "A helper stated at the start feeds every later step, so removing it changes the most; re-close the first dependents first.",
+    "middle": "Check which later steps name the helper before deleting it; each of them needs its own close.",
+    "closing": "A helper used only by the last steps is the easiest to fold into the final term."
+   },
+   "when": "A proof is already short, and one helper fact is used by a few later steps, each for one small rewrite or one argument; the helper's own proof is a large share of the cost.",
+   "how": "Delete the helper and the steps that mention it. Close each dependent goal on its own: a direct term, a one-line closer that finds the fact itself, or the library fact the helper wrapped. Keep the deletion only if the whole proof compiles and the total is lower.",
+   "before": "example (xs : List ℕ) (h : xs ≠ []) : 0 < xs.length ∧ xs.length ≠ 0 := by\n  have hl : 0 < xs.length := List.length_pos_iff.mpr h\n  constructor\n  · exact hl\n  · exact Nat.pos_iff_ne_zero.mp hl",
+   "after": "example (xs : List ℕ) (h : xs ≠ []) : 0 < xs.length ∧ xs.length ≠ 0 :=\n  ⟨List.length_pos_iff.mpr h, by simp [h]⟩",
+   "effect": {
+    "tokens": "unknown",
+    "heartbeats": {
+     "opening": "unknown",
+     "middle": "unknown",
+     "closing": "unknown"
+    },
+    "confidence": "low",
+    "note": "Too little mined evidence; measure with the profiler."
+   },
+   "verified": {
+    "v4.27.0": "pass",
+    "v4.26.0": "pass",
+    "v4.25.0": "pass"
+   },
+   "version_notes": "Stable across 4.25-4.33 as far as known.",
+   "move_class": "",
+   "source": "public:general-practice"
+  },
+  {
+   "id": "S72-sibling-fact-without-premise",
+   "title": "Find a sibling fact that needs no premise",
+   "tags": [
+    "library",
+    "exact?"
+   ],
+   "goal_tags": [],
+   "at": {
+    "opening": "A premise established at the start is usually shared with later steps; drop it only if nothing else uses it.",
+    "middle": "Search for the sibling by the goal's constants before adding a step that proves the premise.",
+    "closing": "At the end the goal is fixed; a weaker sibling may close it directly without the premise."
+   },
+   "when": "A library fact fits the goal except for a premise you do not have (a length, a bound, a nonemptiness), and proving the premise costs a step.",
+   "how": "Search by the constants in the goal, not by the failing name: look for a weaker or differently shaped fact about the same functions that states its result without the premise (a max or min form, an inequality instead of an equality, a membership form). Compile the sibling before dropping the premise step.",
+   "before": "example (n m : ℕ) (h : m ≤ n) : n ≤ n - m + m := by\n  have := Nat.sub_add_cancel h\n  omega",
+   "after": "example (n m : ℕ) (h : m ≤ n) : n ≤ n - m + m := by\n  rw [Nat.sub_add_eq_max]; exact le_max_left n m",
+   "effect": {
+    "tokens": "unknown",
+    "heartbeats": {
+     "opening": "unknown",
+     "middle": "unknown",
+     "closing": "unknown"
+    },
+    "confidence": "low",
+    "note": "Too little mined evidence; measure with the profiler."
+   },
+   "verified": {
+    "v4.27.0": "pass",
+    "v4.26.0": "pass",
+    "v4.25.0": "pass"
+   },
+   "version_notes": "Stable across 4.25-4.33 as far as known.",
+   "move_class": "",
+   "source": "public:general-practice"
+  },
+  {
+   "id": "S73-helper-must-pay",
+   "title": "Keep an auxiliary fact only if it removes more than it adds",
+   "tags": [
+    "have",
+    "set"
+   ],
+   "goal_tags": [],
+   "at": {
+    "opening": "A helper at the start pays only if most later steps use it.",
+    "middle": "Count the uses after the helper; two short uses rarely repay a long statement.",
+    "closing": "A helper used only by the closing step can nearly always be inlined."
+   },
+   "when": "A have or a local lemma is introduced to share work, but it is used once or twice and its statement is long.",
+   "how": "Compile the proof with the helper and without it, and compare both totals before deciding: the helper's statement and proof add cost, and each use saves only the difference to the inline form. Never judge by reading alone.",
+   "before": "example (xs : List ℕ) : (xs ++ []).length + 0 = xs.length := by\n  have h : xs ++ [] = xs := List.append_nil xs\n  rw [h]; rfl",
+   "after": "example (xs : List ℕ) : (xs ++ []).length + 0 = xs.length := by simp",
+   "effect": {
+    "tokens": "unknown",
+    "heartbeats": {
+     "opening": "unknown",
+     "middle": "unknown",
+     "closing": "unknown"
+    },
+    "confidence": "low",
+    "note": "Too little mined evidence; measure with the profiler."
+   },
+   "verified": {
+    "v4.27.0": "pass",
+    "v4.26.0": "pass",
+    "v4.25.0": "pass"
+   },
+   "version_notes": "Stable across 4.25-4.33 as far as known.",
+   "move_class": "",
+   "source": "public:general-practice"
   }
  ]
 }

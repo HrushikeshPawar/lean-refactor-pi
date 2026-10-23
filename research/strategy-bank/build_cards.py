@@ -5,9 +5,9 @@ D = Path(__file__).parent
 stats = json.load(open(D / "move-stats.json"))["moves"]
 
 C = []
-def card(id, title, when, how, before, after, move=None, source="mined", notes="", tags=(), pub=""):
+def card(id, title, when, how, before, after, move=None, source="mined", notes="", tags=(), pub="", goal_tags=(), at=None):
     C.append(dict(id=id, title=title, when=when, how=how, before=before.strip("\n"), after=after.strip("\n"),
-                  move=move, source=source, notes=notes, tags=list(tags), pub=pub))
+                  move=move, source=source, notes=notes, tags=list(tags), pub=pub, goal_tags=list(goal_tags), at=at or {}))
 
 # ---- mined + public: term/tactic shrinking ----
 card("obtain-to-projection","Replace destructuring with projections",
@@ -393,6 +393,40 @@ card("exists-intro-from-lemma","Close ∃ goals by applying the lemma that alrea
  "example (xs : List ℕ) (h : xs ≠ []) : ∃ a, a ∈ xs := ⟨xs.head h, List.head_mem h⟩","", source="both",tags=["exists","library"],
  notes="Lemma names on lists are renamed often; verify on 4.25 and 4.33 before keeping.")
 
+# ---- tight-proof cards: fresh generic examples ----
+card("drop-helper-reclose-dependents","Drop a helper fact and re-close its dependents another way",
+ "A proof is already short, and one helper fact is used by a few later steps, each for one small rewrite or one argument; the helper's own proof is a large share of the cost.",
+ "Delete the helper and the steps that mention it. Close each dependent goal on its own: a direct term, a one-line closer that finds the fact itself, or the library fact the helper wrapped. Keep the deletion only if the whole proof compiles and the total is lower.",
+ "example (xs : List ℕ) (h : xs ≠ []) : 0 < xs.length ∧ xs.length ≠ 0 := by\n  have hl : 0 < xs.length := List.length_pos_iff.mpr h\n  constructor\n  · exact hl\n  · exact Nat.pos_iff_ne_zero.mp hl",
+ "example (xs : List ℕ) (h : xs ≠ []) : 0 < xs.length ∧ xs.length ≠ 0 :=\n  ⟨List.length_pos_iff.mpr h, by simp [h]⟩",
+ tags=["have","bullets"], source="public:general-practice",
+ at={"opening": "A helper stated at the start feeds every later step, so removing it changes the most; re-close the first dependents first.",
+     "middle": "Check which later steps name the helper before deleting it; each of them needs its own close.",
+     "closing": "A helper used only by the last steps is the easiest to fold into the final term."})
+card("sibling-fact-without-premise","Find a sibling fact that needs no premise",
+ "A library fact fits the goal except for a premise you do not have (a length, a bound, a nonemptiness), and proving the premise costs a step.",
+ "Search by the constants in the goal, not by the failing name: look for a weaker or differently shaped fact about the same functions that states its result without the premise (a max or min form, an inequality instead of an equality, a membership form). Compile the sibling before dropping the premise step.",
+ "example (n m : ℕ) (h : m ≤ n) : n ≤ n - m + m := by\n  have := Nat.sub_add_cancel h\n  omega",
+ "example (n m : ℕ) (h : m ≤ n) : n ≤ n - m + m := by\n  rw [Nat.sub_add_eq_max]; exact le_max_left n m",
+ tags=["library","exact?"], source="public:general-practice",
+ at={"opening": "A premise established at the start is usually shared with later steps; drop it only if nothing else uses it.",
+     "middle": "Search for the sibling by the goal's constants before adding a step that proves the premise.",
+     "closing": "At the end the goal is fixed; a weaker sibling may close it directly without the premise."})
+card("helper-must-pay","Keep an auxiliary fact only if it removes more than it adds",
+ "A have or a local lemma is introduced to share work, but it is used once or twice and its statement is long.",
+ "Compile the proof with the helper and without it, and compare both totals before deciding: the helper's statement and proof add cost, and each use saves only the difference to the inline form. Never judge by reading alone.",
+ "example (xs : List ℕ) : (xs ++ []).length + 0 = xs.length := by\n  have h : xs ++ [] = xs := List.append_nil xs\n  rw [h]; rfl",
+ "example (xs : List ℕ) : (xs ++ []).length + 0 = xs.length := by simp",
+ tags=["have","set"], source="public:general-practice",
+ at={"opening": "A helper at the start pays only if most later steps use it.",
+     "middle": "Count the uses after the helper; two short uses rarely repay a long statement.",
+     "closing": "A helper used only by the closing step can nearly always be inlined."})
+GOAL = {"simp-to-simp-only": ["List.length", "List.append"], "simp-only-to-simp": ["List.length"],
+        "grind-to-explicit": ["List.length"], "trim-simp-args": ["List.length", "List.append"],
+        "swap-to-library-lemma": ["List.append", "∈"],
+        "finset-sum-closers": ["Finset.sum", "Finset.range", "∑"], "decide-bounded": ["Finset.range"],
+        "exists-intro-from-lemma": ["List.head", "∈"], "trust-defeq": ["List.length"]}
+
 import sys
 sys.path.insert(0, str(D))
 VER = json.load(open(D / "verify.json")) if (D / "verify.json").exists() else {}
@@ -405,6 +439,7 @@ def merge(parts):
     return {k: sum(p[k] for p in parts) for k in ("n", "down", "up")}
 pool = []
 for c in C:
+    c["goal_tags"] = c["goal_tags"] or GOAL.get(c["id"], [])
     m = c.pop("move"); pub = c.pop("pub")
     s = stats.get(m) if m else None
     eff = {"tokens": "unknown", "heartbeats": {b: "unknown" for b in ("opening", "middle", "closing")}, "confidence": "low"}
@@ -426,7 +461,7 @@ for c in C:
     pool.append(c)
 for i, c in enumerate(pool, 1):
     c["id"] = f"S{i:02d}-{c['id']}"
-order = ["id","title","tags","when","how","before","after","effect","verified","version_notes","move_class","source"]
+order = ["id","title","tags","goal_tags","at","when","how","before","after","effect","verified","version_notes","move_class","source"]
 for c in pool: c["verified"] = {f"v{tc}": v[c["id"]] for tc, v in VER.items() if c["id"] in v}
 pool = [{k:c[k] for k in order} for c in pool]
 def emit(v, ind=0):

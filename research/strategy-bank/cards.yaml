@@ -8,6 +8,8 @@ cards:
       - "rcases"
       - "cases"
       - "anonymous-constructor"
+    goal_tags: []
+    at: {}
     when: "A hypothesis of type A ∧ B, A ↔ B or ∃ is destructured, and each component is used once."
     how: "Use h.1 / h.2 / h.mp / h.mpr / h.left directly where the component is needed. For ∃, keep one obtain only if the witness is used several times."
     before: |-
@@ -24,9 +26,9 @@ cards:
       confidence: "medium"
       note: "Heartbeat direction is the same at every position with data."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Stable across 4.25-4.33 as far as known."
     move_class: "obtain_to_projection"
     source: "both"
@@ -37,6 +39,8 @@ cards:
       - "intro"
       - "rintro"
       - "rcases"
+    goal_tags: []
+    at: {}
     when: "Goal starts with intro followed by rcases/obtain on the introduced hypothesis."
     how: "Use rintro with the pattern. rintro ⟨a, rfl⟩ also substitutes equalities on the spot."
     before: |-
@@ -57,9 +61,9 @@ cards:
       confidence: "low"
       note: "Too little mined evidence; measure with the profiler."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Stable across 4.25-4.33 as far as known."
     move_class: "rcases_to_rintro"
     source: "both"
@@ -70,6 +74,8 @@ cards:
       - "have"
       - "exact"
       - "by"
+    goal_tags: []
+    at: {}
     when: "have h : T := by tac, then exactly one later use as an argument."
     how: "Pass (by tac) in the argument position; the expected type is then known, so T is not written."
     before: |-
@@ -88,9 +94,9 @@ cards:
       confidence: "high"
       note: "Heartbeat direction is the same at every position with data."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Do not inline a have used 3 or more times; the term is then copied each time."
     move_class: "inline_have_into_term"
     source: "both"
@@ -101,6 +107,8 @@ cards:
       - "have"
       - "rw"
       - "show"
+    goal_tags: []
+    at: {}
     when: "have h : a = b := by tac; rw [h] with no other use of h."
     how: "rw [show a = b by tac] (or from term). The statement can often be partly elided: show _ = b."
     before: |-
@@ -119,9 +127,9 @@ cards:
       confidence: "medium"
       note: "Heartbeat direction is the same at every position with data."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Often the whole have dissolves once the hypothesis is rewritten directly; check whether the closing tactic works without it."
     move_class: "inline_have_show"
     source: "both"
@@ -131,6 +139,8 @@ cards:
     tags:
       - "have"
       - "omega"
+    goal_tags: []
+    at: {}
     when: "Several consecutive have lines each feed only the next one or the final close."
     how: "Fold them into the final call: pass them as terms, give them to simp/omega/linarith as arguments, or let a closer find them from context."
     before: |-
@@ -148,9 +158,9 @@ cards:
       confidence: "high"
       note: "Heartbeat direction is the same at every position with data."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Stable across 4.25-4.33 as far as known."
     move_class: "drop_have_chain"
     source: "both"
@@ -161,6 +171,8 @@ cards:
       - "set"
       - "let"
       - "generalize"
+    goal_tags: []
+    at: {}
     when: "A local abbreviation is introduced to shorten text, but is used fewer than about three times."
     how: "Substitute the definition back, or delete the abbreviation if the closing tactic does not need it. Names count as one token, so an abbreviation only pays when it replaces a long expression used often."
     before: |-
@@ -177,9 +189,9 @@ cards:
       confidence: "medium"
       note: "Heartbeat effect depends on where in the proof the edit sits; profile before deciding."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Stable across 4.25-4.33 as far as known."
     move_class: "drop_set_let"
     source: "both"
@@ -189,6 +201,10 @@ cards:
     tags:
       - "simp"
       - "heartbeats"
+    goal_tags:
+      - "List.length"
+      - "List.append"
+    at: {}
     when: "A non-terminal simp or simp [..] is expensive (the profiler shows it) and runs on a big context."
     how: "Run simp? once, paste the simp only list. The list adds tokens but removes simp's search. Use when heartbeat weight dominates."
     before: |-
@@ -206,9 +222,9 @@ cards:
       confidence: "high"
       note: "Heartbeat direction is the same at every position with data."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Lemma lists break on renames across Lean 4.25-4.33; keep a bare simp as fallback if versions matter more than heartbeats. 4.33 transparency change can stop listed lemmas from firing."
     move_class: "simp_to_simp_only"
     source: "both"
@@ -217,6 +233,9 @@ cards:
     title: "Drop a simp only list when bare simp is as fast"
     tags:
       - "simp"
+    goal_tags:
+      - "List.length"
+    at: {}
     when: "simp only [long list] where bare simp closes the goal; the list costs many tokens."
     how: "Try plain simp (or simp with one or two lemmas). Keep it only if heartbeats do not rise by more than the token gain is worth."
     before: |-
@@ -232,9 +251,9 @@ cards:
       confidence: "high"
       note: "Heartbeat effect depends on where in the proof the edit sits; profile before deciding."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Bare simp is the most version-stable form."
     move_class: "simp_only_to_simp"
     source: "both"
@@ -243,6 +262,8 @@ cards:
     title: "Replace a multi-step arithmetic or case chain by grind"
     tags:
       - "grind"
+    goal_tags: []
+    at: {}
     when: "Goal after intros is first-order with equalities, linear arithmetic, or constructor injectivity; the manual proof is several lines."
     how: "Try grind, then grind only [lemmas] from grind? to bound cost. Tokens fall, but grind can cost much more search than the steps it replaces; check the profile before and after."
     before: |-
@@ -258,9 +279,9 @@ cards:
       confidence: "low"
       note: "Heartbeat effect depends on where in the proof the edit sits; profile before deciding."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "grind behaviour changed in 4.26 (cutsat to lia), 4.30 (canonicalizer), 4.32, 4.33; a bare grind can flip between versions. Fallback: first | omega | grind."
     move_class: "grind_replaces"
     source: "both"
@@ -270,6 +291,9 @@ cards:
     tags:
       - "grind"
       - "heartbeats"
+    goal_tags:
+      - "List.length"
+    at: {}
     when: "grind closes a goal but costs many heartbeats or fails on another toolchain."
     how: "Read grind? output; use grind only [..] or replace with omega/simp_all/exact of the lemma it used."
     before: "example (xs : List ℕ) (h : xs = []) : xs.length = 0 := by grind"
@@ -283,9 +307,9 @@ cards:
       confidence: "low"
       note: "Heartbeat direction is the same at every position with data."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Library names can change between versions; keep grind as the fallback if the explicit term breaks."
     move_class: "grind_removed"
     source: "both"
@@ -295,6 +319,8 @@ cards:
     tags:
       - "omega"
       - "arith"
+    goal_tags: []
+    at: {}
     when: "A chain of le_trans / add_lt_add / Nat.* lemma steps or calc over linear arithmetic with +, -, *const, /const, %const, min, max."
     how: "One omega. If context is large, clear unrelated hypotheses first, since omega reads all of them."
     before: |-
@@ -311,9 +337,9 @@ cards:
       confidence: "low"
       note: "Too little mined evidence; measure with the profiler."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "From 4.33, lia is a stronger sibling; omega stays stable across 4.25-4.33."
     move_class: "omega_replaces"
     source: "both"
@@ -324,6 +350,8 @@ cards:
       - "linarith"
       - "nlinarith"
       - "positivity"
+    goal_tags: []
+    at: {}
     when: "linarith or nlinarith on a goal that is linear over ℕ/ℤ, or a positivity/monotonicity claim."
     how: "Use omega for linear integer goals; positivity for 0 < / 0 ≤ of products, sums, powers; gcongr for monotone shapes."
     before: "example (x y : ℤ) (h : 0 ≤ x) (h' : 0 ≤ y) : 0 ≤ x + 2 * y := by linarith"
@@ -337,9 +365,9 @@ cards:
       confidence: "low"
       note: "Too little mined evidence; measure with the profiler."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Stable across 4.25-4.33 as far as known."
     move_class: "linarith_to_omega"
     source: "both"
@@ -349,6 +377,8 @@ cards:
     tags:
       - "aesop"
       - "heartbeats"
+    goal_tags: []
+    at: {}
     when: "aesop closes a goal but is slow or its search is opaque."
     how: "Use aesop? and paste the Try this script, then shorten with simp_all or exact."
     before: "example (p q : Prop) (hp : p) (hq : q) : p ∧ q := by aesop"
@@ -362,9 +392,9 @@ cards:
       confidence: "low"
       note: "Too little mined evidence; measure with the profiler."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Stable across 4.25-4.33 as far as known."
     move_class: "aesop_replaced"
     source: "both"
@@ -373,6 +403,8 @@ cards:
     title: "Merge consecutive rewrites"
     tags:
       - "rw"
+    goal_tags: []
+    at: {}
     when: "Several rw lines in a row on the same goal or hypothesis."
     how: "One rw [a, b, c]. Add at h ⊢ to hit several locations at once."
     before: |-
@@ -392,9 +424,9 @@ cards:
       confidence: "high"
       note: "Heartbeat effect depends on where in the proof the edit sits; profile before deciding."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Stable across 4.25-4.33 as far as known."
     move_class: "rw_chain_merge"
     source: "both"
@@ -405,6 +437,8 @@ cards:
       - "rw"
       - "simp only"
       - "binders"
+    goal_tags: []
+    at: {}
     when: "A rw chain repeats one rewrite across many occurrences, or needs conv / nth_rewrite."
     how: "simp only [lemma] rewrites all instances and goes under binders."
     before: |-
@@ -422,9 +456,9 @@ cards:
       confidence: "medium"
       note: "Heartbeat direction is the same at every position with data."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "rw is cheaper than simp when it works; use this only when rw fails or needs several lines."
     move_class: "rw_to_simp_only"
     source: "both"
@@ -434,6 +468,8 @@ cards:
     tags:
       - "rw"
       - "transport"
+    goal_tags: []
+    at: {}
     when: "rw [h]; exact t where the rewrite only changes the goal's type."
     how: "h ▸ t, or (h ▸ t : T). Test the motive; if it fails, use rwa [h]."
     before: |-
@@ -450,9 +486,9 @@ cards:
       confidence: "medium"
       note: "Heartbeat effect depends on where in the proof the edit sits; profile before deciding."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Stable across 4.25-4.33 as far as known."
     move_class: "rw_to_term"
     source: "both"
@@ -462,6 +498,8 @@ cards:
     tags:
       - "rwa"
       - "simpa"
+    goal_tags: []
+    at: {}
     when: "rw/simp at h followed by exact h, or rw then assumption."
     how: "rwa [..] at h, or simpa [..] using h."
     before: |-
@@ -480,9 +518,9 @@ cards:
       confidence: "medium"
       note: "Heartbeat direction is the same at every position with data."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "simpa is brittle if a linter-fired simp set changes; rwa is stable."
     move_class: "rwa_simpa"
     source: "both"
@@ -492,6 +530,8 @@ cards:
     tags:
       - "intro"
       - "fun"
+    goal_tags: []
+    at: {}
     when: "Goal is ∀ / → and the proof is intro x y followed by one exact."
     how: "Write fun x y => term, or fun ⟨a, b⟩ => .. for patterns."
     before: |-
@@ -508,9 +548,9 @@ cards:
       confidence: "medium"
       note: "Heartbeat effect depends on where in the proof the edit sits; profile before deciding."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Stable across 4.25-4.33 as far as known."
     move_class: "intro_exact_to_fun"
     source: "both"
@@ -520,6 +560,8 @@ cards:
     tags:
       - "constructor"
       - "anonymous-constructor"
+    goal_tags: []
+    at: {}
     when: "Goal is a structure, ∧, ↔ or ∃ and every field has a one-line proof."
     how: "⟨a, b⟩ in term mode; (by tac) per field if needed. For ↔ use ⟨fun h => .., fun h => ..⟩."
     before: |-
@@ -537,9 +579,9 @@ cards:
       confidence: "medium"
       note: "Heartbeat direction is the same at every position with data."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Stable across 4.25-4.33 as far as known."
     move_class: "constructor_to_anon"
     source: "both"
@@ -551,6 +593,8 @@ cards:
       - "<;>"
       - "all_goals"
       - "exacts"
+    goal_tags: []
+    at: {}
     when: "Several sibling goals are closed by the same tactic or by one-line exacts."
     how: "t <;> s runs s on every goal from t; exacts [a, b]; all_goals s for leftover goals."
     before: |-
@@ -572,9 +616,9 @@ cards:
       confidence: "low"
       note: "Too little mined evidence; measure with the profiler."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "<;> reruns elaboration per goal; fine for cheap closers, wasteful for simp_all on big contexts."
     move_class: "bullets_to_comb"
     source: "both"
@@ -584,6 +628,8 @@ cards:
     tags:
       - "bullets"
       - "exacts"
+    goal_tags: []
+    at: {}
     when: "Bullet blocks with a single short tactic each."
     how: "exacts [..], or a flat sequence of exact with focusing handled by the tactic (case _ or no focus) when only one goal remains each time."
     before: |-
@@ -604,9 +650,9 @@ cards:
       confidence: "medium"
       note: "Heartbeat direction is the same at every position with data."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Stable across 4.25-4.33 as far as known."
     move_class: "bullets_removed"
     source: "both"
@@ -617,6 +663,8 @@ cards:
       - "args"
       - "underscore"
       - "unification"
+    goal_tags: []
+    at: {}
     when: "A lemma application spells arguments the unifier can infer from hypotheses or the goal."
     how: "Use _ for them, or drop (x := ..) named args. Keep the ones the unifier cannot solve (compile to check)."
     before: |-
@@ -634,9 +682,9 @@ cards:
       confidence: "high"
       note: "Heartbeat direction is the same at every position with data."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Underscores can make elaboration slower if unification postpones; check heartbeats."
     move_class: "explicit_args_to_underscore"
     source: "both"
@@ -646,6 +694,8 @@ cards:
     tags:
       - "ascription"
       - "binder"
+    goal_tags: []
+    at: {}
     when: "(x : T) casts, (f : A → B) annotations, binder types in fun/∀ that follow from the expected type."
     how: "Delete, recompile. Keep numerals ascribed only when elaboration becomes ambiguous (ℕ vs ℤ vs ℝ)."
     before: "example : ∀ n : ℕ, n + 0 = n := fun (n : ℕ) => rfl"
@@ -659,9 +709,9 @@ cards:
       confidence: "medium"
       note: "Heartbeat direction is the same at every position with data."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Stable across 4.25-4.33 as far as known."
     move_class: "drop_type_ascription"
     source: "both"
@@ -671,6 +721,8 @@ cards:
     tags:
       - "show"
       - "change"
+    goal_tags: []
+    at: {}
     when: "show T or change T followed by tactics that work on the original goal form."
     how: "Delete. Keep when the later tactic depends on the unfolded form; then prefer a term ascription (h : T)."
     before: |-
@@ -687,9 +739,9 @@ cards:
       confidence: "medium"
       note: "Heartbeat direction is the same at every position with data."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "The change ... with syntax was removed in Lean 4.30; avoid it."
     move_class: "drop_show_change"
     source: "both"
@@ -700,6 +752,8 @@ cards:
       - "exact"
       - "by"
       - "rfl"
+    goal_tags: []
+    at: {}
     when: "exact (by tac), by exact t, by rfl, `by simpa using h` where h already has the type."
     how: "Write tac directly, or the bare term t / rfl / h."
     before: "example (n : ℕ) : n + 0 = n := by exact (by simp)"
@@ -713,9 +767,9 @@ cards:
       confidence: "low"
       note: "Too little mined evidence; measure with the profiler."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Stable across 4.25-4.33 as far as known."
     move_class: "exact_by_unwrap"
     source: "both"
@@ -725,6 +779,8 @@ cards:
     tags:
       - "refine"
       - "apply"
+    goal_tags: []
+    at: {}
     when: "exact f a b (by tac1) (by tac2) or apply f followed by a goal-by-goal rewrite."
     how: "refine f a b ?_ ?_ <;> tac, or refine f (?_ : T) when the type of a middle step needs naming once."
     before: |-
@@ -745,9 +801,9 @@ cards:
       confidence: "medium"
       note: "Heartbeat direction is the same at every position with data."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Stable across 4.25-4.33 as far as known."
     move_class: "refine_qmark"
     source: "both"
@@ -757,6 +813,8 @@ cards:
     tags:
       - "apply"
       - "exact"
+    goal_tags: []
+    at: {}
     when: "apply followed by one exact (or assumption)."
     how: "exact f h (or exact f ‹_›)."
     before: |-
@@ -773,9 +831,9 @@ cards:
       confidence: "medium"
       note: "Heartbeat direction is the same at every position with data."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Stable across 4.25-4.33 as far as known."
     move_class: "apply_exact_merge"
     source: "both"
@@ -787,6 +845,8 @@ cards:
       - "cases"
       - "match"
       - "rcases"
+    goal_tags: []
+    at: {}
     when: "Nested cases / induction / bullets, each case short."
     how: "match n with | 0 => .. | k + 1 => .. ; rcases n with _ | _ | n ; or induction n <;> simp_all for uniform cases."
     before: |-
@@ -804,9 +864,9 @@ cards:
       confidence: "high"
       note: "Heartbeat direction is the same at every position with data."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Goal order after cases/induction on match-defined functions changed in 4.26; avoid relying on case tags and rename_i."
     move_class: "induction_to_match_or_rec"
     source: "both"
@@ -815,6 +875,8 @@ cards:
     title: "Eliminate an induction that a closer or library lemma already covers"
     tags:
       - "induction"
+    goal_tags: []
+    at: {}
     when: "induction/cases whose branches are all closed by the same decision procedure."
     how: "Delete induction, call the closer on the whole goal; or use a library recursion principle."
     before: |-
@@ -832,9 +894,9 @@ cards:
       confidence: "medium"
       note: "Heartbeat effect depends on where in the proof the edit sits; profile before deciding."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Heartbeats can rise on this move when the closer must do real search; verify."
     move_class: "drop_induction"
     source: "both"
@@ -845,6 +907,8 @@ cards:
       - "by_contra"
       - "push_neg"
       - "contrapose"
+    goal_tags: []
+    at: {}
     when: "by_contra h; push_neg at h, or by_contra then simp at h."
     how: "by_contra! h (and contrapose! for contrapositive)."
     before: |-
@@ -865,9 +929,9 @@ cards:
       confidence: "low"
       note: "Too little mined evidence; measure with the profiler."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Stable across 4.25-4.33 as far as known."
     move_class: "by_contra_push_neg"
     source: "both"
@@ -877,6 +941,8 @@ cards:
     tags:
       - "calc"
       - "trans"
+    goal_tags: []
+    at: {}
     when: "calc with two or three steps, or steps that are each closed by a one-line lemma."
     how: "Use .trans / le_trans / lt_of_lt_of_le chains, or one omega/nlinarith/positivity for the whole inequality. Heartbeats can fall because calc rechecks every _ line."
     before: |-
@@ -893,9 +959,9 @@ cards:
       confidence: "low"
       note: "Too little mined evidence; measure with the profiler."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Stable across 4.25-4.33 as far as known."
     move_class: "calc_to_chain"
     source: "both"
@@ -905,6 +971,8 @@ cards:
     tags:
       - "calc"
       - "ring"
+    goal_tags: []
+    at: {}
     when: "Two adjacent calc steps use the same relation and the first is by rfl/simp/ring."
     how: "Merge them into one step whose proof is one tactic (ring, omega, simp)."
     before: |-
@@ -923,9 +991,9 @@ cards:
       confidence: "medium"
       note: "Heartbeat effect depends on where in the proof the edit sits; profile before deciding."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Stable across 4.25-4.33 as far as known."
     move_class: "calc_shortened"
     source: "both"
@@ -935,6 +1003,8 @@ cards:
     tags:
       - "norm_num"
       - "decide"
+    goal_tags: []
+    at: {}
     when: "Goals about literals, small bounded Finset/Fin/Nat facts, divisibility of numerals."
     how: "norm_num [defs] in one call; decide for tiny decidable props; omega for linear."
     before: |-
@@ -952,9 +1022,9 @@ cards:
       confidence: "low"
       note: "Too little mined evidence; measure with the profiler."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "decide cost explodes on big Nat/Finset terms; bound the range first."
     move_class: "norm_num_replaces"
     source: "both"
@@ -964,6 +1034,8 @@ cards:
     tags:
       - "cast"
       - "norm_cast"
+    goal_tags: []
+    at: {}
     when: "Goal mixes ↑n casts and chains of Nat.cast_add / Int.natCast_* rewrites."
     how: "exact_mod_cast h; push_cast; norm_cast at h ⊢."
     before: |-
@@ -980,9 +1052,9 @@ cards:
       confidence: "low"
       note: "Too little mined evidence; measure with the profiler."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Library cast lemma names (Int.ofNat_*, Int.natCast_*) were renamed repeatedly; cast tactics are stable."
     move_class: "cast_tactics"
     source: "both"
@@ -993,6 +1065,8 @@ cards:
       - "convert"
       - "congr"
       - "gcongr"
+    goal_tags: []
+    at: {}
     when: "Goal differs from a known fact only in a subterm."
     how: "convert h using 2 leaves just the differing subgoals; congr! and gcongr for function applications and monotone shapes."
     before: |-
@@ -1010,9 +1084,9 @@ cards:
       confidence: "low"
       note: "Too little mined evidence; measure with the profiler."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Stable across 4.25-4.33 as far as known."
     move_class: "convert_congr"
     source: "both"
@@ -1022,6 +1096,8 @@ cards:
     tags:
       - "exists"
       - "use"
+    goal_tags: []
+    at: {}
     when: "refine ⟨w, ?_⟩ then a closing tactic, or exists w."
     how: "use w closes trivial residual goals automatically (rfl, trivial)."
     before: |-
@@ -1038,9 +1114,9 @@ cards:
       confidence: "medium"
       note: "Heartbeat direction is the same at every position with data."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Stable across 4.25-4.33 as far as known."
     move_class: "use_witness"
     source: "both"
@@ -1050,6 +1126,8 @@ cards:
     tags:
       - "ext"
       - "funext"
+    goal_tags: []
+    at: {}
     when: "ext x followed by rfl/simp, or Subtype.ext/Fin.ext before simp."
     how: "Delete the ext and call simp/rfl on the equation, or use funext _ <;> exact."
     before: |-
@@ -1066,9 +1144,9 @@ cards:
       confidence: "low"
       note: "Heartbeat direction is the same at every position with data."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Stable across 4.25-4.33 as far as known."
     move_class: "ext_funext_removed"
     source: "both"
@@ -1077,6 +1155,10 @@ cards:
     title: "Trim simp lemma lists"
     tags:
       - "simp"
+    goal_tags:
+      - "List.length"
+      - "List.append"
+    at: {}
     when: "simp [a, b, c, d] where some lemmas are already simp lemmas or unused."
     how: "Remove one lemma at a time and recompile (a linter flags unused simp args). Fewer tokens, usually fewer heartbeats."
     before: |-
@@ -1092,9 +1174,9 @@ cards:
       confidence: "high"
       note: "Heartbeat effect depends on where in the proof the edit sits; profile before deciding."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Stable across 4.25-4.33 as far as known."
     move_class: "simp_arg_trim"
     source: "both"
@@ -1104,6 +1186,8 @@ cards:
     tags:
       - "simp_all"
       - "simp [*]"
+    goal_tags: []
+    at: {}
     when: "Many residual goals each closed by a short simp or assumption."
     how: "all_goals simp [*] once at the end, or simp_all."
     before: |-
@@ -1123,9 +1207,9 @@ cards:
       confidence: "medium"
       note: "Heartbeat direction is the same at every position with data."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Quadratic on big contexts; clear unrelated hypotheses first."
     move_class: "simp_star"
     source: "both"
@@ -1135,6 +1219,8 @@ cards:
     tags:
       - "positivity"
       - "gcongr"
+    goal_tags: []
+    at: {}
     when: "0 < e, 0 ≤ e, or f x ≤ f y with the same outer shape."
     how: "positivity; gcongr (then side goals ?_ are usually assumptions)."
     before: |-
@@ -1151,9 +1237,9 @@ cards:
       confidence: "low"
       note: "Too little mined evidence; measure with the profiler."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Stable across 4.25-4.33 as far as known."
     move_class: "positivity_gcongr"
     source: "both"
@@ -1163,6 +1249,8 @@ cards:
     tags:
       - "lambda"
       - "eta"
+    goal_tags: []
+    at: {}
     when: "fun x => f x, fun x => x + 1, fun x => g (h x)."
     how: "f, (· + 1), g ∘ h."
     before: "example (xs : List ℕ) : (xs.map (fun x => x + 1)).length = xs.length := by simp"
@@ -1176,9 +1264,9 @@ cards:
       confidence: "high"
       note: "Heartbeat effect depends on where in the proof the edit sits; profile before deciding."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Stable across 4.25-4.33 as far as known."
     move_class: "term_mode_lambda"
     source: "both"
@@ -1188,6 +1276,8 @@ cards:
     tags:
       - "parens"
       - "<|"
+    goal_tags: []
+    at: {}
     when: "Nested applications ending in a long argument; each paren pair costs 2 tokens."
     how: "f <| g <| x, or x |> f. Do not mix with dot-notation chains."
     before: |-
@@ -1205,9 +1295,9 @@ cards:
       confidence: "medium"
       note: "Heartbeat direction is the same at every position with data."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Stable across 4.25-4.33 as far as known."
     move_class: "pipe_paren_removal"
     source: "both"
@@ -1217,6 +1307,10 @@ cards:
     tags:
       - "library"
       - "exact?"
+    goal_tags:
+      - "List.append"
+      - "∈"
+    at: {}
     when: "Several steps recompute a fact (monotonicity, membership, cardinality, sum) that has a named lemma."
     how: "Search with exact? / apply? / rw? on the sub-goal, or grep the lemma namespace; use the lemma directly. Prefer short, stable names."
     before: |-
@@ -1234,9 +1328,9 @@ cards:
       confidence: "high"
       note: "Heartbeat effect depends on where in the proof the edit sits; profile before deciding."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Check the name on Lean 4.25 and 4.33: standard-library List lemma names churn."
     move_class: "lemma_swap"
     source: "both"
@@ -1246,6 +1340,8 @@ cards:
     tags:
       - "dead"
       - "linter"
+    goal_tags: []
+    at: {}
     when: "A step is unused (have never referenced, tactic after goals are closed, simp that made no progress, redundant clear or intro)."
     how: "Delete it and recompile; use unused-variable and unusedTactic linters, or bisect the steps."
     before: |-
@@ -1262,9 +1358,9 @@ cards:
       confidence: "high"
       note: "Heartbeat direction is the same at every position with data."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Stable across 4.25-4.33 as far as known."
     move_class: "step_deleted"
     source: "both"
@@ -1274,6 +1370,8 @@ cards:
     tags:
       - "first"
       - "compat"
+    goal_tags: []
+    at: {}
     when: "A proof that is fragile across Lean 4.25-4.33 (grind, simp lists, renamed lemmas)."
     how: "first | omega | simp | grind, cheapest first (failed branches still cost heartbeats)."
     before: "example (a b : ℕ) (h : a < b) : a + 1 ≤ b := by grind"
@@ -1287,9 +1385,9 @@ cards:
       confidence: "low"
       note: "Too little mined evidence; measure with the profiler."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Adds a few tokens; only when a cross-version gate fails."
     move_class: ""
     source: "public:https://leanprover-community.github.io/contribute/style.html"
@@ -1300,6 +1398,8 @@ cards:
       - "omega"
       - "clear"
       - "heartbeats"
+    goal_tags: []
+    at: {}
     when: "omega or simp_all is slow because the context is large."
     how: "clear h1 h2 .. or use simp only [h]; omega only reads relevant facts when the context is small."
     before: |-
@@ -1318,9 +1418,9 @@ cards:
       confidence: "low"
       note: "Too little mined evidence; measure with the profiler."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Stable across 4.25-4.33 as far as known."
     move_class: ""
     source: "public:https://leanprover-community.github.io/contribute/style.html"
@@ -1331,6 +1431,8 @@ cards:
       - "rfl"
       - "heartbeats"
       - "defeq"
+    goal_tags: []
+    at: {}
     when: "rfl or exact is slow because defeq checking unfolds definitions."
     how: "with_reducible rfl / with_reducible exact h; if it fails, the unfolding was needed."
     before: "example (a : ℕ) : a + 0 = a := by rfl"
@@ -1344,9 +1446,9 @@ cards:
       confidence: "low"
       note: "Too little mined evidence; measure with the profiler."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "4.28 added with_unfolding_none; 4.32 with_implicit."
     move_class: ""
     source: "public:https://leanprover-community.github.io/contribute/style.html"
@@ -1356,6 +1458,9 @@ cards:
     tags:
       - "decide"
       - "heartbeats"
+    goal_tags:
+      - "Finset.range"
+    at: {}
     when: "decide on Nat/Finset/Fin goals blows up the kernel."
     how: "Use norm_num / simp with simprocs, or reduce to a smaller range before decide."
     before: "example : ∀ x ∈ Finset.range 4, x * x < 16 := by decide"
@@ -1373,9 +1478,9 @@ cards:
       confidence: "low"
       note: "Too little mined evidence; measure with the profiler."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Avoid native_decide and kernel-trust options."
     move_class: ""
     source: "public:https://leanprover-community.github.io/contribute/style.html"
@@ -1385,6 +1490,8 @@ cards:
     tags:
       - "names"
       - "compat"
+    goal_tags: []
+    at: {}
     when: "A proof opens a namespace or relies on short ambiguous names."
     how: "Use Nat.lt_irrefl rather than lt_irrefl guessed from open; 4.33 made some Nat.* lemmas protected."
     before: |-
@@ -1400,9 +1507,9 @@ cards:
       confidence: "low"
       note: "Too little mined evidence; measure with the profiler."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Costs a few tokens; wins on version compatibility."
     move_class: ""
     source: "public:https://leanprover-community.github.io/contribute/style.html"
@@ -1412,6 +1519,8 @@ cards:
     tags:
       - "rename_i"
       - "compat"
+    goal_tags: []
+    at: {}
     when: "rename_i, a✝ names, case tags after induction or cases."
     how: "Use rcases/obtain with explicit patterns or ‹T› / assumption."
     before: |-
@@ -1432,9 +1541,9 @@ cards:
       confidence: "low"
       note: "Too little mined evidence; measure with the profiler."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Case order after match compilation changed in 4.26."
     move_class: ""
     source: "public:https://leanprover-community.github.io/contribute/style.html"
@@ -1443,6 +1552,8 @@ cards:
     title: "Refer to a hypothesis by its type"
     tags:
       - "assumption"
+    goal_tags: []
+    at: {}
     when: "A named hypothesis is used once and its name was introduced only for that."
     how: "‹T› or assumption; naming in intro becomes _."
     before: |-
@@ -1458,9 +1569,9 @@ cards:
       confidence: "low"
       note: "Too little mined evidence; measure with the profiler."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Stable across 4.25-4.33 as far as known."
     move_class: ""
     source: "public:https://github.com/cameronfreer/lean4-skills"
@@ -1469,6 +1580,8 @@ cards:
     title: "Use leading-dot constructors and lemmas"
     tags:
       - "dot-notation"
+    goal_tags: []
+    at: {}
     when: "Expected type is known and constructor names are namespaced."
     how: ".inl .inr .intro .refl .symm .trans instead of Or.inl, Exists.intro, Eq.refl."
     before: "example (p q : Prop) (hp : p) : p ∨ q := Or.inl hp"
@@ -1482,9 +1595,9 @@ cards:
       confidence: "low"
       note: "Too little mined evidence; measure with the profiler."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Stable across 4.25-4.33 as far as known."
     move_class: ""
     source: "public:https://github.com/cameronfreer/lean4-skills"
@@ -1494,6 +1607,8 @@ cards:
     tags:
       - "Or.imp"
       - "Exists.imp"
+    goal_tags: []
+    at: {}
     when: "Goal maps a disjunction/conjunction/existential to another with a per-case function."
     how: "Or.imp, And.imp, Exists.imp, Or.elim, Iff.trans, Function.comp."
     before: |-
@@ -1512,9 +1627,9 @@ cards:
       confidence: "low"
       note: "Too little mined evidence; measure with the profiler."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Mined as a repeated winning rewrite in earlier runs (see plan learnings)."
     move_class: ""
     source: "both"
@@ -1523,6 +1638,8 @@ cards:
     title: "Use a ready-made induction principle"
     tags:
       - "induction"
+    goal_tags: []
+    at: {}
     when: "Induction starts at a base other than 0, or over a well-founded order, or needs strong hypotheses."
     how: "Nat.le_induction, Nat.strong_induction_on, Nat.twoStepInduction, List.rec-style via induction ... generalizing."
     before: |-
@@ -1540,9 +1657,9 @@ cards:
       confidence: "low"
       note: "Too little mined evidence; measure with the profiler."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Renames: Nat.le_induction argument order differs across Mathlib releases."
     move_class: ""
     source: "both"
@@ -1552,6 +1669,8 @@ cards:
     tags:
       - "rw"
       - "show"
+    goal_tags: []
+    at: {}
     when: "A rewrite needs a one-off equation proved by a short tactic."
     how: "rw [show _ = _ by tac] or rw [h (by omega)]."
     before: |-
@@ -1570,9 +1689,9 @@ cards:
       confidence: "low"
       note: "Too little mined evidence; measure with the profiler."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Stable across 4.25-4.33 as far as known."
     move_class: ""
     source: "both"
@@ -1582,6 +1701,8 @@ cards:
     tags:
       - "if"
       - "by_cases"
+    goal_tags: []
+    at: {}
     when: "by_cases c followed by rw [if_pos]/[if_neg] in each branch."
     how: "split_ifs <;> omega, or simp [h] with the decision in context."
     before: |-
@@ -1601,9 +1722,9 @@ cards:
       confidence: "low"
       note: "Too little mined evidence; measure with the profiler."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Stable across 4.25-4.33 as far as known."
     move_class: ""
     source: "public:https://github.com/cameronfreer/lean4-skills"
@@ -1613,6 +1734,8 @@ cards:
     tags:
       - "rcases"
       - "Nat"
+    goal_tags: []
+    at: {}
     when: "Nested cases on n for 0, 1, 2, n+3."
     how: "rcases n with _ | _ | _ | n, then all_goals omega / simp, or match with | 0 | 1 => .. ."
     before: |-
@@ -1638,9 +1761,9 @@ cards:
       confidence: "low"
       note: "Too little mined evidence; measure with the profiler."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Stable; omega reads the numerals produced by rcases."
     move_class: ""
     source: "public:https://github.com/cameronfreer/lean4-skills"
@@ -1650,6 +1773,11 @@ cards:
     tags:
       - "Finset"
       - "sum"
+    goal_tags:
+      - "Finset.sum"
+      - "Finset.range"
+      - "∑"
+    at: {}
     when: "A Finset sum identity is proved by induction on the index set."
     how: "simp [Finset.sum_range_succ] for small concrete ranges; Finset.sum_comm / Finset.sum_congr / Finset.sum_le_sum for structure."
     before: |-
@@ -1667,9 +1795,9 @@ cards:
       confidence: "low"
       note: "Too little mined evidence; measure with the profiler."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "BigOperators notation ∑ i ∈ s differs from ∑ i in s on older Mathlib; check on the oldest toolchain."
     move_class: ""
     source: "public:https://leanprover-community.github.io/contribute/style.html"
@@ -1679,6 +1807,8 @@ cards:
     tags:
       - "fun_prop"
       - "continuity"
+    goal_tags: []
+    at: {}
     when: "Continuity / measurability / differentiability / monotonicity side goals proved by lemma threading."
     how: "fun_prop, continuity, measurability, positivity, bound."
     before: |-
@@ -1694,9 +1824,9 @@ cards:
       confidence: "low"
       note: "Too little mined evidence; measure with the profiler."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Stable across 4.25-4.33 as far as known."
     move_class: ""
     source: "public:https://leanprover-community.github.io/contribute/style.html"
@@ -1705,6 +1835,8 @@ cards:
     title: "Replace exact + simp with simpa using"
     tags:
       - "simpa"
+    goal_tags: []
+    at: {}
     when: "have h := ..; simp at h; exact h"
     how: "simpa using term."
     before: |-
@@ -1722,9 +1854,9 @@ cards:
       confidence: "low"
       note: "Too little mined evidence; measure with the profiler."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Stable across 4.25-4.33 as far as known."
     move_class: ""
     source: "both"
@@ -1734,6 +1866,8 @@ cards:
     tags:
       - "at"
       - "location"
+    goal_tags: []
+    at: {}
     when: "The same simp/rw/norm_num is applied to several hypotheses in turn."
     how: "simp at h1 h2 ⊢, rw [e] at *, norm_num at h ⊢."
     before: |-
@@ -1751,9 +1885,9 @@ cards:
       confidence: "low"
       note: "Too little mined evidence; measure with the profiler."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Stable across 4.25-4.33 as far as known."
     move_class: ""
     source: "both"
@@ -1762,6 +1896,8 @@ cards:
     title: "Eliminate equalities by substitution"
     tags:
       - "subst"
+    goal_tags: []
+    at: {}
     when: "An equation x = e is used only to rewrite everywhere."
     how: "subst or rintro rfl; then every later mention disappears."
     before: |-
@@ -1780,9 +1916,9 @@ cards:
       confidence: "low"
       note: "Too little mined evidence; measure with the profiler."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Stable across 4.25-4.33 as far as known."
     move_class: ""
     source: "both"
@@ -1792,6 +1928,9 @@ cards:
     tags:
       - "rfl"
       - "heartbeats"
+    goal_tags:
+      - "List.length"
+    at: {}
     when: "Goal is a unfolding of a definition or a computation on literals."
     how: "rfl, or exact of the term; cheaper than simp/unfold."
     before: "example (xs : List ℕ) : (0 :: xs).length = xs.length + 1 := by simp"
@@ -1805,9 +1944,9 @@ cards:
       confidence: "low"
       note: "Too little mined evidence; measure with the profiler."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Library List.length structure changes can break rfl; test on all toolchains."
     move_class: ""
     source: "public:https://leanprover-community.github.io/contribute/style.html"
@@ -1817,6 +1956,8 @@ cards:
     tags:
       - "heartbeats"
       - "ladder"
+    goal_tags: []
+    at: {}
     when: "Any slow step; use the profiler to locate it."
     how: "Try in order: exact/rfl, rw, simp only, omega, simp, norm_num, nlinarith, aesop, grind. Use the cheapest that closes it."
     before: |-
@@ -1832,9 +1973,9 @@ cards:
       confidence: "low"
       note: "Too little mined evidence; measure with the profiler."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Stable across 4.25-4.33 as far as known."
     move_class: ""
     source: "public:https://leanprover-community.github.io/contribute/style.html"
@@ -1843,6 +1984,8 @@ cards:
     title: "Use .symm / ▸ / Eq.subst to avoid rewriting direction flips"
     tags:
       - "symm"
+    goal_tags: []
+    at: {}
     when: "rw [← h] then exact, or exact h.symm after rewriting."
     how: "Pass h.symm to the term that needs it."
     before: |-
@@ -1858,9 +2001,9 @@ cards:
       confidence: "low"
       note: "Too little mined evidence; measure with the profiler."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Stable across 4.25-4.33 as far as known."
     move_class: ""
     source: "both"
@@ -1870,6 +2013,8 @@ cards:
     tags:
       - "interval_cases"
       - "fin_cases"
+    goal_tags: []
+    at: {}
     when: "A bounded variable is split by repeated cases."
     how: "interval_cases x <;> simp_all, fin_cases i <;> simp, or decide."
     before: |-
@@ -1895,9 +2040,9 @@ cards:
       confidence: "low"
       note: "Too little mined evidence; measure with the profiler."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Stable across 4.25-4.33 as far as known."
     move_class: ""
     source: "both"
@@ -1908,6 +2053,8 @@ cards:
       - "tauto"
       - "simp_all"
       - "omega"
+    goal_tags: []
+    at: {}
     when: "The final 2-4 lines of a proof all do arithmetic or logic simplification of the same shape."
     how: "Delete from the bottom up, replace by omega / simp_all / grind / tauto and recompile; stop at the first failure."
     before: |-
@@ -1926,9 +2073,9 @@ cards:
       confidence: "low"
       note: "Too little mined evidence; measure with the profiler."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Stable across 4.25-4.33 as far as known."
     move_class: ""
     source: "both"
@@ -1938,6 +2085,8 @@ cards:
     tags:
       - "induction"
       - "generalizing"
+    goal_tags: []
+    at: {}
     when: "An induction fails or needs an extra have in each step."
     how: "induction n generalizing m, so the hypothesis covers all m; delete side lemmas."
     before: |-
@@ -1957,9 +2106,9 @@ cards:
       confidence: "low"
       note: "Too little mined evidence; measure with the profiler."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Stable across 4.25-4.33 as far as known."
     move_class: ""
     source: "both"
@@ -1968,6 +2117,8 @@ cards:
     title: "Hoist a repeated prefix out of branches"
     tags:
       - "hoist"
+    goal_tags: []
+    at: {}
     when: "Each case branch starts with the same rw/simp."
     how: "Run the shared tactic before the split (or t <;> s), so it appears once."
     before: |-
@@ -1987,9 +2138,9 @@ cards:
       confidence: "low"
       note: "Too little mined evidence; measure with the profiler."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Stable across 4.25-4.33 as far as known."
     move_class: ""
     source: "public:general-practice"
@@ -1999,6 +2150,10 @@ cards:
     tags:
       - "exists"
       - "library"
+    goal_tags:
+      - "List.head"
+      - "∈"
+    at: {}
     when: "refine ⟨_, ?_⟩ followed by providing the witness from a lemma statement."
     how: "exact lemma_name args (anonymous ∃ is a structure) or obtain from the lemma and pass on."
     before: |-
@@ -2015,9 +2170,114 @@ cards:
       confidence: "low"
       note: "Too little mined evidence; measure with the profiler."
     verified:
-      v4.25.0: "pass"
-      v4.26.0: "pass"
       v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
     version_notes: "Lemma names on lists are renamed often; verify on 4.25 and 4.33 before keeping."
     move_class: ""
     source: "both"
+  -
+    id: "S71-drop-helper-reclose-dependents"
+    title: "Drop a helper fact and re-close its dependents another way"
+    tags:
+      - "have"
+      - "bullets"
+    goal_tags: []
+    at:
+      opening: "A helper stated at the start feeds every later step, so removing it changes the most; re-close the first dependents first."
+      middle: "Check which later steps name the helper before deleting it; each of them needs its own close."
+      closing: "A helper used only by the last steps is the easiest to fold into the final term."
+    when: "A proof is already short, and one helper fact is used by a few later steps, each for one small rewrite or one argument; the helper's own proof is a large share of the cost."
+    how: "Delete the helper and the steps that mention it. Close each dependent goal on its own: a direct term, a one-line closer that finds the fact itself, or the library fact the helper wrapped. Keep the deletion only if the whole proof compiles and the total is lower."
+    before: |-
+      example (xs : List ℕ) (h : xs ≠ []) : 0 < xs.length ∧ xs.length ≠ 0 := by
+        have hl : 0 < xs.length := List.length_pos_iff.mpr h
+        constructor
+        · exact hl
+        · exact Nat.pos_iff_ne_zero.mp hl
+    after: |-
+      example (xs : List ℕ) (h : xs ≠ []) : 0 < xs.length ∧ xs.length ≠ 0 :=
+        ⟨List.length_pos_iff.mpr h, by simp [h]⟩
+    effect:
+      tokens: "unknown"
+      heartbeats:
+        opening: "unknown"
+        middle: "unknown"
+        closing: "unknown"
+      confidence: "low"
+      note: "Too little mined evidence; measure with the profiler."
+    verified:
+      v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
+    version_notes: "Stable across 4.25-4.33 as far as known."
+    move_class: ""
+    source: "public:general-practice"
+  -
+    id: "S72-sibling-fact-without-premise"
+    title: "Find a sibling fact that needs no premise"
+    tags:
+      - "library"
+      - "exact?"
+    goal_tags: []
+    at:
+      opening: "A premise established at the start is usually shared with later steps; drop it only if nothing else uses it."
+      middle: "Search for the sibling by the goal's constants before adding a step that proves the premise."
+      closing: "At the end the goal is fixed; a weaker sibling may close it directly without the premise."
+    when: "A library fact fits the goal except for a premise you do not have (a length, a bound, a nonemptiness), and proving the premise costs a step."
+    how: "Search by the constants in the goal, not by the failing name: look for a weaker or differently shaped fact about the same functions that states its result without the premise (a max or min form, an inequality instead of an equality, a membership form). Compile the sibling before dropping the premise step."
+    before: |-
+      example (n m : ℕ) (h : m ≤ n) : n ≤ n - m + m := by
+        have := Nat.sub_add_cancel h
+        omega
+    after: |-
+      example (n m : ℕ) (h : m ≤ n) : n ≤ n - m + m := by
+        rw [Nat.sub_add_eq_max]; exact le_max_left n m
+    effect:
+      tokens: "unknown"
+      heartbeats:
+        opening: "unknown"
+        middle: "unknown"
+        closing: "unknown"
+      confidence: "low"
+      note: "Too little mined evidence; measure with the profiler."
+    verified:
+      v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
+    version_notes: "Stable across 4.25-4.33 as far as known."
+    move_class: ""
+    source: "public:general-practice"
+  -
+    id: "S73-helper-must-pay"
+    title: "Keep an auxiliary fact only if it removes more than it adds"
+    tags:
+      - "have"
+      - "set"
+    goal_tags: []
+    at:
+      opening: "A helper at the start pays only if most later steps use it."
+      middle: "Count the uses after the helper; two short uses rarely repay a long statement."
+      closing: "A helper used only by the closing step can nearly always be inlined."
+    when: "A have or a local lemma is introduced to share work, but it is used once or twice and its statement is long."
+    how: "Compile the proof with the helper and without it, and compare both totals before deciding: the helper's statement and proof add cost, and each use saves only the difference to the inline form. Never judge by reading alone."
+    before: |-
+      example (xs : List ℕ) : (xs ++ []).length + 0 = xs.length := by
+        have h : xs ++ [] = xs := List.append_nil xs
+        rw [h]; rfl
+    after: "example (xs : List ℕ) : (xs ++ []).length + 0 = xs.length := by simp"
+    effect:
+      tokens: "unknown"
+      heartbeats:
+        opening: "unknown"
+        middle: "unknown"
+        closing: "unknown"
+      confidence: "low"
+      note: "Too little mined evidence; measure with the profiler."
+    verified:
+      v4.27.0: "pass"
+      v4.26.0: "pass"
+      v4.25.0: "pass"
+    version_notes: "Stable across 4.25-4.33 as far as known."
+    move_class: ""
+    source: "public:general-practice"

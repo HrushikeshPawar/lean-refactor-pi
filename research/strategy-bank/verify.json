@@ -1,5 +1,5 @@
 {
- "4.25.0": {
+ "4.27.0": {
   "S01-obtain-to-projection": "pass",
   "S02-rintro-merge": "pass",
   "S03-inline-single-use-have": "pass",
@@ -69,7 +69,10 @@
   "S67-one-big-closer": "pass",
   "S68-generalize-hyps-in-induction": "pass",
   "S69-shared-prefix": "pass",
-  "S70-exists-intro-from-lemma": "pass"
+  "S70-exists-intro-from-lemma": "pass",
+  "S71-drop-helper-reclose-dependents": "pass",
+  "S72-sibling-fact-without-premise": "pass",
+  "S73-helper-must-pay": "pass"
  },
  "4.26.0": {
   "S01-obtain-to-projection": "pass",
@@ -141,9 +144,12 @@
   "S67-one-big-closer": "pass",
   "S68-generalize-hyps-in-induction": "pass",
   "S69-shared-prefix": "pass",
-  "S70-exists-intro-from-lemma": "pass"
+  "S70-exists-intro-from-lemma": "pass",
+  "S71-drop-helper-reclose-dependents": "pass",
+  "S72-sibling-fact-without-premise": "pass",
+  "S73-helper-must-pay": "pass"
  },
- "4.27.0": {
+ "4.25.0": {
   "S01-obtain-to-projection": "pass",
   "S02-rintro-merge": "pass",
   "S03-inline-single-use-have": "pass",
@@ -213,6 +219,9 @@
   "S67-one-big-closer": "pass",
   "S68-generalize-hyps-in-induction": "pass",
   "S69-shared-prefix": "pass",
-  "S70-exists-intro-from-lemma": "pass"
+  "S70-exists-intro-from-lemma": "pass",
+  "S71-drop-helper-reclose-dependents": "pass",
+  "S72-sibling-fact-without-premise": "pass",
+  "S73-helper-must-pay": "pass"
  }
 }
