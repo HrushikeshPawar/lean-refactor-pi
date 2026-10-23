@@ -723,7 +723,7 @@ def _idle_note(run_id: str, actor: str, bucket: dict) -> list[str]:
     bucket["idle_noted_at"] = now
     if not idle:
         return []
-    note = text.render("replies/team.idle_slots", idle=idle, slots=orchestration._MODEL_SLOTS)
+    note = text.render("replies/team.idle_slots", idle=idle, slots=orchestration.slot_limit(directory))
     if ended:
         note += " " + text.render("replies/team.idle_ended", jobs=", ".join(ended))
     return [note + " " + text.render("replies/team.idle_fill")]

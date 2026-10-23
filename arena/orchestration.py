@@ -1,6 +1,6 @@
 """Worker assignments. A receipt is durable before the child is opened.
 
-At most `_MODEL_SLOTS` (the worker model's session concurrency) model activations own a slot. A queued job waits for a real exit.
+At most `slot_limit` (the worker model's session concurrency, or a polishing session's `workers`) model activations own a slot. A queued job waits for a real exit.
 Cancellation clears queued prompts, then aborts, and keeps the slot until the child is gone.
 A passing tool result is published while the activation is still active.
 A follow-up reuses the hypothesis session; a follow-up to an active job is steered into its running turn.
@@ -26,6 +26,27 @@ from arena.pi_rpc import WORKER_MODEL, WORKER_TOOLS, FrameReader, cancel_lines, 
 from arena.run_control import OperationRejected
 
 _MODEL_SLOTS = _SESSION_CONCURRENCY[WORKER_MODEL]
+
+
+def _run_config(directory: Path) -> dict:
+    try:
+        return json.loads((Path(directory) / "run-config.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def worker_model(directory: Path) -> str:
+    """The run's worker model: its run config, else the default every normal run uses."""
+    return _run_config(directory).get("worker_model") or WORKER_MODEL
+
+
+def slot_limit(directory: Path) -> int:
+    """Worker slots of the run: a polishing session's `workers`, else the default pool."""
+    return _run_config(directory).get("workers") or _MODEL_SLOTS
+
+
+def is_golf(directory: Path) -> bool:
+    return bool(_run_config(directory).get("golf"))
 _readers: dict[str, threading.Thread] = {}
 _owned: dict[str, object] = {}
 _live: dict[str, dict] = {}
@@ -250,7 +271,7 @@ def _slot_count(directory: Path) -> int:
 
 
 def _can_admit_directly(directory: Path) -> bool:
-    return _slot_count(directory) < _MODEL_SLOTS and not any(
+    return _slot_count(directory) < slot_limit(directory) and not any(
         _activation_view(directory, row)["state"] == "queued" for row in _delegations(directory)
     )
 
@@ -407,7 +428,7 @@ def _fill_slots(directory: Path) -> None:
     """Open the oldest queued assignment only while a model slot is free."""
     while True:
         with run_control.control_lock(directory):
-            if _recovering(directory) or _slot_count(directory) >= _MODEL_SLOTS:
+            if _recovering(directory) or _slot_count(directory) >= slot_limit(directory):
                 return
             rows = _delegations(directory)
             # A follow-up waits for its own job's previous process to exit: one process per worker session.
@@ -973,7 +994,8 @@ def _worker_packet(directory: Path, stored: dict) -> str:
     theorem = json.loads((directory / "run-config.json").read_text())["theorem"]
     families = _island_families(directory) if stored["scope"] == "island" else None
     return context.worker_packet(theorem, task=stored["task"], anchor=stored["anchor"], node=node, families=families,
-                                 objective=stored.get("objective"), trim=stored["scope"] == "trim")
+                                 objective=stored.get("objective"), trim=stored["scope"] == "trim",
+                                 golf=is_golf(directory))
 
 
 def _open_activation(directory: Path, stored: dict, open_child, command_id: str,
@@ -1012,7 +1034,7 @@ def _open_activation(directory: Path, stored: dict, open_child, command_id: str,
                 directory, run_id=stored["run_id"], worker_actor_id=stored["worker_actor_id"],
                 worker_session_id=stored["worker_session_id"], job_id=stored["job_id"],
                 activation_id=activation_id, anchor=stored["anchor"], generation=generation,
-                island=stored["scope"] in _PERSISTENT,
+                model=worker_model(directory), island=stored["scope"] in _PERSISTENT,
             )
             with run_control.control_lock(directory):
                 _append_ownership(directory, stored, phase="intent", generation=generation,
@@ -1924,7 +1946,7 @@ def idle_slots(directory: Path) -> int:
     started = (first or {}).get("ts")
     if not isinstance(started, (int, float)) or time.time() - started < text.numbers()["idle_note_after_minutes"] * 60:
         return 0
-    return max(0, _MODEL_SLOTS - _slot_count(directory))
+    return max(0, slot_limit(directory) - _slot_count(directory))
 
 
 def ended_islands(directory: Path) -> list[str]:

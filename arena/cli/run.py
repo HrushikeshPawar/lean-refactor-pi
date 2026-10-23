@@ -19,8 +19,9 @@ from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TypedDict
+from typing import Annotated, TypedDict
 
+from cyclopts import Parameter
 from rich.console import Console
 
 from arena import campaign, lean_health, lean_session, text
@@ -45,6 +46,9 @@ SYSTEM_PROMPT = text.render("messages/run.system_prompt")
 # Every per-model fact (prices, windows, output limits, compaction, timeout, thinking levels) lives in models.yaml.
 CONFIG = model_config.load()
 MODELS = model_config.models()
+GOLF_WORKER_MODEL = "deepseek-v4.1-flash"  # the default worker model, as in every run
+GOLF_WORKERS = 2
+GOLF_MAX_WORKERS = 3
 # After Pi exits, pending background full checks get this long before the submission is chosen.
 DRAIN_S = 180  # wall-clock cap on the closing drain; candidates left unchecked are recorded in the summary
 # How long Pi gets to finish an in-flight evaluation and write cost.json after a stop request.
@@ -491,6 +495,10 @@ class RunOptions:
     seed_run: Path | None = None  # an ended run whose graph and history this run continues from
     seed_proof: Path | None = None  # a proof file this run starts from instead of the reference proof
     no_golf: bool = False  # compatibility flag; post-run golf is disabled for every run
+    # A short polishing session that starts from a best proof (--seed-proof) with Sol-class workers.
+    golf: Annotated[bool, Parameter(negative="")] = False
+    worker_model: str | None = None  # golf only; default deepseek-v4.1-flash
+    workers: int | None = None  # golf only; default 2, at most 3
     dry_run: bool = False
     plain: bool = False
 
@@ -503,6 +511,23 @@ def _release_setup() -> None:
     if setup is not None:
         for line in setup.restore():
             print(line, flush=True)
+
+
+def _golf_team(worker_model: str | None, workers: int | None) -> dict | str:
+    """The polishing session's team, or the refusal text."""
+    model = worker_model or GOLF_WORKER_MODEL
+    if model not in MODELS:
+        return f"unknown worker model {model!r}; choose from {', '.join(MODELS)}"
+    count = GOLF_WORKERS if workers is None else workers
+    if not 1 <= count <= GOLF_MAX_WORKERS:
+        return f"--workers must be between 1 and {GOLF_MAX_WORKERS}"
+    return {"worker_model": model, "workers": count}
+
+
+def _golf_start(theorem: str, run_id: str, seeded: dict, path: Path) -> str:
+    from arena.context import golf_start_section
+
+    return golf_start_section(seeded["candidate_id"], seeded["best_proxy"], read_seed_proof(theorem, path))
 
 
 def execute(options: RunOptions) -> int:
@@ -564,6 +589,22 @@ def run(options: RunOptions) -> int:
             file=sys.stderr,
         )
         return 2
+    golf_team = None
+    if args.golf or args.worker_model is not None or args.workers is not None:
+        if args.resume_run:
+            if not args.golf and (args.worker_model is not None or args.workers is not None):
+                print("error: --worker-model and --workers need --golf", file=sys.stderr)
+                return 2
+        elif not args.golf:
+            print("error: --worker-model and --workers need --golf", file=sys.stderr)
+            return 2
+        elif args.seed_proof is None:
+            print("error: --golf needs --seed-proof: it starts from a best proof", file=sys.stderr)
+            return 2
+        golf_team = _golf_team(args.worker_model, args.workers)
+        if isinstance(golf_team, str):
+            print(f"error: {golf_team}", file=sys.stderr)
+            return 2
     directory = run_dir(args.run_id)
     if directory.exists() != args.resume_run:
         print("error: --resume-run must be used exactly when the run ID already exists", file=sys.stderr)
@@ -602,12 +643,16 @@ def run(options: RunOptions) -> int:
         ):
             print("error: resume thinking level or skill differs from the original run", file=sys.stderr)
             return 2
+        saved = {key: config.get(key) for key in ("golf", "worker_model", "workers")}
+        if golf_team is not None and (not saved["golf"] or golf_team != {k: saved[k] for k in golf_team}):
+            print("error: resume golf settings differ from the original run", file=sys.stderr)
+            return 2
         prompt = text.render("messages/run.resume")
     else:
         prompt = (
             text.render("messages/run.preflight")
             if args.preflight
-            else packet(args.theorem, args.model) + ("\nAdditional instructions:\n" + extra + "\n" if extra else "")
+            else packet(args.theorem, args.model, golf=golf_team) + ("\nAdditional instructions:\n" + extra + "\n" if extra else "")
         )
     if args.no_langfuse and not args.test_extension:
         print("error: --no-langfuse is only for offline runs with --test-extension", file=sys.stderr)
@@ -682,6 +727,7 @@ def run(options: RunOptions) -> int:
                     "thinking": args.thinking,
                     "seed_run": None if args.seed_run is None else str(args.seed_run),
                     "seed_proof": None if args.seed_proof is None else str(args.seed_proof),
+                    **({"golf": True, **golf_team} if golf_team else {}),
                     "merge_worker": args.merge_worker,
                     "compact_at_tokens": args.compact_at_tokens,
                     "compact_keep_tokens": args.compact_keep_tokens,
@@ -707,6 +753,8 @@ def run(options: RunOptions) -> int:
             print(f"Seeded from {args.seed_proof}: proxy {seeded['best_proxy']}", flush=True)
             # The recorded packet hash stays that of the plain packet; the prior work follows it.
             section = prior_work(args.run_id)
+            if golf_team:
+                section = _golf_start(args.theorem, args.run_id, seeded, args.seed_proof) + "\n\n" + section
             with (directory / "packet.txt").open("a") as packet_file:
                 packet_file.write("\n" + section)
             command[-1] = prompt + "\n" + section

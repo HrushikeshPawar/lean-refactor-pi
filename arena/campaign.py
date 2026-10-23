@@ -753,11 +753,11 @@ def _source_hint(name: str, symbol: str) -> tuple[str, str | None, tuple[int, in
     return symbol, module, span
 
 
-def packet(name: str, model: str | None = None) -> str:
+def packet(name: str, model: str | None = None, golf: dict | None = None) -> str:
     """Kickoff packet: task, exchange rates, source-derived context. The model is the orchestrating one."""
     from arena.context import render_packet
 
-    return render_packet(name, model=model)
+    return render_packet(name, model=model, golf=golf)
 
 
 def _append(directory: Path, event: dict) -> None:

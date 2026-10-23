@@ -70,7 +70,7 @@ def _jobs(result: dict, directory: Path, job) -> str:
         return _render("jobs_none")
     nodes = orchestration.proof_nodes(directory)
     used = sum(1 for item in found if item.get("occupies_slot"))
-    lines = [_render("jobs_head", used=used, slots=orchestration._MODEL_SLOTS)]
+    lines = [_render("jobs_head", used=used, slots=orchestration.slot_limit(directory))]
     cards = {row["job_id"]: row for row in orchestration.current_cards(directory).values() if row.get("job_id")}
     for item in found:
         saved = [nodes[f["proof_id"]] for f in item.get("findings") or [] if f.get("proof_id") in nodes]

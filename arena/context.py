@@ -935,20 +935,29 @@ def _reference_price_table(table: dict, proof: str, profile: dict | None) -> lis
     return render_price_table(table, proof, profile, proof_id="reference").splitlines()
 
 
-def _team_section(model: str | None) -> list[str]:
-    """The orchestrator's team paragraph. Worker count, model and the output-price ratio are computed here."""
+def _team_section(model: str | None, golf: dict | None = None) -> list[str]:
+    """The orchestrator's team paragraph. Worker count, model and the output-price ratio are computed here.
+
+    `golf` ({"workers", "worker_model"}) swaps in the polishing-session paragraph for a run that starts from a best proof."""
     if model is None:
         return []
     from arena.models import _SESSION_CONCURRENCY, load
     from arena.pi_rpc import WORKER_MODEL
 
+    worker_model = golf["worker_model"] if golf else WORKER_MODEL
+    workers = golf["workers"] if golf else _SESSION_CONCURRENCY[WORKER_MODEL]
     prices = load()["models"]
     # One simple rule: how many times cheaper a worker's output token is than the orchestrator's.
-    ratio = round(prices[model]["price"]["output"] / prices[WORKER_MODEL]["price"]["output"])
+    ratio = round(prices[model]["price"]["output"] / prices[worker_model]["price"]["output"])
     cost = render_text("packet/team-cost", ratio=ratio) if ratio > 1 else ""
     return render_text(
-        "packet/team", workers=_SESSION_CONCURRENCY[WORKER_MODEL], worker_model=WORKER_MODEL, cost=cost
+        "packet/golf-team" if golf else "packet/team", workers=workers, worker_model=worker_model, cost=cost
     ).strip().splitlines()
+
+
+def golf_start_section(node: str, score, proof: str) -> str:
+    """The seeded best proof, appended to a polishing session's first prompt."""
+    return render_text("packet/golf-start", node=node, score=score, proof=proof.strip()).strip()
 
 
 def _scoring_lines(rates: dict) -> list[str]:
@@ -997,7 +1006,9 @@ def _pinned_part(row: dict, targets: list) -> tuple[str, list[str]]:
     )
 
 
-def packet_sections(name: str, *, cache_only: bool = False, model: str | None = None) -> list[tuple[str, str]]:
+def packet_sections(
+    name: str, *, cache_only: bool = False, model: str | None = None, golf: dict | None = None
+) -> list[tuple[str, str]]:
     row = problem(name)
     targets = versions(row)
     context = cached_context(name) if cache_only else lean_context(name)
@@ -1041,7 +1052,7 @@ def packet_sections(name: str, *, cache_only: bool = False, model: str | None = 
         ),
         (template("packet/sections.titles.profile").strip(), _profile_section(prof, row["src"], name)),
         ("", template("packet/search").strip().splitlines()),
-        (template("packet/sections.titles.team").strip(), _team_section(model)),
+        (template("packet/sections.titles.team").strip(), _team_section(model, golf)),
         (titles["goals"], _goal_section(context, row["src"], facts=goal_facts)),
         (LIBRARY_TITLE, _library_section(context)),
         (titles["types"], _types_section(context)),
@@ -1074,8 +1085,8 @@ def packet_sections(name: str, *, cache_only: bool = False, model: str | None = 
     ]
 
 
-def render_packet(name: str, *, cache_only: bool = False, model: str | None = None) -> str:
-    sections = packet_sections(name, cache_only=cache_only, model=model)
+def render_packet(name: str, *, cache_only: bool = False, model: str | None = None, golf: dict | None = None) -> str:
+    sections = packet_sections(name, cache_only=cache_only, model=model, golf=golf)
     return "\n\n".join(content for _title, content in sections) + "\n"
 
 
@@ -1113,7 +1124,7 @@ _ISLAND_PACKETS = {None: "packet/island", "tokens": "packet/island_tokens", "hea
 
 
 def worker_packet(name: str, *, task: str, anchor: dict, node, families: list[str] | None = None,
-                  objective: str | None = None, trim: bool = False) -> str:
+                  objective: str | None = None, trim: bool = False, golf: bool = False) -> str:
     """First prompt of a delegated worker: the shared startup contract plus its anchor. No Sol-only sections.
 
     `node` is the graph node the anchor resolved to, so the proof text and goals are the saved ones.
@@ -1139,6 +1150,7 @@ def worker_packet(name: str, *, task: str, anchor: dict, node, families: list[st
             render_text(_ISLAND_PACKETS[objective], families="\n".join(families or [])).strip().splitlines())]
           if island else []),
         *([("", template("packet/trim").strip().splitlines())] if trim else []),
+        *([("", template("packet/golf-worker").strip().splitlines())] if golf else []),
         ("", template("packet/search").strip().splitlines()),
         (render_text("packet/sections.titles.anchored", node=node.id), numbered),
         ("", anchored[:1]),

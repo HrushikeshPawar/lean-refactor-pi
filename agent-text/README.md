@@ -133,6 +133,9 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `messages/salvage.salvaged` | 6 | Agent messages and notices | when the matching event occurs |
 | `messages/salvage.salvaged_unseen` | 11 | Agent messages and notices | when the matching event occurs |
 | `messages/trim.result_stub` | 9 | Agent messages and notices | when a repeat is shortened |
+| `packet/golf-start` | 44 | Initial theorem packet | once per run |
+| `packet/golf-team` | 312 | Initial theorem packet | once per run |
+| `packet/golf-worker` | 75 | Initial theorem packet | once per run |
 | `packet/island` | 109 | Initial theorem packet | once per run |
 | `packet/island_heartbeats` | 97 | Initial theorem packet | once per run |
 | `packet/island_tokens` | 127 | Initial theorem packet | once per run |
