@@ -1,0 +1,1 @@
+Reference cards for the costliest step of your anchor are shown below; the `patterns` tool returns more for any step or snippet. A card is a pattern seen to lower the cost elsewhere, so compile a change before trusting it.

@@ -133,6 +133,8 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `messages/salvage.salvaged` | 6 | Agent messages and notices | when the matching event occurs |
 | `messages/salvage.salvaged_unseen` | 11 | Agent messages and notices | when the matching event occurs |
 | `messages/trim.result_stub` | 9 | Agent messages and notices | when a repeat is shortened |
+| `packet/cards-team` | 33 | Initial theorem packet | once per run |
+| `packet/cards-worker` | 40 | Initial theorem packet | once per run |
 | `packet/golf-start` | 44 | Initial theorem packet | once per run |
 | `packet/golf-team` | 312 | Initial theorem packet | once per run |
 | `packet/golf-worker` | 75 | Initial theorem packet | once per run |
@@ -214,6 +216,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `packet/sections.required.reference` | 5 | Initial theorem packet | once per run |
 | `packet/sections.required.source` | 2 | Initial theorem packet | once per run |
 | `packet/sections.titles.anchored` | 11 | Initial theorem packet | once per run |
+| `packet/sections.titles.cards` | 8 | Initial theorem packet | once per run |
 | `packet/sections.titles.dependencies` | 3 | Initial theorem packet | once per run |
 | `packet/sections.titles.earlier` | 6 | Initial theorem packet | once per run |
 | `packet/sections.titles.goals` | 4 | Initial theorem packet | once per run |
@@ -273,6 +276,14 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/merge.not_submitted` | 2 | Tool replies | when the matching tool result occurs |
 | `replies/merge.submitted` | 2 | Tool replies | when the matching tool result occurs |
 | `replies/merge.summary` | 9 | Tool replies | when the matching tool result occurs |
+| `replies/patterns.bad_input` | 15 | Tool replies | when the matching tool result occurs |
+| `replies/patterns.card` | 19 | Tool replies | when the matching tool result occurs |
+| `replies/patterns.down` | 2 | Tool replies | when the matching tool result occurs |
+| `replies/patterns.mixed` | 1 | Tool replies | when the matching tool result occurs |
+| `replies/patterns.none` | 6 | Tool replies | when the matching tool result occurs |
+| `replies/patterns.unknown` | 2 | Tool replies | when the matching tool result occurs |
+| `replies/patterns.unknown_node` | 5 | Tool replies | when the matching tool result occurs |
+| `replies/patterns.up` | 2 | Tool replies | when the matching tool result occurs |
 | `replies/price-row` | 18 | Compile replies | when a scored proof is compiled |
 | `replies/price-row.changed` | 3 | Compile replies | when a scored proof is compiled |
 | `replies/price-row.parenthesis` | 1 | Compile replies | when a scored proof is compiled |
@@ -564,6 +575,11 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `tools/goal.params.try` | 10 | Model tool definitions | every request |
 | `tools/jobs.description` | 15 | Model tool definitions | every request |
 | `tools/jobs.params.job_ids` | 9 | Model tool definitions | every request |
+| `tools/patterns.description` | 68 | Model tool definitions | every request |
+| `tools/patterns.params.node` | 5 | Model tool definitions | every request |
+| `tools/patterns.params.position` | 17 | Model tool definitions | every request |
+| `tools/patterns.params.step` | 9 | Model tool definitions | every request |
+| `tools/patterns.params.text` | 10 | Model tool definitions | every request |
 | `tools/read.description` | 17 | Model tool definitions | every request |
 | `tools/read.params.against` | 6 | Model tool definitions | every request |
 | `tools/read.params.experiment` | 23 | Model tool definitions | every request |

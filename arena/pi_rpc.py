@@ -8,6 +8,7 @@ from pathlib import Path
 
 WORKER_MODEL = "deepseek-v4.1-flash"
 WORKER_TOOLS = ("compile", "goal", "search", "read", "scratch", "card")
+CARDS_TOOL = "patterns"  # added to the worker tools only in a run started with --cards
 
 
 class FrameReader:
@@ -85,7 +86,8 @@ def worker_launch(
         raise ValueError("worker launch requires a saved theorem")
     root = Path(__file__).resolve().parents[1]
     session_dir = directory / "sessions" / worker_session_id
-    tools = ",".join(WORKER_TOOLS)
+    cards = bool(run_config.get("cards"))
+    tools = ",".join((*WORKER_TOOLS, *([CARDS_TOOL] if cards else [])))
     return {
         "argv": [
             "pi",
@@ -112,6 +114,7 @@ def worker_launch(
         "env": {
             **({"ARENA_GENERATION": generation} if generation is not None else {}),
             **({"ARENA_ISLAND": "1"} if island else {}),
+            **({"ARENA_CARDS": "1"} if cards else {}),
             "ARENA_RUN_ID": run_id,
             "ARENA_ACTOR_ID": worker_actor_id,
             "ARENA_SESSION_ID": worker_session_id,
@@ -133,5 +136,5 @@ def worker_launch(
         "provider": provider(model, config),
         "session_dir": str(session_dir),
         "actor_id": worker_actor_id,
-        "tools": list(WORKER_TOOLS),
+        "tools": tools.split(","),
     }

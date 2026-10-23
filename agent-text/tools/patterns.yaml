@@ -1,0 +1,6 @@
+description: "Return reference cards for a proof step: short patterns that say when a change applies, how to make it, a before and after example, and which way it usually moves tokens and heartbeats. Send node with step to use a saved step, or text to use any snippet. Each card is a pattern seen to lower the cost somewhere, not a promise; compile the change to check it."
+params:
+  node: "Node id. Send with step."
+  step: "Step id such as s2, in that node's outline."
+  text: "A proof snippet to match, instead of node and step."
+  position: "Where the snippet sits in its proof: opening, middle or closing. Used with text; defaults to middle."

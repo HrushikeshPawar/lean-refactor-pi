@@ -14,7 +14,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
-from arena import coordinator, orchestration, team_reply, text
+from arena import coordinator, orchestration, patterns, team_reply, text
 from arena import reply as tool_reply
 from arena import tools as v7_tools
 from arena.campaign import (
@@ -46,6 +46,7 @@ ACTIONS = (
     "jobs",
     "cancel",
     "card",
+    "patterns",
     "island_turn",
 )
 
@@ -97,6 +98,13 @@ def run(args: SimpleNamespace) -> dict:
         return _with_text("await_results", result, args.run_id)
     if args.action in ("delegate", "jobs", "cancel"):
         return _with_text(args.action, _management(args), args.run_id)
+    if args.action == "patterns":
+        if args.request_file is None:
+            raise ValueError("request-file is required")
+        request = json.loads(args.request_file.read_text())
+        if not isinstance(request, dict):
+            raise ValueError("request-file must contain an object")
+        return patterns.patterns_tool(args.theorem, args.run_id, request)
     if args.action == "card":
         return _with_text("card", _card(args), args.run_id)
     if args.action == "island_turn":

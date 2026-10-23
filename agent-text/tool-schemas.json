@@ -160,6 +160,15 @@
         "ideas": {"type": "string", "description": "ideas"},
         "asks": {"type": "string", "description": "asks"}
       }
+    },
+    "patterns": {
+      "handler": true,
+      "properties": {
+        "node": {"type": "string", "description": "node"},
+        "step": {"type": "string", "description": "step"},
+        "text": {"type": "string", "description": "text"},
+        "position": {"type": "string", "enum": ["opening", "middle", "closing"], "description": "position"}
+      }
     }
   }
 }

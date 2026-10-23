@@ -799,6 +799,25 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     });
   }
 
+  // Reference cards: registered only in a run started with --cards (ARENA_CARDS=1 for the orchestrator and workers).
+  if (process.env.ARENA_CARDS === "1") {
+    const patternParams = await parametersFor("patterns", toolSchemas.tools.patterns, sharedNumbers);
+    await registerTool({ name: "patterns", label: "patterns",
+      description: await renderText("tools/patterns.description"), parameters: patternParams,
+      async execute(_id: string, params: Record<string, unknown>, signal?: AbortSignal) {
+        const directory = await mkdtemp(resolve(tmpdir(), "arena-patterns-"));
+        try {
+          const file = resolve(directory, "request.json");
+          await writeFile(file, JSON.stringify(params), "utf8");
+          const result = await campaign("patterns", ["--request-file", file], signal);
+          return { isError: result.ok === false, content: [{ type: "text", text: typeof result.text === "string" ? result.text : JSON.stringify(result) }], details: result };
+        } finally {
+          await rm(directory, { recursive: true, force: true });
+        }
+      },
+    });
+  }
+
   if (executableTools(toolSchemas, actorRole).includes("await_results")) {
     const waitParams = await parametersFor("await_results", toolSchemas.tools.await_results, sharedNumbers);
     await registerTool({ name: "await_results", label: "await_results",

@@ -497,6 +497,8 @@ class RunOptions:
     no_golf: bool = False  # compatibility flag; post-run golf is disabled for every run
     # A short polishing session that starts from a best proof (--seed-proof) with Sol-class workers.
     golf: Annotated[bool, Parameter(negative="")] = False
+    # Strategy cards: the `patterns` tool for every actor and cards in each worker's first packet. Off by default.
+    cards: Annotated[bool, Parameter(negative="")] = False
     worker_model: str | None = None  # golf only; default deepseek-v4.1-flash
     workers: int | None = None  # golf only; default 2, at most 3
     dry_run: bool = False
@@ -647,12 +649,18 @@ def run(options: RunOptions) -> int:
         if golf_team is not None and (not saved["golf"] or golf_team != {k: saved[k] for k in golf_team}):
             print("error: resume golf settings differ from the original run", file=sys.stderr)
             return 2
+        if args.cards and not config.get("cards"):
+            print("error: resume cards setting differs from the original run", file=sys.stderr)
+            return 2
+        args.cards = bool(config.get("cards"))
         prompt = text.render("messages/run.resume")
     else:
         prompt = (
             text.render("messages/run.preflight")
             if args.preflight
-            else packet(args.theorem, args.model, golf=golf_team) + ("\nAdditional instructions:\n" + extra + "\n" if extra else "")
+            else packet(args.theorem, args.model, golf=golf_team)
+            + ("\n" + text.render("packet/cards-team") + "\n" if args.cards else "")
+            + ("\nAdditional instructions:\n" + extra + "\n" if extra else "")
         )
     if args.no_langfuse and not args.test_extension:
         print("error: --no-langfuse is only for offline runs with --test-extension", file=sys.stderr)
@@ -728,6 +736,7 @@ def run(options: RunOptions) -> int:
                     "seed_run": None if args.seed_run is None else str(args.seed_run),
                     "seed_proof": None if args.seed_proof is None else str(args.seed_proof),
                     **({"golf": True, **golf_team} if golf_team else {}),
+                    **({"cards": True} if args.cards else {}),
                     "merge_worker": args.merge_worker,
                     "compact_at_tokens": args.compact_at_tokens,
                     "compact_keep_tokens": args.compact_keep_tokens,
@@ -764,6 +773,8 @@ def run(options: RunOptions) -> int:
     env["ARENA_BUDGET_REQUIRED"] = "1"
     env["ARENA_AUTOCONTINUE"] = "0" if args.preflight else "1"
     env["ARENA_RUN_ID"] = args.run_id
+    if args.cards:
+        env["ARENA_CARDS"] = "1"
     env["ARENA_MODEL"] = args.model
     env["ARENA_PI_MODEL_ID"] = CONFIG["models"][args.model].get("id", args.model)
     env["ARENA_MODELS_JSON"] = model_config.pi_json(CONFIG)

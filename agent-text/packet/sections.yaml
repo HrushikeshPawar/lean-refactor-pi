@@ -7,6 +7,7 @@ titles:
   worker: "Worker"
   hypothesis: "Your hypothesis"
   island: "Your island"
+  cards: "Reference cards for the costliest step (step {step})"
   anchored: "Anchored proof (node {node}, lines as in errors and the outline)"
   worker_goals: "Recorded goal states in the anchor"
   goals: "Goals before original steps"

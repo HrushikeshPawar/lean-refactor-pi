@@ -1,0 +1,16 @@
+card: |-
+  {title}
+  When: {when}
+  How: {how}
+  Tokens: {tokens}. Heartbeats at the {position} of a proof: {heartbeats}.
+  Before:
+  {before}
+  After:
+  {after}
+down: "usually lower"
+up: "usually higher"
+mixed: "mixed"
+unknown: "no data"
+none: "No reference card matches this snippet."
+bad_input: "Send node with step (a step id such as s2), or text with a snippet."
+unknown_node: "Unknown node or step: {target}."

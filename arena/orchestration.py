@@ -47,6 +47,10 @@ def slot_limit(directory: Path) -> int:
 
 def is_golf(directory: Path) -> bool:
     return bool(_run_config(directory).get("golf"))
+
+
+def is_cards(directory: Path) -> bool:
+    return bool(_run_config(directory).get("cards"))
 _readers: dict[str, threading.Thread] = {}
 _owned: dict[str, object] = {}
 _live: dict[str, dict] = {}
@@ -993,9 +997,15 @@ def _worker_packet(directory: Path, stored: dict) -> str:
     node = next(item for item in graph.nodes if item.id == stored["anchor"]["node"])
     theorem = json.loads((directory / "run-config.json").read_text())["theorem"]
     families = _island_families(directory) if stored["scope"] == "island" else None
+    cards = None
+    if is_cards(directory):
+        from arena import patterns
+
+        costly = patterns.costliest_step(theorem, directory.name, node)
+        cards = costly and (costly[0], patterns.render_cards(costly[1], costly[2]))
     return context.worker_packet(theorem, task=stored["task"], anchor=stored["anchor"], node=node, families=families,
                                  objective=stored.get("objective"), trim=stored["scope"] == "trim",
-                                 golf=is_golf(directory))
+                                 golf=is_golf(directory), cards=cards)
 
 
 def _open_activation(directory: Path, stored: dict, open_child, command_id: str,
