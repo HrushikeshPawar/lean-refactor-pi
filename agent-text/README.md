@@ -147,9 +147,9 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `packet/price-table.coordinates` | 19 | Prices action replies | when the table is requested |
 | `packet/price-table.detail` | 9 | Prices action replies | when the table is requested |
 | `packet/price-table.detail_assumption` | 20 | Prices action replies | when the table is requested |
-| `packet/price-table.detail_head` | 17 | Prices action replies | when the table is requested |
+| `packet/price-table.detail_head` | 14 | Prices action replies | when the table is requested |
 | `packet/price-table.detail_row` | 11 | Prices action replies | when the table is requested |
-| `packet/price-table.hotspot` | 21 | Prices action replies | when the table is requested |
+| `packet/price-table.hotspot` | 19 | Prices action replies | when the table is requested |
 | `packet/price-table.hotspot_omitted` | 8 | Prices action replies | when the table is requested |
 | `packet/price-table.legend` | 14 | Prices action replies | when the table is requested |
 | `packet/price-table.missing_hb` | 18 | Prices action replies | when the table is requested |
@@ -238,7 +238,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `packet/sections.titles.worker` | 1 | Initial theorem packet | once per run |
 | `packet/sections.titles.worker_goals` | 6 | Initial theorem packet | once per run |
 | `packet/task` | 10 | Initial theorem packet | once per run |
-| `packet/team` | 649 | Initial theorem packet | once per run |
+| `packet/team` | 652 | Initial theorem packet | once per run |
 | `packet/team-cost` | 10 | Initial theorem packet | once per run |
 | `packet/trim` | 86 | Initial theorem packet | once per run |
 | `packet/worker` | 172 | Initial theorem packet | once per run |
@@ -494,7 +494,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/tools.read_step_after` | 2 | Tool replies | when the matching tool result occurs |
 | `replies/tools.read_step_before` | 2 | Tool replies | when the matching tool result occurs |
 | `replies/tools.read_tree_cols` | 15 | Tool replies | when the matching tool result occurs |
-| `replies/tools.read_tree_head` | 28 | Tool replies | when the matching tool result occurs |
+| `replies/tools.read_tree_head` | 26 | Tool replies | when the matching tool result occurs |
 | `replies/tools.read_tree_more` | 9 | Tool replies | when the matching tool result occurs |
 | `replies/tools.read_tree_pending` | 10 | Tool replies | when the matching tool result occurs |
 | `replies/tools.read_tree_row` | 13 | Tool replies | when the matching tool result occurs |

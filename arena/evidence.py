@@ -176,8 +176,8 @@ def cost_evidence(
         "page_index": page,
         "page_count": page_count,
         "omitted_on_page": max(0, len(detail) - page * page_size),
-        "retrieval": f"read(node={node_label}, view=tree) proof={proof_id}",
-        "next_retrieval": f"read(node={node_label}, view=tree:{page + 1}) proof={proof_id}"
+        "retrieval": f"read(node={node_label}, view=tree)",
+        "next_retrieval": f"read(node={node_label}, view=tree:{page + 1})"
         if page < page_count
         else None,
     }
@@ -221,7 +221,6 @@ def render_cost_overview(table: dict, evidence: dict) -> list[str]:
             parent=hotspot["parent"],
             parent_range=hotspot["parent_range"],
             range=hotspot["range"],
-            proof=hotspot["proof_id"],
             incl_hb=hotspot["incl_hb"],
             tokens=hotspot["tokens"],
             text=hotspot["text"],
@@ -244,7 +243,6 @@ def render_cost_detail(evidence: dict) -> list[str]:
             page=evidence["page_index"],
             pages=evidence["page_count"],
             omitted=evidence["omitted_on_page"],
-            proof=evidence["proof_id"],
         ),
     ]
     if evidence["has_columns"]:

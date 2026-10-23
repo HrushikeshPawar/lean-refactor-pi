@@ -87,6 +87,9 @@ class GoldenSessionTests(unittest.TestCase):
     def results(self) -> list[dict]:
         return [row for row in self.journal if row.get("kind") == "tool_result"]
 
+    def contexts(self) -> list[dict]:
+        return [row for row in self.journal if row.get("kind") == "context_message"]
+
     def delivered(self) -> list[tuple[str, str]]:
         """Everything the arena wrote for the model: tool results (with their footers) and runner messages."""
         texts = [
@@ -96,6 +99,7 @@ class GoldenSessionTests(unittest.TestCase):
             )
             for row in self.results()
         ]
+        texts += [(f"context message {index}", row.get("content") or "") for index, row in enumerate(self.contexts())]
         if self.requests:
             texts += [
                 (f"user message {index}", message_text(message))
@@ -157,9 +161,12 @@ class GoldenSessionTests(unittest.TestCase):
     def test_finish_is_unmentioned_until_the_final_tenth_and_the_tool_list_never_changes(self):
         before, after = self.requests[: self.spend_turn + 1], self.requests[self.spend_turn + 1 :]
         self.assertTrue(after, "no request was sent inside the final tenth")
+        # The session's own tool list (the orchestrator's, with the team tools) is fixed from the first request on.
+        first = set(offered_tools(self.requests[0]))
+        self.assertLessEqual(START_TOOLS, first)
         for request in before:
             with self.subTest(request=request["index"]):
-                self.assertEqual(set(offered_tools(request)), START_TOOLS)
+                self.assertEqual(set(offered_tools(request)), first)
                 for definition in request["tool_definitions"]:
                     self.assertNotRegex(json.dumps(definition, ensure_ascii=False), STOP_TEXT, definition["name"])
                 for message in request["messages"]:
@@ -167,7 +174,23 @@ class GoldenSessionTests(unittest.TestCase):
                         self.assertNotRegex(message_text(message), STOP_TEXT, message["role"])
         for request in after:
             with self.subTest(request=request["index"]):
-                self.assertEqual(set(offered_tools(request)), START_TOOLS)
+                self.assertEqual(set(offered_tools(request)), first)
+
+    def test_run_state_arrives_in_one_context_message_per_turn_not_in_tool_replies(self):
+        from arena import text
+
+        contexts = self.contexts()
+        self.assertTrue(contexts, "no context message was sent")
+        heads = [text.render(f"replies/tools.{key}") for key in ("section_updates", "section_cards", "section_map")]
+        for row in self.results():
+            with self.subTest(result=row.get("tool_call_id")):
+                shown = row.get("delivered_text") or ""
+                for head in heads:
+                    self.assertNotIn(head, shown)
+        sent = "\n".join(message_text(message) for message in self.requests[-1]["messages"] if message["role"] != "assistant")
+        for row in contexts:
+            with self.subTest(context=row.get("id")):
+                self.assertIn(row["content"].strip().splitlines()[0], sent)
 
     def test_no_tool_errors_log(self):
         self.assertFalse(self.tool_errors_log)

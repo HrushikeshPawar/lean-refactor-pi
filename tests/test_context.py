@@ -862,7 +862,8 @@ class FixturePacketTests(unittest.TestCase):
         self.assertIn("not tied to any line", packet)
         self.assertNotIn("tokens missing", packet)
         self.assertNotIn("Self hb at range", packet)
-        self.assertIn("Full detail: read(node=n1, view=tree) proof=reference", packet)
+        self.assertIn("Full detail: read(node=n1, view=tree).", packet)
+        self.assertNotIn("proof=", packet)
         self.assertIn("Not a splice target", packet)
         self.assertIn("Inclusive costs are not summed", packet)
         self.assertNotRegex(packet, r"source revision [0-9a-f]")
@@ -886,8 +887,8 @@ class FixturePacketTests(unittest.TestCase):
         })
         self.assertEqual(evidence["hotspots"][0]["range"], "1:10-1:23")
         self.assertIn("tokens 2 self_hb 0 incl_hb 5", "\n".join(render_cost_detail(evidence)))
-        self.assertEqual(evidence["retrieval"], "read(node=n8, view=tree) proof=p-exact")
-        self.assertEqual(evidence["next_retrieval"], "read(node=n8, view=tree:2) proof=p-exact")
+        self.assertEqual(evidence["retrieval"], "read(node=n8, view=tree)")
+        self.assertEqual(evidence["next_retrieval"], "read(node=n8, view=tree:2)")
         self.assertEqual(cost_evidence(
             proof, None, proof_id="p", total_tokens=6, published_score=None,
             versions=None, local_hb=5,
@@ -911,7 +912,7 @@ class FixturePacketTests(unittest.TestCase):
         ):
             read = tools.read_tool(ski, "fixture", {"node": "n8", "view": "prices"})
         self.assertEqual(read["items"][0]["lines"], price["text"].splitlines())
-        self.assertIn("proof p-exact", "\n".join(read["items"][0]["lines"]))
+        self.assertNotIn("p-exact", "\n".join(read["items"][0]["lines"]))
 
 
 @slow

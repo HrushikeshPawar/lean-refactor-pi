@@ -111,7 +111,7 @@ read_outline_hint: "heartbeats are inclusive. Missing is not zero. step: sN give
 read_outline_cut: "{count} more lines not shown (limit {limit} characters)."
 read_step_before: "before: {goal}"
 read_step_after: "after: {goal}"
-read_tree_head: "### Cost tree of {node}, proof {proof}, page {page} of {pages}: measured spans in source order. Own heartbeats are in this detail. Indentation is not a splice id."
+read_tree_head: "### Cost tree of {node}, page {page} of {pages}: measured spans in source order. Own heartbeats are in this detail. Indentation is not a splice id."
 read_tree_cols: "| line | node | kind | tokens | heartbeats | own heartbeats |\n|---|---|---|---|---|---|"
 read_tree_row: "| {line} | `{text}` | {kind} | {tokens} | {heartbeats} | {own} |"
 read_tree_more: "{count} measured spans remain after this page. Continue: {retrieval}."

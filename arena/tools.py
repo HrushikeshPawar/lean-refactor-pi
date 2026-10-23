@@ -1803,7 +1803,6 @@ def read_tool(theorem: str, run_id: str, request: dict) -> dict:
                 _render(
                     "read_tree_head",
                     node=node.id,
-                    proof=evidence["proof_id"],
                     page=evidence["page_index"],
                     pages=evidence["page_count"],
                 ),
