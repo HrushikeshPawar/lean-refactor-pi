@@ -1,0 +1,2064 @@
+{
+ "pairs_seen": 1512,
+ "improving_pairs": 1337,
+ "moves": {
+  "other_shrink": {
+   "count": 840,
+   "features": "uncategorised shrink",
+   "mean_step_token_delta": -8.11,
+   "median_step_token_delta": -4.0,
+   "share_token_reducing": 0.93,
+   "n_hb_single": 553,
+   "mean_hb_delta_single_step_pairs": -23,
+   "share_hb_reducing": 0.58,
+   "positions": {
+    "closing": {
+     "tokens": {
+      "n": 279,
+      "down": 262,
+      "up": 6,
+      "mean": -12
+     },
+     "heartbeats": {
+      "n": 209,
+      "down": 123,
+      "up": 62,
+      "mean": 2
+     }
+    },
+    "middle": {
+     "tokens": {
+      "n": 474,
+      "down": 436,
+      "up": 12,
+      "mean": -6
+     },
+     "heartbeats": {
+      "n": 291,
+      "down": 164,
+      "up": 85,
+      "mean": -13
+     }
+    },
+    "opening": {
+     "tokens": {
+      "n": 87,
+      "down": 79,
+      "up": 2,
+      "mean": -7
+     },
+     "heartbeats": {
+      "n": 53,
+      "down": 34,
+      "up": 10,
+      "mean": -169
+     }
+    }
+   }
+  },
+  "unclassified": {
+   "count": 361,
+   "features": "",
+   "mean_step_token_delta": 4.29,
+   "median_step_token_delta": 0,
+   "share_token_reducing": 0.35,
+   "n_hb_single": 188,
+   "mean_hb_delta_single_step_pairs": -253,
+   "share_hb_reducing": 0.74,
+   "positions": {
+    "closing": {
+     "tokens": {
+      "n": 125,
+      "down": 47,
+      "up": 55,
+      "mean": 3
+     },
+     "heartbeats": {
+      "n": 81,
+      "down": 63,
+      "up": 11,
+      "mean": -480
+     }
+    },
+    "middle": {
+     "tokens": {
+      "n": 197,
+      "down": 68,
+      "up": 78,
+      "mean": 4
+     },
+     "heartbeats": {
+      "n": 94,
+      "down": 65,
+      "up": 17,
+      "mean": -51
+     }
+    },
+    "opening": {
+     "tokens": {
+      "n": 39,
+      "down": 11,
+      "up": 18,
+      "mean": 9
+     },
+     "heartbeats": {
+      "n": 13,
+      "down": 12,
+      "up": 1,
+      "mean": -301
+     }
+    }
+   }
+  },
+  "induction_to_match_or_rec": {
+   "count": 255,
+   "features": "induction/cases restructure",
+   "mean_step_token_delta": -12.32,
+   "median_step_token_delta": -6,
+   "share_token_reducing": 0.94,
+   "n_hb_single": 172,
+   "mean_hb_delta_single_step_pairs": 46,
+   "share_hb_reducing": 0.46,
+   "positions": {
+    "closing": {
+     "tokens": {
+      "n": 128,
+      "down": 125,
+      "up": 2,
+      "mean": -18
+     },
+     "heartbeats": {
+      "n": 96,
+      "down": 52,
+      "up": 28,
+      "mean": 167
+     }
+    },
+    "middle": {
+     "tokens": {
+      "n": 116,
+      "down": 105,
+      "up": 4,
+      "mean": -7
+     },
+     "heartbeats": {
+      "n": 66,
+      "down": 21,
+      "up": 34,
+      "mean": 9
+     }
+    },
+    "opening": {
+     "tokens": {
+      "n": 11,
+      "down": 10,
+      "up": 0,
+      "mean": -4
+     },
+     "heartbeats": {
+      "n": 10,
+      "down": 6,
+      "up": 3,
+      "mean": -877
+     }
+    }
+   }
+  },
+  "lemma_swap": {
+   "count": 236,
+   "features": "different lemma names, same shape",
+   "mean_step_token_delta": -14.65,
+   "median_step_token_delta": -6.0,
+   "share_token_reducing": 0.89,
+   "n_hb_single": 147,
+   "mean_hb_delta_single_step_pairs": -31,
+   "share_hb_reducing": 0.69,
+   "positions": {
+    "closing": {
+     "tokens": {
+      "n": 71,
+      "down": 65,
+      "up": 2,
+      "mean": -22
+     },
+     "heartbeats": {
+      "n": 47,
+      "down": 38,
+      "up": 7,
+      "mean": -160
+     }
+    },
+    "middle": {
+     "tokens": {
+      "n": 141,
+      "down": 124,
+      "up": 9,
+      "mean": -12
+     },
+     "heartbeats": {
+      "n": 82,
+      "down": 52,
+      "up": 28,
+      "mean": 39
+     }
+    },
+    "opening": {
+     "tokens": {
+      "n": 24,
+      "down": 22,
+      "up": 0,
+      "mean": -10
+     },
+     "heartbeats": {
+      "n": 18,
+      "down": 12,
+      "up": 5,
+      "mean": -11
+     }
+    }
+   }
+  },
+  "drop_have_chain": {
+   "count": 155,
+   "features": "fewer have",
+   "mean_step_token_delta": -40.23,
+   "median_step_token_delta": -22,
+   "share_token_reducing": 0.95,
+   "n_hb_single": 125,
+   "mean_hb_delta_single_step_pairs": -472,
+   "share_hb_reducing": 0.83,
+   "positions": {
+    "closing": {
+     "tokens": {
+      "n": 58,
+      "down": 53,
+      "up": 2,
+      "mean": -53
+     },
+     "heartbeats": {
+      "n": 47,
+      "down": 38,
+      "up": 9,
+      "mean": -341
+     }
+    },
+    "middle": {
+     "tokens": {
+      "n": 93,
+      "down": 91,
+      "up": 0,
+      "mean": -33
+     },
+     "heartbeats": {
+      "n": 75,
+      "down": 63,
+      "up": 10,
+      "mean": -564
+     }
+    },
+    "opening": {
+     "tokens": {
+      "n": 4,
+      "down": 4,
+      "up": 0,
+      "mean": -36
+     },
+     "heartbeats": {
+      "n": 3,
+      "down": 3,
+      "up": 0,
+      "mean": -222
+     }
+    }
+   }
+  },
+  "simp_arg_trim": {
+   "count": 132,
+   "features": "fewer simp lemmas",
+   "mean_step_token_delta": -20.93,
+   "median_step_token_delta": -8.0,
+   "share_token_reducing": 0.98,
+   "n_hb_single": 98,
+   "mean_hb_delta_single_step_pairs": -25,
+   "share_hb_reducing": 0.73,
+   "positions": {
+    "closing": {
+     "tokens": {
+      "n": 37,
+      "down": 37,
+      "up": 0,
+      "mean": -31
+     },
+     "heartbeats": {
+      "n": 28,
+      "down": 22,
+      "up": 5,
+      "mean": 139
+     }
+    },
+    "middle": {
+     "tokens": {
+      "n": 80,
+      "down": 77,
+      "up": 1,
+      "mean": -14
+     },
+     "heartbeats": {
+      "n": 56,
+      "down": 39,
+      "up": 17,
+      "mean": -34
+     }
+    },
+    "opening": {
+     "tokens": {
+      "n": 15,
+      "down": 15,
+      "up": 0,
+      "mean": -32
+     },
+     "heartbeats": {
+      "n": 14,
+      "down": 11,
+      "up": 3,
+      "mean": -316
+     }
+    }
+   }
+  },
+  "simp_only_to_simp": {
+   "count": 116,
+   "features": "simp only -> simp",
+   "mean_step_token_delta": -27.16,
+   "median_step_token_delta": -6.0,
+   "share_token_reducing": 0.88,
+   "n_hb_single": 86,
+   "mean_hb_delta_single_step_pairs": -273,
+   "share_hb_reducing": 0.62,
+   "positions": {
+    "closing": {
+     "tokens": {
+      "n": 36,
+      "down": 27,
+      "up": 9,
+      "mean": -49
+     },
+     "heartbeats": {
+      "n": 27,
+      "down": 20,
+      "up": 7,
+      "mean": -387
+     }
+    },
+    "middle": {
+     "tokens": {
+      "n": 67,
+      "down": 64,
+      "up": 3,
+      "mean": -18
+     },
+     "heartbeats": {
+      "n": 51,
+      "down": 30,
+      "up": 18,
+      "mean": -368
+     }
+    },
+    "opening": {
+     "tokens": {
+      "n": 13,
+      "down": 11,
+      "up": 2,
+      "mean": -14
+     },
+     "heartbeats": {
+      "n": 8,
+      "down": 3,
+      "up": 5,
+      "mean": 718
+     }
+    }
+   }
+  },
+  "step_deleted": {
+   "count": 91,
+   "features": "",
+   "mean_step_token_delta": -43.15,
+   "median_step_token_delta": -21,
+   "share_token_reducing": 1.0,
+   "n_hb_single": 13,
+   "mean_hb_delta_single_step_pairs": -346,
+   "share_hb_reducing": 0.62,
+   "positions": {
+    "closing": {
+     "tokens": {
+      "n": 17,
+      "down": 17,
+      "up": 0,
+      "mean": -24
+     },
+     "heartbeats": {
+      "n": 2,
+      "down": 2,
+      "up": 0,
+      "mean": -390
+     }
+    },
+    "middle": {
+     "tokens": {
+      "n": 63,
+      "down": 63,
+      "up": 0,
+      "mean": -51
+     },
+     "heartbeats": {
+      "n": 10,
+      "down": 5,
+      "up": 4,
+      "mean": -372
+     }
+    },
+    "opening": {
+     "tokens": {
+      "n": 11,
+      "down": 11,
+      "up": 0,
+      "mean": -29
+     },
+     "heartbeats": {
+      "n": 1,
+      "down": 1,
+      "up": 0,
+      "mean": -1
+     }
+    }
+   }
+  },
+  "explicit_args_to_underscore": {
+   "count": 89,
+   "features": "explicit args -> _",
+   "mean_step_token_delta": -11.69,
+   "median_step_token_delta": -5,
+   "share_token_reducing": 0.87,
+   "n_hb_single": 61,
+   "mean_hb_delta_single_step_pairs": 10,
+   "share_hb_reducing": 0.51,
+   "positions": {
+    "closing": {
+     "tokens": {
+      "n": 32,
+      "down": 28,
+      "up": 3,
+      "mean": -13
+     },
+     "heartbeats": {
+      "n": 24,
+      "down": 15,
+      "up": 8,
+      "mean": -27
+     }
+    },
+    "middle": {
+     "tokens": {
+      "n": 49,
+      "down": 43,
+      "up": 4,
+      "mean": -9
+     },
+     "heartbeats": {
+      "n": 31,
+      "down": 14,
+      "up": 11,
+      "mean": -9
+     }
+    },
+    "opening": {
+     "tokens": {
+      "n": 8,
+      "down": 6,
+      "up": 0,
+      "mean": -19
+     },
+     "heartbeats": {
+      "n": 6,
+      "down": 2,
+      "up": 4,
+      "mean": 252
+     }
+    }
+   }
+  },
+  "rw_chain_merge": {
+   "count": 83,
+   "features": "consecutive rw merged",
+   "mean_step_token_delta": -37.57,
+   "median_step_token_delta": -19,
+   "share_token_reducing": 0.94,
+   "n_hb_single": 52,
+   "mean_hb_delta_single_step_pairs": -176,
+   "share_hb_reducing": 0.81,
+   "positions": {
+    "closing": {
+     "tokens": {
+      "n": 29,
+      "down": 26,
+      "up": 2,
+      "mean": -45
+     },
+     "heartbeats": {
+      "n": 22,
+      "down": 15,
+      "up": 7,
+      "mean": -209
+     }
+    },
+    "middle": {
+     "tokens": {
+      "n": 54,
+      "down": 52,
+      "up": 0,
+      "mean": -33
+     },
+     "heartbeats": {
+      "n": 30,
+      "down": 27,
+      "up": 3,
+      "mean": -151
+     }
+    }
+   }
+  },
+  "inline_have_into_term": {
+   "count": 67,
+   "features": "have := by; exact -> exact (by ..)",
+   "mean_step_token_delta": -40.46,
+   "median_step_token_delta": -22,
+   "share_token_reducing": 0.97,
+   "n_hb_single": 59,
+   "mean_hb_delta_single_step_pairs": -856,
+   "share_hb_reducing": 0.86,
+   "positions": {
+    "closing": {
+     "tokens": {
+      "n": 23,
+      "down": 22,
+      "up": 0,
+      "mean": -52
+     },
+     "heartbeats": {
+      "n": 21,
+      "down": 18,
+      "up": 3,
+      "mean": -274
+     }
+    },
+    "middle": {
+     "tokens": {
+      "n": 42,
+      "down": 41,
+      "up": 0,
+      "mean": -34
+     },
+     "heartbeats": {
+      "n": 36,
+      "down": 31,
+      "up": 4,
+      "mean": -1228
+     }
+    },
+    "opening": {
+     "tokens": {
+      "n": 2,
+      "down": 2,
+      "up": 0,
+      "mean": -53
+     },
+     "heartbeats": {
+      "n": 2,
+      "down": 2,
+      "up": 0,
+      "mean": -276
+     }
+    }
+   }
+  },
+  "term_mode_lambda": {
+   "count": 64,
+   "features": "fun x => f x -> f / (\u00b7 ..)",
+   "mean_step_token_delta": -40.31,
+   "median_step_token_delta": -17.5,
+   "share_token_reducing": 1.0,
+   "n_hb_single": 40,
+   "mean_hb_delta_single_step_pairs": -314,
+   "share_hb_reducing": 0.82,
+   "positions": {
+    "closing": {
+     "tokens": {
+      "n": 19,
+      "down": 19,
+      "up": 0,
+      "mean": -30
+     },
+     "heartbeats": {
+      "n": 15,
+      "down": 14,
+      "up": 0,
+      "mean": -331
+     }
+    },
+    "middle": {
+     "tokens": {
+      "n": 28,
+      "down": 28,
+      "up": 0,
+      "mean": -25
+     },
+     "heartbeats": {
+      "n": 15,
+      "down": 14,
+      "up": 1,
+      "mean": -104
+     }
+    },
+    "opening": {
+     "tokens": {
+      "n": 17,
+      "down": 17,
+      "up": 0,
+      "mean": -77
+     },
+     "heartbeats": {
+      "n": 10,
+      "down": 5,
+      "up": 4,
+      "mean": -605
+     }
+    }
+   }
+  },
+  "simp_to_simp_only": {
+   "count": 58,
+   "features": "simp -> simp only",
+   "mean_step_token_delta": -15.67,
+   "median_step_token_delta": 3.0,
+   "share_token_reducing": 0.29,
+   "n_hb_single": 38,
+   "mean_hb_delta_single_step_pairs": -859,
+   "share_hb_reducing": 0.92,
+   "positions": {
+    "closing": {
+     "tokens": {
+      "n": 13,
+      "down": 2,
+      "up": 11,
+      "mean": 3
+     },
+     "heartbeats": {
+      "n": 7,
+      "down": 6,
+      "up": 1,
+      "mean": -608
+     }
+    },
+    "middle": {
+     "tokens": {
+      "n": 42,
+      "down": 12,
+      "up": 29,
+      "mean": -9
+     },
+     "heartbeats": {
+      "n": 28,
+      "down": 26,
+      "up": 2,
+      "mean": -443
+     }
+    },
+    "opening": {
+     "tokens": {
+      "n": 3,
+      "down": 3,
+      "up": 0,
+      "mean": -198
+     },
+     "heartbeats": {
+      "n": 3,
+      "down": 3,
+      "up": 0,
+      "mean": -5331
+     }
+    }
+   }
+  },
+  "step_added": {
+   "count": 55,
+   "features": "",
+   "mean_step_token_delta": 26.2,
+   "median_step_token_delta": 8,
+   "share_token_reducing": 0.0,
+   "n_hb_single": 3,
+   "mean_hb_delta_single_step_pairs": -71,
+   "share_hb_reducing": 1.0,
+   "positions": {
+    "closing": {
+     "tokens": {
+      "n": 10,
+      "down": 0,
+      "up": 10,
+      "mean": 41
+     },
+     "heartbeats": {
+      "n": 2,
+      "down": 2,
+      "up": 0,
+      "mean": -106
+     }
+    },
+    "middle": {
+     "tokens": {
+      "n": 21,
+      "down": 0,
+      "up": 21,
+      "mean": 34
+     },
+     "heartbeats": {
+      "n": 1,
+      "down": 1,
+      "up": 0,
+      "mean": -2
+     }
+    },
+    "opening": {
+     "tokens": {
+      "n": 24,
+      "down": 0,
+      "up": 24,
+      "mean": 14
+     },
+     "heartbeats": {
+      "n": 0,
+      "down": 0,
+      "up": 0,
+      "mean": null
+     }
+    }
+   }
+  },
+  "rw_to_term": {
+   "count": 44,
+   "features": "rw+exact -> term/\u25b8",
+   "mean_step_token_delta": -17.18,
+   "median_step_token_delta": -8.0,
+   "share_token_reducing": 0.84,
+   "n_hb_single": 31,
+   "mean_hb_delta_single_step_pairs": -34,
+   "share_hb_reducing": 0.71,
+   "positions": {
+    "closing": {
+     "tokens": {
+      "n": 20,
+      "down": 18,
+      "up": 1,
+      "mean": -28
+     },
+     "heartbeats": {
+      "n": 16,
+      "down": 11,
+      "up": 4,
+      "mean": -23
+     }
+    },
+    "middle": {
+     "tokens": {
+      "n": 23,
+      "down": 18,
+      "up": 2,
+      "mean": -8
+     },
+     "heartbeats": {
+      "n": 15,
+      "down": 11,
+      "up": 3,
+      "mean": -46
+     }
+    },
+    "opening": {
+     "tokens": {
+      "n": 1,
+      "down": 1,
+      "up": 0,
+      "mean": -5
+     },
+     "heartbeats": {
+      "n": 0,
+      "down": 0,
+      "up": 0,
+      "mean": null
+     }
+    }
+   }
+  },
+  "apply_exact_merge": {
+   "count": 43,
+   "features": "apply f; exact h -> exact f h",
+   "mean_step_token_delta": -18.91,
+   "median_step_token_delta": -3,
+   "share_token_reducing": 0.77,
+   "n_hb_single": 31,
+   "mean_hb_delta_single_step_pairs": -28,
+   "share_hb_reducing": 0.45,
+   "positions": {
+    "closing": {
+     "tokens": {
+      "n": 15,
+      "down": 12,
+      "up": 3,
+      "mean": -36
+     },
+     "heartbeats": {
+      "n": 11,
+      "down": 4,
+      "up": 7,
+      "mean": 52
+     }
+    },
+    "middle": {
+     "tokens": {
+      "n": 26,
+      "down": 19,
+      "up": 7,
+      "mean": -10
+     },
+     "heartbeats": {
+      "n": 18,
+      "down": 9,
+      "up": 9,
+      "mean": -79
+     }
+    },
+    "opening": {
+     "tokens": {
+      "n": 2,
+      "down": 2,
+      "up": 0,
+      "mean": -10
+     },
+     "heartbeats": {
+      "n": 2,
+      "down": 1,
+      "up": 1,
+      "mean": -11
+     }
+    }
+   }
+  },
+  "refine_qmark": {
+   "count": 39,
+   "features": "exact f h -> refine f ?_",
+   "mean_step_token_delta": -4.9,
+   "median_step_token_delta": -1,
+   "share_token_reducing": 0.62,
+   "n_hb_single": 29,
+   "mean_hb_delta_single_step_pairs": -34,
+   "share_hb_reducing": 0.52,
+   "positions": {
+    "closing": {
+     "tokens": {
+      "n": 24,
+      "down": 14,
+      "up": 6,
+      "mean": -8
+     },
+     "heartbeats": {
+      "n": 22,
+      "down": 13,
+      "up": 8,
+      "mean": -43
+     }
+    },
+    "middle": {
+     "tokens": {
+      "n": 14,
+      "down": 9,
+      "up": 4,
+      "mean": -1
+     },
+     "heartbeats": {
+      "n": 6,
+      "down": 2,
+      "up": 4,
+      "mean": -8
+     }
+    },
+    "opening": {
+     "tokens": {
+      "n": 1,
+      "down": 1,
+      "up": 0,
+      "mean": -1
+     },
+     "heartbeats": {
+      "n": 1,
+      "down": 0,
+      "up": 0,
+      "mean": 0
+     }
+    }
+   }
+  },
+  "inline_have_show": {
+   "count": 33,
+   "features": "have -> rw [show .. by ..]",
+   "mean_step_token_delta": -62.85,
+   "median_step_token_delta": -30,
+   "share_token_reducing": 0.97,
+   "n_hb_single": 30,
+   "mean_hb_delta_single_step_pairs": -904,
+   "share_hb_reducing": 0.87,
+   "positions": {
+    "closing": {
+     "tokens": {
+      "n": 16,
+      "down": 16,
+      "up": 0,
+      "mean": -90
+     },
+     "heartbeats": {
+      "n": 15,
+      "down": 12,
+      "up": 3,
+      "mean": -367
+     }
+    },
+    "middle": {
+     "tokens": {
+      "n": 16,
+      "down": 15,
+      "up": 0,
+      "mean": -36
+     },
+     "heartbeats": {
+      "n": 14,
+      "down": 13,
+      "up": 0,
+      "mean": -1514
+     }
+    },
+    "opening": {
+     "tokens": {
+      "n": 1,
+      "down": 1,
+      "up": 0,
+      "mean": -60
+     },
+     "heartbeats": {
+      "n": 1,
+      "down": 1,
+      "up": 0,
+      "mean": -432
+     }
+    }
+   }
+  },
+  "drop_set_let": {
+   "count": 33,
+   "features": "set/let/generalize removed",
+   "mean_step_token_delta": -33.3,
+   "median_step_token_delta": -14,
+   "share_token_reducing": 0.94,
+   "n_hb_single": 29,
+   "mean_hb_delta_single_step_pairs": -135,
+   "share_hb_reducing": 0.72,
+   "positions": {
+    "closing": {
+     "tokens": {
+      "n": 13,
+      "down": 13,
+      "up": 0,
+      "mean": -43
+     },
+     "heartbeats": {
+      "n": 13,
+      "down": 9,
+      "up": 3,
+      "mean": -400
+     }
+    },
+    "middle": {
+     "tokens": {
+      "n": 14,
+      "down": 12,
+      "up": 2,
+      "mean": -25
+     },
+     "heartbeats": {
+      "n": 11,
+      "down": 11,
+      "up": 0,
+      "mean": -254
+     }
+    },
+    "opening": {
+     "tokens": {
+      "n": 6,
+      "down": 6,
+      "up": 0,
+      "mean": -32
+     },
+     "heartbeats": {
+      "n": 5,
+      "down": 1,
+      "up": 4,
+      "mean": 814
+     }
+    }
+   }
+  },
+  "constructor_to_anon": {
+   "count": 28,
+   "features": "constructor+exacts -> \u27e8,\u27e9",
+   "mean_step_token_delta": -15.71,
+   "median_step_token_delta": 0.0,
+   "share_token_reducing": 0.5,
+   "n_hb_single": 17,
+   "mean_hb_delta_single_step_pairs": -15,
+   "share_hb_reducing": 0.76,
+   "positions": {
+    "closing": {
+     "tokens": {
+      "n": 19,
+      "down": 11,
+      "up": 8,
+      "mean": -9
+     },
+     "heartbeats": {
+      "n": 14,
+      "down": 10,
+      "up": 3,
+      "mean": -15
+     }
+    },
+    "middle": {
+     "tokens": {
+      "n": 9,
+      "down": 3,
+      "up": 6,
+      "mean": -29
+     },
+     "heartbeats": {
+      "n": 3,
+      "down": 3,
+      "up": 0,
+      "mean": -11
+     }
+    }
+   }
+  },
+  "drop_show_change": {
+   "count": 27,
+   "features": "show/change removed",
+   "mean_step_token_delta": -43.15,
+   "median_step_token_delta": -29,
+   "share_token_reducing": 0.93,
+   "n_hb_single": 19,
+   "mean_hb_delta_single_step_pairs": 117,
+   "share_hb_reducing": 0.68,
+   "positions": {
+    "closing": {
+     "tokens": {
+      "n": 5,
+      "down": 5,
+      "up": 0,
+      "mean": -34
+     },
+     "heartbeats": {
+      "n": 3,
+      "down": 2,
+      "up": 1,
+      "mean": 1296
+     }
+    },
+    "middle": {
+     "tokens": {
+      "n": 22,
+      "down": 20,
+      "up": 2,
+      "mean": -45
+     },
+     "heartbeats": {
+      "n": 16,
+      "down": 11,
+      "up": 5,
+      "mean": -104
+     }
+    }
+   }
+  },
+  "use_witness": {
+   "count": 27,
+   "features": "refine \u27e8_,_\u27e9 -> use",
+   "mean_step_token_delta": -9.07,
+   "median_step_token_delta": -2,
+   "share_token_reducing": 0.93,
+   "n_hb_single": 9,
+   "mean_hb_delta_single_step_pairs": 3,
+   "share_hb_reducing": 0.56,
+   "positions": {
+    "closing": {
+     "tokens": {
+      "n": 8,
+      "down": 8,
+      "up": 0,
+      "mean": -28
+     },
+     "heartbeats": {
+      "n": 2,
+      "down": 2,
+      "up": 0,
+      "mean": -4
+     }
+    },
+    "middle": {
+     "tokens": {
+      "n": 17,
+      "down": 15,
+      "up": 2,
+      "mean": -1
+     },
+     "heartbeats": {
+      "n": 6,
+      "down": 2,
+      "up": 4,
+      "mean": 6
+     }
+    },
+    "opening": {
+     "tokens": {
+      "n": 2,
+      "down": 2,
+      "up": 0,
+      "mean": -2
+     },
+     "heartbeats": {
+      "n": 1,
+      "down": 1,
+      "up": 0,
+      "mean": -2
+     }
+    }
+   }
+  },
+  "rw_to_simp_only": {
+   "count": 24,
+   "features": "rw -> simp only",
+   "mean_step_token_delta": -14.83,
+   "median_step_token_delta": -2.0,
+   "share_token_reducing": 0.62,
+   "n_hb_single": 22,
+   "mean_hb_delta_single_step_pairs": -457,
+   "share_hb_reducing": 0.95,
+   "positions": {
+    "closing": {
+     "tokens": {
+      "n": 7,
+      "down": 6,
+      "up": 1,
+      "mean": -45
+     },
+     "heartbeats": {
+      "n": 6,
+      "down": 5,
+      "up": 1,
+      "mean": -1161
+     }
+    },
+    "middle": {
+     "tokens": {
+      "n": 17,
+      "down": 9,
+      "up": 6,
+      "mean": -3
+     },
+     "heartbeats": {
+      "n": 16,
+      "down": 16,
+      "up": 0,
+      "mean": -193
+     }
+    }
+   }
+  },
+  "drop_induction": {
+   "count": 22,
+   "features": "induction/cases removed",
+   "mean_step_token_delta": -22.77,
+   "median_step_token_delta": -2.0,
+   "share_token_reducing": 0.73,
+   "n_hb_single": 9,
+   "mean_hb_delta_single_step_pairs": 1997,
+   "share_hb_reducing": 0.78,
+   "positions": {
+    "closing": {
+     "tokens": {
+      "n": 3,
+      "down": 2,
+      "up": 0,
+      "mean": -3
+     },
+     "heartbeats": {
+      "n": 3,
+      "down": 2,
+      "up": 1,
+      "mean": 4774
+     }
+    },
+    "middle": {
+     "tokens": {
+      "n": 19,
+      "down": 14,
+      "up": 4,
+      "mean": -26
+     },
+     "heartbeats": {
+      "n": 6,
+      "down": 5,
+      "up": 1,
+      "mean": 609
+     }
+    }
+   }
+  },
+  "drop_type_ascription": {
+   "count": 21,
+   "features": "(x : T) removed",
+   "mean_step_token_delta": -21.81,
+   "median_step_token_delta": -12,
+   "share_token_reducing": 1.0,
+   "n_hb_single": 16,
+   "mean_hb_delta_single_step_pairs": -85,
+   "share_hb_reducing": 0.88,
+   "positions": {
+    "closing": {
+     "tokens": {
+      "n": 2,
+      "down": 2,
+      "up": 0,
+      "mean": -62
+     },
+     "heartbeats": {
+      "n": 1,
+      "down": 1,
+      "up": 0,
+      "mean": -208
+     }
+    },
+    "middle": {
+     "tokens": {
+      "n": 14,
+      "down": 14,
+      "up": 0,
+      "mean": -17
+     },
+     "heartbeats": {
+      "n": 12,
+      "down": 10,
+      "up": 2,
+      "mean": 59
+     }
+    },
+    "opening": {
+     "tokens": {
+      "n": 5,
+      "down": 5,
+      "up": 0,
+      "mean": -18
+     },
+     "heartbeats": {
+      "n": 3,
+      "down": 3,
+      "up": 0,
+      "mean": -617
+     }
+    }
+   }
+  },
+  "rwa_simpa": {
+   "count": 19,
+   "features": "rw;exact -> rwa/simpa",
+   "mean_step_token_delta": -10.95,
+   "median_step_token_delta": -2,
+   "share_token_reducing": 0.68,
+   "n_hb_single": 15,
+   "mean_hb_delta_single_step_pairs": 24,
+   "share_hb_reducing": 0.8,
+   "positions": {
+    "closing": {
+     "tokens": {
+      "n": 7,
+      "down": 4,
+      "up": 3,
+      "mean": -11
+     },
+     "heartbeats": {
+      "n": 5,
+      "down": 5,
+      "up": 0,
+      "mean": -488
+     }
+    },
+    "middle": {
+     "tokens": {
+      "n": 11,
+      "down": 8,
+      "up": 3,
+      "mean": -3
+     },
+     "heartbeats": {
+      "n": 9,
+      "down": 7,
+      "up": 2,
+      "mean": 27
+     }
+    },
+    "opening": {
+     "tokens": {
+      "n": 1,
+      "down": 1,
+      "up": 0,
+      "mean": -95
+     },
+     "heartbeats": {
+      "n": 1,
+      "down": 0,
+      "up": 1,
+      "mean": 2557
+     }
+    }
+   }
+  },
+  "bullets_removed": {
+   "count": 16,
+   "features": "fewer bullets",
+   "mean_step_token_delta": -28.06,
+   "median_step_token_delta": -2.0,
+   "share_token_reducing": 0.75,
+   "n_hb_single": 6,
+   "mean_hb_delta_single_step_pairs": -3,
+   "share_hb_reducing": 0.67,
+   "positions": {
+    "closing": {
+     "tokens": {
+      "n": 8,
+      "down": 6,
+      "up": 0,
+      "mean": -21
+     },
+     "heartbeats": {
+      "n": 4,
+      "down": 3,
+      "up": 0,
+      "mean": -3
+     }
+    },
+    "middle": {
+     "tokens": {
+      "n": 8,
+      "down": 6,
+      "up": 0,
+      "mean": -35
+     },
+     "heartbeats": {
+      "n": 2,
+      "down": 1,
+      "up": 0,
+      "mean": -3
+     }
+    }
+   }
+  },
+  "calc_shortened": {
+   "count": 13,
+   "features": "calc fewer steps",
+   "mean_step_token_delta": -81.54,
+   "median_step_token_delta": -70,
+   "share_token_reducing": 1.0,
+   "n_hb_single": 12,
+   "mean_hb_delta_single_step_pairs": 97,
+   "share_hb_reducing": 0.67,
+   "positions": {
+    "closing": {
+     "tokens": {
+      "n": 4,
+      "down": 4,
+      "up": 0,
+      "mean": -46
+     },
+     "heartbeats": {
+      "n": 3,
+      "down": 2,
+      "up": 1,
+      "mean": -79
+     }
+    },
+    "middle": {
+     "tokens": {
+      "n": 4,
+      "down": 4,
+      "up": 0,
+      "mean": -54
+     },
+     "heartbeats": {
+      "n": 4,
+      "down": 4,
+      "up": 0,
+      "mean": -268
+     }
+    },
+    "opening": {
+     "tokens": {
+      "n": 5,
+      "down": 5,
+      "up": 0,
+      "mean": -132
+     },
+     "heartbeats": {
+      "n": 5,
+      "down": 2,
+      "up": 3,
+      "mean": 494
+     }
+    }
+   }
+  },
+  "pipe_paren_removal": {
+   "count": 12,
+   "features": "parens -> <| / |>",
+   "mean_step_token_delta": -39.17,
+   "median_step_token_delta": -16.0,
+   "share_token_reducing": 0.92,
+   "n_hb_single": 11,
+   "mean_hb_delta_single_step_pairs": 89,
+   "share_hb_reducing": 0.45,
+   "positions": {
+    "closing": {
+     "tokens": {
+      "n": 5,
+      "down": 4,
+      "up": 0,
+      "mean": -2
+     },
+     "heartbeats": {
+      "n": 4,
+      "down": 2,
+      "up": 2,
+      "mean": 1
+     }
+    },
+    "middle": {
+     "tokens": {
+      "n": 3,
+      "down": 3,
+      "up": 0,
+      "mean": -20
+     },
+     "heartbeats": {
+      "n": 3,
+      "down": 1,
+      "up": 2,
+      "mean": -7
+     }
+    },
+    "opening": {
+     "tokens": {
+      "n": 4,
+      "down": 4,
+      "up": 0,
+      "mean": -100
+     },
+     "heartbeats": {
+      "n": 4,
+      "down": 2,
+      "up": 2,
+      "mean": 248
+     }
+    }
+   }
+  },
+  "obtain_to_projection": {
+   "count": 12,
+   "features": "obtain/rcases -> .1/.2",
+   "mean_step_token_delta": -12.25,
+   "median_step_token_delta": -7.5,
+   "share_token_reducing": 1.0,
+   "n_hb_single": 11,
+   "mean_hb_delta_single_step_pairs": -3,
+   "share_hb_reducing": 0.27,
+   "positions": {
+    "closing": {
+     "tokens": {
+      "n": 1,
+      "down": 1,
+      "up": 0,
+      "mean": -7
+     },
+     "heartbeats": {
+      "n": 1,
+      "down": 1,
+      "up": 0,
+      "mean": -6
+     }
+    },
+    "middle": {
+     "tokens": {
+      "n": 10,
+      "down": 10,
+      "up": 0,
+      "mean": -14
+     },
+     "heartbeats": {
+      "n": 10,
+      "down": 2,
+      "up": 8,
+      "mean": -3
+     }
+    },
+    "opening": {
+     "tokens": {
+      "n": 1,
+      "down": 1,
+      "up": 0,
+      "mean": -5
+     },
+     "heartbeats": {
+      "n": 0,
+      "down": 0,
+      "up": 0,
+      "mean": null
+     }
+    }
+   }
+  },
+  "intro_exact_to_fun": {
+   "count": 11,
+   "features": "intro+exact -> fun",
+   "mean_step_token_delta": -14.73,
+   "median_step_token_delta": -7,
+   "share_token_reducing": 0.82,
+   "n_hb_single": 10,
+   "mean_hb_delta_single_step_pairs": -79,
+   "share_hb_reducing": 0.7,
+   "positions": {
+    "closing": {
+     "tokens": {
+      "n": 5,
+      "down": 3,
+      "up": 2,
+      "mean": -15
+     },
+     "heartbeats": {
+      "n": 5,
+      "down": 5,
+      "up": 0,
+      "mean": -128
+     }
+    },
+    "middle": {
+     "tokens": {
+      "n": 6,
+      "down": 6,
+      "up": 0,
+      "mean": -15
+     },
+     "heartbeats": {
+      "n": 5,
+      "down": 2,
+      "up": 3,
+      "mean": -29
+     }
+    }
+   }
+  },
+  "simp_star": {
+   "count": 10,
+   "features": "simp [*] / simp_all",
+   "mean_step_token_delta": -3,
+   "median_step_token_delta": -4.5,
+   "share_token_reducing": 0.9,
+   "n_hb_single": 7,
+   "mean_hb_delta_single_step_pairs": -13,
+   "share_hb_reducing": 0.14,
+   "positions": {
+    "closing": {
+     "tokens": {
+      "n": 2,
+      "down": 1,
+      "up": 1,
+      "mean": 7
+     },
+     "heartbeats": {
+      "n": 1,
+      "down": 0,
+      "up": 1,
+      "mean": 41
+     }
+    },
+    "middle": {
+     "tokens": {
+      "n": 7,
+      "down": 7,
+      "up": 0,
+      "mean": -6
+     },
+     "heartbeats": {
+      "n": 5,
+      "down": 1,
+      "up": 4,
+      "mean": -53
+     }
+    },
+    "opening": {
+     "tokens": {
+      "n": 1,
+      "down": 1,
+      "up": 0,
+      "mean": -2
+     },
+     "heartbeats": {
+      "n": 1,
+      "down": 0,
+      "up": 1,
+      "mean": 135
+     }
+    }
+   }
+  },
+  "ext_funext_removed": {
+   "count": 8,
+   "features": "ext/funext removed or merged",
+   "mean_step_token_delta": -26.75,
+   "median_step_token_delta": -21.0,
+   "share_token_reducing": 0.88,
+   "n_hb_single": 7,
+   "mean_hb_delta_single_step_pairs": -306,
+   "share_hb_reducing": 1.0,
+   "positions": {
+    "closing": {
+     "tokens": {
+      "n": 3,
+      "down": 2,
+      "up": 1,
+      "mean": -39
+     },
+     "heartbeats": {
+      "n": 3,
+      "down": 3,
+      "up": 0,
+      "mean": -436
+     }
+    },
+    "middle": {
+     "tokens": {
+      "n": 5,
+      "down": 5,
+      "up": 0,
+      "mean": -20
+     },
+     "heartbeats": {
+      "n": 4,
+      "down": 4,
+      "up": 0,
+      "mean": -209
+     }
+    }
+   }
+  },
+  "grind_replaces": {
+   "count": 7,
+   "features": "manual tactics -> grind",
+   "mean_step_token_delta": -24.43,
+   "median_step_token_delta": -18,
+   "share_token_reducing": 0.86,
+   "n_hb_single": 7,
+   "mean_hb_delta_single_step_pairs": 3485,
+   "share_hb_reducing": 0.14,
+   "positions": {
+    "closing": {
+     "tokens": {
+      "n": 3,
+      "down": 2,
+      "up": 0,
+      "mean": -6
+     },
+     "heartbeats": {
+      "n": 3,
+      "down": 1,
+      "up": 2,
+      "mean": 6004
+     }
+    },
+    "middle": {
+     "tokens": {
+      "n": 3,
+      "down": 3,
+      "up": 0,
+      "mean": -39
+     },
+     "heartbeats": {
+      "n": 3,
+      "down": 0,
+      "up": 3,
+      "mean": 2066
+     }
+    },
+    "opening": {
+     "tokens": {
+      "n": 1,
+      "down": 1,
+      "up": 0,
+      "mean": -36
+     },
+     "heartbeats": {
+      "n": 1,
+      "down": 0,
+      "up": 1,
+      "mean": 183
+     }
+    }
+   }
+  },
+  "grind_removed": {
+   "count": 7,
+   "features": "grind -> other",
+   "mean_step_token_delta": 1.57,
+   "median_step_token_delta": 2,
+   "share_token_reducing": 0.43,
+   "n_hb_single": 6,
+   "mean_hb_delta_single_step_pairs": -214,
+   "share_hb_reducing": 1.0,
+   "positions": {
+    "closing": {
+     "tokens": {
+      "n": 5,
+      "down": 1,
+      "up": 4,
+      "mean": 6
+     },
+     "heartbeats": {
+      "n": 4,
+      "down": 4,
+      "up": 0,
+      "mean": -185
+     }
+    },
+    "middle": {
+     "tokens": {
+      "n": 2,
+      "down": 2,
+      "up": 0,
+      "mean": -8
+     },
+     "heartbeats": {
+      "n": 2,
+      "down": 2,
+      "up": 0,
+      "mean": -272
+     }
+    }
+   }
+  },
+  "omega_replaces": {
+   "count": 5,
+   "features": "chain -> omega/lia",
+   "mean_step_token_delta": 35.6,
+   "median_step_token_delta": 27,
+   "share_token_reducing": 0.2,
+   "n_hb_single": 1,
+   "mean_hb_delta_single_step_pairs": 13,
+   "share_hb_reducing": 0.0,
+   "positions": {
+    "closing": {
+     "tokens": {
+      "n": 4,
+      "down": 1,
+      "up": 3,
+      "mean": 42
+     },
+     "heartbeats": {
+      "n": 1,
+      "down": 0,
+      "up": 1,
+      "mean": 13
+     }
+    },
+    "middle": {
+     "tokens": {
+      "n": 1,
+      "down": 0,
+      "up": 1,
+      "mean": 10
+     },
+     "heartbeats": {
+      "n": 0,
+      "down": 0,
+      "up": 0,
+      "mean": null
+     }
+    }
+   }
+  },
+  "calc_to_chain": {
+   "count": 5,
+   "features": "calc removed",
+   "mean_step_token_delta": -158,
+   "median_step_token_delta": -30,
+   "share_token_reducing": 1.0,
+   "n_hb_single": 5,
+   "mean_hb_delta_single_step_pairs": -2041,
+   "share_hb_reducing": 0.8,
+   "positions": {
+    "closing": {
+     "tokens": {
+      "n": 2,
+      "down": 2,
+      "up": 0,
+      "mean": -84
+     },
+     "heartbeats": {
+      "n": 2,
+      "down": 1,
+      "up": 1,
+      "mean": -406
+     }
+    },
+    "middle": {
+     "tokens": {
+      "n": 1,
+      "down": 1,
+      "up": 0,
+      "mean": -14
+     },
+     "heartbeats": {
+      "n": 1,
+      "down": 1,
+      "up": 0,
+      "mean": -630
+     }
+    },
+    "opening": {
+     "tokens": {
+      "n": 2,
+      "down": 2,
+      "up": 0,
+      "mean": -304
+     },
+     "heartbeats": {
+      "n": 2,
+      "down": 2,
+      "up": 0,
+      "mean": -4382
+     }
+    }
+   }
+  },
+  "rcases_to_rintro": {
+   "count": 4,
+   "features": "intro+rcases -> rintro",
+   "mean_step_token_delta": -8.5,
+   "median_step_token_delta": -4.0,
+   "share_token_reducing": 1.0,
+   "n_hb_single": 3,
+   "mean_hb_delta_single_step_pairs": -47,
+   "share_hb_reducing": 1.0,
+   "positions": {
+    "closing": {
+     "tokens": {
+      "n": 1,
+      "down": 1,
+      "up": 0,
+      "mean": -24
+     },
+     "heartbeats": {
+      "n": 1,
+      "down": 1,
+      "up": 0,
+      "mean": -18
+     }
+    },
+    "middle": {
+     "tokens": {
+      "n": 2,
+      "down": 2,
+      "up": 0,
+      "mean": -2
+     },
+     "heartbeats": {
+      "n": 2,
+      "down": 2,
+      "up": 0,
+      "mean": -62
+     }
+    },
+    "opening": {
+     "tokens": {
+      "n": 1,
+      "down": 1,
+      "up": 0,
+      "mean": -6
+     },
+     "heartbeats": {
+      "n": 0,
+      "down": 0,
+      "up": 0,
+      "mean": null
+     }
+    }
+   }
+  },
+  "norm_num_replaces": {
+   "count": 3,
+   "features": "norm_num/simp arith merge",
+   "mean_step_token_delta": 17.33,
+   "median_step_token_delta": 0,
+   "share_token_reducing": 0.0,
+   "n_hb_single": 2,
+   "mean_hb_delta_single_step_pairs": -34,
+   "share_hb_reducing": 1.0,
+   "positions": {
+    "closing": {
+     "tokens": {
+      "n": 1,
+      "down": 0,
+      "up": 1,
+      "mean": 52
+     },
+     "heartbeats": {
+      "n": 0,
+      "down": 0,
+      "up": 0,
+      "mean": null
+     }
+    },
+    "middle": {
+     "tokens": {
+      "n": 1,
+      "down": 0,
+      "up": 0,
+      "mean": 0
+     },
+     "heartbeats": {
+      "n": 1,
+      "down": 1,
+      "up": 0,
+      "mean": -33
+     }
+    },
+    "opening": {
+     "tokens": {
+      "n": 1,
+      "down": 0,
+      "up": 0,
+      "mean": 0
+     },
+     "heartbeats": {
+      "n": 1,
+      "down": 1,
+      "up": 0,
+      "mean": -34
+     }
+    }
+   }
+  },
+  "convert_congr": {
+   "count": 3,
+   "features": "convert/congr/gcongr",
+   "mean_step_token_delta": -26.33,
+   "median_step_token_delta": -21,
+   "share_token_reducing": 1.0,
+   "n_hb_single": 2,
+   "mean_hb_delta_single_step_pairs": 118,
+   "share_hb_reducing": 0.0,
+   "positions": {
+    "closing": {
+     "tokens": {
+      "n": 1,
+      "down": 1,
+      "up": 0,
+      "mean": -37
+     },
+     "heartbeats": {
+      "n": 1,
+      "down": 0,
+      "up": 1,
+      "mean": 209
+     }
+    },
+    "middle": {
+     "tokens": {
+      "n": 2,
+      "down": 2,
+      "up": 0,
+      "mean": -21
+     },
+     "heartbeats": {
+      "n": 1,
+      "down": 0,
+      "up": 1,
+      "mean": 27
+     }
+    }
+   }
+  },
+  "exact_term_direct": {
+   "count": 2,
+   "features": "tactic block -> single exact",
+   "mean_step_token_delta": -17.5,
+   "median_step_token_delta": -17.5,
+   "share_token_reducing": 1.0,
+   "n_hb_single": 2,
+   "mean_hb_delta_single_step_pairs": -17,
+   "share_hb_reducing": 0.5,
+   "positions": {
+    "closing": {
+     "tokens": {
+      "n": 2,
+      "down": 2,
+      "up": 0,
+      "mean": -18
+     },
+     "heartbeats": {
+      "n": 2,
+      "down": 1,
+      "up": 1,
+      "mean": -17
+     }
+    }
+   }
+  },
+  "bullets_to_comb": {
+   "count": 1,
+   "features": "bullets -> <;> / all_goals / exacts",
+   "mean_step_token_delta": -133,
+   "median_step_token_delta": -133,
+   "share_token_reducing": 1.0,
+   "n_hb_single": 0,
+   "mean_hb_delta_single_step_pairs": null,
+   "share_hb_reducing": null,
+   "positions": {
+    "closing": {
+     "tokens": {
+      "n": 1,
+      "down": 1,
+      "up": 0,
+      "mean": -133
+     },
+     "heartbeats": {
+      "n": 0,
+      "down": 0,
+      "up": 0,
+      "mean": null
+     }
+    }
+   }
+  }
+ }
+}
