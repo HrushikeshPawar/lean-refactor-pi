@@ -435,8 +435,9 @@ class ReadGoalSearchTests(CascadeToolCase):
             again = tools.read_tool("T", "logic", {"view": "map"})
         self.assertTrue(result["ok"])
         self.assertEqual(result["items"], [])
-        self.assertTrue(any(node in line for line in result["map"]))
-        self.assertEqual(again["map"], result["map"])
+        map_lines = [line for section in result["context"]["sections"] for line in section]
+        self.assertTrue(any(node in line for line in map_lines))
+        self.assertEqual([line for section in again["context"]["sections"] for line in section], map_lines)
         missing = tools.read_tool("T", "logic", {"view": "source"})
         self.assertEqual(missing["error"]["code"], "bad_target")
 

@@ -84,9 +84,9 @@ class NoticeTests(unittest.TestCase):
             self.assertNotIn("Merge ready", shown)
             self.assertNotIn("this plan was saved against", shown)
 
-    def test_only_sol_gets_the_notices_field_and_the_text_is_left_alone(self):
+    def test_only_sol_gets_the_notices_in_its_context_and_the_text_is_left_alone(self):
         with patch.object(reply, "current_actor", return_value="job-actor"):
-            self.assertNotIn("notices", team_reply.sol_notices("run", "delegate", {"ok": True, "text": "t"}))
+            self.assertNotIn("context", team_reply.sol_notices("run", "delegate", {"ok": True, "text": "t"}))
         with patch.object(reply, "current_actor", return_value="sol"), \
                 patch.object(reply, "_delivery_lock", return_value=nullcontext()), \
                 patch.object(reply, "_load", return_value={}), patch.object(reply, "_write_actor") as write, \
@@ -94,7 +94,7 @@ class NoticeTests(unittest.TestCase):
                 patch.object(team_reply.campaign, "run_dir", return_value=Path("run")):
             result = team_reply.sol_notices("run", "delegate", {"ok": True, "text": "t"})
         self.assertEqual(result, {"ok": True, "text": "t",
-                                  "notices": {"kinds": ["merge_ready"], "lines": ["Merge ready: n2, n3."]}})
+                                  "context": {"sections": [["", "Merge ready: n2, n3."]], "kinds": ["merge_ready"]}})
         write.assert_called_once()
 
 class MergeTests(unittest.TestCase):

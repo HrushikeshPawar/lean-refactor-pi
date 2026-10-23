@@ -25,7 +25,6 @@ def reply(
     facts: list[str] | None = None,
     items: list[dict] | None = None,
     handles: list[str] | None = None,
-    map_lines: list[str] | None = None,
     stop: bool = False,
 ) -> dict:
     return {
@@ -34,9 +33,29 @@ def reply(
         "facts": list(facts or []),
         "items": list(items or []),
         "handles": list(dict.fromkeys(handles or [])),
-        "map": map_lines,
         "stop": stop,
     }
+
+
+def _sections(result: dict) -> list[list[str]]:
+    """The ambient sections a reply carries in `context` (see add_context)."""
+    return [list(section) for section in (result.get("context") or {}).get("sections", [])]
+
+
+def _section(sections: list[list[str]], head: str) -> list[str]:
+    """The section under this header, header included, or []."""
+    return next((section for section in sections if section[:1] == [head]), [])
+
+
+def add_context(result: dict, sections: list[list[str]], kinds: list[str]) -> dict:
+    """Add ambient sections to a reply's `context`. The extension sends one turn's context as one hidden message,
+    so the reply text keeps only the call's own result. A section is [header, *lines]; header "" has none."""
+    previous = result.get("context") or {}
+    result["context"] = {
+        "sections": [*_sections(result), *(list(section) for section in sections if len(section) > 1)],
+        "kinds": list(dict.fromkeys([*previous.get("kinds", []), *kinds])),
+    }
+    return result
 
 
 def request_error(code: str, bad_input: object, valid: list[str], forms: list[str]) -> dict:
@@ -1046,7 +1065,8 @@ def attach_context(
     holes: list[dict] | None = None,
     action: str | None = None,
 ) -> dict:
-    """Attach new state updates and a changed map, persisting this actor's delivery cursor.
+    """Attach new state updates, a changed map and unseen cards to the reply's `context`, persisting this actor's
+    delivery cursor. The reply text keeps only the call's own result (plus an update about a node this call filed).
     `holes`, when given, replaces the map's open holes (the caller's current lineage only).
     `action` is the tool call's name; it feeds the worker's compile nudge (see _compile_nudge)."""
     actor = current_actor()
@@ -1058,6 +1078,10 @@ def attach_context(
         updates = []
     delivered = int(bucket.get("delivered_seq", -1))
     fresh = [item for item in updates if int(item.get("seq", -1)) > delivered]
+    # Sections an earlier pass over this reply already added.
+    earlier = _sections(result)
+    map_head = text.render("replies/tools.section_map")
+    map_part = _section(earlier, map_head)
     if include_map or force_map:
         data = campaign.map_view(run_id)
         if holes is not None:
@@ -1066,27 +1090,31 @@ def attach_context(
         # A compile reply carries the map only for a first or new best; `read` with view "map" shows all of it.
         if force_map or "map_hash" not in bucket or key != bucket.get("map_key"):
             lines = _map_lines(data, compact=not force_map)
-            result["map"] = [text.render("replies/tools.section_map"), *lines] if lines else lines
+            map_part = [map_head, *lines] if lines else []
         bucket["map_hash"], bucket["map_key"] = "shown", key
     # Node ids the model has been shown; an update never names a node outside them.
-    seen = set(bucket.get("seen_nodes", [])) | _node_ids(result)
+    seen = set(bucket.get("seen_nodes", [])) | _node_ids(result, extra=map_part)
     authors = node_authors(run_id) if fresh else {}
     facts = [
         _tag_authors(_update_text(item, seen), authors)
         for item in fresh
         if isinstance(item.get("text"), str) and not item.get("quiet")
     ]
-    # A reply that already passed through here keeps its card section apart from the update facts.
-    earlier = result.get("facts", [])
+    updates_head = text.render("replies/tools.section_updates")
+    facts += _section(earlier, updates_head)[1:]
+    notes = {
+        "idle": _idle_note(run_id, actor, bucket),
+        "best": _best_note(run_id, actor, bucket, bool(fresh)),
+        "plateau": _plateau_note(run_id, actor, bucket),
+        "card_stale": _card_stale_note(run_id, actor, bucket),
+        "compile_nudge": _compile_nudge(actor, bucket, action),
+    }
+    for lines in notes.values():
+        facts += lines
     cards_head = text.render("replies/tools.section_cards")
-    split = earlier.index(cards_head) if cards_head in earlier else len(earlier)
-    facts += earlier[:split]
-    facts += _idle_note(run_id, actor, bucket)
-    facts += _best_note(run_id, actor, bucket, bool(fresh))
-    facts += _plateau_note(run_id, actor, bucket)
-    facts += _card_stale_note(run_id, actor, bucket)
-    facts += _compile_nudge(actor, bucket, action)
-    cards = earlier[split:] + [line for line in _card_lines(run_id, actor, bucket) if not earlier[split:] or line != cards_head]
+    earlier_cards = _section(earlier, cards_head)
+    new_cards = _card_lines(run_id, actor, bucket)
+    cards = [*earlier_cards, *new_cards[1:]] if earlier_cards else new_cards
     if fresh:
         receipt = _commit_delivery(run_id, actor, fresh)
         bucket["delivered_seq"] = max(int(item.get("seq", -1)) for item in fresh)
@@ -1100,26 +1128,31 @@ def attach_context(
             },
         }
         result["delivery"] = {"actor_id": actor, "event_ids": receipt["event_ids"], "cursor": bucket["delivered_seq"]}
-    # Sections: updates from background checks, this call's result, then the search map.
-    # A reply can pass through here more than once; each header is added once.
-    updates_head, result_head = (
-        text.render("replies/tools.section_updates"),
-        text.render("replies/tools.section_result"),
-    )
-    facts = [line for line in facts if line != updates_head]
+    result_head = text.render("replies/tools.section_result")
     first = next((item for item in result.get("items", []) if item.get("lines")), None)
     # An update about a node this call filed (its cross-version verdict) belongs with this call's result.
     own = set(result.get("handles", []))
+    own_facts = list(result.get("facts", []))
     mine = [
-        line for line in facts if own and re.match(r"(n[1-9][0-9]*)\b", line) and line.split()[0].rstrip(":") in own
+        line for line in [*own_facts, *facts]
+        if own and re.match(r"(n[1-9][0-9]*)\b", line) and line.split()[0].rstrip(":") in own
     ]
     if first is not None and mine:
         facts = [line for line in facts if line not in mine]
-    result["facts"] = [updates_head, *facts] if facts else facts
-    result["facts"] = [*result["facts"], *cards]
+        result["facts"] = [line for line in own_facts if line not in mine]
     if first is not None:
         body = first["lines"][1:] if first["lines"][0] == result_head else first["lines"]
         first["lines"] = [result_head, *[line for line in mine if line not in body], *body]
+    # Updates from background checks, then the cards, then the search map. Other sections stay where they were.
+    others = [section for section in earlier if section[:1] not in ([updates_head], [cards_head], [map_head])]
+    parts = [[updates_head, *facts] if facts else [], cards, map_part]
+    kinds = [name for name, present in (("updates", bool(facts)), ("cards", bool(cards)), ("map", bool(map_part)))
+             if present]
+    kinds += [name for name, lines in notes.items() if lines]
+    result["context"] = {
+        "sections": [section for section in parts if section] + others,
+        "kinds": list(dict.fromkeys([*(result.get("context") or {}).get("kinds", []), *kinds])),
+    }
     bucket["seen_nodes"] = sorted(seen | _node_ids(result))
     _write_actor(run_id, actor, bucket, state)
     return result
@@ -1162,8 +1195,9 @@ def _tag_authors(line: str, authors: dict[str, str]) -> str:
     return re.sub(r"\bn[1-9][0-9]*\b", tag, line)
 
 
-def _node_ids(result: dict) -> set[str]:
-    shown_text = [*result.get("facts", []), *(result.get("map") or []), *result.get("handles", [])]
+def _node_ids(result: dict, extra: list[str] = ()) -> set[str]:
+    shown_text = [*result.get("facts", []), *extra, *result.get("handles", [])]
+    shown_text += [line for section in _sections(result) for line in section]
     shown_text += [
         line for item in result.get("items", []) for line in item.get("lines") or [] if isinstance(line, str)
     ]

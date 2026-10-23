@@ -6,7 +6,6 @@ type Reply = {
   facts?: string[];
   items?: Array<Record<string, any>>;
   handles?: string[];
-  map?: string[] | null;
   stop?: boolean;
 };
 
@@ -30,7 +29,8 @@ async function errorLine(error: unknown, validKeys: string[]): Promise<string | 
   return render("messages/errors.request", { code, input, valid: valid.join(", "), forms: listText(value.forms) });
 }
 
-export async function renderReply(reply: Reply, footer: string, validKeys: string[] = []) {
+/** The call's own result as text. Ambient state (`context`) is sent separately, once per turn (context.ts). */
+export async function renderReply(reply: Reply, validKeys: string[] = []) {
   const lines = [...(reply.facts ?? [])];
   for (const item of reply.items ?? []) {
     const itemLines = Array.isArray(item.lines) ? item.lines.filter((line): line is string => typeof line === "string" && Boolean(line)) : [];
@@ -41,12 +41,10 @@ export async function renderReply(reply: Reply, footer: string, validKeys: strin
       if (line) lines.push(line);
     }
   }
-  if (Array.isArray(reply.map)) lines.push(...reply.map.filter((line): line is string => typeof line === "string"));
   if (reply.error) {
     const line = await errorLine(reply.error, validKeys);
     if (line) lines.push(line);
   }
-  if (footer) lines.push(footer);
   return {
     isError: reply.ok === false,
     content: [{ type: "text" as const, text: lines.join("\n") }],

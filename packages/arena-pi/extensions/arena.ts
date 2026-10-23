@@ -20,6 +20,7 @@ import { classifyFailure, nextWait } from "./outage.ts";
 import { applyToolTurnEffort, requestDetailedSummary } from "./thinking.ts";
 import { abortActiveStream, installDispatchGate, pythonDispatch, readSharedSpend, settleProviderUsage, type SharedSpend } from "./provider_gate.ts";
 import { renderReply } from "./reply.ts";
+import { turnContext, type ToolContext } from "./context.ts";
 import { executableTools, loadToolSchemas, parametersFor } from "./tool_schema.ts";
 
 const root = resolve(import.meta.dirname, "../../..");
@@ -119,6 +120,9 @@ export default async function arenaExtension(pi: ExtensionAPI) {
   let turnHadProofAttempt = false;
   let turnHadNovelContext = false;
   let turnHadVerifiedImprovement = false;
+  // Each tool reply's ambient `context`, and how many tool results the turn has had: flushed at turn_end.
+  let turnContexts: ToolContext[] = [];
+  let turnToolResults = 0;
   let previousVerified: Record<string, any> | null | undefined;
   const discoveries = new Set<string>();
   // Model-facing trimming of tool results; its record of what the model has seen resets on compaction.
@@ -620,17 +624,10 @@ export default async function arenaExtension(pi: ExtensionAPI) {
   });
 
   const untrimmed = new Map<string, string>();
-  const footers = new Map<string, string>();
   function textOf(content: unknown): string {
     if (!Array.isArray(content)) return "";
     return content.filter(part => part && typeof part === "object" && part.type === "text" && part.text)
       .map(part => String(part.text)).join("\n");
-  }
-  function stripFooter(delivered: string, footer: string | undefined): string {
-    if (!footer) return delivered;
-    if (delivered === footer) return "";
-    const suffix = `\n\n${footer}`;
-    return delivered.endsWith(suffix) ? delivered.slice(0, -suffix.length) : delivered;
   }
   pi.on("tool_execution_end", (event, ctx) => {
     // The batch of the message that crossed the limit ends here; after its last result no provider request follows.
@@ -659,30 +656,36 @@ export default async function arenaExtension(pi: ExtensionAPI) {
       discoveries.add(signature);
       appendCost({ kind: "discovery", signature, tool: event.toolName });
     }
-    // Sol's new plan and merge notices ride in the tool's details, never in its text. They reach the model as one
-    // hidden message, queued behind this turn's tool results, the same way the memory message is sent.
-    const notices = payload?.notices as { kinds?: string[]; lines?: string[] } | undefined;
-    if (notices?.lines?.length) {
-      const content = notices.lines.join("\n");
-      try {
-        appendCost({ kind: "notice", kinds: notices.kinds ?? [], chars: content.length });
-        pi.sendMessage({ customType: "arena-notice", content, display: false }, { triggerTurn: false });
-      } catch (error) { console.error(`[arena-notice] not sent: ${error}`); }
-    }
-    // Taken before the early return so a result outside an open attempt does not leave its footer behind.
-    const footer = footers.get(event.toolCallId);
-    footers.delete(event.toolCallId);
+    // The reply's ambient context (updates, cards, notices) waits for turn_end, where it is sent once for the turn.
+    turnToolResults += 1;
+    if (payload?.context) turnContexts.push(payload.context as ToolContext);
     if (!openAttempt) return;
     const deliveredText = textOf(result?.content);
-    // `tool_result` runs before this event, so the trace takes the untrimmed text and footer it stashed.
+    // `tool_result` runs before this event, so the trace takes the untrimmed text it stashed.
     const full = untrimmed.get(event.toolCallId);
     untrimmed.delete(event.toolCallId);
-    const withoutFooter = stripFooter(deliveredText, footer);
-    // `text` keeps its v6 meaning: the untrimmed text when trimmed, else the delivered text with its footer.
     appendTrace({ kind: "tool_result", id: openAttempt, tool_call_id: event.toolCallId,
-      name: event.toolName, result: event.result, text: full ?? deliveredText, delivered_text: withoutFooter,
-      ...(footer ? { footer } : {}), ...(full !== undefined ? { trimmed: true } : {}),
-      is_error: event.isError });
+      name: event.toolName, result: event.result, text: full ?? deliveredText, delivered_text: deliveredText,
+      ...(full !== undefined ? { trimmed: true } : {}), is_error: event.isError });
+  });
+
+  // Pi holds a message sent with triggerTurn false while streaming and appends it right after turn_end's handlers,
+  // so this turn's hidden context lands after its last tool result and before the next provider request.
+  pi.on("turn_end", async () => {
+    const contexts = turnContexts;
+    const toolResults = turnToolResults;
+    turnContexts = [];
+    turnToolResults = 0;
+    if (!active || !toolResults) return;
+    let spend: string | undefined;
+    try { spend = await spendFooter(spentUsd, limit); } catch { /* the spend line is best effort */ }
+    const message = turnContext(contexts, spend);
+    if (!message) return;
+    try {
+      appendCost({ kind: "context", kinds: message.kinds, chars: message.content.length });
+      appendTrace({ kind: "context_message", id: openAttempt ?? null, kinds: message.kinds, content: message.content });
+      pi.sendMessage({ customType: "arena-context", content: message.content, display: false }, { triggerTurn: false });
+    } catch (error) { console.error(`[arena-context] not sent: ${error}`); }
   });
 
   pi.on("tool_result", async event => {
@@ -694,17 +697,10 @@ export default async function arenaExtension(pi: ExtensionAPI) {
       return text === part.text ? part : { ...part, text };
     }));
     const changed = content.some((part, index) => part !== event.content[index]);
-    if (changed) untrimmed.set(event.toolCallId, event.content.filter(part => part.type === "text" && part.text)
+    if (!changed) return;
+    untrimmed.set(event.toolCallId, event.content.filter(part => part.type === "text" && part.text)
       .map(part => (part as { text: string }).text).join("\n"));
-    let spend = "";
-    try { spend = await spendFooter(spentUsd, limit); } catch { /* the footer is best effort */ }
-    if (spend) footers.set(event.toolCallId, spend);
-    if (!spend && !changed) return;
-    // The footer joins the last text part after a blank line: Pi concatenates parts without a separator.
-    const lastText = spend ? content.map(part => part.type === "text" && Boolean(part.text)).lastIndexOf(true) : -1;
-    const withSpend = !spend ? content : lastText < 0 ? [...content, { type: "text" as const, text: spend }]
-      : content.map((part, index) => index === lastText ? { ...part, text: `${(part as { text: string }).text}\n\n${spend}` } : part);
-    return { content: withSpend, details: event.details, isError: event.isError };
+    return { content, details: event.details, isError: event.isError };
   });
 
   pi.on("context", async event => {
@@ -737,7 +733,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     try {
       const file = resolve(directory, "request.json");
       await writeFile(file, JSON.stringify(params), "utf8");
-      return await renderReply(await campaign(name, ["--request-file", file]), "", validKeys);
+      return await renderReply(await campaign(name, ["--request-file", file]), validKeys);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

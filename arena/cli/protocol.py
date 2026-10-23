@@ -52,7 +52,7 @@ ACTIONS = (
 )
 
 
-# Tool calls the model makes. Each carries sol's new notices in its details (team_reply.sol_notices); their text does not.
+# Tool calls the model makes. Each may carry sol's new notices in its `context` (team_reply.sol_notices), not its text.
 NOTICE_ACTIONS = ("compile", "goal", "search", "read", "scratch", "patterns", "await_results", "delegate", "jobs",
                   "cancel", "card", "plan")
 
@@ -139,10 +139,16 @@ def _resolve_jobs(run_id: str, job_ids):
 
 
 def _with_text(action: str, result: dict, run_id: str) -> dict:
-    """The model reads `text`; the rest stays in the tool details. Cards the caller has not seen follow it."""
-    shown = team_reply.render(action, result, run_dir(run_id))
-    cards = tool_reply.card_lines(run_id) if result.get("ok") is not False else []
-    return {**result, "text": "\n".join([shown, *cards])}
+    """The model reads `text`: the call's own result. Open requests and the cards the caller has not seen go to
+    `context`, which the extension sends with the turn's other ambient lines."""
+    directory = run_dir(run_id)
+    shown = {**result, "text": team_reply.render(action, result, directory)}
+    if result.get("ok") is False:
+        return shown
+    requests = team_reply.open_requests(directory) if action in ("await_results", "jobs") else []
+    cards = tool_reply.card_lines(run_id)
+    kinds = [name for name, lines in (("open_requests", requests), ("cards", cards)) if lines]
+    return tool_reply.add_context(shown, [requests, cards], kinds)
 
 
 def _harness_actor() -> str:

@@ -44,14 +44,20 @@ def _attach(monkeypatch, best):
     return state, lambda: reply.attach_context("run", {}, include_map=True)
 
 
+def _map(result: dict) -> list[str]:
+    """The search map lines a reply carries in its context (none when it carries no map section)."""
+    head = text.render("replies/tools.section_map")
+    return next((section for section in result["context"]["sections"] if section[:1] == [head]), [])
+
+
 def test_compile_reply_carries_the_map_only_for_a_new_best(monkeypatch):
     state, call = _attach(monkeypatch, "n3")
     first = call()
-    assert first["map"] and text.render("replies/tools.map_shapes").split("\n")[0] not in "\n".join(first["map"])
-    assert "Latest nodes" not in "\n".join(first["map"])
-    assert not call().get("map")
+    assert _map(first) and text.render("replies/tools.map_shapes").split("\n")[0] not in "\n".join(_map(first))
+    assert "Latest nodes" not in "\n".join(_map(first))
+    assert not _map(call())
     monkeypatch.setattr(campaign, "map_view", lambda _r: {"best": {"node": "n4"}, "archive": [], "recent": []})
-    assert call()["map"]
+    assert _map(call())
 
 
 def test_salvage_bookkeeping_updates_are_not_delivered(monkeypatch):
@@ -63,8 +69,9 @@ def test_salvage_bookkeeping_updates_are_not_delivered(monkeypatch):
     )
     monkeypatch.setattr(reply, "_commit_delivery", lambda *a: {"operation_id": "o", "event_ids": ["1", "2"]})
     monkeypatch.setattr(reply, "node_authors", lambda _r: {})
-    facts = "\n".join(reply.attach_context("run", {}).get("facts", []))
-    assert "n6 checked" in facts and "compiling part" not in facts
+    result = reply.attach_context("run", {})
+    shown = "\n".join(line for section in result["context"]["sections"] for line in section)
+    assert "n6 checked" in shown and "compiling part" not in shown
 
 
 def test_text_only_nudge_says_not_to_paste_proofs():

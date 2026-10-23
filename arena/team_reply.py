@@ -65,7 +65,7 @@ def render(action: str, result: dict, directory: Path) -> str:
     if action == "plan":
         return "\n".join([_render("plan_saved", version=result.get("version")), *result.get("warnings", [])])
     if action == "await_results":
-        return "\n".join([_await(result, directory, job), *open_requests(directory)])
+        return _await(result, directory, job)
     raise ValueError(f"no team reply for {action}")
 
 
@@ -120,8 +120,8 @@ def notices(directory: Path, bucket: dict, action: str | None) -> tuple[list[str
 
 
 def sol_notices(run_id: str, action: str, result: dict) -> dict:
-    """Add sol's new notices to a tool reply as `notices` in its details; the text the model reads is unchanged.
-    Each of sol's tool calls counts toward the repeat of a missing plan. Workers get no field."""
+    """Add sol's new notices to a tool reply's `context`; the text the model reads is unchanged. Each of sol's tool
+    calls counts toward the repeat of a missing plan. Workers get no notices."""
     from arena import reply
 
     if reply.current_actor() != "sol" or not isinstance(result, dict):
@@ -132,8 +132,7 @@ def sol_notices(run_id: str, action: str, result: dict) -> dict:
         bucket["calls"] = bucket.get("calls", 0) + 1
         kinds, lines = notices(campaign.run_dir(run_id), bucket, action)
         reply._write_actor(run_id, "sol", bucket, state)
-    result["notices"] = {"kinds": kinds, "lines": lines}
-    return result
+    return reply.add_context(result, [["", *lines]], kinds) if lines else result
 
 
 def _jobs_count(directory: Path, nodes: list[str]) -> int:
@@ -175,10 +174,6 @@ def open_requests(directory: Path) -> list[str]:
 
 
 def _jobs(result: dict, directory: Path, job) -> str:
-    return "\n".join([_jobs_body(result, directory, job), *open_requests(directory)])
-
-
-def _jobs_body(result: dict, directory: Path, job) -> str:
     found = result.get("jobs") or []
     if not found:
         return _render("jobs_none")

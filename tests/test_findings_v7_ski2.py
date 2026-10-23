@@ -88,17 +88,18 @@ class MapDeliveryTests(unittest.TestCase):
             return reply.attach_context("m", reply.reply(), include_map=True)
 
     def test_full_map_only_when_it_matters(self):
+        head = text.render("replies/tools.section_map")
         first = self.attach(self.view("n1", "n1"))
-        self.assertEqual(first["map"][0], text.render("replies/tools.section_map"))
+        self.assertEqual(first["context"]["sections"][0][0], head)
         quiet = self.attach(self.view("n1", "n2"))
-        self.assertIsNone(quiet["map"])
+        self.assertEqual(quiet["context"]["sections"], [])
         unchanged = self.attach(self.view("n1", "n2"))
-        self.assertIsNone(unchanged["map"])
+        self.assertEqual(unchanged["context"]["sections"], [])
         best = self.attach(self.view("n3", "n3"))
-        self.assertEqual(best["map"][0], text.render("replies/tools.section_map"))
+        self.assertEqual(best["context"]["sections"][0][0], head)
         reply.reset_delivered("m")
         again = self.attach(self.view("n3", "n3"))
-        self.assertEqual(again["map"][0], text.render("replies/tools.section_map"))
+        self.assertEqual(again["context"]["sections"][0][0], head)
 
 
 class ErrorGroupTests(unittest.TestCase):

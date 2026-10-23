@@ -441,13 +441,15 @@ class CompileToolTests(CascadeCase):
             sol_reply = reply.attach_context(run_id, reply.reply())
         with patch.dict(os.environ, {"ARENA_ACTOR_ID": "worker"}):
             worker_reply = reply.attach_context(run_id, reply.reply())
-        self.assertTrue(sol_reply["facts"])
-        self.assertEqual(sol_reply["facts"][1:], [line.replace(" by orchestrator", "") for line in worker_reply["facts"][1:]])
-        self.assertIn("n2 by orchestrator compiles", worker_reply["facts"][1])
+        sol_updates = sol_reply["context"]["sections"][0]
+        worker_updates = worker_reply["context"]["sections"][0]
+        self.assertTrue(sol_updates)
+        self.assertEqual(sol_updates[1:], [line.replace(" by orchestrator", "") for line in worker_updates[1:]])
+        self.assertIn("n2 by orchestrator compiles", worker_updates[1])
         with patch.dict(os.environ, {"ARENA_ACTOR_ID": "sol"}):
             again = reply.attach_context(run_id, reply.reply())
             repeated = reply.redeliver(run_id)
-        self.assertFalse(again["facts"])
+        self.assertFalse(again["context"]["sections"])
         self.assertTrue(repeated["event_ids"])
         replies = [event for event in campaign.events(self.directory) if event.get("kind") == "delivered_reply"]
         self.assertEqual(sum(1 for event in replies if event.get("actor_id") == "sol"), 1)
@@ -461,7 +463,7 @@ class CompileToolTests(CascadeCase):
             recovered = reply.redeliver(run_id)
             self.assertTrue(recovered["event_ids"])
             self.assertEqual(recovered["receipt"]["status"], "committed")
-            self.assertFalse(reply.attach_context(run_id, reply.reply())["facts"])
+            self.assertFalse(reply.attach_context(run_id, reply.reply())["context"]["sections"])
 
         child_id = "harness-child"
         (self.directory / "proofs" / f"{child_id}.lean").write_text("by\n  exact\n")

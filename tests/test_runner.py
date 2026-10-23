@@ -282,6 +282,11 @@ def tool_results(request: dict, name: str) -> list[dict]:
     return [m for m in request["messages"] if m["role"] == "toolResult" and m.get("toolName") == name]
 
 
+def shown_context(details: dict) -> list[str]:
+    """The ambient lines a tool reply sends with the turn (its `context` sections), in order."""
+    return [line for section in details.get("context", {}).get("sections", []) for line in section]
+
+
 def compiled_node(run: FakeRun, reply: dict) -> tuple[str, str, float]:
     """The one node a single-draft compile reply filed: its id, its stored candidate label and the map's score for it.
 
@@ -296,7 +301,8 @@ def compiled_node(run: FakeRun, reply: dict) -> tuple[str, str, float]:
     )
     [proof_id] = [current for current in filed if campaign._graph_node_id(history, current) == item["node"]]
     scores = {
-        match[1]: float(match[2]) for line in reply["map"] if (match := re.match(r"best (\S+) score ([\d.]+)", line))
+        match[1]: float(match[2])
+        for line in shown_context(reply) if (match := re.match(r"best (\S+) score ([\d.]+)", line))
     }
     return item["node"], campaign.node_label(history, proof_id), scores[item["node"]]
 
@@ -342,10 +348,8 @@ class AutomaticChecksTests(unittest.TestCase):
         node, label, score = compiled_node(run, compiled["details"])
         self.assertEqual(score, FIXTURE_SCORE[2])
         # The cross-version fact names the filed node by its graph id and carries its score.
-        self.assertTrue(
-            any(re.search(rf"\b{node}\b", fact) and str(score) in fact for fact in compiled["details"]["facts"]),
-            compiled["details"]["facts"],
-        )
+        facts = [*compiled["details"]["facts"], *shown_context(compiled["details"])]
+        self.assertTrue(any(re.search(rf"\b{node}\b", fact) and str(score) in fact for fact in facts), facts)
         self.assertIn(node, compiled["details"]["handles"])
         for earlier, after in itertools.pairwise(requests):
             before = earlier["messages"]
@@ -416,9 +420,8 @@ class AutomaticChecksTests(unittest.TestCase):
         [item] = compiled["details"]["items"]
         _, label, _ = compiled_node(run, compiled["details"])
         node = re.compile(rf"\b{item['node']}\b")
-        self.assertFalse(
-            any(node.search(fact) for fact in compiled["details"]["facts"]), "the check did not stay queued"
-        )
+        facts = [*compiled["details"]["facts"], *shown_context(compiled["details"])]
+        self.assertFalse(any(node.search(fact) for fact in facts), "the check did not stay queued")
         submission = run.json("submission.json")
         self.assertEqual(submission["candidate"], label, run.stdout)
         self.assertEqual((submission["tokens"], submission["heartbeats"], submission["proxy"]), FIXTURE_SCORE)

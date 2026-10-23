@@ -32,7 +32,6 @@ class ReplyTests(unittest.TestCase):
                 "facts": [],
                 "items": [],
                 "handles": [],
-                "map": None,
                 "stop": False,
             },
         )
@@ -137,22 +136,40 @@ class ReplyTests(unittest.TestCase):
         ):
             first = reply.attach_context(self.run_id, reply.reply(), include_map=True)
             second = reply.attach_context(self.run_id, reply.reply(), include_map=True)
-        self.assertEqual(first["facts"], ["## Updates", "update"])
-        self.assertEqual(second["facts"], [])
-        self.assertEqual(first["map"], [])
-        self.assertIsNone(second["map"])
+        self.assertEqual(first["context"]["sections"], [["## Updates", "update"]])
+        self.assertEqual(second["context"]["sections"], [])
+        self.assertEqual(first["facts"], [])
+
+    def test_ambient_sections_leave_the_reply_text_and_keep_their_order(self):
+        update = {"seq": 1, "text": "update"}
+        with (
+            patch.object(campaign, "state", return_value={"updates": [update]}),
+            patch.object(campaign, "map_view", return_value={"best": None, "archive": [], "recent": [], "effort": [], "open": []}),
+            patch.object(reply, "_map_lines", return_value=["best n1"]),
+            patch.object(reply, "_card_lines", return_value=[text.render("replies/tools.section_cards"), "card"]),
+        ):
+            result = reply.attach_context(self.run_id, reply.reply(facts=["own fact"]), include_map=True)
+        self.assertEqual(result["facts"], ["own fact"])
+        self.assertEqual(
+            result["context"]["sections"],
+            [
+                [text.render("replies/tools.section_updates"), "update"],
+                [text.render("replies/tools.section_cards"), "card"],
+                [text.render("replies/tools.section_map"), "best n1"],
+            ],
+        )
 
     def test_an_update_names_its_source_node_only_once_the_model_has_seen_it(self):
         update = {"seq": 1, "text": "n11: sketch from n7; line 3 is a hole to fill.", "source": ["n7"]}
         update["unseen_text"] = "n11: sketch from earlier broken nodes; line 3 is a hole to fill."
         with patch.object(campaign, "state", return_value={"updates": [update]}):
             unseen = reply.attach_context(self.run_id, reply.reply())
-        self.assertEqual(unseen["facts"], ["## Updates", update["unseen_text"]])
+        self.assertEqual(unseen["context"]["sections"], [["## Updates", update["unseen_text"]]])
         shown = reply.reply(items=[{"ref": "d1", "ok": True, "lines": ["n7 <- n2 draft status broken."]}])
         later = {"seq": 2, "text": update["text"], "source": ["n7"], "unseen_text": update["unseen_text"]}
         with patch.object(campaign, "state", return_value={"updates": [update, later]}):
             seen = reply.attach_context(self.run_id, shown)
-        self.assertEqual(seen["facts"], ["## Updates", update["text"]])
+        self.assertEqual(seen["context"]["sections"], [["## Updates", update["text"]]])
 
 
 class UntriedStepTests(unittest.TestCase):

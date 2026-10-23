@@ -1,5 +1,6 @@
 """Smoke tests for the golf-run fixes: floor claims, open worker requests, the receipt's tools, island acceptance."""
 
+import importlib
 import json
 import tempfile
 import unittest
@@ -51,6 +52,18 @@ class GolfFixTests(unittest.TestCase):
             delegations.append({"job_id": "j2", "ts": 20.0})
             with patch.object(orchestration, "_job_rows", lambda d, j: [r for r in delegations if r["job_id"] == j]):
                 self.assertEqual(team_reply.open_requests(self.directory), [])
+
+    def test_open_requests_and_cards_ride_in_context_and_leave_the_await_text(self):
+        protocol = importlib.import_module("arena.cli.protocol")
+
+        with patch.object(protocol, "run_dir", return_value=self.directory), \
+                patch.object(team_reply, "open_requests", return_value=["## Open", "asks"]), \
+                patch.object(protocol.tool_reply, "card_lines", return_value=["## Cards", "card"]):
+            result = protocol._with_text("await_results", {"ok": True, "wake_reason": "no_pending_work"}, "run-1")
+        self.assertNotIn("asks", result["text"])
+        self.assertNotIn("card", result["text"])
+        self.assertEqual(result["context"]["sections"], [["## Open", "asks"], ["## Cards", "card"]])
+        self.assertEqual(result["context"]["kinds"], ["open_requests", "cards"])
 
     def test_floor_claim_naming_an_uncompiled_construct_is_flagged_unmeasured(self):
         (self.directory / "proofs").mkdir()
