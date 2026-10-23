@@ -51,7 +51,7 @@ budget:
   packet_words: 920
   # 215: the worker packet explains the card (what to write, what arrives in replies).
   worker_words: 215
-  reply_words: 40
+  reply_words: 60
   # Continuation nudges are sent only after a turn with no tool call, a few times a run.
   nudge_words: 60
   # The island packet section and its family lines exist only for island workers; they are not in the shared worker packet.

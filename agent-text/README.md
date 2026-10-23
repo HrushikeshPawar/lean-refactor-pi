@@ -278,9 +278,12 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/merge.summary` | 9 | Tool replies | when the matching tool result occurs |
 | `replies/patterns.bad_input` | 15 | Tool replies | when the matching tool result occurs |
 | `replies/patterns.card` | 19 | Tool replies | when the matching tool result occurs |
+| `replies/patterns.card_at` | 7 | Tool replies | when the matching tool result occurs |
 | `replies/patterns.down` | 2 | Tool replies | when the matching tool result occurs |
 | `replies/patterns.mixed` | 1 | Tool replies | when the matching tool result occurs |
 | `replies/patterns.none` | 6 | Tool replies | when the matching tool result occurs |
+| `replies/patterns.seen_all` | 30 | Tool replies | when the matching tool result occurs |
+| `replies/patterns.seen_note` | 8 | Tool replies | when the matching tool result occurs |
 | `replies/patterns.unknown` | 2 | Tool replies | when the matching tool result occurs |
 | `replies/patterns.unknown_node` | 5 | Tool replies | when the matching tool result occurs |
 | `replies/patterns.up` | 2 | Tool replies | when the matching tool result occurs |
@@ -314,16 +317,17 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/team.card_compare_node` | 7 | Tool replies | when the matching tool result occurs |
 | `replies/team.card_empty` | 11 | Tool replies | when the matching tool result occurs |
 | `replies/team.card_field` | 2 | Tool replies | when the matching tool result occurs |
-| `replies/team.card_floor` | 38 | Tool replies | when the matching tool result occurs |
+| `replies/team.card_floor` | 59 | Tool replies | when the matching tool result occurs |
 | `replies/team.card_head` | 5 | Tool replies | when the matching tool result occurs |
 | `replies/team.card_saved` | 3 | Tool replies | when the matching tool result occurs |
+| `replies/team.card_unmeasured` | 28 | Tool replies | when the matching tool result occurs |
 | `replies/team.delegate_messaged` | 8 | Tool replies | when the matching tool result occurs |
 | `replies/team.delegate_resumed` | 11 | Tool replies | when the matching tool result occurs |
 | `replies/team.delegate_reused` | 7 | Tool replies | when the matching tool result occurs |
 | `replies/team.delegate_started` | 13 | Tool replies | when the matching tool result occurs |
 | `replies/team.floor_none` | 19 | Tool replies | when the matching tool result occurs |
 | `replies/team.floor_options` | 4 | Tool replies | when the matching tool result occurs |
-| `replies/team.floor_push` | 23 | Tool replies | when the matching tool result occurs |
+| `replies/team.floor_push` | 33 | Tool replies | when the matching tool result occurs |
 | `replies/team.idle_ended` | 5 | Tool replies | when the matching tool result occurs |
 | `replies/team.idle_ended_job` | 2 | Tool replies | when the matching tool result occurs |
 | `replies/team.idle_fill` | 39 | Tool replies | when the matching tool result occurs |
@@ -351,6 +355,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/team.open_ask` | 5 | Tool replies | when the matching tool result occurs |
 | `replies/team.open_floor` | 10 | Tool replies | when the matching tool result occurs |
 | `replies/team.open_requests_head` | 25 | Tool replies | when the matching tool result occurs |
+| `replies/team.open_unmeasured` | 33 | Tool replies | when the matching tool result occurs |
 | `replies/team.reject` | 3 | Tool replies | when the matching tool result occurs |
 | `replies/team.reject_bare` | 3 | Tool replies | when the matching tool result occurs |
 | `replies/team.role_family` | 2 | Tool replies | when the matching tool result occurs |
@@ -582,7 +587,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `tools/goal.params.try` | 10 | Model tool definitions | every request |
 | `tools/jobs.description` | 15 | Model tool definitions | every request |
 | `tools/jobs.params.job_ids` | 9 | Model tool definitions | every request |
-| `tools/patterns.description` | 68 | Model tool definitions | every request |
+| `tools/patterns.description` | 100 | Model tool definitions | every request |
 | `tools/patterns.params.node` | 5 | Model tool definitions | every request |
 | `tools/patterns.params.position` | 17 | Model tool definitions | every request |
 | `tools/patterns.params.step` | 9 | Model tool definitions | every request |

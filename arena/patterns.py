@@ -1,11 +1,23 @@
-"""Reference cards for proof steps: feature extraction, ranking by tag overlap, position-aware rendering.
+"""Reference cards for proof steps: feature extraction, ranking, position-aware rendering, per-actor memory.
 
 The cards are data (research/strategy-bank/cards.json); every model-facing sentence comes from agent-text.
+
+Ranking: score = tactic tags shared with the step + GOAL_WEIGHT per goal tag found in the goal text (the saved
+step's goal before and after when `{node, step}` is sent, else the snippet itself). Cards may carry `goal_tags`:
+constants such as `List.zip` (also matched as `.zip`) or symbols such as `∈`. Ties go to higher confidence.
+
+Already-applied rule: a card is dropped when its `after` introduces tactic tags (tags in `after` but not in
+`before`) and the step already has all of them, or when it removes tags (in `before` but not in `after`), none
+of them is in the step, and no goal tag matched (what it replaces is not there).
+
+Memory: the tool remembers per run dir and actor which card ids it returned (`patterns-seen/<actor>.json`) and
+shows only unseen ones; with none left it says so.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 from functools import lru_cache
 from pathlib import Path
@@ -67,11 +79,52 @@ def position(index: int, count: int) -> str:
     return "middle"
 
 
-def rank(step_text: str, limit: int = 5) -> list[dict]:
-    """Cards sharing at least one tag with the step, most overlap first; ties go to higher confidence, then bank order."""
+GOAL_WEIGHT = 2
+
+
+@lru_cache(maxsize=None)
+def _goal_pattern(tag: str) -> re.Pattern:
+    if not re.search(r"\w", tag):
+        return re.compile(re.escape(tag))
+    if "." not in tag:
+        return re.compile(rf"(?<![\w.]){re.escape(tag)}(?![\w'])")
+    last = re.escape(tag.rsplit(".", 1)[1])
+    return re.compile(rf"(?<![\w.']){re.escape(tag)}(?![\w'])|(?<=[\w)\]])\.{last}(?![\w'])")
+
+
+def goal_hits(card: dict, goal_text: str) -> int:
+    """How many of the card's goal tags occur in the goal text."""
+    return sum(1 for tag in card.get("goal_tags", ()) if _goal_pattern(tag).search(goal_text))
+
+
+@lru_cache(maxsize=None)
+def _moves(card_id: str) -> tuple[frozenset, frozenset]:
+    """(tags the card's after introduces, tags its before removes), from the cards' tag vocabulary."""
+    card = next(item for item in load_cards() if item["id"] == card_id)
+    before, after = features(card["before"]), features(card["after"])
+    return frozenset(after - before), frozenset(before - after)
+
+
+def already_applied(card: dict, found: set[str], hits: int = 0) -> bool:
+    """The step already makes the card's move (see the module docstring)."""
+    introduced, removed = _moves(card["id"])
+    if introduced and introduced <= found:
+        return True
+    return bool(removed) and not removed & found and not hits
+
+
+def rank(step_text: str, limit: int = 5, goal: str = "", seen: frozenset | set = frozenset()) -> list[dict]:
+    """Relevant cards, best first: tactic overlap plus GOAL_WEIGHT per goal tag, then confidence, then bank order.
+
+    Cards the step already applies are dropped; ids in `seen` are left out."""
     found = features(step_text)
-    scored = [(len(found & set(card["tags"])), card) for card in load_cards()]
-    scored = [(score, card) for score, card in scored if score]
+    goal_text = f"{goal}\n{step_text}"
+    scored = []
+    for card in load_cards():
+        hits = goal_hits(card, goal_text)
+        score = len(found & set(card["tags"])) + GOAL_WEIGHT * hits
+        if score and card["id"] not in seen and not already_applied(card, found, hits):
+            scored.append((score, card))
     scored.sort(key=lambda pair: (-pair[0], -_CONFIDENCE.get(pair[1]["effect"]["confidence"], 0)))
     return [card for _score, card in scored[:limit]]
 
@@ -84,13 +137,50 @@ def render_card(card: dict, where: str) -> str:
         tokens=text.render(f"replies/patterns.{effect['tokens']}"),
         position=where, heartbeats=text.render(f"replies/patterns.{effect['heartbeats'][where]}"),
         before=card["before"], after=card["after"],
-    )
+    ) + (("\n" + text.render("replies/patterns.card_at", position=where, note=card["at"][where]))
+         if card.get("at", {}).get(where) else "")
 
 
-def render_cards(step_text: str, where: str, limit: int = 3) -> str:
-    cards = rank(step_text, limit)
+def render_cards(step_text: str, where: str, limit: int = 3, goal: str = "") -> str:
+    cards = rank(step_text, limit, goal)
     if not cards:
         return text.render("replies/patterns.none")
+    return "\n\n".join(render_card(card, where) for card in cards)
+
+
+def _seen_file(directory: Path, actor: str) -> Path:
+    return directory / "patterns-seen" / f"{re.sub(r'[^A-Za-z0-9._-]', '_', actor)}.json"
+
+
+def _load_seen(directory: Path, actor: str) -> list[str]:
+    try:
+        return list(json.loads(_seen_file(directory, actor).read_text()))
+    except (OSError, ValueError):
+        return []
+
+
+def _remember(directory: Path, actor: str, ids: list[str]) -> None:
+    path = _seen_file(directory, actor)
+    path.parent.mkdir(exist_ok=True)
+    temporary = path.with_suffix(f".{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(sorted(set(_load_seen(directory, actor)) | set(ids))))
+    temporary.replace(path)
+
+
+def render_fresh(step_text: str, where: str, goal: str, directory: Path | None, actor: str, limit: int = 3) -> str:
+    """Cards for the step that this actor has not been shown in this run dir; says so when none are left.
+
+    Memory is skipped when `directory` does not exist."""
+    memory = directory is not None and directory.is_dir()
+    seen = set(_load_seen(directory, actor)) if memory else set()
+    cards = rank(step_text, limit, goal, seen)
+    if not cards:
+        old = rank(step_text, 99, goal)
+        if not old:
+            return text.render("replies/patterns.none")
+        return text.render("replies/patterns.seen_all", titles="; ".join(card["title"] for card in old))
+    if memory:
+        _remember(directory, actor, [card["id"] for card in cards])
     return "\n\n".join(render_card(card, where) for card in cards)
 
 
@@ -119,13 +209,23 @@ def patterns_tool(theorem: str, run_id: str, request: dict) -> dict:
     where = request.get("position") or "middle"
     if unknown or where not in POSITIONS or bool(request.get("text")) == bool(request.get("node") and request.get("step")):
         return {"ok": False, "category": "invalid_input", "text": text.render("replies/patterns.bad_input")}
+    from arena import campaign
+
+    try:
+        directory = campaign.run_dir(run_id)
+    except ValueError:
+        directory = None
+    actor = os.environ.get("ARENA_ACTOR_ID") or "sol"
     if request.get("text"):
-        return {"ok": True, "text": render_cards(str(request["text"]), where)}
+        body = str(request["text"])
+        return {"ok": True, "text": render_fresh(body, where, body, directory, actor)}
     try:
         node = tools._node(run_id, request["node"])
-        steps = split_steps(node.proof_text)
+        steps = getattr(node, "steps", None) or split_steps(node.proof_text)  # node.steps carries the step goals
         index = next(i for i, step in enumerate(steps) if step.id == request["step"])
     except (ValueError, StopIteration):
         return {"ok": False, "category": "invalid_input",
                 "text": text.render("replies/patterns.unknown_node", target=f"{request['node']} {request['step']}")}
-    return {"ok": True, "text": render_cards(steps[index].text, position(index, len(steps)))}
+    step = steps[index]
+    goal = "\n".join(part for part in (step.before, step.after) if part)
+    return {"ok": True, "text": render_fresh(step.text, position(index, len(steps)), goal, directory, actor)}

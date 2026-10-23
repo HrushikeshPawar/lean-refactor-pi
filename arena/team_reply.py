@@ -55,7 +55,7 @@ def render(action: str, result: dict, directory: Path) -> str:
                        scope=result.get("scope", "?"), anchor=_anchor(result.get("anchor")))
     if action == "card":
         saved = _render("card_saved", version=result.get("version"))
-        return f"{saved} {_render('card_floor')}" if result.get("floor") else saved
+        return f"{saved} {orchestration.card_floor_text(result.get('unmeasured') or [])}" if result.get("floor") else saved
     if action == "cancel":
         return _render("cancel_done", job=job(result.get("job_id")), state=result.get("state", "?"))
     if action == "jobs":
@@ -79,6 +79,9 @@ def open_requests(directory: Path) -> list[str]:
                                  ask=" ".join(item["ask"].split())))
         if item["floor"]:
             lines.append(_render("open_floor", job=item["job"], version=item["version"]))
+        if item.get("unmeasured"):
+            lines.append(_render("open_unmeasured", job=item["job"],
+                                 names=", ".join(f"`{n}`" for n in item["unmeasured"])))
     floor = next((item for item in requests if item["floor"]), None)
     if floor is not None:
         status = orchestration.island_status(directory, floor["job_id"]) or {}

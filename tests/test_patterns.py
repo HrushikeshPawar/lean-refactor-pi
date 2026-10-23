@@ -75,6 +75,43 @@ class RankingTests(unittest.TestCase):
         self.assertIn("simp only", body)
 
 
+class GoalAwareTests(unittest.TestCase):
+    GOAL = "⊢ ∑ i ∈ Finset.range n, i = n * (n - 1) / 2"
+
+    def test_goal_constants_rank_a_card_the_tactics_do_not_reach(self):
+        self.assertEqual(patterns.rank("zzz", 3), [])
+        ranked = patterns.rank("zzz", 3, self.GOAL)
+        self.assertEqual(ranked[0]["id"], "S58-finset-sum-closers")
+        self.assertTrue(patterns.goal_hits(ranked[0], "Finset.range n |>.sum id"))  # method form matches too
+
+    def test_a_card_whose_move_the_step_already_makes_is_dropped(self):
+        ids = {card["id"] for card in patterns.rank("grind", 99)}
+        self.assertNotIn("S09-grind-closer", ids)  # recommends grind, which the step already is
+        self.assertIn("S10-grind-to-explicit", ids)  # replaces grind, which the step has
+        self.assertNotIn("S10-grind-to-explicit", {card["id"] for card in patterns.rank("omega", 99)})  # no grind to replace
+
+    def test_cards_are_not_repeated_for_one_actor_and_run_dir(self):
+        with tempfile.TemporaryDirectory() as name, patch.dict("os.environ", {"ARENA_ACTOR_ID": "w1"}):
+            directory = Path(name)
+            first = patterns.render_fresh("exact foo", "middle", self.GOAL, directory, "w1")
+            again = patterns.render_fresh("exact foo", "middle", self.GOAL, directory, "w1")
+            other = patterns.render_fresh("exact foo", "middle", self.GOAL, directory, "w2")
+            self.assertIn("Close sum/product identities", first)
+            self.assertNotIn("Close sum/product identities", again)
+            self.assertIn("Close sum/product identities", other)
+            for _ in range(5):
+                last = patterns.render_fresh("exact foo", "middle", self.GOAL, directory, "w1")
+            self.assertIn("already seen every card", last)
+
+    def test_new_tight_proof_cards_are_in_the_bank_and_compile(self):
+        cards = {card["id"]: card for card in patterns.load_cards()}
+        for ident in ("S71-drop-helper-reclose-dependents", "S72-sibling-fact-without-premise",
+                      "S73-helper-must-pay"):
+            self.assertEqual(set(cards[ident]["verified"].values()), {"pass"})
+            self.assertEqual(set(cards[ident]["at"]), set(patterns.POSITIONS))
+        self.assertIn("At the closing of this proof", patterns.render_card(cards["S73-helper-must-pay"], "closing"))
+
+
 class GatingTests(unittest.TestCase):
     def launch(self, **config):
         with tempfile.TemporaryDirectory() as name:
@@ -162,7 +199,11 @@ class ProtocolTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as name:
             file = Path(name, "request.json")
             file.write_text(json.dumps(request))
-            return protocol.run(SimpleNamespace(action="patterns", request_file=file, theorem="t", run_id=run_id))
+            with patch("arena.campaign.run_dir", return_value=Path(name, "run")):  # keep the seen-cards memory out of runs/
+                return self.run_protocol(file, run_id)
+
+    def run_protocol(self, file, run_id):
+        return protocol.run(SimpleNamespace(action="patterns", request_file=file, theorem="t", run_id=run_id))
 
     def test_snippet_session(self):
         reply = self.call({"text": "obtain ⟨a, b⟩ := h", "position": "closing"})

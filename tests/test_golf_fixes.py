@@ -52,6 +52,15 @@ class GolfFixTests(unittest.TestCase):
             with patch.object(orchestration, "_job_rows", lambda d, j: [r for r in delegations if r["job_id"] == j]):
                 self.assertEqual(team_reply.open_requests(self.directory), [])
 
+    def test_floor_claim_naming_an_uncompiled_construct_is_flagged_unmeasured(self):
+        (self.directory / "proofs").mkdir()
+        (self.directory / "proofs" / "p.lean").write_text("theorem t : True := by exact List.length_pos_iff.mpr h")
+        claim = {"best": "`List.of_mem_zip` costs ≥14 tokens, so 63 is the floor; `length_pos_iff` is fine"}
+        self.assertTrue(orchestration.card_claims_floor({"best": "this direction cannot work"}))
+        self.assertEqual(orchestration.unmeasured_constructs(self.directory, claim), ["List.of_mem_zip"])
+        self.assertIn("`List.of_mem_zip`", team_reply.render(
+            "card", {"ok": True, "version": 2, "floor": True, "unmeasured": ["List.of_mem_zip"]}, self.directory))
+
     def test_island_best_needs_every_toolchain(self):
         nodes = {"p1": _node("n1", "a", None, 100, 40, versions=(True, False, True)),
                  "p2": _node("n2", "a", 80.0, 100, 60)}

@@ -1769,8 +1769,9 @@ def save_card(
     before = (previous or {}).get("fields", {})
     changed = [name for name in fields if merged.get(name, "") != before.get(name, "")]
     floor = bool(job_id) and is_cards(directory) and card_claims_floor(merged)
+    unmeasured = unmeasured_constructs(directory, merged) if floor else []
     if not changed:
-        return {"ok": True, "version": (previous or {}).get("version", 0), "floor": floor}
+        return {"ok": True, "version": (previous or {}).get("version", 0), "floor": floor, "unmeasured": unmeasured}
     version = (previous or {}).get("version", 0) + 1
     label = (text.render("replies/team.author_sol") if actor_id == "sol" and not job_id
              else job_labels(directory).get(job_id) or worker_job_labels(directory).get(actor_id) or actor_id)
@@ -1783,7 +1784,7 @@ def save_card(
         lambda ctx: [ctx.append_ledger(row)],
     )
     _wake()
-    return {**applied, "version": version, "floor": floor}
+    return {**applied, "version": version, "floor": floor, "unmeasured": unmeasured}
 
 
 # A card "claims a floor" when focus, best, held or ideas say the current shape cannot go lower. Detection is a
@@ -1791,7 +1792,9 @@ def save_card(
 _FLOOR_FIELDS = ("focus", "best", "held", "ideas")
 _FLOOR_CLAIM = re.compile(
     r"\b(?:floor|final|converged|plateau(?:ed)?|no further (?:gain|gains|improvement|reduction)"
-    r"|nothing (?:left|more) to (?:gain|cut|lower)|cannot be (?:lowered|improved|reduced)|at (?:its|the) minimum)\b",
+    r"|nothing (?:left|more) to (?:gain|cut|lower)|cannot be (?:lowered|improved|reduced)|at (?:its|the) minimum"
+    r"|cannot|can't|impossible)\b"
+    r"|\bcosts?\s*(?:at least|more than|[≥>]=?)\s*\d+",
     re.I,
 )
 
@@ -1806,6 +1809,47 @@ def card_claims_floor(fields: dict) -> bool:
             if not _NEGATION.search(value[max(0, match.start() - 15):match.start()]):
                 return True
     return False
+
+
+_CLAIM_SENTENCES = re.compile(r"(?<=[.!?;])\s+|\n")
+_BACKTICKED = re.compile(r"`([^`]+)`")
+_NAME = re.compile(r"[A-Za-z_][\w'.]*")
+# Without backticks: a dotted name or a snake_case name.
+_BARE_NAME = re.compile(r"\b(?:[A-Za-z]\w*(?:\.[\w']+)+|[a-z]+(?:_[a-z0-9']+)+)\b")
+
+
+def claimed_constructs(fields: dict) -> list[str]:
+    """Names in the sentences of a card that make a floor, cost or `cannot` claim: backticked identifiers, else
+    dotted or snake_case names. Order of appearance, no repeats."""
+    found: list[str] = []
+    for name in _FLOOR_FIELDS:
+        for sentence in _CLAIM_SENTENCES.split(str(fields.get(name) or "")):
+            if not card_claims_floor({"focus": sentence}):
+                continue
+            ticks = [m.group(1) for m in _BACKTICKED.finditer(sentence)]
+            names = [token for tick in ticks for token in _NAME.findall(tick)] or _BARE_NAME.findall(sentence)
+            found += [n for n in names if len(n) >= 3 and n not in found]
+    return found
+
+
+def unmeasured_constructs(directory: Path, fields: dict) -> list[str]:
+    """Claimed constructs (see claimed_constructs) that no saved proof of the run contains: nobody compiled them.
+
+    A name counts as present when its last dotted component occurs as a whole word in any file under proofs/."""
+    names = claimed_constructs(fields)
+    if not names:
+        return []
+    corpus = "\n".join(path.read_text(errors="replace") for path in sorted((directory / "proofs").glob("*.lean")))
+    return [name for name in names
+            if not re.search(rf"(?<![\w'.]){re.escape(name.rsplit('.', 1)[-1])}(?![\w'])", corpus)]
+
+
+def card_floor_text(unmeasured: list[str]) -> str:
+    """The worker's push after a floor claim; names the claimed constructs no compiled proof contains."""
+    body = text.render("replies/team.card_floor")
+    if not unmeasured:
+        return body
+    return f"{body} " + text.render("replies/team.card_unmeasured", names=", ".join(f"`{n}`" for n in unmeasured))
 
 
 def open_requests(directory: Path) -> list[dict]:
@@ -1832,7 +1876,7 @@ def open_requests(directory: Path) -> list[dict]:
         if declined or any(ts > saved for ts in started):
             continue
         found.append({"job": label, "version": row["version"], "ask": ask, "floor": floor,
-                      "job_id": row["job_id"]})
+                      "job_id": row["job_id"], "unmeasured": unmeasured_constructs(directory, fields) if floor else []})
     return found
 
 
@@ -2016,7 +2060,7 @@ def island_turn(directory: Path, job_id: str, activation_id: str) -> dict:
                                        tokens=top.tokens, heartbeats=top.heartbeats)
     card = next((row for row in current_cards(directory).values() if row.get("job_id") == job_id), None)
     if card is not None and is_cards(directory) and card_claims_floor(card["fields"]):
-        message += "\n" + text.render("replies/team.card_floor")
+        message += "\n" + card_floor_text(unmeasured_constructs(directory, card["fields"]))
     return {"ok": True, "continue": True, "text": message}
 
 
