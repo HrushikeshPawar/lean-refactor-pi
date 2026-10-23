@@ -1,6 +1,6 @@
 """Worker assignments. A receipt is durable before the child is opened.
 
-At most `slot_limit` (the worker model's session concurrency, or a polishing session's `workers`) model activations own a slot. A queued job waits for a real exit.
+At most `slot_limit` (the worker model's session concurrency, or a polishing session's `workers`) model activations own a slot. A queued job waits for a real exit. A merge job may also own one extra slot beyond that limit, and only one merge job does at a time.
 Cancellation clears queued prompts, then aborts, and keeps the slot until the child is gone.
 A passing tool result is published while the activation is still active.
 A follow-up reuses the hypothesis session; a follow-up to an active job is steered into its running turn.
@@ -106,10 +106,13 @@ _PERSISTENT = ("island", "trim")
 _TURN_LOOP = (*_PERSISTENT, "merge")
 
 
-def _resolve_anchor(directory: Path, scope: str, anchor: object) -> dict | str:
-    """Resolve a caller reference against the saved proof. Caller hashes are not copied."""
+def _resolve_anchor(directory: Path, scope: str, anchor: object, objective: str | None = None) -> dict | str:
+    """Resolve a caller reference against the saved proof. Caller hashes are not copied.
+    An island without an anchor starts from the run best when it has a token objective and one exists."""
     if scope == "island" and anchor is None:
-        anchor = {"node": next((n.id for n in proof_nodes(directory).values() if n.origin == "reference"), "n1")}
+        top = run_best(directory) if objective == "tokens" else None
+        anchor = {"node": top.id} if top is not None else {
+            "node": next((n.id for n in proof_nodes(directory).values() if n.origin == "reference"), "n1")}
     if scope not in ("proof", "step", "island") or not isinstance(anchor, dict):
         return "scope"
     ref = anchor.get("node")
@@ -290,9 +293,20 @@ def _slot_count(directory: Path) -> int:
     return sum(1 for row in _delegations(directory) if _activation_view(directory, row)["occupies_slot"])
 
 
-def _can_admit_directly(directory: Path) -> bool:
-    return _slot_count(directory) < slot_limit(directory) and not any(
-        _activation_view(directory, row)["state"] == "queued" for row in _delegations(directory)
+def _slot_open(directory: Path, scope: str | None) -> bool:
+    """A worker slot is free for a job of `scope`: one of the run's pool, or for a merge job the one extra slot.
+    A merge job takes the extra slot only when no other merge job runs, so at most one merge job uses it."""
+    occupying = [row for row in _delegations(directory) if _activation_view(directory, row)["occupies_slot"]]
+    if len(occupying) < slot_limit(directory):
+        return True
+    return scope == "merge" and len(occupying) == slot_limit(directory) and not any(
+        row.get("scope") == "merge" for row in occupying)
+
+
+def _can_admit_directly(directory: Path, scope: str | None) -> bool:
+    return _slot_open(directory, scope) and not any(
+        _activation_view(directory, row)["state"] == "queued" and _slot_open(directory, row.get("scope"))
+        for row in _delegations(directory)
     )
 
 
@@ -448,12 +462,13 @@ def _fill_slots(directory: Path) -> None:
     """Open the oldest queued assignment only while a model slot is free."""
     while True:
         with run_control.control_lock(directory):
-            if _recovering(directory) or _slot_count(directory) >= slot_limit(directory):
+            if _recovering(directory):
                 return
             rows = _delegations(directory)
             # A follow-up waits for its own job's previous process to exit: one process per worker session.
             queued = next(
-                (row for row in rows if _activation_view(directory, row)["state"] == "queued" and not any(
+                (row for row in rows if _activation_view(directory, row)["state"] == "queued"
+                 and _slot_open(directory, row.get("scope")) and not any(
                     other["job_id"] == row["job_id"] and _activation_view(directory, other)["occupies_slot"]
                     for other in rows)),
                 None,
@@ -1020,9 +1035,11 @@ def _worker_packet(directory: Path, stored: dict) -> str:
         costly = patterns.costliest_step(theorem, directory.name, node, objective=stored.get("objective"))
         cards = costly and (costly[0], patterns.render_cards(costly[1], costly[2], objective=stored.get("objective")))
     merge = _merge_lines(directory, stored["anchor"]) if stored["scope"] == "merge" else None
+    top = run_best(directory) if stored.get("objective") == "tokens" else None
+    best = top is not None and top.id == stored["anchor"]["node"]
     return context.worker_packet(theorem, task=stored["task"], anchor=stored["anchor"], node=node, families=families,
                                  objective=stored.get("objective"), trim=stored["scope"] == "trim",
-                                 golf=is_golf(directory), cards=cards, merge=merge)
+                                 golf=is_golf(directory), cards=cards, merge=merge, best=best)
 
 
 def _open_activation(directory: Path, stored: dict, open_child, command_id: str,
@@ -1129,7 +1146,7 @@ def _same_anchor(directory: Path, stored: dict, scope: str | None, anchor: objec
         return True
     if scope != stored["scope"]:
         return False
-    resolved = _resolve_anchor(directory, scope or "", anchor)
+    resolved = _resolve_anchor(directory, scope or "", anchor, stored.get("objective"))
     return False if isinstance(resolved, str) else resolved == stored["anchor"]
 
 
@@ -1237,7 +1254,7 @@ def _follow_up(
                 "objective": source.get("objective"),
                 "tools": list(source["tools"]),
                 # A settled job whose process has not exited yet keeps its slot: queue behind it.
-                "state": "launching" if not current["occupies_slot"] and _can_admit_directly(directory) else "queued",
+                "state": "launching" if not current["occupies_slot"] and _can_admit_directly(directory, source["scope"]) else "queued",
                 "resumed": True,
             }
             applied = run_control._apply_locked(
@@ -1319,7 +1336,7 @@ def delegate(
     if scope == "merge":
         resolved = _merge_anchor(directory, anchor)
     else:
-        resolved = _resolve_anchor(directory, "island" if scope == "trim" else scope, anchor)
+        resolved = _resolve_anchor(directory, "island" if scope == "trim" else scope, anchor, objective)
     if isinstance(resolved, str):
         key = _ANCHOR_HINTS.get(resolved) or ("anchor_step" if scope == "step" else "anchor_proof")
         return _reject(operation_id, resolved, hint=f"replies/delegate.{key}")
@@ -1365,7 +1382,7 @@ def delegate(
         with run_control.control_lock(directory):
             if run_control._receipt(run_control._control_rows(directory), operation_id) is None and _recovering(directory):
                 return _reject(operation_id, "recovering", "recovery_required", "replies/delegate.recovering")
-            if _can_admit_directly(directory):
+            if _can_admit_directly(directory, scope):
                 delegation["state"] = "launching"
             applied = run_control._apply_locked(
                 directory,
@@ -1447,7 +1464,7 @@ def cancel(
                 writer.append_ledger({
                     "type": "assignment_state", "state": state,
                     "command_id": snapshot["command_id"], "cancel_operation_id": canonical_id,
-                    "occupies_slot": snapshot["occupies_slot"],
+                    "occupies_slot": snapshot["occupies_slot"], "reason": "cancelled",
                 })
                 return []
 
@@ -2210,16 +2227,34 @@ def merge_ready(directory: Path) -> list[str]:
     return [node.id for node in sorted(newest.values(), key=lambda node: saved[node.proof_id])]
 
 
+def _job_end_reason(directory: Path, job_id: str) -> str | None:
+    """Why a job ended without an island_turn stop: `run_stopped` or `cancelled`; None while it is still open.
+    A queued job the run stopped never starts, so it ends as run_stopped too."""
+    snapshot = _job_snapshot(directory, job_id)
+    if snapshot is None:
+        return None
+    stopped = any(row.get("kind") == "run_stop" for row in run_control._control_rows(directory))
+    if snapshot["state"] == "queued" and stopped:
+        return "run_stopped"
+    if snapshot["state"] != "cancelled":
+        return None
+    activations = {row["activation_id"] for row in _job_rows(directory, job_id)}
+    reasons = {row.get("reason") for row in _states(directory)
+               if row.get("activation_id") in activations and row.get("state") == "cancelled"}
+    return "run_stopped" if "run_stopped" in reasons else "cancelled"
+
+
 def merge_jobs(directory: Path) -> list[dict]:
     """Merge jobs for a dashboard: `job_id`, `label`, the chosen `nodes` (base first), the job `state` and its `end`
-    reason (the last island_turn stop, None while open)."""
+    reason: the last island_turn stop, else run_stopped or cancelled, None while open."""
     labels = job_labels(directory)
     ends: dict[str, str] = {}
     for row in events(directory):
         if row.get("type") == "island_turn" and row.get("stop"):
             ends[row["job_id"]] = row["stop"]
     return [{"job_id": job, "label": labels.get(job), "nodes": (row.get("anchor") or {}).get("nodes", []),
-             "state": (_job_snapshot(directory, job) or {}).get("state"), "end": ends.get(job)}
+             "state": (_job_snapshot(directory, job) or {}).get("state"),
+             "end": ends.get(job) or _job_end_reason(directory, job)}
             for job, row in _first_delegations(directory).items() if row.get("scope") == "merge"]
 
 

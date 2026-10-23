@@ -140,7 +140,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `packet/golf-worker` | 75 | Initial theorem packet | once per run |
 | `packet/island` | 109 | Initial theorem packet | once per run |
 | `packet/island_heartbeats` | 137 | Initial theorem packet | once per run |
-| `packet/island_tokens` | 153 | Initial theorem packet | once per run |
+| `packet/island_tokens` | 228 | Initial theorem packet | once per run |
 | `packet/merge` | 77 | Initial theorem packet | once per run |
 | `packet/price-table` | 12 | Prices action replies | when the table is requested |
 | `packet/price-table.clipped` | 2 | Prices action replies | when the table is requested |
@@ -160,6 +160,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `packet/price-table.summary` | 28 | Prices action replies | when the table is requested |
 | `packet/scoring` | 144 | Initial theorem packet | once per run |
 | `packet/search` | 190 | Initial theorem packet | once per run |
+| `packet/sections.fixed.anchor_best` | 13 | Initial theorem packet | once per run |
 | `packet/sections.fixed.anchor_hole` | 9 | Initial theorem packet | once per run |
 | `packet/sections.fixed.anchor_island` | 14 | Initial theorem packet | once per run |
 | `packet/sections.fixed.anchor_proof` | 8 | Initial theorem packet | once per run |
@@ -238,7 +239,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `packet/sections.titles.worker` | 1 | Initial theorem packet | once per run |
 | `packet/sections.titles.worker_goals` | 6 | Initial theorem packet | once per run |
 | `packet/task` | 10 | Initial theorem packet | once per run |
-| `packet/team` | 652 | Initial theorem packet | once per run |
+| `packet/team` | 692 | Initial theorem packet | once per run |
 | `packet/team-cost` | 10 | Initial theorem packet | once per run |
 | `packet/trim` | 86 | Initial theorem packet | once per run |
 | `packet/worker` | 172 | Initial theorem packet | once per run |
@@ -344,7 +345,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/team.island_best_tokens` | 3 | Tool replies | when the matching tool result occurs |
 | `replies/team.island_continue` | 28 | Tool replies | when the matching tool result occurs |
 | `replies/team.island_continue_heartbeats` | 24 | Tool replies | when the matching tool result occurs |
-| `replies/team.island_continue_tokens` | 24 | Tool replies | when the matching tool result occurs |
+| `replies/team.island_continue_tokens` | 34 | Tool replies | when the matching tool result occurs |
 | `replies/team.island_line` | 9 | Tool replies | when the matching tool result occurs |
 | `replies/team.island_line_axis` | 9 | Tool replies | when the matching tool result occurs |
 | `replies/team.island_new_structure` | 19 | Tool replies | when the matching tool result occurs |
@@ -601,7 +602,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `tools/delegate.params.at_steps` | 13 | Model tool definitions | every request |
 | `tools/delegate.params.job_id` | 15 | Model tool definitions | every request |
 | `tools/delegate.params.objective` | 23 | Model tool definitions | every request |
-| `tools/delegate.params.scope` | 114 | Model tool definitions | every request |
+| `tools/delegate.params.scope` | 142 | Model tool definitions | every request |
 | `tools/delegate.params.task` | 5 | Model tool definitions | every request |
 | `tools/goal.description` | 41 | Model tool definitions | every request |
 | `tools/goal.params.hole` | 6 | Model tool definitions | every request |
@@ -617,7 +618,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `tools/patterns.params.text` | 10 | Model tool definitions | every request |
 | `tools/plan.description` | 56 | Model tool definitions | every request |
 | `tools/plan.params.cards` | 7 | Model tool definitions | every request |
-| `tools/plan.params.expect` | 16 | Model tool definitions | every request |
+| `tools/plan.params.expect` | 24 | Model tool definitions | every request |
 | `tools/plan.params.kind` | 26 | Model tool definitions | every request |
 | `tools/plan.params.note` | 9 | Model tool definitions | every request |
 | `tools/plan.params.status` | 5 | Model tool definitions | every request |

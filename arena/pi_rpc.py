@@ -123,6 +123,8 @@ def worker_launch(
             "ARENA_RUN_DIR": str(directory),
             "ARENA_WORKER_THEOREM": theorem,
             "ARENA_MODEL": model,
+            # The run's limit, as the orchestrator gets it (arena/cli/run.py): workers spend from the same run total.
+            **({"ARENA_LIMIT_USD": str(run_config["limit_usd"])} if run_config.get("limit_usd") is not None else {}),
             "ARENA_PI_MODEL_ID": model_config.get("id", model),
             "ARENA_MODELS_JSON": pi_json(config),
             "ARENA_REQUEST_OUTPUT_TOKENS": str(model_config["request_output_tokens"]),

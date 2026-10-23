@@ -1093,11 +1093,11 @@ def render_packet(
     return "\n\n".join(content for _title, content in sections) + "\n"
 
 
-def _anchor_lines(anchor: dict, node, *, island: bool = False) -> list[str]:
+def _anchor_lines(anchor: dict, node, *, island: bool = False, best: bool = False) -> list[str]:
     """Anchor description, then the recorded goal states it covers, from the saved node."""
     if island:
-        return [render_text("packet/sections.fixed.anchor_island", node=node.id,
-                            count=len(node.proof_text.splitlines()))]
+        key = "anchor_best" if best else "anchor_island"
+        return [render_text(f"packet/sections.fixed.{key}", node=node.id, count=len(node.proof_text.splitlines()))]
     if "hole" in anchor:
         hole = next((item for item in node.holes if f"{node.id}.h{item['index']}" == anchor["hole"]), None)
         head = render_text("packet/sections.fixed.anchor_hole", node=node.id, hole=anchor["hole"],
@@ -1128,7 +1128,7 @@ _ISLAND_PACKETS = {None: "packet/island", "tokens": "packet/island_tokens", "hea
 
 def worker_packet(name: str, *, task: str, anchor: dict, node, families: list[str] | None = None,
                   objective: str | None = None, trim: bool = False, golf: bool = False,
-                  cards: tuple[str, str] | None = None, merge: list[str] | None = None) -> str:
+                  cards: tuple[str, str] | None = None, merge: list[str] | None = None, best: bool = False) -> str:
     """First prompt of a delegated worker: the shared startup contract plus its anchor. No Sol-only sections.
 
     `node` is the graph node the anchor resolved to, so the proof text and goals are the saved ones.
@@ -1136,6 +1136,7 @@ def worker_packet(name: str, *, task: str, anchor: dict, node, families: list[st
     picks the axis packet. `trim` (trim jobs) gets the trim packet instead, with no island title.
     `cards` (runs with --cards) is (step id, rendered reference cards) for the anchor's costliest step.
     `merge` (merge jobs) is the chosen nodes as lines (see orchestration._merge_lines); the base is the first node.
+    `best` (island jobs) says the anchor is the run best rather than the original proof.
     """
     island = families is not None
     row = problem(name)
@@ -1145,7 +1146,7 @@ def worker_packet(name: str, *, task: str, anchor: dict, node, families: list[st
         render_text("replies/tools.source_line", line=number, text=line)
         for number, line in enumerate(node.proof_text.splitlines(), 1)
     ]
-    anchored = _anchor_lines(anchor, node, island=island)
+    anchored = _anchor_lines(anchor, node, island=island, best=best)
     parts: list[tuple[str, list[str]]] = [
         ("", render_text("packet/task", name=name, statement=row["statement"]).strip().splitlines()),
         ("", _scoring_lines(rates)),

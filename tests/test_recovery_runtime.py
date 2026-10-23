@@ -172,3 +172,12 @@ def test_jsonl_cache_sees_appends_and_waits_for_a_complete_line(tmp_path):
     assert campaign.events(tmp_path) == [{"a": 1}, {"a": 2}, {"a": 3}]
     ledger.write_bytes(b'{"b":9}\n{"b":8}\n{"b":7}\n')  # rewritten in place: no stale rows
     assert campaign.events(tmp_path) == [{"b": 9}, {"b": 8}, {"b": 7}]
+
+
+def test_worker_launch_carries_the_run_limit(tmp_path):
+    (tmp_path / "run-config.json").write_text(json.dumps({"theorem": "demo", "limit_usd": 0.25}))
+    launch = pi_rpc.worker_launch(
+        tmp_path, run_id="run", worker_actor_id="worker", worker_session_id="s", job_id="job",
+        activation_id="activation", anchor={"node": "n1"},
+    )
+    assert launch["env"]["ARENA_LIMIT_USD"] == "0.25"

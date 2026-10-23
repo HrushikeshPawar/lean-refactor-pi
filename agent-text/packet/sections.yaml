@@ -42,6 +42,7 @@ fixed:
   anchor_proof: "Anchor: node {node}, the whole proof ({count} lines)."
   anchor_steps: "Anchor: node {node}, steps {start}-{end} (proof lines {first}-{last}). The hypothesis concerns this range."
   anchor_island: "Reference: node {node}, the original proof ({count} lines). Your hypothesis is a different structure."
+  anchor_best: "Anchor: node {node}, the run best ({count} lines). Your job starts from it."
   island_family: "{route}: best {node} score {score}\n{lines}"
   anchor_hole: "Anchor: node {node}, hole {hole} at proof line {line}."
   worker_hole_goal: "{hole} goal: {text}"

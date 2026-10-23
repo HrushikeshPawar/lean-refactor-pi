@@ -2578,7 +2578,7 @@ class IslandTests(unittest.TestCase):
 
             r4_best = best_node("n9", "r4", 80.0, 500)
             with patch.object(orchestration, "proof_nodes", lambda _d: {"p0": r4_best}):
-                started, _child = self._island(directory, objective="tokens")
+                started, _child = self._island(directory, objective="tokens", anchor={"node": "n1"})
             job_id = started["job_id"]
 
             def turn(tokens, run_best_node, activation=started["activation_id"]):
@@ -2686,3 +2686,68 @@ class IslandTests(unittest.TestCase):
             )["state"] for index in range(5)]
             self.assertEqual(states, ["launching"] * 4 + ["queued"])
             self.assertEqual(len(children), 4)
+
+
+class MergeSlotTests(unittest.TestCase):
+    def test_merge_job_takes_the_extra_slot_and_a_second_merge_queues(self):
+        def merge_anchor(_directory, _anchor):
+            return {"node": "n1", "nodes": ["n1"], "resolved": []}
+
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:  # held children stay open
+            directory = Path(tmp)
+            _seed_parent(directory)
+            children = []
+
+            def open_child(_launch):
+                children.append(_HeldChild())
+                return children[-1]
+
+            def delegate(index, scope):
+                return orchestration.delegate(
+                    directory, operation_id=f"op-{index}", run_id="run-1", actor_id="sol", session_id="sol-session",
+                    task=f"hypothesis {index}", scope=scope, anchor={"node": "n1"} if scope == "proof" else {"nodes": ["n1"]},
+                    open_child=open_child,
+                )
+
+            with (
+                patch.object(orchestration, "_merge_anchor", merge_anchor),
+                patch.object(orchestration, "_merge_lines", lambda _directory, _anchor: ["merge line"]),
+            ):
+                states = [delegate(index, "proof")["state"] for index in range(4)]
+                self.assertEqual(states, ["launching"] * 4)
+                # All normal slots are busy: a non-merge job queues, a merge job takes the extra slot.
+                self.assertEqual(delegate(4, "proof")["state"], "queued")
+                merge = delegate(5, "merge")
+                self.assertEqual(merge["state"], "launching")
+                second = delegate(6, "merge")
+                self.assertEqual(second["state"], "queued")
+                self.assertEqual(delegate(7, "proof")["state"], "queued")
+                self.assertEqual(len(children), 5)
+                # A queued merge job cancelled before it starts ends as cancelled.
+                orchestration.cancel(directory, operation_id="op-cancel", run_id="run-1", actor_id="sol",
+                                     session_id="sol-session", job_id=second["job_id"])
+                ends = {row["job_id"]: row["end"] for row in orchestration.merge_jobs(directory)}
+                self.assertEqual(ends, {merge["job_id"]: None, second["job_id"]: "cancelled"})
+                # A queued merge job the run stops before it starts ends as run_stopped.
+                third = delegate(8, "merge")
+                self.assertEqual(third["state"], "queued")
+                run_control._append_control(directory, {"schema_version": run_control.SCHEMA_VERSION,
+                                                        "kind": "run_stop", "event_id": "stop", "reason": "test"})
+                ends = {row["job_id"]: row["end"] for row in orchestration.merge_jobs(directory)}
+                self.assertEqual(ends[third["job_id"]], "run_stopped")
+
+
+class TokenIslandAnchorTests(unittest.TestCase):
+    def test_token_island_starts_from_the_run_best_and_other_islands_from_the_original(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _seed_parent(directory)
+            (directory / "proofs" / "child.lean").write_text(_PROOF)
+            with (directory / "ledger.jsonl").open("a") as ledger:
+                ledger.write(json.dumps({"kind": "candidate", "candidate_id": "child", "origin": "model"}) + "\n")
+            best = SimpleNamespace(id="n2", route="r2", score=80.0)
+            with patch.object(orchestration, "run_best", return_value=best):
+                tokens = orchestration._resolve_anchor(directory, "island", None, "tokens")
+                heartbeats = orchestration._resolve_anchor(directory, "island", None, "heartbeats")
+            self.assertEqual((tokens["node"], heartbeats["node"]), ("n2", "n1"))
+            self.assertEqual(orchestration._resolve_anchor(directory, "island", None)["node"], "n1")

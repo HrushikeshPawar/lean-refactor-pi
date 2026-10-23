@@ -49,7 +49,8 @@ budget:
   # 870: the team paragraph adds Sol's default stance (keep hill climbing) and a per-role guide (r12b analysis).
   # 920: keep every slot busy, refill ended islands, no best is final, combine axis extremes (r14 stall analysis).
   # 1040: the plan paragraph (ordered steps, one reshape and one merge step, re-plan after each best) and merge jobs.
-  packet_words: 1040
+  # 1080: a merge job's extra slot and the measured-or-estimated wording of the plan paragraph.
+  packet_words: 1080
   # 215: the worker packet explains the card (what to write, what arrives in replies).
   # 240: read a definition's source before using it instead of reconstructing it (GLM trace analysis 2026-10-23).
   worker_words: 240
