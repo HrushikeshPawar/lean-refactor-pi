@@ -344,7 +344,7 @@ class TextRendererTests(unittest.TestCase):
         worker = [tool["name"] for tool in registered_tools("worker")]
         self.assertEqual(worker, ["compile", "goal", "search", "read", "scratch", "card"])
         self.assertEqual(
-            sol, ["compile", "goal", "search", "read", "scratch", "card", "delegate", "jobs", "await_results", "cancel"]
+            sol, ["compile", "goal", "search", "read", "scratch", "card", "delegate", "jobs", "await_results", "cancel", "plan"]
         )
         live = dict(render_tool_sections(registered_tools("sol")))
         self.assertIn("fill: object, optional", live["compile"])

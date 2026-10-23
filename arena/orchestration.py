@@ -98,10 +98,12 @@ def _reject(operation_id: str, reason: str, category: str = "invalid_input", hin
     return rejected
 
 
-_ANCHOR_HINTS = {"node": "node", "hole": "hole", "steps": "steps", "scope": "scope"}
+_ANCHOR_HINTS = {"node": "node", "hole": "hole", "steps": "steps", "scope": "scope", "merge": "merge"}
 _OBJECTIVES = ("tokens", "heartbeats")
 # Jobs that keep a worker turning over for the rest of the run: an island (a family, or an axis with an objective) or a trim job.
 _PERSISTENT = ("island", "trim")
+# Jobs that take more turns than one: the persistent ones, and a merge job, which the harness ends by count (see _merge_end).
+_TURN_LOOP = (*_PERSISTENT, "merge")
 
 
 def _resolve_anchor(directory: Path, scope: str, anchor: object) -> dict | str:
@@ -1015,11 +1017,12 @@ def _worker_packet(directory: Path, stored: dict) -> str:
     if is_cards(directory):
         from arena import patterns
 
-        costly = patterns.costliest_step(theorem, directory.name, node)
-        cards = costly and (costly[0], patterns.render_cards(costly[1], costly[2]))
+        costly = patterns.costliest_step(theorem, directory.name, node, objective=stored.get("objective"))
+        cards = costly and (costly[0], patterns.render_cards(costly[1], costly[2], objective=stored.get("objective")))
+    merge = _merge_lines(directory, stored["anchor"]) if stored["scope"] == "merge" else None
     return context.worker_packet(theorem, task=stored["task"], anchor=stored["anchor"], node=node, families=families,
                                  objective=stored.get("objective"), trim=stored["scope"] == "trim",
-                                 golf=is_golf(directory), cards=cards)
+                                 golf=is_golf(directory), cards=cards, merge=merge)
 
 
 def _open_activation(directory: Path, stored: dict, open_child, command_id: str,
@@ -1058,7 +1061,7 @@ def _open_activation(directory: Path, stored: dict, open_child, command_id: str,
                 directory, run_id=stored["run_id"], worker_actor_id=stored["worker_actor_id"],
                 worker_session_id=stored["worker_session_id"], job_id=stored["job_id"],
                 activation_id=activation_id, anchor=stored["anchor"], generation=generation,
-                model=worker_model(directory), island=stored["scope"] in _PERSISTENT,
+                model=worker_model(directory), island=stored["scope"] in _TURN_LOOP,
             )
             with run_control.control_lock(directory):
                 _append_ownership(directory, stored, phase="intent", generation=generation,
@@ -1308,12 +1311,15 @@ def delegate(
         )
     if scope == "trim" and anchor is not None:
         return _reject(operation_id, "anchor", hint="replies/delegate.anchor_trim")
-    if scope is None or (anchor is None and scope not in _PERSISTENT):
+    if scope is None or (anchor is None and scope not in (*_PERSISTENT, "merge")):
         return _reject(operation_id, "scope", hint="replies/delegate.scope")
     if scope == "trim":
         best = run_best(directory)
         anchor = None if best is None else {"node": best.id}
-    resolved = _resolve_anchor(directory, "island" if scope == "trim" else scope, anchor)
+    if scope == "merge":
+        resolved = _merge_anchor(directory, anchor)
+    else:
+        resolved = _resolve_anchor(directory, "island" if scope == "trim" else scope, anchor)
     if isinstance(resolved, str):
         key = _ANCHOR_HINTS.get(resolved) or ("anchor_step" if scope == "step" else "anchor_proof")
         return _reject(operation_id, resolved, hint=f"replies/delegate.{key}")
@@ -2033,9 +2039,10 @@ def island_turn(directory: Path, job_id: str, activation_id: str) -> dict:
     top = run_best(directory)
     status = island_status(directory, job_id)
     best = (None if top is None else top.score) if trim else _merit(status, objective)
+    merge = original.get("scope") == "merge"
     rows = [row for row in events(directory) if row.get("type") == "island_turn" and row.get("job_id") == job_id]
     previous_route = rows[-1].get("best_route") if rows else original.get("best_route")
-    new = {"event_id": uuid.uuid4().hex, "type": "island_turn", "job_id": job_id,
+    new = {"event_id": uuid.uuid4().hex, "type": "island_turn", "job_id": job_id, "scope": original.get("scope"),
            "activation_id": activation_id, "best": best, "best_route": None if top is None else top.route}
     streak = _stale_streak([*rows, new])
     spend = run_control.read_state(directory)
@@ -2044,15 +2051,17 @@ def island_turn(directory: Path, job_id: str, activation_id: str) -> dict:
         "run_stopped" if spend["stopped"]
         else "cancelled" if snapshot is None or snapshot["state"] not in ("active", "launching")
         else "stale" if not trim and streak >= limits["island_stale_turns"]
+        else _merge_end(directory, job_id) if merge
         else None
     )
     _append(directory, {**new, "stale": streak, "stop": reason})
     if reason is not None:
         return {"ok": True, "continue": False, "reason": reason}
-    if trim:
+    if trim or merge:
         shown = (text.render("replies/team.island_best", node=top.id, score=round(top.score, 2))
                  if top is not None else text.render("replies/team.island_none"))
-        return {"ok": True, "continue": True, "text": text.render("replies/team.trim_continue", best=shown)}
+        key = "replies/team.trim_continue" if trim else "replies/team.merge_continue"
+        return {"ok": True, "continue": True, "text": text.render(key, best=shown)}
     key = {"tokens": "island_continue_tokens", "heartbeats": "island_continue_heartbeats"}.get(objective, "island_continue")
     message = text.render(f"replies/team.{key}", best=_shown_best(status, objective))
     if objective is not None and top is not None and top.route != previous_route:
@@ -2062,6 +2071,156 @@ def island_turn(directory: Path, job_id: str, activation_id: str) -> dict:
     if card is not None and is_cards(directory) and card_claims_floor(card["fields"]):
         message += "\n" + card_floor_text(unmeasured_constructs(directory, card["fields"]))
     return {"ok": True, "continue": True, "text": message}
+
+
+def _saved_times(directory: Path) -> dict[str, float]:
+    """Proof id to the time its first candidate or probe was saved (see reply._first_saved_times)."""
+    from arena import reply
+
+    return reply._first_saved_times(directory)
+
+
+def _first_delegations(directory: Path) -> dict[str, dict]:
+    """Job id to its first delegation row: scope, anchor and start time."""
+    first: dict[str, dict] = {}
+    for row in _delegations(directory):
+        if row.get("job_id"):
+            first.setdefault(row["job_id"], row)
+    return first
+
+
+def merge_defaults(directory: Path) -> list[str]:
+    """The run best, then each other job's newest closed node that is not the best, in job order. The harness's pick."""
+    best = run_best(directory)
+    saved = _saved_times(directory)
+    order = list(job_labels(directory))
+    newest: dict[str, object] = {}
+    for node in proof_nodes(directory).values():
+        job = node_author_job(node)
+        if job is None or not _closed(node) or (best is not None and node.id == best.id):
+            continue
+        held = newest.get(job)
+        if held is None or saved.get(node.proof_id, 0.0) > saved.get(held.proof_id, 0.0):
+            newest[job] = node
+    picks = [] if best is None else [best.id]
+    picks += [node.id for job, node in sorted(newest.items(), key=lambda pair: order.index(pair[0]))]
+    return picks
+
+
+def _merge_anchor(directory: Path, anchor: object) -> dict | str:
+    """A merge job's chosen nodes, each resolved and frozen like a proof anchor. The first is the base.
+
+    Without an anchor the harness picks them (merge_defaults). Returns a reason key when the choice is not usable."""
+    if anchor is None:
+        ids = merge_defaults(directory)
+    elif isinstance(anchor, dict) and set(anchor) == {"nodes"} and isinstance(anchor["nodes"], list):
+        ids = anchor["nodes"]
+    else:
+        return "merge"
+    if len(ids) < 2:
+        return "merge"
+    if not all(isinstance(item, str) and item for item in ids):
+        return "node"
+    resolved = [_resolve_anchor(directory, "proof", {"node": item}) for item in ids]
+    if any(isinstance(item, str) for item in resolved):
+        return "node"
+    nodes = [item["node"] for item in resolved]
+    if len(set(nodes)) != len(nodes):
+        return "merge"
+    return {"node": nodes[0], "nodes": nodes, "resolved": resolved}
+
+
+def _merge_lines(directory: Path, anchor: dict) -> list[str]:
+    """The merge packet's node list: the base (run best) first, then each chosen node with its measures, its owner's
+    held and failed card fields, and its diff against the base (the read view diff)."""
+    from arena import reply
+    from arena.tools import diff_lines
+
+    nodes = {node.id: node for node in proof_nodes(directory).values()}
+    labels = job_labels(directory)
+    cards = {row["job_id"]: row["fields"] for row in current_cards(directory).values() if row.get("job_id")}
+    base = nodes[anchor["node"]]
+    limit = text.numbers()["merge_diff_lines"]
+    lines: list[str] = []
+    for node_id in anchor["nodes"]:
+        node = nodes[node_id]
+        owner = node_author_job(node)
+        owner_label = labels.get(owner) or text.render("replies/team.author_sol")
+        lines.append(text.render(
+            "packet/sections.fixed.merge_node", node=node.id,
+            score=reply.shown(None if node.score is None else round(node.score, 2)),
+            tokens=reply.shown(node.tokens), heartbeats=reply.shown(node.heartbeats), owner=owner_label,
+        ))
+        fields = cards.get(owner) or {}
+        held = [f"{name}: {' '.join(fields[name].split())}" for name in ("held", "failed") if fields.get(name)]
+        if held:
+            lines.append(text.render("packet/sections.fixed.merge_card", owner=owner_label, fields=" | ".join(held)))
+        if node.id != base.id:
+            lines.append(text.render("packet/sections.fixed.merge_diff", base=base.id))
+            lines += diff_lines(base, node)[:limit]
+    return lines
+
+
+def _merge_end(directory: Path, job_id: str) -> str | None:
+    """Why a merge job ends: its closed nodes reached merge_max_compiles, or its last merge_stale_compiles closed nodes
+    each failed to beat the run best as it stood when that node was saved. None while it continues."""
+    limits = text.numbers()
+    saved = _saved_times(directory)
+    nodes = list(proof_nodes(directory).values())
+    own = sorted((node for node in nodes if _closed(node) and node_author_job(node) == job_id),
+                 key=lambda node: saved.get(node.proof_id, 0.0))
+    if len(own) >= limits["merge_max_compiles"]:
+        return "compile_cap"
+    scored = [node for node in nodes if node.verified and node.score is not None]
+
+    def beat(node) -> bool:
+        if node.score is None:
+            return False
+        earlier = [item.score for item in scored
+                   if item.id != node.id and saved.get(item.proof_id, 0.0) < saved.get(node.proof_id, 0.0)]
+        return not earlier or node.score > max(earlier) + 1e-9
+
+    last = own[-limits["merge_stale_compiles"]:]
+    if len(last) == limits["merge_stale_compiles"] and not any(beat(node) for node in last):
+        return "not_beating"
+    return None
+
+
+def merge_ready(directory: Path) -> list[str]:
+    """Node ids, newest closed node of each job, when two or more jobs saved one since the last merge job began (or
+    since the run began) and no merge job runs. Empty otherwise."""
+    first = _first_delegations(directory)
+    merges = {job: row for job, row in first.items() if row.get("scope") == "merge"}
+    if any((_job_snapshot(directory, job) or {}).get("state") in _live_states for job in merges):
+        return []
+    events_ = events(directory)
+    run_started = float((events_[0] if events_ else {}).get("ts", 0.0))
+    since = max((float(row.get("ts", 0.0)) for row in merges.values()), default=run_started)
+    saved = _saved_times(directory)
+    newest: dict[str, object] = {}
+    for node in proof_nodes(directory).values():
+        job = node_author_job(node)
+        if job is None or not _closed(node) or saved.get(node.proof_id, 0.0) <= since:
+            continue
+        held = newest.get(job)
+        if held is None or saved[node.proof_id] > saved.get(held.proof_id, 0.0):
+            newest[job] = node
+    if len(newest) < 2:
+        return []
+    return [node.id for node in sorted(newest.values(), key=lambda node: saved[node.proof_id])]
+
+
+def merge_jobs(directory: Path) -> list[dict]:
+    """Merge jobs for a dashboard: `job_id`, `label`, the chosen `nodes` (base first), the job `state` and its `end`
+    reason (the last island_turn stop, None while open)."""
+    labels = job_labels(directory)
+    ends: dict[str, str] = {}
+    for row in events(directory):
+        if row.get("type") == "island_turn" and row.get("stop"):
+            ends[row["job_id"]] = row["stop"]
+    return [{"job_id": job, "label": labels.get(job), "nodes": (row.get("anchor") or {}).get("nodes", []),
+             "state": (_job_snapshot(directory, job) or {}).get("state"), "end": ends.get(job)}
+            for job, row in _first_delegations(directory).items() if row.get("scope") == "merge"]
 
 
 def idle_slots(directory: Path) -> int:

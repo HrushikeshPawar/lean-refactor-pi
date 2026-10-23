@@ -1,7 +1,7 @@
 {
   "roles": {
     "worker": ["compile", "goal", "search", "read", "scratch", "card"],
-    "sol": ["compile", "goal", "search", "read", "scratch", "card", "delegate", "jobs", "await_results", "cancel"]
+    "sol": ["compile", "goal", "search", "read", "scratch", "card", "delegate", "jobs", "await_results", "cancel", "plan"]
   },
   "tools": {
     "compile": {
@@ -116,16 +116,17 @@
       "handler": true,
       "properties": {
         "task": {"type": "string", "required": true, "description": "task"},
-        "scope": {"type": "string", "enum": ["proof", "step", "island", "trim"], "description": "scope"},
+        "scope": {"type": "string", "enum": ["proof", "step", "island", "trim", "merge"], "description": "scope"},
         "objective": {"type": "string", "enum": ["tokens", "heartbeats"], "description": "objective"},
         "job_id": {"type": "string", "description": "job_id"},
         "at": {
           "type": "object",
           "description": "at",
           "properties": {
-            "node": {"type": "string", "required": true, "description": "at_node"},
+            "node": {"type": "string", "description": "at_node"},
             "steps": {"type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2, "description": "at_steps"},
-            "hole": {"type": "string", "description": "at_hole"}
+            "hole": {"type": "string", "description": "at_hole"},
+            "nodes": {"type": "array", "items": {"type": "string"}, "description": "at_nodes"}
           },
           "exclusive": ["steps", "hole"]
         }
@@ -169,6 +170,40 @@
         "text": {"type": "string", "description": "text"},
         "position": {"type": "string", "enum": ["opening", "middle", "closing"], "description": "position"}
       }
+    },
+    "plan": {
+      "handler": true,
+      "properties": {
+        "steps": {
+          "type": "array",
+          "required": true,
+          "minItems": 1,
+          "maxItemsFrom": "plan_max_steps",
+          "description": "steps",
+          "items": {
+            "type": "object",
+            "properties": {
+              "target": {"type": "string", "required": true, "description": "target"},
+              "kind": {
+                "type": "string",
+                "required": true,
+                "enum": ["shape", "step", "trim", "merge", "heartbeats", "tokens"],
+                "description": "kind"
+              },
+              "expect": {"type": "string", "required": true, "description": "expect"},
+              "cards": {"type": "string", "description": "cards"},
+              "status": {
+                "type": "string",
+                "required": true,
+                "enum": ["open", "running", "done", "failed"],
+                "description": "status"
+              },
+              "note": {"type": "string", "description": "note"}
+            }
+          }
+        }
+      }
     }
   }
 }
+

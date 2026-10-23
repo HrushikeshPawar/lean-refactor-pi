@@ -513,7 +513,7 @@ class V8E2ETests(unittest.TestCase):
         sol_names = [t["name"] for t in tool_schema.registered_tools("sol")]
         self.assertEqual(worker_names, ["compile", "goal", "search", "read", "scratch", "card"])
         self.assertEqual(sol_names[:6], worker_names[:6])
-        self.assertEqual(set(sol_names) - set(worker_names), {"delegate", "jobs", "await_results", "cancel"})
+        self.assertEqual(set(sol_names) - set(worker_names), {"delegate", "jobs", "await_results", "cancel", "plan"})
 
         def walk(properties, depth=0):
             for key, field in properties.items():

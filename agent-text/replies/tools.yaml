@@ -173,3 +173,4 @@ plateau_axes: "Shortest closed proof: {token_node} {tokens} tokens ({token_hb} H
 plateau_costly: "Costliest steps of {node}: {steps}."
 plateau_step: "{step} {tokens} tok {heartbeats} HB"
 plateau_push: "Proof structures you have not tried remain: rework the best proof a new way, starting from its costliest step."
+compile_nudge: "{calls} tool calls since your last compile. Test drafts with compile, several per call, rather than checking them in reasoning."

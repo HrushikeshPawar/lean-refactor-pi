@@ -113,8 +113,19 @@ def already_applied(card: dict, found: set[str], hits: int = 0) -> bool:
     return bool(removed) and not removed & found and not hits
 
 
-def rank(step_text: str, limit: int = 5, goal: str = "", seen: frozenset | set = frozenset()) -> list[dict]:
-    """Relevant cards, best first: tactic overlap plus GOAL_WEIGHT per goal tag, then confidence, then bank order.
+def _favoured(card: dict, objective: str | None, where: str) -> bool:
+    """The card is said to lower the island's measure at this position (tokens, or heartbeats at `where`)."""
+    if objective == "tokens":
+        return card["effect"]["tokens"] == "down"
+    if objective == "heartbeats":
+        return card["effect"]["heartbeats"].get(where) == "down"
+    return False
+
+
+def rank(step_text: str, limit: int = 5, goal: str = "", seen: frozenset | set = frozenset(),
+         objective: str | None = None, where: str = "middle") -> list[dict]:
+    """Relevant cards, best first: tactic overlap plus GOAL_WEIGHT per goal tag, then, for an axis island, the cards
+    that lower its measure, then confidence, then bank order.
 
     Cards the step already applies are dropped; ids in `seen` are left out."""
     found = features(step_text)
@@ -125,7 +136,8 @@ def rank(step_text: str, limit: int = 5, goal: str = "", seen: frozenset | set =
         score = len(found & set(card["tags"])) + GOAL_WEIGHT * hits
         if score and card["id"] not in seen and not already_applied(card, found, hits):
             scored.append((score, card))
-    scored.sort(key=lambda pair: (-pair[0], -_CONFIDENCE.get(pair[1]["effect"]["confidence"], 0)))
+    scored.sort(key=lambda pair: (-pair[0], not _favoured(pair[1], objective, where),
+                                  -_CONFIDENCE.get(pair[1]["effect"]["confidence"], 0)))
     return [card for _score, card in scored[:limit]]
 
 
@@ -141,8 +153,8 @@ def render_card(card: dict, where: str) -> str:
          if card.get("at", {}).get(where) else "")
 
 
-def render_cards(step_text: str, where: str, limit: int = 3, goal: str = "") -> str:
-    cards = rank(step_text, limit, goal)
+def render_cards(step_text: str, where: str, limit: int = 3, goal: str = "", objective: str | None = None) -> str:
+    cards = rank(step_text, limit, goal, objective=objective, where=where)
     if not cards:
         return text.render("replies/patterns.none")
     return "\n\n".join(render_card(card, where) for card in cards)
@@ -184,8 +196,10 @@ def render_fresh(step_text: str, where: str, goal: str, directory: Path | None, 
     return "\n\n".join(render_card(card, where) for card in cards)
 
 
-def costliest_step(theorem: str, run_id: str, node) -> tuple[str, str, str] | None:
-    """(step id, step text, position) of the node's costliest step by the price table, or None."""
+def costliest_step(theorem: str, run_id: str, node, objective: str | None = None) -> tuple[str, str, str] | None:
+    """(step id, step text, position) of the node's costliest step by the price table, or None.
+
+    An axis island (objective tokens or heartbeats) takes the costliest step in that measure instead of in points."""
     from arena import campaign
 
     steps = split_steps(node.proof_text)
@@ -195,6 +209,10 @@ def costliest_step(theorem: str, run_id: str, node) -> tuple[str, str, str] | No
 
     def cost(step) -> tuple[float, int]:
         row = rows.get(step.id) or {}
+        if objective == "tokens":
+            return (row.get("tokens") or 0, 0)
+        if objective == "heartbeats":
+            return (row.get("incl_hb") or 0, 0)
         return (row.get("pts_if_gone") if row.get("pts_if_gone") is not None else -1.0, row.get("tokens") or 0)
 
     step = max(steps, key=cost)

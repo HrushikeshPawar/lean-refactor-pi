@@ -1,0 +1,9 @@
+description: "Save your plan: the full list of steps you intend to run, replacing the previous plan. Each save is a new version. Order steps by expected gain, costliest first. Each delegated job carries one step. The replies after delegate, jobs and await_results show the open steps, and say when the plan is missing, stale or empty."
+params:
+  steps: "The whole plan, at most {plan_max_steps} steps. A save is rejected while any step is open or running unless the plan keeps a shape step and a merge step."
+  target: "Node range the step works on, such as n40 lines 9-23, or whole proof."
+  kind: "shape: reshape the whole proof. step: rework one step range. trim: tighten the run best. merge: combine closed nodes. heartbeats or tokens: an axis island's measure."
+  expect: "The expected change in tokens or heartbeats, and whether it is measured from prices or estimated."
+  cards: "Reference cards the step will use, optional."
+  status: "open, running, done or failed."
+  note: "The result, or the failure reason. Required with failed."

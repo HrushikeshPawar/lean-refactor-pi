@@ -1128,13 +1128,14 @@ _ISLAND_PACKETS = {None: "packet/island", "tokens": "packet/island_tokens", "hea
 
 def worker_packet(name: str, *, task: str, anchor: dict, node, families: list[str] | None = None,
                   objective: str | None = None, trim: bool = False, golf: bool = False,
-                  cards: tuple[str, str] | None = None) -> str:
+                  cards: tuple[str, str] | None = None, merge: list[str] | None = None) -> str:
     """First prompt of a delegated worker: the shared startup contract plus its anchor. No Sol-only sections.
 
     `node` is the graph node the anchor resolved to, so the proof text and goals are the saved ones.
     `families` (island jobs only) are the existing proof families, one `island_family` entry each; `objective`
     picks the axis packet. `trim` (trim jobs) gets the trim packet instead, with no island title.
     `cards` (runs with --cards) is (step id, rendered reference cards) for the anchor's costliest step.
+    `merge` (merge jobs) is the chosen nodes as lines (see orchestration._merge_lines); the base is the first node.
     """
     island = families is not None
     row = problem(name)
@@ -1156,6 +1157,8 @@ def worker_packet(name: str, *, task: str, anchor: dict, node, families: list[st
           if island else []),
         *([("", template("packet/trim").strip().splitlines())] if trim else []),
         *([("", template("packet/golf-worker").strip().splitlines())] if golf else []),
+        *([("", template("packet/merge").strip().splitlines()),
+           (template("packet/sections.titles.merge").strip(), merge)] if merge is not None else []),
         *([(render_text("packet/sections.titles.cards", step=cards[0]),
             [template("packet/cards-worker").strip(), "", *cards[1].splitlines()])] if cards else []),
         ("", template("packet/search").strip().splitlines()),

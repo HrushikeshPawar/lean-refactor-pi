@@ -245,6 +245,11 @@ def _rejected_delegate(request: dict) -> dict | None:
         return None
     if scope == "trim":
         return None  # orchestration.delegate rejects an anchor on trim
+    if scope == "merge":
+        # Nodes only; orchestration.delegate resolves them, or the harness picks them when there is no anchor.
+        if anchor is None or (isinstance(anchor, dict) and set(anchor) == {"nodes"}):
+            return None
+        return _delegate_invalid("anchor", operation_id, "merge")
     if scope not in ("proof", "step", "island") or not isinstance(anchor, dict) or not isinstance(anchor.get("node"), str) or not anchor.get("node"):
         return _delegate_invalid("scope", operation_id)
     steps = anchor.get("steps")

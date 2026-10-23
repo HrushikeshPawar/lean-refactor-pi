@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from arena import orchestration, text
+from arena import orchestration, plans, text
 
 
 def _render(key: str, **values) -> str:
@@ -15,6 +15,8 @@ def _render(key: str, **values) -> str:
 
 def _anchor(anchor: dict | None) -> str:
     anchor = anchor or {}
+    if isinstance(anchor.get("nodes"), list):
+        return _render("anchor_merge", nodes=", ".join(anchor["nodes"]))
     if anchor.get("hole"):
         return _render("anchor_hole", hole=anchor["hole"])
     steps = anchor.get("steps")
@@ -60,9 +62,26 @@ def render(action: str, result: dict, directory: Path) -> str:
         return _render("cancel_done", job=job(result.get("job_id")), state=result.get("state", "?"))
     if action == "jobs":
         return _jobs(result, directory, job)
+    if action == "plan":
+        return "\n".join([_render("plan_saved", version=result.get("version")), *result.get("warnings", [])])
     if action == "await_results":
-        return "\n".join([_await(result, directory, job), *open_requests(directory)])
+        return "\n".join([_await(result, directory, job), *open_requests(directory), *nudges(directory)])
     raise ValueError(f"no team reply for {action}")
+
+
+def nudges(directory: Path) -> list[str]:
+    """The plan block and its nudges, then the merge hint. Appended after await_results and jobs replies only."""
+    lines = plans.lines(directory)
+    ready = orchestration.merge_ready(directory)
+    if ready:
+        lines.append(_render("merge_ready", nodes=", ".join(ready), count=_jobs_count(directory, ready)))
+    return lines
+
+
+def _jobs_count(directory: Path, nodes: list[str]) -> int:
+    """How many distinct jobs saved the named nodes."""
+    by_id = {node.id: node for node in orchestration.proof_nodes(directory).values()}
+    return len({orchestration.node_author_job(by_id[node_id]) for node_id in nodes if node_id in by_id})
 
 
 def open_requests(directory: Path) -> list[str]:
@@ -98,7 +117,7 @@ def open_requests(directory: Path) -> list[str]:
 
 
 def _jobs(result: dict, directory: Path, job) -> str:
-    return "\n".join([_jobs_body(result, directory, job), *open_requests(directory)])
+    return "\n".join([_jobs_body(result, directory, job), *open_requests(directory), *nudges(directory)])
 
 
 def _jobs_body(result: dict, directory: Path, job) -> str:

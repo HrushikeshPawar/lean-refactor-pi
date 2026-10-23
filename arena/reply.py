@@ -845,6 +845,22 @@ def _card_stale_note(run_id: str, actor: str, bucket: dict) -> list[str]:
         return []
 
 
+def _compile_nudge(actor: str, bucket: dict, action: str | None) -> list[str]:
+    """A worker that made `compile_nudge_calls` tool calls in a row without a compile is told to test its drafts with
+    compile. The count lives in the worker's own delivery bucket, one per job, so it is deterministic and per job.
+    Only the protocol's outer call passes `action`, so each tool call is counted once."""
+    if actor == "sol" or action is None:
+        return []
+    if action == "compile":
+        bucket["calls_since_compile"] = 0
+        return []
+    calls = int(bucket.get("calls_since_compile", 0)) + 1
+    bucket["calls_since_compile"] = calls
+    if calls != text.numbers()["compile_nudge_calls"]:
+        return []
+    return [text.render("replies/tools.compile_nudge", calls=calls)]
+
+
 def _eval_score(result: object) -> float | None:
     """A full evaluation's score, read as `graph` reads it."""
     metrics = (result.get("metrics") if isinstance(result, dict) else None) or {}
@@ -1027,9 +1043,11 @@ def attach_context(
     include_map: bool = False,
     force_map: bool = False,
     holes: list[dict] | None = None,
+    action: str | None = None,
 ) -> dict:
     """Attach new state updates and a changed map, persisting this actor's delivery cursor.
-    `holes`, when given, replaces the map's open holes (the caller's current lineage only)."""
+    `holes`, when given, replaces the map's open holes (the caller's current lineage only).
+    `action` is the tool call's name; it feeds the worker's compile nudge (see _compile_nudge)."""
     actor = current_actor()
     state = _load(run_id)
     bucket = _bucket(state, actor)
@@ -1066,6 +1084,7 @@ def attach_context(
     facts += _best_note(run_id, actor, bucket, bool(fresh))
     facts += _plateau_note(run_id, actor, bucket)
     facts += _card_stale_note(run_id, actor, bucket)
+    facts += _compile_nudge(actor, bucket, action)
     cards = earlier[split:] + [line for line in _card_lines(run_id, actor, bucket) if not earlier[split:] or line != cards_head]
     if fresh:
         receipt = _commit_delivery(run_id, actor, fresh)

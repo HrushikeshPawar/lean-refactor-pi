@@ -50,6 +50,19 @@ def _nodes(run_id: str) -> tuple[list[dict], graph.Graph]:
     )
 
 
+def diff_lines(against, node) -> list[str]:
+    """Unified diff of two nodes' proof text, `against` first: the `read` view diff, also used by merge packets."""
+    return list(
+        difflib.unified_diff(
+            against.proof_text.splitlines(),
+            node.proof_text.splitlines(),
+            fromfile=against.id,
+            tofile=node.id,
+            lineterm="",
+        )
+    )
+
+
 def _node(run_id: str, reference: str):
     history, projection = _nodes(run_id)
     proof_id = campaign.resolve_node_ref(history, reference)
@@ -1772,15 +1785,7 @@ def read_tool(theorem: str, run_id: str, request: dict) -> dict:
             other = _node(run_id, parent_id)
         except (ValueError, TypeError, StopIteration):
             return _invalid("invalid_against", parent_id, [item.id for item in projection.nodes], TOOL_FORMS["read"])
-        diff = list(
-            difflib.unified_diff(
-                other.proof_text.splitlines(),
-                node.proof_text.splitlines(),
-                fromfile=other.id,
-                tofile=node.id,
-                lineterm="",
-            )
-        )
+        diff = diff_lines(other, node)
         lines = [_render("read_diff", node=node.id, against=other.id, change=f"{len(diff)} lines"), *diff]
         data["diff"] = diff
     elif view == "outline":

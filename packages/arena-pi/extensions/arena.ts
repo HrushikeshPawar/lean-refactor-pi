@@ -779,7 +779,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     },
   });
 
-  for (const name of ["delegate", "jobs", "cancel", "card"]) {
+  for (const name of ["delegate", "jobs", "cancel", "card", "plan"]) {
     if (!executableTools(toolSchemas, actorRole).includes(name)) continue;
     const params = await parametersFor(name, toolSchemas.tools[name], sharedNumbers);
     await registerTool({

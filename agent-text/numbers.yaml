@@ -48,9 +48,11 @@ budget:
   static_words: 860
   # 870: the team paragraph adds Sol's default stance (keep hill climbing) and a per-role guide (r12b analysis).
   # 920: keep every slot busy, refill ended islands, no best is final, combine axis extremes (r14 stall analysis).
-  packet_words: 920
+  # 1040: the plan paragraph (ordered steps, one reshape and one merge step, re-plan after each best) and merge jobs.
+  packet_words: 1040
   # 215: the worker packet explains the card (what to write, what arrives in replies).
-  worker_words: 215
+  # 240: read a definition's source before using it instead of reconstructing it (GLM trace analysis 2026-10-23).
+  worker_words: 240
   reply_words: 60
   # Continuation nudges are sent only after a turn with no tool call, a few times a run.
   nudge_words: 60
@@ -75,3 +77,13 @@ plateau_points: 1.0
 plateau_minutes: 10
 # A worker is reminded to update its card about its new best nodes at most once per this many minutes.
 card_stale_minutes: 5
+# The orchestrator's plan holds at most this many steps (see arena/plans.py).
+plan_max_steps: 12
+# A merge job ends after this many closed nodes of its own, or when its last merge_stale_compiles closed nodes all
+# failed to beat the run best as it stood when each was saved.
+merge_max_compiles: 8
+merge_stale_compiles: 4
+# A merge packet shows at most this many diff lines per node.
+merge_diff_lines: 120
+# A worker is told to test its drafts with compile after this many tool calls without a compile.
+compile_nudge_calls: 4

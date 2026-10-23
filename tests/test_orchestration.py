@@ -2003,7 +2003,7 @@ class TeamReplyAwaitTests(unittest.TestCase):
     def render(self, events, jobs=(), nodes=None):
         from types import SimpleNamespace
 
-        found = {key: SimpleNamespace(id=key, score=score) for key, score in (nodes or {}).items()}
+        found = {key: SimpleNamespace(id=key, score=score, attempts=[]) for key, score in (nodes or {}).items()}
         with patch.object(orchestration, "job_labels", return_value={"j2": "job2"}), \
                 patch.object(orchestration, "proof_nodes", return_value={f"p-{k}": v for k, v in found.items()}):
             return team_reply.render("await_results", {"events": events, "jobs": list(jobs)}, Path("."))
