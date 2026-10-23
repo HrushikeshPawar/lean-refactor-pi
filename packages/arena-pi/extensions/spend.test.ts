@@ -1,6 +1,33 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { callCost, limitReached, limitUsd, spendFooter } from "./spend.ts";
+import { callCost, inPeak, limitReached, limitUsd, peakPriced, spendFooter } from "./spend.ts";
+
+const PEAK = { multiplier: 2, weekdays: ["mon", "tue", "wed", "thu", "fri"], utc: ["01:00-04:00", "06:00-10:00"] };
+
+test("peak windows are weekday UTC windows, start inclusive and end exclusive", () => {
+  const at = (iso: string) => inPeak(PEAK, new Date(iso));
+  assert.equal(at("2026-10-26T01:00:00Z"), true); // Monday 01:00
+  assert.equal(at("2026-10-26T00:59:59Z"), false);
+  assert.equal(at("2026-10-26T03:59:59Z"), true);
+  assert.equal(at("2026-10-26T04:00:00Z"), false);
+  assert.equal(at("2026-10-23T09:59:00Z"), true); // Friday 09:59
+  assert.equal(at("2026-10-23T10:00:00Z"), false);
+  assert.equal(at("2026-10-24T07:00:00Z"), false); // Saturday
+  assert.equal(at("2026-10-25T02:00:00Z"), false); // Sunday
+  assert.equal(inPeak(undefined, new Date("2026-10-26T02:00:00Z")), false);
+});
+
+test("a call sent at peak has every cost component scaled; off-peak calls are unchanged", () => {
+  const usage = { input: 10, cost: { input: 0.001, output: 0.002, cacheRead: 0.0001, cacheWrite: 0, total: 0.0031 } };
+  const atPeak = peakPriced(usage, PEAK, new Date("2026-10-26T02:00:00Z"));
+  assert.equal(atPeak.multiplier, 2);
+  assert.deepEqual(atPeak.usage?.cost, { input: 0.002, output: 0.004, cacheRead: 0.0002, cacheWrite: 0, total: 0.0062 });
+  assert.equal(atPeak.usage?.input, 10);
+  const offPeak = peakPriced(usage, PEAK, new Date("2026-10-24T02:00:00Z"));
+  assert.equal(offPeak.multiplier, 1);
+  assert.equal(offPeak.usage, usage);
+  assert.equal(peakPriced(undefined, PEAK, new Date("2026-10-26T02:00:00Z")).usage, undefined);
+});
 
 test("the limit defaults to fifty cents and anything above two and a half dollars is refused at startup", () => {
   assert.equal(limitUsd({}), 2.5);

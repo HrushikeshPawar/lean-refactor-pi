@@ -14,7 +14,7 @@ import { BlobStore, DeltaChain, settleWithUsageEvidence, splitRequest, stampReco
 import { nothingToSummarize, objectToolArguments, ResultTrimmer } from "./trim.ts";
 import { stopDecision } from "./control.ts";
 import { continuationPush } from "./rules.ts";
-import { cacheAlarm, cacheHitPct, callCost, limitReached, limitUsd, spendFooter } from "./spend.ts";
+import { cacheAlarm, cacheHitPct, callCost, limitReached, limitUsd, peakPriced, spendFooter, type PeakPricing } from "./spend.ts";
 import { numbers as textNumbers, render as renderText } from "./text.ts";
 import { classifyFailure, nextWait } from "./outage.ts";
 import { applyToolTurnEffort, requestDetailedSummary } from "./thinking.ts";
@@ -71,6 +71,8 @@ export default async function arenaExtension(pi: ExtensionAPI) {
   // Providers Pi does not ship (models.yaml `providers`) are registered here; Pi prices their calls from these models.
   const configuredModels = JSON.parse(process.env.ARENA_MODELS_JSON ?? "{}");
   for (const [name, config] of Object.entries(configuredModels.providers ?? {})) pi.registerProvider(name, config as any);
+  // This process's model (a worker's own model in a worker process): its peak pricing, if any.
+  const peakPricing: PeakPricing | undefined = configuredModels.models?.[process.env.ARENA_MODEL ?? ""]?.peak;
   // A factory invocation owns one Pi session. No active theorem is module-global.
   let active: string | undefined;
   const runId = process.env.ARENA_RUN_ID;
@@ -94,6 +96,8 @@ export default async function arenaExtension(pi: ExtensionAPI) {
   let limitToolsLeft = 0;
   // The provider request currently open: opened in before_provider_request, closed by the call's settle row.
   let pendingRequest: string | undefined;
+  // When each open request was sent: a call is charged at the peak price in force then (models.yaml `peak`).
+  const requestSent = new Map<string, number>();
   // Aborts a request whose stream has no assistant message growth for ARENA_STREAM_IDLE_S (0 disables). Armed per
   // request, not for compaction summaries (they emit no message events). Aborting the HTTP stream ends the turn
   // with a retryable provider error, which message_end settles as unknown usage.
@@ -347,6 +351,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     // makes two sequential summary requests and the first never gets a message_end. The compaction settle row
     // (session_compact) carries the cost of both, under the id of the last.
     const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    requestSent.set(id, Date.now());
     pendingRequest = id;
     compactionRequests?.push(id);
     if (!compactionRequests) { lastSize = 0; watchdog.arm(); }
@@ -382,7 +387,13 @@ export default async function arenaExtension(pi: ExtensionAPI) {
 
   // Await the charging authority before Pi can start another request. The old journal is supporting evidence.
   // `toolCalls` is the number of tool calls in the message being settled; they still run when the limit is crossed.
-  async function settle(id: string, usage: AssistantMessage["usage"] | undefined, extra: Record<string, unknown>, ctx: ExtensionContext, toolCalls = 0, covered = [id]) {
+  // Returns the call's settled cost in dollars (after peak pricing), 0 when its usage is unknown.
+  async function settle(id: string, reportedUsage: AssistantMessage["usage"] | undefined, extra: Record<string, unknown>, ctx: ExtensionContext, toolCalls = 0, covered = [id]) {
+    // Peak pricing scales the reported cost before anything is charged, so the shared authority (control.jsonl, fed
+    // this same usage), the local total and the cost ledger all carry the same amount.
+    const sent = covered.map(key => requestSent.get(key)).find(time => time !== undefined) ?? Date.now();
+    for (const key of covered) requestSent.delete(key);
+    const { usage, multiplier } = peakPriced(reportedUsage, peakPricing, new Date(sent));
     const known = knownUsage(usage);
     const usd = known ? callCost(usage) : 0;
     let shared: SharedSpend | undefined;
@@ -403,6 +414,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     else spentUsd += usd;
     const cost = usage?.cost;
     appendCost({ kind: "settle", id, usd, usage_known: known, spent_usd: spentUsd, limit_usd: limit,
+      ...(peakPricing ? { peak_multiplier: multiplier } : {}),
       covered_request_ids: covered, actor_id: sharedIdentity().actorId, session_id: sharedIdentity().sessionId,
       ...(process.env.ARENA_JOB_ID ? { job_id: process.env.ARENA_JOB_ID } : {}), shared_authority: "control.jsonl",
       tokens: { input: usage?.input ?? 0, output: usage?.output ?? 0,
@@ -433,6 +445,7 @@ export default async function arenaExtension(pi: ExtensionAPI) {
       if (toolCalls > 0) limitToolsLeft = toolCalls;
       else ctx.abort();
     }
+    return usd;
   }
 
   // Close the open request when its message_end will never arrive. The usage is unknown, never $0.
@@ -477,8 +490,8 @@ export default async function arenaExtension(pi: ExtensionAPI) {
     // Failed calls have their own retry budget; only a completed response with unknown usage counts here.
     if (known) unknownUsageStreak = 0;
     else if (!failedWithoutUsage) unknownUsageStreak += 1;
-    await settle(id, usage, { response_id: message.responseId ?? null }, ctx, blocks.filter(block => block.type === "toolCall").length);
-    appendTrace({ ...delivered, settled_usd: known ? callCost(message.usage) : null,
+    const settledUsd = await settle(id, usage, { response_id: message.responseId ?? null }, ctx, blocks.filter(block => block.type === "toolCall").length);
+    appendTrace({ ...delivered, settled_usd: known ? settledUsd : null,
       usage: { input: message.usage?.input ?? 0, output: message.usage?.output ?? 0,
         cache_read: message.usage?.cacheRead ?? 0, cache_write: message.usage?.cacheWrite ?? 0 } });
     // The next request of a failed one is its retry.

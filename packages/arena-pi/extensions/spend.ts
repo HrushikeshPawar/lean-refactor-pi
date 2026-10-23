@@ -21,6 +21,35 @@ export function callCost(usage: { cost?: { total?: number } } | undefined): numb
   return typeof total === "number" && Number.isFinite(total) && total > 0 ? total : 0;
 }
 
+/** A model's `peak` block from models.yaml (ARENA_MODELS_JSON): a multiplier on weekdays in UTC windows. */
+export type PeakPricing = { multiplier: number; weekdays: string[]; utc: string[] };
+const WEEKDAYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"]; // Date.getUTCDay() order
+
+function clockMinutes(clock: string): number {
+  const [hours, minutes] = clock.split(":").map(Number);
+  return hours * 60 + minutes;
+}
+
+/** True when a call at `when` (UTC) bills at peak. Mirrors arena/models.py in_peak. */
+export function inPeak(peak: PeakPricing | undefined, when: Date): boolean {
+  if (!peak || !peak.weekdays.includes(WEEKDAYS[when.getUTCDay()])) return false;
+  const minute = when.getUTCHours() * 60 + when.getUTCMinutes();
+  return peak.utc.some(window => {
+    const [start, end] = window.split("-");
+    return clockMinutes(start) <= minute && minute < clockMinutes(end);
+  });
+}
+
+/** The usage with every cost component scaled by the peak multiplier when the call was sent at peak. */
+export function peakPriced<U extends { cost?: Record<string, number> }>(
+  usage: U | undefined, peak: PeakPricing | undefined, when: Date,
+): { usage: U | undefined; multiplier: number } {
+  const multiplier = peak && inPeak(peak, when) ? peak.multiplier : 1;
+  if (multiplier === 1 || !usage?.cost) return { usage, multiplier };
+  const cost = Object.fromEntries(Object.entries(usage.cost).map(([key, value]) => [key, value * multiplier]));
+  return { usage: { ...usage, cost }, multiplier };
+}
+
 export function limitReached(spentUsd: number, limit: number): boolean {
   return spentUsd >= limit;
 }

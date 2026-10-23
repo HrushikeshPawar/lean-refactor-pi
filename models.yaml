@@ -49,6 +49,10 @@ models:
     context_window: 1000000
     max_tokens: 384000
     request_output_tokens: 64000   # 16K, then 32K, were hit by high thinking (v6cov time_deriv: 4 turns); a 64K turn costs ~$0.038
+    # OpenCode Go bills this model at 2x the price above during these UTC windows (weekdays only; weekends are off-peak).
+    # Source: OpenCode Go docs (opencode.ai/docs/go), checked 2026-10-23. Each call's cost is scaled at settlement, and
+    # `arena run` refuses to start or stops a run in a window unless --allow-peak is given.
+    peak: {multiplier: 2, weekdays: [mon, tue, wed, thu, fri], utc: ["01:00-04:00", "06:00-10:00"]}
     compaction:
       # Measured over 4 runs: a compaction costs $0.055-0.075 (the summary request goes out uncached at
       # 350-400K tokens, plus a cold turn after it) and saves only ~$0.015 of cache reads afterwards

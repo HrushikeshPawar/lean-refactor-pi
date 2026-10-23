@@ -15,7 +15,7 @@ import sys
 import threading
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -54,6 +54,10 @@ GOLF_MAX_WORKERS = 3
 DRAIN_S = 180  # wall-clock cap on the closing drain; candidates left unchecked are recorded in the summary
 # How long Pi gets to finish an in-flight evaluation and write cost.json after a stop request.
 STOP_GRACE_S = 45
+# A run checks for a peak window this often (models.yaml `peak`: OpenCode Go bills some models at 2x in UTC windows).
+PEAK_CHECK_S = 60
+PEAK_STOP_REASON = "peak_hours"
+PEAK_EXIT_CODE = 75  # EX_TEMPFAIL, as lean_health.EXIT_CODE: the run stopped for a reason that clears later
 THINKING_LEVELS = tuple(CONFIG["thinking"]["levels"])
 _tool_started: dict[str, float] = {}
 _request_count = 0
@@ -385,6 +389,56 @@ def watch_background_failure(failed: threading.Event, directory: Path, stop_fn) 
     return thread
 
 
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def run_models(args, directory: Path) -> list[tuple[str, str]]:
+    """(role, model) for each model the run calls: the orchestrator and the worker (run-config's on a resume)."""
+    worker = args.worker_model or WORKER_MODEL
+    config_path = directory / "run-config.json"
+    if args.resume_run and config_path.is_file():
+        worker = json.loads(config_path.read_text()).get("worker_model") or WORKER_MODEL
+    return [("orchestrator", args.model), ("worker", worker)]
+
+
+def peak_notice(at_peak: list[tuple[str, str]], when: datetime) -> list[str]:
+    """Which models bill at peak now, their multiplier, and when off-peak starts (UTC and local)."""
+    off = max(model_config.next_off_peak(name, when, CONFIG) for _, name in at_peak)
+    who = ", ".join(f"{name} ({role}, {CONFIG['models'][name]['peak']['multiplier']:g}x)" for role, name in at_peak)
+    return [
+        f"peak hours: {who} billed at peak pricing now",
+        f"off-peak starts {off:%Y-%m-%d %H:%M UTC} ({off.astimezone():%Y-%m-%d %H:%M %Z})",
+    ]
+
+
+def peak_stop_message(at_peak: list[tuple[str, str]], when: datetime) -> str:
+    first, second = peak_notice(at_peak, when)
+    return "\n".join([
+        f"Stopping Pi for {first}; no further spend",
+        second,
+        "continue with --resume-run after off-peak starts, or --resume-run --allow-peak now",
+    ])
+
+
+def watch_peak(
+    peak_models: list[tuple[str, str]], stop_fn, done: threading.Event, interval_s: float = PEAK_CHECK_S
+) -> threading.Thread:
+    """Stop Pi once a peak window begins while the run is going: one check per interval, until `done` is set."""
+
+    def watch() -> None:
+        while not done.wait(interval_s):
+            when = _now()
+            at_peak = [(role, name) for role, name in peak_models if model_config.in_peak(name, when, CONFIG)]
+            if at_peak:
+                stop_fn(peak_stop_message(at_peak, when))
+                return
+
+    thread = threading.Thread(target=watch, name="arena-peak-watcher", daemon=True)
+    thread.start()
+    return thread
+
+
 def start_lean_session(directory: Path, row: dict, run_id: str) -> None:
     """Lease this run's toolchains on the shared Lean service; failure only costs speed."""
     try:
@@ -504,6 +558,8 @@ class RunOptions:
     workers: int | None = None  # golf only; default 2, at most 3
     dry_run: bool = False
     plain: bool = False
+    # Run in OpenCode Go peak hours (2x pricing) anyway. Without it a run refuses to start in a peak, and stops when one begins.
+    allow_peak: Annotated[bool, Parameter(negative="")] = False
 
 
 def _release_setup() -> None:
@@ -625,6 +681,15 @@ def run(options: RunOptions) -> int:
             read_seed_proof(args.theorem, args.seed_proof)
         except ValueError as error:
             print(f"error: {error}", file=sys.stderr)
+            return 2
+    # Peak pricing (models.yaml `peak`): a run in a peak window does not start unless --allow-peak; a dry run only warns.
+    peak_watch = [(role, name) for role, name in run_models(args, directory) if CONFIG["models"][name].get("peak")]
+    at_peak = [(role, name) for role, name in peak_watch if model_config.in_peak(name, _now(), CONFIG)]
+    if at_peak and not args.allow_peak:
+        notice = peak_notice(at_peak, _now())
+        print(f"{'warning' if args.dry_run else 'error'}: {notice[0]}", file=sys.stderr)
+        print("\n".join([notice[1], "rerun with --allow-peak to run anyway"]), file=sys.stderr)
+        if not args.dry_run:
             return 2
     global _SETUP
     if not args.dry_run and live.enabled(args.plain):
@@ -852,7 +917,7 @@ def run(options: RunOptions) -> int:
     )
     event_log = directory / "events.jsonl"
     event_offset = event_log.stat().st_size if event_log.exists() else 0
-    state: dict = {"process": None, "signal": None, "timer": None, "tripped": False}
+    state: dict = {"process": None, "signal": None, "timer": None, "tripped": False, "peak": False}
     stop_lock = threading.Lock()
     segment_started = time.time()
 
@@ -882,11 +947,12 @@ def run(options: RunOptions) -> int:
             state["timer"].daemon = True
             state["timer"].start()
 
-    def stop_for_lean(message: str) -> None:
+    def stop_pi(message: str, peak: bool = False) -> None:
         with stop_lock:
             if state["tripped"]:
                 return
             state["tripped"] = True
+            state["peak"] = peak
         print(message, file=sys.stderr, flush=True)
         process = state["process"]
         if process is not None and process.poll() is None:
@@ -923,7 +989,9 @@ def run(options: RunOptions) -> int:
         )
         stderr_reader.start()
         if _BACKGROUND["thread"] is not None:
-            watch_background_failure(_BACKGROUND["failed"], directory, stop_for_lean)
+            watch_background_failure(_BACKGROUND["failed"], directory, stop_pi)
+        if peak_watch and not args.allow_peak:
+            watch_peak(peak_watch, lambda message: stop_pi(message, peak=True), _BACKGROUND["stop"])
         if state["signal"] is not None:
             process.terminate()
         assert process.stdout is not None
@@ -944,7 +1012,7 @@ def run(options: RunOptions) -> int:
                         f"Lean circuit breaker tripped ({lean_health.BREAKER_LIMIT} consecutive Lean timeouts or "
                         "failures); stopping Pi cleanly"
                     )
-                stop_for_lean(message)
+                stop_pi(message)
         try:
             exit_code = process.wait(timeout=STOP_GRACE_S)
         except subprocess.TimeoutExpired:
@@ -970,7 +1038,8 @@ def run(options: RunOptions) -> int:
         exit_code,
         state["signal"],
         segment_started,
-        tripped=state["tripped"] or lean_health.tripped(directory) is not None,
+        tripped=(state["tripped"] and not state["peak"]) or lean_health.tripped(directory) is not None,
+        peak=state["peak"],
     )
 
 
@@ -1040,6 +1109,7 @@ def finish(
     interrupted: int | None,
     segment_started: float = 0.0,
     tripped: bool = False,
+    peak: bool = False,
 ) -> int:
     """Always leave cost.json and a run summary behind, even for a killed or crashed run."""
     report_path = directory / "cost.json"
@@ -1097,7 +1167,8 @@ def finish(
     try:
         written = write_summary(
             directory,
-            "interrupted" if interrupted is not None and not tripped else lean_health.STOP_REASON if tripped else None,
+            "interrupted" if interrupted is not None and not tripped
+            else lean_health.STOP_REASON if tripped else PEAK_STOP_REASON if peak else None,
         )
         if fancy:
             run_report.print_run_summary(Console(), directory, written)
@@ -1105,6 +1176,9 @@ def finish(
             print(render_text(written), end="", flush=True)
     except Exception as error:  # a summary failure must never hide the run's own result
         print(f"Run summary failed: {error}", file=sys.stderr)
+    if peak:
+        print(f"stop_reason={PEAK_STOP_REASON}; cost.json and summary.json were written", flush=True)
+        return PEAK_EXIT_CODE
     if tripped:
         print(f"stop_reason={lean_health.STOP_REASON}; cost.json and summary.json were written", flush=True)
         return lean_health.EXIT_CODE

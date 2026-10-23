@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from functools import cache
 from pathlib import Path
@@ -17,6 +18,9 @@ from pathlib import Path
 PATH = Path(__file__).resolve().parents[1] / "models.yaml"
 PRICE_KEYS = ("input", "output", "cache_read", "cache_write")
 POSITIVE = ("context_window", "max_tokens", "request_output_tokens")
+WEEKDAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")  # datetime.weekday() order
+_CLOCK = r"(?:[01]\d|2[0-3]):[0-5]\d|24:00"
+_WINDOW = re.compile(rf"({_CLOCK})-({_CLOCK})")
 
 
 class ModelConfigError(ValueError):
@@ -117,6 +121,34 @@ def _price(owner: str, price) -> None:
             raise ModelConfigError(f"models.yaml: {owner}.{key} must be a non-negative number, got {value!r}")
 
 
+def _clock_minutes(clock: str) -> int:
+    hours, minutes = clock.split(":")
+    return int(hours) * 60 + int(minutes)
+
+
+def _window(window) -> tuple[int, int] | None:
+    """A `HH:MM-HH:MM` UTC window as minutes from midnight, or None when it is malformed or empty."""
+    match = _WINDOW.fullmatch(window) if isinstance(window, str) else None
+    if match is None:
+        return None
+    start, end = (_clock_minutes(part) for part in match.groups())
+    return (start, end) if start < end else None
+
+
+def _peak(owner: str, peak) -> None:
+    if not isinstance(peak, dict) or set(peak) != {"multiplier", "weekdays", "utc"}:
+        raise ModelConfigError(f"models.yaml: {owner}.peak needs multiplier, weekdays and utc")
+    multiplier = peak["multiplier"]
+    if isinstance(multiplier, bool) or not isinstance(multiplier, (int, float)) or multiplier <= 1:
+        raise ModelConfigError(f"models.yaml: {owner}.peak.multiplier must be a number above 1, got {multiplier!r}")
+    weekdays = peak["weekdays"]
+    if not isinstance(weekdays, list) or not weekdays or any(day not in WEEKDAY_NAMES for day in weekdays):
+        raise ModelConfigError(f"models.yaml: {owner}.peak.weekdays must be a list of {', '.join(WEEKDAY_NAMES)}")
+    windows = peak["utc"]
+    if not isinstance(windows, list) or not windows or any(_window(window) is None for window in windows):
+        raise ModelConfigError(f"models.yaml: {owner}.peak.utc must be a list of HH:MM-HH:MM UTC windows, start before end")
+
+
 def validate(config: dict) -> dict:
     for key in ("provider", "models", "thinking", "provider_timeout_ms", "outage_limit_ms", "retry"):
         if key not in config:
@@ -153,6 +185,8 @@ def validate(config: dict) -> dict:
         if "high_price" in model:
             _price(f"{name}.high_price", model["high_price"])
             _number(name, "high_context_threshold", model["high_context_threshold"], integer=True)
+        if "peak" in model:
+            _peak(name, model["peak"])
         compaction = model.get("compaction")
         if not isinstance(compaction, dict):
             raise ModelConfigError(f"models.yaml: {name}.compaction is required")
@@ -189,6 +223,47 @@ def load(path: Path = PATH) -> dict:
 
 def models() -> tuple[str, ...]:
     return tuple(load()["models"])
+
+
+def _utc(when: datetime) -> datetime:
+    if when.tzinfo is None:
+        raise ValueError("peak pricing needs a timezone-aware time")
+    return when.astimezone(timezone.utc)
+
+
+def in_peak(name: str, when: datetime, config: dict | None = None) -> bool:
+    """True when the model bills at its peak multiplier at `when`. A model with no `peak` block never does."""
+    peak = (config or load())["models"][name].get("peak")
+    if peak is None:
+        return False
+    moment = _utc(when)
+    minute = moment.hour * 60 + moment.minute
+    return WEEKDAY_NAMES[moment.weekday()] in peak["weekdays"] and any(
+        start <= minute < end for start, end in map(_window, peak["utc"])
+    )
+
+
+def peak_multiplier(name: str, when: datetime, config: dict | None = None) -> float:
+    """The factor a call's actual cost is scaled by at `when`: the peak multiplier at peak, else 1.0."""
+    peak = (config or load())["models"][name].get("peak")
+    return float(peak["multiplier"]) if peak is not None and in_peak(name, when, config) else 1.0
+
+
+def next_off_peak(name: str, when: datetime, config: dict | None = None) -> datetime:
+    """The first UTC instant at or after `when` that is off-peak (`when` itself when it already is)."""
+    config = config or load()
+    moment = _utc(when)
+    if not in_peak(name, moment, config):
+        return moment
+    # A peak ends at the close of one of its windows, so the first off-peak instant is one of those closes.
+    midnight = moment.replace(hour=0, minute=0, second=0, microsecond=0)
+    for offset in range(8):
+        day = midnight + timedelta(days=offset)
+        for _, end in sorted(map(_window, config["models"][name]["peak"]["utc"])):
+            close = day + timedelta(minutes=end)
+            if close > moment and not in_peak(name, close, config):
+                return close
+    raise ValueError(f"{name} has no off-peak instant within a week")
 
 
 def _camel(key: str) -> str:
