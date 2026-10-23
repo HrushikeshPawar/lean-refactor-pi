@@ -35,8 +35,8 @@ def certify(name: str, tolerance: float = 0.05) -> dict:
     if missing:
         return {"name": name, "status": "unprovisioned", "missing": missing}
     try:
-        fast = evaluate(name, row["src"], "fast")
-        full = evaluate(name, row["src"], "full")
+        fast = evaluate(name, row["src"], "fast", request_class="sol_foreground")
+        full = evaluate(name, row["src"], "full", request_class="full_check")
     except (ValueError, FileNotFoundError) as error:
         return {"name": name, "status": "failed", "reasons": [str(error)[:200]]}
     published_tokens, published_heartbeats = reference(name)

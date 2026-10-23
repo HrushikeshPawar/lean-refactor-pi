@@ -118,9 +118,12 @@ def _settled_usd(path: Path) -> float:
 def _nodes(path: Path) -> list[NodeRow]:
     from arena.campaign import _proof_reader, events
     from arena.graph import Graph
+    from arena.run_control import committed_operation_ids
 
     directory = path.parent
-    graph = Graph.from_history(events(directory), _proof_reader(directory))
+    graph = Graph.from_history(
+        events(directory), _proof_reader(directory), committed_operations=committed_operation_ids(directory)
+    )
     ids = {node.proof_id: node.id for node in graph.nodes}
     rows = []
     for node in graph.nodes:
@@ -447,9 +450,11 @@ class LiveDisplay:
         console: Console | None = None,
         refresh_s: float = REFRESH_S,
         poll_s: float = POLL_S,
+        redirect: bool = True,
     ):
         self.render_fn, self.poll_fn = render, poll
-        self.console = console or Console()
+        self.redirect = redirect
+        self.console = console or Console(file=sys.stdout)  # bound now: the run later swaps sys.stdout for its event sink
         self.refresh_s, self.poll_s = refresh_s, poll_s
         self.live: Live | None = None
         self.active = False
@@ -464,8 +469,8 @@ class LiveDisplay:
                 self.render_fn(self.console.width),
                 console=self.console,
                 auto_refresh=False,
-                redirect_stdout=True,
-                redirect_stderr=True,
+                redirect_stdout=self.redirect,
+                redirect_stderr=self.redirect,
             )
             self.live.start(refresh=True)
         except Exception as error:
@@ -544,7 +549,8 @@ class RunDisplay(LiveDisplay):
     """The live view of one `arena run`."""
 
     def __init__(self, view: RunView, console: Console | None = None, **kwargs):
-        super().__init__(view.render, view.poll, console, **kwargs)
+        # The runner routes stray prints into the event panel itself (see arena.cli.run), so rich does not.
+        super().__init__(view.render, view.poll, console, redirect=False, **kwargs)
         self.view = view
 
     def line(self, text: str) -> bool:

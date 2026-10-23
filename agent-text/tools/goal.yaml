@@ -1,6 +1,6 @@
 description: "Return the goals at a node line or hole, with a map of each case's hypothesis names. Snippets in try replace that line's whole step or that hole; each reports its verdict, tokens, and the goals left after that snippet alone."
 params:
-  node: "Node identifier containing the position."
+  node: "Required with line. With hole, send the full id (n2.h1) alone."
   hole: "Open hole identifier, such as n2.h1."
-  line: "One-based line number in the node proof."
+  line: "One-based line of the node's proof, within its length."
   try: "Proof snippets for the selected position; needs line or hole."

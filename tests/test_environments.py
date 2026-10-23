@@ -141,7 +141,7 @@ class MeasurementVersionTests(unittest.TestCase):
     def test_fast_mode_also_compiles_the_measurement_version_and_records_it(self):
         calls = []
 
-        def compile_stub(row, proof, version, commit, measure=False, probe=False, report_start_line=None, lane="model"):
+        def compile_stub(row, proof, version, commit, measure=False, probe=False, report_start_line=None, lane="model", **_kwargs):
             calls.append((version, measure))
             return {
                 "passed": True,
@@ -182,6 +182,7 @@ class CertificationTests(unittest.TestCase):
         with (
             patch.object(arena_certify.environments, "provisioned", return_value=found),
             patch.object(arena_certify, "evaluate", return_value=result),
+            patch.object(arena_certify, "render_packet", return_value="packet"),
         ):
             return arena_certify.certify("Core.InitsUpdatesComm")
 

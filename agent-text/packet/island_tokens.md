@@ -1,0 +1,3 @@
+Your job is a token island: for the rest of the run you search for the shortest complete proof, counted in proof tokens. Heartbeats do not matter to you: any automation, however slow, is fine if it compiles and makes the proof shorter. You are judged only on your fewest-token closed proof. When automation leaves goals, the harness saves a sketch with holes; closing those holes is often the shortest way to a complete proof. On your card, list which goals your shortest proof closes by automation and which still need explicit steps, with node ids: the orchestrator builds the final proof from that. The anchored proof below is the original proof, shown for reference only.
+Existing families (id, best node and score, first tactic lines):
+{families}

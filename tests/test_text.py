@@ -1,6 +1,7 @@
 import ast
 import io
 import json
+from dataclasses import replace
 import os
 import re
 import tempfile
@@ -19,6 +20,7 @@ LINT_PYTHON = (
     "arena/tools.py",
     "arena/campaign.py",
     "arena/summary.py",
+    "arena/team_reply.py",
 )
 LINT_TYPESCRIPT = ("arena.ts", "rules.ts", "trim.ts", "reply.ts", "spend.ts")
 LOG_CALLS = {"logging", "logger", "log", "LOG"}
@@ -163,7 +165,11 @@ class TextRendererTests(unittest.TestCase):
         }
         self.assertTrue(required <= set(terms))
         denied = re.compile(r"\b(?:" + "|".join(map(re.escape, terms)) + r")\b", re.I)
+        # The team packet uses "idea" in its plain sense: workers' cards carry ideas Sol harvests or seeds.
+        card_texts = {"packet/team"}
         for key in text.keys():  # noqa: SIM118
+            if key in card_texts:
+                continue
             with self.subTest(key=key):
                 values = {
                     name: 1 if fmt else "X"
@@ -190,8 +196,20 @@ class TextRendererTests(unittest.TestCase):
         self.assertEqual(result["theorem"], "Core.InitsUpdatesComm")
         self.assertEqual([part["part"] for part in parts[:3]], ["system prompt", "skill", "tools/compile"])
         self.assertEqual(
-            [part["part"] for part in parts[3:7]], ["tools/goal", "tools/search", "tools/read", "tools/finish"]
+            [part["part"] for part in parts[3:12]],
+            [
+                "tools/goal",
+                "tools/search",
+                "tools/read",
+                "tools/scratch",
+                "tools/card",
+                "tools/delegate",
+                "tools/jobs",
+                "tools/await_results",
+                "tools/cancel",
+            ],
         )
+        self.assertNotIn("tools/finish", [part["part"] for part in parts])
         self.assertTrue(any(part["part"].startswith("Pinned environment") for part in parts))
         for part in parts:
             self.assertEqual(part["chars"], len(part["text"]))
@@ -252,6 +270,9 @@ class TextRendererTests(unittest.TestCase):
             "packet/scoring",
             "packet/price-table",
             "packet/price-table.legend",
+            "packet/search",
+            "packet/team",
+            "packet/team-cost",
             "packet/sections.titles.goals",
             "packet/sections.titles.library",
         )
@@ -259,7 +280,8 @@ class TextRendererTests(unittest.TestCase):
         self.assertLessEqual(packet_words, numbers["budget.packet_words"])
         for key in text.keys():  # noqa: SIM118
             if key.startswith(("replies/", "messages/")):
-                self.assertLessEqual(len(text.template(key).split()), numbers["budget.reply_words"], key)
+                limit = numbers["budget.nudge_words" if key.startswith("messages/continuation.") else "budget.reply_words"]
+                self.assertLessEqual(len(text.template(key).split()), limit, key)
 
     def test_shared_renderer_cases(self):
         cases = json.loads((Path(__file__).parent / "fixtures" / "text-cases.json").read_text())
@@ -279,13 +301,102 @@ class TextRendererTests(unittest.TestCase):
                         self.assertEqual(text.render(case["key"], **case.get("values", {})), case["expect"])
                 text._load.cache_clear()
 
+    def test_v8_inspection_matches_actor_schema(self):
+        from arena import tools
+        from arena.tool_schema import registered_tools, render_tool_sections
+
+        injected = {
+            "roles": {"sol": ["compile"], "worker": ["compile"]},
+            "tools": {
+                "compile": {
+                    "exclusive": ["drafts", "fill"],
+                    "requireOne": True,
+                    "properties": {
+                        "drafts": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 1,
+                            "maxItems": 4,
+                            "description": "drafts",
+                        },
+                        "fill": {
+                            "type": "object",
+                            "description": "fill",
+                            "properties": {
+                                "hole": {"type": "string", "required": True, "description": "fill_hole"},
+                                "text": {"type": "string", "required": True, "description": "fill_text"},
+                            },
+                        },
+                    },
+                }
+            },
+        }
+        rendered = dict(render_tool_sections(registered_tools("sol", injected)))
+        self.assertIn("fill: object, optional", rendered["compile"])
+        self.assertIn("  hole: string, required", rendered["compile"])
+        self.assertNotRegex(rendered["compile"], r"(?m)^fill_hole:")
+        widened = json.loads(json.dumps(injected))
+        widened["tools"]["compile"]["properties"]["fill"]["properties"]["hole"]["type"] = "integer"
+        widened_help = dict(render_tool_sections(registered_tools("sol", widened)))["compile"]
+        self.assertIn("  hole: integer, required", widened_help)
+
+        sol = [tool["name"] for tool in registered_tools("sol")]
+        worker = [tool["name"] for tool in registered_tools("worker")]
+        self.assertEqual(worker, ["compile", "goal", "search", "read", "scratch", "card"])
+        self.assertEqual(
+            sol, ["compile", "goal", "search", "read", "scratch", "card", "delegate", "jobs", "await_results", "cancel"]
+        )
+        live = dict(render_tool_sections(registered_tools("sol")))
+        self.assertIn("fill: object, optional", live["compile"])
+        self.assertIn("  hole: string, required", live["compile"])
+        self.assertIn("one of: drafts | splice | fill | merge", live["compile"])
+        self.assertIn("default focus", live["compile"])
+        self.assertNotIn("finish", sol)
+        for name in ("delegate", "jobs", "cancel"):
+            self.assertNotIn(name, worker)
+        catalog = json.loads((Path(__file__).parents[1] / "agent-text" / "tool-schemas.json").read_text())
+        self.assertNotIn("cursor", catalog["tools"]["jobs"]["properties"])
+
+        empty_compile = tools.compile_tool("T", "logic", {})
+        empty_goal = tools.goal_tool("T", "logic", {})
+        self.assertEqual(empty_compile["error"]["code"], "empty_arguments")
+        self.assertEqual(empty_goal["error"]["code"], empty_compile["error"]["code"])
+        over = tools.compile_tool("T", "logic", {"drafts": ["by rfl"] * 5})
+        self.assertEqual(over["error"]["code"], "bad_drafts")
+        with (
+            patch("arena.campaign.problem", return_value={"name": "T", "statement": "theorem t : True", "src": "by trivial"}),
+            patch("arena.tools._focus_proof", return_value=("n1", "theorem t : True := by\n  trivial")),
+            patch("arena.engine._proof_length", side_effect=lambda proof, *_args: len(proof)),
+        ):
+            accepted = tools.compile_tool("T", "logic", {"check": "tokens", "drafts": ["by trivial"]})
+        self.assertTrue(accepted["ok"])
+        self.assertGreater(accepted["items"][0]["tokens"], 0)
+
+        fixtures = Path(__file__).parent / "fixtures/agent_text"
+        context = json.loads((fixtures / "core-context.json").read_text())
+        profile = json.loads((fixtures / "core-profile.json").read_text())
+        output = io.StringIO()
+        with (
+            patch("arena.context.cached_context", return_value=context),
+            patch("arena.context.reference_profile", return_value=profile),
+            patch("arena.context.lean_context", side_effect=AssertionError("Lean started")),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(render_template(theorem="Core.InitsUpdatesComm", json_output=True, actor="worker"), 0)
+        parts = json.loads(output.getvalue())["parts"]
+        self.assertEqual(
+            [part["part"] for part in parts if part["part"].startswith("tools/")],
+            ["tools/compile", "tools/goal", "tools/search", "tools/read", "tools/scratch", "tools/card"],
+        )
+        compile = next(part["text"] for part in parts if part["part"] == "tools/compile")
+        self.assertIn("  hole: string, required", compile)
+        self.assertNotIn("tools/finish", [part["part"] for part in parts])
+
     def test_five_tool_descriptions_include_the_shared_limits(self):
         numbers = text.numbers()
         compile_description = text.render("tools/compile.description")
-        finish_description = text.render("tools/finish.description")
         self.assertIn(str(numbers["compile_max_drafts"]), compile_description)
-        self.assertIn(str(numbers["finish_remaining_pct"]), finish_description)
-        for name in ("compile", "goal", "search", "read", "finish"):
+        for name in ("compile", "goal", "search", "read"):
             with self.subTest(tool=name):
                 self.assertTrue(text.render(f"tools/{name}.description"))
 
@@ -356,7 +467,7 @@ def _rates(stem: str) -> dict:
 
 
 class HiddenStopTests(unittest.TestCase):
-    """D42: before the final tenth no model-facing text names finishing, stopping or the threshold."""
+    """D42: no model-facing text names finishing, stopping or the threshold; Pi offers no finish tool."""
 
     def before_threshold(self) -> dict[str, str]:
         from arena.cli.run import SYSTEM_PROMPT
@@ -367,9 +478,7 @@ class HiddenStopTests(unittest.TestCase):
             texts.update(_rendered(f"tools/{tool}."))
         texts.update(_rendered("messages/footer"))
         texts.update(_rendered("messages/compaction-memory."))
-        continuation = _rendered("messages/continuation.")
-        continuation.pop("messages/continuation.finish_available")
-        texts.update(continuation)
+        texts.update(_rendered("messages/continuation."))
         return texts
 
     def test_text_before_the_threshold_never_mentions_ending_the_run(self):
@@ -387,14 +496,10 @@ class HiddenStopTests(unittest.TestCase):
                 # Rank and line numbers may be any integer; a percentage or fraction of the limit may not.
                 self.assertNotRegex(packet, rf"(?<![\d.])(?:{pct}|{100 - pct})\s*%")
 
-    def test_finish_is_named_only_by_the_texts_shown_once_it_is_offered(self):
-        pct = text.numbers()["finish_remaining_pct"]
+    def test_no_finish_text_exists(self):
         templates = {**_rendered("messages/"), **_rendered("replies/"), **_rendered("tools/")}
-        naming = sorted(key for key, rendered in templates.items() if re.search(r"\bfinish", rendered, re.I))
-        self.assertEqual(
-            [key for key in naming if not key.startswith("tools/finish.")], ["messages/continuation.finish_available"]
-        )
-        self.assertRegex(text.render("tools/finish.description"), _number_pattern(pct))
+        self.assertEqual(sorted(key for key in text.keys() if key.startswith("tools/finish")), [])  # noqa: SIM118
+        self.assertEqual(sorted(key for key, rendered in templates.items() if re.search(r"\bfinish", rendered, re.I)), [])
 
 
 class PlaceholderTests(unittest.TestCase):
@@ -413,7 +518,7 @@ class PlaceholderTests(unittest.TestCase):
                 text._check("demo", body)
 
     def test_a_missing_or_unused_value_raises(self):
-        key = "messages/continuation.focus_material"
+        key = "messages/continuation.skeleton"
         values = _dummies(key)
         self.assertTrue(values)
         missing = dict(values)
@@ -604,6 +709,99 @@ class RuleConsistencyTests(unittest.TestCase):
 class PacketBehaviourTests(unittest.TestCase):
     """Checkbox 18 (a)-(c), from fixture contexts; no Lean."""
 
+    def test_team_section_only_in_orchestrator_packet_with_computed_numbers(self):
+        from arena import context
+        from arena.models import _SESSION_CONCURRENCY, load
+        from arena.pi_rpc import WORKER_MODEL
+
+        cached, measured = _fixture("ski")
+        prices = load()["models"]
+        ratio = round(prices["gpt-6.1-sol"]["price"]["output"] / prices[WORKER_MODEL]["price"]["output"])
+
+        def team(model):
+            with (
+                patch.object(context, "cached_context", return_value=cached),
+                patch.object(context, "reference_profile", return_value=measured),
+            ):
+                return context.packet_sections(ROWS["ski"], cache_only=True, model=model)
+
+        body = dict(team("gpt-6.1-sol"))["Team"]
+        self.assertIn(f"up to {_SESSION_CONCURRENCY[WORKER_MODEL]} worker sessions ({WORKER_MODEL})", body)
+        self.assertIn(f"costs about {ratio}\u00d7 less than yours", body)
+        self.assertNotIn("less than yours", dict(team(WORKER_MODEL))["Team"])
+        self.assertNotIn("Team", dict(team(None)))
+
+    def test_worker_packet_carries_contract_anchor_and_task_without_team(self):
+        from types import SimpleNamespace
+
+        from arena import context
+        from arena.steps import split_steps
+
+        proof = "theorem t : True := by\n  intro h\n  trivial"
+        steps = [replace(step, before=f"goal before {step.id}") for step in split_steps(proof)]
+        node = SimpleNamespace(id="n1", proof_text=proof, steps=steps, holes=[])
+        sol = "gpt-6.1-sol"
+        cached, measured = _fixture("ski")
+        with (
+            patch.object(context, "cached_context", return_value=cached),
+            patch.object(context, "reference_profile", return_value=measured),
+        ):
+            orchestrator = context.render_packet(ROWS["ski"], cache_only=True, model=sol)
+        whole = context.worker_packet(ROWS["ski"], task="try symmetry", anchor={"node": "n1"}, node=node)
+        stepped = context.worker_packet(
+            ROWS["ski"], task="try symmetry", anchor={"node": "n1", "steps": [2, 2]}, node=node
+        )
+        row = context.problem(ROWS["ski"])
+        for packet in (whole, stepped):
+            self.assertIn(row["statement"], packet)
+            self.assertIn("2:   intro h", packet)
+            self.assertIn("try symmetry", packet)
+            self.assertIn(text.template("packet/scoring").splitlines()[0], packet)
+            self.assertIn("You are a worker", packet)
+            self.assertNotIn("worker sessions", packet)
+            self.assertNotIn("\nTeam\n", packet)
+            self.assertNotIn(text.template("packet/sections.titles.goals").strip(), packet)
+        self.assertIn("worker sessions", orchestrator)
+        self.assertIn("the whole proof (3 lines)", whole)
+        self.assertNotIn("goal before", whole)
+        self.assertIn("steps 2-2", stepped)
+        self.assertIn(f"goal before {steps[1].id}", stepped)
+        self.assertNotIn(f"goal before {steps[0].id}", stepped)
+        own = sum(len(text.template(key).split()) for key in (
+            "packet/worker", "packet/sections.titles.worker", "packet/sections.titles.hypothesis",
+            "packet/sections.titles.anchored", "packet/sections.titles.worker_goals",
+            "packet/sections.fixed.anchor_proof", "packet/sections.fixed.anchor_steps",
+            "packet/sections.fixed.anchor_hole", "packet/sections.fixed.worker_hole_goal",
+            "packet/sections.fixed.worker_goal_omitted"))
+        self.assertLessEqual(own, text.numbers()["budget.worker_words"])
+
+    def test_island_worker_packet_lists_existing_families_within_its_own_budget(self):
+        from types import SimpleNamespace
+
+        from arena import context
+
+        proof = "theorem t : True := by\n  intro h\n  trivial"
+        node = SimpleNamespace(id="n1", proof_text=proof, steps=[], holes=[])
+        families = ["r1: best n1 score 70.0\n  intro h", "r2: best n7 score 66.5\n  omega"]
+        cached, measured = _fixture("ski")
+        with (
+            patch.object(context, "cached_context", return_value=cached),
+            patch.object(context, "reference_profile", return_value=measured),
+        ):
+            packet = context.worker_packet(
+                ROWS["ski"], task="a different structure", anchor={"node": "n1"}, node=node, families=families
+            )
+            plain = context.worker_packet(ROWS["ski"], task="try symmetry", anchor={"node": "n1"}, node=node)
+        self.assertIn("Your island\n", packet)
+        self.assertIn("judged against your island's best", packet)
+        self.assertIn("r2: best n7 score 66.5\n  omega", packet)
+        self.assertIn("Reference: node n1, the original proof (3 lines)", packet)
+        self.assertNotIn("Your island", plain)
+        own = sum(len(text.template(key).split()) for key in (
+            "packet/island", "packet/sections.titles.island", "packet/sections.fixed.anchor_island",
+            "packet/sections.fixed.island_family"))
+        self.assertLessEqual(own, text.numbers()["budget.island_words"])
+
     def test_packet_order_rates_price_rows_goals_and_library_format(self):
         from arena import context
 
@@ -634,7 +832,7 @@ class PacketBehaviourTests(unittest.TestCase):
                 ]
                 self.assertEqual(rows, [f"s{i}" for i in range(1, len(rows) + 1)])
                 steps = [
-                    line[len(goal_prefix) :].split(":")[0]
+                    line[len(goal_prefix) :].split(" proof line ")[0]
                     for line in sections[goals][1].splitlines()
                     if line.startswith(goal_prefix)
                 ]
@@ -663,33 +861,3 @@ class PacketBehaviourTests(unittest.TestCase):
         self.assertFalse({f"decl:{name}" for name in known} & handles)
         self.assertLessEqual(len(lines), context.LIMITS["library"])
         self.assertLessEqual(sum(len(line) + 1 for line in lines), context.LIMITS["library_budget"])
-
-    def test_an_over_limit_packet_sheds_every_local_line_before_any_library_line(self):
-        from arena import context
-
-        inventory, _ = _fixture("core")
-        library = len(_section(_sections("core"), context.LIBRARY_TITLE))
-        self.assertGreater(library, 0)
-        # Many locals with long types, as in the row whose packet overflowed (fiberwise).
-        inventory["local"] = [
-            {**inventory["local"][0], "name": f"h{i}", "type": "T " * 150, "proof_line": i} for i in range(400)
-        ]
-        with patch.object(context, "MAX_PACKET_CHARS", 10**7):
-            full = _sections("core", inventory)
-        self.assertGreater(len("\n\n".join(body for _title, body in full)), context.MAX_PACKET_CHARS)
-        sections = _sections("core", inventory)
-        packet = "\n\n".join(body for _title, body in sections)
-        self.assertLessEqual(len(packet), context.MAX_PACKET_CHARS)
-        self.assertEqual(len(_section(sections, context.LIBRARY_TITLE)), library)
-        self.assertLess(len(_section(sections, context.LOCAL_TITLE)), len(_section(full, context.LOCAL_TITLE)))
-        self.assertEqual(_section(sections, context.EARLIER_TITLE), [])
-        # A tighter limit forces library lines out: by then no local line is left.
-        without = [(title, body) for title, body in full if not title.startswith(context.LOCAL_TITLE)]
-        without = [(t, b) for t, b in without if not t.startswith(context.EARLIER_TITLE)]
-        limit = len("\n\n".join(body for _title, body in without)) - 2000
-        with patch.object(context, "MAX_PACKET_CHARS", limit):
-            tight = _sections("core", inventory)
-        self.assertLessEqual(len("\n\n".join(body for _title, body in tight)), limit)
-        self.assertEqual(_section(tight, context.LOCAL_TITLE), [])
-        self.assertLess(len(_section(tight, context.LIBRARY_TITLE)), library)
-        self.assertGreater(len(_section(tight, context.LIBRARY_TITLE)), 0)

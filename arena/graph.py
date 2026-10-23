@@ -12,13 +12,14 @@ from __future__ import annotations
 import re
 import textwrap
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from difflib import SequenceMatcher
 from functools import cache
 
 from arena import goalstate, text
 from arena.routes import proof_body
 from arena.routes import signature as route_signature
+from arena.run_control import committed_history
 from arena.salvage import fill_cost
 from arena.salvage import holes as find_holes
 from arena.steps import Step, hdr_index, split_steps, step_range
@@ -96,6 +97,90 @@ def measured_parent(texts: list[tuple[str, str]], text: str) -> tuple[str | None
 FILING_MIN_SIMILARITY = 0.50
 
 
+def _missing_fields(event: dict, keys: tuple[str, ...]) -> list[str]:
+    data = event.get("data") if isinstance(event.get("data"), dict) else {}
+    missing = list(data.get("missing") or [])
+    for key in keys:
+        if event.get(key) in (None, "") and key not in missing and data.get(key) in (None, ""):
+            missing.append(key)
+    return missing
+
+
+def _attempt_view(event: dict) -> dict:
+    data = event.get("data") if isinstance(event.get("data"), dict) else {}
+    return {
+        "attempt_id": event.get("event_id"),
+        "operation_id": event.get("operation_id"),
+        "actor_id": event.get("actor_id"),
+        "session_id": event.get("session_id"),
+        "tool_call_id": event.get("tool_call_id") or data.get("tool_call_id"),
+        "job_id": event.get("job_id") or data.get("job_id"),
+        "request_id": event.get("request_id") or data.get("request_id"),
+        "evaluation_id": event.get("evaluation_id") or data.get("evaluation_id"),
+        "relation": data.get("relation"),
+        "operation": data.get("operation"),
+        "inputs": data.get("inputs") or [],
+        "named_parent": data.get("named_parent"),
+        "artifact": data.get("artifact"),
+        "missing": _missing_fields(event, ("tool_call_id",)),
+    }
+
+
+def _derivation_view(event: dict) -> dict:
+    data = event.get("data") if isinstance(event.get("data"), dict) else {}
+    return {
+        "source": "derivation",
+        "type": data.get("relation"),
+        "parents": event.get("parents") or [],
+        "exact": data.get("relation") == "exact",
+        "relation": data.get("relation"),
+        "named_parent": data.get("named_parent"),
+        "operation": data.get("operation"),
+        "inputs": data.get("inputs") or [],
+        "artifact": data.get("artifact"),
+        "operation_id": event.get("operation_id"),
+        "actor_id": event.get("actor_id"),
+        "missing": _missing_fields(event, ("tool_call_id",)),
+    }
+
+
+def _edge_derivations(edge: dict | None) -> list[dict]:
+    if not edge:
+        return []
+    missing = [key for key in ("actor_id", "session_id", "tool_call_id", "operation_id") if key not in edge]
+    return [
+        {
+            "source": "edge",
+            "type": edge.get("type"),
+            "parents": edge.get("from") or [],
+            "exact": bool(edge.get("exact")),
+            "relation": "exact" if edge.get("exact") else edge.get("type"),
+            "named_parent": edge.get("named_parent"),
+            "operation": edge.get("operation"),
+            "inputs": [],
+            "artifact": None,
+            "missing": missing,
+        }
+    ]
+
+
+def _missing_attempt() -> dict:
+    missing = ["attempt_id", "actor_id", "session_id", "tool_call_id", "operation_id"]
+    return {
+        "attempt_id": None,
+        "operation_id": None,
+        "actor_id": None,
+        "session_id": None,
+        "tool_call_id": None,
+        "relation": None,
+        "operation": None,
+        "inputs": [],
+        "named_parent": None,
+        "artifact": None,
+        "missing": missing,
+    }
+
+
 @dataclass
 class Node:
     id: str
@@ -115,6 +200,8 @@ class Node:
     label: str
     holes: list[dict]
     proof_text: str
+    attempts: list[dict] = field(default_factory=list)
+    derivations: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -125,13 +212,23 @@ class Graph:
     stall_events: list[dict]
 
     @classmethod
-    def from_history(cls, history: list[dict], read_text: Callable[[str], str | None]) -> Graph:
+    def from_history(
+        cls,
+        history: list[dict],
+        read_text: Callable[[str], str | None],
+        *,
+        committed_operations: set[str] | frozenset[str] = frozenset(),
+    ) -> Graph:
+        """Project legacy history and only receipt-backed operation events."""
+        history = committed_history(history, committed_operations)
         total_versions = len((history[0].get("versions") if history else None) or [1])
         proof_ids: list[str] = []
         entries: dict[str, dict] = {}
         evaluations: dict[str, list[tuple[str, dict]]] = {}
         probe_results: dict[str, dict] = {}
         edges: dict[str, dict] = {}
+        attempts: dict[str, list[dict]] = {}
+        derivations: dict[str, list[dict]] = {}
         step_goals: dict[str, list[dict]] = {}
         routes: dict[str, str] = {}
         labels: dict[str, str] = {}
@@ -158,7 +255,15 @@ class Graph:
             elif kind == "evaluation":
                 evaluations.setdefault(event["candidate_id"], []).append((event["mode"], event["result"]))
             elif kind == "edge":
-                edges[event["proof_id"]] = event
+                edges.setdefault(event["proof_id"], event)
+            elif kind == "attempt":
+                proof_id = event.get("proof_id") or event.get("candidate_id")
+                if proof_id:
+                    attempts.setdefault(proof_id, []).append(_attempt_view(event))
+            elif kind == "derivation":
+                proof_id = event.get("proof_id") or event.get("candidate_id")
+                if proof_id:
+                    derivations.setdefault(proof_id, []).append(_derivation_view(event))
             elif kind == "focus":
                 focus = event["proof_id"]
             elif kind == "stall":
@@ -240,6 +345,8 @@ class Graph:
                     labels.get(proof_id, f"p{proof_id[:8]}"),
                     hole_rows,
                     proof,
+                    attempts.get(proof_id) or [_missing_attempt()],
+                    _edge_derivations(edge) + derivations.get(proof_id, []),
                 )
             )
         closing_fills: dict[tuple[str, str], list[Node]] = {}

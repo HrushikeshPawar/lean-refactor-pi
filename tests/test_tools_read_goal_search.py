@@ -1,3 +1,7 @@
+import hashlib
+import os
+import shutil
+from pathlib import Path
 from unittest.mock import patch
 
 from arena import campaign, tools
@@ -34,13 +38,105 @@ class ScratchResultTests(ToolCase):
             patch.object(tools.engine, "versions", return_value=[("v", "c")]),
             patch("arena.scoring.reference", return_value=(1000, 10000)),
             patch.object(tools.engine, "candidate_file", return_value=built),
-            patch.object(tools.engine, "run_lean", return_value=(0, output)),
+            patch.object(tools.engine, "run_lean", return_value=None if output is None else (0, output)),
             patch.object(tools, "_history", return_value=[]),
-            patch.object(campaign, "_append"),
             patch.object(campaign, "run_dir", return_value=self.directory),
         ):
             result = tools.scratch_tool("T", "logic", {"code": code})
         return (result.get("details") or result)["items"][0]["lines"]
+
+    def test_read_handle_example_is_neutral(self):
+        text = (Path(__file__).parents[1] / "agent-text" / "tools" / "read.yaml").read_text()
+        self.assertNotIn("ArkLib", text)
+        self.assertIn("cslib:Cslib/Foo.lean:120-150", text)
+
+    def test_scratch_retains_exact_original_code_for_success_failure_and_timeout(self):
+        code = "-- original λ context\r\n#check Nat.add_comm\r\n  \r\n"
+        shift = tools._SNIPPET_PREFIX.count("\n")
+        for output in ("", f"f.lean:{shift + 1}:0: error: fixture failure\n", None):
+            with self.subTest(output=output):
+                self.scratch(code, output=output)
+                saved = [row for row in campaign.events(self.directory) if row["kind"] == "scratch"][-1]
+                self.assertEqual(saved["code"], code)
+                self.assertEqual(saved["code_sha256"], hashlib.sha256(code.encode()).hexdigest())
+
+    def test_scratch_retains_code_when_context_construction_fails(self):
+        code = "#check Nat.add_comm\n"
+        with (
+            patch.object(tools.engine, "versions", return_value=[("v", "c")]),
+            patch.object(tools.engine, "candidate_file", side_effect=RuntimeError("fixture context unavailable")),
+        ):
+            result = tools.scratch_tool("T", "logic", {"code": code})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["items"][0]["outcome"], "construction_error")
+        saved = [row for row in campaign.events(self.directory) if row["kind"] == "scratch"][-1]
+        self.assertEqual(saved["code"], code)
+
+    def test_v8_scratch_failure_is_retrievable(self):
+        code = "-- original λ\r\n#check Nat.add_comm\r\n"
+        lean = patch.object(tools.engine, "run_lean", side_effect=AssertionError("lean must not run"))
+        with (
+            patch.object(tools.engine, "versions", return_value=[("v", "c")]),
+            patch.object(tools.engine, "candidate_file", side_effect=RuntimeError("fixture context unavailable")),
+            lean,
+        ):
+            result = tools.scratch_tool("T", "logic", {"code": code})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["items"][0]["outcome"], "construction_error")
+        saved = next(row for row in campaign.events(self.directory) if row.get("experiment_id"))
+        with lean:
+            found = tools.read_tool("T", "logic", {"experiment": saved["experiment_id"]})
+        item = found["items"][0]
+        self.assertEqual(item["code"], code)
+        self.assertEqual(item["outcome"], "construction_error")
+        self.assertIn("fixture context unavailable", "\n".join(item["lines"]))
+        self.assertNotEqual(item.get("validity"), "passed")
+        legacy = tools.read_tool("T", "logic", {"experiment": "a" * 64})
+        campaign._append(self.directory, {"kind": "scratch", "code_sha256": "b" * 64})
+        missing = tools.read_tool("T", "logic", {"experiment": "b" * 64})
+        self.assertEqual(missing["items"][0]["code_status"], "missing")
+        self.assertIsNone(missing["items"][0]["code"])
+        self.assertIn("missing code", "\n".join(missing["items"][0]["lines"]))
+        self.assertFalse(legacy["ok"])
+        built = {"path": "p", "text": "", "head": 0, "offset": 0, "start_line": 1}
+        with (
+            patch.object(tools.engine, "versions", return_value=[("v", "c")]),
+            patch.object(tools.engine, "candidate_file", return_value=built) as build,
+            patch.object(tools.engine, "run_lean", return_value=(1, "process failed without a Lean diagnostic")) as run,
+        ):
+            failed = tools.scratch_tool("T", "logic", {"code": "#check Nat"})["items"][0]
+            self.assertEqual(failed["outcome"], "failure")
+            repeated = tools.scratch_tool("T", "logic", {"code": "#check Nat"})
+            self.assertTrue(any("seen 2 times" in fact for fact in repeated["facts"]))
+            with patch.object(tools.engine, "run_lean", side_effect=OSError("transport unavailable")):
+                execution = tools.scratch_tool("T", "logic", {"code": "#check Bool"})["items"][0]
+            self.assertEqual(execution["outcome"], "execution_error")
+            with patch.object(tools, "_scratch_messages", side_effect=RuntimeError("renderer unavailable")):
+                processing = tools.scratch_tool("T", "logic", {"code": "#check Int"})["items"][0]
+            self.assertEqual(processing["outcome"], "processing_error")
+            self.assertEqual(processing["raw"], "process failed without a Lean diagnostic")
+            helper = tools.experiments.accept("logic", "def scratch_helper : Nat := 1", [])
+            tools.scratch_tool("T", "logic", {"code": "#check scratch_helper", "helpers": [helper["experiment_id"]]})
+            self.assertIn("def scratch_helper", build.call_args.args[1])
+            missing = tools.scratch_tool("T", "logic", {"code": "#check Nat", "helpers": ["missing"]})["items"][0]
+            self.assertEqual(missing["outcome"], "dependency_missing")
+            self.assertEqual(missing["validity"], "not_a_target_candidate")
+            self.assertIn("experiment_id", missing)
+            count = run.call_count
+            with (
+                patch.dict(os.environ, {"ARENA_JOB_ID": "j1", "ARENA_ACTIVATION_ID": "a1"}),
+                patch(
+                    "arena.orchestration.jobs",
+                    return_value={"jobs": [{"activations": [{"activation_id": "a1", "state": "cancelling"}]}]},
+                ),
+            ):
+                cancelled = tools.scratch_tool("T", "logic", {"code": "#check Unit"})["items"][0]
+            self.assertEqual(cancelled["outcome"], "cancelled")
+            self.assertEqual(run.call_count, count)
+            with patch.object(tools, "_scratch_cancelled", side_effect=[False, True]):
+                during_build = tools.scratch_tool("T", "logic", {"code": "#check String"})["items"][0]
+            self.assertEqual(during_build["outcome"], "cancelled")
+            self.assertEqual(run.call_count, count)
 
     def test_result_line_counts_messages_and_body_tokens_only_when_the_snippet_declares(self):
         check = self.scratch("#check Nat.add_comm\n")
@@ -65,6 +161,65 @@ class ScratchResultTests(ToolCase):
         self.assertNotIn("\u0335", "\n".join(lines))
         self.assertTrue(warnings[0].endswith("(also lines 3)"))
         self.assertFalse([line for line in lines if "line ?" in line])
+
+    def test_v8_scratch_promotes_exact_replacement(self):
+        filed = tools.compile_tool("T", "logic", {"drafts": ["by\n  sorry"]})
+        parent = filed["items"][0]["node"]
+        parent_node = next(node for node in tools._nodes("logic")[1].nodes if node.id == parent)
+        expected = parent_node.proof_text.replace("sorry", "trivial")
+        compiles = len(type(self).calls)
+        with patch.object(tools.engine, "run_lean", side_effect=AssertionError("scratch must not compile itself")):
+            result = tools.scratch_tool(
+                "T", "logic", {"replacement": "trivial", "at": {"node": parent, "steps": [1, 1]}}
+            )
+        self.assertEqual(len(type(self).calls) - compiles, 1)
+        item = result["items"][0]
+        self.assertEqual(item["promotion"]["state"], "promoted")
+        self.assertEqual(item["promotion"]["verification"]["cold"], "not_checked")
+        child = next(node for node in tools._nodes("logic")[1].nodes if node.id == item["promotion"]["node"])
+        self.assertEqual(child.proof_text, expected)
+        self.assertEqual(item["promotion"]["derivation"]["from"], [parent_node.proof_id])
+        saved = tools.experiments.retrieve("logic", item["experiment_id"])
+        self.assertEqual(saved["promotion"]["node"], child.id)
+        self.assertEqual(saved["context"]["anchor"]["node"], parent)
+        mixed = tools.scratch_tool("T", "logic", {"code": "#check Nat", "replacement": "trivial"})
+        self.assertFalse(mixed["ok"])
+        self.assertEqual(mixed["error"]["code"], "mixed_form")
+        built = {"path": "p", "text": "", "head": 0, "offset": 0, "start_line": 1}
+        with (
+            patch.object(tools.engine, "versions", return_value=[("v", "c")]),
+            patch.object(tools.engine, "candidate_file", return_value=built),
+            patch.object(tools.engine, "run_lean", return_value=(0, "")),
+        ):
+            check = tools.scratch_tool("T", "logic", {"code": "#check Nat"})["items"][0]
+            example = tools.scratch_tool("T", "logic", {"code": "example : True := trivial"})["items"][0]
+            snippet = tools.scratch_tool("T", "logic", {"code": "exact ?_"})["items"][0]
+        self.assertEqual(check["promotion"]["reason"], "general_check")
+        self.assertEqual(example["promotion"]["reason"], "unrelated_example")
+        self.assertEqual(snippet["promotion"]["reason"], "ambiguous_snippet")
+        helper = tools.experiments.accept("logic", "def scratch_helper : Nat := 1", [])
+        refused = tools.scratch_tool(
+            "T",
+            "logic",
+            {"replacement": "trivial", "at": {"node": parent, "steps": [1, 1]}, "helpers": [helper["experiment_id"]]},
+        )["items"][0]
+        self.assertEqual(refused["promotion"]["reason"], "helper_not_embeddable")
+        self.assertEqual(len(type(self).calls) - compiles, 1)
+        failed = tools.scratch_tool(
+            "T", "logic", {"replacement": "bad", "at": {"node": parent, "steps": [1, 1]}}
+        )["items"][0]
+        self.assertEqual(failed["promotion"]["state"], "failed")
+        self.assertEqual(failed["promotion"]["reason"], "proof_error")
+        self.assertTrue(failed["experiment_id"])
+        self.assertTrue(failed["promotion"]["node"])
+
+
+    def test_v8_scratch_promotes_full_theorem_after_repeated_header_lines(self):
+        row = {**ROW, "header": "import Mathlib\n\nopen Set Function\n\n"}
+        code = "open Set Function\n\ntheorem t : True := by\n  trivial"
+        with patch.object(campaign, "problem", return_value=row):
+            item = tools.scratch_tool("T", "logic", {"code": code})["items"][0]
+        self.assertEqual(item["promotion"]["state"], "promoted")
 
 
 class CascadeToolCase(ToolCase):
@@ -265,12 +420,13 @@ class ReadGoalSearchTests(CascadeToolCase):
 
     def test_prices_of_an_unmeasured_node_say_n_a_not_none(self):
         node = self.sketch()
-        total = {"tokens": 290, "heartbeats": None, "versions": "0/3"}
-        with patch.object(campaign, "price_table", return_value={"total": total}):
+        table = {"total": {"tokens": 290, "heartbeats": None, "versions": "0/3"}}
+        table["text"] = campaign.render_price_table(table)
+        with patch.object(campaign, "price_table", return_value=table):
             result = tools.read_tool("T", "logic", {"node": node, "view": "prices"})
-        line = result["items"][0]["lines"][1]  # [0] is the result section header
-        self.assertIn("heartbeats n/a", line)
-        self.assertNotIn("None", line)
+        lines = "\n".join(result["items"][0]["lines"])
+        self.assertIn("local heartbeats missing", lines)  # missing is not zero (decision 51)
+        self.assertNotIn("None", lines)
 
     def test_read_map_needs_no_target(self):
         node = self.sketch()
@@ -283,23 +439,6 @@ class ReadGoalSearchTests(CascadeToolCase):
         self.assertEqual(again["map"], result["map"])
         missing = tools.read_tool("T", "logic", {"view": "source"})
         self.assertEqual(missing["error"]["code"], "bad_target")
-
-    def test_finish_returns_archive_and_stops(self):
-        with (
-            patch.object(
-                campaign,
-                "state",
-                return_value={
-                    "baseline": {"tokens": 100, "heartbeats": 1000},
-                    "best": {"tokens": 80, "heartbeats": 500, "versions": {"v1": True}},
-                },
-            ),
-            patch.object(campaign, "map_view", return_value={"archive": [{"letter": "A", "node": "n1", "score": 90}]}),
-        ):
-            result = tools.finish_tool("T", "logic", {})
-        self.assertTrue(result["stop"])
-        self.assertTrue(any("Archive:" in fact for fact in result["facts"]))
-        self.assertTrue(any("Points left:" in fact for fact in result["facts"]))
 
 
 class ToolReplyTextTests(CascadeToolCase):
@@ -322,14 +461,17 @@ class ToolReplyTextTests(CascadeToolCase):
                 {"returncode": 0, "goals_after": "case a\n⊢ True\n\ncase b\nh : True\n⊢ True"},
                 {"returncode": 1, "output": "T.lean:2:2: error: unknown tactic\n  near x\nT.lean:3:2: error: later"},
                 {"timeout": True},
+                {"returncode": 1, "goals_after": "⊢ True",
+                 "output": "T.lean:2:2: error: unknown identifier 'x'\nT.lean:1:0: error: unsolved goals\n⊢ True"},
             ],
-            {"hole": f"{node}.h1", "try": ["trivial", "constructor", "bogus x", "skip"]},
+            {"hole": f"{node}.h1", "try": ["trivial", "constructor", "bogus x", "skip", "exact x"]},
         )
         lines = [line for item in result["items"][1:] for line in item["lines"]]
         verdicts = [line for line in lines if line.startswith("t")]
         self.assertEqual(
             [line.split(", tokens")[0] for line in verdicts],
-            ["t1 compiles", "t2 open goals 2", "t3 error: unknown tactic near x", "t4 timed out"],
+            ["t1 compiles", "t2 open goals 2", "t3 error: unknown tactic near x", "t4 timed out",
+             "t5 error: unknown identifier 'x'"],
         )
         self.assertTrue(all(", tokens " in line for line in verdicts))
         # An open snippet shows the goals it leaves, with each case's hypothesis names.
@@ -374,7 +516,7 @@ class ToolReplyTextTests(CascadeToolCase):
         bare = tools.read_tool("T", "logic", {"node": node, "view": "outline"})["items"][0]["lines"]
         self.assertEqual(bare[0], RESULT)
         self.assertTrue(bare[1].startswith("| step |"))
-        self.assertRegex(bare[2], r"^\| s1 \| 2-2 \| \S+ \| - \| - \| `skip` \|$")  # unmeasured: no heartbeats, no pts
+        self.assertRegex(bare[2], r"^\| s1 \| 2-2 \| \S+ \| - \| `skip` \|$")  # unmeasured: no heartbeats
         proof_id = campaign.resolve_node_ref(campaign.events(self.directory), node)
         hypotheses = "a : ℕ\nb : ℕ\n"
         goals = [
@@ -396,6 +538,90 @@ class ToolReplyTextTests(CascadeToolCase):
         )
         missing = tools.read_tool("T", "logic", {"node": node, "view": "outline", "step": "s9"})
         self.assertEqual(missing["error"]["code"], "unknown_step")
+
+    def test_v8_reply_preserves_actionable_evidence(self):
+        conclusion = "TargetConclusion"
+        binders = " ".join(f"(h{index} : Nat)" for index in range(30))
+        signature = f"Nat.long : ∀ {binders}, {conclusion} = {conclusion}"
+        hit = {
+            "name": "Nat.long",
+            "handle": "decl:Nat.long",
+            "signature": signature + " `tick",
+            "module": "Init",
+            "line": 3,
+            "why": "exact",
+        }
+        miss = {
+            "query": "Nope.missing",
+            "hits": [],
+            "error": {"code": "not_found", "input": "Nope.missing", "suggestions": ["List.nil"]},
+        }
+        with patch("arena.tools.search.search", return_value={"queries": [miss, {"query": "Nat.long", "hits": [hit]}]}):
+            found = tools.search_tool("T", "logic", {"queries": ["Nope.missing", "Nat.long"]})
+        miss_item, hit_item = found["items"]
+        shown = "\n".join(line for item in found["items"] for line in item["lines"])
+        self.assertTrue(miss_item["ok"])
+        self.assertEqual(miss_item.get("hits"), [])
+        self.assertNotIn("invalid", shown.lower())
+        self.assertNotIn("List.nil", shown)
+        self.assertIn(conclusion, shown)
+        self.assertEqual(hit_item["hits"][0]["signature"], signature + " `tick")
+        self.assertEqual(shown.count("`") % 2, 0)
+        saved = next(event for event in campaign.events(self.directory) if event.get("kind") == "search")
+        self.assertEqual(saved["hits"][0]["signature"], signature + " `tick")
+        target = "⊢ " + " ".join([conclusion] * 12)
+        goals = "\n".join(f"h{index} : Nat" for index in range(40)) + "\n" + target
+        node = self.sketch()
+        tried = self.goal_with_tries(
+            [{"returncode": 1, "output": "T.lean:2:2: error: unsolved goals\n" + goals}],
+            {"hole": f"{node}.h1", "try": ["sorry"]},
+        )
+        body = "\n".join(line for item in tried["items"] for line in item["lines"])
+        self.assertIn("open goals", body)
+        self.assertNotIn("error:", body)
+        self.assertIn(conclusion, body)
+        self.assertEqual(tried["items"][1]["goals"], goals)
+        pipe_signature = "A|" * 150 + "FINAL_CONCLUSION"
+        preview = tools._signature_preview(pipe_signature, 200)
+        self.assertIn("FINAL_CONCLUSION", preview)
+        self.assertIn("(clipped)", preview)
+        self.assertNotIn("|", preview.replace("\\|", ""))
+        diagnostic = "unsolved goals\nh : Nat\n⊢ " + "A " * 1600 + "\n  FINAL_CONCLUSION"
+        error_preview = tools._error_text(diagnostic, set(), 120)
+        self.assertIn("FINAL_CONCLUSION", error_preview)
+        self.assertIn("not shown", error_preview)
+        case_goals = [
+            "case left\nh : " + "Nat " * 100 + "\n⊢ Left\n  LEFT_CONTINUATION",
+            "case right\nh : " + "Nat " * 100 + "\n⊢ Right\n  RIGHT_CONTINUATION",
+            "h : " + "Nat " * 100 + "\n⊢ Untagged\n  UNTAGGED_CONTINUATION",
+        ]
+        clipped_cases = tools._preview_keeping_targets(tools._goal_cases(case_goals, 12), 100)
+        for identity in ("case left", "case right", "goal 3 of 3 (no case tag)"):
+            self.assertIn(identity, clipped_cases)
+        for conclusion in ("LEFT_CONTINUATION", "RIGHT_CONTINUATION", "UNTAGGED_CONTINUATION"):
+            self.assertIn(conclusion, clipped_cases)
+        self.assertNotIn("case left:", clipped_cases)
+        self.assertIn("not shown", clipped_cases)
+        many_goals = [f"case c{index}\nh : Nat\n⊢ Goal{index}" for index in range(13)]
+        raw_goals = "\n\n".join(many_goals)
+        trial = self.goal_with_tries(
+            [{"returncode": 1, "goals_after": raw_goals, "output": diagnostic}],
+            {"hole": f"{node}.h1", "try": ["sorry"]},
+        )
+        self.assertIn("1 more goals not shown", "\n".join(trial["items"][1]["lines"]))
+        self.assertEqual(trial["items"][1]["goals"], raw_goals)
+        self.assertEqual(trial["items"][1]["output"], diagnostic)
+        with (
+            patch(
+                "arena.tools.engine.candidate_file",
+                return_value={"path": "T.lean", "text": ROW["src"], "head": 0, "start_line": 1},
+            ),
+            patch("arena.tools.engine.lean_goals", return_value={"goals": many_goals, "rendered": raw_goals}),
+        ):
+            current = tools.goal_tool("T", "logic", {"hole": f"{node}.h1"})["items"][0]
+        self.assertEqual(current["goal"], raw_goals)
+        self.assertEqual(current["goals"], many_goals)
+        self.assertIn("1 more goals not shown", "\n".join(current["lines"]))
 
 
 class ReadHandleForgivingTests(CascadeToolCase):
@@ -438,3 +664,72 @@ class ReadHandleForgivingTests(CascadeToolCase):
         by_hole = tools.read_tool("T", "logic", {"hole": f"{node}.h1"})
         self.assertNotEqual((by_handle.get("error") or {}).get("code"), "bad_handle")
         self.assertEqual(by_handle, by_hole)
+
+
+class ActionableRejectionTests(CascadeToolCase):
+    def test_representative_rejections_say_how_to_fix_the_call(self):
+        from arena import coordinator
+
+        node = self.sketch()
+        step = tools.read_tool("T", "logic", {"node": node, "step": "s1"})["error"]
+        self.assertIn("with view outline", " ".join(step["valid"]))
+        unknown = tools.read_tool("T", "logic", {"node": "n99"})["error"]
+        self.assertIn(node, unknown["valid"])
+        hole = tools.read_tool("T", "logic", {"hole": "n99.h1"})["error"]
+        self.assertEqual((hole["code"], hole["input"], hole["valid"]), ("invalid_hole", "n99.h1", ["nN.hK"]))
+        line = tools.goal_tool("T", "logic", {"node": node, "line": 99})["error"]
+        self.assertEqual(line["code"], "invalid_goal")
+        self.assertIn("outside the proof", line["input"])
+        cancel = coordinator.Coordinator._cancel(object(), {"actor_id": "sol"})
+        self.assertEqual((cancel["reason"], cancel["hint"]), ("job_id", "cancel needs job_id, one string."))
+
+
+class ScratchRealLeanTests(ToolCase):
+    """Real `lean` through the real scratch path; the snippet replaces the declaration under a doc comment."""
+
+    SOURCE = "import Lean\n\n/-- doc -/\ntheorem t : True := by\n  trivial\n"
+
+    def run_scratch(self, code):
+        import subprocess
+        import tempfile
+        from pathlib import Path
+
+        if shutil.which("lean") is None:
+            self.skipTest("lean is not installed")
+        directory = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, directory)
+        offset = self.SOURCE.index("theorem t")
+        start = self.SOURCE[:offset].count("\n") + 1
+
+        def candidate(row, proof, *args, **kwargs):
+            text = self.SOURCE[:offset] + proof.rstrip("\n") + "\n"
+            return {"path": directory, "text": text, "head": self.SOURCE.index("/--"), "offset": offset,
+                    "start_line": start, "end_line": start + proof.count("\n")}
+
+        def run(row, path, lean_text, **kwargs):
+            (directory / "T.lean").write_text(lean_text)
+            done = subprocess.run(["lean", "T.lean"], capture_output=True, text=True, cwd=directory)
+            return done.returncode, done.stdout + done.stderr
+
+        with (
+            patch.object(tools.engine, "versions", return_value=[("v", "c")]),
+            patch("arena.scoring.reference", return_value=(1000, 10000)),
+            patch.object(tools.engine, "candidate_file", side_effect=candidate),
+            patch.object(tools.engine, "run_lean", side_effect=run),
+            patch.object(tools, "_history", return_value=[]),
+            patch.object(campaign, "run_dir", return_value=self.directory),
+        ):
+            result = tools.scratch_tool("T", "logic", {"code": code})
+        return (result.get("details") or result)["items"][0]["lines"]
+
+    def test_check_under_a_doc_comment_is_not_a_failure(self):
+        self.assertEqual(self.run_scratch("#check Nat\n")[0], "OK: errors 0, warnings 0")
+
+    def test_case_tag_hint_lists_the_real_tags(self):
+        code = "example (h : p \u2228 q) : True := by\n  cases h\n  case' x.inl => trivial\n"
+        result = self.run_scratch(code)
+        lines = "\n".join(result)
+        self.assertIn("Case tag `x.inl` not found", lines)
+        self.assertIn("`inl`: inl", lines)
+        self.assertNotIn("x.inlinl", lines)
+        self.assertNotIn("\u0335", lines)

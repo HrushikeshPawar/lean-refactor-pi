@@ -51,6 +51,50 @@ def write_run(root: Path, run_id: str, proxy_helper: bool):
     return directory
 
 
+class RuntimeQueueTests(unittest.TestCase):
+    def test_queue_age_advances_for_all_pending_jobs_before_selection(self):
+        from arena import campaign
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with mock.patch.object(campaign, "ROOT", root), contextlib.redirect_stderr(io.StringIO()):
+                directory = campaign.run_dir("queue-age")
+                with mock.patch.object(campaign.time, "time", return_value=100.0):
+                    campaign._mark_queued(directory, [], "autocheck", "full", ["first", "second"])
+                history = campaign.events(directory)
+                queued = campaign._mark_queued(directory, history, "autocheck", "full", ["first", "second"])
+                self.assertEqual(set(queued), {"first", "second"})
+                self.assertEqual(campaign._queue_age(queued["second"], now=105.0), 5.0)
+
+    def test_full_job_queue_age_uses_fast_result_even_if_checker_sees_it_later(self):
+        from arena import campaign
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with mock.patch.object(campaign, "ROOT", root), contextlib.redirect_stderr(io.StringIO()):
+                directory = campaign.run_dir("full-queue-age")
+                directory.mkdir(parents=True)
+                (directory / "ledger.jsonl").write_text(
+                    "\n".join(
+                        json.dumps(row)
+                        for row in (
+                            {"kind": "candidate", "candidate_id": "candidate-a", "ts": 100.0},
+                            {"kind": "evaluation", "candidate_id": "candidate-a", "mode": "fast", "ts": 120.0},
+                        )
+                    )
+                    + "\n"
+                )
+                with mock.patch.object(campaign.time, "time", return_value=150.0):
+                    queued = campaign._mark_queued(
+                        directory, campaign.events(directory), "autocheck", "full", ["candidate-a"]
+                    )["candidate-a"]
+                    self.assertEqual(campaign._queue_age(queued), 30.0)
+                logged = campaign.events(directory)[-1]
+                self.assertEqual(logged["ts"], 150.0)
+                self.assertEqual(logged["eligible_ts"], 120.0)
+                self.assertEqual(logged["eligibility_source"], "fast_evaluation")
+
+
 class PlanTests(unittest.TestCase):
     def test_dry_run_prints_plan_and_planned_spend_without_spending(self):
         out = io.StringIO()
@@ -91,12 +135,14 @@ class PlanTests(unittest.TestCase):
 class ColdVerificationTests(unittest.TestCase):
     def test_cold_verification_compiles_every_version_and_rejects_one_failure(self):
         from arena import campaign
+        from tests.test_cold_outcomes import admit_fixture_proof
 
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
             (directory / "proofs").mkdir()
             (directory / "proofs" / "c1.lean").write_text("theorem t : True := by trivial\n")
-            history = [{"theorem": "T", "versions": ["v1", "v2"]}]
+            admit_fixture_proof(directory, "c1")
+            history = [{"theorem": "T", "versions": [["v1", "c1"], ["v2", "c2"]]}]
             calls = []
 
             def compile_version(_row, _proof, version, _commit, **_kwargs):
@@ -110,6 +156,7 @@ class ColdVerificationTests(unittest.TestCase):
                 mock.patch.object(campaign, "lean_lock", return_value=contextlib.nullcontext()),
                 mock.patch.object(campaign, "force_cold", return_value=contextlib.nullcontext()),
                 mock.patch("arena.engine.problem", return_value={"name": "T", "proof_length": 1}),
+                mock.patch.object(campaign, "problem", return_value={"name": "T", "version_info": [{"v1": "c1"}, {"v2": "c2"}]}),
                 mock.patch("arena.engine.versions", return_value=[("v1", "c1"), ("v2", "c2")]),
                 mock.patch("arena.engine.measure_version", return_value=("v1", "c1")),
                 mock.patch("arena.engine.validate_proof", return_value=1),
@@ -124,6 +171,101 @@ class ColdVerificationTests(unittest.TestCase):
             self.assertEqual(calls, ["v1", "v2"])
             self.assertFalse(result["confirmed"])
             self.assertEqual(result["passed"], {"v1": True, "v2": False})
+
+    def test_v8_inconclusive_cold_uses_certified_fallback(self):
+        from arena import campaign
+        from tests.test_cold_outcomes import admit_fixture_proof
+
+        proof_a = "theorem t : True := by\n  exact True.intro\n"
+        proof_b = "theorem t : True := by\n  trivial\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            proofs = directory / "proofs"
+            proofs.mkdir()
+            (proofs / "higher.lean").write_text(proof_a)
+            (proofs / "lower.lean").write_text(proof_b)
+            admit_fixture_proof(directory, "higher")
+            admit_fixture_proof(directory, "lower")
+            original = (proofs / "higher.lean").read_bytes()
+
+            def full(score: float) -> dict:
+                return {
+                    "ok": True,
+                    "mode": "full",
+                    "tokens": 4,
+                    "heartbeat": 10,
+                    "compat": {"v1": {"passed": True, "heartbeats": 10, "lean": {"path": "session"}}},
+                    "metrics": {"proxy": score},
+                }
+
+            history = [
+                {"kind": "problem", "theorem": "T", "versions": [["v1", "c1"]]},
+                {"kind": "candidate", "candidate_id": "higher", "origin": "model"},
+                {"kind": "evaluation", "candidate_id": "higher", "mode": "full", "result": full(90)},
+                {"kind": "candidate", "candidate_id": "lower", "origin": "model"},
+                {"kind": "evaluation", "candidate_id": "lower", "mode": "full", "result": full(70)},
+                {
+                    "kind": "cold_verification",
+                    "candidate_id": "lower",
+                    "confirmed": True,
+                    "outcome": "passed",
+                    "passed": {"v1": True},
+                    "mode": "cold",
+                    "cold_heartbeats": 10,
+                    "recorded_heartbeats": 10,
+                },
+            ]
+            (directory / "ledger.jsonl").write_text(
+                "".join(json.dumps(row) + "\n" for row in history)
+            )
+            seen = []
+
+            def timeout(_name, proof, _mode, **_kwargs):
+                seen.append(proof)
+                return {
+                    "ok": True,
+                    "mode": "full",
+                    "compat": {
+                        "v1": {
+                            "passed": False,
+                            "timeout": True,
+                            "error": "Lean timed out",
+                            "diagnostics": ["clock"],
+                        }
+                    },
+                    "heartbeat": None,
+                }
+
+            with (
+                mock.patch.object(campaign, "run_dir", return_value=directory),
+                mock.patch.object(campaign.lean_health, "tripped", return_value=None),
+                mock.patch.object(campaign, "lean_lock", return_value=contextlib.nullcontext()),
+                mock.patch.object(campaign, "force_cold", return_value=contextlib.nullcontext()),
+                mock.patch.object(campaign, "_evaluate", side_effect=timeout),
+                mock.patch.object(campaign, "problem", return_value={"name": "T", "version_info": [{"v1": "c1"}]}),
+            ):
+                identity, _proof, error = campaign._cold_input(directory, history, "lower", 10)
+                self.assertIsNone(error)
+                history[-1].update(identity)
+                (directory / "ledger.jsonl").write_text("".join(json.dumps(row) + "\n" for row in history))
+                answer = campaign.submission("run")
+                retry = campaign.cold_verify("run", {"id": "higher", "heartbeats": 10})
+
+            self.assertEqual(answer["candidate_id"], "lower")
+            self.assertNotIn("rejected_on_cold", answer)
+            pending = answer["pending_checks"]
+            self.assertEqual(pending[0]["candidate_id"], "higher")
+            self.assertEqual(pending[0]["outcome"], "inconclusive")
+            self.assertEqual(pending[0]["cause"], "timeout")
+            self.assertEqual(seen, [proof_a, proof_a])
+            self.assertEqual(retry["outcome"], "inconclusive")
+            self.assertEqual(retry["proof_id"], "higher")
+            self.assertEqual(retry["mode"], "cold")
+            self.assertIn("clock", json.dumps(retry.get("compat")))
+            self.assertEqual((proofs / "higher.lean").read_bytes(), original)
+            kinds = [json.loads(line)["kind"] for line in (directory / "ledger.jsonl").read_text().splitlines()]
+            self.assertEqual(kinds.count("candidate"), 2)
+            self.assertGreaterEqual(kinds.count("cold_verification"), 3)
 
 
 class GateTests(unittest.TestCase):
@@ -388,7 +530,7 @@ def offline_campaign(root: Path, packets=None):
     with (
         mock.patch.object(rc, "RUNS", root),
         mock.patch.object(rc, "check_indexes"),
-        mock.patch("arena.campaign.packet", side_effect=packets or (lambda row: "x" * 1234)),
+        mock.patch("arena.campaign.packet", side_effect=packets or (lambda row, model=None: "x" * 1234)),
         mock.patch.object(rc, "Housekeeping", housekeeping),
         mock.patch.object(rc.scheduler, "ResourceSampler", FakeSampler),
         mock.patch.object(rc.scheduler, "mem_total_default", return_value=16.0),

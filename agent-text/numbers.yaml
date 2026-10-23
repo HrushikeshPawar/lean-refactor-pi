@@ -6,6 +6,7 @@ compile_max_drafts: 4
 error_passes_max: 3
 error_message_chars: 400
 cross_version_wait_seconds: 10
+await_timeout_minutes: 10
 goal_try_max: 6
 goal_cases_max: 12
 goal_try_chars: 1500
@@ -13,9 +14,9 @@ scratch_max_chars: 8000
 scratch_message_chars: 3000
 scratch_output_chars: 300
 goal_hyp_chars: 1000
+error_goals_max: 3
 outline_max_chars: 6000
 read_source_lines: 400
-finish_points_lines: 4
 source_lines_per_call: 400
 find_files_per_query: 30
 search_hits_default: 10
@@ -40,13 +41,37 @@ packet_scope_chars: 600
 packet_library: 60
 packet_library_budget: 7000
 packet_library_chars: 340
-packet_local_type_chars: 320
 memory_library_lines: 15
 memory_read_entries: 30
+memory_recovery_entries: 8
 budget:
-  static_words: 685
-  packet_words: 214
+  static_words: 860
+  # 870: the team paragraph adds Sol's default stance (keep hill climbing) and a per-role guide (r12b analysis).
+  # 920: keep every slot busy, refill ended islands, no best is final, combine axis extremes (r14 stall analysis).
+  packet_words: 920
+  # 215: the worker packet explains the card (what to write, what arrives in replies).
+  worker_words: 215
   reply_words: 40
+  # Continuation nudges are sent only after a turn with no tool call, a few times a run.
+  nudge_words: 60
+  # The island packet section and its family lines exist only for island workers; they are not in the shared worker packet.
+  # 135: the island packet explains the stay-open loop and the card.
+  island_words: 135
 # Steps below the step table are named when tried at most this often and still worth at least this many points.
+# An island worker settles after this many consecutive full turns without improving its island best.
+island_stale_turns: 4
+# The island startup packet lists at most this many existing families, each with this many tactic lines.
+island_families: 6
+island_family_lines: 4
+# The orchestrator is told about idle worker slots once the run is this many minutes old.
+idle_note_after_minutes: 5
+# While slots stay idle the note repeats this often; r14's orchestrator ignored a single note for 17 minutes.
+idle_note_repeat_minutes: 5
 untried_step_max_tries: 2
 untried_step_min_pts: 0.5
+# The orchestrator is told of a plateau when the run best gains less than plateau_points in plateau_minutes.
+# 0.5 never fired in run r11 until its last 2 minutes: the best gained about 0.5 per 10 minutes from 1-3 token trims alone.
+plateau_points: 1.0
+plateau_minutes: 10
+# A worker is reminded to update its card about its new best nodes at most once per this many minutes.
+card_stale_minutes: 5

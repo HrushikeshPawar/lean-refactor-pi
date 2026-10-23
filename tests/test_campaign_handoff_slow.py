@@ -39,7 +39,8 @@ class CampaignHandoffTests(unittest.TestCase):
         cls.work = Path(tempfile.mkdtemp())
         cls.service = cls.work / "lean"
         script = cls.work / "script.json"
-        # One turn spends into the final tenth of the $0.1 limit, so the closing text-only turn ends each run.
+        # One turn spends into the final tenth of the $0.1 limit. A text-only turn does not end a run; the
+        # scripted provider keeps answering "done" after the script until the actual-cost limit ends each run.
         steps = [cheap_tool("read", {"view": "map"}, output=SPEND_90_PCT), {"text": "done"}]
         script.write_text(json.dumps(steps))
         env = {

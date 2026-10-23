@@ -14,19 +14,21 @@ keys in ~/.pi/agent/langfuse.json (never sent to the browser) and cached; `--no-
 from __future__ import annotations
 
 import fnmatch
+import inspect
 import json
 import re
 import signal
 import sys
 import threading
 import time
+from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
 from arena.campaign import graph_state, run_dir
 from arena.summary import configured_cap
-from arena.viewer_data import Langfuse, campaign_of, hub_row, node_calls, read_jsonl, run_dashboard
+from arena.viewer_data import Langfuse, campaign_of, card_payload, hub_row, node_calls, read_jsonl, run_dashboard
 
 ASSETS = Path(__file__).resolve().parents[1] / "graph_viewer"
 
@@ -63,6 +65,7 @@ def slim_probes(payload: dict, history: list[dict]) -> list[dict]:
         rows.append(
             {
                 "proof_id": identifier,
+                "node": probe.get("node"),
                 "parent": probe.get("parent"),
                 "ts": probe.get("ts"),
                 "route": routes.get(identifier),
@@ -82,6 +85,42 @@ def slim_probes(payload: dict, history: list[dict]) -> list[dict]:
     return rows
 
 
+LINEAGE_EDGES = frozenset({"edited_from", "filled_from", "merged_from", "salvaged_from"})
+
+
+def recorded_lineage(payload: dict, directory: Path, history: list[dict]) -> None:
+    """Parents as the graph recorded them. The ledger names the best node as parent of a draft compiled without one;
+    here such a draft is a root, a draft filed under the focus keeps that link as `filed_under`, and every probe names
+    the actor whose attempt made it."""
+    from arena.orchestration import proof_nodes
+
+    graph = proof_nodes(directory)
+    actors: dict[str, str] = {}
+    for row in history:
+        if row.get("kind") == "attempt" and row.get("proof_id") and row.get("actor_id"):
+            actors.setdefault(row["proof_id"], row["actor_id"])
+
+    def lineage(edge: dict | None) -> tuple[list[str], str | None]:
+        edge = edge or {}
+        sources = list(edge.get("from") or edge.get("parents") or [])
+        if edge.get("type") in LINEAGE_EDGES:
+            return sources, None
+        return [], sources[0] if edge.get("type") == "filed_under_focus" and sources else None
+
+    for item in payload.get("nodes", []):
+        node = graph.get(item["id"])
+        if node is None:
+            continue
+        item["parents"], item["filed_under"] = lineage(node.edge)
+        item["derivations"] = [{**d, "parents": lineage(d)[0]} for d in node.derivations] or [{"parents": item["parents"]}]
+    for probe in payload.get("probes", []):
+        node = graph.get(probe["proof_id"])
+        if node is not None:
+            parents, probe["filed_under"] = lineage(node.edge)
+            probe["parent"] = parents[0] if parents else None
+        probe["actor_id"] = actors.get(probe["proof_id"])
+
+
 # A live run's ledger changes every few seconds, so file stamps never let a cache hit, and rebuilding a large graph
 # takes seconds (v7-check4 Binius: graph 5.8 s, dashboard 4.8 s, polled by every open tab). Each run's payloads are
 # rebuilt at most once per MEMO_SECONDS; concurrent requests for the same payload wait for one build.
@@ -89,6 +128,20 @@ MEMO_SECONDS = 10.0
 _MEMO: dict[tuple[str, str], tuple[float, bytes]] = {}
 _MEMO_LOCKS: dict[tuple[str, str], threading.Lock] = {}
 _MEMO_GUARD = threading.Lock()
+
+
+def job_roles(delegations: list[dict]) -> dict[str, dict]:
+    """Worker actor id to its job's role (trim, token island, HB island, family island, proof, step) and first task."""
+    names = {"tokens": "token island", "heartbeats": "HB island"}
+    roles: dict[str, dict] = {}
+    for row in delegations:
+        actor = row.get("worker_actor_id")
+        if not actor or actor in roles or not row.get("scope"):
+            continue
+        scope = row["scope"]
+        role = names.get(row.get("objective"), "family island") if scope == "island" else scope
+        roles[actor] = {"role": role, "task": row.get("task")}
+    return roles
 
 
 def memo_json(kind: str, run_id: str, build) -> bytes:
@@ -104,51 +157,119 @@ def memo_json(kind: str, run_id: str, build) -> bytes:
         return body
 
 
+def _request_amount(event: dict) -> Decimal:
+    amount = event.get("usd")
+    if isinstance(amount, str):
+        return Decimal(amount)
+    return Decimal(str(amount))
+
+
+def _read_spend(directory: Path, events: list[dict]) -> dict:
+    """One total. Control rows are read, never repaired or rewritten."""
+    if (directory / "control.jsonl").is_file():
+        from arena.run_control import _control_rows, _spend_view
+
+        state = _spend_view(directory, _control_rows(directory))
+        return {
+            "total": state["total"],
+            "by_actor": state["by_actor"],
+            "by_job": state["by_job"],
+            "accounting": state["accounting"],
+            "authority": "control.jsonl",
+        }
+    from arena.summary import counted_settles
+
+    rows, unknown = counted_settles(events)
+    charged = Decimal("0")
+    by_actor: dict[str, Decimal] = {}
+    by_job: dict[str, Decimal] = {}
+    for event in rows:
+        amount = _request_amount(event)
+        charged += amount
+        if event.get("actor_id"):
+            by_actor[event["actor_id"]] = by_actor.get(event["actor_id"], Decimal("0")) + amount
+        if event.get("job_id"):
+            by_job[event["job_id"]] = by_job.get(event["job_id"], Decimal("0")) + amount
+    return {
+        "total": format(charged, "f"),
+        "by_actor": {key: format(value, "f") for key, value in by_actor.items()},
+        "by_job": {key: format(value, "f") for key, value in by_job.items()},
+        "accounting": "unknown" if unknown else "known",
+        "authority": "cost-ledger.jsonl",
+    }
+
+
 def graph_payload(run_id: str) -> dict:
     payload = graph_state(run_id)
     directory = run_dir(run_id)
-    payload["probes"] = slim_probes(payload, read_jsonl(directory / "ledger.jsonl"))
+    ledger = read_jsonl(directory / "ledger.jsonl")
+    payload["probes"] = slim_probes(payload, ledger)
+    recorded_lineage(payload, directory, ledger)
     status = directory / "merge-worker.json"
     payload["worker"] = json.loads(status.read_text()) if status.exists() else None
+    payload["cards"] = card_payload(directory)
     charged = 0.0
     pi_embedded = 0.0
     parts = {"input": 0.0, "output": 0.0, "cache_read": 0.0, "cache_write": 0.0}
     names = {"input": "input", "output": "output", "cacheRead": "cache_read", "cacheWrite": "cache_write"}
     costs = []
     journal = directory / "cost-ledger.jsonl"
+    cost_events: list[dict] = []
     if journal.exists():
         for line in journal.read_text().splitlines():
-            event = json.loads(line)
-            if event.get("kind") != "settle" or event.get("usage_known") is False:
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
                 continue
-            usd = float(event["usd"])
-            charged += usd
-            pi_embedded += float(event.get("pi_embedded_cost_usd") or 0)
-            for key, value in (event.get("ledger_components_usd") or {}).items():
-                if key in names:
-                    parts[names[key]] += float(value)
-            tokens = event.get("tokens") or {}
-            # Cache hit rate: cache_read over every prompt token (input + cache_read + cache_write).
-            prompt = tokens.get("input", 0) + tokens.get("cache_read", 0) + tokens.get("cache_write", 0)
-            ts = event.get("ts")
-            costs.append(
-                {
-                    "number": len(costs) + 1,
-                    "spent_usd": charged,
-                    "request_usd": usd,
-                    "parts": dict(parts),
-                    "tokens": tokens,
-                    "reuse_pct": 100 * tokens.get("cache_read", 0) / prompt if prompt else None,
-                    # The cost journal stamps milliseconds; the candidate ledger uses seconds.
-                    "ts": ts / 1000 if ts and ts > 1e11 else ts,
-                }
-            )
+            if isinstance(event, dict):
+                cost_events.append(event)
+    from arena.summary import counted_settles
+
+    for event in counted_settles(cost_events)[0]:
+        usd = float(event["usd"])
+        charged += usd
+        pi_embedded += float(event.get("pi_embedded_cost_usd") or 0)
+        for key, value in (event.get("ledger_components_usd") or {}).items():
+            if key in names:
+                parts[names[key]] += float(value)
+        tokens = event.get("tokens") or {}
+        # Cache hit rate: cache_read over every prompt token (input + cache_read + cache_write).
+        prompt = tokens.get("input", 0) + tokens.get("cache_read", 0) + tokens.get("cache_write", 0)
+        ts = event.get("ts")
+        costs.append(
+            {
+                "number": len(costs) + 1,
+                "spent_usd": charged,
+                "request_usd": usd,
+                "parts": dict(parts),
+                "tokens": tokens,
+                "reuse_pct": 100 * tokens.get("cache_read", 0) / prompt if prompt else None,
+                # The cost journal stamps milliseconds; the candidate ledger uses seconds.
+                "ts": ts / 1000 if ts and ts > 1e11 else ts,
+            }
+        )
     payload["cost_timeline"] = costs
-    payload["cost"] = {"spent_usd": charged, "pi_embedded_usd": pi_embedded}
+    payload["spend"] = _read_spend(directory, cost_events)
+    spent = float(Decimal(payload["spend"]["total"]))
+    payload["cost"] = {
+        "spent_usd": spent,
+        "pi_embedded_usd": pi_embedded,
+        "authority": payload["spend"]["authority"],
+    }
+    payload["cost_timeline_authority"] = "cost-ledger.jsonl"
     payload["baseline"] = baseline_point(payload)
     give_reference_its_numbers(payload)
     config = directory / "run-config.json"
     payload["limit_usd"] = configured_cap(json.loads(config.read_text())) if config.exists() else None
+    payload["models"] = run_models(directory)
+    from arena.orchestration import _delegations, worker_job_labels
+
+    jobs = worker_job_labels(directory)
+    roles = job_roles(_delegations(directory))
+    for actor in payload.get("actors") or []:
+        actor["job"] = jobs.get(actor["actor_id"])
+        actor.update(roles.get(actor["actor_id"], {}))
+    payload["target"] = target_to_beat(payload.get("theorem"), directory.parent)
     report = directory / "cost.json"
     payload["cost_report"] = json.loads(report.read_text()) if report.exists() else {}
     if "pi_embedded_estimate" not in payload["cost_report"]:
@@ -173,6 +294,46 @@ def graph_payload(run_id: str) -> dict:
             "missing_entries": missing_entries,
         }
     return payload
+
+
+def run_models(directory: Path) -> dict:
+    """The model behind the orchestrator role (run-config `model`) and behind workers, which every run
+    launches with `pi_rpc.worker_launch`'s default model."""
+    from arena.pi_rpc import worker_launch
+
+    worker = inspect.signature(worker_launch).parameters["model"].default
+    try:
+        config = json.loads((directory / "run-config.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        return {"orchestrator": None, "worker": worker}
+    return {"orchestrator": config.get("model"), "worker": worker}
+
+
+def target_to_beat(theorem: str | None, runs_root: Path) -> dict | None:
+    """Our latest submission's number for this theorem: the newest runs/pi-budget/*/submission-final/scores.json
+    (by mtime) that has the row. scores.json holds proxy and source only; tokens and heartbeats come from the
+    source run's submission.json when the source is a run."""
+    if not theorem:
+        return None
+    files = sorted(runs_root.glob("*/submission-final/scores.json"), key=lambda f: f.stat().st_mtime, reverse=True)
+    for file in files:
+        try:
+            row = json.loads(file.read_text()).get(theorem)
+        except (OSError, json.JSONDecodeError, AttributeError):
+            continue
+        if not isinstance(row, dict) or row.get("proxy") is None:
+            continue
+        source = str(row.get("source") or "")
+        tokens = heartbeats = None
+        try:
+            made = json.loads((runs_root / source.split(" ")[0] / "submission.json").read_text())
+            if made.get("proxy") == row["proxy"]:
+                tokens, heartbeats = made.get("tokens"), made.get("heartbeats")
+        except (OSError, json.JSONDecodeError, AttributeError):
+            pass
+        return {"proxy": row["proxy"], "tokens": tokens, "heartbeats": heartbeats, "source": source,
+                "submission": file.parent.parent.name}
+    return None
 
 
 def baseline_point(payload: dict) -> dict | None:
@@ -265,7 +426,16 @@ def run_card(run_id: str, langfuse: Langfuse | None = None) -> dict:
     directory = run_dir(run_id)
     row = hub_row(run_id, directory, campaign_of(run_id, directory.parent))
     row["langfuse_url"] = langfuse.session_url(run_id) if langfuse else None
+    row["target"] = target_to_beat(row.get("theorem"), directory.parent)
     return row
+
+
+def dashboard_payload(run_id: str) -> dict:
+    directory = run_dir(run_id)
+    payload = run_dashboard(run_id, directory)
+    theorem = (payload.get("summary") or {}).get("theorem") or (payload.get("config") or {}).get("theorem")
+    payload["target"] = target_to_beat(theorem, directory.parent)
+    return payload
 
 
 def run_dashboard_start(run_id: str) -> float | None:
@@ -304,11 +474,12 @@ def handler_for(runs: Runs | str, langfuse: Langfuse | None = None):
 
         def viewer(self, run_id: str, rest: str) -> None:
             node_match = re.fullmatch(r"node/([A-Za-z0-9._-]+)\.json", rest)
+            experiment_match = re.fullmatch(r"experiment/([A-Za-z0-9._:-]+)\.json", rest)
             if rest == "graph.json":
                 self.send(memo_json("graph", run_id, lambda: graph_payload(run_id)), "application/json; charset=utf-8")
             elif rest == "dashboard.json":
                 self.send(
-                    memo_json("dashboard", run_id, lambda: run_dashboard(run_id, run_dir(run_id))),
+                    memo_json("dashboard", run_id, lambda: dashboard_payload(run_id)),
                     "application/json; charset=utf-8",
                 )
             elif rest == "langfuse.json":
@@ -322,6 +493,11 @@ def handler_for(runs: Runs | str, langfuse: Langfuse | None = None):
             elif rest in VIEWER_FILES:
                 filename, content_type = VIEWER_FILES[rest]
                 self.send((ASSETS / filename).read_bytes(), content_type)
+            elif experiment_match:
+                from arena import experiments
+
+                body = experiments.retrieve(run_id, experiment_match.group(1)) or {"missing": experiment_match.group(1)}
+                self.send(json.dumps(body, ensure_ascii=False).encode(), "application/json; charset=utf-8")
             elif node_match:
                 node_id = node_match.group(1)
                 if ".." in node_id:

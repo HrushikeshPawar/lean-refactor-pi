@@ -79,7 +79,11 @@ export function normalizeToolArguments<T>(params: T, schema: { properties?: Reco
 }
 
 /** Pi calls this before schema validation; malformed arguments get a template-rendered error. */
-export function requireToolArguments(args: unknown, missingError: string): unknown {
-  if (args === null || args === undefined) throw new Error(missingError);
+export function requireToolArguments(args: unknown, missingError: string, allowEmpty = false): unknown {
+  // A tool whose parameters are all optional (jobs, await_results) treats a missing argument object as {}.
+  if (args === null || args === undefined) {
+    if (allowEmpty) return {};
+    throw new Error(missingError);
+  }
   return args;
 }

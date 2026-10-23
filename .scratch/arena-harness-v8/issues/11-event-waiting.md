@@ -1,0 +1,152 @@
+# 11: Wait without polling or no-event deadlocks
+
+**What to build:** Sol waits for useful evidence at zero provider-call cost and receives no_pending_work when no producer can still reply.
+
+**Blocked by:** 10: Admit two workers and cancel stale work cleanly
+
+**Status:** done
+
+**Branch:** `v8/11-event-waiting`
+
+**Stacked on:** `v8/10-two-worker-cancel`
+
+**Read first:** [Harness v8 specification](../../../docs/SPEC-harness-v8.md), Decisions 11, 15–16; appendix B, C and F. The shared GitButler/testing rules are included below, matching [_common.md](_common.md).
+
+**Ownership:** Event registration, wake-up and no-event behavior. Reuse existing job/cancellation state.
+
+**Shared contracts:** [S6](../contracts.md#s6-scope-and-error-contracts), [S7](../contracts.md#s7-initial-public-management-shapes-and-delivery-semantics)
+
+## Current implementation context and contract
+
+**Current entry points:** arena/reply.py::attach_context; arena/cli/protocol.py::run; proposed orchestration actor inbox and wait registry.
+
+**Implementation contract:** await_results accepts actor cursor and optional job IDs. Under one coordinator state lock, read retained events, register interest and recheck producer state. Return matching events and next cursor, or wake_reason no_pending_work when no selected producer can emit. Wake on stop, failure, cancellation and settlement. Cursor advancement still commits with delivered reply. Sol continuation follows no_pending_work; no provider polling or hidden hypothesis creation.
+
+**Smoke outcome:** Inject a finding at registration and receive it once by identity; then finish all producers and await again, receiving no_pending_work with zero provider invocations.
+
+## What to build and acceptance
+
+- [x] 1. Implement await_results with actor-local cursor and optional job selection. Install the listener and recheck retained state without a lost-event window.
+- [x] 2. Return already-available evidence immediately; simultaneous worker findings reach every intended actor without one actor consuming another's updates.
+- [x] 3. Wake on result, settlement, cancellation, failure and run stop. Waiting itself starts zero provider requests. A directory watch wakes the coordinator when another process commits a row.
+- [x] 4. When no selected active/queued assignment or submitted check can produce a relevant event, return no_pending_work rather than wait forever. A running verification is a producer until its outcome is recorded.
+- [x] 5. Handled prompts and exited/stale children cannot count as live producers. Sol gets an ordinary below-budget continuation, not a successful finish or automatic new hypothesis. `await_results` is a protocol action and returns `no_pending_work` as a normal tool result.
+- [x] 6. Use the one assigned fast smoke for this slice. Retain the stated behavior requirements; actual-Pi/real-Lean journeys and the broader race matrix are final E2E coverage, not this ticket's gate.
+
+## Verify
+
+Use one focused smoke. This selector is **proposed**, not an already-passing test. Reuse or extend the named existing case when possible; if the module/class is new, add only the boundary smoke needed for this journey. No tests collected is not a pass.
+
+```bash
+uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_orchestration.py::V8WorkerSmokeTests::test_v8_wait_registration_and_no_work
+```
+
+Expected: the named behavior check passes with no actual provider, Pi or Lean process. Aim for seconds and at most 60 seconds. No per-ticket full suite or slow suite.
+
+**Deferred to final E2E:** Long-running actual-Pi waiting and two real streams. See the shared [final E2E checklist](../final-e2e.md).
+
+## Review corrections and remaining implementation gaps
+
+The original named smoke passed in 0.07s. Review fixes isolate worker inbox receipts from ordinary proof replies using an explicit inbox channel, and keep acknowledgements monotonic across older filtered cursors. Proof reply recovery skips inbox receipts instead of expecting their data to contain the proof cursor/sequence fields. Public wait events retain request, actor, session, run and operation identities. A stop takes precedence over results, and remains an immediate `run_stopped` outcome after its event has already been acknowledged. Empty replies now have durable, idempotent receipts instead of unrecorded operation IDs.
+
+Waiter registration and finding publication already share the control lock through `_take`; a proposed nested acquisition was rejected and removed after a diagnostic reproduced the non-reentrant deadlock. The extended smoke exercises a real waiting thread with a registration barrier, plus mixed delivery records, old filtered cursors and repeated stop waits. Waiting no longer calls `observe_exit` and cannot admit queued work as a read side effect. Orphaned assignments without a local producer return `no_pending_work` with `recovery_required`; this does not certify process absence or release their slots.
+
+Verified: `uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_orchestration.py::V8WorkerSmokeTests` passed with 4 tests and 4 subtests in 0.25s. Ruff passed for orchestration, run control, reply recovery and the touched test file. All process/model outcomes are injected; no provider, real Pi or Lean process was started.
+
+The three review blockers now have an implementation. Another process writing the run directory wakes the in-process condition through a directory watch. A submitted check is a `verification` row: `running` counts as a producer, and `passed` or `proof_error` is a result event. `record_evaluation` writes those rows when the operation or `ARENA_JOB_ID` names a job. The protocol action `await_results` returns that payload as a normal tool result, including `no_pending_work`, and does not finish the run or create a hypothesis.
+
+Review of `yqs` found and corrected additional defects. Failed inotify setup now returns a retryable `notification_unavailable` at the would-block boundary; retained evidence and immediate no-work replies still work. Watch descriptors use close-on-exec. Verification outcomes use per-version compatibility instead of `result.ok`, which indicates completion of evaluation rather than successful compilation. Definitive compiler failure is `proof_error`; missing/failed infrastructure evidence is `inconclusive`. Unexpected exceptions close the producer as inconclusive and propagate. Normal terminal notifications follow the durable evaluation record.
+
+Verification after review: the four worker smokes plus one narrow verification-outcome smoke passed with **5 tests and 4 subtests in 0.59s**. Ruff passed on the touched Python files. The new outcome smoke first reproduced `passed != proof_error`, then verified correct classification, evidence ordering, and closure on an injected transport exception. The initially selected compile-test module could not collect because the existing environment lacks `cyclopts`; the check uses the existing fake campaign seam in `test_orchestration.py` instead, without installing dependencies. No provider, real Pi, or Lean process was started.
+
+Implementation blockers identified at review of `uru`, resolved by the closure below:
+
+- **Coordinator routing and caller integration.** The protocol directly executes `await_results` in its own process, but worker liveness belongs to the coordinator's `_owned`, `_readers` and `_openers`. An injected subprocess repro showed `Coordinator sees producer: True` while the separate process returned `no_pending_work/recovery_required`. Route management through the S3 run-scoped coordinator boundary and wire the Pi/runner caller. A successful in-process call to `protocol.run` does not test that boundary.
+- **Full-check attribution and retry lifecycle.** `_run_full_check` calls `record_evaluation` without the originating job; the normal Sol autocheck environment has no worker `ARENA_JOB_ID`. These checks remain invisible after their worker ends. In addition, verification operation identity currently uses only job/evaluation/state, so retrying an inconclusive check can reuse the old running receipt while the latest durable state remains terminal. Retain ownership and distinguish check executions without inventing proof lineage.
+- **Watch ownership and invalidation.** Successful directory watches retain their descriptor, daemon thread and registry key indefinitely. Directory removal/replacement or a watcher read/poll failure can invalidate the watch while its registry key still reports success. Add bounded run/wait ownership and explicit invalidation handling; silent notification loss must not restore an infinite wait.
+
+At that review, status remained `needs-review` and acceptance 3–5 were unchecked. Ticket 12 was untouched.
+
+Reporting handled/exhausted/completed as `settled` remains an accepted wake-reason mapping. Actual-Pi and real-Lean waiting stay on the final E2E pass.
+
+
+## Review closure
+
+All six acceptance items are complete for this ticket's offline implementation slice. Protocol subprocesses now use the runner-owned private Unix socket; they never infer live worker ownership from their own process-local tables. The runner owns the coordinator lifecycle, and Sol has an `await_results` tool whose normal `no_pending_work` response continues reasoning. Disconnect cancellation wakes the wait and releases the connection without acknowledging new evidence.
+
+Verification tracks each execution with a distinct `check_id`, separately from the reusable evaluation key. Committed exact-proof attempts identify every originating job. Eligible full checks are durably queued before the worker tool returns and stay scheduled after later score changes. Sol's background checker uses those saved owners, and an inconclusive check can execute again with a new identity. Evaluation evidence precedes terminal delivery.
+
+Filesystem notifications now use a per-wait lease. Return, cancellation and failure join the watcher and close its descriptors. Invalidated watches, queue overflow and read/poll errors wake with retryable `notification_unavailable`. Lock-file activity is ignored, avoiding a self-wake loop. There is no permanent watch registry or test-only global registration event.
+
+Verified with one focused combined run:
+
+```bash
+UV_CACHE_DIR=/tmp/arena-uv-cache uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_coordinator_wait.py tests/test_verification_wait.py tests/test_wait_watch.py tests/test_orchestration.py::V8WorkerSmokeTests tests/test_orchestration.py::V8VerificationSmokeTests
+```
+
+Result: **10 tests and 10 subtests passed in 0.94s**. The local Unix-socket checks required scoped access because the sandbox rejects socket binding with `EPERM`. Tests include a real `uv run` protocol subprocess against a coordinator-owned injected worker, disconnect cleanup, exact ownership across two jobs, an inconclusive verification retry, watch invalidation and descriptor cleanup. Scoped Ruff and TypeScript syntax passed. A final legacy-history replay check reproduced an older check remaining pending after its terminal row; both projections now normalize missing `check_id` to the same legacy identity as the writer. The extended verification smoke passed in 0.20s after that correction, with touched-file Ruff clean. Independent source review, including the final correction, found no remaining critical defects in these repairs.
+
+No provider, real Pi or Lean process was started. Actual Pi cancellation, two real streams and real Lean remain final E2E coverage. Coordinator crash/process reconciliation remains ticket 12, which was not changed. Reviewer marks ticket 11 **done**.
+
+---
+
+<!-- Shared v8 implementation rules. Included in every numbered ticket with 11, v8/11-event-waiting and v8/10-two-worker-cancel resolved. This template is not an implementation ticket. -->
+
+## Before you start
+
+1. Read this whole ticket, the named sections of `docs/SPEC-harness-v8.md`, and the shared contract sections linked above. The current v8 decisions and the user's minimum-fast-test policy are binding. Do not rediscover or reverse settled budget, ownership, lineage or lifecycle decisions.
+2. Read the installed `but` skill before version-control commands. Run `but status` to confirm the named stack parent and identify existing uncommitted work. You are not alone in the checkout. Do not modify or commit another ticket's work. Unrelated dirty files may remain; overlapping uncommitted changes or an unexpected parent must be reported before editing.
+3. If your branch is absent and the named parent is the reviewed current top of the stack, create only this ticket's branch with `but branch new v8/11-event-waiting --above v8/10-two-worker-cancel`. If it exists, verify its position and continue. Do not create later branches, move existing lower branches, or repair an unexpected stack on your own.
+4. Run every Python command through `uv run`, including tests, helper scripts and one-off snippets. Never invoke the virtualenv interpreter directly or use a bare Python interpreter. Use `uv run --no-sync python` with the existing environment for the single focused check in Verify. A cheap targeted baseline is useful when the old behavior is testable. A proposed new selector must be implemented or mapped to an existing equivalent; no tests collected is not a pass. Do not run dependency synchronization or install packages by habit.
+5. If a named interface differs because a predecessor changed it, follow that reviewed interface and record the mapping. If the behavior contract conflicts with current callers, stop and report the concrete conflict instead of broadening the design.
+
+## Rules for every change
+
+- Own only the responsibility named in this ticket. Preserve runtime improvements and other agents' edits. No drive-by refactors or unrelated formatting. Report out-of-scope defects in the hand-back.
+- Model-facing prose belongs in `agent-text/` and uses the shared renderer. Generic proof-search methods are allowed by v8; saved task-specific answers are not. Do not revive the obsolete v7 ban on all methodological advice.
+- Keep operation-generated lineage and raw artifacts exact. Notes, similarity and default focus never replace exact construction records. No model judge or hidden proof transformation.
+- Sol and workers share actual reported cost only. No reservations, model pools, per-job dollar limits or final-turn reserve. Unknown usage is not silently zero.
+- Implement the working journey in the ticket and reuse existing public boundaries. New APIs, modules and `v8_*` test selectors are explicitly proposed; they are not already implemented merely because the ticket names them.
+- Never print, log or commit secrets. No paid model calls, competition submission, or long live resource experiment. Fake providers are local fixtures. Actual Pi/Lean integration belongs to the final E2E pass unless the user explicitly changes this ticket's scope.
+- No live `/proc` or other runs in the smoke test; inject process, memory, Lean and network outcomes. Production process ownership checks may use OS identity, but tests inject those readings. No sleep-based race tests or broad process-name kills.
+
+## Minimum fast-test policy
+
+- One small reused or extended behavior smoke is normally enough to check out this ticket. Aim for seconds, normally 5–15 seconds and no more than 60 seconds for the selected check. Do not add a regression test for every checkbox or cosmetic wording change.
+- Run the focused Verify command. Do not run the whole fast suite, entire slow files, actual Pi, Lean, worker warm-ups or resource matrices after each ticket or commit.
+- Use touched-file syntax/lint checks when relevant. Do not run repository-wide quality tools to chase unrelated diagnostics. Preserve meaningful assertions; report a pre-existing failure rather than weakening its setup.
+- If the smoke fails or exposes a concrete adjacent risk, add only the targeted check needed to resolve it. A passing fixture proves the narrow behavior, not actual-Pi or real-Lean acceptance.
+- The shared `final-e2e.md` checklist owns one broad fast-suite run and selected real-Pi/Lean integration at the end of the linear stack. Keep deferred coverage visible in every hand-back. No 30-minute gate per ticket.
+
+## Version control (GitButler)
+
+Your branch is **`v8/11-event-waiting`**, directly above **`v8/10-two-worker-cancel`**. Work proceeds one reviewed ticket at a time, oldest to newest. Logical blockers are listed separately from this immediate stack parent.
+
+- Use `but` for status, diffs, branch creation, commits and history inspection. Never substitute raw Git write commands or run `but setup`.
+- Commit only your own changes. Use `but diff`, copy the current file/hunk IDs, then `but commit -b v8/11-event-waiting -m "type(scope): summary" <id> <id>`. Never omit IDs when another session has dirty work. Use hunk IDs if one file mixes ownership.
+- Keep commits atomic. Put the behavior and its focused check together; separate unrelated generated output or documentation. One ticket may have several coherent commits; it must not become one giant unrelated commit.
+- Use succinct Conventional Commits subjects. Include non-obvious decisions and the selected verification in the body when needed. End the body with `Ticket: v8-11`.
+- For a small follow-up clearly belonging to your own unpublished commit, use `but amend -t <commit> <ids>`. Never rewrite another ticket, a reviewed/pushed commit, or ambiguous history. Such a change needs reviewer direction.
+- Do not push, open PRs, pull, merge, discard other work, or move/restack lower branches. If a commit reports an unexpected dependency/conflict, report it; do not work around it by rebuilding the stack.
+- Mutation output reports success. Do not append routine status/diff calls after every mutation. Reinspect only when the next action actually needs new IDs or remaining-change information.
+- Do not change the plan, spec, shared contracts, other tickets, or `vendor/` to make an implementation appear compliant. Propose a concrete contract correction to the reviewer if required. Update only your own ticket's checkboxes/status as part of its hand-back.
+
+## Hand-back
+
+- Every acceptance item is done or explicitly reported incomplete with its reason.
+- Your changes and focused check are committed only on `v8/11-event-waiting`. Other sessions' files/commits are preserved. A globally clean workspace is not claimed if unrelated work exists.
+- Change this ticket's Status to `needs-review` in your final commit. The reviewer marks it done.
+- Report the exact focused command and result, relevant baseline, changed interfaces, files/commits and deferred final-E2E coverage. Do not claim unrun integration or broad suites passed.
+
+Use this concise review report:
+
+```text
+Review report: v8-11
+Commits: oldest first
+Acceptance: done / incomplete with reason
+Check: exact command, baseline if relevant, result
+Interfaces: changed contracts and callers
+Deferred E2E: actual-Pi/Lean/cross-ticket coverage not run
+Deviations: accepted mappings or unresolved contract conflicts
+Out of scope: defects noticed, not changed
+```

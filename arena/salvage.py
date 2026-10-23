@@ -257,33 +257,59 @@ def _kept(original: str, final: str) -> float:
     return matched / len(left) if left else 0.0
 
 
-def salvage(name: str, proof: str, compile: Callable[[str], dict]) -> dict:
-    """Attempt the replayed S1→S2→S3→S4 chain using an injected compiler."""
+def salvage(
+    name: str,
+    proof: str,
+    compile: Callable[[str], dict],
+    *,
+    should_yield: Callable[[], str | None] | None = None,
+    resume: dict | None = None,
+) -> dict:
+    """Attempt salvage, yielding only between compiler requests when asked."""
     roots = parse(proof.split("\n"))
     if roots is None:
         return {"status": "unparseable", "compiles": 0, "rounds": [], "text": None, "result": None, "kept": None}
-    current = proof
-    rounds = []
-    last_result = None
-    s1_used = False
-    for index in range(MAX_COMPILES):
+    current = resume["current"] if resume else proof
+    rounds = list(resume["rounds"]) if resume else []
+    last_result = resume.get("last_result") if resume else None
+    s1_used = bool(resume.get("s1_used")) if resume else False
+    completed = int(resume.get("compiles", 0)) if resume else 0
+    for index in range(completed, MAX_COMPILES):
+        reason = should_yield() if should_yield else None
+        if reason:
+            return {
+                "status": "deferred",
+                "reason": reason,
+                "compiles": completed,
+                "rounds": rounds,
+                "text": None,
+                "result": last_result,
+                "kept": None,
+                "continuation": {
+                    "current": current,
+                    "rounds": rounds,
+                    "s1_used": s1_used,
+                    "compiles": completed,
+                },
+            }
         try:
             compiled = _compiled(name, current, compile)
         except (ValueError, FileNotFoundError):
             return {
                 "status": "unavailable",
-                "compiles": index + 1,
+                "compiles": completed + 1,
                 "rounds": rounds,
                 "text": None,
                 "result": last_result,
                 "kept": None,
             }
         last_result = compiled["result"]
+        completed += 1
         if compiled["clean"]:
             status = "salvaged" if index else "clean-as-is"
             return {
                 "status": status,
-                "compiles": index + 1,
+                "compiles": completed,
                 "rounds": rounds,
                 "text": current if status == "salvaged" else None,
                 "result": last_result,
@@ -292,7 +318,7 @@ def salvage(name: str, proof: str, compile: Callable[[str], dict]) -> dict:
         if compiled["unlocated"]:
             status = "broken-unlocated"
             break
-        if index == MAX_COMPILES - 1:
+        if completed == MAX_COMPILES:
             status = "broken-pass-limit"
             break
         lines = current.split("\n")
@@ -325,7 +351,7 @@ def salvage(name: str, proof: str, compile: Callable[[str], dict]) -> dict:
         current = next_text
     return {
         "status": status,
-        "compiles": len(rounds) + (1 if last_result is not None else 0),
+        "compiles": completed,
         "rounds": rounds,
         "text": None,
         "result": last_result,

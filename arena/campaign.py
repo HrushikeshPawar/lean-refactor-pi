@@ -12,16 +12,19 @@ import shutil
 import subprocess
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from contextvars import ContextVar
+from functools import wraps
 from pathlib import Path
 
 from arena import goalstate, lean_health, lean_session, routes, text
 from arena import text as agent_text
 from arena.engine import (
     ROOT,
+    actor_request_class,
     candidate_file,
     evaluate,
     force_cold,
@@ -34,7 +37,6 @@ from arena.engine import (
 )
 from arena.graph import (
     FILING_MIN_SIMILARITY,
-    Cell,
     Graph,
     Node,
     archive,
@@ -45,7 +47,6 @@ from arena.graph import (
     measured_parent,
     merge_steps,
     merge_text,
-    quality,
     ranked_frontier,
     similarity,
     splice_text,
@@ -56,6 +57,7 @@ from arena.graph import map_view as graph_map_view
 from arena.prices import changed_steps, fmt_hb, fmt_signed, rates, snippet_tokens, step_table
 from arena.prices import price_row as build_price_row
 from arena.profile import profile
+from arena.run_control import cached_jsonl_rows, committed_operation_ids
 from arena.salvage import fill_cost, fill_text
 from arena.salvage import holes as find_holes
 from arena.salvage import salvage as salvage_proof
@@ -82,7 +84,131 @@ _SESSION: ContextVar[_Session | None] = ContextVar("source_session", default=Non
 _NAMED_PARENT_UNSET = object()
 _BATCH_FOCUS: ContextVar[tuple[bool, str | None]] = ContextVar("arena_batch_focus", default=(False, None))
 _BATCH_NEWLY_FILED: ContextVar[set[str] | None] = ContextVar("arena_batch_newly_filed", default=None)
+_OPERATION_RECEIPTS: ContextVar[list[dict] | None] = ContextVar("arena_operation_receipts", default=None)
 _SALVAGE_DIRECTORY: ContextVar[Path | None] = ContextVar("arena_salvage_directory", default=None)
+_SUBMISSION_ADMISSIONS: ContextVar[dict | None] = ContextVar("arena_submission_admissions", default=None)
+_SELECT_COMPILED: ContextVar[bool] = ContextVar("arena_select_compiled", default=False)
+
+
+@contextmanager
+def compile_authorization():
+    """An agent compile selects the exact submitted proof in its admission."""
+    token = _SELECT_COMPILED.set(True)
+    try:
+        yield
+    finally:
+        _SELECT_COMPILED.reset(token)
+
+
+def _submission_scope(function):
+    """Keep exact admission receipts within one tool/background invocation."""
+
+    @wraps(function)
+    def invoke(*args, **kwargs):
+        if _SUBMISSION_ADMISSIONS.get() is not None:
+            return function(*args, **kwargs)
+        token = _SUBMISSION_ADMISSIONS.set({})
+        try:
+            return function(*args, **kwargs)
+        finally:
+            _SUBMISSION_ADMISSIONS.reset(token)
+
+    return invoke
+
+
+def _submission_key(directory: Path, proof_id: str, proof: str, inputs) -> str:
+    from arena.run_control import actor_ids
+
+    identity = actor_ids(directory.name)
+    return json.dumps(
+        [
+            str(directory),
+            proof_id,
+            hashlib.sha256(proof.encode()).hexdigest(),
+            inputs,
+            {key: identity.get(key) for key in ("actor_id", "session_id", "job_id", "activation_id")},
+        ],
+        sort_keys=True,
+    )
+
+
+def _submission_attempt(directory: Path, proof_id: str, proof: str, inputs) -> dict | None:
+    return (_SUBMISSION_ADMISSIONS.get() or {}).get(_submission_key(directory, proof_id, proof, inputs))
+
+
+def _published_events(directory: Path) -> list[dict]:
+    from arena.run_control import published_history
+
+    return published_history(directory, events(directory))
+
+
+def _submit_proof(directory: Path, proof_id: str, proof: str, inputs, *, evaluation=None, candidate=None) -> dict:
+    from arena.run_control import SubmissionRefused, actor_ids, submit_candidate
+
+    attempt = _submission_attempt(directory, proof_id, proof, inputs)
+    if attempt is None:
+        identity = actor_ids(directory.name)
+        attempt = {
+            "operation_id": uuid.uuid4().hex,
+            "run_id": directory.name,
+            "actor_id": identity["actor_id"],
+            "session_id": identity["session_id"],
+            **{key: identity[key] for key in ("job_id", "activation_id", "generation") if identity.get(key)},
+            "proof_id": proof_id,
+            "proof_sha256": hashlib.sha256(proof.encode()).hexdigest(),
+            "authorization": "candidate",
+            "inputs": inputs,
+            **({"evaluation": evaluation} if evaluation is not None else {}),
+            **({"candidate": candidate} if candidate is not None else {}),
+        }
+        if _SELECT_COMPILED.get():
+            attempt["ledger_events"] = [{"kind": "proof_selection", "proof_id": proof_id, "candidate_id": proof_id}]
+    decision = submit_candidate(directory, attempt)
+    if not decision["ok"]:
+        raise SubmissionRefused(decision.get("operation_id") or "")
+    admissions = _SUBMISSION_ADMISSIONS.get()
+    if admissions is not None:
+        admissions[_submission_key(directory, proof_id, proof, inputs)] = attempt
+    return attempt
+
+
+def _append_submitted(directory: Path, attempt: dict, event: dict) -> None:
+    """Publish an outcome only under the receipt that admitted its exact input."""
+    from arena.run_control import SubmissionRefused, _apply_locked, _submit_locked, control_lock
+
+    arguments = {"submission_id": attempt["operation_id"], "event": event}
+    operation_id = hashlib.sha256(json.dumps(arguments, sort_keys=True).encode()).hexdigest()
+    with control_lock(directory):
+        if not _submit_locked(directory, attempt)["ok"]:
+            raise SubmissionRefused(attempt["operation_id"])
+
+        def publish(ctx):
+            ctx.append_ledger(
+                {
+                    **event,
+                    "submission_id": attempt["operation_id"],
+                    **({"generation": attempt["generation"]} if attempt.get("generation") else {}),
+                }
+            )
+            return ctx.evidence
+
+        receipt = _apply_locked(
+            directory,
+            {
+                "operation_id": operation_id,
+                "kind": "submission_outcome",
+                "arguments": arguments,
+                **{
+                    key: attempt[key]
+                    for key in ("run_id", "actor_id", "session_id", "job_id", "activation_id")
+                    if key in attempt
+                },
+            },
+            publish,
+        )
+    receipts = _OPERATION_RECEIPTS.get()
+    if receipts is not None:
+        receipts.append(receipt)
 
 
 class _Session:
@@ -627,11 +753,11 @@ def _source_hint(name: str, symbol: str) -> tuple[str, str | None, tuple[int, in
     return symbol, module, span
 
 
-def packet(name: str) -> str:
-    """Kickoff packet: task, exchange rates, source-derived context. Built once per row and cached."""
+def packet(name: str, model: str | None = None) -> str:
+    """Kickoff packet: task, exchange rates, source-derived context. The model is the orchestrating one."""
     from arena.context import render_packet
 
-    return render_packet(name)
+    return render_packet(name, model=model)
 
 
 def _append(directory: Path, event: dict) -> None:
@@ -643,18 +769,50 @@ def _append(directory: Path, event: dict) -> None:
         fcntl.flock(fd, fcntl.LOCK_EX)
         row = {"ts": time.time(), **context, **event}
         data = (json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
+        start = os.lseek(fd, 0, os.SEEK_END)
         os.write(fd, data)
         os.fsync(fd)
     finally:
         os.close(fd)
+    return {
+        "byte_start": start,
+        "byte_end": start + len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "record": "ledger.jsonl",
+    }
 
 
-def _evaluate(name: str, proof: str, mode: str, known: dict | None = None, lane: str = "model") -> dict:
+# Set by `arena run` to show a concise human line for a phase; the event itself only goes to the ledger.
+RUNTIME_SINK: Callable[[Path, dict], None] | None = None
+
+
+def _runtime_event(directory: Path, event: dict) -> None:
+    """Persist an operator-facing lifecycle event; never prints raw JSON."""
+    _append(directory, event)
+    sink = RUNTIME_SINK
+    if sink is not None:
+        try:
+            sink(directory, event)
+        except Exception:  # a display problem must not break the run
+            pass
+
+
+def _evaluate(
+    name: str,
+    proof: str,
+    mode: str,
+    known: dict | None = None,
+    lane: str = "model",
+    request_class: str | None = None,
+) -> dict:
     """`engine.evaluate`, sending background-lane work (full checks, cold verification) to the Lean session's
     background lane when the engine supports lanes, so it never takes a model worker."""
+    kwargs = {}
     if lane != "model" and "lane" in inspect.signature(evaluate).parameters:
-        return evaluate(name, proof, mode, known=known, lane=lane)
-    return evaluate(name, proof, mode, known=known)
+        kwargs["lane"] = lane
+    if request_class is not None and "request_class" in inspect.signature(evaluate).parameters:
+        kwargs["request_class"] = request_class
+    return evaluate(name, proof, mode, known=known, **kwargs)
 
 
 def _refuse_if_tripped(directory: Path) -> None:
@@ -671,16 +829,7 @@ def events(directory: Path) -> list[dict]:
     file = directory / "ledger.jsonl"
     if not file.exists():
         return []
-    with file.open("rb") as handle:
-        fcntl.flock(handle, fcntl.LOCK_SH)
-        data = handle.read().decode()
-    rows = []
-    for line in data.splitlines():
-        try:
-            rows.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue  # a torn final line from a killed writer must not make the run unreadable
-    return rows
+    return cached_jsonl_rows(file, dicts_only=False, lock_shared=True)
 
 
 @contextmanager
@@ -741,7 +890,7 @@ def _copy_tracked(project: Path, shadow: Path) -> None:
         shutil.copy2(source, target)
 
 
-def init(name: str, run_id: str, extra: str = "", seed: Path | None = None) -> dict:
+def init(name: str, run_id: str, extra: str = "", seed: Path | None = None, model: str | None = None) -> dict:
     """Start a run. With `seed`, the graph of that ended run replaces the reference-only start."""
     directory = run_dir(run_id)
     # The runner may already have started the run's Lean session here; nothing else counts as a run.
@@ -753,7 +902,7 @@ def init(name: str, run_id: str, extra: str = "", seed: Path | None = None) -> d
     version, commit = versions(row)[0]
     project = workspace(row, version, commit)
     directory.mkdir(parents=True, exist_ok=True)
-    text = packet(name) + ("\nAdditional instructions:\n" + extra + "\n" if extra else "")
+    text = packet(name, model) + ("\nAdditional instructions:\n" + extra + "\n" if extra else "")
     (directory / "packet.txt").write_text(text)
     shadow = directory / "scratch" / "project"
     _copy_tracked(project, shadow)
@@ -805,13 +954,19 @@ def init(name: str, run_id: str, extra: str = "", seed: Path | None = None) -> d
 
 def _externalize_output(directory: Path, key: str, result: dict) -> dict:
     """Keep full Lean output beside the ledger; results carry only a reference."""
-    for version, item in (result.get("compat") or {}).items():
+    if not result.get("compat"):
+        return result
+    compat = {}
+    for version, item in result["compat"].items():
+        item = dict(item)  # a reused result's versions can be ledger rows shared with other readers
         raw = item.pop("raw_output", None)
         if raw:
             path = directory / "diagnostics" / f"{key[:16]}-{result.get('mode', 'eval')}-{version}.txt"
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(raw + "\n")
             item["full_diagnostics_ref"] = str(path.relative_to(directory))
+        compat[version] = item
+    result["compat"] = compat
     return result
 
 
@@ -961,6 +1116,21 @@ def _graph_proof_ids(history: list[dict]) -> list[str]:
     return found
 
 
+def worker_anchor_proof(run_id: str, history: list[dict]) -> str | None:
+    """The proof id of the anchor node of the job this process works for; None for any other actor."""
+    job_id = os.environ.get("ARENA_JOB_ID")
+    if not job_id:
+        return None
+    from arena.orchestration import jobs
+
+    snapshot = next((job for job in jobs(run_dir(run_id), [job_id])["jobs"] if job.get("job_id") == job_id), None)
+    node = ((snapshot or {}).get("anchor") or {}).get("node")
+    try:
+        return resolve_node_ref(history, node) if node else None
+    except (ValueError, KeyError):
+        return None
+
+
 def resolve_node_ref(history: list[dict], reference: str) -> str:
     value = reference.strip()
     proof_ids = _graph_proof_ids(history)
@@ -986,12 +1156,11 @@ def resolve_node_ref(history: list[dict], reference: str) -> str:
 
 
 def _named_parent_id(history: list[dict], reference: str | None) -> str | None:
-    if not reference:
+    """Resolve a named parent. Graph ids, candidate numbers and probe ids stay a named relation."""
+    if not reference or not isinstance(reference, str):
         return None
     try:
-        if re.fullmatch(r"\s*[pP][1-9][0-9]*\s*", reference):
-            return resolve_probe_ref(history, reference)
-        return resolve_candidate_ref(history, reference)
+        return resolve_node_ref(history, reference)
     except ValueError:
         return None
 
@@ -1006,6 +1175,177 @@ def _proof_reader(directory: Path) -> Callable[[str], str | None]:
     return read
 
 
+def _construction_payload(edge_type: str, sources: list, operation: dict | None, named_parent, exact: bool) -> dict:
+    return {
+        "type": edge_type,
+        "from": list(sources),
+        "operation": operation,
+        "named_parent": named_parent,
+        "exact": exact,
+    }
+
+
+def _construction_relation(
+    edge: dict,
+    operation: dict | None,
+    named_parent,
+    *,
+    alternate: bool,
+) -> dict | None:
+    """Describe the submitted relation without changing its durable representation."""
+    if alternate and operation is not None:
+        edge_type = operation["type"]
+        sources = list(operation.get("from") or [])
+        operation_data = (
+            {"hole": operation["hole"], "text": operation["text"],
+             **({"experiment_id": operation["experiment_id"]} if operation.get("experiment_id") else {})}
+            if edge_type == "filled_from"
+            else {key: value for key, value in operation.items() if key != "type"}
+        )
+        exact = True
+    elif alternate:
+        # An unanchored repeat is still this actor's submitted attempt. Its text
+        # does not prove that the caller repeated an earlier exact construction.
+        return _construction_payload("root", [], None, named_parent, False)
+    else:
+        edge_type = edge.get("type")
+        sources = list(edge.get("from") or [])
+        operation_data = edge.get("operation")
+        exact = bool(edge.get("exact"))
+        named_parent = edge.get("named_parent")
+    return _construction_payload(edge_type, sources, operation_data, named_parent, exact)
+
+
+def _admit_graph_submission(
+    directory: Path, proof_id: str, proof: str, operation: dict | None, *, duplicate: bool
+) -> bool:
+    """Authorize a graph attempt under the same stop boundary as candidate submission.
+
+    The caller already holds the control lock. A candidate submitted with the same
+    inputs stays admissible so its attempt can be recorded after that commit.
+    """
+    from arena.run_control import _submit_locked, actor_ids
+
+    identity = actor_ids(directory.name)
+    attempt = _submission_attempt(directory, proof_id, proof, operation)
+    if attempt is None:
+        attempt = {
+            "operation_id": uuid.uuid4().hex,
+            "run_id": directory.name,
+            "actor_id": identity["actor_id"],
+            "session_id": identity["session_id"],
+            "proof_id": proof_id,
+            "proof_sha256": hashlib.sha256(proof.encode()).hexdigest(),
+            "authorization": "duplicate" if duplicate else "candidate",
+            "inputs": operation,
+        }
+    decision = _submit_locked(directory, attempt)
+    return bool(decision["ok"])
+
+
+def _record_construction(
+    directory: Path,
+    proof_id: str,
+    edge: dict,
+    operation: dict | None,
+    named_parent,
+    *,
+    alternate: bool,
+) -> None:
+    """Record an attempt. A different exact construction also records a derivation."""
+    import uuid
+
+    from arena.run_control import _apply_locked, actor_ids, construction_digest, input_roles, published_history
+
+    payload = _construction_relation(edge, operation, named_parent, alternate=alternate)
+    if payload is None:
+        return
+    edge_type = payload["type"]
+    sources = payload["from"]
+    operation_data = payload["operation"]
+    digest = construction_digest(payload)
+    if alternate:
+        prior = {
+            construction_digest(
+                _construction_payload(
+                    edge.get("type"),
+                    edge.get("from") or [],
+                    edge.get("operation"),
+                    edge.get("named_parent"),
+                    bool(edge.get("exact")),
+                )
+            )
+        }
+        for event in published_history(directory, events(directory)):
+            if event.get("kind") == "derivation" and (event.get("proof_id") or event.get("candidate_id")) == proof_id:
+                data = event.get("data") or {}
+                if data.get("construction_digest"):
+                    prior.add(data["construction_digest"])
+        # Only an exact construction is lineage; an unanchored repeat is an attempt alone.
+        fresh_derivation = payload["exact"] and digest not in prior
+    else:
+        fresh_derivation = False
+    identity = actor_ids(directory.name)
+    artifact = directory / "proofs" / f"{proof_id}.lean"
+    artifact_ref = {
+        "path": f"proofs/{proof_id}.lean",
+        "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest() if artifact.is_file() else None,
+    }
+    if not artifact.is_file():
+        artifact_ref["missing"] = True
+    run_id = directory.name
+
+    def mutate(ctx):
+        data = {
+            "relation": "exact" if payload["exact"] else edge_type,
+            "operation": operation_data,
+            "inputs": input_roles({"type": edge_type, "from": sources, **(operation_data or {})}),
+            "named_parent": payload["named_parent"],
+            "artifact": artifact_ref,
+            "construction_digest": digest,
+            "tool_call_id": identity.get("tool_call_id"),
+            "missing": identity["missing"],
+        }
+        ctx.append_ledger(
+            {
+                "kind": "attempt",
+                "proof_id": proof_id,
+                "candidate_id": proof_id,
+                "data": data,
+                **({"generation": identity["generation"]} if identity.get("generation") else {}),
+            }
+        )
+        if fresh_derivation:
+            ctx.append_ledger(
+                {
+                    "kind": "derivation",
+                    "proof_id": proof_id,
+                    "candidate_id": proof_id,
+                    "parents": sources,
+                    "data": data,
+                    **({"generation": identity["generation"]} if identity.get("generation") else {}),
+                }
+            )
+        return ctx.evidence
+
+    receipt = _apply_locked(
+        directory,
+        {
+            "operation_id": uuid.uuid4().hex,
+            "kind": "attempt",
+            "arguments": payload,
+            "run_id": run_id,
+            "actor_id": identity["actor_id"],
+            "session_id": identity["session_id"],
+            **{key: identity[key] for key in ("job_id", "activation_id") if identity.get(key)},
+        },
+        mutate,
+    )
+    receipts = _OPERATION_RECEIPTS.get()
+    if receipts is not None:
+        receipts.append(receipt)
+
+
 def _file_node(
     directory: Path,
     history: list[dict],
@@ -1015,20 +1355,41 @@ def _file_node(
     operation: dict | None = None,
     projection_out: list[Graph] | None = None,
 ) -> tuple[dict, bool]:
-    """Append exactly one graph edge per proof id under the run's graph lock."""
+    """Append exactly one graph edge per proof id under the run's graph lock.
+
+    The control lock is held outside the graph lock. A second construction appends
+    an attempt and, when its inputs differ, a derivation. It does not rewrite the edge.
+    """
+    from arena.run_control import control_lock
+
     directory.mkdir(parents=True, exist_ok=True)
-    with (directory / "graph.lock").open("a") as handle:
+    with control_lock(directory), (directory / "graph.lock").open("a") as handle:
         fcntl.flock(handle, fcntl.LOCK_EX)
-        history = events(directory)
+        history = _published_events(directory)
         existing = next(
             (event for event in history if event.get("kind") == "edge" and event.get("proof_id") == proof_id), None
         )
         if existing:
+            if _admit_graph_submission(directory, proof_id, proof, operation, duplicate=True):
+                _record_construction(
+                    directory,
+                    proof_id,
+                    existing,
+                    operation,
+                    named_parent,
+                    alternate=True,
+                )
             if projection_out is not None:
-                projection_out.append(Graph.from_history(history, _proof_reader(directory)))
+                projection_out.append(
+                    Graph.from_history(
+                        events(directory),
+                        _proof_reader(directory),
+                        committed_operations=committed_operation_ids(directory),
+                    )
+                )
             return existing, False
         read = _proof_reader(directory)
-        graph = Graph.from_history(history, read)
+        graph = Graph.from_history(history, read, committed_operations=committed_operation_ids(directory))
         recent = [
             node.proof_id
             for node in graph.nodes
@@ -1042,7 +1403,8 @@ def _file_node(
             sources = list(operation.get("from", []))
             exact = True
             operation_data = (
-                {"hole": operation["hole"], "text": operation["text"]}
+                {"hole": operation["hole"], "text": operation["text"],
+                 **({"experiment_id": operation["experiment_id"]} if operation.get("experiment_id") else {})}
                 if edge_type == "filled_from"
                 else dict(operation)
             )
@@ -1068,16 +1430,24 @@ def _file_node(
             "measured_similarity": measured_score,
             "operation": operation_data,
         }
+        if not _admit_graph_submission(directory, proof_id, proof, operation, duplicate=False):
+            return {**event, "refused": "run_stopped"}, False
         _append(directory, event)
+        _record_construction(directory, proof_id, event, operation, named_parent, alternate=False)
         earlier: dict[str, list[dict]] = {}
         graph_nodes = {node.proof_id: node for node in graph.nodes}
         for node in graph.nodes:
             if node.route is not None:
-                earlier.setdefault(node.route, []).append(node.signature)
+                # Only closed proofs are members; drafts and sketches keep their route name but are never matched against.
+                members = earlier.setdefault(node.route, [])
+                if node.status == "closed":
+                    members.append(node.signature)
         parent = sources[0] if sources else None
         parent_node = graph_nodes.get(parent)
-        if routes.is_draft(proof):
-            # Harness and test sketches never open a route; they belong to their base's route.
+        compile_result = routes.attempt_results(history).get(proof_id, (None, None))[1]
+        if routes.is_draft(proof) or (compile_result is not None and not goalstate.closed(compile_result)):
+            # Sketches, test drafts and proofs that did not compile never open a route or become members; they carry
+            # their base's route.
             assignment = routes.attach(earlier, routes.signature(proof), parent_node.route if parent_node else None)
         else:
             assignment = routes.assign(
@@ -1118,13 +1488,19 @@ def _file_node(
         if batch_newly_filed is not None:
             batch_newly_filed.add(proof_id)
         if projection_out is not None:
-            projection_out.append(Graph.from_history(events(directory), read))
+            projection_out.append(
+                Graph.from_history(events(directory), read, committed_operations=committed_operation_ids(directory))
+            )
         return event, True
 
 
-def _settle_focus(directory: Path, proof_ids: list[str], graph: Graph | None = None) -> Graph:
+def _settle_focus(
+    directory: Path, proof_ids: list[str], graph: Graph | None = None, *, actor_local: bool = False
+) -> Graph:
     history = events(directory)
-    graph = graph or Graph.from_history(history, _proof_reader(directory))
+    graph = graph or Graph.from_history(
+        history, _proof_reader(directory), committed_operations=committed_operation_ids(directory)
+    )
     nodes = {node.proof_id: node for node in graph.nodes}
     eligible = [nodes[ident] for ident in proof_ids if ident in nodes and nodes[ident].status in ("closed", "sketch")]
     if not eligible:
@@ -1137,6 +1513,10 @@ def _settle_focus(directory: Path, proof_ids: list[str], graph: Graph | None = N
         return (0, -len(re.findall(r"\bsorry\b", proof)))
 
     winner = max(eligible, key=rank)
+    if actor_local:
+        from arena.reply import set_actor_focus
+
+        set_actor_focus(directory.name, winner.proof_id)
     if winner.proof_id != graph.focus:
         _append(directory, {"kind": "focus", "proof_id": winner.proof_id, "reason": "batch_best"})
         graph.focus = winner.proof_id
@@ -1144,7 +1524,7 @@ def _settle_focus(directory: Path, proof_ids: list[str], graph: Graph | None = N
 
 
 def _check_stall(directory: Path, graph: Graph, newly_filed: set[str]) -> None:
-    raw_threshold = os.environ.get("ARENA_STALL_M", "12")
+    raw_threshold = os.environ.get("ARENA_STALL_M", "8")
     try:
         threshold = int(raw_threshold)
     except ValueError as error:
@@ -1152,7 +1532,6 @@ def _check_stall(directory: Path, graph: Graph, newly_filed: set[str]) -> None:
     mode = os.environ.get("ARENA_STALL_TARGET", "best_other_cell")
     if mode not in ("best_other_cell", "least_visited", "map_only"):
         raise ValueError(text.render("messages/errors.stall_target", mode=mode))
-    current_focus = graph.focus
     for fired in stall_fires(graph, threshold):
         if fired["after"] not in newly_filed:
             continue
@@ -1167,171 +1546,6 @@ def _check_stall(directory: Path, graph: Graph, newly_filed: set[str]) -> None:
                 "target": target.node.proof_id if target else None,
             },
         )
-        if target is None or target.node.proof_id == current_focus:
-            continue
-        _append(
-            directory,
-            {
-                "kind": "focus",
-                "proof_id": target.node.proof_id,
-                "reason": "stall",
-                "root": fired["root"],
-                "cell": target.letter,
-                "visits": target.visits,
-            },
-        )
-        current_focus = target.node.proof_id
-
-
-def _best_first(cells: list[Cell]) -> list[Cell]:
-    return sorted(cells, key=lambda cell: (-(quality(cell.node) or 0.0), cell.letter))
-
-
-def _no_work_candidates(graph: Graph, current_route: str | None) -> list[Node]:
-    """Starting points in order: best cells of other routes, the original, then other closed nodes by quality."""
-    others = [
-        cell.node
-        for cell in _best_first(archive(graph))
-        if (current_route is None or cell.route != current_route) and not routes.is_draft(cell.node.proof_text)
-    ]
-    original = [node for node in graph.nodes if node.origin == "reference"]
-    closed = sorted(
-        (node for node in graph.nodes if node.status == "closed" and not routes.is_draft(node.proof_text)),
-        key=lambda node: (-(quality(node) or 0.0), node.id),
-    )
-    unique: dict[str, Node] = {}
-    for node in [*others, *original, *closed]:
-        unique.setdefault(node.proof_id, node)
-    return list(unique.values())
-
-
-def _start_material(theorem: str, run_id: str, node: Node) -> dict:
-    """The node's proof and its three costliest steps by tokens, from the same price rows as the read view."""
-    table = price_table(theorem, run_id, node.id)
-    rows = sorted(table["rows"], key=lambda row: (-row["tokens"], row["first_line"]))[:3]
-    return {"proof": node.proof_text, "prices": render_price_table({**table, "rows": rows})}
-
-
-def no_work_focus(run_id: str, theorem: str) -> dict:
-    """Move focus after a turn with no work: never to the current focus, never to a starting point already offered."""
-    directory = run_dir(run_id)
-    history = events(directory)
-    graph = Graph.from_history(history, _proof_reader(directory))
-    current = next((node for node in graph.nodes if node.proof_id == graph.focus), None)
-    offered = {item["proof_id"] for item in history if item.get("kind") == "focus" and item.get("reason") == "no_work"}
-    candidates = [
-        node for node in _no_work_candidates(graph, current.route if current else None) if node.proof_id != graph.focus
-    ]
-    fresh = [node for node in candidates if node.proof_id not in offered]
-    # Once every candidate was offered, the cycle starts again; the current focus stays excluded.
-    pool = fresh or candidates
-    if not pool:
-        return {"moved": False}
-    target = pool[0]
-    _append(directory, {"kind": "focus", "proof_id": target.proof_id, "reason": "no_work"})
-    history = events(directory)
-    return {"moved": True, "label": _update_id(history, target.proof_id), **_start_material(theorem, run_id, target)}
-
-
-def _restart_order(graph: Graph) -> list[Node]:
-    """Restart starting points in rotation: the best clean node, the original reference, then the best cell of each
-    other route that scores no lower than that best. Sketches and test drafts never start a restart."""
-    reference = next((node for node in graph.nodes if node.origin == "reference"), None)
-    scored = [node for node in graph.nodes if node.score is not None and not routes.is_draft(node.proof_text)]
-    best = max(scored, key=lambda node: node.score) if scored else reference
-    if best is None:
-        raise ValueError(text.render("messages/errors.node_reference_invalid", reference="restart start"))
-    excluded = {node.route for node in (best, reference) if node is not None}
-    per_route: dict[str | None, Node] = {}
-    for cell in _best_first(archive(graph)):
-        node = cell.node
-        if cell.route in excluded or routes.is_draft(node.proof_text) or node.score is None:
-            continue
-        if best.score is not None and node.score < best.score:
-            continue
-        per_route.setdefault(cell.route, node)
-    unique: dict[str, Node] = {}
-    for node in [best, reference, *per_route.values()]:
-        if node is not None:
-            unique.setdefault(node.proof_id, node)
-    return list(unique.values())
-
-
-def _island_order(graph: Graph) -> list[Node | None]:
-    """Island starting points in rotation: the statement alone (None), the original reference, then the best scored
-    node on another route than the best. Each island leaves the best node's skeleton behind."""
-    reference = next((node for node in graph.nodes if node.origin == "reference"), None)
-    scored = [node for node in graph.nodes if node.score is not None and not routes.is_draft(node.proof_text)]
-    best = max(scored, key=lambda node: node.score) if scored else None
-    other = next(
-        (
-            cell.node
-            for cell in _best_first(archive(graph))
-            if cell.node.score is not None
-            and not routes.is_draft(cell.node.proof_text)
-            and best is not None
-            and cell.route != best.route
-        ),
-        None,
-    )
-    return [None, *[node for node in (reference, other) if node is not None and node is not best]]
-
-
-def _tried_since_restart(history: list[dict], graph: Graph) -> list[str]:
-    """Distinct ideas tried since the last restart that failed or did not beat the best so far, newest last."""
-    start = max((seq for seq, item in enumerate(history) if item.get("kind") == "restart"), default=-1)
-    nodes = {node.proof_id: node for node in graph.nodes}
-    best = max(
-        (
-            score
-            for score in (
-                _metric_score((item.get("result") or {}).get("metrics"))
-                for item in history[: start + 1]
-                if item.get("kind") == "evaluation"
-            )
-            if score is not None
-        ),
-        default=None,
-    )
-    lines: list[str] = []
-    for item in history[start + 1 :]:
-        result = item.get("result") or {}
-        if item.get("kind") == "probe":
-            proof_id = item["proof_id"]
-            verdict = _failure_text(result) if _probe_failed(result) else None
-        elif item.get("kind") == "evaluation":
-            proof_id = item["candidate_id"]
-            metrics = result.get("metrics") or {}
-            score = _metric_score(metrics)
-            if not metrics.get("compiled"):
-                verdict = _failure_text(result)
-            elif score is None or (best is not None and score <= best):
-                verdict = None
-            else:
-                best = score
-                continue
-        else:
-            continue
-        node = nodes.get(proof_id)
-        parents = (node.edge or {}).get("from") or [] if node else []
-        parent = nodes.get(parents[0]) if parents else None
-        changes = changed_steps(parent.steps, node.steps) if parent and node else []
-        steps = ", ".join(step_id for change in changes for step_id in change["ids"]) or "whole proof"
-        outcome = (
-            text.render("packet/restart.tried_failed", reason=verdict)
-            if verdict
-            else text.render("packet/restart.tried_no_gain")
-        )
-        lines.append(
-            text.render(
-                "packet/restart.tried_line",
-                label=_update_id(history, proof_id),
-                steps=steps,
-                verdict=outcome,
-            )
-        )
-    distinct = [line for index, line in enumerate(lines) if line not in lines[index + 1 :]]
-    return distinct[-8:]
 
 
 def _kickoff_within(sections: list[tuple[str, str]], limit: int) -> str:
@@ -1342,91 +1556,26 @@ def _kickoff_within(sections: list[tuple[str, str]], limit: int) -> str:
     for title, content in sections:
         head = f"{title}\n"
         if title and content.startswith(head):
-            parts.append((title, content[len(head) :].split("\n")))
+            lines = content[len(head) :].split("\n")
+            if title == context.template("packet/sections.titles.goals").strip():
+                # Restore the atomic per-step entries flattened by packet serialization.
+                goal_pattern = re.escape(context.template("packet/sections.fixed.goal"))
+                for field, pattern in (("step", r"s\d+"), ("line", r"\d+"), ("text", ".*")):
+                    goal_pattern = goal_pattern.replace(re.escape("{" + field + "}"), pattern)
+                coverage_prefix = context.template("packet/sections.fixed.goal_coverage").split("{")[0]
+                entries: list[str] = []
+                for line in lines:
+                    if not entries or re.fullmatch(goal_pattern, line) or line.startswith(coverage_prefix):
+                        entries.append(line)
+                    else:
+                        entries[-1] += "\n" + line
+                lines = entries
+            parts.append((title, lines))
         else:
             parts.append(("", content.split("\n")))
     fitted = context._fit_sections(parts, limit)
     return "\n\n".join((f"{title}\n" if title else "") + "\n".join(body) for title, body in fitted) + "\n"
 
-
-def island_packet(name: str, run_id: str) -> dict:
-    """A new island after a turn that ended with text: a fresh context from the statement alone, the original
-    reference, or another route's best node, in rotation. The best so far stays recorded."""
-    return restart_packet(name, run_id, island=True)
-
-
-def restart_packet(name: str, run_id: str, island: bool = False) -> dict:
-    """Restart the conversation at the next starting point: the kickoff packet, the start node, the costliest steps,
-    the ideas already tried, and the map. The whole packet stays within the packet budget."""
-    from arena import context, reply
-
-    directory = run_dir(run_id)
-    history = events(directory)
-    graph = Graph.from_history(history, _proof_reader(directory))
-    restarts = sum(1 for item in history if item.get("kind") == "restart")
-    reference = next((node for node in graph.nodes if node.origin == "reference"), None)
-    if island:
-        islands = sum(1 for item in history if item.get("kind") == "restart" and item.get("island"))
-        pick = _island_order(graph)[islands % len(_island_order(graph))]
-        blank, start = pick is None, pick or reference
-    else:
-        order = _restart_order(graph)
-        blank, start = False, order[restarts % len(order)]
-    if start is None:
-        raise ValueError(text.render("messages/errors.node_reference_invalid", reference="restart start"))
-    scored = [node for node in graph.nodes if node.score is not None]
-    best_node = max(scored, key=lambda node: node.score) if scored else None
-    tried = _tried_since_restart(history, graph)
-    _append(directory, {"kind": "restart", "proof_id": start.proof_id, "island": island, "blank": blank})
-    _append(directory, {"kind": "focus", "proof_id": start.proof_id, "reason": "island" if island else "restart"})
-    history = events(directory)
-    graph_map = map_view_from(history, directory)
-    map_lines = list(reply._map_lines({**graph_map, "open": []}))
-    label = _update_id(history, start.proof_id)
-    best = f"{_update_id(history, best_node.proof_id)} (score {best_node.score})" if best_node is not None else label
-    if blank:
-        statement = problem(name)["statement"]
-        head = [
-            text.render("packet/restart.island_blank", best=best),
-            text.render("packet/restart.island_statement", statement=statement),
-        ]
-    else:
-        material = _start_material(name, run_id, start)
-        head = [
-            text.render("packet/restart.island_start", label=label, best=best)
-            if island
-            else text.render("packet/restart.start", label=label),
-            f"```lean\n{start.proof_text}\n```",
-            text.render("packet/restart.prices_heading"),
-            material["prices"].rstrip("\n"),
-        ]
-    sections = context.packet_sections(name)
-    while True:
-        tail = "\n".join(
-            [
-                *head,
-                *([text.render("packet/restart.tried_heading"), *tried] if tried else []),
-                text.render("messages/compaction-memory.map_heading"),
-                *map_lines,
-            ]
-        )
-        try:
-            kickoff = _kickoff_within(sections, context.MAX_PACKET_CHARS - len(tail) - 2)
-            break
-        except ValueError:
-            # The kickoff cannot shrink further: shed the map first, then the tried list.
-            if map_lines:
-                map_lines.pop()
-            elif tried:
-                tried.pop(0)
-            else:
-                raise
-    return {
-        "ok": True,
-        "text": kickoff.rstrip("\n") + "\n" + tail + "\n",
-        "label": label,
-        "restart": restarts + 1,
-    }
 
 
 def _metric_score(metrics: dict | None) -> float | None:
@@ -1581,6 +1730,7 @@ def _model_view(result: dict) -> dict:
     # `ok` says the tool ran; `compiled` says whether the draft compiled. On a failed compile the
     # heartbeat is only the work done before the error, not a cost of the draft.
     failed = any(not info.get("passed") for info in (result.get("compat") or {}).values())
+    view["outcome"] = _verification_outcome(result)
     if failed:
         view = {("heartbeat_to_failure" if key == "heartbeat" else key): value for key, value in view.items()}
         view["compiled"] = False
@@ -1597,7 +1747,8 @@ def _model_view(result: dict) -> dict:
     compat = {}
     for version, info in (result.get("compat") or {}).items():
         item = {"passed": bool(info.get("passed"))}
-        for key in ("heartbeats", "diagnostics", "full_diagnostics_ref", "error"):
+        for key in ("heartbeats", "diagnostics", "full_diagnostics_ref", "error", "outcome", "cause",
+                    "retryable", "exit_code", "timeout"):
             if info.get(key) not in (None, [], ""):
                 item["heartbeats_to_failure" if key == "heartbeats" and not item["passed"] else key] = info[key]
         lean = info.get("lean") or {}
@@ -1632,6 +1783,78 @@ def _compiled_versions(history: list[dict], candidate_id: str, row: dict) -> dic
     }
 
 
+def _verification_outcome(result: dict) -> str:
+    """Separate an evaluated proof from checks that could not establish an outcome."""
+    compat = result.get("compat") or {}
+    if result.get("lean_unavailable") or result.get("timeout") or not compat:
+        if result.get("outcome") == "proof_error":
+            return "proof_error"
+        return "inconclusive"
+    if result.get("ok") is not False and all(info.get("passed") is True for info in compat.values()):
+        return "passed"
+    # A completed Lean failure is proof evidence; a timeout, signal, or absent
+    # measurement is not. Another version's inconclusive check cannot erase it.
+    if any(
+        info.get("passed") is False
+        and info.get("exit_code") == 1
+        and not info.get("lean_unavailable")
+        and not info.get("timeout")
+        and info.get("outcome") != "inconclusive"
+        and info.get("cause") not in {"context", "measurement", "resource_denial", "toolchain_unavailable", "worker_crash"}
+        for info in compat.values()
+    ):
+        return "proof_error"
+    return "inconclusive"
+
+
+def _verification_owners(directory: Path, proof_id: str) -> list[dict]:
+    """Join exact proof attempts to their durable worker assignment, never their parents."""
+    from arena.run_control import published_history
+
+    history = published_history(directory, events(directory))
+    assignments = [item for item in history if item.get("type") == "delegation"]
+    owners = {}
+    for attempt in history:
+        if attempt.get("kind") != "attempt" or (attempt.get("proof_id") or attempt.get("candidate_id")) != proof_id:
+            continue
+        for assignment in assignments:
+            if (attempt.get("actor_id"), attempt.get("session_id")) != (
+                assignment.get("worker_actor_id"), assignment.get("worker_session_id"),
+            ):
+                continue
+            job_id = assignment["job_id"]
+            owner = owners.setdefault(job_id, {
+                "job_id": job_id, "actor_id": attempt["actor_id"], "session_id": attempt["session_id"],
+                "run_id": assignment["run_id"], "proof_id": proof_id, "attempt_ids": [],
+            })
+            if attempt.get("event_id") and attempt["event_id"] not in owner["attempt_ids"]:
+                owner["attempt_ids"].append(attempt["event_id"])
+    return list(owners.values())
+
+
+def _queue_full_check(directory: Path, run_id: str, proof_id: str) -> list[dict]:
+    from arena import orchestration
+
+    with _candidate_lock(directory, proof_id):
+        key = _evaluation_key(proof_id, "full", problem(events(directory)[0]["theorem"]))
+        rows = [item for item in orchestration._history(directory)
+                if item.get("type") == "verification" and item.get("proof_id") == proof_id
+                and item.get("evaluation_id") == key]
+        latest = {}
+        for item in rows:
+            execution = item.get("check_id") or f"legacy:{item['job_id']}:{key}"
+            latest[(item["job_id"], execution)] = {**item, "check_id": execution}
+        pending = [item for item in latest.values() if item["state"] in {"queued", "running"}]
+        check_id = pending[0]["check_id"] if pending else uuid.uuid4().hex
+        checks = [{**owner, "check_id": check_id, "evaluation_id": key}
+                  for owner in _verification_owners(directory, proof_id) if owner["run_id"] == run_id]
+        for check in checks:
+            if not any(item["job_id"] == check["job_id"] for item in pending):
+                orchestration.note_verification(directory, **check, state="queued")
+        return checks
+
+
+@_submission_scope
 def record_evaluation(
     name: str,
     run_id: str,
@@ -1647,6 +1870,7 @@ def record_evaluation(
     precomputed: dict | None = None,
     operation: dict | None = None,
     named_parent: str | object | None = _NAMED_PARENT_UNSET,
+    verification_checks: list[dict] | None = None,
 ) -> dict:
     """Record a candidate and its evaluation. `precomputed` is a result the caller already
     compiled for this exact proof and mode; `trigger` says whether the model or the
@@ -1656,14 +1880,18 @@ def record_evaluation(
     directory = run_dir(run_id)
     if lane == "model" and trigger == "model":
         _refuse_if_tripped(directory)
+    record_started = time.monotonic()
     row = problem(name)
     # Forbidden constructs and statement edits are rejected before anything is recorded,
     # so `sorry` drafts can never become candidates.
     validate_proof(row, proof)
     candidate_id = hashlib.sha256((name + "\0" + proof).encode()).hexdigest()
     notes: list[str] = []
+    lock_wait_started = time.monotonic()
+    lean_lock_wait_seconds = 0.0
     with _candidate_lock(directory, candidate_id):
-        history = events(directory)
+        lock_wait_seconds = round(time.monotonic() - lock_wait_started, 3)
+        history = _published_events(directory)
         if not history or history[0].get("theorem") != name:
             raise ValueError(text.render("messages/errors.run_theorem_mismatch"))
         if history[0].get("versions") and history[0]["versions"] != [list(pair) for pair in versions(row)]:
@@ -1680,21 +1908,36 @@ def record_evaluation(
                 explicit.append(resolved)
         lineage = explicit or ([_current(history)] if candidate_id not in known and _current(history) else [])
         lineage = [parent for parent in lineage if parent != candidate_id]
+        hypothesis_ref = hypothesis if isinstance(hypothesis, str) and hypothesis.startswith("hyp:") else None
+        if hypothesis_ref:
+            hypothesis = ""
         _snapshot(directory, candidate_id, proof)
         if candidate_id not in known:
-            _append(
-                directory,
-                {
-                    "kind": "candidate",
-                    "candidate_id": candidate_id,
-                    "parents": lineage,
-                    "hypothesis": hypothesis,
-                    "origin": origin,
-                    "merge": merge,
-                    "source_versions": versions(row),
-                    "evaluator_sha256": _evaluator_sha(),
-                },
+            key = _evaluation_key(candidate_id, mode, row)
+            candidate = {
+                "kind": "candidate",
+                "candidate_id": candidate_id,
+                "parents": lineage,
+                "hypothesis": hypothesis,
+                "hypothesis_ref": hypothesis_ref,
+                "origin": origin,
+                "merge": merge,
+                "source_versions": versions(row),
+                "evaluator_sha256": _evaluator_sha(),
+            }
+            prior_admission = _submission_attempt(directory, candidate_id, proof, operation)
+            attempt = _submit_proof(
+                directory, candidate_id, proof, operation,
+                evaluation={"mode": mode, "key": key, "state": "queued"}, candidate=candidate,
             )
+            if prior_admission is not None and not any(
+                event.get("kind") == "candidate" and event.get("candidate_id") == candidate_id
+                for event in _published_events(directory)
+            ):
+                # A complete probe was admitted before its result was known. Its
+                # successful outcome can publish the candidate under that receipt.
+                _append_submitted(directory, attempt, candidate)
+            history = _published_events(directory)
         elif explicit and not any(
             item.get("kind") == "derivation"
             and item.get("candidate_id") == candidate_id
@@ -1705,66 +1948,123 @@ def record_evaluation(
                 item for item in history if item.get("kind") == "candidate" and item["candidate_id"] == candidate_id
             )
             if original.get("parents", []) != explicit:
-                _append(
+                from arena.run_control import actor_ids, submit_candidate
+
+                identity = actor_ids(directory.name)
+                submit_candidate(
                     directory,
                     {
-                        "kind": "derivation",
-                        "candidate_id": candidate_id,
-                        "parents": explicit,
-                        "origin": origin,
-                        "merge": merge,
+                        "operation_id": uuid.uuid4().hex,
+                        "run_id": run_id,
+                        "actor_id": identity["actor_id"],
+                        "session_id": identity["session_id"],
+                        "proof_id": candidate_id,
+                        "proof_sha256": hashlib.sha256(proof.encode()).hexdigest(),
+                        "authorization": "duplicate",
+                        "inputs": {"parents": explicit, "origin": origin},
+                        "ledger_events": [{"kind": "derivation", "candidate_id": candidate_id,
+                                           "parents": explicit, "origin": origin, "merge": merge}],
                     },
                 )
         key = _evaluation_key(candidate_id, mode, row)
+        if candidate_id in known and _SELECT_COMPILED.get():
+            from arena.run_control import SubmissionRefused
+
+            # Already-published candidates can finish verification even if this
+            # fresh selection is refused; no new construction is authorized.
+            with suppress(SubmissionRefused):
+                _submit_proof(directory, candidate_id, proof, operation, evaluation={
+                    "mode": mode, "key": key, "state": "queued",
+                })
         prior = next(
             (item for item in reversed(history) if item.get("kind") == "evaluation" and item["key"] == key), None
         )
-        if prior:
-            result = json.loads(json.dumps(prior["result"]))
-        elif precomputed is not None:
-            result = precomputed
-        else:
-            try:
-                with lean_lock(directory, lane):
-                    result = _evaluate(
-                        name,
-                        proof,
-                        mode,
-                        known=_compiled_versions(history, candidate_id, row) if mode == "full" else None,
-                        lane=lane,
-                    )
-            except (ValueError, FileNotFoundError) as error:
-                result = {
-                    "ok": False,
-                    "name": name,
-                    "mode": mode,
-                    "error": str(error),
-                    "compat": {},
-                    "tokens": None,
-                    "heartbeat": None,
-                    "local_proxy": None,
-                }
-                if isinstance(error, FileNotFoundError):
-                    result["lean_unavailable"] = True  # Lean (or the workspace) could not run: counts for the breaker
-        if not prior:
-            _externalize_output(directory, candidate_id, result)
-            _append(
-                directory,
-                {
-                    "kind": "evaluation",
-                    "candidate_id": candidate_id,
-                    "key": key,
-                    "mode": mode,
-                    "trigger": trigger,
-                    "result": result,
-                },
-            )
+        if prior and _verification_outcome(prior["result"]) == "inconclusive":
+            prior = None
+        checks = list(verification_checks or [])
+        if not prior and not checks and trigger != "auto":
+            job_id = operation.get("job_id") if isinstance(operation, dict) else None
+            job_id = job_id or os.environ.get("ARENA_JOB_ID")
+            if job_id:
+                checks = [{"job_id": job_id, "check_id": uuid.uuid4().hex, "evaluation_id": key,
+                           "proof_id": candidate_id, "run_id": run_id,
+                           "actor_id": os.environ.get("ARENA_ACTOR_ID") or "sol",
+                           "session_id": os.environ.get("ARENA_SESSION_ID") or run_id}]
+        if checks:
+            from arena import orchestration
+
+            for check in checks:
+                orchestration.note_verification(directory, **check, state="running")
+        try:
+            if prior:
+                result = json.loads(json.dumps(prior["result"]))
+            elif precomputed is not None:
+                result = precomputed
+            else:
+                try:
+                    from arena.run_control import submission_barrier
+
+                    submission_barrier("during_lean", directory)
+                    lean_lock_started = time.monotonic()
+                    with lean_lock(directory, lane):
+                        lean_lock_wait_seconds = round(time.monotonic() - lean_lock_started, 3)
+                        result = _evaluate(
+                            name,
+                            proof,
+                            mode,
+                            known=_compiled_versions(history, candidate_id, row) if mode == "full" else None,
+                            lane=lane,
+                            request_class=(
+                                ("full_check" if mode == "full" else "opportunistic")
+                                if origin in {"assembly", "golf"} or trigger == "golf"
+                                # a harness-submitted check is promising; a worker's own tool call stays its own class
+                                else "full_check"
+                                if trigger == "auto"
+                                else actor_request_class()
+                            ),
+                        )
+                except (ValueError, FileNotFoundError) as error:
+                    result = {
+                        "ok": False,
+                        "name": name,
+                        "mode": mode,
+                        "error": str(error),
+                        "compat": {},
+                        "tokens": None,
+                        "heartbeat": None,
+                        "local_proxy": None,
+                    }
+                    if isinstance(error, FileNotFoundError):
+                        result["lean_unavailable"] = True  # Lean (or the workspace) could not run: counts for the breaker
+            if not prior:
+                result.setdefault("harness_timing", {})
+                result["harness_timing"].update(
+                    {"candidate_lock_wait_seconds": lock_wait_seconds, "lean_lock_wait_seconds": lean_lock_wait_seconds}
+                )
+                _externalize_output(directory, candidate_id, result)
+                _append(
+                    directory,
+                    {
+                        "kind": "evaluation",
+                        "candidate_id": candidate_id,
+                        "key": key,
+                        "mode": mode,
+                        "trigger": trigger,
+                        "result": result,
+                    },
+                )
+        except BaseException:
+            for check in checks:
+                orchestration.note_verification(directory, **check, state="inconclusive")
+            raise
+        for check in checks:
+            orchestration.note_verification(directory, **check, state=_verification_outcome(result))
     if lane == "model" and trigger == "model" and not prior:
         _check_breaker(directory)
     location = materialize(name, run_id, proof) if materialize_live and result.get("tokens") is not None else {}
     if location:
         _append(directory, {"kind": "current", "candidate_id": candidate_id})
-    filing_history = events(directory)
+    filing_history = _published_events(directory)
     in_batch, _ = _BATCH_FOCUS.get()
     projection_out: list[Graph] = []
     _, newly_filed = _file_node(
@@ -1780,9 +2080,14 @@ def record_evaluation(
         None if in_batch else projection_out,
     )
     if not in_batch:
-        graph = _settle_focus(directory, [candidate_id], projection_out[0] if projection_out else None)
+        graph = _settle_focus(
+            directory,
+            [candidate_id],
+            projection_out[0] if projection_out else None,
+            actor_local=origin == "model" and trigger == "model",
+        )
         _check_stall(directory, graph, {candidate_id} if newly_filed else set())
-    history = events(directory)
+    history = _published_events(directory)
     rows = _summaries(history)
     me = next((r for r in rows if r["id"] == candidate_id), None)
     result.setdefault("metrics", None)
@@ -1816,7 +2121,13 @@ def record_evaluation(
         **location,
     }
     if me and (result.get("metrics") or {}).get("axes") and not re.search(r"\bsorry\b", proof):
-        projection = projection_out[0] if projection_out else Graph.from_history(history, _proof_reader(directory))
+        projection = (
+            projection_out[0]
+            if projection_out
+            else Graph.from_history(
+                history, _proof_reader(directory), committed_operations=committed_operation_ids(directory)
+            )
+        )
         node = next((item for item in projection.nodes if item.proof_id == candidate_id), None)
         if node is not None and node.score is not None:
             parent_ids = (node.edge or {}).get("from") or []
@@ -1845,6 +2156,21 @@ def record_evaluation(
             total_versions = len(versions(problem(name)))
             row["versions"] = _versions_text(node.versions, total_versions)
             reply["price_row"] = render_price_row(row, parent_node is None, parent_node is best_node)
+    if not prior:
+        _append(
+            directory,
+            {
+                "kind": "evaluation_span",
+                "candidate_id": candidate_id,
+                "mode": mode,
+                "seconds": round(time.monotonic() - record_started, 3),
+                "materialized": bool(location),
+                "filed": newly_filed,
+            },
+        )
+    if (mode == "fast" and origin != "reference" and _verification_outcome(result) == "passed"
+            and any(job["id"] == candidate_id for job in _autocheck_jobs(_summaries(events(directory))))):
+        _queue_full_check(directory, run_id, candidate_id)
     return reply
 
 
@@ -1855,9 +2181,13 @@ def evaluate_request(
     mode: str = "fast",
     parents: list[str] | None = None,
     hypothesis: str = "",
+    operation: dict | None = None,
+    named_parent: str | object | None = _NAMED_PARENT_UNSET,
 ) -> dict:
     """Evaluate one complete proof and return its scored view."""
-    result = record_evaluation(name, run_id, proof, mode, parents, hypothesis)
+    result = record_evaluation(
+        name, run_id, proof, mode, parents, hypothesis, operation=operation, named_parent=named_parent
+    )
     return _model_view({**result, "full_check": _full_check_status(events(run_dir(run_id)), result["candidate_id"])})
 
 
@@ -1901,9 +2231,12 @@ def _probe_workers(count: int) -> int:
 def _compile_probe(name: str, row: dict, proof: str) -> dict:
     """Compile one draft. A complete draft is compiled exactly as a fast evaluation would be,
     so if it passes it becomes a candidate without another compile."""
+    from arena.run_control import submission_barrier
+
+    submission_barrier("during_lean", None)
     complete = not _has_hole(row, proof)
     try:
-        return evaluate(name, proof, "fast" if complete else "probe")
+        return evaluate(name, proof, "fast" if complete else "probe", request_class=actor_request_class())
     except (ValueError, FileNotFoundError) as error:
         return {
             "ok": False,
@@ -1921,7 +2254,7 @@ def _compile_probes(name: str, directory: Path, drafts: list[str]) -> dict[str, 
     parents match sequential execution. Drafts that cannot be prepared are left for `probe` to
     reject with its usual error.
     """
-    history = events(directory)
+    history = _published_events(directory)
     row = problem(name)
     known = set(_candidate_ids(history)) | {item["proof_id"] for item in history if item.get("kind") == "probe"}
     pending: dict[str, str] = {}
@@ -1931,7 +2264,18 @@ def _compile_probes(name: str, directory: Path, drafts: list[str]) -> dict[str, 
             validate_proof(row, proof, allow_sorry=True)
         except ValueError:
             continue
-        if hashlib.sha256((name + "\0" + proof).encode()).hexdigest() not in known:
+        proof_id = hashlib.sha256((name + "\0" + proof).encode()).hexdigest()
+        if proof_id not in known:
+            from arena.run_control import SubmissionRefused
+
+            try:
+                _snapshot(directory, proof_id, proof)
+                check_mode = "probe" if _has_hole(row, proof) else "fast"
+                _submit_proof(directory, proof_id, proof, None, evaluation={
+                    "mode": check_mode, "key": _evaluation_key(proof_id, check_mode, row), "state": "queued",
+                })
+            except SubmissionRefused:
+                continue
             pending.setdefault(proof, proof)
     if not pending:
         return {}
@@ -1946,6 +2290,7 @@ def _compile_probes(name: str, directory: Path, drafts: list[str]) -> dict[str, 
     return compiled
 
 
+@_submission_scope
 def probe(
     name: str,
     run_id: str,
@@ -1960,7 +2305,7 @@ def probe(
     proof = normalize_draft(name, proof)
     directory = run_dir(run_id)
     _refuse_if_tripped(directory)
-    history = events(directory)
+    history = _published_events(directory)
     row = problem(name)
     notes: list[str] = []
     parent_id = None
@@ -1972,7 +2317,15 @@ def probe(
     parent_id = parent_id or _current(history)
     proof_id = hashlib.sha256((name + "\0" + proof).encode()).hexdigest()
     if proof_id in set(_candidate_ids(history)):
-        return evaluate_request(name, run_id, proof, mode, parents=[parent] if parent else None)
+        return evaluate_request(
+            name,
+            run_id,
+            proof,
+            mode,
+            parents=[parent] if parent else None,
+            operation=operation,
+            named_parent=named_parent,
+        )
     earlier = next(
         (item for item in reversed(history) if item.get("kind") == "probe" and item["proof_id"] == proof_id), None
     )
@@ -1982,6 +2335,11 @@ def probe(
     else:
         validate_proof(row, proof, allow_sorry=True)
         complete = not _has_hole(row, proof)
+        _snapshot(directory, proof_id, proof)
+        check_mode = "fast" if complete else "probe"
+        attempt = _submit_proof(directory, proof_id, proof, operation, evaluation={
+            "mode": check_mode, "key": _evaluation_key(proof_id, check_mode, row), "state": "queued",
+        })
         result = (_PRECOMPILED.get() or {}).get(proof)
         if result is None:
             with lean_lock(directory):
@@ -2008,18 +2366,20 @@ def probe(
         result = {**result, "mode": "probe", "scored": False}
         _externalize_output(directory, proof_id, result)
         _snapshot(directory, proof_id, proof)
-        _append(
+        _append_submitted(
             directory,
+            attempt,
             {
                 "kind": "probe",
                 "proof_id": proof_id,
+                "evaluation_id": _evaluation_key(proof_id, "probe", row),
                 "parent": parent_id,
                 "named_parent": None if named_parent is _NAMED_PARENT_UNSET else named_parent,
                 "note": note,
                 "result": result,
             },
         )
-        filing_history = events(directory)
+        filing_history = _published_events(directory)
         in_batch, _ = _BATCH_FOCUS.get()
         projection_out: list[Graph] = []
         _, new_node = _file_node(
@@ -2038,7 +2398,7 @@ def probe(
     if earlier:
         # A repeat leaves its own row, so the reply can say how often this text has been tried.
         _append(directory, {"kind": "repeat", "proof_id": proof_id})
-        filing_history = events(directory)
+        filing_history = _published_events(directory)
         in_batch, _ = _BATCH_FOCUS.get()
         projection_out = []
         _, new_node = _file_node(
@@ -2054,7 +2414,7 @@ def probe(
             newly_filed.add(proof_id)
     in_batch, _ = _BATCH_FOCUS.get()
     if not in_batch:
-        graph = _settle_focus(directory, [proof_id], projection_out[0] if projection_out else None)
+        graph = _settle_focus(directory, [proof_id], projection_out[0] if projection_out else None, actor_local=True)
         _check_stall(directory, graph, newly_filed)
     location = materialize(name, run_id, proof) if result.get("tokens") is not None else {}
     label = _probe_numbers(events(directory))[proof_id]
@@ -2088,6 +2448,7 @@ def normalize_draft(name: str, draft: str) -> str:
     return statement + " := by\n" + block
 
 
+@_submission_scope
 def probe_batch(
     name: str,
     run_id: str,
@@ -2100,8 +2461,18 @@ def probe_batch(
     if not isinstance(drafts, list) or not 1 <= len(drafts) <= MAX_DRAFTS:
         raise ValueError(text.render("messages/errors.draft_limit"))
     history = events(run_dir(run_id))
-    fixed_parent = resolve_parent_ref(history, parent) if parent else _current(history)
-    starting_focus = next((item["proof_id"] for item in reversed(history) if item.get("kind") == "focus"), None)
+    from arena.reply import actor_focus_proof, set_actor_focus
+
+    actor_focus = actor_focus_proof(run_id)
+    if actor_focus is None and (anchored := worker_anchor_proof(run_id, history)):
+        set_actor_focus(run_id, anchored)  # a worker files under its job's anchor, never the run's moving focus
+        actor_focus = anchored
+    fixed_parent = resolve_parent_ref(history, parent) if parent else actor_focus or _current(history)
+    starting_focus = actor_focus or next(
+        (item["proof_id"] for item in reversed(history) if item.get("kind") == "focus"), None
+    )
+    if actor_focus is None and starting_focus is not None:
+        set_actor_focus(run_id, starting_focus)
     outcomes = []
     token = _PRECOMPILED.set(_compile_probes(name, run_dir(run_id), drafts) if len(drafts) > 1 else {})
     focus_token = _BATCH_FOCUS.set((True, starting_focus))
@@ -2128,11 +2499,12 @@ def probe_batch(
         proof_id = hashlib.sha256((name + "\0" + proof).encode()).hexdigest()
         if proof_id not in filed:
             filed.append(proof_id)
-    graph = _settle_focus(directory, filed)
+    graph = _settle_focus(directory, filed, actor_local=True)
     _check_stall(directory, graph, newly_filed)
     return {"ok": True, "drafts": outcomes}
 
 
+@_submission_scope
 def compile_operation(
     name: str,
     run_id: str,
@@ -2145,6 +2517,13 @@ def compile_operation(
     if mode not in ("fast", "full"):
         raise ValueError(text.render("messages/errors.evaluation_mode"))
     directory = run_dir(run_id)
+    from arena.run_control import read_state, submission_barrier
+
+    submission_barrier("before_construction", directory)
+    if read_state(directory).get("stopped"):
+        from arena.run_control import SubmissionRefused
+
+        raise SubmissionRefused()
     history = events(directory)
 
     def proof_for(reference: str) -> str:
@@ -2188,7 +2567,9 @@ def compile_operation(
         hole_ref = operation.get("hole", "")
         if not isinstance(hole_ref, str):
             hole_ref = str(hole_ref)
-        projection = Graph.from_history(history, _proof_reader(directory))
+        projection = Graph.from_history(
+            history, _proof_reader(directory), committed_operations=committed_operation_ids(directory)
+        )
         sketch = next((node for node in projection.nodes if hole_ref.startswith(f"{node.id}.h")), None)
         valid_holes = [
             f"{hole['id']} line {hole['line']}"
@@ -2214,22 +2595,70 @@ def compile_operation(
     else:
         raise ValueError(text.render("messages/errors.operation_type_invalid", kind=kind))
 
+    if operation.get("experiment_id"):
+        edge_operation["experiment_id"] = operation["experiment_id"]
     proof = normalize_draft(name, proof)
-    result = probe(
-        name,
-        run_id,
-        proof,
-        operation=edge_operation,
-        mode=mode,
-        note=note,
-        named_parent=named_parent,
-    )
+    receipts: list[dict] = []
+    token = _OPERATION_RECEIPTS.set(receipts)
+    failure = None
+    result = {}
+    try:
+        result = probe(
+            name,
+            run_id,
+            proof,
+            operation=edge_operation,
+            mode=mode,
+            note=note,
+            named_parent=named_parent,
+        )
+    except Exception as error:
+        failure = error
+    finally:
+        _OPERATION_RECEIPTS.reset(token)
     proof_id = hashlib.sha256((name + "\0" + proof).encode()).hexdigest()
-    filed = next(
-        event for event in events(directory) if event.get("kind") == "edge" and event.get("proof_id") == proof_id
-    )
-    node = _graph_node_id(events(directory), proof_id)
-    return {**result, "node": node, "edge": {"type": filed["type"], "from": filed["from"]}}
+    from arena.run_control import published_history
+
+    history = published_history(directory, events(directory))
+    event_ids = {ref["event_id"] for receipt in receipts for ref in receipt.get("evidence_refs", [])}
+    attempt = next((event for event in history if event.get("kind") == "attempt"
+                    and event.get("event_id") in event_ids and event.get("proof_id") == proof_id), None)
+    key = _evaluation_key(proof_id, mode, problem(name))
+    evaluation = next((event for event in reversed(history) if event.get("kind") == "evaluation"
+                       and event.get("key") == key), None)
+    if evaluation is None:
+        evaluation = next((event for event in reversed(history) if event.get("kind") == "probe"
+                           and event.get("proof_id") == proof_id), None)
+    full_key = _evaluation_key(proof_id, "full", problem(name))
+    full = next((event for event in reversed(history) if event.get("kind") == "evaluation"
+                 and event.get("key") == full_key), None)
+    construction = (attempt or {}).get("data") or {}
+    derivation = next((event for event in history if event.get("kind") == "derivation"
+                       and event.get("proof_id") == proof_id
+                       and (event.get("data") or {}).get("construction_digest") == construction.get("construction_digest")), None)
+    evidence = {
+        **result,
+        "node": _graph_node_id(history, proof_id) if attempt else None,
+        "proof_id": proof_id,
+        "complete": not _has_hole(problem(name), proof),
+        "edge": {"type": edge_operation["type"], "from": edge_operation["from"],
+                 "operation": construction.get("operation"),
+                 "construction_digest": construction.get("construction_digest")},
+        "attempt_id": (attempt or {}).get("event_id"),
+        "derivation_id": (derivation or {}).get("event_id"),
+        "construction_operation_id": (attempt or {}).get("operation_id"),
+        "evaluation_id": (evaluation or {}).get("key") or (evaluation or {}).get("evaluation_id"),
+        "evaluation_ref": None if evaluation is None else {
+            "record": "ledger.jsonl",
+            "row": next(index for index, event in enumerate(events(directory), 1) if event == evaluation),
+        },
+        "raw_result": (evaluation or {}).get("result") or {},
+        "full_result": (full or {}).get("result"),
+    }
+    if failure is not None:
+        failure.operation_evidence = evidence
+        raise failure
+    return evidence
 
 
 def _cached_profiles(name: str, history: list[dict]) -> dict[str, dict]:
@@ -2320,34 +2749,28 @@ def render_price_row(row: dict, root: bool = False, parent_is_best: bool = False
     return "\n".join(rendered)
 
 
-def render_price_table(table: dict) -> str:
-    rows = [text.render("packet/price-table").strip()]
-    rows.extend(
-        [
-            text.render(
-                "packet/price-table.row",
-                step=row["id"],
-                lines=f"{row['first_line']}-{row['last_line']}",
-                tokens=row["tokens"],
-                self_hb=fmt_hb(row["self_hb"]),
-                incl_hb=fmt_hb(row["incl_hb"]),
-                pts_if_gone="-" if row["pts_if_gone"] is None else f"{row['pts_if_gone']:+.2f}",
-                text=row["text"],
-            )
-            for row in table["rows"]
-        ]
+def render_price_table(
+    table: dict,
+    proof: str = "",
+    profile: dict | None = None,
+    proof_id: str = "reference",
+    node_label: str = "n1",
+) -> str:
+    """Structural overview. Totals are not a step row. pts_if_gone stays off this text."""
+    from arena.evidence import cost_evidence, render_cost_overview
+
+    total = table.get("total") or {}
+    evidence = cost_evidence(
+        proof,
+        profile,
+        proof_id=proof_id,
+        total_tokens=total.get("tokens"),
+        published_score=total.get("proxy"),
+        versions=total.get("versions"),
+        local_hb=total.get("heartbeats"),
+        node_label=node_label,
     )
-    total = table["total"]
-    rows.append(
-        text.render(
-            "packet/price-table.total",
-            tokens=total["tokens"],
-            heartbeats=fmt_hb(total["heartbeats"]),
-            versions=total["versions"] or "-",
-            score="-" if total["proxy"] is None else f"{total['proxy']:.2f}",
-        )
-    )
-    return "\n".join(rows)
+    return "\n".join(render_cost_overview(table, evidence))
 
 
 def _reference_tokens(name: str, node: Node) -> int:
@@ -2372,7 +2795,9 @@ def _table_for_node(name: str, node: Node, profiles: dict[str, dict], price_rate
         node.proof_text,
         profile_result,
         price_rates,
-        node.tokens if node.tokens is not None else _reference_tokens(name, node),
+        _reference_tokens(name, node) if node.origin == "reference" else (
+            node.tokens if node.tokens is not None else _reference_tokens(name, node)
+        ),
         node.heartbeats,
         _versions_total(node.versions, total_versions),
     )
@@ -2382,28 +2807,20 @@ def _table_for_node(name: str, node: Node, profiles: dict[str, dict], price_rate
 
 def _span(lines: list[str], entry: dict) -> str:
     """The source text a profile entry covers, from its start line and column to its end line and column."""
-    first, last = entry.get("proof_line"), entry.get("end_proof_line") or entry.get("proof_line")
-    if not isinstance(first, int) or not 0 < first <= len(lines):
-        return ""
-    start, end = int(entry.get("column") or 0), entry.get("end_column")
-    last = min(int(last), len(lines))
-    if first == last:
-        return lines[first - 1][start : end if isinstance(end, int) else None]
-    body = [
-        lines[first - 1][start:],
-        *lines[first : last - 1],
-        lines[last - 1][: end if isinstance(end, int) else None],
-    ]
-    return "\n".join(body)
+    from arena.evidence import source_span
+
+    return source_span(lines, entry)
 
 
-def cost_tree(name: str, run_id: str, reference: str) -> dict:
+def cost_tree(name: str, run_id: str, reference: str, page: int = 1, page_size: int = 30) -> dict:
     """A node's measured cost tree: every profiled tactic and stated term in source order with its nesting depth,
     tokens of its source span, total and own heartbeats, and the points it would return if it cost nothing.
     Cached data only; never Lean."""
     directory = run_dir(run_id)
     history = events(directory)
-    graph = Graph.from_history(history, _proof_reader(directory))
+    graph = Graph.from_history(
+        history, _proof_reader(directory), committed_operations=committed_operation_ids(directory)
+    )
     proof_id = resolve_node_ref(history, reference)
     node = next(node for node in graph.nodes if node.proof_id == proof_id)
     profile = _cached_profiles(name, history).get(proof_id)
@@ -2443,14 +2860,31 @@ def cost_tree(name: str, run_id: str, reference: str) -> dict:
         floor = cached_heartbeat_floor(name)
     except (ValueError, OSError, KeyError):
         floor = None
+    from arena.evidence import cost_evidence, render_cost_detail
+
+    node_label = _update_id(history, proof_id)
+    evidence = cost_evidence(
+        node.proof_text,
+        profile,
+        proof_id=proof_id,
+        total_tokens=node.tokens,
+        published_score=node.score,
+        versions=None,
+        local_hb=(profile or {}).get("measured_total") if profile else None,
+        node_label=node_label,
+        page=page,
+        page_size=page_size,
+    )
     return {
-        "node": _update_id(history, proof_id),
+        "node": node_label,
         "profiled": profile is not None,
         "rows": rows,
         "measured": (profile or {}).get("measured_total"),
         "attributed": (profile or {}).get("profiled_total"),
         "unattributed": (profile or {}).get("unattributed"),
         "floor": floor,
+        "evidence": evidence,
+        "detail": render_cost_detail(evidence),
     }
 
 
@@ -2458,7 +2892,9 @@ def price_table(name: str, run_id: str, reference: str | None = None) -> dict:
     """Return prices from cached proof/profile data only; this action never starts Lean."""
     directory = run_dir(run_id)
     history = events(directory)
-    graph = Graph.from_history(history, _proof_reader(directory))
+    graph = Graph.from_history(
+        history, _proof_reader(directory), committed_operations=committed_operation_ids(directory)
+    )
     scored = [node for node in graph.nodes if node.score is not None]
     if reference:
         proof_id = resolve_node_ref(history, reference)
@@ -2485,7 +2921,13 @@ def price_table(name: str, run_id: str, reference: str | None = None) -> dict:
             profiles[node.proof_id] = reference_result
             profiled = True
     table = _table_for_node(name, node, profiles, price_rates, total_versions)
-    return {**table, "text": render_price_table(table), "profiled": profiled}
+    return {
+        **table,
+        "text": render_price_table(
+            table, node.proof_text, profiles.get(node.proof_id), node.proof_id, node.id
+        ),
+        "profiled": profiled,
+    }
 
 
 def map_view(run_id: str) -> dict:
@@ -2496,7 +2938,9 @@ def map_view(run_id: str) -> dict:
 
 def map_view_from(history: list[dict], directory: Path) -> dict:
     """The map for `history`, reading stored proofs from `directory`. Cached data only, never Lean."""
-    graph = Graph.from_history(history, _proof_reader(directory))
+    graph = Graph.from_history(
+        history, _proof_reader(directory), committed_operations=committed_operation_ids(directory)
+    )
     from arena.scoring import reference as scoring_reference
 
     name = history[0]["theorem"]
@@ -2557,9 +3001,26 @@ def _line_costs(proof: str, profile: dict | None) -> dict:
     return {"tactic": [row(line, spent) for line in tactic], "quiet": [row(line, stated) for line in quiet]}
 
 
+def _cold_view(directory: Path, history: list[dict], event: dict | None) -> dict | None:
+    """Present a cold check only for the bytes and context currently being inspected."""
+    if event is None:
+        return None
+    identity, _proof, error = _cold_input(
+        directory, history, event.get("proof_id") or event["candidate_id"], event.get("recorded_heartbeats")
+    )
+    if error or any(event.get(key) != value for key, value in identity.items()) or (
+        event.get("outcome") == "passed" and not _cold_passed(event)
+    ):
+        return {**event, "outcome": "inconclusive", "cause": "context", "confirmed": False, "retryable": True}
+    outcome = event.get("outcome") or ("passed" if _cold_passed(event) else "inconclusive")
+    return {**event, "outcome": outcome}
+
+
 def graph_state(run_id: str) -> dict:
     directory = run_dir(run_id)
-    history = events(directory)
+    from arena.run_control import published_history
+
+    history = published_history(directory, events(directory))
     if not history:
         return {
             "run_id": run_id,
@@ -2605,6 +3066,10 @@ def graph_state(run_id: str) -> dict:
                 "children": [],
                 "decision": "pursue",
                 "route": None,
+                "eligibility": proof_eligibility(history, identifier),
+                "verification": "unevaluated",
+                "cold": None,
+                "hypothesis_ref": event.get("hypothesis_ref"),
             }
             order.append(identifier)
         elif kind == "derivation" and event["candidate_id"] in nodes:
@@ -2646,9 +3111,31 @@ def graph_state(run_id: str) -> dict:
             and all(version.get("passed") for version in compat.values())
             else ("primary" if next(iter(compat.values()), {}).get("passed") else "fail")
         )
+        node["verification"] = row["status"]
+        node["verification_outcome"] = _verification_outcome(result)
+        row["outcome"] = node["verification_outcome"]
+        node["cold"] = None
         if row["status"] == "full" and row["local_proxy"] is not None and row["local_proxy"] > best_proxy:
             best_proxy = row["local_proxy"]
             milestones.append(row.copy())
+    for identifier, node in nodes.items():
+        node["eligibility"] = proof_eligibility(history, identifier)
+        cold = next(
+            (
+                event
+                for event in reversed(history)
+                if event.get("kind") == "cold_verification" and event.get("candidate_id") == identifier
+            ),
+            None,
+        )
+        cold = _cold_view(directory, history, cold)
+        cold_outcome = None if cold is None else cold.get("outcome") or (
+            "passed" if cold.get("confirmed") else _verification_outcome(cold)
+        )
+        node["cold"] = True if cold_outcome == "passed" else False if cold_outcome == "proof_error" else None
+        node["cold_outcome"] = cold_outcome
+        node["cold_cause"] = None if cold is None else cold.get("cause")
+        node["cold_retryable"] = False if cold is None else bool(cold.get("retryable"))
     fingerprints: dict[str, set[str]] = {}
     for identifier in order:
         node = nodes[identifier]
@@ -2714,12 +3201,18 @@ def graph_state(run_id: str) -> dict:
                 right["merge_partners"] += 1
     rows = [nodes[identifier] for identifier in order]
     ranked = ranked_frontier(rows)
-    projection = Graph.from_history(history, _proof_reader(directory))
+    projection = Graph.from_history(
+        history, _proof_reader(directory), committed_operations=committed_operation_ids(directory)
+    )
     projected = {node.proof_id: node for node in projection.nodes}
     for node in rows:
         graph_node = projected.get(node["id"])
         node["node"] = graph_node.id if graph_node else None
         node["edge"] = graph_node.edge if graph_node else None
+        node["attempts"] = graph_node.attempts if graph_node else []
+        node["alternate_derivations"] = (
+            [item for item in graph_node.derivations if item.get("source") == "derivation"] if graph_node else []
+        )
     for probe_row in probes:
         graph_node = projected.get(probe_row["proof_id"])
         probe_row["node"] = graph_node.id if graph_node else None
@@ -2738,7 +3231,115 @@ def graph_state(run_id: str) -> dict:
         "routes": (route_rows := route_table(history)),
         "route_progress": _route_progress(route_rows),
         "focus": projection.focus,
+        "job_log": _served_jobs(history),
+        "experiments": _served_experiments(history),
+        "actors": _served_actors(history),
     }
+
+
+_WAIT_STATUS = {"wait": "waiting", "wait_end": "wait_ended"}
+
+
+def _open_waits(history: list[dict]) -> set[str]:
+    """Actors whose latest `wait` has no matching `wait_end`."""
+    open_waits: dict[str, str] = {}
+    for event in history:
+        if event.get("kind") == "wait" and event.get("actor_id"):
+            open_waits[event["wait_id"]] = event["actor_id"]
+        elif event.get("kind") == "wait_end":
+            open_waits.pop(event.get("wait_id"), None)
+    return set(open_waits.values())
+
+
+def _served_jobs(history: list[dict]) -> list[dict]:
+    rows = []
+    for event in history:
+        source = _job_source(event)
+        if source is None:
+            continue
+        rows.append(
+            {
+                "source": source,
+                "job_id": event.get("job_id"),
+                "status": event.get("status") or event.get("state") or _WAIT_STATUS.get(event.get("kind")),
+                "actor_id": event.get("actor_id"),
+                "session_id": event.get("session_id"),
+                "candidate_id": event.get("candidate_id") or event.get("proof_id"),
+                "queue": event.get("queue_depths"),
+                "activation_id": event.get("activation_id"),
+                "operation_id": event.get("operation_id"),
+                "event_id": event.get("event_id"),
+                "phase": event.get("phase"),
+                "check": event.get("job") if source == "runtime" else None,
+            }
+        )
+    return rows
+
+
+def _job_source(event: dict) -> str | None:
+    if event.get("type") in ("delegation", "assignment_state"):
+        return "orchestration"
+    if event.get("type") == "verification":
+        return "check"
+    if event.get("kind") == "job":
+        return "runtime"
+    if event.get("kind") in ("wait", "wait_end"):
+        return "wait"
+    return None
+
+
+def _served_experiments(history: list[dict]) -> list[dict]:
+    """One row per experiment: its accepted, raw and outcome rows joined by `experiment_id`."""
+    found: dict[str, dict] = {}
+    for event in history:
+        if event.get("kind") != "scratch":
+            continue
+        key = event.get("experiment_id") or event.get("code_sha256") or ""
+        row = found.setdefault(key, {"experiment_id": event.get("experiment_id")})
+        row["phase"] = event.get("phase")
+        for field in ("actor_id", "session_id", "tool_call_id", "job_id", "code_sha256", "elapsed_ms"):
+            if event.get(field) is not None:
+                row[field] = event[field]
+        row["proof_id"] = event.get("proof_id") or event.get("candidate_id") or row.get("proof_id")
+        at = (event.get("request") or {}).get("at")
+        if at is not None:
+            row["at"] = at
+        if event.get("phase") == "outcome":
+            row["outcome"] = event.get("outcome")
+            for field in ("promotion", "validity", "compatibility", "cold"):
+                row[field] = event.get(field)
+            rendered = event.get("rendered")
+            row["headline"] = rendered[0] if isinstance(rendered, list) and rendered else event.get("diagnostic")
+        else:
+            row.setdefault("outcome", event.get("outcome"))
+    return list(found.values())
+
+
+def _served_actors(history: list[dict]) -> list[dict]:
+    sessions: dict[str, set[str]] = {}
+    for event in history:
+        actor = event.get("actor_id")
+        session = event.get("session_id")
+        if not actor:
+            continue
+        found = sessions.setdefault(actor, set())
+        if session:
+            found.add(session)
+    waiting = _open_waits(history)
+    rows = []
+    for actor, found in sessions.items():
+        ordered = sorted(found)
+        status = "missing" if not ordered else "recorded" if len(ordered) == 1 else "ambiguous"
+        rows.append(
+            {
+                "actor_id": actor,
+                "session_id": ordered[0] if len(ordered) == 1 else None,
+                "sessions": ordered,
+                "session_status": status,
+                "waiting": actor in waiting,
+            }
+        )
+    return rows
 
 
 def merge_once(run_id: str, graph: dict | None = None) -> dict | None:
@@ -2893,6 +3494,27 @@ def _autocheck_jobs(rows: list[dict], closing: bool = False) -> list[dict]:
     return sorted(jobs, key=lambda r: (r["score"] if r["score"] is not None else float("-inf"), r["n"]), reverse=True)
 
 
+def _submitted_full_jobs(directory: Path, history: list[dict], rows: list[dict], closing: bool) -> list[dict]:
+    from arena.run_control import published_history
+
+    latest = {}
+    for event in published_history(directory, history):
+        if event.get("type") == "verification" and event.get("proof_id"):
+            execution = event.get("check_id") or f"legacy:{event['job_id']}:{event['evaluation_id']}"
+            latest[(event["job_id"], execution)] = event
+    pending = {event["proof_id"] for event in latest.values() if event["state"] == "queued"}
+    # A saved candidate can precede any attributed check intent. Recovery uses
+    # the existing full queue rather than inventing an author or an evaluation.
+    evaluated_full = {event.get("candidate_id") for event in history
+                      if event.get("kind") == "evaluation" and event.get("mode") == "full"}
+    pending.update(event["candidate_id"] for event in history
+                   if event.get("kind") == "job_queued" and event.get("job") == "full"
+                   and event.get("phase") == "recovery" and event.get("candidate_id") not in evaluated_full)
+    selected = _autocheck_jobs(rows, closing=closing)
+    ids = {row["id"] for row in selected}
+    return selected + [row for row in rows if row["id"] in pending and row["id"] not in ids]
+
+
 def _step_goal_jobs(history: list[dict], directory: Path) -> list[str]:
     """Proof ids whose closed or sketch states have no terminal step-goal event."""
     done = {
@@ -2945,12 +3567,61 @@ def _profile_jobs(history: list[dict], graph: Graph) -> list[Node]:
     ]
 
 
+def _mark_queued(directory: Path, history: list[dict], phase: str, kind: str, ids: list[str]) -> dict[str, dict]:
+    queued = {
+        (event.get("job"), event.get("candidate_id")): event for event in history if event.get("kind") == "job_queued"
+    }
+    result = {}
+    for identifier in ids:
+        event = queued.get((kind, identifier))
+        if event is None:
+            eligible = None
+            source = "observed"
+            if kind == "full":
+                eligible = next(
+                    (
+                        row.get("ts")
+                        for row in reversed(history)
+                        if row.get("kind") == "evaluation"
+                        and row.get("mode") == "fast"
+                        and row.get("candidate_id") == identifier
+                    ),
+                    None,
+                )
+                if eligible is not None:
+                    source = "fast_evaluation"
+            event = {
+                "ts": time.time(),
+                "eligible_ts": eligible if isinstance(eligible, (int, float)) else time.time(),
+                "eligibility_source": source,
+            }
+            _runtime_event(
+                directory,
+                {
+                    "kind": "job_queued",
+                    "job": kind,
+                    "candidate_id": identifier,
+                    "phase": phase,
+                    "eligible_ts": event["eligible_ts"],
+                    "eligibility_source": source,
+                },
+            )
+        result[identifier] = event
+    return result
+
+
+def _queue_age(event: dict, now: float | None = None) -> float:
+    return round(max(0, (time.time() if now is None else now) - event.get("eligible_ts", event["ts"])), 2)
+
+
 def profile_in_call(name: str, run_id: str, node_refs: list[str]) -> None:
     """Profile closed nodes inside the model's own tool call, on the model lane: the background lane and the
     autocheck lock can be held for tens of seconds by other jobs, and the reply must not read "pending"."""
     directory = run_dir(run_id)
     history = events(directory)
-    graph = Graph.from_history(history, _proof_reader(directory))
+    graph = Graph.from_history(
+        history, _proof_reader(directory), committed_operations=committed_operation_ids(directory)
+    )
     attempted = {event.get("proof_id") for event in history if event.get("kind") in {"profile", "profile_error"}}
     for ref in node_refs:
         try:
@@ -2999,8 +3670,12 @@ def _run_profile_job(name: str, run_id: str, node: Node) -> None:
 
 def _salvage_jobs(history: list[dict], directory: Path, graph: Graph | None = None) -> list[Node]:
     """Broken, filed graph nodes with no terminal salvage event yet."""
-    done = {item.get("proof_id") for item in history if item.get("kind") == "salvage"}
-    graph = graph or Graph.from_history(history, _proof_reader(directory))
+    done = {
+        item.get("proof_id") for item in history if item.get("kind") == "salvage" and item.get("status") != "deferred"
+    }
+    graph = graph or Graph.from_history(
+        history, _proof_reader(directory), committed_operations=committed_operation_ids(directory)
+    )
     # The pinned reference compiles by definition; it reads as broken only because it is never evaluated.
     return [
         node
@@ -3012,7 +3687,9 @@ def _salvage_jobs(history: list[dict], directory: Path, graph: Graph | None = No
 def _assembly_jobs(history: list[dict], directory: Path, graph: Graph | None = None) -> list[Node]:
     """Sketch nodes whose every hole has a closing fill and no assembly event."""
     done = {item.get("sketch") for item in history if item.get("kind") == "assembly"}
-    graph = graph or Graph.from_history(history, _proof_reader(directory))
+    graph = graph or Graph.from_history(
+        history, _proof_reader(directory), committed_operations=committed_operation_ids(directory)
+    )
     return [
         node
         for node in graph.nodes
@@ -3029,7 +3706,7 @@ def _salvage_compile(name: str, text_value: str) -> dict:
     if directory is None:
         raise ValueError
     with lean_lock(directory, "background"):
-        result = _evaluate(name, text_value, "probe", lane="background")
+        result = _evaluate(name, text_value, "probe", lane="background", request_class="opportunistic")
     compat = result.get("compat") or {}
     first = next(iter(compat.values()), {})
     diagnostics = first.get("diagnostics") or []
@@ -3040,23 +3717,90 @@ def _salvage_compile(name: str, text_value: str) -> dict:
     return {"clean": clean, "error_lines": lines, "unlocated": not clean and not lines, "result": result}
 
 
-def _run_salvage(name: str, run_id: str, node: Node) -> dict:
+SALVAGE_SOFT_CAP_SECONDS = 60
+
+
+@_submission_scope
+def _run_salvage(name: str, run_id: str, node: Node, drain_deadline: float | None = None) -> dict:
     directory = run_dir(run_id)
+    from arena.run_control import read_state, submission_barrier
+
+    submission_barrier("before_construction", directory)
+    if read_state(directory).get("stopped"):
+        _append(directory, {
+            "kind": "salvage", "proof_id": node.proof_id, "status": "run_stopped",
+            "compiles": 0, "rounds": [], "kept": None, "sketch_id": None,
+        })
+        write_state(run_id)
+        return {"status": "run_stopped", "compiles": 0, "rounds": [], "text": None, "result": None, "kept": None}
     started = time.monotonic()
     proof = node.proof_text
+    history = _published_events(directory)
+    prior = next(
+        (
+            item
+            for item in reversed(history)
+            if item.get("kind") == "salvage"
+            and item.get("proof_id") == node.proof_id
+            and item.get("status") == "deferred"
+        ),
+        None,
+    )
+
+    def should_yield() -> str | None:
+        from arena.run_control import read_state
+
+        if read_state(directory).get("stopped"):
+            return "run_stopped"
+        now = time.monotonic()
+        if drain_deadline is not None and now >= drain_deadline:
+            return "drain_budget_exhausted"
+        if now - started >= SALVAGE_SOFT_CAP_SECONDS:
+            return "salvage_soft_cap_exhausted"
+        if _autocheck_jobs(_summaries(events(directory)), closing=False):
+            return "full_check_arrived"
+        return None
+
+    submission_refused = False
+    operation = {"type": "salvaged_from", "from": [node.proof_id]}
+
+    def compile_salvage(candidate):
+        nonlocal submission_refused
+        from arena.run_control import SubmissionRefused
+
+        proof_id = hashlib.sha256((name + "\0" + candidate).encode()).hexdigest()
+        _snapshot(directory, proof_id, candidate)
+        try:
+            _submit_proof(directory, proof_id, candidate, operation, evaluation={
+                "mode": "probe", "key": _evaluation_key(proof_id, "probe", problem(name)), "state": "queued",
+            })
+        except SubmissionRefused:
+            submission_refused = True
+            raise
+        submission_barrier("during_lean", directory)
+        return _salvage_compile(name, candidate)
+
     token = _SALVAGE_DIRECTORY.set(directory)
     try:
-        outcome = salvage_proof(name, proof, lambda candidate: _salvage_compile(name, candidate))
+        outcome = salvage_proof(
+            name,
+            proof,
+            compile_salvage,
+            should_yield=should_yield,
+            resume=(prior or {}).get("continuation"),
+        )
     except (ValueError, FileNotFoundError):
         outcome = {"status": "unavailable", "compiles": 0, "rounds": [], "text": None, "result": None, "kept": None}
     finally:
         _SALVAGE_DIRECTORY.reset(token)
+    if submission_refused or outcome.get("reason") == "run_stopped":
+        outcome = {**outcome, "status": "run_stopped"}
     sketch_id = None
     if outcome["status"] == "salvaged":
         sketch_text = outcome["text"]
         sketch_id = hashlib.sha256((name + "\0" + sketch_text).encode()).hexdigest()
         _snapshot(directory, sketch_id, sketch_text)
-        history = events(directory)
+        history = _published_events(directory)
         has_node = any(
             item.get("proof_id") == sketch_id and item.get("kind") in ("probe", "candidate") for item in history
         )
@@ -3065,39 +3809,64 @@ def _run_salvage(name: str, run_id: str, node: Node) -> dict:
             result["mode"] = "probe"
             result["scored"] = False
             result["salvaged"] = True
-            _append(directory, {"kind": "probe", "proof_id": sketch_id, "parent": node.proof_id, "result": result})
+            from arena.run_control import SubmissionRefused
+
+            try:
+                attempt = _submit_proof(directory, sketch_id, sketch_text, operation, evaluation={
+                    "mode": "probe", "key": _evaluation_key(sketch_id, "probe", problem(name)), "state": "queued",
+                })
+            except SubmissionRefused:
+                outcome = {**outcome, "status": "run_stopped", "text": None}
+                sketch_id = None
+            else:
+                _append_submitted(directory, attempt, {
+                    "kind": "probe", "proof_id": sketch_id, "parent": node.proof_id, "result": result,
+                })
+        if sketch_id is not None:
             _file_node(
                 directory,
                 events(directory),
                 sketch_id,
                 sketch_text,
-                operation={"type": "salvaged_from", "from": [node.proof_id]},
+                operation=operation,
             )
-    _append(
-        directory,
-        {
-            "kind": "salvage",
-            "proof_id": node.proof_id,
-            "status": outcome["status"],
-            "compiles": outcome["compiles"],
-            "rounds": outcome["rounds"],
-            "kept": outcome["kept"],
-            "sketch_id": sketch_id,
-            "seconds": round(time.monotonic() - started, 2),
-        },
-    )
+    event = {
+        "kind": "salvage",
+        "proof_id": node.proof_id,
+        "status": outcome["status"],
+        "compiles": outcome["compiles"],
+        "rounds": outcome["rounds"],
+        "kept": outcome["kept"],
+        "sketch_id": sketch_id,
+        "seconds": round(time.monotonic() - started, 2),
+    }
+    if outcome["status"] == "deferred":
+        event.update(reason=outcome["reason"], continuation=outcome["continuation"])
+    _append(directory, event)
     write_state(run_id)
     return outcome
 
 
 def _run_assembly(name: str, run_id: str, sketch: Node) -> None:
     directory = run_dir(run_id)
+    from arena.run_control import read_state, submission_barrier
+
+    submission_barrier("before_construction", directory)
+    if read_state(directory).get("stopped"):
+        _append(directory, {
+            "kind": "assembly", "sketch": sketch.proof_id, "node": None, "fills": {},
+            "alternatives": {}, "status": "run_stopped",
+        })
+        write_state(run_id)
+        return
     started = time.monotonic()
     fills: dict[str, str] = {}
     alternatives: dict[str, list[str]] = {}
     chosen: list[tuple[dict, Node]] = []
     try:
-        graph = Graph.from_history(events(directory), _proof_reader(directory))
+        graph = Graph.from_history(
+            events(directory), _proof_reader(directory), committed_operations=committed_operation_ids(directory)
+        )
         by_id = {node.id: node for node in graph.nodes}
         for hole in sketch.holes:
             candidates = [by_id[node_id] for node_id in hole["fills"]]
@@ -3140,6 +3909,8 @@ def _run_assembly(name: str, run_id: str, sketch: Node) -> None:
             },
         )
     except Exception as error:
+        from arena.run_control import SubmissionRefused
+
         _append(
             directory,
             {
@@ -3148,7 +3919,7 @@ def _run_assembly(name: str, run_id: str, sketch: Node) -> None:
                 "node": None,
                 "fills": fills,
                 "alternatives": alternatives,
-                "status": "error",
+                "status": "run_stopped" if isinstance(error, SubmissionRefused) else "error",
                 "error": str(error)[:300],
                 "seconds": round(time.monotonic() - started, 2),
             },
@@ -3158,21 +3929,42 @@ def _run_assembly(name: str, run_id: str, sketch: Node) -> None:
 
 def _run_full_check(name: str, run_id: str, job: dict) -> str:
     directory = run_dir(run_id)
+    from arena import orchestration
+    from arena.recovery_proofs import _check_arguments, check_mode
+
+    latest = {}
+    for event in orchestration._history(directory):
+        if event.get("type") == "verification" and event.get("proof_id") == job["id"]:
+            identity = (event["job_id"], event.get("check_id") or f"legacy:{event['job_id']}:{event['evaluation_id']}")
+            latest[identity] = event
+    pending = [event for event in latest.values() if event["state"] == "queued"]
+    mode = check_mode(job["id"], pending[0]["evaluation_id"], problem(name)) if pending else "full"
+    if mode is None:
+        raise ValueError("queued evaluation context changed")  # log: internal error # not-model-facing
+    checks = [_check_arguments(event) for event in pending
+              if event["evaluation_id"] == pending[0]["evaluation_id"]] if pending else _queue_full_check(
+                  directory, run_id, job["id"],
+              )
     try:
         proof = (directory / "proofs" / f"{job['id']}.lean").read_text()
-        record_evaluation(name, run_id, proof, "full", materialize_live=False, lane="batch", trigger="auto")
+        record_evaluation(name, run_id, proof, mode, materialize_live=False, lane="batch", trigger="auto",
+                          verification_checks=checks)
     except Exception as error:  # record the failure so the queue moves on
         _append(
             directory,
             {
                 "kind": "evaluation",
                 "candidate_id": job["id"],
-                "key": f"auto-error-{job['id']}",
-                "mode": "full",
+                "key": _evaluation_key(job["id"], mode, problem(name)),
+                "mode": mode,
                 "trigger": "auto",
-                "result": {"ok": False, "mode": "full", "error": str(error)[:300], "compat": {}},
+                "result": {"ok": False, "mode": mode, "error": str(error)[:300], "compat": {}},
             },
         )
+        from arena import orchestration
+
+        for check in checks:
+            orchestration.note_verification(directory, **check, state="inconclusive")
     write_state(run_id)
     return f"#{job['n']}"
 
@@ -3223,12 +4015,13 @@ def _run_step_goals(name: str, run_id: str, proof_id: str) -> None:
     write_state(run_id)
 
 
-def autocheck(
+def _autocheck_impl(
     name: str,
     run_id: str,
     max_seconds: float | None = None,
     closing: bool = False,
     kinds: tuple[str, ...] | None = None,
+    phase_id: str = "",
 ) -> dict:
     """Drain salvage, assembly, full checks and step goals in the background lane.
 
@@ -3241,7 +4034,10 @@ def autocheck(
     directory = run_dir(run_id)
     directory.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
+    drain_deadline = started + max_seconds if max_seconds is not None else None
     checked: list[str] = []
+    capped_salvage: set[str] = set()
+    phase = "closing_drain" if closing else "autocheck"
     with (directory / "autocheck.lock").open("a") as handle:
         while True:
             try:
@@ -3252,38 +4048,185 @@ def autocheck(
                 if kinds is None or max_seconds is None or time.monotonic() - started >= max_seconds:
                     return {"ok": True, "checked": [], "running_elsewhere": True}
                 time.sleep(0.2)
+        phase_started = time.monotonic()
+        _runtime_event(
+            directory,
+            {
+                "kind": "phase",
+                "phase": phase,
+                "phase_id": phase_id,
+                "status": "start",
+                "lock_wait_seconds": round(phase_started - started, 2),
+            },
+        )
         while max_seconds is None or time.monotonic() - started < max_seconds:
             if lean_health.tripped(directory):
                 break  # Lean is unhealthy: background checks pause with the model's work
             history = events(directory)
-            projection = Graph.from_history(history, _proof_reader(directory))
+            projection = Graph.from_history(
+                history, _proof_reader(directory), committed_operations=committed_operation_ids(directory)
+            )
             # Closing drain: the model has stopped, so only full checks (and assemblies, whose
             # results become new candidates) matter; salvage, step goals and profiles (which only
             # feed price tables) only serve the model.
-            order = ("full", "assembly") if closing else ("salvage", "assembly", "full", "step_goals", "profiles")
+            order = ("full", "assembly") if closing else ("full", "salvage", "assembly", "step_goals", "profiles")
             if kinds is not None:
                 order = tuple(kind for kind in order if kind in kinds)
+            jobs_by_kind = {
+                "full": _submitted_full_jobs(directory, history, _summaries(history), closing=closing),
+                "salvage": _salvage_jobs(history, directory, projection),
+                "assembly": _assembly_jobs(history, directory, projection),
+                "step_goals": _step_goal_jobs(history, directory) if not closing else [],
+                "profiles": _profile_jobs(history, projection) if not closing else [],
+            }
+            queued_by_kind = {}
+            eligible_kinds = ("full", "assembly") if closing else tuple(jobs_by_kind)
+            for queued_kind in eligible_kinds:
+                jobs_for_kind = jobs_by_kind[queued_kind]
+                ids = [
+                    item["id"]
+                    if queued_kind == "full"
+                    else item.proof_id
+                    if queued_kind in ("salvage", "assembly", "profiles")
+                    else item
+                    for item in jobs_for_kind
+                ]
+                queued_by_kind[queued_kind] = _mark_queued(directory, history, phase, queued_kind, ids)
+            queues = {key: len(value) for key, value in jobs_by_kind.items()}
             for kind in order:
-                if kind == "salvage" and (salvage_jobs := _salvage_jobs(history, directory, projection)):
-                    _run_salvage(name, run_id, salvage_jobs[0])
-                    break
-                if kind == "assembly" and (assembly_jobs := _assembly_jobs(history, directory, projection)):
-                    _run_assembly(name, run_id, assembly_jobs[0])
-                    break
-                if kind == "full" and (jobs := _autocheck_jobs(_summaries(history), closing=closing)):
-                    checked.append(_run_full_check(name, run_id, jobs[0]))
-                    break
-                if kind == "step_goals" and (goal_jobs := _step_goal_jobs(history, directory)):
-                    _run_step_goals(name, run_id, goal_jobs[0])
-                    break
-                if kind == "profiles" and (profile_jobs := _profile_jobs(history, projection)):
-                    _run_profile_job(name, run_id, profile_jobs[0])
+                job = None
+                jobs = jobs_by_kind[kind]
+                if kind == "salvage" and jobs:
+                    selected = next((item for item in jobs if item.proof_id not in capped_salvage), None)
+                    if selected is not None:
+                        job = (
+                            selected.proof_id,
+                            lambda selected=selected: _run_salvage(name, run_id, selected, drain_deadline),
+                            queued_by_kind[kind][selected.proof_id],
+                        )
+                elif kind == "assembly" and jobs:
+                    selected = jobs[0]
+                    job = (
+                        selected.proof_id,
+                        lambda selected=selected: _run_assembly(name, run_id, selected),
+                        queued_by_kind[kind][selected.proof_id],
+                    )
+                elif kind == "full" and jobs:
+                    selected = jobs[0]
+                    job = (
+                        selected["id"],
+                        lambda selected=selected: checked.append(_run_full_check(name, run_id, selected)),
+                        queued_by_kind[kind][selected["id"]],
+                    )
+                elif kind == "step_goals" and jobs:
+                    selected = jobs[0]
+                    job = (
+                        selected,
+                        lambda selected=selected: _run_step_goals(name, run_id, selected),
+                        queued_by_kind[kind][selected],
+                    )
+                elif kind == "profiles" and jobs:
+                    selected = jobs[0]
+                    job = (
+                        selected.proof_id,
+                        lambda selected=selected: _run_profile_job(name, run_id, selected),
+                        queued_by_kind[kind][selected.proof_id],
+                    )
+                if job:
+                    job_id, run_job, queued = job
+                    created = next(
+                        (
+                            e.get("ts")
+                            for e in history
+                            if e.get("kind") == "candidate" and e.get("candidate_id") == job_id
+                        ),
+                        None,
+                    )
+                    job_id_event = f"{phase_id}:{kind}:{job_id}"
+                    _runtime_event(
+                        directory,
+                        {
+                            "kind": "job",
+                            "phase": phase,
+                            "phase_id": phase_id,
+                            "job_id": job_id_event,
+                            "job": kind,
+                            "candidate_id": job_id,
+                            "status": "start",
+                            "queue_depths": queues,
+                            "queue_age_s": _queue_age(queued),
+                            "candidate_age_s": round(max(0, time.time() - created), 2) if created else None,
+                        },
+                    )
+                    job_started = time.monotonic()
+                    status = "end"
+                    job_outcome = None
+                    try:
+                        job_outcome = run_job()
+                    except Exception as error:
+                        status = "error"
+                        _runtime_event(
+                            directory,
+                            {
+                                "kind": "job",
+                                "phase": phase,
+                                "phase_id": phase_id,
+                                "job_id": job_id_event,
+                                "job": kind,
+                                "candidate_id": job_id,
+                                "status": status,
+                                "error": str(error)[:300],
+                                "seconds": round(time.monotonic() - job_started, 2),
+                            },
+                        )
+                        _runtime_event(
+                            directory,
+                            {
+                                "kind": "phase",
+                                "phase": phase,
+                                "phase_id": phase_id,
+                                "status": "error",
+                                "error": str(error)[:300],
+                                "seconds": round(time.monotonic() - phase_started, 2),
+                            },
+                        )
+                        raise
+                    else:
+                        if kind == "salvage" and (job_outcome or {}).get("status") == "deferred":
+                            status = "deferred"
+                            if job_outcome.get("reason") != "full_check_arrived":
+                                capped_salvage.add(job_id)
+                        _runtime_event(
+                            directory,
+                            {
+                                "kind": "job",
+                                "phase": phase,
+                                "phase_id": phase_id,
+                                "job_id": job_id_event,
+                                "job": kind,
+                                "candidate_id": job_id,
+                                "status": status,
+                                "reason": (job_outcome or {}).get("reason"),
+                                "seconds": round(time.monotonic() - job_started, 2),
+                            },
+                        )
                     break
             else:
                 break
     rows = _summaries(events(directory))
     remaining = [f"#{r['n']}" for r in _autocheck_jobs(rows, closing=closing)]
     outcome = {"ok": True, "checked": checked, "remaining": remaining}
+    _runtime_event(
+        directory,
+        {
+            "kind": "phase",
+            "phase": phase,
+            "phase_id": phase_id,
+            "status": "end",
+            "seconds": round(time.monotonic() - phase_started, 2),
+            "remaining": len(remaining),
+        },
+    )
     if closing:
         kept = set(remaining) | set(checked)
         outcome["skipped"] = [f"#{r['n']}" for r in _unchecked(rows) if f"#{r['n']}" not in kept]
@@ -3301,6 +4244,35 @@ def autocheck(
             },
         )
     return outcome
+
+
+def autocheck(
+    name: str,
+    run_id: str,
+    max_seconds: float | None = None,
+    closing: bool = False,
+    kinds: tuple[str, ...] | None = None,
+) -> dict:
+    directory = run_dir(run_id)
+    phase = "closing_drain" if closing else "autocheck"
+    phase_id = f"{phase}:{os.getpid()}:{time.monotonic_ns()}"
+    try:
+        return _autocheck_impl(name, run_id, max_seconds, closing, kinds, phase_id)
+    except Exception as error:
+        history = events(directory)
+        started = any(
+            e.get("kind") == "phase" and e.get("phase_id") == phase_id and e.get("status") == "start" for e in history
+        )
+        ended = any(
+            e.get("kind") == "phase" and e.get("phase_id") == phase_id and e.get("status") in ("end", "error")
+            for e in history
+        )
+        if started and not ended:
+            _runtime_event(
+                directory,
+                {"kind": "phase", "phase": phase, "phase_id": phase_id, "status": "error", "error": str(error)[:300]},
+            )
+        raise
 
 
 def _skeleton(history: list[dict], rows: list[dict], best: dict | None, run_id: str) -> dict:
@@ -3410,6 +4382,7 @@ def state(run_id: str) -> dict:
                         "messages/salvage.salvaged", sketch=sketch, sources=_compact_ids(sources), fill=fill
                     ),
                     "source": sources,
+                    "quiet": True,  # bookkeeping for a draft that does not compile; stays in state, not in replies
                     "unseen_text": text.render("messages/salvage.salvaged_unseen", sketch=sketch, fill=fill),
                 }
             )
@@ -3532,108 +4505,410 @@ def write_state(run_id: str) -> None:
 
 
 COLD_TOLERANCE = 0.05  # same drift tolerance as arena certify
+COLD_ATTEMPTS = 2  # one original check plus one infrastructure retry of that same proof
 
 
-def _used_session(row: dict) -> bool:
-    """Whether the evaluation that made this candidate verified relied on a Lean session."""
-    full = [e for e in row["evaluations"] if e["status"] == "full"]
-    chosen = max(full, key=lambda e: e["score"] or -1, default=None)
-    return chosen is not None and any(
-        (info.get("lean") or {}).get("path") == "session" for info in (chosen["result"].get("compat") or {}).values()
-    )
+def _pin_cause(info: dict) -> str:
+    """Only a completed Lean error condemns a proof; structured infrastructure wins."""
+    if info.get("timeout") or info.get("cause") == "timeout":
+        return "timeout"
+    if info.get("cause") in ("toolchain_unavailable", "resource_denial", "worker_crash", "context", "measurement"):
+        return info["cause"]
+    if info.get("outcome") == "inconclusive":
+        return info.get("cause") or "context"
+    if info.get("lean_unavailable"):
+        return "toolchain_unavailable"
+    if info.get("outcome") == "proof_error" or info.get("cause") == "proof_error":
+        return "proof_error"
+    exit_code = info.get("exit_code")
+    if exit_code == 1 and info.get("passed") is False:
+        return "proof_error"
+    if isinstance(exit_code, int) and exit_code not in (0, 1):
+        return "worker_crash"
+    blob = f"{info.get('error') or ''} {(info.get('lean') or {}).get('reason') or ''}".lower()
+    if "timed out" in blob or "timeout" in blob:
+        return "timeout"
+    if "memory" in blob:
+        return "resource_denial"
+    return "context"
+
+
+def _classify_cold(compat: dict, confirmed: bool, close: bool, error: str | None = None) -> dict:
+    """Inconclusive checks neither certify nor invalidate a submitted proof."""
+    if confirmed:
+        return {"outcome": "passed", "cause": None, "retryable": False}
+    if error:
+        return {"outcome": "inconclusive", "cause": "context", "retryable": True}
+    if compat and all(info.get("passed") is True for info in compat.values()) and not close:
+        return {"outcome": "inconclusive", "cause": "measurement", "retryable": True}
+    causes = [_pin_cause(info) for info in compat.values() if info.get("passed") is not True]
+    if "proof_error" in causes:
+        return {"outcome": "proof_error", "cause": "proof_error", "retryable": False}
+    return {"outcome": "inconclusive", "cause": causes[0] if causes else "context", "retryable": True}
+
+
+def _cold_events(history: list[dict], candidate_id: str) -> list[dict]:
+    """Latest state of each attempt, retaining start and completion in the raw ledger."""
+    attempts = {}
+    for index, event in enumerate(history):
+        if event.get("kind") != "cold_verification" or event.get("candidate_id") != candidate_id:
+            continue
+        key = (event["check_id"], event["attempt"]) if event.get("check_id") and event.get("attempt") else (index,)
+        attempts.pop(key, None)
+        attempts[key] = event
+    return list(attempts.values())
+
+
+def _cold_passed(event: dict | None) -> bool:
+    """A positive event must explicitly establish every required pin."""
+    if not event or event.get("outcome") != "passed" or not event.get("confirmed"):
+        return False
+    pins = [version for version, _commit in (event.get("context") or {}).get("pins", [])]
+    passed = event.get("passed") or {}
+    return bool(pins) and set(passed) == set(pins) and all(value is True for value in passed.values())
+
+
+def _cold_input(
+    directory: Path, history: list[dict], candidate_id: str, heartbeats: int | None
+) -> tuple[dict, str | None, str | None]:
+    """Identity covers the exact bytes, evaluator and immutable source/toolchain pins."""
+    errors = []
+    context = {"pins": history[0].get("versions") or [], "evaluator_sha256": None}
+    try:
+        context["evaluator_sha256"] = _evaluator_sha()
+    except (OSError, ValueError) as error:
+        errors.append(str(error))
+    proof_bytes = None
+    try:
+        proof_bytes = (directory / "proofs" / f"{candidate_id}.lean").read_bytes()
+        proof = proof_bytes.decode("utf-8")
+        from arena.run_control import _control_rows
+
+        committed = committed_operation_ids(directory)
+        submitted_hashes = {
+            event["proof_sha256"] for event in _control_rows(directory)
+            if event.get("kind") == "candidate_submission" and event.get("proof_id") == candidate_id
+            and event.get("operation_id") in committed and event.get("proof_sha256")
+        }
+        if submitted_hashes and submitted_hashes != {hashlib.sha256(proof_bytes).hexdigest()}:
+            errors.append("saved proof bytes do not match the committed submission hash")  # log: internal error # not-model-facing
+        elif not submitted_hashes and hashlib.sha256(
+            (history[0]["theorem"] + "\0" + proof).encode()
+        ).hexdigest() != candidate_id:
+            errors.append("saved proof bytes do not match the submitted proof identity")  # log: internal error # not-model-facing
+    except (OSError, UnicodeError) as error:
+        proof = None
+        errors.append(str(error))
+    try:
+        benchmark = problem(history[0]["theorem"])
+        context["benchmark_sha256"] = hashlib.sha256(
+            json.dumps(benchmark, sort_keys=True, ensure_ascii=False).encode()
+        ).hexdigest()
+        if json.loads(json.dumps(versions(benchmark))) != json.loads(json.dumps(context["pins"])):
+            errors.append("saved toolchain pins do not match the current benchmark")  # log: internal error # not-model-facing
+    except Exception as error:
+        errors.append(str(error))
+    identity = {
+        "proof_id": candidate_id,
+        "proof_sha256": hashlib.sha256(proof_bytes).hexdigest() if proof_bytes is not None else None,
+        "mode": "cold",
+        "context": context,
+        "recorded_heartbeats": heartbeats,
+    }
+    identity["check_id"] = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+    return identity, proof, "; ".join(errors) or None
+
+
+def _matching_cold(history: list[dict], identity: dict) -> list[dict]:
+    return [
+        event
+        for event in _cold_events(history, identity["proof_id"])
+        if event.get("check_id") == identity["check_id"]
+        and all(event.get(key) == value for key, value in identity.items())
+    ]
+
+
+def _certified_cold(directory: Path, history: list[dict], row: dict) -> dict | None:
+    identity, _proof, error = _cold_input(directory, history, row["id"], row.get("heartbeats"))
+    if error:
+        return None
+    matches = _matching_cold(history, identity)
+    return matches[-1] if matches and _cold_passed(matches[-1]) else None
 
 
 def cold_verify(run_id: str, row: dict) -> dict:
-    """Clean cold compile of a candidate on every toolchain; recorded so it runs once.
-
-    A session result is only a fast estimate. A candidate chosen as the answer must also pass
-    a fresh `lake env lean` on every version, with heartbeats within tolerance of what was recorded.
-    """
+    """Independently check exact submitted bytes, with one bounded infrastructure retry."""
     directory = run_dir(run_id)
-    history = events(directory)
-    done = next(
-        (
-            item
-            for item in reversed(history)
-            if item.get("kind") == "cold_verification" and item["candidate_id"] == row["id"]
-        ),
-        None,
-    )
-    if done:
-        return done
-    if lean_health.tripped(directory):
-        # Paused, not recorded: the verification can still run once Lean is healthy again.
-        return {
+    # Counting attempts and running the check share this lock across threads/processes.
+    with _candidate_lock(directory, row["id"]):
+        history = _published_events(directory)
+        identity, proof, context_error = _cold_input(directory, history, row["id"], row.get("heartbeats"))
+        prior = _matching_cold(history, identity)
+        done = prior[-1] if prior else None
+        if done and done.get("state") == "running":
+            # Acquiring the same candidate lock proves the previous checker is no longer
+            # executing. Its durable start consumes one attempt even without a receipt.
+            done = {key: value for key, value in done.items() if key != "ts"}
+            done.update(
+                state="finished",
+                outcome="inconclusive",
+                cause="worker_crash",
+                confirmed=False,
+                retryable=done["attempt"] < COLD_ATTEMPTS,
+                error="cold check interrupted before completion",  # log: internal error # not-model-facing
+                recovered=True,
+            )
+            _append(directory, done)
+        if done and (_cold_passed(done) or done.get("outcome") == "proof_error"):
+            return done
+        if done and (len(prior) >= COLD_ATTEMPTS or not done.get("retryable", True)):
+            return {**done, "retryable": False}
+        event = {
             "kind": "cold_verification",
             "candidate_id": row["id"],
+            **identity,
+            "attempt": len(prior) + 1,
             "confirmed": False,
-            "error": text.render("messages/errors.cold_verification_paused"),
-            "recorded_heartbeats": row["heartbeats"],
-            "paused": True,
+            "recorded_heartbeats": row.get("heartbeats"),
         }
-    name = history[0]["theorem"]
-    proof = (directory / "proofs" / f"{row['id']}.lean").read_text()
-    try:
-        with lean_lock(directory, "background"), force_cold():
-            cold = _evaluate(name, proof, "full", lane="background")
-        compat = cold["compat"]
-        passed = {version: bool(info.get("passed")) for version, info in compat.items()}
-        total = len(history[0].get("versions") or [1])
-        recorded, measured = row["heartbeats"], cold.get("heartbeat")
-        close = (
-            recorded is not None
-            and measured is not None
-            and abs(measured - recorded) <= COLD_TOLERANCE * max(recorded, 1)
+        event["attempt_id"] = hashlib.sha256(f"{identity['check_id']}:{event['attempt']}".encode()).hexdigest()
+        _append(
+            directory, {**event, "state": "running", "outcome": "inconclusive", "cause": "context", "retryable": True}
         )
-        confirmed = len(passed) == total and all(passed.values()) and close
-        event = {
-            "kind": "cold_verification",
-            "candidate_id": row["id"],
-            "confirmed": confirmed,
-            "passed": passed,
-            "compat": cold["compat"],
-            "recorded_heartbeats": recorded,
-            "cold_heartbeats": measured,
+        phase_id = f"cold_verify:{os.getpid()}:{time.monotonic_ns()}"
+        started = time.monotonic()
+        _runtime_event(
+            directory,
+            {
+                "kind": "phase",
+                "phase": "cold_verify",
+                "phase_id": phase_id,
+                "status": "start",
+                "candidate_id": row["id"],
+            },
+        )
+        try:
+            if context_error:
+                event.update(_classify_cold({}, False, False, context_error), error=context_error)
+            elif lean_health.tripped(directory):
+                event.update(
+                    outcome="inconclusive",
+                    cause="resource_denial",
+                    retryable=True,
+                    error=text.render("messages/errors.cold_verification_paused"),
+                    paused=True,
+                )
+            else:
+                with lean_lock(directory, "background"), force_cold():
+                    cold = _evaluate(
+                        history[0]["theorem"], proof, "full", lane="background", request_class="full_check"
+                    )
+                compat = cold.get("compat") or {}
+                passed = {
+                    version: info.get("passed") is True and info.get("outcome", "passed") == "passed"
+                    for version, info in compat.items()
+                }
+                recorded, measured = row.get("heartbeats"), cold.get("heartbeat")
+                close = (
+                    recorded is not None
+                    and measured is not None
+                    and abs(measured - recorded) <= COLD_TOLERANCE * max(recorded, 1)
+                )
+                required = {version for version, _commit in identity["context"]["pins"]}
+                confirmed = bool(required) and set(passed) == required and all(passed.values()) and close
+                event.update(
+                    confirmed=confirmed,
+                    passed=passed,
+                    compat=compat,
+                    cold_heartbeats=measured,
+                    **_classify_cold(compat, confirmed, close),
+                )
+        except Exception as error:
+            from arena.engine import ProofValidityError
+
+            if isinstance(error, ProofValidityError):
+                event.update(outcome="proof_error", cause="validity_error", retryable=False, error=str(error))
+            else:
+                event.update(_classify_cold({}, False, False, str(error)), error=str(error))
+        if event.get("outcome") == "inconclusive" and event["attempt"] >= COLD_ATTEMPTS:
+            event["retryable"] = False
+        event["state"] = "finished"
+        _append(directory, event)
+        _runtime_event(
+            directory,
+            {
+                "kind": "phase",
+                "phase": "cold_verify",
+                "phase_id": phase_id,
+                "status": "error" if event.get("error") else "end",
+                "candidate_id": row["id"],
+                "seconds": round(time.monotonic() - started, 2),
+                "confirmed": bool(event.get("confirmed")),
+                "error": event.get("error"),
+            },
+        )
+        return event
+
+_HARNESS_ORIGINS = frozenset({"auto_merge", "assembly", "golf", "harness", "salvage"})
+
+
+def proof_eligibility(history: list[dict], proof_id: str) -> str:
+    """Agent compilation or an exact selection. An approved ancestor does not approve a child."""
+    if any(
+        event.get("kind") == "proof_selection" and (event.get("proof_id") or event.get("candidate_id")) == proof_id
+        for event in history
+    ):
+        return "eligible"
+    origin = next(
+        (
+            event.get("origin", "model")
+            for event in history
+            if event.get("kind") == "candidate" and event.get("candidate_id") == proof_id
+        ),
+        "model",
+    )
+    if origin in _HARNESS_ORIGINS:
+        return "ineligible"
+    return "eligible"
+
+
+def select_proof(run_id: str, proof_id: str) -> dict:
+    """An agent selects one exact proof. The selection does not extend to descendants."""
+    from arena.run_control import actor_ids, submit_candidate
+
+    directory = run_dir(run_id)
+    identity = actor_ids(directory.name)
+    proof_path = directory / "proofs" / f"{proof_id}.lean"
+    proof_bytes = proof_path.read_bytes() if proof_path.is_file() else proof_id.encode()
+    decision = submit_candidate(
+        directory,
+        {
+            "operation_id": uuid.uuid4().hex,
+            "run_id": run_id,
+            "actor_id": identity["actor_id"],
+            "session_id": identity["session_id"],
+            "proof_id": proof_id,
+            "proof_sha256": hashlib.sha256(proof_bytes).hexdigest(),
+            "authorization": "exact_selection",
+            "inputs": {"proof_id": proof_id},
+            "ledger_events": [{"kind": "proof_selection", "proof_id": proof_id,
+                               "candidate_id": proof_id, "actor_id": identity["actor_id"],
+                               "session_id": identity["session_id"]}],
+        },
+    )
+    if not decision["ok"]:
+        return {
+            "ok": False,
+            "status": "run_stopped",
+            "category": "run_stopped",
+            "proof_id": proof_id,
+            "eligibility": proof_eligibility(_published_events(directory), proof_id),
         }
-    except Exception as error:  # an unverifiable candidate must not be submitted
-        event = {
-            "kind": "cold_verification",
-            "candidate_id": row["id"],
-            "confirmed": False,
-            "error": str(error)[:300],
-            "recorded_heartbeats": row["heartbeats"],
-        }
+    return {"ok": True, "proof_id": proof_id, "eligibility": "eligible", "actor_id": identity["actor_id"]}
+
+
+def write_strategy(run_id: str, body: str) -> dict:
+    """Sol replaces the shared strategic whiteboard. Workers cannot."""
+    from arena.run_control import actor_ids
+
+    directory = run_dir(run_id)
+    identity = actor_ids(directory.name)
+    if identity["actor_id"] != "sol":
+        return {"ok": False, "category": "invalid_input", "reason": "strategy_owner"}
+    _append(directory, {"kind": "strategy", "text": body, "actor_id": "sol", "session_id": identity["session_id"]})
+    return {"ok": True, "text": body}
+
+
+def write_observation(run_id: str, body: str, hypothesis_ref: str | None = None) -> dict:
+    """Append an attributed observation. It does not replace strategy or another actor's notes."""
+    from arena.run_control import actor_ids
+
+    directory = run_dir(run_id)
+    identity = actor_ids(directory.name)
+    event = {
+        "kind": "observation",
+        "text": body,
+        "actor_id": identity["actor_id"],
+        "session_id": identity["session_id"],
+        "hypothesis_ref": hypothesis_ref,
+    }
     _append(directory, event)
-    return event
+    return {"ok": True, **event}
+
+
+def current_strategy(history: list[dict]) -> str | None:
+    texts = [
+        event.get("text") for event in history if event.get("kind") == "strategy" and event.get("actor_id") == "sol"
+    ]
+    return texts[-1] if texts else None
 
 
 def submission(run_id: str) -> dict:
     """The run's answer: the best candidate that passes every version. Written by the harness so
     nothing depends on the model remembering to submit.
 
-    A candidate whose checks ran in a Lean session is re-verified by a clean cold compile first; one
-    that fails it is skipped and listed under `rejected_on_cold`."""
+    Every candidate requires independent all-pin cold certification. Infrastructure failures
+    retain uncertainty and permit only an already-certified eligible fallback."""
     directory = run_dir(run_id)
-    history = events(directory)
+    history = _published_events(directory)
     rows = _summaries(history)
-    # A harness-combined candidate is eligible when it is the best verified candidate.
+    # Harness transformations need selection of this exact proof in addition to verification.
     pool = sorted(
         (
             r
             for r in rows
-            if r["verified"] and r["score"] is not None and r["status"] == "full" and r["origin"] != "reference"
+            if r["verified"]
+            and r["score"] is not None
+            and r["status"] == "full"
+            and r["origin"] != "reference"
+            and proof_eligibility(history, r["id"]) == "eligible"
         ),
         key=lambda r: (r["score"], -r["n"]),
         reverse=True,
     )
-    best, rejected, cold = None, [], None
-    for row in pool:
-        if not _used_session(row):
-            best = row
+    best, rejected, cold, pending = None, [], None, []
+    for index, row in enumerate(pool):
+        certified = _certified_cold(directory, history, row)
+        if certified:
+            best, cold = row, certified
             break
         cold = cold_verify(run_id, row)
-        if cold["confirmed"]:
+        while (
+            cold.get("outcome") == "inconclusive"
+            and cold.get("retryable")
+            and isinstance(cold.get("attempt"), int)
+            and cold["attempt"] < COLD_ATTEMPTS
+        ):
+            cold = cold_verify(run_id, row)
+        if isinstance(cold.get("attempt"), int) and cold["attempt"] >= COLD_ATTEMPTS:
+            cold = {**cold, "retryable": False}
+        if _cold_passed(cold):
             best = row
+            break
+        if cold.get("outcome") == "inconclusive" or (
+            cold.get("outcome") is None and not cold.get("confirmed") and cold.get("passed") is None
+        ):
+            # Certification is unavailable. Do not treat the proof as false, and do not
+            # construct or freshly certify another candidate to take its place.
+            pending.append(
+                {
+                    "candidate": f"#{row['n']}",
+                    "candidate_id": row["id"],
+                    "proof_id": cold.get("proof_id", row["id"]),
+                    "mode": cold.get("mode", "cold"),
+                    "outcome": "inconclusive",
+                    "cause": cold.get("cause"),
+                    "retryable": bool(cold.get("retryable")),
+                    "attempt": cold.get("attempt"),
+                    "passed": cold.get("passed"),
+                    "error": cold.get("error"),
+                }
+            )
+            for later in pool[index + 1 :]:
+                prior = _certified_cold(directory, _published_events(directory), later)
+                if prior:
+                    best, cold = later, prior
+                    break
             break
         rejected.append(
             {
@@ -3642,21 +4917,29 @@ def submission(run_id: str) -> dict:
                 "cold_heartbeats": cold.get("cold_heartbeats"),
                 "passed": cold.get("passed"),
                 "error": cold.get("error"),
+                "outcome": cold.get("outcome", "proof_error"),
             }
         )
+    proof_bytes = None
+    if best is not None:
+        try:
+            proof_bytes = (directory / "proofs" / f"{best['id']}.lean").read_bytes()
+            if hashlib.sha256(proof_bytes).hexdigest() != cold["proof_sha256"]:
+                raise ValueError("proof bytes changed after cold certification")  # log: internal error # not-model-facing
+        except (OSError, ValueError) as error:
+            pending.append({"candidate_id": best["id"], "outcome": "inconclusive",
+                            "cause": "context", "retryable": False, "error": str(error)})
+            best = None
     if best is None:
         answer = {
             "ok": True,
             "candidate": None,
             "reason": "no model candidate passed every version; the original proof stands",  # log: internal record # not-model-facing
         }
-        if rejected:
-            answer["reason"] = (
-                "no candidate that passed in the Lean session also passed a clean cold compile"  # log: internal record # not-model-facing
-            )
+        answer["reason"] = "no certified submission exists"  # log: internal record # not-model-facing
+        (directory / "submission.lean").unlink(missing_ok=True)
     else:
-        proof = (directory / "proofs" / f"{best['id']}.lean").read_text()
-        (directory / "submission.lean").write_text(proof)
+        (directory / "submission.lean").write_bytes(proof_bytes)
         answer = {
             "ok": True,
             "candidate": f"#{best['n']}",
@@ -3665,9 +4948,7 @@ def submission(run_id: str) -> dict:
             "heartbeats": best["heartbeats"],
             "proxy": best["score"],
             "proof_file": "submission.lean",
-            "verified_by": "cold compile"
-            if cold and cold["confirmed"]
-            else "cold compile (no session used)",  # log: internal record # not-model-facing
+            "verified_by": "cold compile",  # log: internal record # not-model-facing
         }
         if cold and cold["confirmed"]:
             # The clean compile is the certified measurement; the session figure is kept for audit.
@@ -3683,6 +4964,8 @@ def submission(run_id: str) -> dict:
                 )
     if rejected:
         answer["rejected_on_cold"] = rejected
+    if pending:
+        answer["pending_checks"] = pending
     (directory / "submission.json").write_text(json.dumps(answer, indent=2) + "\n")
     return answer
 

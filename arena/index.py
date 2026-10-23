@@ -259,7 +259,14 @@ def build_index(name: str, version: str | None = None) -> dict:
     try:
         _log_build(path, "lean_started", timeout_seconds=INDEX_TIMEOUT)
         with engine.force_cold():
-            ran = engine.run_lean(row, built["path"], source, timeout=INDEX_TIMEOUT, prefix_end=built["head"])
+            ran = engine.run_lean(
+                row,
+                built["path"],
+                source,
+                timeout=INDEX_TIMEOUT,
+                prefix_end=built["head"],
+                request_class="opportunistic",
+            )
         if ran is None:
             raise RuntimeError(f"Lean declaration index timed out after {INDEX_TIMEOUT}s")
         returncode, output = ran

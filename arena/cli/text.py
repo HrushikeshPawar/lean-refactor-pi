@@ -13,6 +13,7 @@ from rich.table import Table
 
 from arena import text
 from arena.engine import ROOT
+from arena.tool_schema import registered_tools, render_tool_sections
 
 app = App(name="text", help="Inspect agent-facing text templates.")
 _MARKERS = ("<!-- budget:start -->", "<!-- budget:end -->")
@@ -67,6 +68,7 @@ def render_template(
     list_keys: Annotated[bool, Parameter(name="list")] = False,
     skill: bool = False,
     theorem: str | None = None,
+    actor: str = "sol",
 ) -> int:
     try:
         if theorem is not None:
@@ -77,15 +79,9 @@ def render_template(
             from arena.skill import skill_prompt
 
             parts = [("system prompt", SYSTEM_PROMPT), ("skill", skill_prompt())]
-            for name in ("compile", "goal", "search", "read", "finish", "scratch"):
-                prefix = f"tools/{name}.params."
-                descriptions = [text.render(f"tools/{name}.description")]
-                descriptions.extend(
-                    f"{part.removeprefix(prefix)}: {text.render(part)}"
-                    for part in text.keys()  # noqa: SIM118
-                    if part.startswith(prefix)
-                )
-                parts.append((f"tools/{name}", "\n".join(descriptions)))
+            parts.extend(
+                (f"tools/{name}", body) for name, body in render_tool_sections(registered_tools(actor))
+            )
             parts.extend((title or "Task", content) for title, content in packet_sections(theorem, cache_only=True))
             result = {
                 "theorem": theorem,

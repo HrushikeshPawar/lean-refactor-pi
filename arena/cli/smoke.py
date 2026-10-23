@@ -31,7 +31,6 @@ def execute(rows: list[str]) -> int:
             ("search", {"queries": [name], "kind": "name"}),
             ("read", {"node": "n1"}),
             ("read", {"node": "n1", "view": "prices"}),
-            ("finish", {}),
         ]
         steps = [tool(n, args, 150_000 if n == "read" and args.get("view") == "prices" else 40) for n, args in calls]
         run.script.write_text(json.dumps(steps))

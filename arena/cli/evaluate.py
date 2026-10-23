@@ -13,7 +13,9 @@ from arena.engine import evaluate
 
 def execute(name: str, proof_file: Path, mode: Literal["fast", "full"] = "fast", json_output: bool = False) -> int:
     try:
-        result = evaluate(name, proof_file.read_text(), mode)
+        result = evaluate(
+            name, proof_file.read_text(), mode, request_class="full_check" if mode == "full" else "sol_foreground"
+        )
     except (ValueError, FileNotFoundError) as exc:
         failure = {"ok": False, "name": name, "mode": mode, "error": str(exc)}
         if json_output:

@@ -15,7 +15,7 @@ MERGED = LEFT.replace("exact h", "simpa using h")
 PROXY = {BASE: 40.0, LEFT: 60.0, RIGHT: 55.0, MERGED: 80.0}
 
 
-def fake_eval(_name, proof, mode, known=None):
+def fake_eval(_name, proof, mode, known=None, **_kwargs):
     compat = {"v1": {"passed": True}}
     score = PROXY[proof]
     return {
@@ -43,12 +43,15 @@ class MergeReportTests(unittest.TestCase):
             patch.object(campaign, "versions", return_value=[("v1", "a")]),
             patch.object(campaign, "evaluate", side_effect=fake_eval),
             patch.object(campaign, "materialize"),
+            # Cold verification rescores by tokens; T has no published denominators.
+            patch("arena.scoring.local_proxy",
+                  side_effect=lambda _n, tokens, _hb, _c: {len(p): s for p, s in PROXY.items()}[tokens]),
         ]
         for item in stack:
             item.start()
             self.addCleanup(item.stop)
         directory = campaign.run_dir("m")
-        campaign._append(directory, {"kind": "init", "theorem": "T"})
+        campaign._append(directory, {"kind": "init", "theorem": "T", "versions": [["v1", "a"]]})
         root = campaign.record_evaluation("T", "m", BASE, "full", materialize_live=False)["candidate_id"]
         for proof in (LEFT, RIGHT):
             campaign.record_evaluation("T", "m", proof, "full", [root], materialize_live=False)
@@ -68,6 +71,10 @@ class MergeReportTests(unittest.TestCase):
         unselected = merge_report(campaign.events(directory), directory)
         self.assertFalse(unselected[0]["submitted"])
         self.assertNotIn("(submitted:", merge_text(unselected))
+        # A merge is harness-made: the submission takes it only once an exact agent selection names it.
+        merged = next(event["candidate_id"] for event in reversed(campaign.events(directory))
+                      if event.get("kind") == "merge_check" and event.get("candidate_id"))
+        campaign._append(directory, {"kind": "proof_selection", "proof_id": merged, "candidate_id": merged})
         answer = campaign.submission("m")
         rows = merge_report(campaign.events(directory), directory)
         self.assertEqual(len(rows), 1)

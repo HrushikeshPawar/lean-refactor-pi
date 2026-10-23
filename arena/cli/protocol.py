@@ -9,19 +9,18 @@ import os
 import subprocess
 import time
 import traceback
+import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
+from arena import coordinator, orchestration, team_reply, text
 from arena import reply as tool_reply
 from arena import tools as v7_tools
 from arena.campaign import (
     autocheck,
     frontier,
     init,
-    island_packet,
-    no_work_focus,
-    restart_packet,
     run_dir,
     state,
     submission,
@@ -41,11 +40,13 @@ ACTIONS = (
     "search",
     "read",
     "scratch",
-    "finish",
     "reset_delivered",
-    "no_work_focus",
-    "restart_packet",
-    "island_packet",
+    "await_results",
+    "delegate",
+    "jobs",
+    "cancel",
+    "card",
+    "island_turn",
 )
 
 
@@ -54,7 +55,7 @@ def run(args: SimpleNamespace) -> dict:
         # Compaction calls this with no request: it only forgets what was delivered.
         tool_reply.reset_delivered(args.run_id)
         return tool_reply.reply()
-    if args.action in ("compile", "goal", "search", "read", "scratch", "finish"):
+    if args.action in ("compile", "goal", "search", "read", "scratch"):
         if args.request_file is None:
             raise ValueError("request-file is required")
         request = json.loads(args.request_file.read_text())
@@ -66,17 +67,10 @@ def run(args: SimpleNamespace) -> dict:
             "search": v7_tools.search_tool,
             "read": v7_tools.read_tool,
             "scratch": v7_tools.scratch_tool,
-            "finish": v7_tools.finish_tool,
         }[args.action]
         return tool_reply.attach_context(args.run_id, handler(args.theorem, args.run_id, request))
     if args.action == "init":
         return init(args.theorem, args.run_id)
-    if args.action == "no_work_focus":
-        return no_work_focus(args.run_id, args.theorem)
-    if args.action == "restart_packet":
-        return restart_packet(args.theorem, args.run_id)
-    if args.action == "island_packet":
-        return island_packet(args.theorem, args.run_id)
     if args.action == "frontier":
         return frontier(args.run_id)
     if args.action == "autocheck":
@@ -87,7 +81,100 @@ def run(args: SimpleNamespace) -> dict:
         return memory(args.run_id, args.spent_usd, args.cap_usd)
     if args.action == "submission":
         return submission(args.run_id)
+    if args.action == "await_results":
+        request = {}
+        if args.request_file is not None:
+            request = json.loads(args.request_file.read_text())
+            if not isinstance(request, dict):
+                raise ValueError("request-file must contain an object")
+        # A normal tool result. no_pending_work continues the turn; it does not finish or delegate.
+        result = coordinator.await_results(
+            run_dir(args.run_id),
+            actor_id=os.environ.get("ARENA_ACTOR_ID") or request.get("actor_id") or "sol",
+            cursor=request.get("cursor"),
+            job_ids=_resolve_jobs(args.run_id, request.get("job_ids")),
+        )
+        return _with_text("await_results", result, args.run_id)
+    if args.action in ("delegate", "jobs", "cancel"):
+        return _with_text(args.action, _management(args), args.run_id)
+    if args.action == "card":
+        return _with_text("card", _card(args), args.run_id)
+    if args.action == "island_turn":
+        # A worker's turn ended: the island extension asks whether to continue. The job comes from the environment.
+        job_id, activation_id = os.environ.get("ARENA_JOB_ID"), os.environ.get("ARENA_ACTIVATION_ID")
+        if not job_id or not activation_id:
+            return {"ok": False, "category": "invalid_input", "reason": "worker_only"}
+        return orchestration.island_turn(run_dir(args.run_id), job_id, activation_id)
     raise ValueError(f"Unsupported action: {args.action}")
+
+
+def _resolve_jobs(run_id: str, job_ids):
+    if not isinstance(job_ids, list):
+        return job_ids
+    return [orchestration.resolve_job(run_dir(run_id), item) for item in job_ids]
+
+
+def _with_text(action: str, result: dict, run_id: str) -> dict:
+    """The model reads `text`; the rest stays in the tool details. Cards the caller has not seen follow it."""
+    shown = team_reply.render(action, result, run_dir(run_id))
+    cards = tool_reply.card_lines(run_id) if result.get("ok") is not False else []
+    return {**result, "text": "\n".join([shown, *cards])}
+
+
+def _harness_actor() -> str:
+    return os.environ.get("ARENA_ACTOR_ID") or "sol"
+
+
+def _management(args: SimpleNamespace) -> dict:
+    """Identity comes from the harness. The request body cannot choose the actor."""
+    request = {}
+    if args.request_file is not None:
+        request = json.loads(args.request_file.read_text())
+        if not isinstance(request, dict):
+            raise ValueError("request-file must contain an object")
+    if args.action == "jobs":
+        if any(key != "job_ids" for key in request):
+            return {"ok": False, "category": "invalid_input", "reason": text.render("replies/jobs.unknown_input")}
+        job_ids = request.get("job_ids")
+        if job_ids is not None and (not isinstance(job_ids, list) or any(not isinstance(item, str) for item in job_ids)):
+            return {"ok": False, "category": "invalid_input", "reason": "job_ids",
+                    "hint": text.render("replies/jobs.job_ids")}
+        return orchestration.jobs(run_dir(args.run_id), _resolve_jobs(args.run_id, job_ids))
+    identity = {
+        "actor_id": _harness_actor(),
+        "session_id": os.environ.get("ARENA_SESSION_ID") or args.run_id,
+        "operation_id": os.environ.get("ARENA_TOOL_CALL_ID") or "",
+        "run_id": args.run_id,
+    }
+    if args.action == "cancel":
+        return coordinator.submit(run_dir(args.run_id), {
+            "action": "cancel", "job_id": orchestration.resolve_job(run_dir(args.run_id), request.get("job_id")), **identity,
+        })
+    return coordinator.submit(run_dir(args.run_id), {
+        "action": "delegate",
+        "task": request.get("task"),
+        "scope": request.get("scope"),
+        "job_id": orchestration.resolve_job(run_dir(args.run_id), request.get("job_id")),
+        "at": request.get("at"),
+        "objective": request.get("objective"),
+        **identity,
+    })
+
+
+def _card(args: SimpleNamespace) -> dict:
+    """An actor's card save. Identity comes from the harness environment, never from the request."""
+    request = json.loads(args.request_file.read_text()) if args.request_file is not None else {}
+    fields = {name: request[name].strip() for name in orchestration.CARD_FIELDS if isinstance(request.get(name), str)} \
+        if isinstance(request, dict) else {}
+    if not fields:
+        return {"ok": False, "category": "invalid_input", "reason": "fields",
+                "hint": text.render("replies/team.card_empty")}
+    actor = _harness_actor()
+    return orchestration.save_card(
+        run_dir(args.run_id), operation_id=os.environ.get("ARENA_TOOL_CALL_ID") or uuid.uuid4().hex,
+        job_id=os.environ.get("ARENA_JOB_ID") if actor != "sol" else None, run_id=args.run_id, actor_id=actor,
+        session_id=os.environ.get("ARENA_SESSION_ID") or args.run_id, fields=fields,
+    )
 
 
 def publish_state(run_id: str) -> None:
@@ -136,7 +223,7 @@ def execute(options: ProtocolOptions) -> int:
         return 0
     except (OSError, ValueError, RuntimeError, KeyError, subprocess.SubprocessError) as error:
         message = " ".join(str(error).split()) or type(error).__name__
-        if args.action in ("compile", "goal", "search", "read", "scratch", "finish", "reset_delivered"):
+        if args.action in ("compile", "goal", "search", "read", "scratch", "reset_delivered"):
             log_tool_error(args.run_id, args.action)
             forms = v7_tools.TOOL_FORMS.get(args.action, [])
             print(json.dumps(tool_reply.error_reply("internal_error", message[:400], [], forms), ensure_ascii=False))
@@ -145,7 +232,7 @@ def execute(options: ProtocolOptions) -> int:
         return 2
     except Exception as error:
         message = " ".join(str(error).split()) or type(error).__name__
-        if args.action in ("compile", "goal", "search", "read", "scratch", "finish", "reset_delivered"):
+        if args.action in ("compile", "goal", "search", "read", "scratch", "reset_delivered"):
             log_tool_error(args.run_id, args.action)
             forms = v7_tools.TOOL_FORMS.get(args.action, [])
             print(json.dumps(tool_reply.error_reply("internal_error", message[:400], [], forms), ensure_ascii=False))

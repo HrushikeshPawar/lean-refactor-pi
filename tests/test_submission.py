@@ -102,7 +102,7 @@ class SubmissionTests(unittest.TestCase):
     def test_cold_checks_only_changed_rows(self):
         calls = []
 
-        def evaluate(name, proof, mode):
+        def evaluate(name, proof, mode, **_kwargs):
             calls.append((name, mode))
             return {"local_proxy": 85.02, "compat": {"v1": {"passed": True}}}
 
@@ -115,7 +115,7 @@ class SubmissionTests(unittest.TestCase):
             {"local_proxy": 85.0, "compat": {"v1": {"passed": False}}},
             {"local_proxy": 84.9, "compat": {"v1": {"passed": True}}},
         ):
-            with patch("arena.engine.evaluate", lambda *a, r=result: r), self.assertRaises(sub.SubmissionError):
+            with patch("arena.engine.evaluate", lambda *a, r=result, **_kw: r), self.assertRaises(sub.SubmissionError):
                 self.build("cold-" + str(result["local_proxy"]) + str(result["compat"]["v1"]["passed"]), cold=True)
 
     def test_check_combines_validate_and_forbidden(self):

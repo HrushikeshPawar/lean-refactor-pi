@@ -1,41 +1,23 @@
-// The run-stop decision after a turn ends, as one pure function so its order is testable.
-// D42 (owner): before the final tenth of spend only real failures and the spend limit end a run.
-// A turn without work then moves the focus to a new starting point; the spend limit bounds the cost.
+// The run-stop decision after a turn ends. A text-only turn, a plateau, turns without work, and any
+// continuation count continue. Only the actual-cost limit and provider, usage, or error failures stop.
 
-export const MAX_CONTINUATIONS = 12;
-// A stalled run restarts at its next pause once the spend since the best last changed reaches this fraction of
-// the limit (ski5: the best stood still from turn 39 and the no-work restart came at 53, with a fifth of the spend left).
-export const STALL_RESTART_FRACTION = 0.12;
-// No restart and no focus move once less than this fraction of the limit is left.
-export const RESTART_MIN_REMAINING_FRACTION = 0.2;
+// Consecutive completed Sol turns whose usage is unknown. Unknown is never zero, so the shared total cannot
+// grow and the actual-cost stop would never arrive; this many in a row is an accounting failure.
+export const MAX_UNKNOWN_USAGE_STREAK = 3;
 
 export type StopInput = {
-  limitHit: boolean; finishTurn: boolean; providerUnreachable: boolean; errorLoop: boolean;
-  // The provider refused for a spent subscription window; the campaign moves the row to its fallback model.
+  limitHit: boolean;
+  providerUnreachable: boolean;
+  errorLoop: boolean;
   usageLimit?: boolean;
-  continuations: number; noWorkTurns: number; plateau: number;
-  // Spend since the best last changed (the run's whole spend before the first best).
-  stallUsd: number; limitUsd: number;
-  remainingFraction: number;
-  noWorkThisTurn: boolean; finishAllowed: boolean;
-  // The turn completed with visible text and no tool call: before the final tenth it opens a new island.
-  doneTurn: boolean;
+  unknownUsageStreak?: number;
 };
 
-// A first turn without work moves the focus; a second one in a row, or a best that has not changed for
-// STALL_RESTART_FRACTION of the limit, restarts the conversation from a packet.
-export function stopDecision(input: StopInput): { stop: string | null; moveFocus: boolean; restart: boolean; island: boolean } {
-  const stop = input.limitHit ? "limit_reached"
-    : input.usageLimit ? "usage_limit"
-    : input.finishTurn ? "finished"
-    : input.providerUnreachable ? "provider_unreachable"
-    : input.errorLoop ? "error_loop"
-    : input.finishAllowed && input.continuations >= MAX_CONTINUATIONS ? "continuation_limit"
-    : input.finishAllowed && input.noWorkTurns >= 2 ? "no_work_fallback"
-    : input.continuations >= 4 && input.plateau >= 4 && input.finishAllowed ? "plateau" : null;
-  const early = stop === null && !input.finishAllowed && input.remainingFraction >= RESTART_MIN_REMAINING_FRACTION;
-  const island = early && input.doneTurn;
-  const restart = early && (island || (input.noWorkThisTurn && input.noWorkTurns >= 2)
-    || input.stallUsd >= STALL_RESTART_FRACTION * input.limitUsd);
-  return { stop, moveFocus: early && input.noWorkThisTurn && input.noWorkTurns < 2 && !restart, restart, island };
+export function stopDecision(input: StopInput): string | null {
+  if (input.limitHit) return "limit_reached";
+  if (input.usageLimit) return "usage_limit";
+  if (input.providerUnreachable) return "provider_unreachable";
+  if (input.errorLoop) return "error_loop";
+  if ((input.unknownUsageStreak ?? 0) >= MAX_UNKNOWN_USAGE_STREAK) return "accounting_unknown";
+  return null;
 }

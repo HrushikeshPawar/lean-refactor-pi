@@ -57,6 +57,7 @@ def step_goals(name: str, proof: str, lane: str = "background") -> list[dict]:
         timeout=STEP_TIMEOUT,
         prefix_end=built["head"],
         lane=lane,
+        request_class="opportunistic",
     )
     if result is None:
         raise ValueError("step-goal Lean job timed out")

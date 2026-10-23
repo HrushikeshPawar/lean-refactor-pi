@@ -1,0 +1,669 @@
+{
+  "generated_from": "runs/pi-budget/v8*/trace-journal.jsonl",
+  "method": "arena.traces.read_journal and post_hook_bytes; every reconstructed request body hash-verified",
+  "journal_count": 29,
+  "verified_request_body_count": 2721,
+  "all_request_body_hashes_verified": true,
+  "first_request_packet_run_count": 29,
+  "request_count": 2721,
+  "usage_record_count": 2716,
+  "missing_usage_requests": [
+    {
+      "run": "v8-Cslib.SKI.parallelReduction_diamond-gpt-6.1-sol-r1",
+      "request_id": "1792095032258-f2xczm3f0wi",
+      "http_status": 200
+    },
+    {
+      "run": "v8a-CallElimCorrect.extractedOldExprInVars-deepseek-v4.1-flash-r1",
+      "request_id": "1792120801398-afo3lm9ao7t",
+      "http_status": 200
+    },
+    {
+      "run": "v8a-FieldSpecification.WickAlgebra.-_timeOrd-deepseek-v4.1-flash-r1",
+      "request_id": "1792120798877-p03s23jogba",
+      "http_status": 200
+    },
+    {
+      "run": "v8a-FieldSpecification.WickAlgebra.-_timeOrd-deepseek-v4.1-flash-r1-s1",
+      "request_id": "1792124860623-wqjisl0622o",
+      "http_status": null
+    },
+    {
+      "run": "v8b-CallElimCorrect.extractedOldExprInVars-gpt-6.1-sol-r1",
+      "request_id": "1792137323083-uc0u0h1605s",
+      "http_status": 200
+    }
+  ],
+  "global_prompt_tokens_reported": 163391435,
+  "global_cache_read_share_pct": 95.3122,
+  "known_settled_usd": 23.77253,
+  "groups": {
+    "v8": {
+      "runs": 1,
+      "requests": 1,
+      "packet_chars_min": 19426,
+      "packet_chars_max": 19426,
+      "packet_utf8_bytes_min": 21561,
+      "packet_utf8_bytes_max": 21561,
+      "requests_containing_packet": 1,
+      "requests_containing_packet_pct": 100.0,
+      "request_body_bytes_median_of_run_medians": 29238,
+      "request_body_bytes_max": 29238,
+      "usage_record_count": 0,
+      "prompt_tokens_median": null,
+      "prompt_tokens_max": null,
+      "cache_read_share_pct": null,
+      "known_settled_usd": null,
+      "runs_detail": [
+        {
+          "run": "v8-Cslib.SKI.parallelReduction_diamond-gpt-6.1-sol-r1",
+          "request_count": 1,
+          "packet_chars": 19426,
+          "packet_utf8_bytes": 21561,
+          "packet_sha256": "3115d44d931dbda15e88a20693e66f03cf3b6a6e8a67691ed6a322bae5e10aa3",
+          "first_request_contains_packet": true,
+          "requests_containing_packet": 1,
+          "request_body_bytes_median": 29238,
+          "request_body_bytes_max": 29238,
+          "usage_request_count": 0,
+          "prompt_tokens_median": null,
+          "prompt_tokens_max": null,
+          "cache_read_share_pct": null,
+          "known_settled_usd": null,
+          "tool_schema_utf8_bytes": [
+            5060
+          ]
+        }
+      ]
+    },
+    "v8a": {
+      "runs": 19,
+      "requests": 2081,
+      "packet_chars_min": 19426,
+      "packet_chars_max": 61159,
+      "packet_utf8_bytes_min": 21561,
+      "packet_utf8_bytes_max": 63157,
+      "requests_containing_packet": 1168,
+      "requests_containing_packet_pct": 56.1269,
+      "request_body_bytes_median_of_run_medians": 188297,
+      "request_body_bytes_max": 1084712,
+      "usage_record_count": 2078,
+      "prompt_tokens_median": 44767,
+      "prompt_tokens_max": 377059,
+      "cache_read_share_pct": 95.3908,
+      "known_settled_usd": 16.904983,
+      "runs_detail": [
+        {
+          "run": "v8a-Binius.BinaryBasefold.fiberwise_dist_lt-gpt-6.1-sol-r1",
+          "request_count": 111,
+          "packet_chars": 39972,
+          "packet_utf8_bytes": 42302,
+          "packet_sha256": "1fcfd5a67f603d6799f325cc2f09420cbfb4d5d8bd8a4baec498ffcc462644cb",
+          "first_request_contains_packet": true,
+          "requests_containing_packet": 39,
+          "request_body_bytes_median": 204140,
+          "request_body_bytes_max": 536062,
+          "usage_request_count": 111,
+          "prompt_tokens_median": 47932,
+          "prompt_tokens_max": 99578,
+          "cache_read_share_pct": 95.9991,
+          "known_settled_usd": 1.378005,
+          "tool_schema_utf8_bytes": [
+            5060
+          ]
+        },
+        {
+          "run": "v8a-Binius.BinaryBasefold.fold_advances_eval-gpt-6.1-sol-r1",
+          "request_count": 129,
+          "packet_chars": 39866,
+          "packet_utf8_bytes": 42301,
+          "packet_sha256": "cf058172fdaee22dc20125da51ac548f1e1b2521d367d7059713b16976794993",
+          "first_request_contains_packet": true,
+          "requests_containing_packet": 22,
+          "request_body_bytes_median": 138165,
+          "request_body_bytes_max": 493126,
+          "usage_request_count": 129,
+          "prompt_tokens_median": 35563,
+          "prompt_tokens_max": 91862,
+          "cache_read_share_pct": 95.8214,
+          "known_settled_usd": 1.360618,
+          "tool_schema_utf8_bytes": [
+            5060
+          ]
+        },
+        {
+          "run": "v8a-CallElimCorrect.extractedOldExprInVars-deepseek-v4.1-flash-r1",
+          "request_count": 18,
+          "packet_chars": 37118,
+          "packet_utf8_bytes": 38438,
+          "packet_sha256": "60c66793d636067921fd992e175c388e7dfff802732b089d0d9978de073c24a1",
+          "first_request_contains_packet": true,
+          "requests_containing_packet": 18,
+          "request_body_bytes_median": 126305,
+          "request_body_bytes_max": 203032,
+          "usage_request_count": 17,
+          "prompt_tokens_median": 36285,
+          "prompt_tokens_max": 53570,
+          "cache_read_share_pct": 94.7863,
+          "known_settled_usd": 0.025035,
+          "tool_schema_utf8_bytes": [
+            5125
+          ]
+        },
+        {
+          "run": "v8a-CallElimCorrect.extractedOldExprInVars-deepseek-v4.1-flash-r1-s1",
+          "request_count": 92,
+          "packet_chars": 61159,
+          "packet_utf8_bytes": 62723,
+          "packet_sha256": "5b88430ef996fb85a5726c55bd63cea02dc44475699b336b23089ac369223220",
+          "first_request_contains_packet": true,
+          "requests_containing_packet": 34,
+          "request_body_bytes_median": 309131,
+          "request_body_bytes_max": 884152,
+          "usage_request_count": 92,
+          "prompt_tokens_median": 91344,
+          "prompt_tokens_max": 276031,
+          "cache_read_share_pct": 94.0164,
+          "known_settled_usd": 0.33612,
+          "tool_schema_utf8_bytes": [
+            5125
+          ]
+        },
+        {
+          "run": "v8a-CallElimCorrect.extractedOldExprInVars-gpt-6.1-sol-r1",
+          "request_count": 50,
+          "packet_chars": 37118,
+          "packet_utf8_bytes": 38438,
+          "packet_sha256": "60c66793d636067921fd992e175c388e7dfff802732b089d0d9978de073c24a1",
+          "first_request_contains_packet": true,
+          "requests_containing_packet": 32,
+          "request_body_bytes_median": 118615,
+          "request_body_bytes_max": 306397,
+          "usage_request_count": 50,
+          "prompt_tokens_median": 26570,
+          "prompt_tokens_max": 63439,
+          "cache_read_share_pct": 93.1653,
+          "known_settled_usd": 0.512996,
+          "tool_schema_utf8_bytes": [
+            5060
+          ]
+        },
+        {
+          "run": "v8a-CallElimCorrect.substOldPostSubset-deepseek-v4.1-flash-r1",
+          "request_count": 142,
+          "packet_chars": 39841,
+          "packet_utf8_bytes": 40883,
+          "packet_sha256": "5ce209340f826307ec5edcf0ea1648932c41784b786121e692a5b13e873a72b9",
+          "first_request_contains_packet": true,
+          "requests_containing_packet": 67,
+          "request_body_bytes_median": 233757,
+          "request_body_bytes_max": 739027,
+          "usage_request_count": 142,
+          "prompt_tokens_median": 71529,
+          "prompt_tokens_max": 238341,
+          "cache_read_share_pct": 94.1556,
+          "known_settled_usd": 0.472958,
+          "tool_schema_utf8_bytes": [
+            5125
+          ]
+        },
+        {
+          "run": "v8a-Core.InitsUpdatesComm-deepseek-v4.1-flash-r1",
+          "request_count": 185,
+          "packet_chars": 34608,
+          "packet_utf8_bytes": 36362,
+          "packet_sha256": "8753dbec5f17803aaba14180ae2f810d5a982002a0f9eaddfd0d4f0836b58a70",
+          "first_request_contains_packet": true,
+          "requests_containing_packet": 133,
+          "request_body_bytes_median": 252140,
+          "request_body_bytes_max": 622720,
+          "usage_request_count": 185,
+          "prompt_tokens_median": 75817,
+          "prompt_tokens_max": 184328,
+          "cache_read_share_pct": 95.3088,
+          "known_settled_usd": 0.451773,
+          "tool_schema_utf8_bytes": [
+            5125
+          ]
+        },
+        {
+          "run": "v8a-Cslib.CCS.bisimilarity_congr_choice-deepseek-v4.1-flash-r1",
+          "request_count": 144,
+          "packet_chars": 23053,
+          "packet_utf8_bytes": 24554,
+          "packet_sha256": "4151fc9bddb416c1ec33d9f953148405cfe7b52bc1e6f2bf66c71dff67a6b48a",
+          "first_request_contains_packet": true,
+          "requests_containing_packet": 144,
+          "request_body_bytes_median": 302634,
+          "request_body_bytes_max": 699329,
+          "usage_request_count": 144,
+          "prompt_tokens_median": 96222,
+          "prompt_tokens_max": 226221,
+          "cache_read_share_pct": 94.8137,
+          "known_settled_usd": 0.450327,
+          "tool_schema_utf8_bytes": [
+            5125
+          ]
+        },
+        {
+          "run": "v8a-Cslib.LambdaCalculus.LocallyNameless.Fsu-gpt-6.1-sol-r1",
+          "request_count": 111,
+          "packet_chars": 35323,
+          "packet_utf8_bytes": 39023,
+          "packet_sha256": "23f6d3fe6ac8eb424a363d38af2bc228093a3d721dd7da56b7b448d9a25554d6",
+          "first_request_contains_packet": true,
+          "requests_containing_packet": 111,
+          "request_body_bytes_median": 215800,
+          "request_body_bytes_max": 596905,
+          "usage_request_count": 111,
+          "prompt_tokens_median": 51363,
+          "prompt_tokens_max": 126640,
+          "cache_read_share_pct": 96.9668,
+          "known_settled_usd": 1.378304,
+          "tool_schema_utf8_bytes": [
+            5060
+          ]
+        },
+        {
+          "run": "v8a-Cslib.SKI.parallelReduction_diamond-gpt-6.1-sol-r1",
+          "request_count": 113,
+          "packet_chars": 19426,
+          "packet_utf8_bytes": 21561,
+          "packet_sha256": "3115d44d931dbda15e88a20693e66f03cf3b6a6e8a67691ed6a322bae5e10aa3",
+          "first_request_contains_packet": true,
+          "requests_containing_packet": 113,
+          "request_body_bytes_median": 142257,
+          "request_body_bytes_max": 381590,
+          "usage_request_count": 113,
+          "prompt_tokens_median": 39282,
+          "prompt_tokens_max": 75423,
+          "cache_read_share_pct": 94.3145,
+          "known_settled_usd": 1.363733,
+          "tool_schema_utf8_bytes": [
+            5060
+          ]
+        },
+        {
+          "run": "v8a-Electromagnetism.ElectromagneticPotentia-gpt-6.1-sol-r1",
+          "request_count": 140,
+          "packet_chars": 35780,
+          "packet_utf8_bytes": 38151,
+          "packet_sha256": "97c018de03f5979be1cd9bf88ec9ceaab45b1856a033f0bfbb5911933ca0a755",
+          "first_request_contains_packet": true,
+          "requests_containing_packet": 23,
+          "request_body_bytes_median": 188297,
+          "request_body_bytes_max": 480635,
+          "usage_request_count": 140,
+          "prompt_tokens_median": 44010,
+          "prompt_tokens_max": 95130,
+          "cache_read_share_pct": 96.4406,
+          "known_settled_usd": 1.449596,
+          "tool_schema_utf8_bytes": [
+            5060
+          ]
+        },
+        {
+          "run": "v8a-FieldSpecification.WickAlgebra.-_timeOrd-deepseek-v4.1-flash-r1",
+          "request_count": 11,
+          "packet_chars": 33284,
+          "packet_utf8_bytes": 35169,
+          "packet_sha256": "9a5d26b4dae114a973ed0a284eb1f0494f6f06069cd05737995a0b724578bd09",
+          "first_request_contains_packet": true,
+          "requests_containing_packet": 11,
+          "request_body_bytes_median": 129057,
+          "request_body_bytes_max": 205480,
+          "usage_request_count": 10,
+          "prompt_tokens_median": 41208,
+          "prompt_tokens_max": 68403,
+          "cache_read_share_pct": 90.3594,
+          "known_settled_usd": 0.023807,
+          "tool_schema_utf8_bytes": [
+            5125
+          ]
+        },
+        {
+          "run": "v8a-FieldSpecification.WickAlgebra.-_timeOrd-deepseek-v4.1-flash-r1-s1",
+          "request_count": 95,
+          "packet_chars": 60516,
+          "packet_utf8_bytes": 63157,
+          "packet_sha256": "5b6f5c56b9f75ea4c77957046ad521aedffb78d6e4ec0375459739c1551b8a3b",
+          "first_request_contains_packet": true,
+          "requests_containing_packet": 40,
+          "request_body_bytes_median": 321669,
+          "request_body_bytes_max": 923677,
+          "usage_request_count": 94,
+          "prompt_tokens_median": 108674,
+          "prompt_tokens_max": 304964,
+          "cache_read_share_pct": 95.2339,
+          "known_settled_usd": 0.326916,
+          "tool_schema_utf8_bytes": [
+            5125
+          ]
+        },
+        {
+          "run": "v8a-FieldSpecification.WickAlgebra.-_timeOrd-gpt-6.1-sol-r1",
+          "request_count": 113,
+          "packet_chars": 33284,
+          "packet_utf8_bytes": 35169,
+          "packet_sha256": "9a5d26b4dae114a973ed0a284eb1f0494f6f06069cd05737995a0b724578bd09",
+          "first_request_contains_packet": true,
+          "requests_containing_packet": 113,
+          "request_body_bytes_median": 230403,
+          "request_body_bytes_max": 578630,
+          "usage_request_count": 113,
+          "prompt_tokens_median": 50942,
+          "prompt_tokens_max": 109029,
+          "cache_read_share_pct": 96.9018,
+          "known_settled_usd": 1.40419,
+          "tool_schema_utf8_bytes": [
+            5060
+          ]
+        },
+        {
+          "run": "v8a-fundamental_theorem_of_variational_calcu-gpt-6.1-sol-r1",
+          "request_count": 133,
+          "packet_chars": 39400,
+          "packet_utf8_bytes": 42833,
+          "packet_sha256": "24e96554301c1f140e09be5b91364de07ff508b977c14cceeaf4d72766fe84fb",
+          "first_request_contains_packet": true,
+          "requests_containing_packet": 14,
+          "request_body_bytes_median": 132759,
+          "request_body_bytes_max": 436058,
+          "usage_request_count": 133,
+          "prompt_tokens_median": 32745,
+          "prompt_tokens_max": 81714,
+          "cache_read_share_pct": 94.1903,
+          "known_settled_usd": 1.382258,
+          "tool_schema_utf8_bytes": [
+            5060
+          ]
+        },
+        {
+          "run": "v8a-interleaved_affine_gaps_imply_tensor_gap-deepseek-v4.1-flash-r1",
+          "request_count": 126,
+          "packet_chars": 39853,
+          "packet_utf8_bytes": 41959,
+          "packet_sha256": "6ca54f4899a0b0ff04f31a5236c6bb90cea202c36623e53a9089d40d80000351",
+          "first_request_contains_packet": true,
+          "requests_containing_packet": 51,
+          "request_body_bytes_median": 728427,
+          "request_body_bytes_max": 1084712,
+          "usage_request_count": 126,
+          "prompt_tokens_median": 242704,
+          "prompt_tokens_max": 377059,
+          "cache_read_share_pct": 97.4703,
+          "known_settled_usd": 0.450428,
+          "tool_schema_utf8_bytes": [
+            5125
+          ]
+        },
+        {
+          "run": "v8a-putnam_1964_a4-gpt-6.1-sol-r1",
+          "request_count": 122,
+          "packet_chars": 28912,
+          "packet_utf8_bytes": 30977,
+          "packet_sha256": "5dd88e80a709e9b0c477f29592e2f07ca06f8bfbd75ee41e587e990ff09bcc3e",
+          "first_request_contains_packet": true,
+          "requests_containing_packet": 122,
+          "request_body_bytes_median": 136173,
+          "request_body_bytes_max": 434108,
+          "usage_request_count": 122,
+          "prompt_tokens_median": 32881,
+          "prompt_tokens_max": 72741,
+          "cache_read_share_pct": 94.2954,
+          "known_settled_usd": 1.395222,
+          "tool_schema_utf8_bytes": [
+            5060
+          ]
+        },
+        {
+          "run": "v8a-putnam_1964_b2-gpt-6.1-sol-r1",
+          "request_count": 121,
+          "packet_chars": 31357,
+          "packet_utf8_bytes": 33878,
+          "packet_sha256": "e667281a6ea05251786ac172d76732f1f0a23445a6c0a1ae9be8db9cbae4aaf0",
+          "first_request_contains_packet": true,
+          "requests_containing_packet": 68,
+          "request_body_bytes_median": 113124,
+          "request_body_bytes_max": 235988,
+          "usage_request_count": 121,
+          "prompt_tokens_median": 27266,
+          "prompt_tokens_max": 46175,
+          "cache_read_share_pct": 91.221,
+          "known_settled_usd": 1.354415,
+          "tool_schema_utf8_bytes": [
+            5060
+          ]
+        },
+        {
+          "run": "v8a-putnam_1995_a3-gpt-6.1-sol-r1",
+          "request_count": 125,
+          "packet_chars": 38683,
+          "packet_utf8_bytes": 41539,
+          "packet_sha256": "a5836800a46d7501a92d15cd776b63c5139b2f5fef64ca2bcd70dfd6fa93549a",
+          "first_request_contains_packet": true,
+          "requests_containing_packet": 13,
+          "request_body_bytes_median": 125005,
+          "request_body_bytes_max": 290631,
+          "usage_request_count": 125,
+          "prompt_tokens_median": 32435,
+          "prompt_tokens_max": 65981,
+          "cache_read_share_pct": 93.2557,
+          "known_settled_usd": 1.388282,
+          "tool_schema_utf8_bytes": [
+            5060
+          ]
+        }
+      ]
+    },
+    "v8b": {
+      "runs": 4,
+      "requests": 200,
+      "packet_chars_min": 20736,
+      "packet_chars_max": 41119,
+      "packet_utf8_bytes_min": 22874,
+      "packet_utf8_bytes_max": 42164,
+      "requests_containing_packet": 85,
+      "requests_containing_packet_pct": 42.5,
+      "request_body_bytes_median_of_run_medians": 120360,
+      "request_body_bytes_max": 399561,
+      "usage_record_count": 199,
+      "prompt_tokens_median": 36703,
+      "prompt_tokens_max": 84037,
+      "cache_read_share_pct": 94.6182,
+      "known_settled_usd": 2.182788,
+      "runs_detail": [
+        {
+          "run": "v8b-CallElimCorrect.extractedOldExprInVars-gpt-6.1-sol-r1",
+          "request_count": 19,
+          "packet_chars": 38424,
+          "packet_utf8_bytes": 39747,
+          "packet_sha256": "3f5558844746a5e1a631c16504ef2342e8b9f9d80c7395a050f191cc6a612458",
+          "first_request_contains_packet": true,
+          "requests_containing_packet": 19,
+          "request_body_bytes_median": 106932,
+          "request_body_bytes_max": 203578,
+          "usage_request_count": 18,
+          "prompt_tokens_median": 22447,
+          "prompt_tokens_max": 39626,
+          "cache_read_share_pct": 86.8876,
+          "known_settled_usd": 0.226819,
+          "tool_schema_utf8_bytes": [
+            5060
+          ]
+        },
+        {
+          "run": "v8b-CallElimCorrect.substOldPostSubset-gpt-6.1-sol-r1",
+          "request_count": 8,
+          "packet_chars": 41119,
+          "packet_utf8_bytes": 42164,
+          "packet_sha256": "7dbd65a38f3f3649a2a99ee813431f5d2eede8459d8beeca506b7a604d76106d",
+          "first_request_contains_packet": true,
+          "requests_containing_packet": 8,
+          "request_body_bytes_median": 74135,
+          "request_body_bytes_max": 112268,
+          "usage_request_count": 8,
+          "prompt_tokens_median": 19628,
+          "prompt_tokens_max": 27235,
+          "cache_read_share_pct": 81.4839,
+          "known_settled_usd": 0.094006,
+          "tool_schema_utf8_bytes": [
+            5060
+          ]
+        },
+        {
+          "run": "v8b-Cslib.SKI.parallelReduction_diamond-gpt-6.1-sol-r1",
+          "request_count": 81,
+          "packet_chars": 20736,
+          "packet_utf8_bytes": 22874,
+          "packet_sha256": "e19986e51622f0b2f158ffc5b78c3b1db65cc10da246b500c0eb155b8bcb536f",
+          "first_request_contains_packet": true,
+          "requests_containing_packet": 30,
+          "request_body_bytes_median": 172147,
+          "request_body_bytes_max": 399561,
+          "usage_request_count": 81,
+          "prompt_tokens_median": 46482,
+          "prompt_tokens_max": 84037,
+          "cache_read_share_pct": 95.6405,
+          "known_settled_usd": 0.956395,
+          "tool_schema_utf8_bytes": [
+            5060
+          ]
+        },
+        {
+          "run": "v8b-Electromagnetism.ElectromagneticPotentia-gpt-6.1-sol-r1",
+          "request_count": 92,
+          "packet_chars": 37100,
+          "packet_utf8_bytes": 39474,
+          "packet_sha256": "29dd21032d97390e9a5e2e864851649a5968767255a1051ceeae2a2a0c2a78bb",
+          "first_request_contains_packet": true,
+          "requests_containing_packet": 28,
+          "request_body_bytes_median": 133788,
+          "request_body_bytes_max": 315231,
+          "usage_request_count": 92,
+          "prompt_tokens_median": 36008,
+          "prompt_tokens_max": 70780,
+          "cache_read_share_pct": 95.0636,
+          "known_settled_usd": 0.905567,
+          "tool_schema_utf8_bytes": [
+            5060
+          ]
+        }
+      ]
+    },
+    "v8c": {
+      "runs": 5,
+      "requests": 439,
+      "packet_chars_min": 24361,
+      "packet_chars_max": 41288,
+      "packet_utf8_bytes_min": 25865,
+      "packet_utf8_bytes_max": 43621,
+      "requests_containing_packet": 132,
+      "requests_containing_packet_pct": 30.0683,
+      "request_body_bytes_median_of_run_medians": 169898,
+      "request_body_bytes_max": 451174,
+      "usage_record_count": 439,
+      "prompt_tokens_median": 32625,
+      "prompt_tokens_max": 76248,
+      "cache_read_share_pct": 94.9684,
+      "known_settled_usd": 4.684759,
+      "runs_detail": [
+        {
+          "run": "v8c-Binius.BinaryBasefold.fiberwise_dist_lt-gpt-6.1-sol-r1",
+          "request_count": 95,
+          "packet_chars": 41288,
+          "packet_utf8_bytes": 43621,
+          "packet_sha256": "0160549ded205e86e10c56867e09b47789704d15d104faae3c7b02e2605f72c7",
+          "first_request_contains_packet": true,
+          "requests_containing_packet": 40,
+          "request_body_bytes_median": 186543,
+          "request_body_bytes_max": 418982,
+          "usage_request_count": 95,
+          "prompt_tokens_median": 42993,
+          "prompt_tokens_max": 74238,
+          "cache_read_share_pct": 96.3388,
+          "known_settled_usd": 0.968817,
+          "tool_schema_utf8_bytes": [
+            5065
+          ]
+        },
+        {
+          "run": "v8c-Core.InitsUpdatesComm-gpt-6.1-sol-r1",
+          "request_count": 79,
+          "packet_chars": 35915,
+          "packet_utf8_bytes": 37672,
+          "packet_sha256": "75c8d6ede4cbb759c3d57f9508d6c6d2d9a46a3ca49c138875f386966f96426f",
+          "first_request_contains_packet": true,
+          "requests_containing_packet": 9,
+          "request_body_bytes_median": 95454,
+          "request_body_bytes_max": 213865,
+          "usage_request_count": 79,
+          "prompt_tokens_median": 21595,
+          "prompt_tokens_max": 35907,
+          "cache_read_share_pct": 87.5586,
+          "known_settled_usd": 0.912193,
+          "tool_schema_utf8_bytes": [
+            5065
+          ]
+        },
+        {
+          "run": "v8c-Cslib.CCS.bisimilarity_congr_choice-gpt-6.1-sol-r1",
+          "request_count": 77,
+          "packet_chars": 24361,
+          "packet_utf8_bytes": 25865,
+          "packet_sha256": "25cb48afbc65fc33d0dda4235fdc790be9a88b700e71b941cd675b14e35f2077",
+          "first_request_contains_packet": true,
+          "requests_containing_packet": 10,
+          "request_body_bytes_median": 128706,
+          "request_body_bytes_max": 451174,
+          "usage_request_count": 77,
+          "prompt_tokens_median": 27378,
+          "prompt_tokens_max": 72270,
+          "cache_read_share_pct": 93.5,
+          "known_settled_usd": 0.916465,
+          "tool_schema_utf8_bytes": [
+            5065
+          ]
+        },
+        {
+          "run": "v8c-FieldSpecification.WickAlgebra.-_timeOrd-gpt-6.1-sol-r1",
+          "request_count": 91,
+          "packet_chars": 34604,
+          "packet_utf8_bytes": 36492,
+          "packet_sha256": "b54fe47346d10948959545ceaa94c18c44d0e4253983632c6565ac145ff5990a",
+          "first_request_contains_packet": true,
+          "requests_containing_packet": 34,
+          "request_body_bytes_median": 189485,
+          "request_body_bytes_max": 431600,
+          "usage_request_count": 91,
+          "prompt_tokens_median": 40820,
+          "prompt_tokens_max": 76248,
+          "cache_read_share_pct": 96.3442,
+          "known_settled_usd": 0.952715,
+          "tool_schema_utf8_bytes": [
+            5065
+          ]
+        },
+        {
+          "run": "v8c-interleaved_affine_gaps_imply_tensor_gap-gpt-6.1-sol-r1",
+          "request_count": 97,
+          "packet_chars": 41169,
+          "packet_utf8_bytes": 43278,
+          "packet_sha256": "e07028335d32bc982b71971c8727ccd4bca54e72bb2e476a6e068a341405be8a",
+          "first_request_contains_packet": true,
+          "requests_containing_packet": 39,
+          "request_body_bytes_median": 169898,
+          "request_body_bytes_max": 399596,
+          "usage_request_count": 97,
+          "prompt_tokens_median": 38067,
+          "prompt_tokens_max": 73844,
+          "cache_read_share_pct": 96.4865,
+          "known_settled_usd": 0.934568,
+          "tool_schema_utf8_bytes": [
+            5065
+          ]
+        }
+      ]
+    }
+  }
+}

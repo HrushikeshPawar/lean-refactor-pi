@@ -41,6 +41,7 @@ class FakeRun:
         session: bool = False,
         theorem: str = NAME,
         allow_internal_error: bool = False,
+        golf: bool = False,
     ):
         # Only a test that injects an internal error on purpose may opt out of the health guard (see health_problems).
         self.allow_internal_error = allow_internal_error
@@ -65,6 +66,7 @@ class FakeRun:
             limit,
             "--test-extension",
             str(FAKE),
+            *([] if golf else ["--no-golf"]),  # the closing golf pass runs real Lean for minutes
             *([] if langfuse else ["--no-langfuse"]),
             *([] if session else ["--no-lean-session"]),
             *extra,

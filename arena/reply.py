@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import fcntl
+import functools
 import hashlib
 import json
 import os
 import re
+import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from arena import campaign, text
 
 DELIVERY_FILE = "tool-delivery.json"
+DELIVERY_LOCK = "tool-delivery.{actor}.lock"
 
 
 def reply(
@@ -35,7 +40,7 @@ def reply(
 
 
 def request_error(code: str, bad_input: object, valid: list[str], forms: list[str]) -> dict:
-    return {"code": code, "input": str(bad_input), "valid": valid[:8], "forms": forms}
+    return {"code": code, "input": str(bad_input), "valid": valid[:10], "forms": forms}
 
 
 def error_reply(code: str, bad_input: object, valid: list[str], forms: list[str]) -> dict:
@@ -57,20 +62,79 @@ def _path(run_id: str) -> Path:
     return campaign.run_dir(run_id) / DELIVERY_FILE
 
 
+@contextmanager
+def _delivery_lock(run_id: str):
+    """One actor's reply-state read-modify-write at a time, across the processes of its parallel tool calls.
+    Per actor: `_save` merges only the caller's bucket, so different actors never need to wait for each other.
+    Its own lock file: `control_lock` is taken inside `_save`, and flock on one file is not re-entrant."""
+    directory = campaign.run_dir(run_id)
+    directory.mkdir(parents=True, exist_ok=True)
+    actor = re.sub(r"[^A-Za-z0-9_-]", "_", current_actor())
+    fd = os.open(directory / DELIVERY_LOCK.format(actor=actor), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def _per_run_delivery(func):
+    @functools.wraps(func)
+    def locked(run_id: str, *args, **kwargs):
+        with _delivery_lock(run_id):
+            return func(run_id, *args, **kwargs)
+
+    return locked
+
+
 def _load(run_id: str) -> dict:
+    from arena.run_control import committed_history, committed_operation_ids
+
     try:
         value = json.loads(_path(run_id).read_text())
     except (OSError, ValueError):
         value = {}
-    return value if isinstance(value, dict) else {}
+    state = value if isinstance(value, dict) else {}
+    directory = campaign.run_dir(run_id)
+    committed = committed_operation_ids(directory)
+    for event in committed_history(campaign.events(directory), committed):
+        if event.get("kind") != "delivered_reply" or not event.get("operation_id"):
+            continue
+        data = event.get("data") or {}
+        if data.get("channel") == "worker_inbox" or "acked" in data:
+            continue
+        actor = event["actor_id"]
+        bucket = _bucket(state, actor)
+        if data["cursor"] < bucket.get("delivered_seq", -1):
+            continue
+        bucket["delivered_seq"] = data["cursor"]
+        bucket["last_delivery"] = {
+            "operation_id": event["operation_id"],
+            "event_ids": data["event_ids"],
+            "arguments": {"actor_id": actor, "seqs": data["seqs"], "event_ids": data["event_ids"]},
+        }
+    return state
 
 
-def _save(run_id: str, value: dict) -> None:
+def _save(run_id: str, value: dict, *, actor_update: tuple[str, dict] | None = None) -> None:
+    from arena.run_control import control_lock
+
     path = _path(run_id)
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(f".{os.getpid()}.tmp")
-    temporary.write_text(json.dumps(value, ensure_ascii=False, sort_keys=True) + "\n")
-    os.replace(temporary, path)
+    with control_lock(path.parent):
+        current = _load(run_id)
+        value = {**value, "actors": current.get("actors", {})}
+        if actor_update is not None:
+            actor, bucket = actor_update
+            value["actors"][actor] = bucket
+        for key in ("delivered_seq", "seen_nodes", "map_hash", "map_key"):
+            if key in value["actors"].get("sol", {}):
+                value[key] = value["actors"]["sol"][key]
+            else:
+                value.pop(key, None)
+        temporary = path.with_suffix(f".{os.getpid()}.tmp")
+        temporary.write_text(json.dumps(value, ensure_ascii=False, sort_keys=True) + "\n")
+        os.replace(temporary, path)
 
 
 def map_text(run_id: str) -> str:
@@ -79,20 +143,78 @@ def map_text(run_id: str) -> str:
     return "\n".join([text.render("replies/tools.section_map"), *lines])
 
 
+def current_actor() -> str:
+    """Trusted invocation actor. Historical single-agent calls are Sol."""
+    return os.environ.get("ARENA_ACTOR_ID") or "sol"
+
+
+def _bucket(state: dict, actor: str) -> dict:
+    actors = state.setdefault("actors", {})
+    bucket = actors.setdefault(actor, {})
+    if actor == "sol":
+        for key in ("delivered_seq", "seen_nodes", "map_hash", "map_key"):
+            if key not in bucket and key in state:
+                bucket[key] = state[key]
+    return bucket
+
+
+def _write_actor(run_id: str, actor: str, bucket: dict, state: dict | None = None) -> dict:
+    state = _load(run_id) if state is None else state
+    state.setdefault("actors", {})[actor] = bucket
+    if actor == "sol":
+        for key in ("delivered_seq", "seen_nodes", "map_hash", "map_key"):
+            if key in bucket:
+                state[key] = bucket[key]
+    _save(run_id, state, actor_update=(actor, bucket))
+    return state
+
+
+def actor_focuses(run_id: str) -> list[tuple[str, str]]:
+    """Every actor-local filing anchor. Reading it does not move focus or start work."""
+    found = []
+    for actor, bucket in _load(run_id).get("actors", {}).items():
+        if isinstance(bucket, dict) and isinstance(bucket.get("focus"), str):
+            found.append((actor, bucket["focus"]))
+    return found
+
+
+def actor_focus_proof(run_id: str, actor: str | None = None) -> str | None:
+    actor = actor or current_actor()
+    focus = _bucket(_load(run_id), actor).get("focus")
+    return focus if isinstance(focus, str) else None
+
+
+def set_actor_focus(run_id: str, proof_id: str, actor: str | None = None) -> None:
+    """Actor-local filing anchor. It does not move another actor's focus or the shared frontier."""
+    actor = actor or current_actor()
+    state = _load(run_id)
+    bucket = _bucket(state, actor)
+    bucket["focus"] = proof_id
+    _write_actor(run_id, actor, bucket, state)
+
+
 def mark_delivered(run_id: str, seq: int, shown: str) -> None:
     """Treat ledger rows up to `seq` as delivered and the nodes named in `shown` as seen."""
+    actor = current_actor()
     state = _load(run_id)
-    state["delivered_seq"] = seq
-    state["seen_nodes"] = sorted(set(state.get("seen_nodes", [])) | set(re.findall(r"\bn[1-9][0-9]*\b", shown)))
-    _save(run_id, state)
+    bucket = _bucket(state, actor)
+    bucket["delivered_seq"] = seq
+    bucket["seen_nodes"] = sorted(set(bucket.get("seen_nodes", [])) | set(re.findall(r"\bn[1-9][0-9]*\b", shown)))
+    _write_actor(run_id, actor, bucket, state)
 
 
 def reset_delivered(run_id: str) -> None:
+    actor = current_actor()
     state = _load(run_id)
-    state.pop("map_hash", None)
+    bucket = _bucket(state, actor)
+    bucket.pop("map_hash", None)
+    bucket.pop("map_key", None)
     state["goals"] = {}
     state["diagnostics"] = {}
-    _save(run_id, state)
+    if actor == "sol":
+        state.pop("map_hash", None)
+        state.pop("map_key", None)
+    _write_actor(run_id, actor, bucket, state)
 
 
 def first_time(run_id: str, key: str) -> bool:
@@ -196,6 +318,23 @@ def compact_goal(goal: str, known: set[str] | frozenset[str] = frozenset(), hypo
     return "\n".join(out)
 
 
+def goal_blocks(goal: str) -> list[str]:
+    """A goal text as its separate goals (case tag, hypotheses, `⊢` target), each one string."""
+    lines = goal.strip("\n").split("\n")
+    targets = [index for index, line in enumerate(lines) if line.startswith("⊢")]
+    blocks: list[str] = []
+    cursor = 0
+    for target in targets:
+        if target < cursor:
+            continue
+        parsed = _parse_goal(lines, max(cursor, _goal_start(lines, target)), target)
+        blocks.append("\n".join(lines[cursor : parsed["end"]]))
+        cursor = parsed["end"]
+    if cursor < len(lines) and "\n".join(lines[cursor:]).strip():
+        blocks.append("\n".join(lines[cursor:]))
+    return blocks or [goal.strip()]
+
+
 def compact_message(
     message: str, known: set[str] | frozenset[str] = frozenset(), hypothesis_chars: int | None = None
 ) -> str:
@@ -296,7 +435,7 @@ def _signed(value: object) -> object:
     return f"{value:+d}" if isinstance(value, int) else shown(value)
 
 
-def _effort_lines(data: dict) -> list[str]:
+def _effort_lines(data: dict, compact: bool = False) -> list[str]:
     """The best node's steps ranked by points at stake, with units the model can act on."""
     rows = sorted(data.get("effort", []), key=lambda item: (-(item.get("at_stake") or 0), -(item.get("tokens") or 0)))
     if not rows:
@@ -304,7 +443,7 @@ def _effort_lines(data: dict) -> list[str]:
     best = data.get("best") or {}
     lines = [
         text.render("replies/tools.map_steps_head", node=shown(best.get("node"))),
-        text.render("replies/tools.map_steps_legend"),
+        *([] if compact else [text.render("replies/tools.map_steps_legend")]),
         text.render("replies/tools.map_steps_cols"),
     ]
     for item in rows[:EFFORT_SHOWN]:
@@ -365,7 +504,7 @@ def cell(value: object, limit: int = LINE_TEXT_CHARS) -> str:
     return flat if len(flat) <= limit else flat[: limit - 1] + "…"
 
 
-def _line_cost_lines(data: dict) -> list[str]:
+def _line_cost_lines(data: dict, compact: bool = False) -> list[str]:
     """The best node's costliest tactic lines and its longest lines that run nothing of their own."""
     costs = data.get("line_costs") or {}
     node = shown((data.get("best") or {}).get("node"))
@@ -384,7 +523,8 @@ def _line_cost_lines(data: dict) -> list[str]:
         )
     if costs.get("quiet"):
         lines.append(text.render("replies/tools.map_quiet_lines_head", node=node))
-        lines.append(text.render("replies/tools.map_quiet_lines_note"))
+        if not compact:
+            lines.append(text.render("replies/tools.map_quiet_lines_note"))
         lines.append(text.render("replies/tools.map_quiet_lines_cols"))
         lines.extend(
             text.render(
@@ -409,12 +549,14 @@ def _line_cost_lines(data: dict) -> list[str]:
             )
             for row in costs["repeated"]
         )
-    if costs.get("tactic") or costs.get("quiet"):
+    if not compact and (costs.get("tactic") or costs.get("quiet")):
         lines.append(text.render("replies/tools.map_lines_note"))
     return lines
 
 
-def _map_lines(data: dict) -> list[str]:
+def _map_lines(data: dict, compact: bool = False) -> list[str]:
+    """The search map. `compact` (the copy a compile reply carries for a new best) keeps the best, its ranked
+    steps, its costly lines and the open holes; `read` with view "map" shows everything."""
     lines: list[str] = []
     best = data.get("best")
     if best or data.get("reference"):
@@ -439,7 +581,7 @@ def _map_lines(data: dict) -> list[str]:
                 heartbeats=shown(original.get("heartbeats")),
             )
         )
-    archive = data.get("archive", [])
+    archive = [] if compact else data.get("archive", [])
     if archive:
         lines.append(text.render("replies/tools.map_shapes"))
     lines.extend(
@@ -458,7 +600,8 @@ def _map_lines(data: dict) -> list[str]:
             ]
         ]
     )
-    if data.get("recent"):
+    recent = [] if compact else data.get("recent", [])
+    if recent:
         lines.append(text.render("replies/tools.map_recent_head"))
     lines.extend(
         [
@@ -471,13 +614,13 @@ def _map_lines(data: dict) -> list[str]:
                 heartbeats=_node_hb(item),
                 score=shown(item.get("score")),
             )
-            for item in data.get("recent", [])
+            for item in recent
         ]
     )
-    if any(item.get("status") == "sketch" for item in data.get("recent", [])):
+    if any(item.get("status") == "sketch" for item in recent):
         lines.append(text.render("replies/tools.map_recent_salvage"))
-    lines.extend(_effort_lines(data))
-    lines.extend(_line_cost_lines(data))
+    lines.extend(_effort_lines(data, compact))
+    lines.extend(_line_cost_lines(data, compact))
     holes = data.get("open", [])
     if holes:
         lines.append(text.render("replies/tools.map_holes_head"))
@@ -494,11 +637,389 @@ def _map_lines(data: dict) -> list[str]:
 
 
 def _map_key(data: dict) -> list:
-    """What makes a map worth showing in full again: the best node and the set of shapes (route letter, node)."""
-    best = (data.get("best") or {}).get("node")
-    return [best, sorted([str(item.get("letter")), str(item.get("node"))] for item in data.get("archive", []))]
+    """What makes a map worth showing again: the best node."""
+    return [(data.get("best") or {}).get("node")]
 
 
+def _commit_delivery(run_id: str, actor: str, fresh: list[dict]) -> dict:
+    """Commit this actor's cursor with the delivered identities. The same delivery retries once."""
+    from arena.run_control import actor_ids, apply_operation
+
+    seqs = [int(item.get("seq", -1)) for item in fresh]
+    identities = [str(item.get("event_id") or item.get("seq")) for item in fresh]
+    operation_id = hashlib.sha256(f"{actor}:{seqs}:{identities}".encode()).hexdigest()[:32]
+    identity = actor_ids(run_id)
+    directory = campaign.run_dir(run_id)
+
+    def mutate(ctx):
+        return [
+            ctx.append_ledger(
+                {
+                    "kind": "delivered_reply",
+                    "data": {"seqs": seqs, "event_ids": identities, "cursor": max(seqs)},
+                }
+            )
+        ]
+
+    receipt = apply_operation(
+        directory,
+        {
+            "operation_id": operation_id,
+            "kind": "delivered_reply",
+            "arguments": {"actor_id": actor, "seqs": seqs, "event_ids": identities},
+            "run_id": run_id,
+            "actor_id": identity["actor_id"] if identity["actor_id"] == actor else actor,
+            "session_id": identity["session_id"],
+        },
+        mutate,
+    )
+    return {**receipt, "event_ids": identities, "operation_id": operation_id}
+
+
+def redeliver(run_id: str, actor: str | None = None) -> dict:
+    """Repeat the last committed delivery for this actor. Does not append another reply."""
+    actor = actor or current_actor()
+    bucket = _bucket(_load(run_id), actor)
+    last = bucket.get("last_delivery")
+    if not isinstance(last, dict):
+        return {"ok": True, "event_ids": [], "repeated": False}
+    from arena.run_control import apply_operation
+
+    directory = campaign.run_dir(run_id)
+    receipt = apply_operation(
+        directory,
+        {
+            "operation_id": last["operation_id"],
+            "kind": "delivered_reply",
+            "arguments": last["arguments"],
+            "run_id": run_id,
+            "actor_id": actor,
+            "session_id": os.environ.get("ARENA_SESSION_ID") or run_id,
+        },
+        lambda ctx: [],
+    )
+    return {"ok": True, "event_ids": last.get("event_ids") or [], "repeated": True, "receipt": receipt}
+
+
+def _idle_note(run_id: str, actor: str, bucket: dict) -> list[str]:
+    """The orchestrator's note of idle worker slots: on each change in the idle count, and again every
+    `idle_note_repeat_minutes` while slots stay idle (r14 left three slots idle for 17 minutes after one note).
+    It names the islands that ended for not improving."""
+    from arena import orchestration
+
+    if actor != "sol":
+        return []
+    try:
+        directory = campaign.run_dir(run_id)
+        idle = orchestration.idle_slots(directory) if (directory / "ledger.jsonl").exists() else 0
+        ended = orchestration.ended_islands(directory) if idle else []
+    except (OSError, ValueError, KeyError):
+        return []
+    now = time.time()
+    repeat = text.numbers()["idle_note_repeat_minutes"] * 60
+    if idle == bucket.get("idle_noted", 0) and (not idle or now - bucket.get("idle_noted_at", 0) < repeat):
+        return []
+    bucket["idle_noted"] = idle
+    bucket["idle_noted_at"] = now
+    if not idle:
+        return []
+    note = text.render("replies/team.idle_slots", idle=idle, slots=orchestration._MODEL_SLOTS)
+    if ended:
+        note += " " + text.render("replies/team.idle_ended", jobs=", ".join(ended))
+    return [note + " " + text.render("replies/team.idle_fill")]
+
+
+def _best_note(run_id: str, actor: str, bucket: dict, changed: bool) -> list[str]:
+    """Say once, per actor, when the run's best verified node changed since this actor last saw it.
+
+    Nothing is said to the node's own author, or on first sight when the best is still the original proof."""
+    if "best_seen" in bucket and not changed:
+        return []
+    from arena import orchestration
+
+    try:
+        directory = campaign.run_dir(run_id)
+        best = orchestration.run_best(directory)
+        if best is None:
+            return []
+        seen = bucket.get("best_seen")
+        known = seen is not None and best.score <= seen["score"] + 1e-9
+        first_sight = seen is None and best.origin == "reference"
+        bucket["best_seen"] = {"node": best.id, "score": max(best.score, seen["score"] if seen else best.score)}
+        author = node_authors(run_id).get(best.id)
+        if known or first_sight or author is None:
+            return []
+        return [text.render("replies/team.steer_best", node=best.id, score=round(best.score, 2), author=author)]
+    except (OSError, ValueError, KeyError):
+        return []
+
+
+def _first_saved_times(directory: Path) -> dict[str, float]:
+    """Proof id to the time its first candidate or probe row was saved."""
+    times: dict[str, float] = {}
+    for event in campaign.events(directory):
+        if event.get("kind") in ("candidate", "probe"):
+            proof_id = event.get("candidate_id") or event.get("proof_id")
+            if proof_id is not None:
+                times.setdefault(proof_id, float(event.get("ts", 0.0)))
+    return times
+
+
+def _measure(objective: str | None):
+    """A node's standing for a job, higher is better: its score, or minus its tokens or heartbeats on an axis island."""
+    if objective in ("tokens", "heartbeats"):
+        return lambda node: None if getattr(node, objective) is None else -getattr(node, objective)
+    return lambda node: node.score
+
+
+def _card_nudge(bucket: dict, candidates: list[str]) -> list[str]:
+    """Names the candidate nodes not yet named, the three most recent, at most once per `card_stale_minutes`.
+    Unnamed candidates wait for the next reminder window rather than being dropped."""
+    mentioned = set(bucket.get("card_nudged", []))
+    fresh = [node_id for node_id in candidates if node_id not in mentioned]
+    if not fresh:
+        return []
+    now = time.time()
+    last = bucket.get("card_stale_at")
+    if last is not None and now - float(last) < text.numbers()["card_stale_minutes"] * 60:
+        return []
+    named = fresh[-3:]
+    bucket["card_stale_at"] = now
+    bucket["card_nudged"] = sorted(mentioned | set(named))
+    return [text.render("replies/tools.card_stale", nodes=", ".join(named))]
+
+
+def _orchestrator_card_note(directory: Path, bucket: dict) -> list[str]:
+    """The orchestrator is reminded when the run best is a node saved after its own latest card (any author)."""
+    from arena import orchestration
+
+    best = orchestration.run_best(directory)
+    if best is None:
+        return []
+    card = orchestration.current_cards(directory).get("sol")
+    if card is None:
+        newer = best.origin != "reference"
+    else:
+        newer = _first_saved_times(directory).get(best.proof_id, 0.0) > float(card.get("ts", 0.0))
+    return _card_nudge(bucket, [best.id] if newer else [])
+
+
+def _card_stale_note(run_id: str, actor: str, bucket: dict) -> list[str]:
+    """A worker whose own best improved after its card was saved is told once per node to update the card.
+    An axis island's best is its fewest tokens or heartbeats. With no card yet, every improving node counts."""
+    from arena import orchestration
+
+    try:
+        directory = campaign.run_dir(run_id)
+        if actor == "sol":
+            return _orchestrator_card_note(directory, bucket)
+        label = orchestration.worker_job_labels(directory).get(actor)
+        if label is None:
+            return []
+        job = orchestration.resolve_job(directory, label)
+        card = orchestration.current_cards(directory).get(actor)
+        times = _first_saved_times(directory)
+        measure = _measure(orchestration._job_original(directory, job).get("objective"))
+        own = sorted(
+            (
+                node
+                for node in orchestration.proof_nodes(directory).values()
+                if node.status == "closed" and node.route is not None and orchestration.node_author_job(node) == job
+            ),
+            key=lambda node: times.get(node.proof_id, 0.0),
+        )
+        # Nodes saved before the card set the bar; later nodes that beat the bar are stale. No card: every node is later.
+        saved = float(card.get("ts", 0.0)) if card is not None else float("-inf")
+        before = [measure(node) for node in own if times.get(node.proof_id, 0.0) <= saved]
+        best = max((value for value in before if value is not None), default=None)
+        stale: list[str] = []
+        for node in own:
+            value = measure(node)
+            if value is None or times.get(node.proof_id, 0.0) <= saved:
+                continue
+            if best is None or value > best:
+                stale.append(node.id)
+            best = value if best is None else max(best, value)
+        return _card_nudge(bucket, stale)
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
+
+
+def _eval_score(result: object) -> float | None:
+    """A full evaluation's score, read as `graph` reads it."""
+    metrics = (result.get("metrics") if isinstance(result, dict) else None) or {}
+    value = metrics.get("proxy")
+    return value if value is not None else metrics.get("estimated_proxy")
+
+
+def _plateau_families(nodes: list, best_route: str | None) -> list[str]:
+    """Other routes' best closed scored node, highest score first, at most five."""
+    top: dict[str, object] = {}
+    for node in nodes:
+        if node.status != "closed" or node.route is None or node.route == best_route or node.score is None:
+            continue
+        held = top.get(node.route)
+        if held is None or node.score > held.score:
+            top[node.route] = node
+    ranked = sorted(top.values(), key=lambda node: -node.score)[:5]
+    return [
+        text.render(
+            "replies/tools.plateau_family",
+            route=node.route,
+            node=node.id,
+            score=round(node.score, 2),
+            tokens=shown(node.tokens),
+            hb=shown(node.heartbeats),
+        )
+        for node in ranked
+    ]
+
+
+def _plateau_axes(nodes: list) -> str | None:
+    """The run's shortest and cheapest closed proofs, as one sentence."""
+    closed = [node for node in nodes if node.status == "closed" and node.route is not None]
+    with_tokens = [node for node in closed if node.tokens is not None]
+    with_hb = [node for node in closed if node.heartbeats is not None]
+    if not with_tokens or not with_hb:
+        return None
+    short = min(with_tokens, key=lambda node: node.tokens)
+    cheap = min(with_hb, key=lambda node: node.heartbeats)
+    return text.render(
+        "replies/tools.plateau_axes",
+        token_node=short.id,
+        tokens=short.tokens,
+        token_hb=shown(short.heartbeats),
+        hb_node=cheap.id,
+        heartbeats=cheap.heartbeats,
+        hb_tokens=shown(cheap.tokens),
+    )
+
+
+def _plateau_costly(history: list, best) -> str | None:
+    """The run best's three costliest top-level steps, from cached profiles only (never Lean)."""
+    from arena import campaign
+    from arena.context import reference_profile
+    from arena.prices import step_table
+
+    name = history[0].get("theorem")
+    profile = campaign._cached_profiles(name, history).get(best.proof_id)
+    if profile is None and best.origin == "reference":
+        try:
+            profile = reference_profile(name, cache_only=True) or None
+        except (ValueError, OSError):
+            profile = None
+    if profile is None or not best.proof_text:
+        return None
+    no_points = {"points_per_token": 0.0, "points_per_1k_hb": 0.0, "points_per_version": 0.0}
+    rows = step_table(best.proof_text, profile, no_points, best.tokens or 0, best.heartbeats, "")["rows"]
+    # A step's cost in tokens plus heartbeats, with the same 3.4 heartbeats-per-token exchange the report uses.
+    rows.sort(key=lambda row: -((row["tokens"] or 0) + (row["incl_hb"] or 0) / 3.4))
+    if not rows:
+        return None
+    steps = "; ".join(
+        text.render("replies/tools.plateau_step", step=row["id"], tokens=row["tokens"],
+                    heartbeats=shown(row["incl_hb"]))
+        for row in rows[:3]
+    )
+    return text.render("replies/tools.plateau_costly", node=best.id, steps=steps)
+
+
+def _plateau_note(run_id: str, actor: str, bucket: dict) -> list[str]:
+    """The orchestrator's one fact when the run best has not gained `plateau_points` in the last `plateau_minutes`.
+    Said once per plateau: it re-arms when the best gains `plateau_points` over the score it was said at."""
+    from arena import orchestration
+
+    if actor != "sol":
+        return []
+    numbers = text.numbers()
+    points, minutes = float(numbers["plateau_points"]), numbers["plateau_minutes"]
+    try:
+        directory = campaign.run_dir(run_id)
+        history = campaign.events(directory)
+        best = orchestration.run_best(directory)
+        if best is None or not history:
+            return []
+        now = time.time()
+        start = min(float(row.get("ts", now)) for row in history)
+        if now - start < minutes * 60:
+            return []
+        nodes = orchestration.proof_nodes(directory)
+        verified = {proof_id for proof_id, node in nodes.items() if node.verified}
+        marks = [
+            (float(row.get("ts", start)), _eval_score(row.get("result")))
+            for row in history
+            if row.get("kind") == "evaluation" and row.get("mode") == "full" and row.get("candidate_id") in verified
+        ]
+        marks = [(moment, score) for moment, score in marks if score is not None]
+        reference = next((node.score for node in nodes.values() if node.origin == "reference" and node.score is not None), None)
+        if reference is not None:
+            marks.append((start, reference))
+        cutoff = now - minutes * 60
+        base = max((score for moment, score in marks if moment <= cutoff), default=None)
+        if base is None:
+            return []
+        fired = bucket.get("plateau_fired")
+        if fired is not None and best.score >= fired + points - 1e-9:
+            fired = None
+            bucket.pop("plateau_fired", None)
+        if fired is not None or best.score - base >= points - 1e-9:
+            return []
+        bucket["plateau_fired"] = best.score
+        line = text.render("replies/tools.plateau", node=best.id, score=round(best.score, 2), points=points,
+                           minutes=minutes)
+        families = _plateau_families(list(nodes.values()), best.route)
+        if families:
+            line += " " + text.render("replies/tools.plateau_families", families="; ".join(families))
+        axes = _plateau_axes(list(nodes.values()))
+        if axes:
+            line += " " + axes
+        costly = _plateau_costly(history, best)
+        if costly:
+            line += " " + costly
+        line += " " + text.render("replies/tools.plateau_push")
+        return [line]
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
+
+
+def _card_lines(run_id: str, actor: str, bucket: dict) -> list[str]:
+    """Cards this actor has not seen at their current version: every card but its own."""
+    from arena import orchestration
+
+    try:
+        directory = campaign.run_dir(run_id)
+        seen = bucket.setdefault("cards_seen", {})
+        fresh = [
+            row for owner, row in orchestration.current_cards(directory).items()
+            if owner != actor and row["version"] > seen.get(owner, 0)
+        ]
+        lines = []
+        for row in fresh:
+            seen[row["actor_id"]] = row["version"]
+            lines.append(text.render("replies/team.card_head", label=row["label"], version=row["version"],
+                                     changed=", ".join(row["changed"])))
+            lines += [text.render("replies/team.card_field", name=name, value=row["fields"][name])
+                      for name in orchestration.CARD_FIELDS if row["fields"].get(name)]
+            if actor == "sol" and (compared := orchestration.card_comparison(directory, row)):
+                lines.append(compared)
+        return [text.render("replies/tools.section_cards"), *lines] if lines else []
+    except (OSError, ValueError, KeyError):
+        return []
+
+
+@_per_run_delivery
+def card_lines(run_id: str) -> list[str]:
+    """The current actor's unseen cards, persisting what it has now seen. For replies outside attach_context."""
+    actor = current_actor()
+    state = _load(run_id)
+    bucket = _bucket(state, actor)
+    lines = _card_lines(run_id, actor, bucket)
+    if lines:
+        _write_actor(run_id, actor, bucket, state)
+    return lines
+
+
+@_per_run_delivery
 def attach_context(
     run_id: str,
     result: dict,
@@ -507,34 +1028,58 @@ def attach_context(
     force_map: bool = False,
     holes: list[dict] | None = None,
 ) -> dict:
-    """Attach new state updates and a changed map, persisting delivery cursors.
+    """Attach new state updates and a changed map, persisting this actor's delivery cursor.
     `holes`, when given, replaces the map's open holes (the caller's current lineage only)."""
+    actor = current_actor()
     state = _load(run_id)
+    bucket = _bucket(state, actor)
     try:
         updates = campaign.state(run_id).get("updates", [])
     except (OSError, ValueError, KeyError):
         updates = []
-    delivered = int(state.get("delivered_seq", -1))
+    delivered = int(bucket.get("delivered_seq", -1))
     fresh = [item for item in updates if int(item.get("seq", -1)) > delivered]
     if include_map or force_map:
         data = campaign.map_view(run_id)
         if holes is not None:
             data["open"] = holes
-        lines = _map_lines(data)
-        digest = hashlib.sha256("\n".join(lines).encode()).hexdigest()
-        # The full map only when it matters: first one after a (re)start, a new best, or a new shape/route.
         key = _map_key(data)
-        matters = force_map or "map_hash" not in state or key != state.get("map_key")
-        if matters and (force_map or digest != state.get("map_hash") or key != state.get("map_key")):
+        # A compile reply carries the map only for a first or new best; `read` with view "map" shows all of it.
+        if force_map or "map_hash" not in bucket or key != bucket.get("map_key"):
+            lines = _map_lines(data, compact=not force_map)
             result["map"] = [text.render("replies/tools.section_map"), *lines] if lines else lines
-        elif digest != state.get("map_hash"):
-            result["map"] = [text.render("replies/tools.map_unchanged")]
-        state["map_hash"], state["map_key"] = digest, key
+        bucket["map_hash"], bucket["map_key"] = "shown", key
     # Node ids the model has been shown; an update never names a node outside them.
-    seen = set(state.get("seen_nodes", [])) | _node_ids(result)
-    facts = [_update_text(item, seen) for item in fresh if isinstance(item.get("text"), str)] + result.get("facts", [])
+    seen = set(bucket.get("seen_nodes", [])) | _node_ids(result)
+    authors = node_authors(run_id) if fresh else {}
+    facts = [
+        _tag_authors(_update_text(item, seen), authors)
+        for item in fresh
+        if isinstance(item.get("text"), str) and not item.get("quiet")
+    ]
+    # A reply that already passed through here keeps its card section apart from the update facts.
+    earlier = result.get("facts", [])
+    cards_head = text.render("replies/tools.section_cards")
+    split = earlier.index(cards_head) if cards_head in earlier else len(earlier)
+    facts += earlier[:split]
+    facts += _idle_note(run_id, actor, bucket)
+    facts += _best_note(run_id, actor, bucket, bool(fresh))
+    facts += _plateau_note(run_id, actor, bucket)
+    facts += _card_stale_note(run_id, actor, bucket)
+    cards = earlier[split:] + [line for line in _card_lines(run_id, actor, bucket) if not earlier[split:] or line != cards_head]
     if fresh:
-        state["delivered_seq"] = max(int(item.get("seq", -1)) for item in fresh)
+        receipt = _commit_delivery(run_id, actor, fresh)
+        bucket["delivered_seq"] = max(int(item.get("seq", -1)) for item in fresh)
+        bucket["last_delivery"] = {
+            "operation_id": receipt["operation_id"],
+            "event_ids": receipt["event_ids"],
+            "arguments": {
+                "actor_id": actor,
+                "seqs": [int(item.get("seq", -1)) for item in fresh],
+                "event_ids": receipt["event_ids"],
+            },
+        }
+        result["delivery"] = {"actor_id": actor, "event_ids": receipt["event_ids"], "cursor": bucket["delivered_seq"]}
     # Sections: updates from background checks, this call's result, then the search map.
     # A reply can pass through here more than once; each header is added once.
     updates_head, result_head = (
@@ -551,12 +1096,50 @@ def attach_context(
     if first is not None and mine:
         facts = [line for line in facts if line not in mine]
     result["facts"] = [updates_head, *facts] if facts else facts
+    result["facts"] = [*result["facts"], *cards]
     if first is not None:
         body = first["lines"][1:] if first["lines"][0] == result_head else first["lines"]
         first["lines"] = [result_head, *[line for line in mine if line not in body], *body]
-    state["seen_nodes"] = sorted(seen | _node_ids(result))
-    _save(run_id, state)
+    bucket["seen_nodes"] = sorted(seen | _node_ids(result))
+    _write_actor(run_id, actor, bucket, state)
     return result
+
+
+def node_authors(run_id: str) -> dict[str, str]:
+    """Node id to the author label, for nodes first saved by an actor other than the caller's."""
+    from arena import orchestration
+    from arena.run_control import published_history
+
+    try:
+        directory = campaign.run_dir(run_id)
+        history = published_history(directory, campaign.events(directory))
+        first: dict[str, str] = {}
+        for event in history:
+            if event.get("kind") == "attempt" and event.get("proof_id") and event.get("actor_id"):
+                first.setdefault(event["proof_id"], event["actor_id"])
+        labels = orchestration.worker_job_labels(directory)
+        me = current_actor()
+        return {
+            f"n{index}": labels.get(first[proof_id]) or ("orchestrator" if first[proof_id] == "sol" else first[proof_id])
+            for index, proof_id in enumerate(campaign._graph_proof_ids(history), 1)
+            if first.get(proof_id) not in (None, me)
+        }
+    except (OSError, ValueError, KeyError):
+        return {}
+
+
+def _tag_authors(line: str, authors: dict[str, str]) -> str:
+    """Name the author at the first mention of each node another actor saved."""
+    named: set[str] = set()
+
+    def tag(match: re.Match) -> str:
+        node = match.group(0)
+        if node not in authors or node in named:
+            return node
+        named.add(node)
+        return text.render("replies/tools.by_author", node=node, author=authors[node])
+
+    return re.sub(r"\bn[1-9][0-9]*\b", tag, line)
 
 
 def _node_ids(result: dict) -> set[str]:

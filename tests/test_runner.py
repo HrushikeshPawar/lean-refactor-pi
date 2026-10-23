@@ -17,7 +17,7 @@ from arena.skill import SKILL_DIR, skill_hash, skill_prompt
 from tests.pi_support import LIVE_LANGFUSE, NAME, PI_AVAILABLE, AnthropicWire, FakeRun, message_text
 from tests.slow import slow
 
-# Two text-only turns end a run only inside the final tenth, so they follow a turn that spends to 90%.
+# Text-only turns never end a run; only the actual-cost limit does. These two follow a turn that spends to 90%.
 STOP = [{"text": "done"}] * 2
 # Words that name ending the run; none may reach the model before the final tenth of the spend (plan D42).
 STOP_TEXT = re.compile(r"\b(?:finish\w*|stop\w*|threshold\w*|tenth|end(?:s|ing)? the run)\b", re.I)
@@ -170,13 +170,8 @@ def _spend_numbers(spent: float, cap: float) -> list[str]:
 
 
 def _spend_facts(message: str) -> str:
-    """A continuation up to its focus move: the focus line and the proof and prices after it are not spend facts."""
-    from arena import text
-
-    focus = text.render("messages/continuation.focus_moved", label="n0").replace("n0", r"n\d+")
-    lines = message.splitlines()
-    cut = next((i for i, line in enumerate(lines) if re.fullmatch(focus, line)), len(lines))
-    return "\n".join(lines[:cut])
+    """Spend facts in a continuation. A stall or focus line is not part of the continuation."""
+    return message
 
 
 def cheap_tool(name: str, arguments: dict, **usage) -> dict:
@@ -372,18 +367,20 @@ class AutomaticChecksTests(unittest.TestCase):
             ("read", {"node": "n1", "view": "", "against": "", "hole": ""}),
         ]
         steps = [cheap_tool(name, args) for name, args in calls]
-        steps += [cheap_tool("read", {"view": "map"}, output=SPEND_90_PCT), {"text": "done"}]
+        # A text-only turn at 90% continues; the final read crosses the limit and ends the run.
+        steps += [cheap_tool("read", {"view": "map"}, output=SPEND_90_PCT), {"text": "done"},
+                  cheap_tool("read", {"view": "map"}, output=20_000)]
         run = self.fake(steps, session=True, timeout=900)  # goal needs the Lean session's LSP lane
         summary = run.json("summary.json")
         self.assertEqual(summary["tools"]["errors"], {}, run.stdout[-1500:])
-        self.assertEqual(set(summary["tools"]["calls"]), ARENA_TOOLS)
+        self.assertEqual(set(summary["tools"]["calls"]), ARENA_TOOLS - {"scratch"})  # the script never calls scratch
         self.assertEqual(summary["tools"]["calls"]["compile"], 2)
-        self.assertEqual(summary["stop_reason"], "finished")
+        self.assertEqual(summary["stop_reason"], "limit_reached")
         self.assertEqual(len(run.requests), len(steps))
         # Item errors too: only a missing search index (a machine cache, built by `arena index build`) is allowed.
         allowed = {"no_index"} if index_path(NAME) is None else set()
         results = [m for m in run.requests[-1]["messages"] if m["role"] == "toolResult"]
-        # The closing text-only turn ends the run; stop_reason "finished" above is its success.
+        # The crossing read's result is never delivered: the run ends at the limit before another request.
         self.assertEqual([m["toolName"] for m in results], [name for name, _ in calls] + ["read"])
         for result in results:
             with self.subTest(tool=result["toolName"], call=result["toolCallId"]):
@@ -866,16 +863,11 @@ class ErrorLoopAndContinuationTests(unittest.TestCase):
         # Only continuations sent before spend reached the final tenth; those after it are checked elsewhere.
         before_tenth = [(m, s) for m, s in self.continuations(run) if 1 - s / cap > pct / 100]
         self.assertGreaterEqual(len(before_tenth), 2)
-        focus = text.render("messages/continuation.focus_moved", label="n0").replace("n0", r"(n\d+)")
         for message, spent in before_tenth:
             with self.subTest(message=message):
                 self.assertGreater(1 - spent / cap, pct / 100)
                 self.assertNotRegex(message, STOP_TEXT)
                 self.assertNotRegex(message, rf"(?<![\d.]){pct}(?!\d|\.\d)")
-                # Spend is the only fact, plus at most one focus move to a node id (a text-only turn moves the
-                # focus before the final tenth); the proof and prices after a move are not counted.
-                moves = [line for line in message.splitlines() if re.fullmatch(focus, line)]
-                self.assertLessEqual(len(moves), 1)
                 numbers = re.findall(r"\d+(?:\.\d+)?", _spend_facts(message))
                 self.assertEqual(sorted(numbers), sorted(_spend_numbers(spent, cap)))
 
@@ -894,28 +886,27 @@ class ErrorLoopAndContinuationTests(unittest.TestCase):
         )
         pct = text.numbers()["finish_remaining_pct"]
         cap = float(run.json("run-config.json")["limit_usd"])
-        available = text.render("messages/continuation.finish_available")
         for message, spent in self.continuations(run):
             with self.subTest(message=message):
                 self.assertLessEqual(1 - spent / cap, pct / 100)
-                lines = message.splitlines()
-                self.assertEqual(lines.count(available), 1)
-                self.assertEqual([line for line in lines if STOP_TEXT.search(line)], [available])
+                self.assertNotRegex(message, STOP_TEXT)
                 self.assertIn(_spend_numbers(spent, cap)[0], message)
 
-    def test_one_text_only_turn_in_the_final_tenth_stops_provider_continuations(self):
+    def test_a_text_only_turn_in_the_final_tenth_continues_until_the_limit(self):
         run = self.fake(
             [
                 cheap_tool("read", {"node": "n1"}, output=SPEND_90_PCT),
                 {"text": "done"},
+                cheap_tool("read", {"node": "n1"}, output=20_000),
                 {"text": "must not be requested"},
             ],
             env={"ARENA_AUTOCONTINUE": "1"},
         )
-        self.assertEqual(len(run.requests), 2, run.stdout)
-        self.assertEqual(run.json("summary.json")["stop_reason"], "finished")
+        self.assertEqual(len(run.requests), 3, run.stdout)
+        self.assertEqual(run.json("summary.json")["stop_reason"], "limit_reached")
         controls = [row for row in run.jsonl("cost-ledger.jsonl") if row.get("kind") == "control"]
-        self.assertEqual([row.get("stop") for row in controls].count("finished"), 1)
+        self.assertTrue(controls, run.stdout)
+        self.assertEqual({row["stop"] for row in controls if row.get("stop")} - {"limit_reached"}, set())
 
     def test_compile_drafts_count_as_proof_attempts(self):
         from arena.campaign import problem
@@ -932,17 +923,16 @@ class ErrorLoopAndContinuationTests(unittest.TestCase):
         self.assertTrue(all(row["proof_attempt"] for row in controls[:3]), controls)
         self.assertFalse(any(row.get("stop") == "no_work_fallback" for row in controls[:3]), controls)
 
-    def test_an_identical_read_is_stubbed_and_no_work_ends_the_run_only_in_the_final_tenth(self):
-        # D42: before the final tenth a turn without work moves the focus and never ends the run;
-        # inside the final tenth two such turns in a row do.
+    def test_an_identical_read_is_stubbed_and_turns_without_work_never_end_the_run_before_the_limit(self):
+        # v8: a turn without work, early or inside the final tenth, never ends the run; only the actual-cost limit does.
         early = 3
         read = cheap_tool("read", {"node": "n1"})
         script: list = [read, {"text": "first final"}]
         for index in range(early):
             script += [read, {"text": f"final {index}"}]
-        # A text-only turn finishes the run in the final tenth, so the last two no-work turns end without visible text.
+        # Two more no-work turns inside the final tenth continue; the last read crosses the limit.
         script += [cheap_tool("read", {"node": "n1"}, output=SPEND_90_PCT), {"text": ""}]
-        script.append({"text": "must not be requested"})
+        script += [cheap_tool("read", {"node": "n1"}, output=20_000), {"text": "must not be requested"}]
         run = self.fake(script, env={"ARENA_AUTOCONTINUE": "1", "ARENA_ISLANDS": "0"})
         # Two turns without work in a row restart the context before the final tenth, so the reads are gathered
         # across every request: each scripted read reaches the model once, in full or as a stub.
@@ -963,12 +953,13 @@ class ErrorLoopAndContinuationTests(unittest.TestCase):
             self.assertLess(len(repeat), len(first) / 2)
         # The first read of each context is new context; every stubbed repeat is a turn without work.
         controls = [row for row in run.jsonl("cost-ledger.jsonl") if row.get("kind") == "control"]
-        self.assertEqual(controls[-1]["stop"], "no_work_fallback")
+        self.assertEqual({row["stop"] for row in controls if row.get("stop")} - {"limit_reached"}, set())
         self.assertFalse(any(row.get("stop") for row in controls[:-1]))
         cap = float(run.json("run-config.json")["limit_usd"])
         settled = [row["spent_usd"] for row in run.jsonl("cost-ledger.jsonl") if row.get("kind") == "settle"]
         self.assertGreaterEqual(settled[-1] / cap, 0.9)
-        self.assertEqual(len(run.requests), 2 * (early + 2))
+        self.assertEqual(run.json("summary.json")["stop_reason"], "limit_reached")
+        self.assertEqual(len(run.requests), 2 * (early + 2) + 1)
 
 
 @slow
@@ -1094,11 +1085,13 @@ class TruncationTests(unittest.TestCase):
 @unittest.skipUnless(PI_AVAILABLE and FIXTURE.exists(), "pi and the Strata fixture are required")
 class FinishReplayTests(unittest.TestCase):
     def test_one_finishing_turn_submits_the_candidate_verified_before_it(self):
-        # The run ends on a text-only turn in the final tenth; the submission is the node the earlier compile verified.
+        # A text-only turn in the final tenth continues; the run ends at the limit, and the submission is the
+        # node the earlier compile verified.
         run = FakeRun(
             [
                 cheap_tool("compile", {"drafts": [FIXTURE.read_text()], "check": "lean"}, output=SPEND_90_PCT),
                 {"text": "done"},
+                cheap_tool("read", {"view": "map"}, output=20_000),
                 {"text": "must not be requested"},
             ],
             timeout=1200,
@@ -1107,11 +1100,11 @@ class FinishReplayTests(unittest.TestCase):
         run.run()
         assert run.result is not None
         self.assertEqual(run.result.returncode, 0, run.stdout + run.result.stderr[-1000:])
-        self.assertEqual(len(run.requests), 2, run.stdout)
+        self.assertEqual(len(run.requests), 3, run.stdout)
         [compiled] = tool_results(run.requests[1], "compile")
         _, label, _ = compiled_node(run, compiled["details"])
         summary = run.json("summary.json")
-        self.assertEqual(summary["stop_reason"], "finished")
+        self.assertEqual(summary["stop_reason"], "limit_reached")
         submission = run.json("submission.json")
         self.assertEqual(submission["candidate"], label, run.stdout)
         self.assertEqual((submission["tokens"], submission["heartbeats"], submission["proxy"]), FIXTURE_SCORE)

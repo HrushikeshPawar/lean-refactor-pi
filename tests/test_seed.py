@@ -11,6 +11,7 @@ import types
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from typing import ClassVar
 from unittest import mock
 
 from rich.console import Console
@@ -19,11 +20,12 @@ from arena import campaign, seed
 from arena import text as agent_text
 from arena.cli import campaigns as rc
 from arena.graph import Graph
+from tests.graph_support import FakeRunCase
 from tests.pi_support import PI_AVAILABLE, FakeRun, message_text
 from tests.slow import slow
 from tests.test_campaign import LOCK, campaign_args, offline_campaign
 from tests.test_findings_v7_ski2 import _history
-from tests.test_runner import SPEND_90_PCT, STOP, STOP_TEXT, cheap_tool
+from tests.test_runner import FIXTURE, SPEND_90_PCT, STOP, STOP_TEXT, cheap_tool
 
 SOL = "gpt-6.1-sol"
 DEEPSEEK = "deepseek-v4.1-flash"
@@ -243,6 +245,43 @@ class SeededRunTests(unittest.TestCase):
                 second.cleanup()
 
 
+@slow
+@unittest.skipUnless(PI_AVAILABLE, "pi and the Strata fixture are required")
+class SeedProofRunTests(unittest.TestCase):
+    """A run seeded from a proof file: the seed is checked on every toolchain first, then Pi starts from it."""
+
+    def test_a_run_starts_from_the_proof_and_a_failing_proof_refuses_to_start(self):
+        fixture = FIXTURE.read_text()
+        work = Path(tempfile.mkdtemp())
+        good, bad = work / "good.lean", work / "bad.lean"
+        good.write_text(fixture.replace("intros Hup Hinit", "intro Hup Hinit"))
+        bad.write_text(fixture.replace("InitStatesUpdated Hinit", "InitStatesUpdatedNoSuchLemma Hinit"))
+        refused = FakeRun([*STOP])
+        run = FakeRun([cheap_tool("read", {"view": "map"}, output=SPEND_90_PCT), *STOP])
+        try:
+            refused.run("--seed-proof", str(bad), guard=False)
+            assert refused.result is not None
+            self.assertEqual(refused.result.returncode, 2, refused.result.stderr)
+            self.assertIn("does not pass every toolchain", refused.result.stderr)
+            self.assertEqual(refused.requests, [])  # Pi never started
+            run.run("--seed-proof", str(good))
+            assert run.result is not None
+            self.assertEqual(run.result.returncode, 0, run.result.stderr)
+            ledger = run.jsonl("ledger.jsonl")
+            self.assertEqual([row["source_proof"] for row in ledger if row["kind"] == "seeded"], [str(good)])
+            self.assertEqual([row["origin"] for row in ledger if row["kind"] == "candidate"][:2], ["reference", "seed"])
+            prompt = message_text(run.requests[0]["messages"][-1])
+            self.assertIn(agent_text.render("messages/prior-work.heading"), prompt)
+            self.assertNotIn(agent_text.render("messages/prior-work.digest_heading"), prompt)
+            self.assertEqual(run.json("run-config.json")["seed_proof"], str(good))
+        finally:
+            refused.cleanup()
+            run.cleanup()
+            good.unlink()
+            bad.unlink()
+            work.rmdir()
+
+
 class RequeueSeedTests(unittest.TestCase):
     spec = types.MappingProxyType({"row": "A", "model": SOL, "replicate": 1, "run_id": f"v8-A-{SOL}-r1"})
 
@@ -296,6 +335,252 @@ class RequeueSeedTests(unittest.TestCase):
         self.assertEqual(len(launched), 2)
         self.assertIn("--seed-run", launched[1])
         self.assertIn("1 run(s) stopped, 0 never launched", output.getvalue())
+
+
+class SeedProofTests(FakeRunCase):
+    """`--seed-proof`: the proof becomes a candidate (origin seed), is checked on every toolchain, then focus and current."""
+
+    proof = "theorem t := by\n  exact seed"
+
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.object(campaign, "cold_verify", return_value={"confirmed": True})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def write(self, text: str | None = None) -> Path:
+        path = Path(self.temporary.name) / "seed.lean"
+        path.write_text(text or self.proof)
+        return path
+
+    def rows(self, kind: str) -> list[dict]:
+        return [row for row in campaign.events(self.directory) if row["kind"] == kind]
+
+    def test_a_passing_proof_is_a_seed_candidate_and_the_runs_focus_and_current(self):
+        path = self.write()
+        started = seed.start_from_proof("T", "logic", path)
+        (candidate,) = [row for row in self.rows("candidate") if row["origin"] == "seed"]
+        reference = next(row for row in self.rows("candidate") if row["origin"] == "reference")
+        self.assertEqual(candidate["parents"], [reference["candidate_id"]])
+        self.assertEqual(started["candidate_id"], candidate["candidate_id"])
+        (seeded,) = self.rows("seeded")
+        self.assertEqual(seeded["source_proof"], str(path))
+        self.assertEqual(seeded["best_proxy"], started["best_proxy"])
+        self.assertEqual(self.rows("focus")[-1]["proof_id"], candidate["candidate_id"])
+        self.assertEqual(self.rows("current")[-1]["candidate_id"], candidate["candidate_id"])
+        self.assertEqual(campaign.state("logic")["best"]["candidate"], "#2")
+        full = [row for row in self.rows("evaluation") if row["candidate_id"] == candidate["candidate_id"]]
+        self.assertEqual([row["mode"] for row in full], ["full"])
+
+    def test_a_proof_failing_a_toolchain_is_refused_and_leaves_no_seed_rows(self):
+        for text, version in (("theorem t := by\n  bad", "v1"), ("theorem t := by\n  old", "v2")):
+            with self.subTest(version=version), self.assertRaises(ValueError) as caught:
+                seed.start_from_proof("T", "logic", self.write(text))
+            self.assertIn("does not pass every toolchain", str(caught.exception))
+            self.assertIn(version, str(caught.exception))
+        self.assertEqual(self.rows("seeded"), [])
+        self.assertNotIn("seed", [row["reason"] for row in self.rows("focus")])
+
+    def test_an_unreadable_or_foreign_proof_is_refused_before_any_check(self):
+        with self.assertRaises(ValueError) as caught:
+            seed.start_from_proof("T", "logic", Path(self.temporary.name) / "missing.lean")
+        self.assertIn("cannot be read", str(caught.exception))
+        with mock.patch.object(campaign, "validate_proof", side_effect=ValueError("statement modified")):
+            with self.assertRaises(ValueError) as caught:
+                seed.start_from_proof("T", "logic", self.write())
+            self.assertIn("is not a proof of T", str(caught.exception))
+        self.assertEqual([row for row in self.rows("candidate") if row["origin"] == "seed"], [])
+
+    def test_the_reference_proof_is_no_seed(self):
+        started = seed.start_from_proof("T", "logic", self.write("theorem t := by\n  ref"))
+        self.assertTrue(started["reference"])
+        self.assertEqual(self.rows("seeded"), [])
+
+    def test_the_first_prompt_gets_the_prior_work_heading_and_map_without_a_digest(self):
+        seed.start_from_proof("T", "logic", self.write())
+        section = seed.prior_work("logic")
+        self.assertIn(agent_text.render("messages/prior-work.heading"), section)
+        self.assertIn(agent_text.render("messages/prior-work.map_heading"), section)
+        self.assertIn("n2", section)
+        self.assertNotIn(agent_text.render("messages/prior-work.digest_heading"), section)
+        self.assertIsNone(STOP_TEXT.search(section))
+
+
+class SeedProofColdVerificationTests(SeedProofTests):
+    """A proof checked in a Lean session is only a fast estimate: it must also pass the cold compile."""
+
+    lean_info: ClassVar[dict] = {"path": "session"}
+
+    def test_a_proof_failing_the_cold_verification_is_refused(self):
+        cold = {"confirmed": False, "passed": {"v1": True, "v2": False}, "cold_heartbeats": 99}
+        with (
+            mock.patch.object(campaign, "cold_verify", return_value=cold) as verify,
+            self.assertRaises(ValueError) as caught,
+        ):
+            seed.start_from_proof("T", "logic", self.write())
+        verify.assert_called_once()
+        self.assertIn("cold verification", str(caught.exception))
+        self.assertEqual(self.rows("seeded"), [])
+
+    def test_a_confirmed_proof_is_seeded(self):
+        with mock.patch.object(campaign, "cold_verify", return_value={"confirmed": True}) as verify:
+            seed.start_from_proof("T", "logic", self.write())
+        verify.assert_called_once()
+        self.assertEqual(len(self.rows("seeded")), 1)
+
+
+class SeedProofRunOptionTests(unittest.TestCase):
+    def options(self, **kwargs):
+        from arena.engine import ROOT
+
+        theorem = json.loads((ROOT / "benchmark/original/warmup.jsonl").read_text().splitlines()[0])["name"]
+        run_module = importlib.import_module("arena.cli.run")
+        return run_module, run_module.RunOptions(
+            model=rc.MODELS[0], theorem=theorem, run_id="seed-proof-option-test", dry_run=True, **kwargs
+        )
+
+    def refused(self, **kwargs) -> str:
+        run_module, options = self.options(**kwargs)
+        error = io.StringIO()
+        with contextlib.redirect_stderr(error):
+            self.assertEqual(run_module.run(options), 2)
+        return error.getvalue()
+
+    def test_it_cannot_go_with_the_other_ways_to_start(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            proof = Path(tmp) / "p.lean"
+            proof.write_text("theorem x : True := by\n  trivial")
+            for other in ({"seed_run": Path(tmp)}, {"resume_run": True}, {"preflight": True}):
+                with self.subTest(other=other):
+                    self.assertIn("--seed-proof", self.refused(seed_proof=proof, **other))
+
+    def test_a_missing_or_foreign_proof_file_is_refused_before_anything_starts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIn("cannot be read", self.refused(seed_proof=Path(tmp) / "none.lean"))
+            foreign = Path(tmp) / "foreign.lean"
+            foreign.write_text("theorem unrelated : True := by\n  trivial")
+            self.assertIn("is not a proof of", self.refused(seed_proof=foreign))
+
+    def test_the_flags_exist_with_their_defaults(self):
+        _, options = self.options()
+        self.assertEqual((options.seed_proof, options.no_golf), (None, False))
+
+
+class CampaignSeedProofsTests(unittest.TestCase):
+    rows = ("Core.InitsUpdatesComm", "Cslib.SKI.parallelReduction_diamond")
+
+    def write_dir(self, root: Path, names=None) -> Path:
+        directory = root / "best"
+        directory.mkdir()
+        lines = [json.dumps({"name": name, "proof": f"theorem {name} := by\n  p\n"}) for name in names or self.rows]
+        (directory / "submission.jsonl").write_text("\n".join(lines) + "\n")
+        return directory
+
+    def test_proofs_are_read_per_row_and_a_bad_line_is_named(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(sorted(rc.load_seed_proofs(self.write_dir(Path(tmp)))), sorted(self.rows))
+            (Path(tmp) / "best" / "submission.jsonl").write_text('{"name": "A"}\n')
+            with self.assertRaises(ValueError) as caught:
+                rc.load_seed_proofs(Path(tmp) / "best")
+            self.assertIn("line 1", str(caught.exception))
+
+    def test_each_rows_runs_get_the_flag_and_rows_without_a_proof_run_unseeded(self):
+        specs = rc.plan("p", [*self.rows, "Other.row"], ["deepseek-v4.1-flash"], 2)
+        out = Path("/campaign-out")
+        missing = rc.assign_seed_proofs(specs, dict.fromkeys(self.rows, "x"), out)
+        self.assertEqual(missing, ["Other.row"])
+        for spec in specs:
+            argv = rc.command(spec, 0.5, "high", [])
+            if spec["row"] == "Other.row":
+                self.assertNotIn("--seed-proof", argv)
+            else:
+                self.assertEqual(
+                    argv[argv.index("--seed-proof") + 1], str(out / "seeds" / f"{rc.slug(spec['row'], 200)}.lean")
+                )
+
+    def test_a_requeue_seeds_from_the_stopped_run_not_the_proof(self):
+        spec = {"row": "A", "model": SOL, "replicate": 1, "run_id": f"v8-A-{SOL}-r1", "seed_proof": "/s/A.lean"}
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(rc, "RUNS", Path(tmp)):
+            (moved,) = rc.usage_limit_specs([spec], [{"stop_reason": "usage_limit"}], DEEPSEEK)
+        argv = rc.command(moved, 0.5, "high", [])
+        self.assertIn("--seed-run", argv)
+        self.assertNotIn("--seed-proof", argv)
+
+    def test_the_dry_run_shows_the_flag_notes_missing_rows_and_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = self.write_dir(Path(tmp), self.rows[:1])
+            out = io.StringIO()
+            with (
+                mock.patch.object(
+                    rc.engine, "problem", side_effect=lambda name: {"name": name, "source": name, "version_info": []}
+                ),
+                mock.patch.object(rc, "RUNS", Path(tmp) / "runs"),
+                contextlib.redirect_stdout(out),
+            ):
+                code = rc.cli_execute(
+                    rc.CampaignOptions(
+                        prefix="p",
+                        rows=",".join(self.rows),
+                        models="deepseek-v4.1-flash",
+                        replicates=1,
+                        limit_usd=0.1,
+                        seed_proofs=directory,
+                        dry_run=True,
+                        plain=True,
+                    )
+                )
+            self.assertEqual(code, 0)
+            shown = out.getvalue()
+            self.assertEqual(shown.count("--seed-proof"), 1)
+            self.assertIn(f"has no proof for {self.rows[1]}", shown)
+            self.assertFalse((Path(tmp) / "runs").exists())
+
+    def test_a_missing_directory_is_refused(self):
+        error = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stderr(error):
+            code = rc.cli_execute(
+                rc.CampaignOptions(
+                    prefix="p",
+                    rows="Core.InitsUpdatesComm",
+                    models="deepseek-v4.1-flash",
+                    seed_proofs=Path(tmp) / "none",
+                    dry_run=True,
+                )
+            )
+        self.assertEqual(code, 2)
+        self.assertIn("--seed-proofs", error.getvalue())
+
+    def test_the_campaign_writes_the_seed_files_records_the_settings_and_launches_with_the_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            specs = rc.plan("fake", ["A", "B"], [SOL], 1)
+            proofs = {"A": "theorem a := by\n  p\n"}
+            rc.assign_seed_proofs(specs, proofs, root / "fake-campaign")
+            launched = []
+
+            def fake_run(cmd, **_kw):
+                launched.append(cmd)
+                run_id = cmd[cmd.index("--run-id") + 1]
+                (root / run_id).mkdir()
+                (root / run_id / "run-config.json").write_text(json.dumps({"packet_sha256": "hash"}))
+                return SimpleNamespace(returncode=0)
+
+            args = campaign_args("fake")
+            args.seed_proofs, args.seed_texts = Path("/seeds"), proofs
+            with (
+                offline_campaign(root),
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                rc._run_campaign(args, ["A", "B"], [SOL], specs, [], LOCK, run_fn=fake_run)
+            seeded = root / "fake-campaign" / "seeds" / "A.lean"
+            self.assertEqual(seeded.read_text(), "theorem a := by\n  p\n")
+            self.assertFalse((root / "fake-campaign" / "seeds" / "B.lean").exists())
+            settings = json.loads((root / "fake-campaign" / "campaign.json").read_text())["settings"]
+            self.assertEqual((settings["seed_proofs"], settings["seeded_rows"]), ("/seeds", ["A"]))
+            by_row = {cmd[cmd.index("--theorem") + 1]: cmd for cmd in launched}
+            self.assertEqual(by_row["A"][by_row["A"].index("--seed-proof") + 1], str(seeded))
+            self.assertNotIn("--seed-proof", by_row["B"])
 
 
 if __name__ == "__main__":

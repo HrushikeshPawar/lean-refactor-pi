@@ -104,6 +104,15 @@ def eval_(
 
 
 @app.command()
+def golf(theorem: str, proof: Path, out: Path, seconds: float = 600.0) -> int:
+    """One bounded greedy golf pass over a loose proof: fast-mode search, then a full cold check before writing."""
+    load_env()
+    from arena.cli.golf import execute
+
+    return execute(theorem, proof, out, seconds)
+
+
+@app.command()
 def merge(run_id: str, parent_pid: int | None = None, once: bool = False) -> int:
     from arena.cli.merge import execute
 

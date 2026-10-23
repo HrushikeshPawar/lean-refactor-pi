@@ -1,3 +1,8 @@
-description: "Run Lean commands in this theorem's environment, such as example ... := by trace_state; rfl, #check or #print. Nothing becomes a node or is scored. Replies give OK or FAILED, error and warning counts, body tokens (after :=), messages by line, and each declaration's heartbeats and points."
+description: "Run an isolated Lean experiment, or submit an exact target replacement in the same call. Use code for commands, examples or a complete target theorem; use replacement with at or the job's recorded anchor for a proof edit. Unambiguous target proofs use normal compile and return candidate references and verification coverage. A local experiment OK is not target certification. Every accepted input has a retrievable experiment id."
 params:
-  code: "Lean commands that take the target declaration's place; no import lines. sorry is allowed here."
+  code: "Lean commands that take the target declaration's place; no import lines. sorry is allowed here. Unicode and line endings are kept exactly."
+  replacement: "Exact proof-local replacement for the anchored steps or hole. Mutually exclusive with code."
+  at: "Saved parent node plus steps [first,last] counted from 1 (s2-s3 is [2,3]), or hole. Omit only when the job's anchor is a step range or hole. For a whole-proof anchor send code with the full theorem, or use compile drafts."
+  helpers: "Optional experiment ids whose recorded snippets this call depends on. Only named helpers and their recorded dependencies are included. Diagnostic lines use that combined source."
+  at_hole: "Open hole id of that node, such as n3.h1. Exclusive with steps."
+  note: "Optional short label."

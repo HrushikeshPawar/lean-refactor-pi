@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from arena import models
 
@@ -67,6 +68,55 @@ class ModelConfigTests(unittest.TestCase):
         self.assertEqual(json.loads(models.pi_json())["models"]["mimo-v2.6-pro"]["toolTurnReasoningEffort"], "high")
         self.broken(lambda config: config["models"]["mimo-v2.6-pro"].update(tool_turn_reasoning_effort=""))
         self.broken(lambda config: config["retry"].update(base_delay_ms=0))
+
+    def test_v8_cap_exposure_report(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            report = models.cap_exposure_report(GOOD, home=home)
+            missing = copy.deepcopy(GOOD)
+            del missing["models"]["gpt-6.1-sol"]["request_output_tokens"]
+            gap = models.cap_exposure_report(missing, home=home)
+            too_small = copy.deepcopy(GOOD)
+            too_small["models"]["gpt-6.1-sol"]["context_window"] = 100_000
+            infeasible = models.cap_exposure_report(too_small, home=home)
+            self.assertEqual(infeasible["status"], "not_established")
+            precise = copy.deepcopy(GOOD)
+            precise["models"]["gpt-6.1-sol"]["price"]["input"] = 1.8001
+            precise_report = models.cap_exposure_report(precise, home=home)
+            self.assertEqual(precise_report["status"], "exposed")
+            self.assertEqual(precise_report["exposure_witness"]["usd"], "0.50001")
+            missing_worker = copy.deepcopy(GOOD)
+            del missing_worker["models"]["deepseek-v4.1-flash"]["request_output_tokens"]
+            self.assertEqual(models.cap_exposure_report(missing_worker, home=home)["status"], "exposed")
+            sol = GOOD["models"]["gpt-6.1-sol"]
+            catalog = {sol.get("id", "gpt-6.1-sol"): {"cost": models._camelize(sol["price"])}}
+            with patch.object(
+                models, "pi_catalog", side_effect=lambda provider, _home: catalog if provider == "openai" else {}
+            ):
+                partial = models.cap_exposure_report(GOOD, home=home)
+            self.assertEqual(partial["catalog_parity"], "not_compared")
+        self.assertEqual(report["status"], "exposed")
+        self.assertTrue(report["owner_go_nogo_required"])
+        self.assertIsNone(report["worst_case_bound_usd"])
+        self.assertIsNone(report["actual_billed_usd"])
+        self.assertEqual(report["catalog_parity"], "not_compared")
+        self.assertEqual(
+            report["illustrations"],
+            {
+                "sol_output_usd": "0.3200",
+                "deepseek_output_usd": "0.0384",
+                "three_model_outputs_usd": "0.3968",
+                "sol_100k_uncached_input_plus_output_usd": "0.5200",
+            },
+        )
+        self.assertEqual(report["headroom_usd"], "0.50")
+        self.assertIn("configuration_identity", report)
+        self.assertTrue(report["unknowns"])
+        self.assertFalse(report["mutates_spend_policy"])
+        self.assertEqual(gap["status"], "not_established")
+        self.assertIsNone(gap["illustrations"]["sol_output_usd"])
+        self.assertIsNone(gap["illustrations"]["sol_100k_uncached_input_plus_output_usd"])
+        self.assertNotEqual(gap["illustrations"]["sol_output_usd"], "0.0000")
 
 
 if __name__ == "__main__":

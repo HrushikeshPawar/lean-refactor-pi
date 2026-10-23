@@ -35,6 +35,14 @@ def diagnostics(*lines):
 
 
 class SalvagePlanningTests(unittest.TestCase):
+    def test_deferred_salvage_resumes_at_the_next_compile(self):
+        proof = "theorem t : True := by\n  bad\n  exact True.intro"
+        compile, seen = scripted([diagnostics(2), {"clean": True, "error_lines": [], "unlocated": False, "result": {}}])
+        first = salvage.salvage("T", proof, compile, should_yield=lambda: "full_check_arrived" if seen else None)
+        self.assertEqual((first["status"], first["compiles"], len(seen)), ("deferred", 1, 1))
+        resumed = salvage.salvage("T", proof, compile, resume=first["continuation"])
+        self.assertEqual((resumed["status"], resumed["compiles"], len(seen)), ("salvaged", 2, 2))
+
     def test_nested_body_error_becomes_one_hole_with_s2(self):
         proof = "theorem t : True := by\n  have h : True := by\n    bad\n  exact h"
         compile, seen = scripted(
@@ -152,6 +160,62 @@ class HoleTests(unittest.TestCase):
 
 
 class SalvageCampaignTests(FakeRunCase):
+    def test_full_candidate_arriving_during_salvage_runs_before_next_salvage_compile(self):
+        with (
+            patch.object(campaign.lean_health, "tripped", return_value=False),
+            patch.object(campaign, "problem", return_value={"name": "T", "statement": "theorem t : True"}),
+        ):
+            campaign.probe("T", "logic", "bad\nexact True.intro")
+            salvage_calls = []
+
+            def compile_salvage(_name, proof):
+                salvage_calls.append(proof)
+                if len(salvage_calls) == 1:
+                    campaign.probe("T", "logic", "exact True.intro")
+                    return diagnostics(2)
+                return {"clean": True, "error_lines": [], "unlocated": False, "result": {"compat": {"v1": {"passed": True}}}}
+
+            with patch.object(campaign, "_salvage_compile", side_effect=compile_salvage):
+                outcome = campaign.autocheck("T", "logic")
+            history = campaign.events(self.directory)
+            deferred = next(item for item in history if item.get("kind") == "salvage" and item.get("status") == "deferred")
+            full_seq = next(
+                seq for seq, item in enumerate(history)
+                if item.get("kind") == "evaluation" and item.get("mode") == "full" and item.get("trigger") == "auto"
+            )
+            deferred_seq = next(seq for seq, item in enumerate(history) if item is deferred)
+            self.assertEqual(deferred["reason"], "full_check_arrived")
+            self.assertEqual(deferred["compiles"], 1)
+            self.assertLess(deferred_seq, full_seq)
+            self.assertEqual(len(salvage_calls), 2)
+            self.assertTrue(outcome["ok"])
+
+    def test_salvage_soft_cap_finishes_active_compile_then_resumes_without_repeating_it(self):
+        with (
+            patch.object(campaign, "problem", return_value={"name": "T", "statement": "theorem t : True"}),
+        ):
+            campaign.probe("T", "logic", "bad\nexact True.intro")
+            node = campaign._salvage_jobs(campaign.events(self.directory), self.directory)[0]
+            with (
+                patch.object(campaign, "_salvage_compile", return_value=diagnostics(2)) as compile_salvage,
+                patch.object(campaign.time, "monotonic", side_effect=[10, 10, 71, 71]),
+            ):
+                deferred = campaign._run_salvage("T", "logic", node)
+            self.assertEqual((deferred["status"], deferred["reason"], deferred["compiles"]), ("deferred", "salvage_soft_cap_exhausted", 1))
+            self.assertEqual(compile_salvage.call_count, 1)
+            self.assertNotEqual(deferred["continuation"]["current"], node.proof_text)
+            self.assertEqual(len(campaign._salvage_jobs(campaign.events(self.directory), self.directory)), 1)
+
+            with patch.object(
+                campaign,
+                "_salvage_compile",
+                return_value={"clean": True, "error_lines": [], "unlocated": False, "result": {"compat": {"v1": {"passed": True}}}},
+            ) as resumed_compile:
+                resumed = campaign._run_salvage("T", "logic", node)
+            self.assertEqual((resumed["status"], resumed["compiles"]), ("salvaged", 2))
+            self.assertEqual(resumed_compile.call_count, 1)
+            self.assertEqual(resumed_compile.call_args.args[1], deferred["continuation"]["current"])
+
     def test_source_drafts_are_listed_compactly_in_one_line(self):
         self.assertEqual(campaign._compact_ids(["n2", "n3", "n4", "n5", "n9", "n11", "n12"]), "n2–n5, n9, n11–n12")
         self.assertEqual(campaign._compact_ids(["n7"]), "n7")
@@ -225,10 +289,10 @@ class SalvageCampaignTests(FakeRunCase):
             any(item.get("kind") in ("profile", "profile_error") for item in campaign.events(self.directory))
         )
 
-    def test_background_drain_runs_salvage_before_full_checks(self):
+    def test_background_drain_runs_full_checks_before_salvage(self):
         outcome, kinds = self.autocheck_kinds(closing=False)
         self.assertEqual(outcome["checked"], ["#2"])
-        self.assertEqual(kinds[:2], ["salvage", "full"])
+        self.assertEqual(kinds[:2], ["full", "salvage"])
 
     def test_interrupted_job_is_requeued_and_unavailable_is_terminal_without_notice(self):
         with (
@@ -275,7 +339,8 @@ class FillAndMapTests(FakeRunCase):
         )
         with patch.object(campaign, "problem", return_value={"name": "T", "statement": "theorem t := by"}):
             projection = graph.Graph.from_history(
-                campaign.events(self.directory), campaign._proof_reader(self.directory)
+                campaign.events(self.directory), campaign._proof_reader(self.directory),
+                committed_operations=campaign.committed_operation_ids(self.directory)
             )
         hole_id = f"{projection.nodes[-1].id}.h1"
         with self.assertRaisesRegex(ValueError, "n999.h1.*line"):
@@ -303,7 +368,8 @@ class FillAndMapTests(FakeRunCase):
             ("filled_from", [sketch_id], {"hole": hole_id, "text": "exact True.intro"}),
         )
         self.assertIn("node", result)
-        graph_after = graph.Graph.from_history(campaign.events(self.directory), campaign._proof_reader(self.directory))
+        graph_after = graph.Graph.from_history(campaign.events(self.directory), campaign._proof_reader(self.directory),
+                committed_operations=campaign.committed_operation_ids(self.directory))
         sketch = next(node for node in graph_after.nodes if node.proof_id == sketch_id)
         self.assertEqual(
             (sketch.holes[0]["status"], sketch.holes[0]["filled_by"]), ("filled", graph_after.nodes[-1].id)
@@ -325,7 +391,8 @@ class FillAndMapTests(FakeRunCase):
             proof,
             operation={"type": "salvaged_from", "from": ["failed"]},
         )
-        before = graph.Graph.from_history(campaign.events(self.directory), campaign._proof_reader(self.directory))
+        before = graph.Graph.from_history(campaign.events(self.directory), campaign._proof_reader(self.directory),
+                committed_operations=campaign.committed_operation_ids(self.directory))
         sketch = next(node for node in before.nodes if node.proof_id == sketch_id)
         fill_id = "d" * 64
         fill_proof = proof.replace("    sorry", "    sorry\n    exact True.intro")
@@ -380,7 +447,8 @@ class FillAndMapTests(FakeRunCase):
                 "operation": {"hole": f"{sketch.id}.h1", "text": "exact True.intro"},
             },
         )
-        after = graph.Graph.from_history(campaign.events(self.directory), campaign._proof_reader(self.directory))
+        after = graph.Graph.from_history(campaign.events(self.directory), campaign._proof_reader(self.directory),
+                committed_operations=campaign.committed_operation_ids(self.directory))
         sketch_after = next(node for node in after.nodes if node.proof_id == sketch_id)
         self.assertEqual(sketch_after.holes[0]["status"], "open")
 
@@ -407,7 +475,8 @@ class FillAndMapTests(FakeRunCase):
             operation={"type": "salvaged_from", "from": ["failed"]},
         )
         with patch.object(campaign, "problem", return_value={"name": "T", "statement": "theorem t := by"}):
-            current = graph.Graph.from_history(campaign.events(self.directory), campaign._proof_reader(self.directory))
+            current = graph.Graph.from_history(campaign.events(self.directory), campaign._proof_reader(self.directory),
+                committed_operations=campaign.committed_operation_ids(self.directory))
             sketch = next(node for node in current.nodes if node.proof_id == sketch_id)
             self.assertEqual(graph.map_view(current)["open"][0]["hole"], f"{sketch.id}.h1")
             campaign.compile_operation(
@@ -466,7 +535,8 @@ class FillAndMapTests(FakeRunCase):
             operation={"type": "salvaged_from", "from": ["failed"]},
         )
         with patch.object(campaign, "problem", return_value={"name": "T", "statement": "theorem t := by"}):
-            current = graph.Graph.from_history(campaign.events(self.directory), campaign._proof_reader(self.directory))
+            current = graph.Graph.from_history(campaign.events(self.directory), campaign._proof_reader(self.directory),
+                committed_operations=campaign.committed_operation_ids(self.directory))
             sketch = next(node for node in current.nodes if node.proof_id == sketch_id)
             fill_proof = proof.replace("    sorry", "    exact True.intro")
             fill_id = "1" * 64
@@ -498,7 +568,8 @@ class FillAndMapTests(FakeRunCase):
                 },
             )
             after_fill = graph.Graph.from_history(
-                campaign.events(self.directory), campaign._proof_reader(self.directory)
+                campaign.events(self.directory), campaign._proof_reader(self.directory),
+                committed_operations=campaign.committed_operation_ids(self.directory)
             )
             filled_sketch = next(node for node in after_fill.nodes if node.proof_id == sketch_id)
             self.assertTrue(filled_sketch.holes[0]["fills"])
@@ -511,7 +582,8 @@ class FillAndMapTests(FakeRunCase):
             broken_node = next(
                 node
                 for node in graph.Graph.from_history(
-                    campaign.events(self.directory), campaign._proof_reader(self.directory)
+                    campaign.events(self.directory), campaign._proof_reader(self.directory),
+                committed_operations=campaign.committed_operation_ids(self.directory)
                 ).nodes
                 if node.proof_id == assembly["node"]
             )

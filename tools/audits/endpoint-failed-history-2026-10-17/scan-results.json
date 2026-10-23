@@ -1,0 +1,1214 @@
+{
+  "input": {
+    "initialized_ledger_count": 176,
+    "ledger_file_count": 178,
+    "ledger_sha256": [
+      {
+        "path": "runs/pi-budget/bench-after-7ca1f7/ledger.jsonl",
+        "sha256": "5e9054a91eed0ed205a4bdfa7763102eedd5fc27b8a940b9a1ebe8207132e96a"
+      },
+      {
+        "path": "runs/pi-budget/bench-before-fde3e9/ledger.jsonl",
+        "sha256": "e4495daa123aab2ee35bc2cadb4e016d1cb0a215be1a01012629ba086b39ca6d"
+      },
+      {
+        "path": "runs/pi-budget/gate-x-thinking-low/ledger.jsonl",
+        "sha256": "46651e23a529cc035a5a7b0765f2eb44d44730f0cce6a53ac25b06cc6cc08b85"
+      },
+      {
+        "path": "runs/pi-budget/hotspot-investigation-v2/ledger.jsonl",
+        "sha256": "4f01d429bf8715831ff55c1137eef7d604942d3ddbcb011ca832082496e01398"
+      },
+      {
+        "path": "runs/pi-budget/inits-luna-source-20261005-01/ledger.jsonl",
+        "sha256": "79f891189d45ec8e70081a477adb8aa2aee8089ee586bfe711eb7241cb19d358"
+      },
+      {
+        "path": "runs/pi-budget/inits-luna-v2-050-20261005-01/ledger.jsonl",
+        "sha256": "6aa1aec8f7c497fd94ef1dc84b6842a309bf417ce4721eb483a2b01db0da92ba"
+      },
+      {
+        "path": "runs/pi-budget/inits-luna-v3-020-20261006-01/ledger.jsonl",
+        "sha256": "b76998f3f1d3a248a11c41edddb8b9b9c7784c3e6462c0bbeedcac3384a720c8"
+      },
+      {
+        "path": "runs/pi-budget/inits-luna-v4-020-20261006-01/ledger.jsonl",
+        "sha256": "078a3fe7314bb403bdd71ff32f6bb419e307adeb729c132bb51b2384f73fcc25"
+      },
+      {
+        "path": "runs/pi-budget/inits-qwen38-v4-020-20261006-01/ledger.jsonl",
+        "sha256": "19b9a3f2ad0a259f6eebe76d952f4af0a94f7ca1115a27d91cd2a21260372517"
+      },
+      {
+        "path": "runs/pi-budget/lrft-b2-replay-01/ledger.jsonl",
+        "sha256": "950a6def44759e55c83ce44ce83e0dd9720bc555e8e2b13cd3607ee1b2ceee83"
+      },
+      {
+        "path": "runs/pi-budget/lrft-b2-replay-02/ledger.jsonl",
+        "sha256": "763299d3dccf8a8853ee00e70f7743f9eba2d1b49ca0ccd71415dd3e3062743a"
+      },
+      {
+        "path": "runs/pi-budget/lrft-core-contention-01/ledger.jsonl",
+        "sha256": "6343fd82b51361eb8dbb78485de6abdb3da9984cf91b6c9ca3c6cdba12d9ac19"
+      },
+      {
+        "path": "runs/pi-budget/lrft-core-yield-disabled-callback-20261016/ledger.jsonl",
+        "sha256": "aa522abafbe87476fd43046fa77977d5b6d48e45f46666dfdd0a450cb7ea8174"
+      },
+      {
+        "path": "runs/pi-budget/lrft-core-yield-enabled-20261016/ledger.jsonl",
+        "sha256": "96ef5d5d222ae4f44a8d89c6679f81fac9b0bf1be7d9ed10008bc43f2aaa47e1"
+      },
+      {
+        "path": "runs/pi-budget/preflight-deepseek-v4-1-flash-026d71ee/ledger.jsonl",
+        "sha256": "e105c3d20ef53d068f532c658418e1704273e8011e1640217f6622562f94308d"
+      },
+      {
+        "path": "runs/pi-budget/preflight-deepseek-v4-1-flash-424d063a/ledger.jsonl",
+        "sha256": "830ae5ec760995e370bea13d326cf14f494e05e9e1356db442a1ee191c73dd45"
+      },
+      {
+        "path": "runs/pi-budget/preflight-deepseek-v4-1-flash-7b57e39f/ledger.jsonl",
+        "sha256": "8d00a5567239f715dc0b94a8ba84121d595c112b5c81f3c39ae43e5cb8014def"
+      },
+      {
+        "path": "runs/pi-budget/preflight-deepseek-v4-1-flash-b12a3de7/ledger.jsonl",
+        "sha256": "2fd6b60e81c237ed40bcd33055da7c2e3a0bdd6a57c2776e14a3836fc87649fd"
+      },
+      {
+        "path": "runs/pi-budget/preflight-deepseek-v4-1-flash-b193cba4/ledger.jsonl",
+        "sha256": "145350cb6daddaa8c78c148248e67b7c8107da1303d7bc73a58deb4191ba5655"
+      },
+      {
+        "path": "runs/pi-budget/preflight-deepseek-v4-1-flash-d37adb55/ledger.jsonl",
+        "sha256": "98922ca854ca33d0b9cdfdaa0a5a6f680b109db8962ccdeb2c2ae665ebcc8461"
+      },
+      {
+        "path": "runs/pi-budget/preflight-deepseek-v4-1-flash-d68db2c9/ledger.jsonl",
+        "sha256": "f814f662565d74a000091a7b3601cc568f4bdc151953a757d084b3be9bcd5cd7"
+      },
+      {
+        "path": "runs/pi-budget/preflight-deepseek-v4-1-flash-dbcfce68/ledger.jsonl",
+        "sha256": "72c9adcb88d4776f0dca9a14b5626a174ad7d112164e7eda330d9103d18a5071"
+      },
+      {
+        "path": "runs/pi-budget/preflight-deepseek-v4-1-flash-dfb4cea9/ledger.jsonl",
+        "sha256": "c69aef64ce727095346e16ef20cbeab5790b0d0ca176a9edfd40d2b47913ce86"
+      },
+      {
+        "path": "runs/pi-budget/preflight-deepseek-v4-1-flash-ea5ca342/ledger.jsonl",
+        "sha256": "08f365ddf2ed9b18dbc60d1ae3257e933e4dc80fdf69418b8fbfa8376a89e7cf"
+      },
+      {
+        "path": "runs/pi-budget/preflight-gpt-6-1-sol-00e3d5b0/ledger.jsonl",
+        "sha256": "56710a148d42352763cd53979123761353395dba067acc74ce33df27f2637580"
+      },
+      {
+        "path": "runs/pi-budget/preflight-gpt-6-1-sol-2d6b73bf/ledger.jsonl",
+        "sha256": "999c2ae08f25ec2b47bf4688a5b46b6acc96b3ff12119db2700dd41388416465"
+      },
+      {
+        "path": "runs/pi-budget/preflight-gpt-6-luna-615c5f95/ledger.jsonl",
+        "sha256": "54931c7612a29c8da23abc7e24d4f1b9a208b3b684bdcea49f85f9f0070bedac"
+      },
+      {
+        "path": "runs/pi-budget/preflight-gpt-6-luna-61ab1567/ledger.jsonl",
+        "sha256": "2dd6c8f07d552e3a5c696b17104a0a20851f11195c7688ec3e2de9ddb988a98d"
+      },
+      {
+        "path": "runs/pi-budget/preflight-gpt-6-luna-86514c4d/ledger.jsonl",
+        "sha256": "fd7343d3406b0c382c889174a6112693e2c57e6ea9843754f03015fc34c1c8c6"
+      },
+      {
+        "path": "runs/pi-budget/preflight-gpt-6-luna-a5fcaeb2/ledger.jsonl",
+        "sha256": "1b8b0ff4bb5f4d4fc025e5999079f94f9ac1edc1cf0619a0370a11287ab4f932"
+      },
+      {
+        "path": "runs/pi-budget/preflight-gpt-6-luna-e11ef937/ledger.jsonl",
+        "sha256": "2e5f989468e022f608121f5e984a7fa4903542ef87cd72683579f2877c221b26"
+      },
+      {
+        "path": "runs/pi-budget/preflight-mimo-v2-6-pro-9861b70e/ledger.jsonl",
+        "sha256": "266956ee3e727cd8ec5eb6fae48f7aedd1dd694fa4f9758e91438778d5e63f6a"
+      },
+      {
+        "path": "runs/pi-budget/preflight-qwen3-8-flash-70fea5ac/ledger.jsonl",
+        "sha256": "88bf5a2d148a5da724c29852bd62cf546f630ba6f41c8f5201beff4804c01ecd"
+      },
+      {
+        "path": "runs/pi-budget/preflight-qwen3-8-flash-73a0894b/ledger.jsonl",
+        "sha256": "1f9c394739324ef98275161485e1e6deaca8bc16424c1e43e9d533560ffd1dfd"
+      },
+      {
+        "path": "runs/pi-budget/preflight-qwen3-8-flash-d8798e26/ledger.jsonl",
+        "sha256": "751bcc41cb58a666466073e4f13062fb14d7dcb902a36749560ff978e8ea5348"
+      },
+      {
+        "path": "runs/pi-budget/proof-ux-physlib-20261007/ledger.jsonl",
+        "sha256": "5ffd1a3ed38ae96b7f3136bd345c628d14f30508bd8bbbb6258c36c4d6d166ec"
+      },
+      {
+        "path": "runs/pi-budget/smoke/ledger.jsonl",
+        "sha256": "7f26824b1d17271a4358c6203ecd5fde7a022c879ecb9d2a142f5fe8c419cb3e"
+      },
+      {
+        "path": "runs/pi-budget/smoke-actual-ledger-20261006-01/ledger.jsonl",
+        "sha256": "c197064ccc8e97c86e5c99b29747ac5d8acd87430dc20ffe74497ca1c196c71b"
+      },
+      {
+        "path": "runs/pi-budget/smoke-fake-crash-20261005/ledger.jsonl",
+        "sha256": "e344ab6f75969ef58c553f9ab99c9544cf21babe965ba198b2e049f373c88cc0"
+      },
+      {
+        "path": "runs/pi-budget/smoke-fake-error-20261005/ledger.jsonl",
+        "sha256": "a07e4943583fe719bb7660d48816989737ef3edda931dc5a062a24985ff7997c"
+      },
+      {
+        "path": "runs/pi-budget/smoke-fake-luna-20261005/ledger.jsonl",
+        "sha256": "e344ab6f75969ef58c553f9ab99c9544cf21babe965ba198b2e049f373c88cc0"
+      },
+      {
+        "path": "runs/pi-budget/smoke-fake-luna-continue-20261005/ledger.jsonl",
+        "sha256": "f1a4f8a9db109c615574db38c167545af000efc58b48ef6e4ce2c31d1edee917"
+      },
+      {
+        "path": "runs/pi-budget/smoke-fake-one-20261005/ledger.jsonl",
+        "sha256": "e344ab6f75969ef58c553f9ab99c9544cf21babe965ba198b2e049f373c88cc0"
+      },
+      {
+        "path": "runs/pi-budget/smoke-fake-three-20261005/ledger.jsonl",
+        "sha256": "008381dafd9af273daa9e88ba739cd85b38b83adc8841316cb75a24f55834fac"
+      },
+      {
+        "path": "runs/pi-budget/smoke-fix-mcp-20261005-01/ledger.jsonl",
+        "sha256": "88bdfe4a4e83ecf596f3764dfb6d685eadfdb0b15f0ba49751981a285714103f"
+      },
+      {
+        "path": "runs/pi-budget/smoke-fix-mcp-20261006-01/ledger.jsonl",
+        "sha256": "da3160c78d0390b23215e844998c795c8b701a1b8dc66334eb931604eb4e9351"
+      },
+      {
+        "path": "runs/pi-budget/smoke-harness-20261005/ledger.jsonl",
+        "sha256": "d5b8b0b19d1c64333dd81e30d70a9a2aee856dd10e10e5b432c1c79943d2bbba"
+      },
+      {
+        "path": "runs/pi-budget/test-1253129a2f/ledger.jsonl",
+        "sha256": "34b1c61a297ad03689a5df307f5e4c65e9e9e7b71d9265d463a299000c5f2c7c"
+      },
+      {
+        "path": "runs/pi-budget/test-3229854d32/ledger.jsonl",
+        "sha256": "2fcb8e7488ce58c4ab5ea598a5f020766c37d74a06d23574e12586c5f4f36da1"
+      },
+      {
+        "path": "runs/pi-budget/test-33a4616850/ledger.jsonl",
+        "sha256": "734157a91d25df8b439b85d6c2c628b927fa4d4099b11405563a3a885f23f2cb"
+      },
+      {
+        "path": "runs/pi-budget/test-367c23f43c/ledger.jsonl",
+        "sha256": "2f662201084e152718f4d978a6f55e3084c7ecf53daf77e729e970f4214e2da5"
+      },
+      {
+        "path": "runs/pi-budget/test-40894861d1/ledger.jsonl",
+        "sha256": "a636d938b43e89f8a4c6b02f225efda5efdbb3f9bebf9a29fd8cbbe1f016c715"
+      },
+      {
+        "path": "runs/pi-budget/test-62e4322437/ledger.jsonl",
+        "sha256": "12d0eb3aaccd959646304c80d2f458023dfb07e6fa1c6ae9e10c3b2bffb6706c"
+      },
+      {
+        "path": "runs/pi-budget/test-7c0248dcfb/ledger.jsonl",
+        "sha256": "cb86ac40444aa50d9c9f8e001c4ffc27d38aa98975f9a07ab6966655b3a2e8d6"
+      },
+      {
+        "path": "runs/pi-budget/test-cafb588a07/ledger.jsonl",
+        "sha256": "85ff4cb715d5c96894d691c38b44e066f51c7cf52fb814630377bdf162192057"
+      },
+      {
+        "path": "runs/pi-budget/test-copy-r1/ledger.jsonl",
+        "sha256": "2582abf929fee49d7287ff8a1fc43153ce6609ca0edab12a2c12f77f4461eb0a"
+      },
+      {
+        "path": "runs/pi-budget/test-de2cd5339b/ledger.jsonl",
+        "sha256": "72ae8f061c20f7803fef0ed1a7ce7e355e3d588020dc4a0014ded5cc21f4b0ab"
+      },
+      {
+        "path": "runs/pi-budget/test-ec59587761/ledger.jsonl",
+        "sha256": "08f38e4e29fbbcf4a20a11a2c71cfaa5a498236e9e33c763e9b1664a8ab1db5f"
+      },
+      {
+        "path": "runs/pi-budget/test-ec6de9f5eb/ledger.jsonl",
+        "sha256": "2252095a576c1a41ebfdf10941be5c3d254f4b82a3c3e0548823c03f12c7e670"
+      },
+      {
+        "path": "runs/pi-budget/test-profwait-1792063852/ledger.jsonl",
+        "sha256": "c03efb96313f7bd94438d04adee70e7f1e2c6adb9475c62933e6348f30d9899e"
+      },
+      {
+        "path": "runs/pi-budget/test-scratch-fix/ledger.jsonl",
+        "sha256": "c9f7b6c7281b2f6e1372b99dbc52802babf9381a4ac7c1cffce70a06e61b0a98"
+      },
+      {
+        "path": "runs/pi-budget/test-search-fix/ledger.jsonl",
+        "sha256": "81a1b4a2b516f881653003e27452c9c7ab8b2771ccf9a5f5cab04c17d7421226"
+      },
+      {
+        "path": "runs/pi-budget/test-showcase-em/ledger.jsonl",
+        "sha256": "5f35a0ea8145f8704d0e813ab41b9023cc088e23c7f679a57ee996ed5714e971"
+      },
+      {
+        "path": "runs/pi-budget/test-showcase-em2/ledger.jsonl",
+        "sha256": "0d15dcbb260b019b41181bd6701d3499dd8c718666a9a0617b164fcaa6bfa23d"
+      },
+      {
+        "path": "runs/pi-budget/v5-accept-20261006-r2-model-gpt-6-luna/ledger.jsonl",
+        "sha256": "a271c1bcf75f3b4c58b55e3bf07f829319f16ef15ee8355cbb7745c21620b37b"
+      },
+      {
+        "path": "runs/pi-budget/v5-accept-20261006-r2-model-qwen3.8-flash/ledger.jsonl",
+        "sha256": "53e3535bbbf3003a432665149151e9ba4b70610b062cfdf04e6f46bd2441027e"
+      },
+      {
+        "path": "runs/pi-budget/v5-gen-20261007-cslib-model-gpt-6-luna/ledger.jsonl",
+        "sha256": "7856f444c4644844c66244ccca4a51f67c5ba8850ed0325358e6b82ebec249e7"
+      },
+      {
+        "path": "runs/pi-budget/v5-gen-20261007-cslib-model-qwen3.8-flash/ledger.jsonl",
+        "sha256": "18def313cc0c92c1850177fe7c8c99dd22b98e6c2d56900b26dea290a4af1e70"
+      },
+      {
+        "path": "runs/pi-budget/v5-gen-20261007-extract-model-gpt-6-luna/ledger.jsonl",
+        "sha256": "29f8633ffd9fe0ce17229b5d400f70599e2e1adc3eff8209f4aef69509ccf9e6"
+      },
+      {
+        "path": "runs/pi-budget/v5-gen-20261007-extract-model-qwen3.8-flash/ledger.jsonl",
+        "sha256": "7157c64d90325e59cb7d6aff7fcb822ce93a7091136c12776756f986cae8910a"
+      },
+      {
+        "path": "runs/pi-budget/v5-gen-20261007-physlib-model-gpt-6-luna/ledger.jsonl",
+        "sha256": "f2e21fe8adcfd6bfb085ae1940acc62887a896925961acb49318ba77892a42e3"
+      },
+      {
+        "path": "runs/pi-budget/v5-gen-20261007-physlib-model-qwen3.8-flash/ledger.jsonl",
+        "sha256": "2dd5680dbe99ded5c0282a8bfc148cbf3eae6565a27a66dcaec054db717b8138"
+      },
+      {
+        "path": "runs/pi-budget/v5-gen-20261007-subst-model-gpt-6-luna/ledger.jsonl",
+        "sha256": "8a92ac15439b97a3a11b2fa2a9ff8a496d1509b6b4dc159e7152780e4ddf5d73"
+      },
+      {
+        "path": "runs/pi-budget/v5-gen-20261007-subst-model-qwen3.8-flash/ledger.jsonl",
+        "sha256": "b276fd5d44954565ad1d58bf9e943d57994348ecf039aa9914a454a0d34e01aa"
+      },
+      {
+        "path": "runs/pi-budget/v5-rep-20261006-r3-model-gpt-6-luna/ledger.jsonl",
+        "sha256": "d35cb43341b447081e4c93b7c663eaabc51df36bc5a0c6f4fea9a90104158aac"
+      },
+      {
+        "path": "runs/pi-budget/v5-rep-20261006-r3-model-qwen3.8-flash/ledger.jsonl",
+        "sha256": "bc0a686994860e0407d0760c7f466802aeff13281796bc58c7acd89006e88a42"
+      },
+      {
+        "path": "runs/pi-budget/v5-rep-20261006-r4-model-gpt-6-luna/ledger.jsonl",
+        "sha256": "e3328bbba79fb3c6b0fce34782e92bf8ad28d916f9cb821805b1ee863bc5ecbd"
+      },
+      {
+        "path": "runs/pi-budget/v5-rep-20261006-r4-model-qwen3.8-flash/ledger.jsonl",
+        "sha256": "f425fd8b91f9e3fa7fa543a16abefbbea0af12bc05e63e21e00fdc74c6a20c56"
+      },
+      {
+        "path": "runs/pi-budget/v6-first-20261008-deepseek-v4-1-flash/ledger.jsonl",
+        "sha256": "22428359b158f563cb2750821edfd68f2aa8d7370ea3aee5b0e472b7c4c1e87a"
+      },
+      {
+        "path": "runs/pi-budget/v6-first-20261008-gpt-6-luna/ledger.jsonl",
+        "sha256": "164a5e855119d4dfb3902c133b79fa7a67b2e2da8160e9f5dc39e5b9d2f050e3"
+      },
+      {
+        "path": "runs/pi-budget/v6ark-Binius.BinaryBasefold.fiberwise_dist_lt-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "c636edff691c15bbd07476758e76fa6a8400d351e57bf511e5b001bcb8c093ec"
+      },
+      {
+        "path": "runs/pi-budget/v6ark-Binius.BinaryBasefold.fold_advances_eval-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "acd2c7c0a24ac1581c192a277471bef99cb1b0ba68371fdb0db884f8e37b4345"
+      },
+      {
+        "path": "runs/pi-budget/v6ark-FieldSpecification.WickAlgebra.-_timeOrd-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "3a151ad895044830c5a4ea85c49da15be116a284dc67c4cfa10c5a407b3a0556"
+      },
+      {
+        "path": "runs/pi-budget/v6ark-interleaved_affine_gaps_imply_tensor_gap-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "4b775439612a6bfbb51dbfb548630b51f0fc0c6f1638d35cd6de3692de37be17"
+      },
+      {
+        "path": "runs/pi-budget/v6ark2-FieldSpecification.WickAlgebra.-_timeOrd-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "d393938f1abf20cf66c56a17e833fd13ab54197e0a92557f750d7eda79ffe963"
+      },
+      {
+        "path": "runs/pi-budget/v6ark2-interleaved_affine_gaps_imply_tensor_gap-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "2089c2567cc8d1af1db2a1de4578fa4ce90406c1327b0c7ea3bf6a64983a7078"
+      },
+      {
+        "path": "runs/pi-budget/v6c1-Core.InitsUpdatesComm-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "c12124e4782084734658f5090380a87a9fd0b4d7d8a9960b3efa2b18df7b747a"
+      },
+      {
+        "path": "runs/pi-budget/v6c1-Core.InitsUpdatesComm-gpt-6-luna-r1/ledger.jsonl",
+        "sha256": "71e22468513c3eb2cb5df30bcd9582a90de6e0c3154f5b865a6d49b1db740ba7"
+      },
+      {
+        "path": "runs/pi-budget/v6c1-fundamental_theorem_of_variational_calcu-gpt-6-luna-r1/ledger.jsonl",
+        "sha256": "8ccc47e07aa41ac1570bba9e4086879a22ae63f6946db3a9279efa1b7e86a848"
+      },
+      {
+        "path": "runs/pi-budget/v6c2-Core.InitsUpdatesComm-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "6b58e4355a9c51ff4a8b77890e540c7a9d298e3433823c47d50eab281730a100"
+      },
+      {
+        "path": "runs/pi-budget/v6c2-Core.InitsUpdatesComm-gpt-6-luna-r1/ledger.jsonl",
+        "sha256": "be553100e927169dcfa344ea611c0e97c8ed94d55ca050225d52574799b580eb"
+      },
+      {
+        "path": "runs/pi-budget/v6c2-fundamental_theorem_of_variational_calcu-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "2fb6eb6e02a39f2f973e9494392066186f4a974e9bac174a2589e4b832215066"
+      },
+      {
+        "path": "runs/pi-budget/v6c2-fundamental_theorem_of_variational_calcu-gpt-6-luna-r1/ledger.jsonl",
+        "sha256": "256868f3b3db6402ab972c75f7ba12f74c7d0a12652c0ecfa2585b7c7812f815"
+      },
+      {
+        "path": "runs/pi-budget/v6c3-Core.InitsUpdatesComm-gpt-6-luna-r1/ledger.jsonl",
+        "sha256": "8b70813b56e92a4cba194921d2cb470bff5b4522e1a0ec7c3ffbafdb36b8d143"
+      },
+      {
+        "path": "runs/pi-budget/v6c3-fundamental_theorem_of_variational_calcu-gpt-6-luna-r1/ledger.jsonl",
+        "sha256": "5e0428d075a5e00f01524d48d5b07aab22d1cef4b931df69c1b6b1f79e89fa40"
+      },
+      {
+        "path": "runs/pi-budget/v6check-Core.InitsUpdatesComm-gpt-6-luna-r1/ledger.jsonl",
+        "sha256": "3843e1fabff20bc93eaa3bb07bfdbab8c2fd5de3df6ee642daa93dc69ebf871e"
+      },
+      {
+        "path": "runs/pi-budget/v6cov-Cslib.LambdaCalculus.LocallyNameless.Fsu-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "4b60c99e96dfbad3aa0f7f26474957855e8b9515192f56a6202914d0f60735d5"
+      },
+      {
+        "path": "runs/pi-budget/v6cov-Cslib.SKI.parallelReduction_diamond-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "c684037bb4ae1aa004271e2e3954fb61f378b31ea2235f65993898ed6fc152ae"
+      },
+      {
+        "path": "runs/pi-budget/v6cov-FieldSpecification.WickAlgebra.-_timeOrd-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "dc6f75c87ca5505b0ef48bc421fdb87d18573f9a10fad52a824d8461df2efd8a"
+      },
+      {
+        "path": "runs/pi-budget/v6cov-putnam_1964_a4-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "95322c091002c0df9e7f2521592ea0c222d4414035d173d739ff89d03a90cff8"
+      },
+      {
+        "path": "runs/pi-budget/v6cov-putnam_1964_b2-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "1ec9b7f4d6ae68d4c4f92dd592be7937b893afdf0a6b3110b0fccf726390ce53"
+      },
+      {
+        "path": "runs/pi-budget/v6cov-putnam_1995_a3-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "2750ab130f2808c7838059a00b7608fec7c06dca9a0a50d81df70ef0cba39e00"
+      },
+      {
+        "path": "runs/pi-budget/v6cov-rerun-Electromagnetism.ElectromagneticPotentia-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "abdb388538e6c04faa789e052524c5e25d38634a843bc688ffddec337b836899"
+      },
+      {
+        "path": "runs/pi-budget/v6pilot-Core.InitsUpdatesComm-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "bad237d7f74d8dc1f19fb4df870dd2c690bacf3fb66f197bd306eae619a8fcf2"
+      },
+      {
+        "path": "runs/pi-budget/v6pilot-Core.InitsUpdatesComm-gpt-6-luna-r1/ledger.jsonl",
+        "sha256": "b8c0a40d5c02ab91234d78f4d82a56159093fbe553e6a719fe91fa357403b7e9"
+      },
+      {
+        "path": "runs/pi-budget/v6pilot-Core.InitsUpdatesComm-qwen3.8-flash-r1/ledger.jsonl",
+        "sha256": "733b3ab282b66c98a4ab228a1f37981bd135c686cc559fe0a34c13a5fa1e04af"
+      },
+      {
+        "path": "runs/pi-budget/v6pilot-Cslib.CCS.bisimilarity_congr_choice-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "a213e334c12318c5ec4909e7114fbdd1003a29906f9c3c9eec6d70ed80bb6aad"
+      },
+      {
+        "path": "runs/pi-budget/v6pilot-Cslib.CCS.bisimilarity_congr_choice-gpt-6-luna-r1/ledger.jsonl",
+        "sha256": "466b34155b43fc6e24c92f9b777c0dc8ac0e0914db197e54df5dc5912d671a3d"
+      },
+      {
+        "path": "runs/pi-budget/v6pilot-Cslib.CCS.bisimilarity_congr_choice-qwen3.8-flash-r1/ledger.jsonl",
+        "sha256": "5bf10dd48c11040028a0085b8d308e784df41c27f81381ae736ba5e36b48b5f1"
+      },
+      {
+        "path": "runs/pi-budget/v6pilot-fundamental_theorem_of_variational_calcu-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "7e783b37b13622fe177f031902405b4a08ff3ef07014cda9a005a80d7d756d81"
+      },
+      {
+        "path": "runs/pi-budget/v6pilot-fundamental_theorem_of_variational_calcu-gpt-6-luna-r1/ledger.jsonl",
+        "sha256": "b161e4fd656703dd5b5c7d5185f22ba1b8f8f4bca0880e2a9e4640242bcc2296"
+      },
+      {
+        "path": "runs/pi-budget/v6pilot-fundamental_theorem_of_variational_calcu-qwen3.8-flash-r1/ledger.jsonl",
+        "sha256": "ea7990a7cab7ab0ddae8f085c10b6fd9cb0fd8ae799c6c76f68886b115c1f7cf"
+      },
+      {
+        "path": "runs/pi-budget/v7-check-Binius.BinaryBasefold.fold_advances_eval-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "aaa41f43e1b644c28468b6335b3b4d2ff0b36f79edc1f2c0a3d4da06aec6edfa"
+      },
+      {
+        "path": "runs/pi-budget/v7-check-Binius.BinaryBasefold.fold_advances_eval-mimo-v2.6-pro-r1/ledger.jsonl",
+        "sha256": "c15af1e15e1e42a78f0be0b50f33ee9f8329244d2bfcd5153f99c9205ab7e870"
+      },
+      {
+        "path": "runs/pi-budget/v7-check-Core.InitsUpdatesComm-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "2668ab512aacdabd5415df613b11ac2dc40493658130c1b49d49bc6b4b8fa152"
+      },
+      {
+        "path": "runs/pi-budget/v7-check-Core.InitsUpdatesComm-mimo-v2.6-pro-r1/ledger.jsonl",
+        "sha256": "a48663ca93ac434b8f2cf3f3fd0fdc6c4de16bc46c17dab646886423c14cf269"
+      },
+      {
+        "path": "runs/pi-budget/v7-check-Cslib.LambdaCalculus.LocallyNameless.Fsu-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "0f9b3633fa434fe1ee38b8ea0aebf7ceea886ed063d0b8df46d47b9ac28f10bf"
+      },
+      {
+        "path": "runs/pi-budget/v7-check-Cslib.LambdaCalculus.LocallyNameless.Fsu-mimo-v2.6-pro-r1/ledger.jsonl",
+        "sha256": "45996a8964cb2634b9067c9e7466f08281f6e6a86fd30e2ad0994c8623147159"
+      },
+      {
+        "path": "runs/pi-budget/v7-check-Electromagnetism.ElectromagneticPotentia-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "b5dfd1953dff409abd837682cef4e724f447fb153635e173ada4e3e27c3d2765"
+      },
+      {
+        "path": "runs/pi-budget/v7-check-Electromagnetism.ElectromagneticPotentia-mimo-v2.6-pro-r1/ledger.jsonl",
+        "sha256": "12fdbf7427c5605b152e658a17df6c0bd0f5d987c71d952d13fe1ec32d70a060"
+      },
+      {
+        "path": "runs/pi-budget/v7-check-FieldSpecification.WickAlgebra.-_timeOrd-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "e8daed03383ab87cf62da647c8f937af6fecfdf7db6610ad8eb2cdf3b9947c66"
+      },
+      {
+        "path": "runs/pi-budget/v7-check-FieldSpecification.WickAlgebra.-_timeOrd-mimo-v2.6-pro-r1/ledger.jsonl",
+        "sha256": "6b8e12144e1a278262fcea29d8a10d6286f7086886e486a2a158539fd4669970"
+      },
+      {
+        "path": "runs/pi-budget/v7-check2-Binius.BinaryBasefold.fold_advances_eval-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "5238962b6c143230ba366509f6dff4bb65073d18277fd878dde55731781e0aa5"
+      },
+      {
+        "path": "runs/pi-budget/v7-check2-Core.InitsUpdatesComm-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "6cc02e2b045266a50f74ec80a0082ba163e3ecfb7d3aae864535241ed1ef5f38"
+      },
+      {
+        "path": "runs/pi-budget/v7-check2-Cslib.LambdaCalculus.LocallyNameless.Fsu-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "80407d59b13abd59afa991b9aba2c75e913978410d3448d437cafd09ffe55d10"
+      },
+      {
+        "path": "runs/pi-budget/v7-check2-Electromagnetism.ElectromagneticPotentia-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "7ca3400eaa4a92ce1b9cd18a608cfbb16cebe8be25fad1518b24a400cd8e15a5"
+      },
+      {
+        "path": "runs/pi-budget/v7-check2-FieldSpecification.WickAlgebra.-_timeOrd-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "1ed00bccb97c44371d8a7a807eadca6c26cec77dbead335e55f132f110135053"
+      },
+      {
+        "path": "runs/pi-budget/v7-check3-Binius.BinaryBasefold.fold_advances_eval-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "b0df27af6288c51a6000df1f26b17855a3e77cceef700135888c3738ec41e75f"
+      },
+      {
+        "path": "runs/pi-budget/v7-check3-Core.InitsUpdatesComm-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "1f06efefb0225589e5a13f2250ed19c8d207430755b87a20a48bd334eb2f967e"
+      },
+      {
+        "path": "runs/pi-budget/v7-check3-Cslib.LambdaCalculus.LocallyNameless.Fsu-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "bdd13584633b41b468e2ad41b1931d4256322b4ee2fa87011e6c810f454c7f84"
+      },
+      {
+        "path": "runs/pi-budget/v7-check3-Cslib.SKI.parallelReduction_diamond-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "3ccefcf5919888d0796473ad5b4008463dbe28688c0402cbdc04388e09b98b20"
+      },
+      {
+        "path": "runs/pi-budget/v7-check3-Electromagnetism.ElectromagneticPotentia-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "b2eac7644a08b21e341df9e3c563abefc28403c869a277f78f64730551184fa3"
+      },
+      {
+        "path": "runs/pi-budget/v7-check3-FieldSpecification.WickAlgebra.-_timeOrd-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "46c1ffb5bafdccf142d7628c479aa8b1697de56cb10eb50167407e0ed714dde7"
+      },
+      {
+        "path": "runs/pi-budget/v7-check4-Binius.BinaryBasefold.fold_advances_eval-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "165d378e0e8186357eb1a5c7511f5d58e2f9f3276a00c94872bb13ad7c4478e2"
+      },
+      {
+        "path": "runs/pi-budget/v7-check4-Core.InitsUpdatesComm-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "c458e076edd57aa8d5c3770ea709a19b44e8d2bfd198ce18f83f19cc168b83a3"
+      },
+      {
+        "path": "runs/pi-budget/v7-check4-Cslib.SKI.parallelReduction_diamond-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "07a2b4d02b78b8457e19682cbecdea5075cafc143f241872c73bf15a9c80acac"
+      },
+      {
+        "path": "runs/pi-budget/v7-check4-Electromagnetism.ElectromagneticPotentia-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "7149f35093952c0c4c6828a4b36517e5f824c34c14c3a42874df4e7a58c5108a"
+      },
+      {
+        "path": "runs/pi-budget/v7-em1-ds-r1/ledger.jsonl",
+        "sha256": "4a257f9b93c399aa944d7ffcf129440f4b4e3bc483c4ff83ff5e3acb077e9781"
+      },
+      {
+        "path": "runs/pi-budget/v7-em2-ds-r1/ledger.jsonl",
+        "sha256": "346449c830564b28992cae91e0008911ac9edead7bfbdd04de3114d4f73d3fe8"
+      },
+      {
+        "path": "runs/pi-budget/v7-sol-ski1/ledger.jsonl",
+        "sha256": "342ab0bd595d48808319e4f4715adac32a9b238416811a4666b456bb0ca13e4b"
+      },
+      {
+        "path": "runs/pi-budget/v7-sol-ski2/ledger.jsonl",
+        "sha256": "964dc44b76f76f97577fddc22eada405f8efd8729a6a1b2bd3af158c6552c6d8"
+      },
+      {
+        "path": "runs/pi-budget/v7solo-ski-Cslib.SKI.parallelReduction_diamond-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "e762010a3cd81ac1df1e386429200a49099a73f16f71601dae36071cb2fe3e65"
+      },
+      {
+        "path": "runs/pi-budget/v7solo-ski2-Cslib.SKI.parallelReduction_diamond-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "6b72d2d57421155a3eba026a69569799303f7b07e9ffc325e4529e7812ab3cd2"
+      },
+      {
+        "path": "runs/pi-budget/v7solo-ski3-Cslib.SKI.parallelReduction_diamond-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "e402ee9646711ea119127cca8ec77b159cb8639c6a9177192a815684b5df0344"
+      },
+      {
+        "path": "runs/pi-budget/v7solo-ski4-Cslib.SKI.parallelReduction_diamond-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "ebee167f266af3b71d286471dd166f5cf8726eaa8bcaf16eca009b4ad2a1dc67"
+      },
+      {
+        "path": "runs/pi-budget/v7solo-ski4-Cslib.SKI.parallelReduction_diamond-mimo-v2.6-pro-r1/ledger.jsonl",
+        "sha256": "97aa9d4d1b1c4adce537379f8e26a39eff14281b8e311fe485b3bb87c1090584"
+      },
+      {
+        "path": "runs/pi-budget/v7solo-ski5-Cslib.SKI.parallelReduction_diamond-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "70e597b64f5219b92dd8b73ee97ea95c21b2cb29447d6e5e5336c8c3400d28e1"
+      },
+      {
+        "path": "runs/pi-budget/v7solo-ski5-Cslib.SKI.parallelReduction_diamond-mimo-v2.6-pro-r1/ledger.jsonl",
+        "sha256": "4ba8217751bb675235135fca9ce499f0e6c6b84899c1817cd4d26670900f4a43"
+      },
+      {
+        "path": "runs/pi-budget/v8-Cslib.LambdaCalculus.LocallyNameless.Fsu-gpt-6.1-sol-r1/ledger.jsonl",
+        "sha256": "bfb95dc0e1105a5253b6b811a3f27ee46f338cd7d461f3828800087b8c8790cc"
+      },
+      {
+        "path": "runs/pi-budget/v8-Cslib.SKI.parallelReduction_diamond-gpt-6.1-sol-r1/ledger.jsonl",
+        "sha256": "01c4a9238710b4865cf87433be092797d15d894019f60887d21d784d46e7f287"
+      },
+      {
+        "path": "runs/pi-budget/v8a-Binius.BinaryBasefold.fiberwise_dist_lt-gpt-6.1-sol-r1/ledger.jsonl",
+        "sha256": "a6c81c5c2660a69a14bc61d236e182b68f0af08fa0371a0e94f9b85171e737bf"
+      },
+      {
+        "path": "runs/pi-budget/v8a-Binius.BinaryBasefold.fold_advances_eval-gpt-6.1-sol-r1/ledger.jsonl",
+        "sha256": "d4a7102db72e0f1034c5538b998d400e71a9039d76d550b23e4f9e7b06247ae6"
+      },
+      {
+        "path": "runs/pi-budget/v8a-CallElimCorrect.extractedOldExprInVars-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "434db26bb7c7b3fbdf8f69f37281da636bef3ca0871cbe218879fae50598a00b"
+      },
+      {
+        "path": "runs/pi-budget/v8a-CallElimCorrect.extractedOldExprInVars-deepseek-v4.1-flash-r1-s1/ledger.jsonl",
+        "sha256": "8733db4ba5164e8ffd4ba9fe3fd22c546e5ce714664caaf89a6274e7f0cf7cf8"
+      },
+      {
+        "path": "runs/pi-budget/v8a-CallElimCorrect.extractedOldExprInVars-gpt-6.1-sol-r1/ledger.jsonl",
+        "sha256": "4e0c6b422ea6c59f0e47161f80553b8249c7ddf165dc0c42046e0dd9c4b58fc2"
+      },
+      {
+        "path": "runs/pi-budget/v8a-CallElimCorrect.substOldPostSubset-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "cf79fafbd4139c75340482ad1b9ad6ae06a740223fb71314fa7e5d1285d5e4d5"
+      },
+      {
+        "path": "runs/pi-budget/v8a-Core.InitsUpdatesComm-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "98ef693dc8700f3c47c9975ae1853f8934010329dda99f95a0f68da8a12cb0be"
+      },
+      {
+        "path": "runs/pi-budget/v8a-Cslib.CCS.bisimilarity_congr_choice-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "61b988ad8582232d5b8ec62cf0b78649db3f2c8367d54464c9980f99623807b7"
+      },
+      {
+        "path": "runs/pi-budget/v8a-Cslib.LambdaCalculus.LocallyNameless.Fsu-gpt-6.1-sol-r1/ledger.jsonl",
+        "sha256": "fdf689c54965aab13515fdc84edc2ff82c7ceb47d12ab014fb1ee8dc002ffcf3"
+      },
+      {
+        "path": "runs/pi-budget/v8a-Cslib.SKI.parallelReduction_diamond-gpt-6.1-sol-r1/ledger.jsonl",
+        "sha256": "7a76d41962ff4d75c75eca3a66699c53da91b72b036ccc4806bf3b60d18063e4"
+      },
+      {
+        "path": "runs/pi-budget/v8a-Electromagnetism.ElectromagneticPotentia-gpt-6.1-sol-r1/ledger.jsonl",
+        "sha256": "2c5b696b69499b062ee9c5fa4154dfcb002656111c098f29821b35a37b4891da"
+      },
+      {
+        "path": "runs/pi-budget/v8a-FieldSpecification.WickAlgebra.-_timeOrd-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "4d6382e09480ed6ca980dc3738137812a93827dd4ef6990d2b6337ed518685ae"
+      },
+      {
+        "path": "runs/pi-budget/v8a-FieldSpecification.WickAlgebra.-_timeOrd-deepseek-v4.1-flash-r1-s1/ledger.jsonl",
+        "sha256": "8df5d8c1e32aaf982af2db54894dfa73075e2d81005291a32ef6b34b0cc18fa5"
+      },
+      {
+        "path": "runs/pi-budget/v8a-FieldSpecification.WickAlgebra.-_timeOrd-gpt-6.1-sol-r1/ledger.jsonl",
+        "sha256": "a08406c3dfd559ed6ecae4578c8a4b6bf8354770babc686ec89b0c944c98f0bd"
+      },
+      {
+        "path": "runs/pi-budget/v8a-fundamental_theorem_of_variational_calcu-gpt-6.1-sol-r1/ledger.jsonl",
+        "sha256": "f3518ad2926ac14b71d80a525598bb2d5e1bace4bd3259c1d46306c87ddda81d"
+      },
+      {
+        "path": "runs/pi-budget/v8a-interleaved_affine_gaps_imply_tensor_gap-deepseek-v4.1-flash-r1/ledger.jsonl",
+        "sha256": "e740c2e6396a6e4d0a36992c6400d8af51490c23b20ae2862254108b3fce1066"
+      },
+      {
+        "path": "runs/pi-budget/v8a-putnam_1964_a4-gpt-6.1-sol-r1/ledger.jsonl",
+        "sha256": "f61aa16bdf0b3c65b37e619a0f9ee83fc424f9f60232e7964345d3189855380c"
+      },
+      {
+        "path": "runs/pi-budget/v8a-putnam_1964_b2-gpt-6.1-sol-r1/ledger.jsonl",
+        "sha256": "c54ecd5fef21214394f3cb70438871c4bb69c81dd56df670378eb05d6bcb1ca9"
+      },
+      {
+        "path": "runs/pi-budget/v8a-putnam_1995_a3-gpt-6.1-sol-r1/ledger.jsonl",
+        "sha256": "2998cdd3b3e36ee0e79c23f0b1535720860cfce46dadc689c74e3214cc19f402"
+      },
+      {
+        "path": "runs/pi-budget/v8b-CallElimCorrect.extractedOldExprInVars-gpt-6.1-sol-r1/ledger.jsonl",
+        "sha256": "f962dbcba36cbc72cc6c0358b20df50c0968e8023f75f502e1267b34221e80db"
+      },
+      {
+        "path": "runs/pi-budget/v8b-CallElimCorrect.substOldPostSubset-gpt-6.1-sol-r1/ledger.jsonl",
+        "sha256": "6ee660189497137146ec699faf6e3b63af7c460068eacf8e2093c88875de72e1"
+      },
+      {
+        "path": "runs/pi-budget/v8b-Cslib.SKI.parallelReduction_diamond-gpt-6.1-sol-r1/ledger.jsonl",
+        "sha256": "1cde158b62669d778406e56eb95b549278cef1bbb6cdfa390080ddb6cecd721f"
+      },
+      {
+        "path": "runs/pi-budget/v8b-Electromagnetism.ElectromagneticPotentia-gpt-6.1-sol-r1/ledger.jsonl",
+        "sha256": "925452e9df01d6626b8163b72315281c3ef2e2c2d9be4103f1999cfb4caae983"
+      },
+      {
+        "path": "runs/pi-budget/v8c-Binius.BinaryBasefold.fiberwise_dist_lt-gpt-6.1-sol-r1/ledger.jsonl",
+        "sha256": "6b582b1dba18bb4115c3080eabe0c327555bb9d9aec130ac2b86a7a7aa6accee"
+      },
+      {
+        "path": "runs/pi-budget/v8c-Core.InitsUpdatesComm-gpt-6.1-sol-r1/ledger.jsonl",
+        "sha256": "a59aa91f5373746d18f70100a4ad5744d942e5544d7397266f1b02209e927bfb"
+      },
+      {
+        "path": "runs/pi-budget/v8c-Cslib.CCS.bisimilarity_congr_choice-gpt-6.1-sol-r1/ledger.jsonl",
+        "sha256": "d54d87b2e76fd688fb31900e508d59a89b06859eb53c3af75a0d0b4850dc5a11"
+      },
+      {
+        "path": "runs/pi-budget/v8c-FieldSpecification.WickAlgebra.-_timeOrd-gpt-6.1-sol-r1/ledger.jsonl",
+        "sha256": "36868b8227f67c4b96caa85ac5c722cb818eab978e3efafeb1c893b1884729bd"
+      },
+      {
+        "path": "runs/pi-budget/v8c-interleaved_affine_gaps_imply_tensor_gap-gpt-6.1-sol-r1/ledger.jsonl",
+        "sha256": "5001710dc71686a78babee77da8c6e612fd322ee988bb40374093365c733607a"
+      }
+    ],
+    "ledgers_without_theorem_init": [
+      "runs/pi-budget/test-scratch-fix/ledger.jsonl",
+      "runs/pi-budget/test-search-fix/ledger.jsonl"
+    ]
+  },
+  "method": {
+    "cold_match": "same run directory and exact candidate_id",
+    "endpoint_order": "numeric Lean version order; endpoints are oldest and newest",
+    "expected_pins": "union of initialized saved pin lists by theorem, checked against benchmark/original/warmup.jsonl",
+    "full_outcome": "missing pin key or non-Boolean passed value is unknown, never a pass",
+    "lean_or_provider_calls": 0,
+    "ledger_glob": "runs/pi-budget/*/ledger.jsonl"
+  },
+  "theorems": {
+    "Binius.BinaryBasefold.fiberwise_dist_lt_imp_dist_lt_unique_decoding_radius": {
+      "cold_events": 9,
+      "endpoint_pass_full_events": 72,
+      "endpoint_pass_middle_failure_events": 0,
+      "endpoint_pass_missing_middle_events": 0,
+      "fast_events": 119,
+      "fast_failed_candidate_ids": 0,
+      "fast_failed_events": 0,
+      "fast_failed_failure_kinds": {},
+      "fast_failed_versions": {},
+      "fast_failures_with_same_run_full_event": 0,
+      "full_events": 72,
+      "full_failed_events": 0,
+      "full_failed_pin_results": 0,
+      "full_failed_pin_results_by_version": {},
+      "full_failure_examples": [],
+      "full_missing_pin_keys": 0,
+      "full_outcome_patterns": {
+        "PPPP": 72
+      },
+      "full_unknown_pass_results": 0,
+      "pins_oldest_to_newest": [
+        "v4.28.0",
+        "v4.29.0",
+        "v4.30.0",
+        "v4.31.0"
+      ],
+      "same_run_full_cold_disagreements": [
+        {
+          "candidate_id": "003ace87ceb8267f31557ad9b9b278e25839305be2c6678db9b69b37c3f9b295",
+          "cold_errors": {
+            "v4.28.0": null
+          },
+          "cold_failure_kind": "unknown",
+          "mismatched_versions": [
+            "v4.28.0"
+          ],
+          "run_id": "v6ark-Binius.BinaryBasefold.fiberwise_dist_lt-deepseek-v4.1-flash-r1"
+        },
+        {
+          "candidate_id": "ab0f537560e8dcc29bccb55b82ab12e12f7c28e20be202438049f510882ecf5c",
+          "cold_errors": {
+            "v4.28.0": "Lean timed out after 60 seconds"
+          },
+          "cold_failure_kind": "timeout",
+          "mismatched_versions": [
+            "v4.28.0"
+          ],
+          "run_id": "v8c-Binius.BinaryBasefold.fiberwise_dist_lt-gpt-6.1-sol-r1"
+        }
+      ]
+    },
+    "Binius.BinaryBasefold.fold_advances_evaluation_poly": {
+      "cold_events": 5,
+      "endpoint_pass_full_events": 228,
+      "endpoint_pass_middle_failure_events": 0,
+      "endpoint_pass_missing_middle_events": 0,
+      "fast_events": 255,
+      "fast_failed_candidate_ids": 0,
+      "fast_failed_events": 0,
+      "fast_failed_failure_kinds": {},
+      "fast_failed_versions": {},
+      "fast_failures_with_same_run_full_event": 0,
+      "full_events": 230,
+      "full_failed_events": 2,
+      "full_failed_pin_results": 2,
+      "full_failed_pin_results_by_version": {
+        "v4.29.0": 2
+      },
+      "full_failure_examples": [
+        {
+          "candidate_id": "badb5bec4d3420833d37e19fc2044bd5dc1923052f50b3b0eef8a34a003526f7",
+          "failed_versions": [
+            "v4.29.0"
+          ],
+          "failure_kind": "proof_error",
+          "run_id": "v6ark-Binius.BinaryBasefold.fold_advances_eval-deepseek-v4.1-flash-r1"
+        },
+        {
+          "candidate_id": "64774af5c592e914616d5373350d992b9ee8981bee5509b6e3b4293f4f69692c",
+          "failed_versions": [
+            "v4.29.0"
+          ],
+          "failure_kind": "proof_error",
+          "run_id": "v6ark-Binius.BinaryBasefold.fold_advances_eval-deepseek-v4.1-flash-r1"
+        }
+      ],
+      "full_missing_pin_keys": 0,
+      "full_outcome_patterns": {
+        "FPP": 2,
+        "PPP": 228
+      },
+      "full_unknown_pass_results": 0,
+      "pins_oldest_to_newest": [
+        "v4.29.0",
+        "v4.30.0",
+        "v4.31.0"
+      ],
+      "same_run_full_cold_disagreements": []
+    },
+    "Core.InitsUpdatesComm": {
+      "cold_events": 20,
+      "endpoint_pass_full_events": 422,
+      "endpoint_pass_middle_failure_events": 0,
+      "endpoint_pass_missing_middle_events": 0,
+      "fast_events": 585,
+      "fast_failed_candidate_ids": 48,
+      "fast_failed_events": 49,
+      "fast_failed_failure_kinds": {
+        "proof_error": 49
+      },
+      "fast_failed_versions": {
+        "v4.29.1": 49
+      },
+      "fast_failures_with_same_run_full_event": 0,
+      "full_events": 423,
+      "full_failed_events": 1,
+      "full_failed_pin_results": 1,
+      "full_failed_pin_results_by_version": {
+        "v4.26.0": 1
+      },
+      "full_failure_examples": [
+        {
+          "candidate_id": "b520ebac3ba038570d659f798ad8f56b12f4cb4e52718a921aabb4fcc10fc526",
+          "failed_versions": [
+            "v4.26.0"
+          ],
+          "failure_kind": "proof_error",
+          "run_id": "smoke-harness-20261005"
+        }
+      ],
+      "full_missing_pin_keys": 0,
+      "full_outcome_patterns": {
+        "FPP": 1,
+        "PPP": 422
+      },
+      "full_unknown_pass_results": 0,
+      "pins_oldest_to_newest": [
+        "v4.26.0",
+        "v4.27.0",
+        "v4.29.1"
+      ],
+      "same_run_full_cold_disagreements": []
+    },
+    "Cslib.CCS.bisimilarity_congr_choice": {
+      "cold_events": 7,
+      "endpoint_pass_full_events": 120,
+      "endpoint_pass_middle_failure_events": 0,
+      "endpoint_pass_missing_middle_events": 0,
+      "fast_events": 162,
+      "fast_failed_candidate_ids": 0,
+      "fast_failed_events": 0,
+      "fast_failed_failure_kinds": {},
+      "fast_failed_versions": {},
+      "fast_failures_with_same_run_full_event": 0,
+      "full_events": 120,
+      "full_failed_events": 0,
+      "full_failed_pin_results": 0,
+      "full_failed_pin_results_by_version": {},
+      "full_failure_examples": [],
+      "full_missing_pin_keys": 0,
+      "full_outcome_patterns": {
+        "PPP": 120
+      },
+      "full_unknown_pass_results": 0,
+      "pins_oldest_to_newest": [
+        "v4.31.0",
+        "v4.32.0",
+        "v4.33.0-rc2"
+      ],
+      "same_run_full_cold_disagreements": []
+    },
+    "Cslib.LambdaCalculus.LocallyNameless.Fsub.Typing.progress": {
+      "cold_events": 8,
+      "endpoint_pass_full_events": 104,
+      "endpoint_pass_middle_failure_events": 0,
+      "endpoint_pass_missing_middle_events": 0,
+      "fast_events": 129,
+      "fast_failed_candidate_ids": 0,
+      "fast_failed_events": 0,
+      "fast_failed_failure_kinds": {},
+      "fast_failed_versions": {},
+      "fast_failures_with_same_run_full_event": 0,
+      "full_events": 104,
+      "full_failed_events": 0,
+      "full_failed_pin_results": 0,
+      "full_failed_pin_results_by_version": {},
+      "full_failure_examples": [],
+      "full_missing_pin_keys": 0,
+      "full_outcome_patterns": {
+        "PPP": 104
+      },
+      "full_unknown_pass_results": 0,
+      "pins_oldest_to_newest": [
+        "v4.31.0",
+        "v4.32.0",
+        "v4.33.0-rc2"
+      ],
+      "same_run_full_cold_disagreements": []
+    },
+    "Cslib.SKI.parallelReduction_diamond": {
+      "cold_events": 15,
+      "endpoint_pass_full_events": 198,
+      "endpoint_pass_middle_failure_events": 0,
+      "endpoint_pass_missing_middle_events": 0,
+      "fast_events": 272,
+      "fast_failed_candidate_ids": 0,
+      "fast_failed_events": 0,
+      "fast_failed_failure_kinds": {},
+      "fast_failed_versions": {},
+      "fast_failures_with_same_run_full_event": 0,
+      "full_events": 215,
+      "full_failed_events": 17,
+      "full_failed_pin_results": 24,
+      "full_failed_pin_results_by_version": {
+        "v4.30.0": 17,
+        "v4.31.0": 7
+      },
+      "full_failure_examples": [
+        {
+          "candidate_id": "39714050fd26ec1ddca3fe4152525b3da1cceaede8a78802eb4da02c1de1149f",
+          "failed_versions": [
+            "v4.30.0"
+          ],
+          "failure_kind": "proof_error",
+          "run_id": "v6cov-Cslib.SKI.parallelReduction_diamond-deepseek-v4.1-flash-r1"
+        },
+        {
+          "candidate_id": "d6ca50c1f046fa93fbbba0fd4e845510671a66f9cb16a11d0832954e42050ff3",
+          "failed_versions": [
+            "v4.30.0"
+          ],
+          "failure_kind": "proof_error",
+          "run_id": "v6cov-Cslib.SKI.parallelReduction_diamond-deepseek-v4.1-flash-r1"
+        },
+        {
+          "candidate_id": "cfc5dfbbdfaa74cc31c7b62eb63152852795cec6220ae127f0525ba0d20a4dd1",
+          "failed_versions": [
+            "v4.30.0"
+          ],
+          "failure_kind": "proof_error",
+          "run_id": "v6cov-Cslib.SKI.parallelReduction_diamond-deepseek-v4.1-flash-r1"
+        },
+        {
+          "candidate_id": "2225fdca34eb6fa1a0adc8054eea7c1a180d355b0d1f01ff4f389a0236b017a5",
+          "failed_versions": [
+            "v4.30.0",
+            "v4.31.0"
+          ],
+          "failure_kind": "proof_error",
+          "run_id": "v7-check4-Cslib.SKI.parallelReduction_diamond-deepseek-v4.1-flash-r1"
+        },
+        {
+          "candidate_id": "0423147ae7af3542cd98d63532318936386e34aec8ece52c286cb628347d2244",
+          "failed_versions": [
+            "v4.30.0",
+            "v4.31.0"
+          ],
+          "failure_kind": "proof_error",
+          "run_id": "v7-check4-Cslib.SKI.parallelReduction_diamond-deepseek-v4.1-flash-r1"
+        },
+        {
+          "candidate_id": "602c88f13d2b1b4ff5d3d055481b58a0c45728aac6fc3931f8845243ea7052bb",
+          "failed_versions": [
+            "v4.30.0",
+            "v4.31.0"
+          ],
+          "failure_kind": "proof_error",
+          "run_id": "v7-check4-Cslib.SKI.parallelReduction_diamond-deepseek-v4.1-flash-r1"
+        },
+        {
+          "candidate_id": "17c4c49717ef213cb26ff9397dc570db34e99f01db92f584570bba3763527e46",
+          "failed_versions": [
+            "v4.30.0",
+            "v4.31.0"
+          ],
+          "failure_kind": "proof_error",
+          "run_id": "v7-check4-Cslib.SKI.parallelReduction_diamond-deepseek-v4.1-flash-r1"
+        },
+        {
+          "candidate_id": "a8ce1ff787788c6756396b53e65f5f89f9ab9b207617d61e6b3296c5b21eb7bf",
+          "failed_versions": [
+            "v4.30.0",
+            "v4.31.0"
+          ],
+          "failure_kind": "proof_error",
+          "run_id": "v7-check4-Cslib.SKI.parallelReduction_diamond-deepseek-v4.1-flash-r1"
+        },
+        {
+          "candidate_id": "ff1f97f0dca9f0af5c4408d194999e2ed678442d04861896d68d363375f4f7cb",
+          "failed_versions": [
+            "v4.30.0",
+            "v4.31.0"
+          ],
+          "failure_kind": "proof_error",
+          "run_id": "v7-check4-Cslib.SKI.parallelReduction_diamond-deepseek-v4.1-flash-r1"
+        },
+        {
+          "candidate_id": "41066d14a22c718469495eb09776318337cbfb8cb0762f9c5a8838335f6238f0",
+          "failed_versions": [
+            "v4.30.0",
+            "v4.31.0"
+          ],
+          "failure_kind": "proof_error",
+          "run_id": "v7-check4-Cslib.SKI.parallelReduction_diamond-deepseek-v4.1-flash-r1"
+        },
+        {
+          "candidate_id": "5ab464805e1412bfa18eda5005d64e5e2bead62c5eb65a6590077a758667c641",
+          "failed_versions": [
+            "v4.30.0"
+          ],
+          "failure_kind": "proof_error",
+          "run_id": "v7-sol-ski1"
+        },
+        {
+          "candidate_id": "075d3ada4f43a8f28847b33d463aebedbe4c5defa3c0d6706f62b6b72c4b9039",
+          "failed_versions": [
+            "v4.30.0"
+          ],
+          "failure_kind": "proof_error",
+          "run_id": "v7-sol-ski1"
+        },
+        {
+          "candidate_id": "1bfc816ba33d467c0b8092ca7a08dff7f719bdc9681100302ba33108d35a0579",
+          "failed_versions": [
+            "v4.30.0"
+          ],
+          "failure_kind": "proof_error",
+          "run_id": "v7-sol-ski2"
+        },
+        {
+          "candidate_id": "1a55591dc1616992e92be00a46bbcce9088fb5d872bdaaf5ff8b8f5c492061a1",
+          "failed_versions": [
+            "v4.30.0"
+          ],
+          "failure_kind": "proof_error",
+          "run_id": "v7-sol-ski2"
+        },
+        {
+          "candidate_id": "7778dc2578362d9b1662649191ee7c8ef4e5ea93f9994fc437559c68ced2bdaf",
+          "failed_versions": [
+            "v4.30.0"
+          ],
+          "failure_kind": "proof_error",
+          "run_id": "v7solo-ski4-Cslib.SKI.parallelReduction_diamond-deepseek-v4.1-flash-r1"
+        },
+        {
+          "candidate_id": "3174812a259e7fa0d974ec5cd4dc91fc438649460441c20c8c4a06f41424d670",
+          "failed_versions": [
+            "v4.30.0"
+          ],
+          "failure_kind": "proof_error",
+          "run_id": "v7solo-ski5-Cslib.SKI.parallelReduction_diamond-mimo-v2.6-pro-r1"
+        },
+        {
+          "candidate_id": "fe11ffed7ee6ab2d37892e37b3a3184f663f4edd60b3a9d289e622ff7b4407e4",
+          "failed_versions": [
+            "v4.30.0"
+          ],
+          "failure_kind": "proof_error",
+          "run_id": "v7solo-ski5-Cslib.SKI.parallelReduction_diamond-mimo-v2.6-pro-r1"
+        }
+      ],
+      "full_missing_pin_keys": 0,
+      "full_outcome_patterns": {
+        "FFPP": 7,
+        "FPPP": 10,
+        "PPPP": 198
+      },
+      "full_unknown_pass_results": 0,
+      "pins_oldest_to_newest": [
+        "v4.30.0",
+        "v4.31.0",
+        "v4.32.0",
+        "v4.33.0-rc2"
+      ],
+      "same_run_full_cold_disagreements": []
+    },
+    "interleaved_affine_gaps_imply_tensor_gaps": {
+      "cold_events": 5,
+      "endpoint_pass_full_events": 112,
+      "endpoint_pass_middle_failure_events": 0,
+      "endpoint_pass_missing_middle_events": 0,
+      "fast_events": 163,
+      "fast_failed_candidate_ids": 0,
+      "fast_failed_events": 0,
+      "fast_failed_failure_kinds": {},
+      "fast_failed_versions": {},
+      "fast_failures_with_same_run_full_event": 0,
+      "full_events": 112,
+      "full_failed_events": 0,
+      "full_failed_pin_results": 0,
+      "full_failed_pin_results_by_version": {},
+      "full_failure_examples": [],
+      "full_missing_pin_keys": 0,
+      "full_outcome_patterns": {
+        "PPP": 112
+      },
+      "full_unknown_pass_results": 0,
+      "pins_oldest_to_newest": [
+        "v4.29.0",
+        "v4.30.0",
+        "v4.31.0"
+      ],
+      "same_run_full_cold_disagreements": []
+    },
+    "putnam_1964_a4": {
+      "cold_events": 2,
+      "endpoint_pass_full_events": 83,
+      "endpoint_pass_middle_failure_events": 0,
+      "endpoint_pass_missing_middle_events": 0,
+      "fast_events": 105,
+      "fast_failed_candidate_ids": 0,
+      "fast_failed_events": 0,
+      "fast_failed_failure_kinds": {},
+      "fast_failed_versions": {},
+      "fast_failures_with_same_run_full_event": 0,
+      "full_events": 83,
+      "full_failed_events": 0,
+      "full_failed_pin_results": 0,
+      "full_failed_pin_results_by_version": {},
+      "full_failure_examples": [],
+      "full_missing_pin_keys": 0,
+      "full_outcome_patterns": {
+        "PPP": 83
+      },
+      "full_unknown_pass_results": 0,
+      "pins_oldest_to_newest": [
+        "v4.25.0",
+        "v4.26.0",
+        "v4.27.0"
+      ],
+      "same_run_full_cold_disagreements": []
+    },
+    "putnam_1995_a3": {
+      "cold_events": 7,
+      "endpoint_pass_full_events": 92,
+      "endpoint_pass_middle_failure_events": 0,
+      "endpoint_pass_missing_middle_events": 0,
+      "fast_events": 123,
+      "fast_failed_candidate_ids": 0,
+      "fast_failed_events": 0,
+      "fast_failed_failure_kinds": {},
+      "fast_failed_versions": {},
+      "fast_failures_with_same_run_full_event": 0,
+      "full_events": 92,
+      "full_failed_events": 0,
+      "full_failed_pin_results": 0,
+      "full_failed_pin_results_by_version": {},
+      "full_failure_examples": [],
+      "full_missing_pin_keys": 0,
+      "full_outcome_patterns": {
+        "PPP": 92
+      },
+      "full_unknown_pass_results": 0,
+      "pins_oldest_to_newest": [
+        "v4.25.0",
+        "v4.26.0",
+        "v4.27.0"
+      ],
+      "same_run_full_cold_disagreements": []
+    }
+  },
+  "totals": {
+    "cold_events": 78,
+    "endpoint_pass_full_events": 1431,
+    "endpoint_pass_middle_failure_events": 0,
+    "endpoint_pass_missing_middle_events": 0,
+    "fast_events": 1913,
+    "fast_failed_candidate_ids_by_theorem": {
+      "Core.InitsUpdatesComm": 48
+    },
+    "fast_failed_events": 49,
+    "full_events": 1451,
+    "full_failed_events": 20,
+    "full_failed_pin_results": 27,
+    "full_missing_pin_keys": 0,
+    "full_unknown_pass_results": 0,
+    "multi_pin_theorems": 9,
+    "same_run_full_cold_disagreements": 2
+  }
+}

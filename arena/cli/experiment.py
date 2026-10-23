@@ -184,7 +184,7 @@ def cli_execute(options: ExperimentOptions, passthrough: tuple[str, ...] = ()) -
         print(f"run IDs already exist: {', '.join(clashes)}", file=sys.stderr)
         return 2
     run_options = list(passthrough)
-    expected = hashlib.sha256(packet(options.theorem).encode()).hexdigest()
+    expected = hashlib.sha256(packet(options.theorem, options.model).encode()).hexdigest()
     print(
         f"{len(specs)} runs varying {options.factor}; packet {expected[:12]}; {workers} at once; "
         f"limit ${options.limit_usd:g} each"

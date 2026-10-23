@@ -21,7 +21,8 @@ main{padding:12px 20px 40px;max-width:2000px;margin:auto}
 .kpi{border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:7px 12px;min-width:0}
 .kpi .l{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.03em;white-space:nowrap}
 .kpi .v{font-size:20px;font-weight:650;line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.kpi .v.good{color:var(--good)}
-.kpi .n{font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.kpi .n{font-size:12px;line-height:1.45;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}.kpi .n.good{color:var(--good)}.kpi .n.bad{color:var(--bad)}
+.kpi .v{font-variant-numeric:tabular-nums}
 .dash{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:12px;align-items:start}
 .span2{grid-column:span 2}
 .col{display:flex;flex-direction:column;gap:12px;min-width:0}
@@ -36,7 +37,7 @@ svg.chart{display:block;max-width:100%;overflow:visible}
 .grid{stroke:var(--grid);stroke-width:1}.axis{stroke:var(--muted);stroke-width:1.2}.xtick{stroke:var(--muted);stroke-width:1}.vgrid{stroke:var(--grid);stroke-width:1}
 .tick{fill:var(--muted);font:12px system-ui;font-variant-numeric:tabular-nums}.axtitle{fill:var(--muted);font:600 12px system-ui}
 .reflabel{font:600 12px system-ui;fill:var(--muted);paint-order:stroke;stroke:var(--panel);stroke-width:4px;stroke-linejoin:round}
-.ref{stroke-width:1.5;stroke-dasharray:6 4}.ref.soft{stroke:var(--mid)}.ref.hard{stroke:var(--bad)}.ref.base{stroke:var(--muted)}
+.ref{stroke-width:1.5;stroke-dasharray:6 4}.ref.soft{stroke:var(--mid)}.ref.hard{stroke:var(--bad)}.ref.base{stroke:var(--muted)}.ref.beat{stroke:var(--good)}.reflabel.beat{fill:var(--good)}
 .reflabel.soft{fill:var(--mid)}.reflabel.hard{fill:var(--bad)}.reflabel.base{fill:var(--muted)}
 .line{fill:none;stroke-width:2.5;stroke-linejoin:round}.line.thin{stroke-width:1.5;opacity:.7}.dot{stroke:var(--panel);stroke-width:1.5}.dot.hollow{fill:var(--panel)!important;stroke-width:2.2}
 .hit{fill:transparent;stroke:none}circle.hit:hover{fill:var(--hover);stroke:var(--k);stroke-width:1.5;fill-opacity:.6}rect.hit:hover{fill:var(--text);fill-opacity:.07}
@@ -120,3 +121,10 @@ circle.pick{cursor:pointer}
 .stackin>.routecard{flex:1 1 0;display:flex;flex-direction:column}.routecard .scroll-body{flex:1;min-height:0;max-height:none}
 .line1{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:4px 0;font-size:13px}.line1 .lbl{width:78px;color:var(--muted);font-size:12px;flex:none}
 .line1 .stack{flex:1;min-width:60px;margin:0}
+
+.chartbar{display:flex;align-items:center;gap:16px;margin:18px 2px 8px}.chartbar h2{margin:0;margin-right:auto;font-size:13px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.beatkey{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)}.beatkey i{width:18px;border-top:2px dashed var(--good)}
+.switch{display:inline-flex;align-items:center;gap:8px;font-size:12px;font-weight:600;color:var(--muted);cursor:pointer;user-select:none}.switch:hover{color:var(--text)}
+.switch input{position:absolute;opacity:0;width:1px;height:1px}.switch .track{position:relative;width:30px;height:17px;border-radius:999px;background:var(--line);transition:background .15s}
+.switch .track::after{content:"";position:absolute;top:2px;left:2px;width:13px;height:13px;border-radius:50%;background:var(--panel);box-shadow:0 1px 2px rgba(0,0,0,.3);transition:transform .15s}
+.switch input:checked+.track{background:var(--blue)}.switch input:checked+.track::after{transform:translateX(13px)}.switch input:focus-visible+.track{outline:2px solid var(--blue);outline-offset:2px}

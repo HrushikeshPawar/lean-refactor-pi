@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import shutil
@@ -29,6 +30,7 @@ SKIPPED_KINDS = frozenset(
         "limit",
         "control",
         "seeded",
+        "golf",
     }
 )
 # Ids of the earlier session's tool calls and requests mean nothing in the new session.
@@ -109,6 +111,86 @@ def carry_over(name: str, run_id: str, seed: Path) -> dict:
     campaign.materialize(name, run_id, proof)
     campaign.write_state(run_id)
     return {"best_proxy": start["score"], "events": carried}
+
+
+def read_seed_proof(name: str, path: Path) -> str:
+    """The proof text of a seed file, checked against the row's statement and forbidden constructs; no Lean."""
+    try:
+        proof = path.read_text().strip()
+    except OSError as error:
+        raise ValueError(f"seed proof {path} cannot be read: {error}") from error  # not-model-facing
+    try:
+        campaign.validate_proof(campaign.problem(name), proof)
+    except ValueError as error:
+        raise ValueError(f"seed proof {path} is not a proof of {name}: {error}") from error  # not-model-facing
+    return proof
+
+
+def _failed_versions(row: dict) -> str:
+    """Which toolchains the seed proof failed, with the first error line of each."""
+    evaluation = next((e for e in reversed(row["evaluations"]) if e["mode"] == "full"), None)
+    compat = (evaluation or {}).get("result", {}).get("compat") or {}
+    failed = [
+        f"{version}: {_first_line(info.get('error') or info.get('output') or info.get('raw_output') or 'failed')}"
+        for version, info in compat.items()
+        if not info.get("passed")
+    ]
+    error = ((evaluation or {}).get("result") or {}).get("error")
+    return "; ".join(failed) or str(error or "no evaluation result")
+
+
+def _first_line(text: str) -> str:
+    return next((line.strip() for line in str(text).splitlines() if line.strip()), "failed")[:200]
+
+
+def start_from_proof(name: str, run_id: str, path: Path) -> dict:
+    """Start a run whose `init` row (reference node) is written from a proof file.
+
+    The proof is added as a candidate (origin "seed"), full-checked on every toolchain and cold-verified the way a
+    submission is. Only a proof that passes everything becomes focus and current (with a `seeded` row); any failure raises
+    ValueError and the run must not start. A proof equal to the reference is no seed (`reference` in the result)."""
+    proof = read_seed_proof(name, path)
+    directory = campaign.run_dir(run_id)
+    history = campaign.events(directory)
+    reference = campaign._candidate_ids(history)[0]
+    if hashlib.sha256((name + "\0" + proof).encode()).hexdigest() == reference:
+        return {"candidate_id": reference, "best_proxy": None, "reference": True}  # nothing to seed from
+    result = campaign.record_evaluation(
+        name,
+        run_id,
+        proof,
+        "full",
+        parents=[reference],
+        hypothesis=f"Seed proof {path.name}",  # log: internal record # not-model-facing
+        origin="seed",
+        materialize_live=False,
+        lane="batch",
+        trigger="seed",
+    )
+    row = next(row for row in campaign._summaries(campaign.events(directory)) if row["id"] == result["candidate_id"])
+    if not row["verified"] or row["score"] is None:
+        raise ValueError(  # not-model-facing
+            f"seed proof {path} does not pass every toolchain ({_failed_versions(row)})"
+        )
+    cold = campaign.cold_verify(run_id, row)
+    if not cold["confirmed"]:
+        detail = cold.get("error") or f"passed {cold.get('passed')}, heartbeats {cold.get('cold_heartbeats')}"
+        raise ValueError(f"seed proof {path} fails the cold verification ({detail})")  # not-model-facing
+    for event in (
+        {
+            "kind": "seeded",
+            "source_proof": str(path),
+            "best_proxy": row["score"],
+            "best_candidate": row["id"],
+            "events": 0,
+        },
+        {"kind": "focus", "proof_id": row["id"], "reason": "seed"},
+        {"kind": "current", "candidate_id": row["id"]},
+    ):
+        campaign._append(directory, event)
+    campaign.materialize(name, run_id, proof)
+    campaign.write_state(run_id)
+    return {"candidate_id": row["id"], "best_proxy": row["score"]}
 
 
 def _clip(value: str, limit: int) -> str:
@@ -194,11 +276,13 @@ def session_digest(seed: Path, limit: int = DIGEST_CHARS) -> str:
     return "\n".join([*head, *kept])
 
 
-def prior_work(run_id: str, seed: Path) -> str:
-    """The section added to a seeded run's first prompt: the graph map, then the digest of the earlier session."""
+def prior_work(run_id: str, seed: Path | None = None) -> str:
+    """The section added to a seeded run's first prompt: the graph map, then the digest of the earlier session
+    (a run seeded from a proof file has no session, so only the map)."""
     shown = reply.map_text(run_id)
     # The model has seen every carried row and node; the first reply must not repeat them as news.
     reply.mark_delivered(run_id, len(campaign.events(campaign.run_dir(run_id))) - 1, shown)
+    digest = [] if seed is None else [agent_text.render("messages/prior-work.digest_heading"), session_digest(seed), ""]
     return "\n".join(
         [
             agent_text.render("messages/prior-work.heading"),
@@ -206,8 +290,6 @@ def prior_work(run_id: str, seed: Path) -> str:
             agent_text.render("messages/prior-work.map_heading"),
             shown,
             "",
-            agent_text.render("messages/prior-work.digest_heading"),
-            session_digest(seed),
-            "",
+            *digest,
         ]
     )

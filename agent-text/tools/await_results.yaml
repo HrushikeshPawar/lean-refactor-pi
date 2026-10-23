@@ -1,0 +1,4 @@
+description: "Wait for your workers without spending. Returns, after at most {await_timeout_minutes} minutes, the nodes your workers saved with their scores, checks, and settled jobs with each worker's last report."
+params:
+  cursor: "Omit: the harness tracks what you have already received."
+  job_ids: "Optional jobs to wait for, such as [\"job1\"]. Omit to receive all your delegated jobs."

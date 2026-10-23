@@ -73,7 +73,7 @@ def cold_check(
             }
         try:
             with force_cold():
-                result = evaluate(name, proof, "full")
+                result = evaluate(name, proof, "full", request_class="full_check")
         except Exception as error:
             return {
                 "passed": {},

@@ -18,3 +18,6 @@ __pycache__/
 # Local secrets (Arena submission key, API keys)
 .env
 .env.*
+
+# Session handoffs (local only)
+handoffs/

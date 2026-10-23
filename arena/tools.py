@@ -4,30 +4,50 @@ from __future__ import annotations
 
 import difflib
 import hashlib
+import json
+import os
 import re
+import time
 
-from arena import campaign, engine, graph, reply, salvage, search, text
+from arena import campaign, engine, experiments, graph, reply, salvage, search, text
 from arena.forbidden import official_filter
 from arena.prices import rates, snippet_tokens
+from arena.run_control import committed_operation_ids
 from arena.steps import parse, split_steps, step_range
 
 TOOL_FORMS = {
     "compile": ["drafts[1..N]", "splice{base,steps,text}", "fill{hole,text}", "merge{base,take}"],
     "goal": ["node+hole", "node+line", "hole:nN.hK", "try:[snippets]"],
     "search": ["queries:[strings]", "kind:name|type|text", "after:prefix"],
-    "read": ["handle:decl:<name>", "node:nN", "hole:nN.hK", "view:source|prices|diff|outline|map", "step:sN"],
-    "finish": ["{}"],
-    "scratch": ["code:<lean commands>"],
+    "read": [
+        "handle:decl:<name>",
+        "node:nN",
+        "hole:nN.hK",
+        "experiment:eN",
+        "ref:<evidence>",
+        "view:source|prices|diff|outline|tree|tree:<page>|map",
+        "step:sN (with view outline)",
+        "against:nN (with view diff)",
+    ],
+    "scratch": ["code:<lean commands>", "replacement+at", "helpers:[experiment ids]"],
 }
 
 
 def _history(run_id: str) -> list[dict]:
-    return campaign.events(campaign.run_dir(run_id))
+    from arena.run_control import published_history
+
+    directory = campaign.run_dir(run_id)
+    return published_history(directory, campaign.events(directory))
 
 
 def _nodes(run_id: str) -> tuple[list[dict], graph.Graph]:
-    history = _history(run_id)
-    return history, graph.Graph.from_history(history, campaign._proof_reader(campaign.run_dir(run_id)))
+    directory = campaign.run_dir(run_id)
+    from arena.run_control import published_history
+
+    history = published_history(directory, campaign.events(directory))
+    return history, graph.Graph.from_history(
+        history, campaign._proof_reader(directory), committed_operations=committed_operation_ids(directory)
+    )
 
 
 def _node(run_id: str, reference: str):
@@ -36,7 +56,20 @@ def _node(run_id: str, reference: str):
     return next(item for item in projection.nodes if item.proof_id == proof_id)
 
 
+def _actor_focus_id(run_id: str):
+    proof_id = reply.actor_focus_proof(run_id)
+    _history_rows, projection = _nodes(run_id)
+    if proof_id is None:
+        proof_id = campaign.worker_anchor_proof(run_id, _history_rows) or projection.focus
+        if proof_id is not None:
+            reply.set_actor_focus(run_id, proof_id)
+    return next((item for item in projection.nodes if item.proof_id == proof_id), None)
+
+
 def _focus_ref(run_id: str) -> str:
+    actor_node = _actor_focus_id(run_id)
+    if actor_node is not None:
+        return actor_node.id
     _history_rows, projection = _nodes(run_id)
     node = next((item for item in projection.nodes if item.proof_id == projection.focus), None)
     if node is None:
@@ -46,12 +79,11 @@ def _focus_ref(run_id: str) -> str:
 
 def _empty_error(tool: str) -> dict:
     valid = {
-        "compile": ["drafts", "splice", "fill", "merge", "base", "from", "note", "check"],
+        "compile": ["drafts", "splice", "fill", "merge", "steps", "text", "base", "from", "note", "check"],
         "goal": ["node", "hole", "line", "try"],
         "search": ["queries", "kind", "after"],
-        "read": ["handle", "node", "hole", "view", "against", "step"],
-        "finish": [],
-        "scratch": ["code"],
+        "read": ["handle", "node", "hole", "experiment", "ref", "view", "against", "step"],
+        "scratch": ["code", "replacement", "at", "helpers"],
     }[tool]
     return reply.error_reply("empty_arguments", "{}", valid, TOOL_FORMS[tool])
 
@@ -59,15 +91,12 @@ def _empty_error(tool: str) -> dict:
 def _is_empty(request: object, tool: str) -> bool:
     if not isinstance(request, dict):
         return True
-    if tool == "finish":
-        return False
     keys = {
         "compile": ("drafts", "splice", "fill", "merge", "base", "from", "note", "check"),
         "goal": ("node", "hole", "line", "try"),
         "search": ("queries", "kind", "after"),
-        "read": ("handle", "node", "hole", "view", "against", "step"),
-        "finish": (),
-        "scratch": ("code",),
+        "read": ("handle", "node", "hole", "experiment", "ref", "view", "against", "step"),
+        "scratch": ("code", "replacement", "at", "helpers"),
     }[tool]
     return not any(key in request and request[key] not in (None, "", [], {}) for key in keys)
 
@@ -107,7 +136,7 @@ def _node_result(run_id: str, proof_id: str) -> dict:
 
 def _filing_line(node, projection, result: dict) -> str:
     """How a node was filed, without its id: the operation and the node it came from."""
-    edge = node.edge or {}
+    edge = result.get("edge") or node.edge or {}
     sources = edge.get("from") or []
 
     def node_id(source: str) -> str:
@@ -149,7 +178,16 @@ def _rewrite_parts(message: str) -> tuple[str, list[str]] | None:
 _GOAL_BLOCK_START = re.compile(r"^(?:case\s|⊢|\S[^:]*? : |\[)")
 
 
-_COMBINING = re.compile("[\u0332\u0335]")
+_COMBINING = re.compile("[\u0332\u0335\u0336]")
+_DIFF_REMOVED = re.compile(".\u0335")
+
+
+def plain_diff(message: str) -> str:
+    """Lean draws a hint's suggested edit as a diff: removed characters carry U+0335, added ones U+0332. Keep the new
+    text only; dropping just the marks would run the old and new text together (`par.red_KS`)."""
+    if "\u0332" in message:
+        message = _DIFF_REMOVED.sub("", message)
+    return _COMBINING.sub("", message)
 _HYP_NAME = re.compile(r"\w+✝[⁰¹²³⁴⁵⁶⁷⁸⁹]*")
 
 
@@ -175,7 +213,7 @@ def _same_message_groups(groups: list[tuple[dict, int]]) -> list[tuple[dict, int
 def error_message(message: str) -> str:
     """A diagnostic's text up to its goal block: the headline and the lines under it, joined into one line and capped
     at `error_message_chars`. A failed rewrite names the pattern it did not find instead."""
-    message = _COMBINING.sub("", message)
+    message = plain_diff(message)
     parts = _rewrite_parts(message)
     lines = message.split("\n")
     if parts:
@@ -230,7 +268,7 @@ def all_errors(name: str, run_id: str, node, result: dict) -> tuple[list[dict], 
         return diagnostics, False
     proof = node.proof_text
     max_passes = int(text.numbers().get("error_passes_max", 3))
-    revealed = list(diagnostics)
+    revealed = [dict(item) for item in diagnostics]
     goal_by_line: dict[int, str] = {}
     for goals in [primary.get("goals") or [], result.get("goals") or []]:
         for item in goals:
@@ -250,7 +288,7 @@ def all_errors(name: str, run_id: str, node, result: dict) -> tuple[list[dict], 
             break
         replacement = "\n".join(planned)
         try:
-            checked = campaign.evaluate(name, replacement, "probe")
+            checked = campaign.evaluate(name, replacement, "probe", request_class="opportunistic")
         except (OSError, ValueError, RuntimeError):
             incomplete = True
             break
@@ -363,32 +401,148 @@ def _mark_ineligible(item: dict, projection) -> None:
         item["status"] = "ineligible"
 
 
-def _compile_item(name: str, run_id: str, node_ref: str, result: dict, filing: str) -> dict:
-    _history_rows, projection = _nodes(run_id)
-    node = next((item for item in projection.nodes if item.id == node_ref), None)
-    if node is None:
-        return {
-            "ref": node_ref,
-            "ok": False,
-            "lines": [],
-            "error": reply.request_error("internal_error", node_ref, [], TOOL_FORMS["compile"]),
-        }
-    primary = _primary(result)
-    # `compat[v]["lean"]` is the model view's Lean-path string ("session" or a fallback note), not a dict.
-    timeout = bool(result.get("timeout") or primary.get("timeout") or _timed_out(primary))
+def _best_label(history: list[dict], proof_id: str) -> str | None:
+    rows = [row for row in campaign._summaries(history)
+            if row.get("score") is not None and row.get("status") in ("primary", "full")
+            and campaign.proof_eligibility(history, row["id"]) == "eligible"]
+    verified = max((row for row in rows if row["verified"]), key=lambda row: row["score"], default=None)
+    if verified and verified["id"] == proof_id:
+        return _render("best_all_pin")
+    provisional = max(rows, key=lambda row: row["score"], default=None)
+    if provisional and not provisional["verified"] and provisional["id"] == proof_id:
+        return _render("best_provisional")
+    return None
+
+
+def _invocation_evidence(name: str, run_id: str, proof_id: str, result: dict, attempt: dict | None) -> dict:
+    """Join one invocation-owned attempt, never the node's most recent construction."""
+    history = _history(run_id)
+    data = (attempt or {}).get("data") or {}
+    derivation = next((event for event in history if event.get("kind") == "derivation"
+                       and event.get("proof_id") == proof_id
+                       and data.get("construction_digest") is not None
+                       and (event.get("data") or {}).get("construction_digest") == data.get("construction_digest")), None)
+    key = campaign._evaluation_key(proof_id, "fast", campaign.problem(name))
+    evaluation = next((event for event in reversed(history) if event.get("kind") == "evaluation"
+                       and event.get("key") == key), None)
+    if evaluation is None:
+        evaluation = next((event for event in reversed(history) if event.get("kind") == "probe"
+                           and event.get("proof_id") == proof_id), None)
+    inputs = data.get("inputs") or []
+    roles = {source["role"] for source in inputs}
+    kind = ("merged_from" if "donor" in roles else "edited_from" if "base" in roles else
+            "filled_from" if "sketch" in roles else "filed_under_focus" if "focus" in roles else "root")
+    return {**result, "edge": {"type": kind, "from": [source["proof_id"] for source in inputs],
+                              "operation": data.get("operation")},
+            "attempt_id": (attempt or {}).get("event_id"),
+            "derivation_id": (derivation or {}).get("event_id"),
+            "construction_operation_id": (attempt or {}).get("operation_id"),
+            "evaluation_id": (evaluation or {}).get("key") or (evaluation or {}).get("evaluation_id"),
+            "evaluation_ref": None if evaluation is None else {
+                "record": "ledger.jsonl",
+                "row": next(index for index, event in enumerate(campaign.events(campaign.run_dir(run_id)), 1)
+                            if event == evaluation),
+            },
+            "raw_result": (evaluation or {}).get("result") or {}}
+
+
+def _compile_evidence(name: str, run_id: str, item: dict, history: list[dict], projection, result: dict) -> None:
+    node = next(node for node in projection.nodes if node.id == item["node"])
+    attempt = next((event for event in history if event.get("kind") == "attempt"
+                    and event.get("event_id") == result.get("attempt_id")), None)
+    data = (attempt or {}).get("data") or {}
+    inputs = [dict(source) for source in data.get("inputs") or []]
+    if (data.get("operation") or {}).get("steps"):
+        for source in inputs:
+            if source["role"] == "base":
+                source["steps"] = data["operation"]["steps"]
+    if data.get("named_parent"):
+        inputs.append({"role": "named_parent", "proof_id": data["named_parent"]})
+    labels = {node.proof_id: node.id for node in projection.nodes}
+    for source in inputs:
+        source["node"] = labels.get(source["proof_id"])
+    raw = result.get("raw_result") or {}
+    primary = campaign._verification_outcome(raw) if raw else result.get("outcome", "not_checked")
+    if campaign._has_hole(campaign.problem(name), node.proof_text):
+        primary = "incomplete"
+    full_key = campaign._evaluation_key(node.proof_id, "full", campaign.problem(name))
+    full = next((event.get("result") for event in reversed(history)
+                 if event.get("kind") == "evaluation" and event.get("key") == full_key), None)
+    full_status = campaign._verification_outcome(full) if full else "not_checked"
+    if full_status == "passed" and len(full.get("compat") or {}) != len(history[0].get("versions") or []):
+        full_status = "inconclusive"
+    if full is None and any(job["id"] == node.proof_id
+                            for job in campaign._autocheck_jobs(campaign._summaries(history))):
+        full_status = "pending"
+    cold = next((event for event in reversed(history) if event.get("kind") == "cold_verification"
+                 and event.get("candidate_id") == node.proof_id), None)
+    cold = campaign._cold_view(campaign.run_dir(run_id), history, cold) if cold else None
+    verification = {"primary": primary, "full": full_status,
+                    "cold": (cold or {}).get("outcome", "not_checked")}
+    comparisons = []
+    for source in inputs:
+        parent = next((other for other in projection.nodes if other.proof_id == source["proof_id"]), None)
+        if parent is None:
+            continue
+        previous = next((event.get("result") for event in reversed(history)
+                         if (event.get("proof_id") or event.get("candidate_id")) == parent.proof_id
+                         and event.get("kind") in ("evaluation", "probe")
+                         and next(iter((event.get("result", {}).get("compat") or {}).keys()), None)
+                         == next(iter((raw.get("compat") or {}).keys()), None)), None)
+        deltas = {}
+        if raw.get("tokens") is not None and previous and previous.get("tokens") is not None:
+            deltas["tokens"] = raw["tokens"] - previous["tokens"]
+        if primary == "passed" and previous and campaign._verification_outcome(previous) == "passed":
+            heartbeat_deltas = {
+                version: current["heartbeats"] - previous["compat"][version]["heartbeats"]
+                for version, current in (raw.get("compat") or {}).items()
+                if version in (previous.get("compat") or {}) and current.get("heartbeats") is not None
+                and previous["compat"][version].get("heartbeats") is not None
+            }
+            if heartbeat_deltas:
+                deltas["heartbeats_by_version"] = heartbeat_deltas
+            elif (raw.get("heartbeat") is not None and previous.get("heartbeat") is not None
+                  and len(raw.get("compat") or {}) == len(previous.get("compat") or {}) == 1):
+                deltas["heartbeats"] = raw["heartbeat"] - previous["heartbeat"]
+        comparisons.append({**source, "deltas": deltas})
+    refs = {key: result.get(key) for key in
+            ("attempt_id", "derivation_id", "construction_operation_id", "evaluation_id", "evaluation_ref")}
+    item.update(**refs, operation=data.get("operation"), inputs=inputs, comparisons=comparisons,
+                verification=verification, best=_best_label(history, node.proof_id))
+    if not item.get("same_as"):
+        item["lines"][0] = _render("compile_filed", node=node.id,
+                                   outcome=reply.outcome(item["status"], node.holes),
+                                   filing=_filing_line(node, projection, result))
+    item["lines"].append(_render("compile_verification", **verification))
+    if item["best"]:
+        item["lines"].append(_render("compile_best", best=item["best"], node=node.id))
+    for source in comparisons:
+        changes = []
+        for metric, delta in source["deltas"].items():
+            if isinstance(delta, dict):
+                changes.extend(_render("compile_heartbeat_delta", version=version, delta=f"{change:+}")
+                               for version, change in delta.items())
+            else:
+                changes.append(_render("compile_delta", metric=metric, delta=f"{delta:+}"))
+        item["lines"].append(_render("compile_input", role=source["role"], node=source["node"] or "?",
+                                    detail=source.get("step") or source.get("steps") or source.get("hole") or "",
+                                    deltas=", ".join(changes) or _render("compile_not_comparable")))
+
+
+def _error_lines(name: str, run_id: str, node, projection, result: dict) -> tuple[list[str], list[dict], bool]:
     errors, incomplete = all_errors(name, run_id, node, result)
     if errors:
         errors = reply.deduplicate_diagnostics(run_id, node.id, errors)
-    holes = node.holes
-    status = "timeout" if timeout else node.status
-    lines = [_render("compile_filed", node=node.id, outcome=reply.outcome(status, holes), filing=filing)]
-    if timeout:
-        lines.append(_render("timeout", seconds=engine.lean_timeout()))
+    lines: list[str] = []
     groups = _same_message_groups(_branch_groups(errors))
     known = _statement_context(projection) | _binder_hypotheses(name, errors) if groups else set()
     if groups:
         lines.append(_render("lean_messages"))
     main_line = _statement_by_line(node.proof_text)
+    # A syntax or elaboration error comes before open goals: it is usually the cause.
+    groups = sorted(groups, key=lambda group: group[0].get("message", "").startswith("unsolved goals"))
+    shown_goals: dict[str, str] = {}
+    cap = int(text.numbers().get("error_goals_max", 3))
     for item, branches, same in groups:
         lines.append(
             _render(
@@ -403,10 +557,48 @@ def _compile_item(name: str, run_id: str, node_ref: str, result: dict, filing: s
         if branches:
             lines.append(_render("error_branches", count=branches))
         if item.get("goal"):
-            goal = reply.compact_goal(item["goal"], known, int(text.numbers().get("goal_hyp_chars", 1000)))
-            lines.append(_render("error_goal", goal=goal))
+            hyp_chars = int(text.numbers().get("goal_hyp_chars", 1000))
+            fresh, repeated = [], {}
+            for block in reply.goal_blocks(item["goal"]):
+                key = " ".join(block.split())
+                if key in shown_goals:
+                    repeated[shown_goals[key]] = repeated.get(shown_goals[key], 0) + 1
+                elif key not in {k for k, _ in fresh}:
+                    fresh.append((key, block))
+            for key, _ in fresh:
+                shown_goals[key] = item["id"]
+            if fresh:
+                kept = [reply.compact_goal(block, known, hyp_chars) for _, block in fresh[:cap]]
+                lines.append(_render("error_goal", goal="\n".join(kept)))
+                if len(fresh) > cap:
+                    lines.append(_render("error_goals_more", count=len(fresh) - cap))
+            for ref in repeated:
+                lines.append(_render("error_goals_same", ref=ref))
         if same:
             lines.append(_render("error_same", count=len(same), ids=", ".join(same)))
+    return lines, errors, incomplete
+
+
+def _compile_item(name: str, run_id: str, node_ref: str, result: dict, filing: str) -> dict:
+    _history_rows, projection = _nodes(run_id)
+    node = next((item for item in projection.nodes if item.id == node_ref), None)
+    if node is None:
+        return {
+            "ref": node_ref,
+            "ok": False,
+            "lines": [],
+            "error": reply.request_error("internal_error", node_ref, [], TOOL_FORMS["compile"]),
+        }
+    primary = _primary(result)
+    # `compat[v]["lean"]` is the model view's Lean-path string ("session" or a fallback note), not a dict.
+    timeout = bool(result.get("timeout") or primary.get("timeout") or _timed_out(primary))
+    holes = node.holes
+    status = "timeout" if timeout else node.status
+    lines = [_render("compile_filed", node=node.id, outcome=reply.outcome(status, holes), filing=filing)]
+    if timeout:
+        lines.append(_render("timeout", seconds=engine.lean_timeout()))
+    error_lines, errors, incomplete = _error_lines(name, run_id, node, projection, result)
+    lines.extend(error_lines)
     if holes:
         lines.append(_render("open_holes"))
     lines.extend(
@@ -446,6 +638,10 @@ def _compile_item(name: str, run_id: str, node_ref: str, result: dict, filing: s
     repeat = attempts > 1
     if repeat:
         facts.append(_render("repeat_fact", node=node.id, count=attempts))
+    # A node first saved by another actor means this text duplicates their work.
+    author = reply.node_authors(run_id).get(node.id) if len(node.attempts) > 1 else None
+    if author:
+        facts.append(_render("same_as_author", node=node.id, author=author))
     return {
         "item": {
             "ref": node.id,
@@ -458,12 +654,19 @@ def _compile_item(name: str, run_id: str, node_ref: str, result: dict, filing: s
             "holes": holes,
             "price": result.get("price_row"),
             "repeat": repeat,
+            "attempts": node.attempts,
+            "derivations": node.derivations,
+            "eligibility": campaign.proof_eligibility(_history_rows, node.proof_id),
+            "verification": status,
         },
         "facts": facts,
     }
 
 
 def _focus_proof(run_id: str) -> tuple[str, str]:
+    actor_node = _actor_focus_id(run_id)
+    if actor_node is not None:
+        return actor_node.id, actor_node.proof_text
     projection = _nodes(run_id)[1]
     node = next((item for item in projection.nodes if item.proof_id == projection.focus), None)
     if node is None:
@@ -563,22 +766,38 @@ def _flat_splice(request: object) -> object:
 
 
 def compile_tool(theorem: str, run_id: str, request: dict) -> dict:
-    valid = ["drafts", "splice", "fill", "merge", "base", "from", "note", "check"]
+    with campaign.compile_authorization():
+        return _compile_tool(theorem, run_id, request)
+
+
+def _compile_tool(theorem: str, run_id: str, request: dict) -> dict:
+    valid = ["drafts", "splice", "fill", "merge", "base", "node", "from", "note", "check"]
+    shown = [*valid[:4], "steps", "text", *valid[4:]]
+    if isinstance(request, dict) and "node" in request:
+        # `node` is an alias of `base`; both given and different is a conflict.
+        if request.get("base") and request["base"] != request["node"]:
+            return _invalid("base_conflict", f"{request['base']} / {request['node']}", ["one base"], TOOL_FORMS["compile"])
+        request = {**{k: v for k, v in request.items() if k != "node"}, "base": request.get("base") or request["node"]}
     request = _flat_splice(request)
     if _is_empty(request, "compile"):
         return _empty_error("compile")
     if not isinstance(request, dict):
-        return _invalid("bad_arguments", request, valid, TOOL_FORMS["compile"])
+        return _invalid("bad_arguments", request, shown, TOOL_FORMS["compile"])
     unknown = sorted(set(request) - set(valid))
     if unknown:
-        return _invalid("unknown_argument", unknown[0], valid, TOOL_FORMS["compile"])
+        return _invalid("unknown_argument", unknown[0], shown, TOOL_FORMS["compile"])
     operations = [key for key in ("drafts", "splice", "fill", "merge") if key in request]
-    if len(operations) == 1 and operations[0] in ("splice", "merge") and request.get("base") and isinstance(
-        request[operations[0]], dict
+    if (
+        len(operations) == 1
+        and operations[0] in ("splice", "merge")
+        and request.get("base")
+        and isinstance(request[operations[0]], dict)
     ):
         inner = request[operations[0]]
         if inner.get("base") and inner["base"] != request["base"]:
-            return _invalid("base_conflict", f"{request['base']} / {inner['base']}", ["one base"], TOOL_FORMS["compile"])
+            return _invalid(
+                "base_conflict", f"{request['base']} / {inner['base']}", ["one base"], TOOL_FORMS["compile"]
+            )
         request = {**request, operations[0]: {**inner, "base": request["base"]}}
     if len(operations) != 1:
         return _invalid(
@@ -612,7 +831,11 @@ def compile_tool(theorem: str, run_id: str, request: dict) -> dict:
             )
 
     outcomes: list[tuple[str, dict, str]] = []
+    evidence_by_ref = {}
+    defaulted_base = None
     if op is None and not request.get("base"):
+        if os.environ.get("ARENA_JOB_ID"):
+            defaulted_base = _focus_ref(run_id)
         raw_drafts = request["drafts"]
         good_drafts = []
         normalized_drafts = []
@@ -628,18 +851,34 @@ def compile_tool(theorem: str, run_id: str, request: dict) -> dict:
                 normalized_drafts.append(campaign.normalize_draft(theorem, draft))
                 indexes.append(index)
         if good_drafts:
-            batch = campaign.probe_batch(
-                theorem,
-                run_id,
-                good_drafts,
-                note=request.get("note"),
-                named_parent=request.get("from"),
-            )
+            receipts = []
+            token = campaign._OPERATION_RECEIPTS.set(receipts)
+            try:
+                batch = campaign.probe_batch(
+                    theorem,
+                    run_id,
+                    good_drafts,
+                    note=request.get("note"),
+                    named_parent=request.get("from"),
+                )
+            finally:
+                campaign._OPERATION_RECEIPTS.reset(token)
+            invocation_ids = {reference["event_id"] for receipt in receipts
+                              for reference in receipt.get("evidence_refs", [])}
+            invocation_attempts = [event for event in _history(run_id)
+                                   if event.get("kind") == "attempt" and event.get("event_id") in invocation_ids]
             projection = _nodes(run_id)[1]
             for original_index, proof, row in zip(indexes, normalized_drafts, batch.get("drafts", []), strict=False):
                 outcome = {key: value for key, value in row.items() if key != "index"}
                 proof_id = hashlib.sha256((theorem + "\0" + proof).encode()).hexdigest()
+                attempt = next((event for event in invocation_attempts if event.get("proof_id") == proof_id), None)
+                if attempt is not None:
+                    invocation_attempts.remove(attempt)
+                outcome = _invocation_evidence(theorem, run_id, proof_id, outcome, attempt)
+                evidence_by_ref[f"d{original_index}"] = outcome
                 node = next((item for item in projection.nodes if item.proof_id == proof_id), None)
+                if node is not None and campaign.proof_eligibility(_history(run_id), node.proof_id) != "eligible":
+                    campaign.select_proof(run_id, node.proof_id)
                 outcomes.append((f"d{original_index}", outcome, node.id if node else ""))
         items = list(item_errors)
         refs: dict[str, tuple[str, dict]] = {}
@@ -704,7 +943,10 @@ def compile_tool(theorem: str, run_id: str, request: dict) -> dict:
                     note=request.get("note"),
                     named_parent=request.get("from"),
                 )
+                evidence_by_ref[ref] = result
                 node = _node(run_id, result["node"])
+                if campaign.proof_eligibility(_history(run_id), node.proof_id) != "eligible":
+                    campaign.select_proof(run_id, node.proof_id)
                 item_result = _compile_item(
                     theorem, run_id, node.id, result, _filing_line(node, _nodes(run_id)[1], result)
                 )
@@ -713,15 +955,24 @@ def compile_tool(theorem: str, run_id: str, request: dict) -> dict:
                 facts.extend(item_result["facts"])
                 handles.append(node.id)
             except (OSError, KeyError, StopIteration, ValueError, RuntimeError) as error:
-                items.append(
-                    _item_error(
+                evidence = getattr(error, "operation_evidence", None)
+                if evidence and evidence.get("node"):
+                    evidence_by_ref[ref] = evidence
+                    node = _node(run_id, evidence["node"])
+                    item_result = _compile_item(theorem, run_id, node.id, evidence,
+                                                _filing_line(node, _nodes(run_id)[1], evidence))
+                    item_result["item"]["ref"] = ref
+                    items.append(item_result["item"])
+                    facts.extend(item_result["facts"])
+                    handles.append(node.id)
+                else:
+                    items.append(_item_error(
                         ref,
                         "invalid_operation",
                         error,
                         ["existing node id", "existing hole id", "existing step id"],
                         TOOL_FORMS["compile"],
-                    )
-                )
+                    ))
     closed_nodes = [item.get("node") for item in items if item.get("status") == "closed"]
     if closed_nodes:
         seconds = float(text.numbers().get("cross_version_wait_seconds", 10))
@@ -734,12 +985,17 @@ def compile_tool(theorem: str, run_id: str, request: dict) -> dict:
         if item.get("status") == "closed" and item.get("node"):
             _refresh_versions(item, history, projection)
             _mark_ineligible(item, projection)
+        if item.get("node") and item.get("ref") in evidence_by_ref:
+            _compile_evidence(theorem, run_id, item, history, projection, evidence_by_ref[item["ref"]])
     for left, right, parent, steps in graph.merge_offers(projection, set(handles)):
         if reply.first_time(run_id, f"merge:{left},{right}"):
             facts.append(_render("merge_offer", left=left, right=right, parent=parent, steps=", ".join(steps)))
     focus = next((node.id for node in projection.nodes if node.proof_id == projection.focus), None)
     lineage = _lineage(projection, handles or ([focus] if focus else []))
     result = reply.reply(facts=facts, items=items, handles=handles)
+    first = next((item for item in items if item.get("lines")), None)
+    if defaulted_base and first is not None:
+        first["lines"] = [_render("base_defaulted", base=defaulted_base), *first["lines"]]
     return reply.attach_context(run_id, result, include_map=True, holes=_open_holes(projection, lineage))
 
 
@@ -777,29 +1033,56 @@ def _goal_cases(goals: list[str], cap: int) -> str:
     return "\n".join(names) + "\n\n" + "\n\n".join(blocks)
 
 
+def _target_lines(lines: list[str]) -> set[int]:
+    """Goal identities, conclusion lines, and their indented continuations."""
+    protected: set[int] = set()
+    untagged = re.escape(text.template("replies/tools.goal_untagged").strip())
+    untagged = untagged.replace(re.escape("{index}"), r"\d+").replace(re.escape("{count}"), r"\d+")
+    active = False
+    for index, line in enumerate(lines):
+        if (line.startswith("case ") and ":" not in line) or re.fullmatch(untagged, line):
+            protected.add(index)
+        if line.startswith("⊢"):
+            active = True
+            protected.add(index)
+        elif active and (not line or line[0].isspace()):
+            protected.add(index)
+        else:
+            active = False
+    return protected
+
+
+def _preview_keeping_targets(shown: str, limit: int) -> str:
+    """Shorten a goal view without dropping a conclusion. The caller keeps the untrimmed text."""
+    if len(shown) <= limit:
+        return shown
+    lines = shown.splitlines()
+    protected = _target_lines(lines)
+    droppable = [index for index in range(len(lines)) if index not in protected]
+    omitted = 0
+    while len("\n".join(lines)) > limit and droppable:
+        lines.pop(droppable.pop(0))
+        protected = _target_lines(lines)
+        droppable = [index for index in range(len(lines)) if index not in protected]
+        omitted += 1
+    body = "\n".join(lines)
+    if omitted:
+        body += "\n" + _render("try_goals_cut", count=omitted)
+    return body
+
+
 def _try_goals(item: dict) -> str:
-    """The goals a snippet leaves: its open goals, or the unsolved goals of its error. Cut at a line boundary."""
-    goals = str(item.get("goals_after") or "").strip()
-    output = str(item.get("output") or "")
-    marker = output.find("unsolved goals")
-    if not goals and item.get("returncode") != 0 and marker >= 0:
-        rest = output[marker:].split("\n", 1)
-        kept = []
-        for line in (rest[1] if len(rest) > 1 else "").splitlines():
-            if re.match(r"\S+:\d+:\d+: ", line):
-                break
-            kept.append(line)
-        goals = "\n".join(kept).strip()
+    """The goals a snippet leaves. Hypotheses may be shortened; each ⊢ target stays whole."""
+    goals = _open_goal_text(item)
     if not goals:
         return ""
     blocks = [block.strip() for block in re.split(r"\n\s*\n", goals) if block.strip()]
-    shown = _goal_cases(blocks, int(text.numbers().get("goal_cases_max", 12)))
-    limit = int(text.numbers().get("goal_try_chars", 1500))
-    if len(shown) <= limit:
-        return shown
-    kept = shown[:limit].rsplit("\n", 1)[0]
-    omitted = len(shown.splitlines()) - len(kept.splitlines())
-    return kept + "\n" + _render("try_goals_cut", count=omitted)
+    cap = int(text.numbers().get("goal_cases_max", 12))
+    shown = _goal_cases(blocks, cap)
+    preview = _preview_keeping_targets(shown, int(text.numbers().get("goal_try_chars", 1500)))
+    if len(blocks) > cap:
+        preview += "\n" + _render("goal_cases_omitted", count=len(blocks) - cap, cap=cap)
+    return preview
 
 
 def goal_tool(theorem: str, run_id: str, request: dict) -> dict:
@@ -839,6 +1122,9 @@ def goal_tool(theorem: str, run_id: str, request: dict) -> dict:
                     TOOL_FORMS["goal"],
                 )
             proof_line = int(line_value)
+            count = len(proof.splitlines())
+            if not 1 <= proof_line <= count:
+                raise ValueError(_render("goal_line_range", line=proof_line, count=count))
         earlier = [
             item
             for item in (_primary(_node_result(run_id, node.proof_id)).get("diagnostics") or [])
@@ -886,7 +1172,8 @@ def goal_tool(theorem: str, run_id: str, request: dict) -> dict:
                 ]
             )
         goals = [str(goal).strip() for goal in (answer or {}).get("goals") or [] if str(goal).strip()]
-        rendered = (answer or {}).get("rendered") or "\n".join(goals)
+        raw_goal = (answer or {}).get("rendered") or "\n".join(goals)
+        rendered = raw_goal
         extra = [_render("try_replaces")] if tries else []
         if len(goals) > 1:
             cap = int(text.numbers().get("goal_cases_max", 12))
@@ -901,7 +1188,8 @@ def goal_tool(theorem: str, run_id: str, request: dict) -> dict:
                 "ok": True,
                 "lines": [_render("goal_item", node=node.id, line=proof_line, goal=rendered), *extra],
                 "error": None,
-                "goal": rendered,
+                "goal": raw_goal,
+                "goals": goals,
             }
         ]
         if tries:
@@ -954,16 +1242,17 @@ def goal_tool(theorem: str, run_id: str, request: dict) -> dict:
                 left = _try_goals(item)
                 if left:
                     lines.append(left)
+                open_goals = _open_goal_text(item)
                 items.append(
                     {
                         "ref": f"t{index}",
-                        "ok": not item.get("timeout") and item.get("returncode") == 0,
+                        "ok": not item.get("timeout") and (item.get("returncode") == 0 or bool(open_goals)),
                         "lines": lines,
                         # The verdict line already says how the snippet failed; a second error line would repeat it.
                         "error": None,
                         "tokens": snippet_tokens(snippet),
                         "delta": snippet_tokens(snippet) - snippet_tokens("sorry"),
-                        "goals": item.get("goals_after"),
+                        "goals": open_goals or item.get("goals_after"),
                         "output": item.get("output"),
                     }
                 )
@@ -977,13 +1266,33 @@ def goal_tool(theorem: str, run_id: str, request: dict) -> dict:
         )
 
 
+def _open_goal_text(item: dict) -> str:
+    """Goals left by a snippet. A closed snippet stays closed even if its log mentions unsolved goals."""
+    goals = str(item.get("goals_after") or "").strip()
+    output = str(item.get("output") or "")
+    marker = output.find("unsolved goals")
+    if not goals and item.get("returncode") not in (0, None) and marker >= 0:
+        rest = output[marker:].split("\n", 1)
+        kept = []
+        for line in (rest[1] if len(rest) > 1 else "").splitlines():
+            if re.match(r"\S+:\d+:\d+: ", line):
+                break
+            kept.append(line)
+        goals = "\n".join(kept).strip()
+    return goals
+
+
 def _try_verdict(item: dict) -> str:
-    """One snippet's outcome: timed out, its first error, the goals it leaves open, or closed."""
+    """One snippet's outcome: timed out, open goals, its first error, or closed."""
     if item.get("timeout"):
         return _render("try_timeout")
+    output = str(item.get("output") or "")
+    found = re.search(r"\berror: (.*)", output) if item.get("returncode") != 0 else None
+    goals = _open_goal_text(item)
+    if goals and (found is None or found.group(1).startswith("unsolved goals")):
+        count = len(re.findall(r"^⊢", goals, re.M)) or 1
+        return _render("try_open", count=count)
     if item.get("returncode") != 0:
-        output = str(item.get("output") or "")
-        found = re.search(r"\berror: (.*)", output)
         if found:
             rest = output[found.start(1) :].splitlines()
             message = " ".join(
@@ -991,10 +1300,6 @@ def _try_verdict(item: dict) -> str:
             )
             return _render("try_error", message=message or found.group(1).strip())
         return _render("try_error", message=output.strip().splitlines()[0] if output.strip() else "-")
-    goals = str(item.get("goals_after") or "")
-    count = len(re.findall(r"^⊢", goals, re.M))
-    if goals.strip():
-        return _render("try_open", count=count or 1)
     return _render("try_closed")
 
 
@@ -1021,6 +1326,24 @@ def _capped_hits(hits: list[dict]) -> list[dict]:
     return kept
 
 
+def _signature_preview(signature: str, limit: int) -> str:
+    """Keep the end of a long signature, where the conclusion sits. Backticks stay out of the cell."""
+    flat = reply.cell(signature, max(len(signature) * 2, 1))
+    if len(flat) <= limit:
+        return flat
+    available = max(1, limit - len(_render("signature_clipped", signature="")))
+    start = len(flat) - available
+    if start > 0 and flat[start] == "|" and flat[start - 1] == "\\":
+        start -= 1
+    return _render("signature_clipped", signature=flat[start:].lstrip())
+
+
+def _relevant_suggestion(query: str, suggestion: str) -> bool:
+    """A suggestion is relevant when it continues the queried name, not a distant edit."""
+    left, right = query.casefold(), suggestion.casefold()
+    return len(left) >= 3 and (right.startswith(left) or left.startswith(right))
+
+
 def _search_row(hit: dict) -> str:
     """One table row: the name once, its signature without the restated name, the place, and why it matched."""
     name = str(hit.get("name") or str(hit.get("handle", "")).removeprefix("decl:"))
@@ -1035,10 +1358,16 @@ def _search_row(hit: dict) -> str:
     return _render(
         "search_row",
         name=reply.cell(name, 120),
-        signature=reply.cell(signature, chars),
+        signature=_signature_preview(signature, chars),
         place=place,
         why=reply.cell(why, 80),
     )
+
+
+def _empty_forms(code: object, kind: object) -> list[str]:
+    if code == "empty_query" and kind in ("name", "type", "text"):
+        return [_render(f"search_empty_{kind}")]
+    return ["nonempty query"]
 
 
 def search_tool(theorem: str, run_id: str, request: dict) -> dict:
@@ -1071,6 +1400,8 @@ def search_tool(theorem: str, run_id: str, request: dict) -> dict:
         # The after form without queries has an empty query: its prefix names the miss instead.
         label = str(query) or (after or "")
         error = row.get("error")
+        if error and error.get("code") == "not_found":
+            error = None
         missing = _missing_line(row, label)
         head = _render("search_head", query=label)
         if error:
@@ -1080,7 +1411,7 @@ def search_tool(theorem: str, run_id: str, request: dict) -> dict:
                     str(query),
                     error.get("code", "search_error"),
                     error.get("input", query),
-                    error.get("valid", ["nonempty query"]),
+                    error.get("valid") or _empty_forms(error.get("code"), kind),
                     TOOL_FORMS["search"],
                     [
                         head,
@@ -1104,7 +1435,12 @@ def search_tool(theorem: str, run_id: str, request: dict) -> dict:
             lines.append(_search_row(hit))
         if any(hit.get("why") == "exact" for hit in shown_hits):
             exact += 1
-        suggestions = row.get("suggestions") or []
+        carried = row.get("suggestions") or []
+        suggestions = carried or [
+            name
+            for name in ((row.get("error") or {}).get("suggestions") or [])
+            if _relevant_suggestion(label, str(name))
+        ]
         if not shown_hits and not missing:
             lines.append(
                 _render(
@@ -1279,7 +1615,6 @@ def _outline(theorem: str, run_id: str, node, wanted: object) -> tuple[list[str]
                 last=step.last_line,
                 tokens=reply.shown(row.get("tokens")),
                 heartbeats=reply.shown(row.get("incl_hb")),
-                points=reply.shown(row.get("pts_if_gone")),
                 text=reply.cell(first_line, 60),
             )
         )
@@ -1319,15 +1654,54 @@ def _handle_as_target(request: dict) -> dict:
     return {**rest, key: value}
 
 
+def _node_choices(run_id: str) -> list[str]:
+    """The newest saved node ids, or the id form when none can be listed."""
+    try:
+        ids = [item.id for item in _nodes(run_id)[1].nodes]
+    except (OSError, ValueError, KeyError):
+        ids = []
+    return ids[-8:] or [_render("read_node_form")]
+
+
+def _hole_choices(run_id: str, hole_ref: object) -> list[str]:
+    """Open hole ids of the named node when it resolves, else the full id form."""
+    try:
+        node = _node(run_id, str(hole_ref).split(".", 1)[0])
+        choices = [f"{node.id}.h{row['index']}" for row in node.holes]
+    except (OSError, ValueError, KeyError, StopIteration):
+        choices = []
+    return choices[:8] or ["nN.hK"]
+
+
 def read_tool(theorem: str, run_id: str, request: dict) -> dict:
     if _is_empty(request, "read"):
         return _empty_error("read")
-    valid = ["handle", "node", "hole", "view", "against", "step"]
+    valid = ["handle", "node", "hole", "experiment", "ref", "view", "against", "step"]
     unknown = sorted(set(request) - set(valid))
     if unknown:
         return _invalid("unknown_argument", unknown[0], valid, TOOL_FORMS["read"])
+    if request.get("ref"):
+        others = [key for key in ("handle", "node", "hole", "experiment") if request.get(key)]
+        if others:
+            return _invalid("bad_target", "ref", ["ref alone"], TOOL_FORMS["read"])
+        return _read_evidence(run_id, request["ref"])
+    if request.get("experiment"):
+        others = [key for key in ("handle", "node", "hole") if request.get(key)]
+        if others:
+            return _invalid("bad_target", "experiment", ["experiment alone"], TOOL_FORMS["read"])
+        return _read_experiment(run_id, request["experiment"])
     request = _handle_as_target(request)
     view = request.get("view", "source")
+    tree_page = 1
+    if isinstance(view, str) and view.startswith("tree"):
+        if view == "tree":
+            tree_page = 1
+            view = "tree"
+        elif re.fullmatch(r"tree:[1-9][0-9]*", view):
+            tree_page = int(view.split(":", 1)[1])
+            view = "tree"
+        else:
+            return _invalid("bad_view", view, ["tree", "tree:<page>"], TOOL_FORMS["read"])
     if request.get("handle") and view != "source":
         return _invalid("bad_view", view, ["source"], TOOL_FORMS["read"])
     if request.get("step") and view != "outline":
@@ -1367,12 +1741,12 @@ def read_tool(theorem: str, run_id: str, request: dict) -> dict:
                     ]
                 ),
             )
-        except (ValueError, IndexError, StopIteration) as error:
-            return _invalid("invalid_hole", error, [], TOOL_FORMS["read"])
+        except (ValueError, IndexError, StopIteration):
+            return _invalid("invalid_hole", hole_ref, _hole_choices(run_id, hole_ref), TOOL_FORMS["read"])
     try:
         node = _node(run_id, request["node"])
     except (ValueError, StopIteration):
-        return _invalid("unknown_node", request.get("node"), [], TOOL_FORMS["read"])
+        return _invalid("unknown_node", request.get("node"), _node_choices(run_id), TOOL_FORMS["read"])
     projection = _nodes(run_id)[1]
     lines = []
     data = {}
@@ -1387,24 +1761,7 @@ def read_tool(theorem: str, run_id: str, request: dict) -> dict:
         data["source"] = node.proof_text
     elif view == "prices":
         price = campaign.price_table(theorem, run_id, node.id)
-        if node.origin == "reference":
-            # The packet's reference table counts the row's proof length (statement excluded); the node's fallback
-            # count includes the statement, so the total is taken from the row the packet uses.
-            price = {**price, "total": {**price.get("total", {}), "tokens": campaign.problem(theorem)["proof_length"]}}
-            price["text"] = campaign.render_price_table(price)
-        # A value not measured yet is stored as None; the model sees "n/a", never Python's None.
-        total = {key: "n/a" if value is None else value for key, value in price.get("total", {}).items()}
-        lines = [
-            _render(
-                "read_price_row",
-                node=node.id,
-                tokens=total.get("tokens", "n/a"),
-                heartbeats=total.get("heartbeats", "n/a"),
-                versions=total.get("versions", "n/a"),
-            ),
-            *str(price.get("text") or "").splitlines(),
-            *text.template("packet/price-table.legend").strip().splitlines(),
-        ]
+        lines = str(price.get("text") or "").splitlines()
         data["prices"] = price
     elif view == "diff":
         against = request.get("against")
@@ -1431,29 +1788,44 @@ def read_tool(theorem: str, run_id: str, request: dict) -> dict:
         if lines is None:
             return _invalid("unknown_step", request.get("step"), [step.id for step in node.steps], TOOL_FORMS["read"])
     elif view == "tree":
-        tree = campaign.cost_tree(theorem, run_id, node.id)
+        tree = campaign.cost_tree(theorem, run_id, node.id, page=tree_page, page_size=TREE_ROWS)
         if not tree["profiled"]:
             lines = [_render("read_tree_pending", node=node.id)]
         else:
-            # The costliest nodes by points, shown in source order so nesting stays readable.
-            keep = sorted(range(len(tree["rows"])), key=lambda index: -tree["rows"][index]["points"])[:TREE_ROWS]
-            shown_rows = [tree["rows"][index] for index in sorted(keep)]
-            lines = [_render("read_tree_head", node=node.id), text.template("replies/tools.read_tree_cols").strip()]
+            evidence = tree["evidence"]
+            shown_rows = evidence["page"]
+            lines = [
+                _render(
+                    "read_tree_head",
+                    node=node.id,
+                    proof=evidence["proof_id"],
+                    page=evidence["page_index"],
+                    pages=evidence["page_count"],
+                ),
+                text.template("replies/tools.read_tree_cols").strip(),
+            ]
+            if evidence["has_columns"]:
+                lines.insert(1, text.template("packet/price-table.coordinates").strip())
             lines += [
                 _render(
                     "read_tree_row",
-                    line=row["line"],
-                    text=("· " * row["depth"]) + reply.cell(row["text"]),
+                    line=row["range"],
+                    text=reply.cell(row["text"]),
                     kind=row["kind"],
                     tokens=row["tokens"],
-                    heartbeats=row["heartbeats"],
-                    own=reply.shown(row["own_heartbeats"]),
-                    points=row["points"],
+                    heartbeats=row["incl_hb"],
+                    own=row["self_hb"],
                 )
                 for row in shown_rows
             ]
-            if len(tree["rows"]) > len(shown_rows):
-                lines.append(_render("read_tree_more", count=len(tree["rows"]) - len(shown_rows)))
+            if evidence["omitted_on_page"]:
+                lines.append(
+                    _render(
+                        "read_tree_more",
+                        count=evidence["omitted_on_page"],
+                        retrieval=evidence["next_retrieval"],
+                    )
+                )
             totals = {
                 "measured": reply.shown(tree["measured"]),
                 "attributed": reply.shown(tree["attributed"]),
@@ -1484,9 +1856,62 @@ def read_tool(theorem: str, run_id: str, request: dict) -> dict:
     )
 
 
+def _read_evidence(run_id: str, reference: str) -> dict:
+    """Follow one compaction reference. Missing and uncommitted references are not found."""
+    from arena.memory import original_evidence
+
+    found = original_evidence(run_id, reference)
+    if found is None:
+        return _invalid("unknown_argument", reference, [], TOOL_FORMS["read"])
+    if found.get("experiment_id") and "code" in found:
+        return _read_experiment(run_id, found["experiment_id"])
+    if found.get("kind") == "proof":
+        lines = [found["text"]]
+        return reply.attach_context(
+            run_id,
+            reply.reply(items=[{"ref": reference, "ok": True, "lines": lines, "error": None, "source": found["text"]}]),
+            include_map=False,
+        )
+    lines = [json.dumps(found, ensure_ascii=False, sort_keys=True)]
+    return reply.attach_context(
+        run_id,
+        reply.reply(items=[{"ref": reference, "ok": True, "lines": lines, "error": None, "record": found}]),
+        include_map=False,
+    )
+
+
+def _read_experiment(run_id: str, reference: str) -> dict:
+    found = experiments.retrieve(run_id, reference)
+    if found is None:
+        return _invalid("unknown_experiment", reference, [], TOOL_FORMS["read"])
+    if found["code_status"] == "missing":
+        lines = [_render("read_experiment_missing", experiment=reference)]
+    elif found["code_status"] == "ambiguous":
+        lines = [_render("read_experiment_ambiguous", experiment=reference)]
+    else:
+        # The outcome row already rendered this evidence. Read it back instead of projecting it again.
+        lines = [line for line in (found.get("rendered") or []) if isinstance(line, str)]
+        if not lines:
+            lines = [
+                _render(
+                    "read_experiment",
+                    experiment=found["experiment_id"],
+                    outcome=found["outcome"],
+                    validity=found["validity"],
+                ),
+                found["code"],
+            ]
+            if found.get("diagnostic"):
+                lines.append(found["diagnostic"])
+    return reply.attach_context(
+        run_id,
+        reply.reply(items=[{"ref": found["experiment_id"], "ok": True, "lines": lines, "error": None, **found}]),
+        include_map=False,
+    )
+
+
 _MARK = re.compile(r"(?:.*:\sinfo:\s)?ARENA_MARK\s(\d+)")
 _INFO_COMMAND = re.compile(r"#(?:check_failure|check|print|eval|reduce|synth|where|help)\b")
-_STRIKE = re.compile("[\u0335\u0336]")
 
 
 def _scratch_messages(output: str) -> list[dict]:
@@ -1608,25 +2033,378 @@ def _body_tokens(span: str) -> int:
 
 def _warning_text(message: str) -> str:
     """A warning on one line: its first line, without notes and strikethrough marks."""
-    first = next((line for line in _STRIKE.sub("", message).splitlines() if line.strip()), "")
+    first = next((line for line in plain_diff(message).splitlines() if line.strip()), "")
     return " ".join(first.split())
 
 
 def _error_text(message: str, known: set[str], limit: int) -> str:
     """An error with its goal state reduced to the hypotheses the theorem does not already have; notes dropped."""
-    kept = [line for line in _STRIKE.sub("", message).splitlines() if not line.startswith("Note:")]
+    kept = [line for line in plain_diff(message).splitlines() if not line.startswith("Note:")]
     compact = reply.compact_message("\n".join(kept), known, int(text.numbers().get("goal_hyp_chars", 1000)))
+    if any(line.startswith("⊢") for line in compact.splitlines()):
+        return _preview_keeping_targets(compact, limit)
     return compact if len(compact) <= limit else compact[: limit - 1] + "…"
 
 
+_TOPLEVEL = re.compile(r"(?m)^(def|theorem|lemma|abbrev|axiom|instance|class|structure|inductive|import)\b")
+_COMMAND = re.compile(r"#(?:check|print|eval|reduce)\b")
+
+
+def _scratch_form(request: dict) -> str:
+    has_code = "code" in request
+    anchored = "replacement" in request or "at" in request
+    if has_code and anchored:
+        return "mixed"
+    return "anchored" if anchored else "general"
+
+
+def _nonpromotion_reason(code: str) -> str:
+    stripped = code.lstrip()
+    if _COMMAND.match(stripped):
+        return "general_check"
+    if stripped.startswith("example"):
+        return "unrelated_example"
+    return "ambiguous_snippet"
+
+
+def _proof_local(code: str) -> bool:
+    return _TOPLEVEL.search(code) is None
+
+
+def _frozen_anchor(run_id: str, anchor: dict) -> dict | str:
+    """Revalidate a stored snapshot against canonical saved artifacts, never caller paths."""
+    from arena.orchestration import _resolve_anchor
+
+    scope = "step" if "hole" in anchor or "steps" in anchor else "proof"
+    resolved = _resolve_anchor(campaign.run_dir(run_id), scope, anchor)
+    if isinstance(resolved, str):
+        return resolved
+    if any(anchor.get(key) != value for key, value in resolved.items()):
+        return "anchor_changed"
+    return resolved
+
+
+def _scratch_anchor(run_id: str, request: dict, *, full_target: bool = False) -> dict | str:
+    """Resolve once. Jobs retain their recorded snapshot; caller hashes confer no authority."""
+    from arena.orchestration import _resolve_anchor, jobs
+
+    supplied = request.get("at")
+    inherited = None
+    job_id = os.environ.get("ARENA_JOB_ID")
+    if job_id:
+        snapshot = next(
+            (job for job in jobs(campaign.run_dir(run_id), [job_id])["jobs"] if job.get("job_id") == job_id),
+            None,
+        )
+        if snapshot is not None:
+            inherited = snapshot.get("anchor")
+    if supplied is None:
+        if isinstance(inherited, dict):
+            return _frozen_anchor(run_id, inherited)
+        if full_target:
+            try:
+                node, _proof = _focus_proof(run_id)
+            except (KeyError, StopIteration, ValueError):
+                return "node"
+            return _resolve_anchor(campaign.run_dir(run_id), "proof", {"node": node})
+        return "anchor"
+    if not isinstance(supplied, dict):
+        return "anchor"
+    resolved = _resolve_anchor(campaign.run_dir(run_id), "step", supplied)
+    if isinstance(resolved, str):
+        return resolved
+    if isinstance(inherited, dict):
+        frozen = _frozen_anchor(run_id, inherited)
+        if isinstance(frozen, str):
+            return frozen
+        if resolved != frozen:
+            return "ambiguous_anchor"
+        return frozen
+    return resolved
+
+
+def _embeddable_scratch(code: str) -> bool:
+    """Conservatively admit proof-local tactics, not Lean commands or declarations."""
+    from arena.forbidden import remove_comments
+
+    source = remove_comments(code)
+    commands = re.compile(
+        r"(?m)^\s*(?:@\[|#|(?:private|protected|noncomputable|unsafe)\b|"
+        r"(?:def|theorem|lemma|example|abbrev|axiom|instance|class|structure|inductive|"
+        r"opaque|import|namespace|section|end|open|export|variable|universe|set_option|"
+        r"attribute|include|omit)\b)"
+    )
+    return commands.search(source) is None and official_filter()(re.sub(r"\bsorry\b", "trivial", code)) is None
+
+
+
+def _promotion_item(experiment_id: str, code: str, outcome: str, lines: list[str], promotion: dict, *, ok: bool = True):
+    return {
+        "ref": experiment_id,
+        "ok": ok,
+        "lines": lines,
+        "error": None,
+        "experiment_id": experiment_id,
+        "outcome": outcome,
+        "code": code,
+        "promotion": promotion,
+        "validity": "not_a_target_candidate",
+        "compatibility": "not_checked",
+        "cold": "not_checked",
+    }
+
+
+def _scratch_promote(
+    theorem: str, run_id: str, request: dict, helpers: list[str], *, source_code: str | None = None,
+    body_offset: int | None = None, original_request: dict | None = None,
+) -> dict:
+    limit = int(text.numbers().get("scratch_max_chars", 4000))
+    replacement = request.get("replacement")
+    if not isinstance(replacement, str) or not replacement.strip():
+        return _invalid("bad_replacement", "empty", [f"1..{limit} characters"], TOOL_FORMS["scratch"])
+    if len(replacement) > limit:
+        return _invalid(
+            "bad_replacement", f"{len(replacement)} characters", [f"1..{limit} characters"], TOOL_FORMS["scratch"]
+        )
+    if re.search(r"(?m)^\s*import\b", replacement):
+        return _invalid("bad_replacement", "import", ["no import lines"], TOOL_FORMS["scratch"])
+    label = official_filter()(re.sub(r"\bsorry\b", "trivial", replacement))
+    if label:
+        return _invalid("forbidden", label, ["no forbidden constructs"], TOOL_FORMS["scratch"])
+    anchor = _scratch_anchor(run_id, request, full_target=source_code is not None)
+    if isinstance(anchor, str):
+        return _invalid("bad_anchor", anchor, [_render("scratch_anchor_form")], TOOL_FORMS["scratch"])
+    submitted_code = replacement if source_code is None else source_code
+    context = {"form": "anchored" if source_code is None else "full_target", "anchor": anchor}
+    if body_offset is not None:
+        context["body_range"] = {"start": body_offset, "end": len(submitted_code)}
+    accepted = experiments.accept(
+        run_id, submitted_code, helpers, context=context,
+        request=request if original_request is None else original_request,
+    )
+    experiment_id = accepted["experiment_id"]
+    if accepted.get("replayed"):
+        return _read_experiment(run_id, experiment_id)
+    started = time.perf_counter()
+    digest = accepted["code_sha256"]
+
+    def close(outcome: str, promotion: dict, lines: list[str], *, ok: bool = True, diagnostic: str | None = None):
+        experiments.finish(
+            run_id,
+            experiment_id,
+            code=submitted_code,
+            digest=digest,
+            outcome=outcome,
+            raw=None,
+            rendered=lines,
+            elapsed_ms=experiments.elapsed_since(started),
+            input_ref=accepted["input_ref"],
+            diagnostic=diagnostic,
+            context=context,
+            promotion=promotion,
+            compatibility="not_checked",
+            cold="not_checked",
+        )
+        evidence = experiments.retrieve(run_id, experiment_id)
+        item = _promotion_item(experiment_id, submitted_code, outcome, lines, evidence["promotion"], ok=ok)
+        response = reply.reply(ok=ok, items=[{**item, **{k: evidence[k] for k in evidence if k not in item}}])
+        if diagnostic == "run_stopped":
+            response["error"] = reply.request_error("run_stopped", run_id, [], TOOL_FORMS["scratch"])
+        return response
+
+    from arena.run_control import read_state
+
+    if read_state(campaign.run_dir(run_id)).get("stopped"):
+        promotion = {"state": "not_promoted", "reason": "run_stopped"}
+        lines = [_render("scratch_not_promoted", reason="run_stopped")]
+        closed = close("recorded", promotion, lines, ok=False, diagnostic="run_stopped")
+        closed["ok"] = False
+        closed["error"] = reply.request_error("run_stopped", run_id, [], TOOL_FORMS["scratch"])
+        return closed
+    prefix, missing = _scratch_helpers(run_id, helpers)
+    if missing:
+        promotion = {"state": "not_promoted", "reason": "dependency_missing", "helpers": missing}
+        lines = [_render("scratch_not_promoted", reason="dependency_missing")]
+        closed = close("dependency_missing", promotion, lines, ok=False, diagnostic="dependency_missing")
+        closed["error"] = reply.request_error("dependency_missing", ",".join(missing), [], TOOL_FORMS["scratch"])
+        return closed
+    # The materialized prefix includes transitive dependencies, so validate all of it.
+    if not _embeddable_scratch(prefix):
+        promotion = {"state": "not_promoted", "reason": "helper_not_embeddable"}
+        lines = [_render("scratch_not_promoted", reason="helper_not_embeddable")]
+        return close("recorded", promotion, lines, ok=False, diagnostic="helper_not_embeddable")
+    if not _embeddable_scratch(replacement):
+        reason = _nonpromotion_reason(replacement)
+        return close("recorded", {"state": "not_promoted", "reason": reason},
+                     [_render("scratch_not_promoted", reason=reason)], ok=False, diagnostic=reason)
+    if _scratch_cancelled(run_id):
+        return close("cancelled", {"state": "not_promoted", "reason": "cancelled"},
+                     [_render("scratch_cancelled")], ok=False, diagnostic="cancelled")
+    embedded = prefix + replacement
+    if source_code is not None:
+        proof = submitted_code
+        if prefix:
+            import textwrap
+
+            body = replacement.lstrip()
+            if not re.match(r"by(?:\s|$)", body):
+                reason = "helper_not_embeddable"
+                return close("recorded", {"state": "not_promoted", "reason": reason},
+                             [_render("scratch_not_promoted", reason=reason)], ok=False)
+            body = prefix + textwrap.dedent(body[2:]).lstrip("\r\n")
+            proof = submitted_code[:body_offset] + "by\n" + textwrap.indent(body, "  ")
+        operation = {"type": "draft", "base": anchor["node"], "text": proof}
+    elif "hole" in anchor:
+        operation = {"type": "fill", "hole": anchor["hole"], "text": embedded}
+    else:
+        step_ids = anchor.get("step_ids") or []
+        if not step_ids:
+            promotion = {"state": "not_promoted", "reason": "anchor"}
+            return close("recorded", promotion, [_render("scratch_not_promoted_anchor")], ok=False)
+        spec = step_ids[0] if len(step_ids) == 1 else f"{step_ids[0]}-{step_ids[-1]}"
+        operation = {"type": "splice", "base": anchor["node"], "steps": spec, "text": embedded}
+    operation["experiment_id"] = experiment_id
+    # Admission is checked again after dependency construction, just before submission.
+    from arena.run_control import submission_barrier
+
+    submission_barrier("before_promotion", campaign.run_dir(run_id))
+    if _scratch_cancelled(run_id) or read_state(campaign.run_dir(run_id)).get("stopped"):
+        reason = "cancelled" if _scratch_cancelled(run_id) else "run_stopped"
+        return close(reason, {"state": "not_promoted", "reason": reason},
+                     [_render("scratch_not_promoted", reason=reason)], ok=False, diagnostic=reason)
+    try:
+        with campaign.compile_authorization():
+            result = campaign.compile_operation(theorem, run_id, operation, named_parent=anchor["proof_id"])
+    except Exception as error:
+        reason = "run_stopped" if read_state(campaign.run_dir(run_id)).get("stopped") else "invalid_operation"
+        evidence = getattr(error, "operation_evidence", {})
+        promotion = {"state": "not_promoted", "reason": reason,
+                     **{key: value for key, value in evidence.items() if key not in {"raw_result", "edge"}}}
+        if "edge" in evidence:
+            promotion["derivation"] = evidence["edge"]
+        return close("recorded", promotion, [str(error)], ok=False, diagnostic=str(error))
+    try:
+        raw_result = result.get("raw_result") or result
+        status = campaign._verification_outcome(raw_result)
+        complete = result.get("complete", not bool(raw_result.get("contains_sorry")))
+        passed = status == "passed" and complete
+        parent_result = _node_result(run_id, anchor["proof_id"])
+        parent_tokens = parent_result.get("tokens")
+        deltas = {}
+        if isinstance(parent_tokens, int) and isinstance(result.get("tokens"), int):
+            deltas["tokens"] = result["tokens"] - parent_tokens
+        if status == "passed" and campaign._verification_outcome(parent_result) == "passed":
+            # Heartbeats are comparable only on the same pinned version.
+            heartbeat_deltas = {
+                version: info["heartbeats"] - parent_info["heartbeats"]
+                for version, info in (raw_result.get("compat") or {}).items()
+                for parent_info in [(parent_result.get("compat") or {}).get(version, {})]
+                if isinstance(info.get("heartbeats"), int) and isinstance(parent_info.get("heartbeats"), int)
+            }
+            if heartbeat_deltas:
+                deltas["heartbeats_by_version"] = heartbeat_deltas
+        history = _history(run_id)
+        full_result = result.get("full_result")
+        full = campaign._verification_outcome(full_result) if isinstance(full_result, dict) else "not_checked"
+        if full == "passed" and len(full_result.get("compat") or {}) != len(campaign.versions(campaign.problem(theorem))):
+            full = "inconclusive"
+        if full_result is None and any(
+            job["id"] == result.get("proof_id") for job in campaign._autocheck_jobs(campaign._summaries(history))
+        ):
+            full = "pending"
+        node = _node(run_id, result["node"])
+        cold = next((row for row in reversed(history) if row.get("kind") == "cold_verification"
+                     and row.get("candidate_id") == node.proof_id), None)
+        cold = campaign._cold_view(campaign.run_dir(run_id), history, cold)
+        verification = {
+            "fast": status if complete else "incomplete",
+            "full": full,
+            "cold": "not_checked" if cold is None else cold.get("outcome") or (
+                "passed" if cold.get("confirmed") else (
+                    "proof_error" if campaign._verification_outcome(cold) == "proof_error" else "inconclusive"
+                )
+            ),
+        }
+        promotion = {
+            "state": "promoted" if passed else "failed" if status == "proof_error" else "not_promoted",
+            "node": node.id,
+            "proof_id": node.proof_id,
+            "derivation": result.get("edge"),
+            "attempt_id": result.get("attempt_id"),
+            "attempt_ids": [result["attempt_id"]] if result.get("attempt_id") else [],
+            "derivation_id": result.get("derivation_id"),
+            "construction_operation_id": result.get("construction_operation_id"),
+            "evaluation_id": result.get("evaluation_id"),
+            "evaluation_ref": result.get("evaluation_ref"),
+            "deltas": deltas,
+            "verification": verification,
+            "diagnostics": {version: value.get("diagnostics", [])
+                            for version, value in (raw_result.get("compat") or {}).items()},
+        }
+        if not passed:
+            promotion["reason"] = "incomplete" if not complete else status
+        outcome = "success" if passed else "failure" if status == "proof_error" else "incomplete" if not complete else status
+        lines = [
+            _render("scratch_experiment", experiment=experiment_id, outcome=outcome),
+            _render(
+                "scratch_promoted" if passed else "scratch_filed_unpromoted",
+                node=node.id,
+                fast=verification["fast"],
+                full=verification["full"],
+                cold=verification["cold"],
+                **({} if passed else {"reason": promotion["reason"]}),
+            ),
+        ]
+        if status == "proof_error" and not passed:
+            lines.extend(_error_lines(theorem, run_id, node, _nodes(run_id)[1], raw_result)[0])
+        best = _best_label(history, node.proof_id) if passed else None
+        promotion["best"] = best
+        if best:
+            lines.append(
+                _render(
+                    "scratch_best",
+                    best=best,
+                    node=node.id,
+                )
+            )
+        for name, delta in deltas.items():
+            if name == "heartbeats_by_version" and isinstance(delta, dict):
+                for version, change in delta.items():
+                    lines.append(_render("compile_heartbeat_delta", version=version, delta=change))
+            else:
+                lines.append(_render("scratch_delta", name=name, delta=delta))
+    except Exception as error:
+        references = {key: result.get(key) for key in (
+            "node", "proof_id", "attempt_id", "derivation_id", "construction_operation_id",
+            "evaluation_id", "evaluation_ref", "edge",
+        )}
+        references["derivation"] = references.pop("edge")
+        promotion = {"state": "not_promoted", "reason": "processing_error", **references}
+        return close("processing_error", promotion, [str(error)], ok=False, diagnostic=str(error))
+    return close(outcome, promotion, lines, ok=True)
+
+
 def scratch_tool(theorem: str, run_id: str, request: dict) -> dict:
-    """Lean commands run in the target's environment in place of its declaration. Never a node, never scored."""
+    """Retain isolated experiments and submit exact target proofs through normal compile."""
     if _is_empty(request, "scratch"):
         return _empty_error("scratch")
-    valid = ["code"]
+    valid = ["code", "replacement", "at", "helpers", "note"]
     unknown = sorted(set(request) - set(valid))
     if unknown:
         return _invalid("unknown_argument", unknown[0], valid, TOOL_FORMS["scratch"])
+    prior = experiments.replay_request(run_id, request)
+    if prior is not None:
+        return _read_experiment(run_id, prior["experiment_id"])
+    if _scratch_form(request) == "mixed":
+        return _invalid("mixed_form", "code+replacement", ["code", "replacement+at"], TOOL_FORMS["scratch"])
+    if _scratch_form(request) == "anchored":
+        helpers = request.get("helpers", [])
+        if not isinstance(helpers, list) or any(not isinstance(item, str) or not item for item in helpers):
+            return _invalid("bad_helpers", helpers, ["experiment ids"], TOOL_FORMS["scratch"])
+        return _scratch_promote(theorem, run_id, request, helpers)
+    helpers = request.get("helpers", [])
+    if not isinstance(helpers, list) or any(not isinstance(item, str) or not item for item in helpers):
+        return _invalid("bad_helpers", helpers, ["experiment ids"], TOOL_FORMS["scratch"])
     limit = int(text.numbers().get("scratch_max_chars", 4000))
     code = request.get("code")
     if not isinstance(code, str) or not code.strip():
@@ -1639,24 +2417,219 @@ def scratch_tool(theorem: str, run_id: str, request: dict) -> dict:
     label = official_filter()(re.sub(r"\bsorry\b", "trivial", code))
     if label:
         return _invalid("forbidden", label, ["no forbidden constructs"], TOOL_FORMS["scratch"])
-    row = campaign.problem(theorem)
-    version, commit = engine.versions(row)[0]
-    # The snippet takes the target declaration's place in the same file the compile tool checks.
-    measured_code, measured_starts = _measured_snippet(code)
-    built = engine.candidate_file(row, measured_code, version, commit)
+    discovery_error = None
+    try:
+        problem = campaign.problem(theorem)
+        statement = problem.get("statement")
+    except Exception as error:
+        problem, statement = {}, None
+        discovery_error = error
+    if isinstance(statement, str) and statement.strip():
+        start = len(code) - len(code.lstrip())
+        # Models often repeat the header's own `open`/`set_option` lines before the statement; the target file has them.
+        preamble = {line.strip() for line in (problem.get("header") or "").splitlines()
+                    if line.strip() and not line.startswith("import")}
+        while (end := code.find("\n", start)) >= 0 and code[start:end].strip() in preamble:
+            start = end + 1 + len(code[end + 1:]) - len(code[end + 1:].lstrip())
+        head = statement
+        if code.startswith(head, start):
+            assignment = re.match(r"\s*:=", code[start + len(head):])
+            if assignment is not None:
+                body_offset = start + len(head) + assignment.end()
+                body = code[body_offset:]
+                if body.strip() and _embeddable_scratch(body):
+                    return _scratch_promote(
+                        theorem, run_id, {"replacement": body}, helpers,
+                        source_code=code, body_offset=body_offset, original_request=request,
+                    )
     digest = hashlib.sha256(code.encode()).hexdigest()
     earlier = sum(
-        1 for event in _history(run_id) if event.get("kind") == "scratch" and event.get("code_sha256") == digest
+        1
+        for event in _history(run_id)
+        if event.get("kind") == "scratch"
+        and event.get("code_sha256") == digest
+        and event.get("phase") in {None, "accepted"}
     )
-    campaign._append(campaign.run_dir(run_id), {"kind": "scratch", "code_sha256": digest})
+    # Retain the exact input before context construction or Lean can fail; instrumentation is not the source.
+    accepted = experiments.accept(run_id, code, helpers, request=request)
+    experiment_id = accepted["experiment_id"]
+    if accepted.get("replayed"):
+        return _read_experiment(run_id, experiment_id)
+    started = time.perf_counter()
+    execution = {"stage": "construction", "context": {"theorem_run": run_id}, "raw": None}
+    try:
+        if discovery_error is not None:
+            raise discovery_error
+        return _scratch_check(theorem, run_id, code, helpers, accepted, earlier, started, execution)
+    except Exception as error:
+        outcome = (
+            "cancelled"
+            if _scratch_cancelled(run_id)
+            else {
+                "construction": "construction_error",
+                "execution": "execution_error",
+                "processing": "processing_error",
+            }[execution["stage"]]
+        )
+        experiments.finish(
+            run_id,
+            experiment_id,
+            code=code,
+            digest=digest,
+            outcome=outcome,
+            raw=execution["raw"],
+            rendered=[str(error)],
+            elapsed_ms=experiments.elapsed_since(started),
+            input_ref=accepted["input_ref"],
+            diagnostic=str(error),
+            context=execution["context"],
+            promotion={
+                "state": "not_promoted",
+                "reason": outcome if outcome in {"cancelled", "dependency_missing"} else _nonpromotion_reason(code),
+            },
+        )
+        evidence = experiments.retrieve(run_id, experiment_id)
+        return reply.reply(
+            ok=False,
+            items=[{"ref": experiment_id, "ok": False, "lines": [str(error)], "error": None, **evidence}],
+        )
+
+
+def _scratch_cancelled(run_id: str) -> bool:
+    job_id = os.environ.get("ARENA_JOB_ID")
+    if not job_id:
+        return False
+    from arena.orchestration import jobs
+
+    snapshots = jobs(campaign.run_dir(run_id), [job_id])["jobs"]
+    activation_id = os.environ.get("ARENA_ACTIVATION_ID")
+    for job in snapshots:
+        activations = job["activations"] if activation_id else [job]
+        for activation in activations:
+            if activation_id and activation["activation_id"] != activation_id:
+                continue
+            if activation["state"] in {"cancelling", "cancelled"}:
+                return True
+    return False
+
+
+def _scratch_helpers(run_id: str, helpers: list[str]) -> tuple[str, list[str]]:
+    """Materialize only named dependencies, in dependency order, inside this one scratch file."""
+    code, missing = [], []
+    included, visiting = set(), set()
+
+    def include(reference):
+        if reference in visiting:
+            missing.append(reference)
+            return
+        if reference in included:
+            return
+        retained = experiments.retrieve(run_id, reference)
+        if retained is None or retained.get("code_status") != "retained":
+            missing.append(reference)
+            return
+        visiting.add(reference)
+        for dependency in retained.get("helpers", []):
+            include(dependency)
+        visiting.remove(reference)
+        included.add(reference)
+        value = retained["code"]
+        code.append(value + ("" if value.endswith("\n") else "\n"))
+
+    for reference in helpers:
+        include(reference)
+    return "".join(code), missing
+
+
+def _scratch_check(theorem, run_id, code, helpers, accepted, earlier, started, execution):
+    experiment_id = accepted["experiment_id"]
+    digest = accepted["code_sha256"]
+    helper_prefix, missing = _scratch_helpers(run_id, helpers)
+    if missing or _scratch_cancelled(run_id):
+        outcome = "dependency_missing" if missing else "cancelled"
+        lines = [] if missing else [_render("scratch_cancelled")]
+        experiments.finish(
+            run_id,
+            experiment_id,
+            code=code,
+            digest=digest,
+            outcome=outcome,
+            raw=None,
+            rendered=lines,
+            elapsed_ms=experiments.elapsed_since(started),
+            input_ref=accepted["input_ref"],
+            diagnostic=outcome if missing else None,
+            promotion={"state": "not_promoted", "reason": outcome},
+        )
+        evidence = experiments.retrieve(run_id, experiment_id)
+        return reply.reply(
+            ok=not missing,
+            error=reply.request_error("dependency_missing", ",".join(missing), [], TOOL_FORMS["scratch"])
+            if missing
+            else None,
+            items=[{"ref": experiment_id, "ok": not missing, "lines": lines, "error": None, **evidence}],
+        )
+    checked_code = helper_prefix + code
+    row = campaign.problem(theorem)
+    version, commit = engine.versions(row)[0]
+    context = {
+        "theorem_run": run_id,
+        "version": version,
+        "commit": commit,
+        "helpers": helpers,
+        "helper_prefix_lines": helper_prefix.count("\n"),
+    }
+    execution["context"] = context
+    # The snippet takes the target declaration's place in the same file the compile tool checks.
+    measured_code, measured_starts = _measured_snippet(checked_code)
+    built = engine.candidate_file(row, measured_code, version, commit)
     facts = [_render("scratch_repeat", count=earlier + 1)] if earlier else []
-    code_lines = code.splitlines()
+    if helper_prefix:
+        facts.append(_render("scratch_helper_lines", line=helper_prefix.count("\n") + 1))
+    code_lines = checked_code.splitlines()
     declarations = [number for number, line in enumerate(code_lines, 1) if _DECLARATION_START.match(line)]
     # The prefix goes in front of the snippet as compile's measure does; its lines are mapped back below.
     inserted = _SNIPPET_PREFIX + (_MEASURE_DEFINITION if measured_starts else "")
     wrapper_start = built["text"][: built["head"]].count("\n") + 1
-    lean_text = built["text"][: built["head"]] + inserted + built["text"][built["head"] :]
-    output = engine.run_lean(row, built["path"], lean_text, prefix_end=built["head"])
+    # The doc comment and attributes in front of the replaced declaration would attach to the snippet's first
+    # command (`#check` then fails to parse); blank them, keeping the line count.
+    orphans = built["text"][built["head"] : built["offset"]]
+    lean_text = (
+        built["text"][: built["head"]] + inserted + "\n" * orphans.count("\n") + built["text"][built["offset"] :]
+    )
+    context.update(
+        {
+            "project": str(built["path"]),
+            "source_sha256": hashlib.sha256(lean_text.encode()).hexdigest(),
+            "prefix_sha256": hashlib.sha256(lean_text[: built["head"]].encode()).hexdigest(),
+        }
+    )
+    if _scratch_cancelled(run_id):
+        experiments.finish(
+            run_id,
+            experiment_id,
+            code=code,
+            digest=digest,
+            outcome="cancelled",
+            raw=None,
+            rendered=[_render("scratch_cancelled")],
+            elapsed_ms=experiments.elapsed_since(started),
+            input_ref=accepted["input_ref"],
+            context=context,
+            promotion={"state": "not_promoted", "reason": "cancelled"},
+        )
+        return _read_experiment(run_id, experiment_id)
+    execution["stage"] = "execution"
+    denied = None
+    try:
+        output = engine.run_lean(
+            row, built["path"], lean_text, prefix_end=built["head"], request_class=engine.actor_request_class()
+        )
+    except engine.LeanInconclusive as error:
+        output, denied = None, error
+    execution["stage"] = "processing"
+    execution["raw"] = None if output is None else output[1]
+    experiments.record_raw(run_id, experiment_id, output, context=context)
     lines: list[str] = []
     heartbeats: dict[int, int] = {}
     errors = warnings = 0
@@ -1666,7 +2639,10 @@ def scratch_tool(theorem: str, run_id: str, request: dict) -> dict:
     info_rows: list[str] = []
     warning_lines: dict[str, list[int]] = {}
     body: list[str] = []
-    if output is None:
+    hidden: list[dict] = []
+    if denied is not None:
+        body.append(_render("scratch_inconclusive", cause=denied.cause, admission=denied.admission))
+    elif output is None:
         body.append(_render("scratch_timeout"))
     else:
         measured_values, kept = [], []
@@ -1685,10 +2661,14 @@ def scratch_tool(theorem: str, run_id: str, request: dict) -> dict:
                     candidate_line, wrapper_start, inserted.count("\n")
                 )
                 if in_wrapper:
+                    if message["severity"] == "error":
+                        hidden.append(message)
                     continue
             snippet_line = candidate_line - built["start_line"] + 1 if candidate_line else None
             # Messages before the snippet come from the harness wrapper; sorry warnings are the allowed sorry itself.
             if snippet_line is not None and snippet_line < 1:
+                if message["severity"] == "error":
+                    hidden.append(message)
                 continue
             if (
                 message["severity"] == "warning"
@@ -1749,54 +2729,68 @@ def scratch_tool(theorem: str, run_id: str, request: dict) -> dict:
             tokens = _body_tokens("\n".join(code_lines[start - 1 : end]))
             points = tokens * price_rates["points_per_token"] + hb / 1000 * price_rates["points_per_1k_hb"]
             body.append(_render("scratch_decl_cost", line=start, tokens=tokens, heartbeats=hb, points=round(points, 1)))
+    if output is not None and output[0] != 0 and not errors:
+        # Errors outside the snippet (the wrapper) still fail the run; show their text, never a bare count.
+        for message in hidden:
+            errors += 1
+            body.append(
+                _render(
+                    "scratch_message",
+                    line="-",
+                    severity="error",
+                    message=_error_text(message["message"], known, message_chars),
+                )
+            )
+        if not errors:
+            errors = 1
+            body.append(_render("scratch_process_failed", returncode=output[0]))
     status = _render("scratch_ok" if output is not None and not errors else "scratch_failed")
+    if denied is not None:
+        status = _render("scratch_inconclusive_status")
     if declarations:
         lines.append(_render("scratch_result_body", status=status, errors=errors, warnings=warnings, tokens=body_total))
     else:
         lines.append(_render("scratch_result", status=status, errors=errors, warnings=warnings))
     lines.extend(body)
-    item = {"ref": "scratch", "ok": True, "lines": lines, "error": None, "repeat": bool(earlier)}
+    outcome = (
+        "cancelled"
+        if _scratch_cancelled(run_id)
+        else "inconclusive"
+        if denied is not None
+        else "timeout"
+        if output is None
+        else "failure"
+        if errors
+        else "success"
+    )
+    lines.append(_render("scratch_experiment", experiment=experiment_id, outcome=outcome))
+    lines.append(_render("scratch_not_promoted", reason=_nonpromotion_reason(code)))
+    raw = None if output is None else output[1]
+    experiments.finish(
+        run_id,
+        experiment_id,
+        code=code,
+        digest=digest,
+        outcome=outcome,
+        raw=raw,
+        rendered=lines,
+        elapsed_ms=experiments.elapsed_since(started),
+        input_ref=accepted["input_ref"],
+        context=context,
+        promotion={"state": "not_promoted", "reason": _nonpromotion_reason(code)},
+    )
+    item = {
+        "ref": experiment_id,
+        "ok": True,
+        "lines": lines,
+        "error": None,
+        "repeat": bool(earlier),
+        "experiment_id": experiment_id,
+        "outcome": outcome,
+        "code": code,
+        "promotion": {"state": "not_promoted", "reason": _nonpromotion_reason(code)},
+        "validity": "not_a_target_candidate",
+        "compatibility": "not_checked",
+        "cold": "not_checked",
+    }
     return reply.reply(facts=facts, items=[item])
-
-
-def finish_tool(theorem: str, run_id: str, request: dict | None = None) -> dict:
-    if request not in (None, {}):
-        return _invalid("bad_arguments", request, [], TOOL_FORMS["finish"])
-    history, _projection = _nodes(run_id)
-    map_data = campaign.map_view(run_id)
-    archive = (
-        ", ".join(
-            f"{row['letter']}:{row['node']} {'-' if row['score'] is None else row['score']}"
-            for row in map_data.get("archive", [])
-        )
-        or "empty"
-    )
-    state = campaign.state(run_id)
-    baseline = state.get("baseline") or {}
-    best = state.get("best") or {}
-
-    def left(axis: str) -> float | str:
-        reference = baseline.get(axis)
-        value = best.get(axis)
-        if not isinstance(reference, (int, float)) or not reference or not isinstance(value, (int, float)):
-            return "unknown"
-        saved = 100 * (1 - value / reference)
-        return round(max(0.0, (100 - saved) / 3), 1)
-
-    compatibility = (
-        round(
-            max(
-                0.0,
-                100 * (1 - sum(best.get("versions", {}).values()) / max(1, len(history[0].get("versions") or [1]))) / 3,
-            ),
-            1,
-        )
-        if best.get("versions")
-        else "unknown"
-    )
-    facts = [
-        _render("finish_archive", archive=archive),
-        _render("finish_points", tokens=left("tokens"), heartbeats=left("heartbeats"), compatibility=compatibility),
-    ][: int(text.numbers().get("finish_points_lines", 4))]
-    campaign._append(campaign.run_dir(run_id), {"kind": "finish"})
-    return reply.attach_context(run_id, reply.reply(facts=facts, stop=True))

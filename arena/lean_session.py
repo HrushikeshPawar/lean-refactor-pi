@@ -24,6 +24,7 @@ import argparse
 import fcntl
 import hashlib
 import json
+import math
 import os
 import signal
 import socket
@@ -322,6 +323,8 @@ class _Doc:
         self.busy = False
         self.used = time.monotonic()
         self.lane = "model"
+        self.request_class = "opportunistic"
+        self.queue_reason: str | None = None
         self.header: str | None = None  # the text of the imports and prefix this document was opened with
         self.display: str | None = None
         self.stale = False  # its file prefix changed while it was busy: closed when released
@@ -778,12 +781,69 @@ def _mem_snapshot() -> tuple[float | None, float | None]:
     return available, swap
 
 
+def _admission_reply(error: SessionError) -> dict:
+    """Memory and worker refusals are infrastructure outcomes, not proof failures."""
+    reason = str(error)
+    reply = {"ok": False, "stale": reason.startswith("stale"), "reason": reason}
+    if reason.startswith("stale") or reason == "session closing":
+        return reply
+    if reason == "Lean server crashed":
+        reply.update(outcome="inconclusive", cause="worker", admission="denied")
+        return reply
+    memory = "memory" in reason
+    queued = reason.startswith("queued") or reason.endswith("busy for too long")
+    reply.update(
+        outcome="inconclusive",
+        cause="resource" if memory else "worker",
+        admission="queued" if queued else "denied",
+    )
+    return reply
+
+
+def _denied(reason: str, cause: str = "worker") -> dict:
+    return {"ok": False, "reason": reason, "outcome": "inconclusive", "cause": cause, "admission": "denied"}
+
+
 def running(pid: int) -> bool:
     """Alive and not a zombie."""
     try:
         return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
     except (OSError, IndexError):
         return False
+
+
+REQUEST_CLASSES = ("sol_foreground", "full_check", "ds_experiment", "opportunistic")
+DS_LEAN_LIMIT = 1  # one DeepSeek Lean compilation at a time, global across every worker of every project
+
+
+class _Waiter:
+    """One queued Lean admission. Priority is the request class, then arrival order."""
+
+    def __init__(self, seq: int, request_class: str, lane: str, header: str | None):
+        self.seq = seq
+        self.request_class = request_class
+        self.lane = lane
+        self.header = header
+        self.queue_reason: str | None = None
+
+
+def normalize_request_class(value: object) -> str:
+    """Lane labels do not assign priority. An omitted or unknown class is the lowest one."""
+    if isinstance(value, str) and value in REQUEST_CLASSES:
+        return value
+    return "opportunistic"
+
+
+def select_waiter(waiters: list[_Waiter], *, ds_compiling: int, lane: str) -> _Waiter | None:
+    """Highest priority class, then FIFO. A second DeepSeek compilation waits while one is executing."""
+    eligible = [
+        waiter
+        for waiter in waiters
+        if waiter.lane == lane and not (waiter.request_class == "ds_experiment" and ds_compiling >= DS_LEAN_LIMIT)
+    ]
+    if not eligible:
+        return None
+    return min(eligible, key=lambda waiter: (REQUEST_CLASSES.index(waiter.request_class), waiter.seq))
 
 
 class _Entry:
@@ -797,16 +857,13 @@ class _Entry:
         self.condition = threading.Condition()
         self.used = time.monotonic()
         self.worker_gb = WORKER_GB
-        self.last_text: str | None = None
-        self.growing = False
+        self.worker_gb_source = "fallback"
+        self.worker_gb_samples = 0
         self.prefixes: dict[tuple[str | None, str], str] = {}  # (run, file) -> hash of the text before the target
         self.unreferenced_since: float | None = None  # when the last lease or hold naming it ended
-        self.last_header_end: int | None = None
         self.was_referenced = False
-        self.queues: dict[str, list[object]] = {
-            "model": [],
-            "background": [],
-        }  # waiters per lane, first come first served
+        self.waiters: list[_Waiter] = []
+        self.next_waiter = 0
 
     def lane_slots(self, lane: str) -> list[_Doc]:
         return [slot for slot in self.slots if slot.lane == lane]
@@ -1108,8 +1165,10 @@ class Session:
             return f"machine workers ({self.budget.limit} open across runs)"
         return None
 
-    def _new_slot(self, entry: _Entry, lane: str) -> tuple[_Doc | None, str | None]:
+    def _new_slot(self, entry: _Entry, lane: str, request_class: str = "opportunistic") -> tuple[_Doc | None, str | None]:
         """A new busy slot in `lane`, or (None, why not). Caller holds `entry.condition` and `self.lock`."""
+        if request_class == "ds_experiment" and self._ds_compiling_locked() >= DS_LEAN_LIMIT:
+            return None, "one DeepSeek Lean compilation"
         blocked = self._may_open(entry, lane, reserve=True)
         if blocked is not None:
             return None, blocked
@@ -1117,34 +1176,80 @@ class Session:
         slot = entry.server.doc((entry.project / "ArenaScratch" / f"Session{self.counter}.lean").as_uri())
         slot.busy = True
         slot.lane = lane
+        slot.request_class = request_class
         slot.token, self._reserved = self._reserved, None
         entry.slots.append(slot)
         return slot, None
 
-    def _acquire(self, entry: _Entry, timeout: float, lane: str = "model", header: str | None = None) -> _Doc:
-        """A worker of `lane`, waiting up to `timeout` seconds for one (first come, first served). Waiting in line
-        is not part of any check's own timeout."""
+    def _ds_compiling_locked(self) -> int:
+        return sum(
+            slot.busy and slot.request_class == "ds_experiment"
+            for other in self.entries.values()
+            for slot in other.slots
+        )
+
+    def _ds_compiling_except(self, slot: _Doc) -> int:
+        return sum(
+            other.busy and other.request_class == "ds_experiment" and other is not slot
+            for entry in self.entries.values()
+            for other in entry.slots
+        )
+
+    def _ds_compiling(self) -> int:
+        """Executing DeepSeek Lean compilations. Priority never interrupts one of them."""
+        with self.lock:
+            return self._ds_compiling_locked()
+
+    def _claim_slot(self, entry: _Entry, slot: _Doc, waiter: _Waiter, started: float) -> _Doc | None:
+        with self.lock:
+            if waiter.request_class == "ds_experiment" and self._ds_compiling_except(slot) >= DS_LEAN_LIMIT:
+                return None
+            slot.busy = True
+            slot.request_class = waiter.request_class
+            slot.queue_reason = waiter.queue_reason
+        self._waited(entry, waiter.lane, started)
+        return slot
+
+    def _acquire(
+        self,
+        entry: _Entry,
+        timeout: float,
+        lane: str = "model",
+        header: str | None = None,
+        request_class: str = "opportunistic",
+    ) -> _Doc:
+        """A worker of `lane` for `request_class`. The highest queued class runs next, FIFO inside that class.
+        An executing check is left to finish; this only chooses the next admission."""
         started = time.monotonic()
         deadline = started + timeout
-        ticket = object()
+        request_class = normalize_request_class(request_class)
         with entry.condition:
-            queue = entry.queues[lane]
-            queue.append(ticket)
+            entry.next_waiter += 1
+            waiter = _Waiter(entry.next_waiter, request_class, lane, header)
+            entry.waiters.append(waiter)
+            entry.condition.notify_all()
             try:
                 while True:
                     if not entry.server.alive():
                         raise SessionError("Lean server crashed")
+                    ds_compiling = self._ds_compiling()
+                    chosen = select_waiter(entry.waiters, ds_compiling=ds_compiling, lane=lane)
+                    if request_class == "ds_experiment" and ds_compiling >= DS_LEAN_LIMIT:
+                        waiter.queue_reason = "queued: one DeepSeek Lean compilation is in flight"
+                    elif chosen is not None and chosen is not waiter:
+                        waiter.queue_reason = f"queued behind {chosen.request_class}"
                     mine = entry.lane_slots(lane)
-                    if queue[0] is ticket:
+                    if chosen is waiter:
                         idle = [slot for slot in mine if not slot.busy]
                         if idle:
                             matching = [slot for slot in idle if header is not None and slot.header == header]
-                            slot = max(matching or idle, key=lambda s: s.used)
-                            slot.busy = True
-                            self._waited(entry, lane, started)
-                            return slot
+                            slot = max(matching or idle, key=lambda item: item.used)
+                            claimed = self._claim_slot(entry, slot, waiter, started)
+                            if claimed is not None:
+                                return claimed
+                            continue
                         with self.lock:
-                            slot, blocked = self._new_slot(entry, lane)
+                            slot, blocked = self._new_slot(entry, lane, request_class)
                             if slot is not None:
                                 opened = (len(entry.lane_slots(lane)), self._workers())
                         if slot is not None:
@@ -1152,14 +1257,27 @@ class Session:
                                 f"worker open {entry.project.name} slot {opened[0]}, {opened[1]} workers total"
                                 + (f" ({lane} lane)" if lane != "model" else "")
                             )
-                            self._waited(entry, lane, started)
-                            return slot
-                        if blocked != "slots" and not mine:
+                            claimed = self._claim_slot(entry, slot, waiter, started)
+                            if claimed is not None:
+                                return claimed
+                            slot.busy = False
+                            slot.request_class = "opportunistic"
+                            with suppress(SessionError, OSError):
+                                entry.server.close_doc(slot)
+                            if slot in entry.slots:
+                                entry.slots.remove(slot)
+                            self._free(slot)
+                            continue
+                        if blocked == "one DeepSeek Lean compilation":
+                            waiter.queue_reason = "queued: one DeepSeek Lean compilation is in flight"
+                        elif blocked != "slots" and not mine:
                             if self._evict_background(entry) or self._evict_unleased(entry):
                                 continue
                             assert blocked is not None
                             self._refused(entry, blocked)
                             raise SessionError(f"no room for a Lean worker: {blocked}")
+                        else:
+                            waiter.queue_reason = waiter.queue_reason or "queued: no free worker"
                     if self.closing:
                         raise SessionError("session closing")
                     left = deadline - time.monotonic()
@@ -1172,7 +1290,7 @@ class Session:
                         )
                     entry.condition.wait(min(left, 1.0))
             finally:
-                queue.remove(ticket)
+                entry.waiters.remove(waiter)
                 entry.condition.notify_all()
 
     @staticmethod
@@ -1242,56 +1360,6 @@ class Session:
                 other.condition.release()
             return True
 
-    def _grow(self, entry: _Entry) -> None:
-        """Open the model toolchain's remaining documents in the background.
-
-        A batch of drafts needs one warm document each; opening them while the model is thinking
-        means the first batch is as fast as the later ones. Memory decides how many fit."""
-        with entry.condition:
-            if (
-                entry.growing
-                or self.closing
-                or len(entry.lane_slots("model")) >= PRIMARY_MAX_WORKERS
-                or entry.last_text is None
-            ):
-                return
-            entry.growing = True
-        threading.Thread(target=self._grow_all, args=(entry,), daemon=True, name="lean-grow").start()
-
-    def _grow_all(self, entry: _Entry) -> None:
-        workers: list[threading.Thread] = []
-        try:
-            while not self.closing:
-                with entry.condition:
-                    if not entry.server.alive():
-                        break
-                    with self.lock:
-                        slot, _blocked = self._new_slot(entry, "model")
-                        if slot is None:
-                            break
-                        text, header_end = entry.last_text, entry.last_header_end
-                        _log(f"worker open {entry.project.name} slot {len(entry.lane_slots('model'))} (pre-warm)")
-                worker = threading.Thread(
-                    target=self._warm, args=(entry, slot, text, header_end), daemon=True, name="lean-warm"
-                )
-                worker.start()
-                workers.append(worker)
-            for worker in workers:
-                worker.join()
-        finally:
-            entry.growing = False
-
-    def _warm(self, entry: _Entry, slot: _Doc, text: str, header_end: int | None = None) -> None:
-        try:
-            if header_end:
-                entry.server.open_header(slot, text[:header_end])
-            else:
-                entry.server.check(slot, text, 600)
-        except (SessionError, OSError):
-            pass
-        finally:
-            self._release(entry, slot)
-
     def _release(self, entry: _Entry, slot: _Doc) -> None:
         with entry.condition:
             slot.busy = False
@@ -1320,27 +1388,39 @@ class Session:
             return self._batch_check(request, project, timeout)
         header_end = request.get("header_end")
         header_end = header_end if isinstance(header_end, int) and 0 < header_end <= len(request["text"]) else None
+        queued_at = time.monotonic()
         try:
             entry = self._entry(project, key)
             self._guard_prefix(entry, request)
             lane = self._lane(project, entry, lane)
             # The wait for a worker has its own limit; the check's timeout starts once the worker is held.
             queue = MODEL_QUEUE_TIMEOUT if lane == "model" else timeout + OPEN_TIMEOUT
-            slot = self._acquire(entry, queue, lane, request["text"][:header_end] if header_end else None)
+            request_class = normalize_request_class(request.get("request_class"))
+            slot = self._acquire(
+                entry, queue, lane, request["text"][:header_end] if header_end else None, request_class
+            )
+            queue_seconds = round(time.monotonic() - queued_at, 3)
         except SessionError as error:
-            return {"ok": False, "stale": str(error).startswith("stale"), "reason": str(error)}
+            return _admission_reply(error)
         except OSError as error:
-            return {"ok": False, "reason": f"cannot start Lean: {error}"}
+            return {
+                "ok": False,
+                "reason": f"cannot start Lean: {error}",
+                "outcome": "inconclusive",
+                "cause": "worker",
+                "admission": "denied",
+            }
         try:
             fresh = slot.text is None
             slot.display = request["display"]
             outcome = entry.server.check(slot, request["text"], timeout, header_end, run_id=request.get("run_id"))
             extra = then(entry, slot) if then is not None and not outcome.get("timeout") else {}
         except SessionError as error:
-            return {"ok": False, "reason": str(error)}
+            return _admission_reply(error)
         finally:
             self._release(entry, slot)
         if outcome.get("timeout"):
+            self._measure(entry)
             _log(
                 f"timeout {entry.project.name}: check ran past {timeout:.1f} s ({lane} lane"
                 + (", worker kept warm)" if outcome.get("warm_kept") else ", worker closed)")
@@ -1350,6 +1430,7 @@ class Session:
                 "timeout": True,
                 "warm_kept": bool(outcome.get("warm_kept")),
                 "header_seconds": outcome.get("header_seconds"),
+                "queue_seconds": queue_seconds,
                 "partial": outcome.get("partial", []),
                 "progress_line": outcome.get("progress_line"),
                 "partial_output": render(outcome.get("partial", []), request["text"], request["display"])[1],
@@ -1357,11 +1438,6 @@ class Session:
             }
         returncode, text = render(outcome["diagnostics"], request["text"], request["display"])
         self._measure(entry)
-        if lane == "model":
-            entry.last_text = request["text"]
-            entry.last_header_end = header_end
-            if self._is_primary(project) or self._is_held(project) or self._is_adhoc(entry):
-                self._grow(entry)
         return {
             "ok": True,
             "returncode": returncode,
@@ -1369,7 +1445,11 @@ class Session:
             "seconds": outcome["seconds"],
             "new_worker": fresh,
             "header_seconds": outcome.get("header_seconds"),
+            "queue_seconds": queue_seconds,
             "lane": lane,
+            "request_class": slot.request_class,
+            "admission": "admitted",
+            **({"queue_reason": slot.queue_reason} if slot.queue_reason else {}),
             "changed_from_line": outcome.get("changed_from_line"),
             "unchanged": bool(outcome.get("unchanged")),
             "messages": len(outcome["diagnostics"]),
@@ -1455,9 +1535,19 @@ class Session:
             hole = request["hole"]
             header_end = request.get("header_end")
             header = request["text"][:header_end] if isinstance(header_end, int) else None
-            slot = self._acquire(entry, MODEL_QUEUE_TIMEOUT, lane, header)
-        except (SessionError, OSError) as error:
-            return {"ok": False, "stale": str(error).startswith("stale"), "reason": str(error)}
+            slot = self._acquire(
+                entry, MODEL_QUEUE_TIMEOUT, lane, header, normalize_request_class(request.get("request_class"))
+            )
+        except SessionError as error:
+            return _admission_reply(error)
+        except OSError as error:
+            return {
+                "ok": False,
+                "reason": f"cannot start Lean: {error}",
+                "outcome": "inconclusive",
+                "cause": "worker",
+                "admission": "denied",
+            }
         results = []
         fresh = slot.text is None
         header_seconds = None
@@ -1468,6 +1558,7 @@ class Session:
                 started = time.monotonic()
                 outcome = entry.server.check(slot, variant, float(request.get("timeout", 180)), header_end)
                 if outcome.get("timeout"):
+                    self._measure(entry)
                     header_seconds = header_seconds or outcome.get("header_seconds")
                     results.append({"timeout": True, "seconds": round(time.monotonic() - started, 3)})
                     continue
@@ -1490,6 +1581,7 @@ class Session:
                     )
                     goals_after = reply.get("rendered") if reply.get("goals") else None
                 except TimeoutError:
+                    self._measure(entry)
                     results.append({"timeout": True, "seconds": round(time.monotonic() - started, 3)})
                     continue
                 results.append(
@@ -1503,8 +1595,10 @@ class Session:
                 )
             self._measure(entry)
             return {"ok": True, "results": results, "lane": lane, "new_worker": fresh, "header_seconds": header_seconds}
-        except (SessionError, OSError) as error:
-            return {"ok": False, "stale": str(error).startswith("stale"), "reason": str(error)}
+        except SessionError as error:
+            return _admission_reply(error)
+        except OSError as error:
+            return _denied(f"cannot start Lean: {error}")
         finally:
             self._release(entry, slot)
 
@@ -1540,14 +1634,12 @@ class Session:
             entry = self._entry(project, key)
             self._guard_prefix(entry, request)
         except SessionError as error:
-            return {"ok": False, "stale": str(error).startswith("stale"), "reason": str(error)}
+            return _admission_reply(error)
         except OSError as error:
-            return {"ok": False, "reason": f"cannot start Lean: {error}"}
+            return _denied(f"cannot start Lean: {error}")
         lane = self._lane(project, entry, request.get("lane", "model"))
         allowed = OTHER_WORKERS if lane == "background" else PRIMARY_MAX_WORKERS
         wanted = max(0, min(int(request.get("slots", 1)), allowed))
-        if lane == "model":
-            entry.last_text, entry.last_header_end = text, header_end
         seconds: list[float] = []
         failed: list[str] = []
         lock = threading.Lock()
@@ -1592,20 +1684,40 @@ class Session:
                 thread.start()
         for thread in threads:
             thread.join()
-        return {
+        self._measure(entry)
+        reply = {
             "ok": True,
             "workers": ready + len(seconds),
             "seconds": sorted(seconds),
             "failed": failed,
             "allowed": allowed,
         }
+        if failed:
+            memory = any("memory" in item for item in failed)
+            reply.update(outcome="inconclusive", cause="resource" if memory else "worker", admission="denied")
+        return reply
 
     def _measure(self, entry: _Entry) -> None:
-        opened = len([s for s in entry.slots if s.text is not None])
-        if opened and entry.worker_gb == WORKER_GB:
-            used = sum(self.pss_fn(entry.server.pgid).values())
-            if used:
-                entry.worker_gb = max(0.5, used / opened)
+        with entry.condition:
+            opened = len([s for s in entry.slots if s.text is not None])
+        if not opened:
+            return
+        try:
+            readings = self.pss_fn(entry.server.pgid).values()
+        except (OSError, TypeError, ValueError):
+            return
+        values = [
+            value
+            for value in readings
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0
+        ]
+        if not values:
+            return
+        measured = max(0.5, sum(values) / opened, max(values))
+        with entry.condition:
+            entry.worker_gb = measured if not entry.worker_gb_samples else max(entry.worker_gb, measured)
+            entry.worker_gb_samples += 1
+            entry.worker_gb_source = "conservative PSS planning high-water"
 
     def status(self) -> dict:
         with self.lock:
@@ -1620,6 +1732,11 @@ class Session:
         for entry in entries:
             readings = self.pss_fn(entry.server.pgid)
             lanes = {slot.uri: slot.lane for slot in list(entry.slots) if slot.text is not None}
+            with entry.condition:
+                busy = len([s for s in entry.slots if s.busy])
+                estimate = round(entry.worker_gb, 3)
+                estimate_source = entry.worker_gb_source
+                estimate_samples = entry.worker_gb_samples
             workers = [
                 {"pid": pid, "gb": round(gb, 3), "lane": lanes.get(self.document_fn(pid) or "")}
                 for pid, gb in sorted(readings.items())
@@ -1628,7 +1745,10 @@ class Session:
                 {
                     "project": str(entry.project),
                     "workers": workers,
-                    "busy": len([s for s in entry.slots if s.busy]),
+                    "busy": busy,
+                    "worker_gb_estimate": estimate,
+                    "worker_gb_source": estimate_source,
+                    "worker_gb_samples": estimate_samples,
                     "gb": round(sum(readings.values()), 2),
                     "pgid": entry.server.pgid,
                     "pids": trees[id(entry)],

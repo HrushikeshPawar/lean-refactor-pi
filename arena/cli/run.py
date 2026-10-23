@@ -16,22 +16,27 @@ import threading
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TypedDict
 
-from arena import lean_health, lean_session, text
+from rich.console import Console
+
+from arena import campaign, lean_health, lean_session, text
 from arena import models as model_config
-from arena.campaign import autocheck, init, packet, run_dir, submission, write_state
-from arena.cli import live
+from arena.campaign import _runtime_event, autocheck, init, packet, run_dir, submission, write_state
+from arena.cli import live, run_report
+from arena.coordinator import Coordinator
 from arena.engine import ROOT
 from arena.provenance import code_version
-from arena.seed import check_seed, prior_work
+from arena.run_control import run_threshold
+from arena.seed import check_seed, prior_work, read_seed_proof, start_from_proof
 from arena.skill import skill_hash, skill_prompt
 from arena.summary import configured_cap, cost_report_from_ledger, render_text, write_summary
 from arena.traces import langfuse_environment, langfuse_extension, plugin_problems
 
-DEFAULT_LIMIT_USD = 0.5
+DEFAULT_LIMIT_USD = 2.5
 MAX_LIMIT_USD = 2.5  # keep equal to MAX_LIMIT_USD in packages/arena-pi/extensions/spend.ts
 
 SYSTEM_PROMPT = text.render("messages/run.system_prompt")
@@ -75,12 +80,50 @@ class _Echo:
         return getattr(self.stream, name)
 
 
+class _LiveSink:
+    """While the live view is up, whole lines written to stdout or stderr become events in its panel (nothing is
+    printed over the layout). Once the view is gone, text goes to the real stream."""
+
+    def __init__(self, stream):
+        self.stream, self.partial = stream, ""
+
+    def write(self, data: str) -> int:
+        self.partial += data
+        *done, self.partial = self.partial.split("\n")
+        for line in done:
+            if line.strip():
+                emit(line)
+        return len(data)
+
+    def flush(self) -> None:
+        pass
+
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
+
+
+def emit(text_line: str) -> None:
+    """One operator line: in the live panel when it is up, else the setup panel or plain output."""
+    line = text_line if text_line.startswith("[") else f"[{datetime.now().astimezone().strftime('%H:%M:%S')}] {text_line}"
+    if _LIVE is None or not _LIVE.line(line):
+        stream = _LIVE_STREAMS[1] if _LIVE_STREAMS else sys.stdout
+        print(line, file=stream, flush=True)
+
+
+_LIVE_STREAMS: tuple | None = None  # the real (stdout, stderr) while the live view owns them
+
+
+def _phase_sink(directory: Path, event: dict) -> None:
+    note = run_report.phase_note(directory, event)
+    if note:
+        emit(note)
+
+
 class _Setup:
     """The setup phase (Lean session, health gate, warm-up) in a small live panel of its own; its lines are shown
     again inside the run view once Pi starts. Plain output when the panel cannot start."""
 
     def __init__(self, run_id: str):
-        from rich.console import Console
         from rich.live import Live
         from rich.panel import Panel
         from rich.text import Text
@@ -173,7 +216,7 @@ def seed_agent_dir(target: Path, source: Path, provider: str, model_id: str, max
 
 
 def attempt_has_model_error(event_log: Path, offset: int, intentional_stop: bool = False) -> bool:
-    """Ignore the abort that ends a run on purpose (spend limit, confirmed finish) and errors Pi's retry loop recovered."""
+    """Ignore the abort that ends a run on purpose (spend limit) and errors Pi's retry loop recovered."""
     pending_error = False
     with event_log.open("rb") as events:
         events.seek(offset)
@@ -265,12 +308,19 @@ def live_view(args, directory: Path, health: dict | None, worker: subprocess.Pop
         merge_worker=worker,
         clear=bool(lines),
     )
+    global _LIVE_STREAMS
+    saved = (sys.stdout, sys.stderr)
     for line in lines:
         if _LIVE is None or not _LIVE.line(line):
             print(line, flush=True)
+    if _LIVE is not None:
+        _LIVE_STREAMS = saved
+        sys.stdout, sys.stderr = _LiveSink(saved[0]), _LiveSink(saved[1])
     try:
         yield
     finally:
+        sys.stdout, sys.stderr = saved
+        _LIVE_STREAMS = None
         display, _LIVE = _LIVE, None
         if display is not None:
             display.stop()
@@ -439,6 +489,8 @@ class RunOptions:
     test_extension: list[Path] = field(default_factory=list)
     resume_run: bool = False
     seed_run: Path | None = None  # an ended run whose graph and history this run continues from
+    seed_proof: Path | None = None  # a proof file this run starts from instead of the reference proof
+    no_golf: bool = False  # compatibility flag; post-run golf is disabled for every run
     dry_run: bool = False
     plain: bool = False
 
@@ -454,6 +506,7 @@ def _release_setup() -> None:
 
 
 def execute(options: RunOptions) -> int:
+    campaign.RUNTIME_SINK = _phase_sink
     try:
         return run(options)
     except KeyboardInterrupt:
@@ -462,6 +515,7 @@ def execute(options: RunOptions) -> int:
         print("interrupted before Pi started; no model spend", file=sys.stderr, flush=True)
         return 130
     finally:
+        campaign.RUNTIME_SINK = None
         _release_setup()
         _BACKGROUND["stop"].set()
         stop_lean_session()
@@ -504,6 +558,12 @@ def run(options: RunOptions) -> int:
         return 2
     extra = args.prompt_file.read_text().strip() if args.prompt_file else ""
 
+    if args.seed_proof is not None and (args.seed_run is not None or args.resume_run or args.preflight):
+        print(
+            "error: --seed-proof starts a new run; it cannot go with --seed-run, --resume-run or --preflight",
+            file=sys.stderr,
+        )
+        return 2
     directory = run_dir(args.run_id)
     if directory.exists() != args.resume_run:
         print("error: --resume-run must be used exactly when the run ID already exists", file=sys.stderr)
@@ -514,6 +574,12 @@ def run(options: RunOptions) -> int:
             return 2
         try:
             check_seed(args.seed_run)
+        except ValueError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
+    if args.seed_proof is not None:
+        try:
+            read_seed_proof(args.theorem, args.seed_proof)
         except ValueError as error:
             print(f"error: {error}", file=sys.stderr)
             return 2
@@ -541,7 +607,7 @@ def run(options: RunOptions) -> int:
         prompt = (
             text.render("messages/run.preflight")
             if args.preflight
-            else packet(args.theorem) + ("\nAdditional instructions:\n" + extra + "\n" if extra else "")
+            else packet(args.theorem, args.model) + ("\nAdditional instructions:\n" + extra + "\n" if extra else "")
         )
     if args.no_langfuse and not args.test_extension:
         print("error: --no-langfuse is only for offline runs with --test-extension", file=sys.stderr)
@@ -598,7 +664,7 @@ def run(options: RunOptions) -> int:
         print("\n".join(price_problems), file=sys.stderr)
         return 1
     if not args.resume_run:
-        init(args.theorem, args.run_id, extra, seed=args.seed_run)
+        init(args.theorem, args.run_id, extra, seed=args.seed_run, model=args.model)
         if args.seed_run is not None:
             # The recorded packet hash stays that of the plain packet; the prior work follows it.
             section = prior_work(args.run_id, args.seed_run)
@@ -615,6 +681,7 @@ def run(options: RunOptions) -> int:
                     "packet_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
                     "thinking": args.thinking,
                     "seed_run": None if args.seed_run is None else str(args.seed_run),
+                    "seed_proof": None if args.seed_proof is None else str(args.seed_proof),
                     "merge_worker": args.merge_worker,
                     "compact_at_tokens": args.compact_at_tokens,
                     "compact_keep_tokens": args.compact_keep_tokens,
@@ -628,6 +695,21 @@ def run(options: RunOptions) -> int:
     health = lean_gate(args.theorem, directory)
     if health is not None and health["verdict"] != "healthy":
         return stop_unhealthy(args, directory, health["reasons"])
+    if args.seed_proof is not None:
+        try:
+            seeded = start_from_proof(args.theorem, args.run_id, args.seed_proof)
+        except ValueError as error:
+            print(f"error: {error}; no model spend, the run did not start", file=sys.stderr)
+            return 2
+        if seeded.get("reference"):
+            print(f"Seed proof {args.seed_proof} is the reference proof; starting as usual", flush=True)
+        else:
+            print(f"Seeded from {args.seed_proof}: proxy {seeded['best_proxy']}", flush=True)
+            # The recorded packet hash stays that of the plain packet; the prior work follows it.
+            section = prior_work(args.run_id)
+            with (directory / "packet.txt").open("a") as packet_file:
+                packet_file.write("\n" + section)
+            command[-1] = prompt + "\n" + section
     start_background_checks(args.theorem, directory, health)
     shadow = directory / "scratch" / "project"
     env = os.environ.copy()
@@ -640,6 +722,7 @@ def run(options: RunOptions) -> int:
     env["ARENA_LIMIT_USD"] = str(args.limit_usd)
     env["ARENA_REQUEST_OUTPUT_TOKENS"] = str(CONFIG["models"][args.model]["request_output_tokens"])
     env.setdefault("ARENA_OUTAGE_LIMIT_MS", str(CONFIG["outage_limit_ms"]))
+    env.setdefault("ARENA_STREAM_IDLE_S", str(CONFIG.get("stream_idle_s", 600)))
     env["ARENA_BUDGET_REPORT_PATH"] = str(directory / "cost.json")
     if plugin is not None:
         try:
@@ -751,7 +834,13 @@ def run(options: RunOptions) -> int:
 
     for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(number, interrupt)
-    with event_log.open("a") as output, live_view(args, directory, health, worker):
+    with (
+        Coordinator(directory) as coordinator,
+        event_log.open("a") as output,
+        live_view(args, directory, health, worker),
+    ):
+        env["ARENA_GENERATION"] = coordinator.generation
+        model_phase_id = f"model:{os.getpid()}:{time.monotonic_ns()}"
         process = subprocess.Popen(
             command,
             cwd=shadow,
@@ -763,6 +852,7 @@ def run(options: RunOptions) -> int:
             bufsize=1,
             start_new_session=True,
         )
+        _runtime_event(directory, {"kind": "phase", "phase": "model", "phase_id": model_phase_id, "status": "start"})
         state["process"] = process
         assert process.stderr is not None
         stderr_reader = threading.Thread(
@@ -798,6 +888,10 @@ def run(options: RunOptions) -> int:
             kill_group(process, signal.SIGKILL)
             exit_code = process.wait()
         stderr_reader.join(timeout=5)
+    _runtime_event(
+        directory,
+        {"kind": "phase", "phase": "model", "phase_id": model_phase_id, "status": "end", "exit_code": exit_code},
+    )
     if state["timer"] is not None:
         state["timer"].cancel()
     # Lean servers and evaluations Pi started share its process group.
@@ -832,7 +926,7 @@ def stamp_tool_event(line: str) -> str:
 
 
 def _stopped_on_purpose(directory: Path) -> bool:
-    """True when the cost ledger's last control row says the run ended by its spend limit or a confirmed finish."""
+    """True when the cost ledger's last control row says the run ended by its spend limit."""
     controls = []
     with contextlib.suppress(OSError, ValueError):
         controls = [
@@ -840,7 +934,7 @@ def _stopped_on_purpose(directory: Path) -> bool:
             for row in map(json.loads, (directory / "cost-ledger.jsonl").read_text().splitlines())
             if row.get("kind") == "control"
         ]
-    return bool(controls) and controls[-1].get("stop") in ("limit_reached", "finished")
+    return bool(controls) and controls[-1].get("stop") == "limit_reached"
 
 
 def kill_group(process: subprocess.Popen, number: int) -> None:
@@ -848,8 +942,8 @@ def kill_group(process: subprocess.Popen, number: int) -> None:
         os.killpg(process.pid, number)
 
 
-def closing_drain(theorem: str, run_id: str) -> dict | None:
-    """Full-check queued candidates for up to DRAIN_S; a further stop request skips the rest (None)."""
+def _until_stopped(job, skipped: str):
+    """Run `job()`; a further stop request skips what is left of it (None)."""
 
     def skip(_signum, _frame):
         raise KeyboardInterrupt
@@ -858,13 +952,20 @@ def closing_drain(theorem: str, run_id: str) -> dict | None:
     if threading.current_thread() is threading.main_thread():
         previous = {number: signal.signal(number, skip) for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
     try:
-        return autocheck(theorem, run_id, DRAIN_S, closing=True)
+        return job()
     except KeyboardInterrupt:
-        print("Closing checks skipped by a further stop request", file=sys.stderr, flush=True)
+        print(skipped, file=sys.stderr, flush=True)
         return None
     finally:
         for number, handler in previous.items():
             signal.signal(number, handler)
+
+
+def closing_drain(theorem: str, run_id: str) -> dict | None:
+    """Full-check queued candidates for up to DRAIN_S; a further stop request skips the rest (None)."""
+    return _until_stopped(
+        lambda: autocheck(theorem, run_id, DRAIN_S, closing=True), "Closing checks skipped by a further stop request"
+    )
 
 
 def finish(
@@ -880,9 +981,15 @@ def finish(
     """Always leave cost.json and a run summary behind, even for a killed or crashed run."""
     report_path = directory / "cost.json"
     # On a resumed run, a cost.json left by an earlier segment is stale.
-    if not report_path.exists() or report_path.stat().st_mtime < segment_started:
+    if (directory / "control.jsonl").is_file():
+        from arena.run_control import read_state
+
+        read_state(directory)
+    elif not report_path.exists() or report_path.stat().st_mtime < segment_started:
         report_path.write_text(json.dumps(cost_report_from_ledger(directory), indent=2) + "\n")
         print("Pi wrote no cost report for this segment; reconstructed it from the cost journal", file=sys.stderr)
+    summary_phase_ended = False
+    fancy = live.enabled(args.plain)  # a terminal gets the rich summary; redirected output keeps plain text
     try:
         # Checks still queued when the model stopped are finished here (no model cost), on a normal end
         # and on an operator stop alike, so the submission reflects every candidate the model produced.
@@ -893,34 +1000,46 @@ def finish(
                 f"Background checks after Pi exited: {drained['checked']}; skipped (cannot beat the best) {drained.get('skipped', [])}; still pending {drained.get('remaining', [])}{' (drain cap reached)' if drained.get('timed_out') else ''}",
                 flush=True,
             )
+        summary_phase_id = f"summary:{os.getpid()}:{time.monotonic_ns()}"
+        _runtime_event(
+            directory, {"kind": "phase", "phase": "summary", "phase_id": summary_phase_id, "status": "start"}
+        )
         write_state(args.run_id)
         answer = submission(args.run_id)
-        print(
-            f"Submission: {answer.get('candidate') or 'none'}"
-            + (
-                f" proxy {answer['proxy']} ({answer['tokens']} tok, {answer['heartbeats']} HB)"
-                if answer.get("candidate")
-                else f" ({answer['reason']})"
-            ),
-            flush=True,
-        )
+        _runtime_event(directory, {"kind": "phase", "phase_id": summary_phase_id, "phase": "summary", "status": "end"})
+        summary_phase_ended = True
+        if not fancy:
+            print(
+                f"Submission: {answer.get('candidate') or 'none'}"
+                + (
+                    f" proxy {answer['proxy']} ({answer['tokens']} tok, {answer['heartbeats']} HB)"
+                    if answer.get("candidate")
+                    else f" ({answer['reason']})"
+                ),
+                flush=True,
+            )
     except Exception as error:
+        if "summary_phase_id" in locals() and not summary_phase_ended:
+            _runtime_event(
+                directory,
+                {
+                    "kind": "phase",
+                    "phase": "summary",
+                    "phase_id": summary_phase_id,
+                    "status": "error",
+                    "error": str(error)[:300],
+                },
+            )
         print(f"Choosing the submission failed: {error}", file=sys.stderr)
     try:
-        print(
-            render_text(
-                write_summary(
-                    directory,
-                    "interrupted"
-                    if interrupted is not None and not tripped
-                    else lean_health.STOP_REASON
-                    if tripped
-                    else None,
-                )
-            ),
-            end="",
-            flush=True,
+        written = write_summary(
+            directory,
+            "interrupted" if interrupted is not None and not tripped else lean_health.STOP_REASON if tripped else None,
         )
+        if fancy:
+            run_report.print_run_summary(Console(), directory, written)
+        else:
+            print(render_text(written), end="", flush=True)
     except Exception as error:  # a summary failure must never hide the run's own result
         print(f"Run summary failed: {error}", file=sys.stderr)
     if tripped:
@@ -939,19 +1058,21 @@ def finish(
     if report.get("error") or report.get("theorem") != args.theorem:
         print(f"Invalid cost report: {report.get('error', 'theorem mismatch')}", file=sys.stderr)
         return 1
-    if report.get("limit_usd") != args.limit_usd:
+    if Decimal(str(report.get("limit_usd") or 0)) != run_threshold(directory):
         print("Arena limit configuration changed", file=sys.stderr)
         return 1
-    print(f"Spent ${report['spent_usd']:.6f} of the ${args.limit_usd:.2f} limit", flush=True)
+    spent_usd = float(report["spent_usd"])
+    if not fancy:
+        print(f"Spent ${spent_usd:.6f} of the ${args.limit_usd:.2f} limit", flush=True)
     cache = report.get("cache_utilization", {})
-    if cache.get("all", {}).get("reuse_pct") is not None:
+    if not fancy and cache.get("all", {}).get("reuse_pct") is not None:
         print(
             f"Cache hit rate: all={cache['all']['reuse_pct']:.1f}% recent-10={cache['recent_ten']['reuse_pct']:.1f}%",
             flush=True,
         )
-    if report["spent_usd"] > args.limit_usd:
+    if spent_usd > args.limit_usd:
         print(
-            f"Spend overshot the ${args.limit_usd:g} limit by ${report['spent_usd'] - args.limit_usd:.6f} on the last call",
+            f"Spend overshot the ${args.limit_usd:g} limit by ${spent_usd - args.limit_usd:.6f} on the last call",
             file=sys.stderr,
         )
     if attempt_has_model_error(event_log, event_offset, _stopped_on_purpose(directory)):

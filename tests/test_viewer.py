@@ -11,6 +11,7 @@ import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from arena import campaign, viewer_data
@@ -215,6 +216,53 @@ class DataTests(unittest.TestCase):
         self.assertEqual(live["tool_results"], 7)
         self.assertEqual(stalled["status"], "stalled")
 
+    def test_hub_row_runtime_phase_and_check_freshness(self):
+        directory = make_run(self.root, "runtime-run", finished=False)
+        ledger = directory / "ledger.jsonl"
+        with ledger.open("a") as handle:
+            handle.write(json.dumps({"kind": "phase", "phase": "model", "status": "start", "ts": T0 + 10}) + "\n")
+            handle.write(json.dumps({"kind": "evaluation", "mode": "fast", "ts": T0 + 20, "result": {"compat": {"v": {"passed": True}}}}) + "\n")
+            handle.write(json.dumps({"kind": "evaluation", "mode": "full", "ts": T0 + 15, "result": {"compat": {"v": {"passed": True}}}}) + "\n")
+            handle.write(json.dumps({"kind": "evaluation", "mode": "full", "ts": T0 + 29, "result": {"compat": {"v": {"passed": False}}}}) + "\n")
+            handle.write(json.dumps({"kind": "phase", "phase": "autocheck", "phase_id": "ac-1", "status": "start", "ts": T0 + 11}) + "\n")
+            handle.write(json.dumps({"kind": "phase", "phase": "autocheck", "phase_id": "ac-1", "status": "end", "ts": T0 + 12}) + "\n")
+            handle.write(json.dumps({"kind": "phase", "phase": "autocheck", "phase_id": "ac-2", "status": "start", "ts": T0 + 13}) + "\n")
+            handle.write(json.dumps({"kind": "job", "job_id": "j-1", "job": "full", "candidate_id": "x", "status": "start", "ts": T0 + 25}) + "\n")
+        row = hub_row("runtime-run", directory, None, now=T0 + 30)
+        self.assertEqual(row["phase"], "model")
+        self.assertEqual((row["fast_check_age_s"], row["full_check_age_s"]), (10, 15))
+        self.assertEqual(row["active_job_elapsed_s"], 5)
+        self.assertFalse(row["full_check_stale"])
+        self.assertEqual(row["active_checker"]["phase_id"], "ac-2")
+        self.assertEqual(row["runtime_events"][-1]["kind"], "job")
+
+    def test_stale_check_warning_requires_live_recent_fast_activity(self):
+        finished = make_run(self.root, "old-finished")
+        idle = make_run(self.root, "old-idle", finished=False)
+        active = make_run(self.root, "active-fast", finished=False)
+        with (active / "ledger.jsonl").open("a") as handle:
+            handle.write(json.dumps(evaluation(T0 + 3500, "c2", "fast", 60.0)) + "\n")
+        finished_row = hub_row("old-finished", finished, None, now=T0 + 3600)
+        idle_row = hub_row("old-idle", idle, None, now=T0 + 3600)
+        active_row = hub_row("active-fast", active, None, now=T0 + 3600)
+        self.assertFalse(finished_row["fast_check_stale"])
+        self.assertFalse(finished_row["full_check_stale"])
+        self.assertFalse(idle_row["full_check_stale"])
+        self.assertTrue(active_row["full_check_stale"])
+
+    def test_score_timeline_merges_fast_and_full_into_one_row(self):
+        ledger = [
+            evaluation(T0 + 1, "a", "fast", 50.0),
+            evaluation(T0 + 2, "b", "fast", 55.0),
+            evaluation(T0 + 3, "a", "full", 52.0),
+            evaluation(T0 + 4, "c", "full", 58.0),
+        ]
+        rows = viewer_data.score_timeline(ledger, T0)
+        self.assertEqual(
+            [(r["n"], r["candidate_id"], r["mode"], r["proxy"], r["best_verified"]) for r in rows],
+            [(1, "a", "full", 52.0, 52.0), (2, "b", "fast", None, None), (3, "c", "full", 58.0, 58.0)],
+        )
+
     def test_hub_row_survives_empty_run_dir(self):
         directory = self.root / "runs" / "pi-budget" / "empty"
         directory.mkdir(parents=True)
@@ -226,11 +274,9 @@ class DataTests(unittest.TestCase):
         board = run_dashboard("r1", directory)
         self.assertEqual(
             [(r["mode"], r["proxy"], r["estimated_proxy"], r["best_verified"]) for r in board["scores"]],
-            [("fast", None, 60.0, None), ("full", 60.5, None, 60.5)],
+            [("full", 60.5, None, 60.5)],
         )
-        self.assertEqual(
-            [(r["n"], r["candidate"], r["candidate_id"]) for r in board["scores"]], [(1, "#2", "c2"), (2, "#2", "c2")]
-        )
+        self.assertEqual([(r["n"], r["candidate"], r["candidate_id"]) for r in board["scores"]], [(1, "#2", "c2")])
         self.assertEqual(board["reference"], None)
         points = board["spend"]["points"]
         self.assertEqual([p["n"] for p in points], [1, 2])
@@ -246,7 +292,9 @@ class DataTests(unittest.TestCase):
         self.assertEqual(kinds, ["limit", "finish", "control"])
         self.assertEqual(board["lean"]["paths"]["session"]["runs"], 2)
         self.assertEqual(board["lean"]["paths"]["cold"]["by_check"], {"probe": 1})
-        self.assertTrue(board["lean"]["cold_verification"]["confirmed"])
+        cold = board["lean"]["cold_verification"]
+        self.assertFalse(cold["confirmed"])  # the fixture event has no identity: unbound evidence is withheld
+        self.assertEqual(cold["cause"], "context")
         self.assertEqual(board["packet"], "kickoff packet text")
 
     def test_dashboard_builds_from_a_legacy_ledger_with_ideas_and_old_tool_names(self):
@@ -448,6 +496,48 @@ def _candidate(ts: float, ident: str, origin: str, **extra) -> dict:
     return {"kind": "candidate", "ts": ts, "candidate_id": ident, "origin": origin, "parents": [], **extra}
 
 
+class RecordedLineageTests(unittest.TestCase):
+    def test_parents_come_from_the_recorded_edge_and_probes_name_their_actor(self):
+        def node(edge):
+            return SimpleNamespace(edge=edge, derivations=[])
+
+        graph = {
+            "p1": node(None),
+            "p2": node({"type": "edited_from", "from": ["p1"]}),
+            "p3": node({"type": "filed_under_focus", "from": ["p2"]}),
+        }
+        payload = {
+            "nodes": [{"id": "p1"}, {"id": "p2"}, {"id": "p3"}],
+            "probes": [{"proof_id": "p3"}, {"proof_id": "p9"}],
+        }
+        history = [{"kind": "attempt", "proof_id": "p3", "actor_id": "a1"}]
+        with patch("arena.orchestration.proof_nodes", return_value=graph):
+            server.recorded_lineage(payload, Path("."), history)
+        root, edited, filed = payload["nodes"]
+        self.assertEqual((root["parents"], root["filed_under"]), ([], None))
+        self.assertEqual((edited["parents"], edited["filed_under"]), (["p1"], None))
+        self.assertEqual((filed["parents"], filed["filed_under"]), ([], "p2"))
+        self.assertEqual([(p["parent"], p.get("filed_under"), p["actor_id"]) for p in payload["probes"][:1]], [(None, "p2", "a1")])
+        self.assertIsNone(payload["probes"][1]["actor_id"])
+
+
+class WorkerLabelTests(unittest.TestCase):
+    def test_worker_actors_map_to_their_job_label(self):
+        from arena import orchestration
+
+        rows = [{"job_id": "j-a", "worker_actor_id": "aa"}, {"job_id": "j-b", "worker_actor_id": "bb"},
+                {"job_id": "j-a", "worker_actor_id": "aa"}]
+        with patch.object(orchestration, "_delegations", return_value=rows):
+            self.assertEqual(orchestration.worker_job_labels(Path(".")), {"aa": "job1", "bb": "job2"})
+        from arena.cli.serve import job_roles
+
+        roles = job_roles([{"worker_actor_id": "aa", "scope": "trim", "task": "t"},
+                           {"worker_actor_id": "bb", "scope": "island", "objective": "tokens"},
+                           {"worker_actor_id": "cc", "scope": "island"}])
+        self.assertEqual({actor: row["role"] for actor, row in roles.items()},
+                         {"aa": "trim", "bb": "token island", "cc": "family island"})
+
+
 class NodeCallTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -554,10 +644,11 @@ class NodeCallTests(unittest.TestCase):
     def test_a_run_without_a_journal_does_not_raise(self):
         write(self.directory / "ledger.jsonl", [_candidate(1.0, "ref", "reference")])
         found = viewer_data.node_calls(self.directory, "n1")
-        self.assertEqual(
-            found,
-            {"node": "n1", "turn": None, "call": None, "reasoning": [], "siblings": [], "reason": "no journal"},
-        )
+        self.assertEqual(found["reason"], "no journal")
+        self.assertIsNone(found["call"])
+        self.assertEqual(found["lineage"], "missing")
+        self.assertEqual(found["records"], [])
+        self.assertEqual(found["artifact"]["missing"], True)
 
     def test_reference_and_unknown_nodes_have_no_call(self):
         self._write(
@@ -593,6 +684,145 @@ class NodeCallTests(unittest.TestCase):
         self.assertEqual(found["reason"], "ambiguous")
         self.assertEqual(found["call"]["tool_call_id"], "early")
         self.assertEqual(found["call"]["name"], "compile")
+
+    def test_v8_node_retains_alternate_actor_attempts(self):
+        proof = "theorem t : True := by\n  trivial\n"
+        (self.directory / "proofs").mkdir()
+        (self.directory / "proofs" / "ref.lean").write_text("theorem t : True := by\n  sorry\n")
+        (self.directory / "proofs" / "c2.lean").write_text(proof)
+        sol = {
+            "kind": "derivation",
+            "proof_id": "c2",
+            "candidate_id": "c2",
+            "actor_id": "sol",
+            "session_id": "sol-session",
+            "parents": ["ref"],
+            "event_id": "der-sol",
+            "data": {"relation": "exact", "operation": {"type": "edited_from"}, "inputs": [{"role": "parent", "id": "ref"}]},
+        }
+        worker = {
+            "kind": "derivation",
+            "proof_id": "c2",
+            "candidate_id": "c2",
+            "actor_id": "worker-a",
+            "session_id": "worker-session",
+            "parents": ["ref"],
+            "event_id": "der-worker",
+            "data": {"relation": "exact", "operation": {"type": "filled_from"}, "inputs": [{"role": "parent", "id": "ref"}]},
+        }
+        self._write(
+            [
+                _request("r1", 1000),
+                *_call("r1", "call-sol", 2000, 4000, delivered="sol body", untrimmed="sol body\nfull"),
+                _response("r1", 4500),
+                _request("r2", 5000),
+                *_call("r2", "call-worker", 6000, 8000, delivered="worker body", untrimmed="worker body\nfull"),
+                _response("r2", 8500),
+            ],
+            [
+                {"kind": "init", "theorem": "T", "ts": 0.1, "versions": ["v1"]},
+                _candidate(1.0, "ref", "reference"),
+                {
+                    "kind": "candidate",
+                    "ts": 1.5,
+                    "candidate_id": "ghost",
+                    "origin": "model",
+                    "operation_id": "uncommitted-op",
+                    "parents": ["ref"],
+                },
+                _candidate(2.5, "c2", "model", parents=["ref"], tool_call_id="call-sol"),
+                {
+                    "kind": "attempt",
+                    "proof_id": "c2",
+                    "operation_id": "uncommitted-op",
+                    "actor_id": "ghost",
+                    "session_id": "ghost-session",
+                    "event_id": "try-ghost",
+                    "tool_call_id": "call-ghost",
+                    "data": {"relation": "exact"},
+                },
+                {
+                    "kind": "attempt",
+                    "proof_id": "c2",
+                    "candidate_id": "c2",
+                    "actor_id": "sol",
+                    "session_id": "sol-session",
+                    "event_id": "try-sol",
+                    "tool_call_id": "call-sol",
+                    "data": {"relation": "exact"},
+                },
+                sol,
+                {
+                    "kind": "attempt",
+                    "proof_id": "c2",
+                    "candidate_id": "c2",
+                    "actor_id": "worker-a",
+                    "session_id": "worker-session",
+                    "event_id": "try-worker",
+                    "tool_call_id": "call-worker",
+                    "data": {"relation": "exact"},
+                },
+                worker,
+                {"kind": "job", "job_id": "j-cancel", "status": "cancelled", "actor_id": "worker-a", "candidate_id": "c2"},
+                {"kind": "job", "job_id": "j-fail", "status": "failed", "actor_id": "sol", "candidate_id": "c2"},
+                {"kind": "job", "job_id": "j-dup", "status": "duplicate", "actor_id": "worker-a", "candidate_id": "c2"},
+                {
+                    "kind": "scratch",
+                    "experiment_id": "ex1",
+                    "phase": "input",
+                    "actor_id": "sol",
+                    "proof_id": "c2",
+                    "code": "exact scratch\n",
+                },
+            ],
+        )
+        (self.directory / "cost-ledger.jsonl").write_text(
+            '{"kind":"settle","id":"req-1","request_id":"req-1","usd":0.2,"actor_id":"sol","job_id":"j-fail"}\n'
+            '{"kind":"settle","id":"req-1","request_id":"req-1","usd":0.2,"actor_id":"sol","job_id":"j-fail","candidate_ids":["c2","c2b"]}\n'
+            '{"kind":"settle","request_id":"req-unknown","usd":9,"usage_known":false}\n'
+            '{"kind":"settle","usd":1\n'
+        )
+        found = viewer_data.node_calls(self.directory, "n2")
+        self.assertEqual(sorted(item["actor_id"] for item in found["attempts"]), ["sol", "worker-a"])
+        self.assertEqual(
+            sorted(item["actor_id"] for item in found["derivations"] if item.get("source") == "derivation"),
+            ["sol", "worker-a"],
+        )
+        self.assertEqual(found["call"]["delivered"], "sol body")
+        self.assertEqual(found["call"]["untrimmed"], "sol body\nfull")
+        self.assertEqual(found["artifact"]["bytes"], proof)
+        stored = {item["line"] for item in found["records"]}
+        ledger = (self.directory / "ledger.jsonl").read_text()
+        self.assertIn(json.dumps(sol) + "\n", stored)
+        self.assertIn(json.dumps(worker) + "\n", stored)
+        self.assertTrue(all(line in ledger for line in stored))
+        self.assertEqual([item["actor_id"] for item in found["attempts"]], ["sol", "worker-a"])
+        self.assertFalse(any("ghost" in line for line in stored))
+        self.assertEqual(
+            [(item["tool_call_id"], item["call"]["delivered"]) for item in found["call_refs"]],
+            [("call-sol", "sol body"), ("call-worker", "worker body")],
+        )
+        self.assertIn("job_id", found["call_refs"][0])
+        self.assertIn("request_id", found["call_refs"][0])
+        self.assertIn("evaluation_id", found["call_refs"][0])
+        with patch("arena.campaign.run_dir", return_value=self.directory), patch(
+            "arena.cli.serve.run_dir", return_value=self.directory
+        ):
+            payload = server.graph_payload("served")
+        proofs = [node for node in payload["nodes"] if node["id"] == "c2"]
+        self.assertEqual(len(proofs), 1)
+        self.assertEqual(sorted(item["actor_id"] for item in proofs[0]["attempts"]), ["sol", "worker-a"])
+        self.assertEqual(
+            [row["status"] for row in payload["job_log"]],
+            ["cancelled", "failed", "duplicate"],
+        )
+        self.assertEqual(payload["experiments"][0]["experiment_id"], "ex1")
+        self.assertEqual(payload["spend"]["total"], "0.2")
+        self.assertEqual(payload["spend"]["by_actor"], {"sol": "0.2"})
+        self.assertEqual(payload["spend"]["by_job"], {"j-fail": "0.2"})
+        self.assertEqual(payload["spend"]["accounting"], "unknown")
+        self.assertEqual(payload["cost"]["spent_usd"], 0.2)
+        self.assertEqual(payload["cost"]["authority"], payload["spend"]["authority"])
 
     def test_v7_edge_rebuilds_the_filing_line_and_holes(self):
         proof = "theorem t : True := by\n  have h : True := sorry\n"

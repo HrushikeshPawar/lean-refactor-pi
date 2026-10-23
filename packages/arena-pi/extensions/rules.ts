@@ -1,4 +1,4 @@
-import { finishAllowed, spendFooter } from "./spend.ts";
+import { spendFooter } from "./spend.ts";
 import { render } from "./text.ts";
 
 type Metrics = { tokens?: number | null; heartbeats?: number | null } | null | undefined;
@@ -20,13 +20,11 @@ async function skeletonFact(skeleton: Skeleton): Promise<string | undefined> {
   return render("messages/continuation.skeleton", { attempts: String(attempts), top_step: step, top_share_pct: String(Math.round(share)) });
 }
 
-// Spend, then the skeleton fact when present, then the finish line once finish is offered. The finish line is
-// stated only by the same predicate that offers the finish rule.
+// Spend, then the skeleton fact when present.
 export async function continuationFacts(spentUsd: number, limitUsd: number, _baseline: Metrics, _best: Metrics, skeleton?: Skeleton) {
   const facts = [await spendFooter(spentUsd, limitUsd)];
   const fact = await skeletonFact(skeleton);
   if (fact) facts.push(fact);
-  if (finishAllowed(spentUsd, limitUsd).allowed) facts.push(await render("messages/continuation.finish_available"));
   return facts.join("\n");
 }
 

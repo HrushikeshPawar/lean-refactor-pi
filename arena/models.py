@@ -7,8 +7,10 @@ provider read: the models, and the providers the extension registers with Pi.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+from decimal import Decimal, InvalidOperation
 from functools import cache
 from pathlib import Path
 
@@ -121,6 +123,8 @@ def validate(config: dict) -> dict:
             raise ModelConfigError(f"models.yaml: missing {key}")
     _number("", "provider_timeout_ms", config["provider_timeout_ms"], integer=True)
     _number("", "outage_limit_ms", config["outage_limit_ms"], integer=True)
+    if "stream_idle_s" in config:
+        _number("", "stream_idle_s", config["stream_idle_s"])
     retry = config["retry"]
     if not isinstance(retry, dict):
         raise ModelConfigError("models.yaml: retry must be a map")
@@ -287,3 +291,219 @@ def catalog_price_problems(config: dict | None = None, home: Path | None = None)
         if any(actual[key] is None or abs(actual[key] - value) > 1e-9 for key, value in expected.items()):
             problems.append(f"{name}: models.yaml price {expected} but Pi charges {actual}")
     return problems
+
+
+# Offline readiness only. These figures describe the shared stop; this module never charges or edits caps.
+SPEND_STOP_USD = Decimal("2.50")
+HEADROOM_USD = Decimal("0.50")
+# One Sol session and four active DeepSeek sessions (the worker slots). Not a measured concurrency; Lean checks beyond
+# the session's Lean workers queue (lean_session.MODEL_QUEUE_TIMEOUT).
+_SESSION_CONCURRENCY = {"gpt-6.1-sol": 1, "deepseek-v4.1-flash": 4}
+_SOL = "gpt-6.1-sol"
+_DEEPSEEK = "deepseek-v4.1-flash"
+_MILLION = Decimal(1_000_000)
+
+
+def _money(tokens: int, per_million) -> Decimal:
+    return Decimal(tokens) * Decimal(str(per_million)) / _MILLION
+
+
+def _usd(amount: Decimal | None) -> str | None:
+    return None if amount is None else f"{amount:.4f}"
+
+
+def _cap_rate(value) -> Decimal | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        rate = Decimal(str(value))
+    except InvalidOperation:
+        return None
+    return rate if rate.is_finite() and rate >= 0 else None
+
+
+def _cap_output_cost(model: dict) -> Decimal | None:
+    price = model.get("price") or {}
+    tokens = model.get("request_output_tokens")
+    rate = _cap_rate(price.get("output")) if isinstance(price, dict) else None
+    if not isinstance(tokens, int) or isinstance(tokens, bool) or tokens <= 0 or rate is None:
+        return None
+    return _money(tokens, rate)
+
+
+def _cap_fits_context(model: dict, input_tokens: int) -> bool:
+    limits = (model.get("context_window"), model.get("request_output_tokens"), model.get("max_tokens"))
+    if any(not isinstance(value, int) or isinstance(value, bool) or value <= 0 for value in limits):
+        return False
+    context, output, maximum = limits
+    return output <= maximum and input_tokens + output <= context
+
+
+def _cap_catalog_evidence(config: dict, home: Path) -> tuple[str, dict]:
+    catalogs = {}
+    evidence = {}
+    for name, model in config.get("models", {}).items():
+        if not isinstance(model, dict):
+            continue
+        provider_name = model.get("provider", config.get("provider"))
+        if provider_name in (config.get("providers") or {}):
+            evidence[name] = {"status": "configured_registration"}
+            continue
+        if provider_name not in catalogs:
+            catalogs[provider_name] = pi_catalog(provider_name, home)
+        catalog = catalogs[provider_name]
+        row = catalog.get(model.get("id", name))
+        actual = row.get("cost") or {} if row is not None else {}
+        expected = _camelize(model.get("price") or {})
+        if row is None:
+            status = "missing_model" if catalog else "missing_catalog"
+        else:
+            status = (
+                "matches"
+                if expected
+                and all(
+                    _cap_rate(actual.get(key)) is not None and _cap_rate(actual.get(key)) == _cap_rate(value)
+                    for key, value in expected.items()
+                )
+                else "differs"
+            )
+        evidence[name] = {
+            "status": status,
+            "provider": provider_name,
+            "model_id": model.get("id", name),
+            "cost": actual or None,
+            "context_window": row.get("contextWindow") if row is not None else None,
+            "max_tokens": row.get("maxTokens") if row is not None else None,
+        }
+    compared = [row["status"] for row in evidence.values() if row["status"] != "configured_registration"]
+    parity = (
+        "differs"
+        if "differs" in compared
+        else "matches"
+        if compared and all(status == "matches" for status in compared)
+        else "not_compared"
+    )
+    return parity, evidence
+
+
+def cap_exposure_report(config: dict, *, home: Path | None = None) -> dict:
+    """Offline cap-exposure report. Does not reserve money, edit caps, or call a provider.
+
+    Illustrations use configured prices and the payload output ceiling. They are not an audited
+    worst case and they are not actual billed usage. This implementation returns `exposed` or
+    `not_established`; `assured` remains reserved for a complete audited bound. Exposure requires
+    an illustration that fits the configured context and output limits. Missing limits are not zero.
+    """
+    models_cfg = config.get("models") or {}
+    sol = models_cfg.get(_SOL) or {}
+    deepseek = models_cfg.get(_DEEPSEEK) or {}
+    unknowns = [
+        "The illustrations omit retries, compaction, cache writes, and reasoning tokens beyond the payload output ceiling.",
+        "This report does not read actual billed usage.",
+        "In-flight requests can settle after the $2.50 stop; no reservation closes that overshoot.",
+    ]
+    identity_source = {
+        "configuration": config,
+        "spend_stop_usd": str(SPEND_STOP_USD),
+        "headroom_usd": str(HEADROOM_USD),
+        "session_concurrency": _SESSION_CONCURRENCY,
+    }
+    identity = hashlib.sha256(json.dumps(identity_source, sort_keys=True, default=str).encode()).hexdigest()
+
+    sol_output = _cap_output_cost(sol)
+    deepseek_output = _cap_output_cost(deepseek)
+    illustrations = {
+        "sol_output_usd": _usd(sol_output),
+        "deepseek_output_usd": _usd(deepseek_output),
+        "three_model_outputs_usd": _usd(
+            None if sol_output is None or deepseek_output is None else sol_output + 2 * deepseek_output
+        ),
+        "sol_100k_uncached_input_plus_output_usd": None,
+    }
+    sol_price = sol.get("price") if isinstance(sol.get("price"), dict) else {}
+    input_rate = _cap_rate(sol_price.get("input"))
+    witness = None
+    if sol_output is not None and input_rate is not None:
+        witness = _money(100_000, input_rate) + sol_output
+        illustrations["sol_100k_uncached_input_plus_output_usd"] = _usd(witness)
+    else:
+        unknowns.append(
+            "gpt-6.1-sol has no finite effective output limit or uncached input price, so its exposure is not established."
+        )
+
+    fits = {
+        "sol_output_usd": _cap_fits_context(sol, 0),
+        "deepseek_output_usd": _cap_fits_context(deepseek, 0),
+        "three_model_outputs_usd": _cap_fits_context(sol, 0) and _cap_fits_context(deepseek, 0),
+        "sol_100k_uncached_input_plus_output_usd": _cap_fits_context(sol, 100_000),
+    }
+    costs = {
+        "sol_output_usd": sol_output,
+        "deepseek_output_usd": deepseek_output,
+        "three_model_outputs_usd": None
+        if sol_output is None or deepseek_output is None
+        else sol_output + 2 * deepseek_output,
+        "sol_100k_uncached_input_plus_output_usd": witness,
+    }
+    witnesses = [(amount, name) for name, amount in costs.items() if amount is not None and fits[name]]
+    largest = max(witnesses, default=None)
+    status = "exposed" if largest is not None and largest[0] > HEADROOM_USD else "not_established"
+    if not fits["sol_100k_uncached_input_plus_output_usd"]:
+        unknowns.append("The 100K Sol illustration is not established to fit the configured context/output limits.")
+    if status == "not_established":
+        unknowns.append("No feasible illustration proves exposure; the complete worst-case bound remains unaudited.")
+
+    catalog_parity, catalog_evidence = _cap_catalog_evidence(config, home or Path.home())
+    if catalog_parity != "matches":
+        unknowns.append("Configured prices alone do not establish provider/catalog parity.")
+
+    assessed = []
+    for name, model in models_cfg.items():
+        if not isinstance(model, dict):
+            continue
+        price = model.get("price") if isinstance(model.get("price"), dict) else None
+        provider_name = model.get("provider", config.get("provider"))
+        registered = provider_name in (config.get("providers") or {})
+        assessed.append(
+            {
+                "name": name,
+                "provider": provider_name,
+                "price_source": "catalog_matches_configured"
+                if not registered and catalog_evidence[name]["status"] == "matches"
+                else "configured",
+                "price": price,
+                "context_window": model.get("context_window"),
+                "max_tokens": model.get("max_tokens"),
+                "request_output_tokens": model.get("request_output_tokens"),
+                "compaction": model.get("compaction"),
+                "high_price": model.get("high_price"),
+                "high_context_threshold": model.get("high_context_threshold"),
+                "reasoning": model.get("reasoning"),
+                "output_cost_usd": _usd(_cap_output_cost(model)),
+                "sessions": _SESSION_CONCURRENCY.get(name),
+            }
+        )
+
+    return {
+        "status": status,
+        "owner_go_nogo_required": True,
+        "headroom_usd": "0.50",
+        "spend_stop_usd": "2.50",
+        "illustrations": illustrations,
+        "illustration_fits_configured_limits": fits,
+        "exposure_witness": {"component": largest[1], "usd": format(largest[0], "f")} if status == "exposed" else None,
+        "worst_case_bound_usd": None,
+        "actual_billed_usd": None,
+        "catalog_parity": catalog_parity,
+        "catalog_evidence": catalog_evidence,
+        "catalog_identity": hashlib.sha256(
+            json.dumps(catalog_evidence, sort_keys=True, default=str).encode()
+        ).hexdigest(),
+        "session_concurrency": dict(_SESSION_CONCURRENCY),
+        "concurrency_source": "v8_decision_13_assumption",
+        "retry": config.get("retry"),
+        "models": assessed,
+        "configuration_identity": identity,
+        "unknowns": unknowns,
+        "mutates_spend_policy": False,
+    }

@@ -1,0 +1,437 @@
+{
+  "generated_date": "2026-10-18",
+  "mode": "current cache-only baseline",
+  "lean_execution": false,
+  "provider_calls": false,
+  "packets": [
+    {
+      "theorem": "Cslib.SKI.parallelReduction_diamond",
+      "review": "01-ski.md",
+      "structured": "01-ski.json",
+      "task_packet": "01-ski.packet.txt",
+      "task_chars": 19426,
+      "task_bytes": 21561,
+      "task_sha256": "3115d44d931dbda15e88a20693e66f03cf3b6a6e8a67691ed6a322bae5e10aa3",
+      "review_bytes": 27093,
+      "review_sha256": "012d12797a91d54425fc085d31db148a2f083c650547ee944b5c86bec62d78d0",
+      "parts": [
+        {
+          "part": "system prompt",
+          "chars": 103,
+          "words": 18,
+          "sha256": "ade365ef7cce73aa32a182510621f9e697857f44aba7d3f9a748da333e08d96e"
+        },
+        {
+          "part": "skill",
+          "chars": 1655,
+          "words": 279,
+          "sha256": "8f332a1b1b368a0a4588f25b8df1b1568689bb8f76c6e187c2ba0afd3e62f326"
+        },
+        {
+          "part": "tools/compile",
+          "chars": 1016,
+          "words": 166,
+          "sha256": "334c7dd490697edf6f9aeb2cfff4c4bb2f76617d72fa8a922c4c7c07274fa517"
+        },
+        {
+          "part": "tools/goal",
+          "chars": 428,
+          "words": 73,
+          "sha256": "a9645ca1dc1126d9e7a69723b6c0ccb5cdd5b8eb5a691d4b8bbe26e636fff599"
+        },
+        {
+          "part": "tools/search",
+          "chars": 313,
+          "words": 43,
+          "sha256": "fadb190cc5aa8cd755489caee8336f9ae55ac2acb3762e2d0a6b30d8e8b28a25"
+        },
+        {
+          "part": "tools/read",
+          "chars": 472,
+          "words": 70,
+          "sha256": "4b9a0b5ce2e3248e6c06b02f5e1ba47808cb88d33a1f378921a67ed6a23f9090"
+        },
+        {
+          "part": "tools/finish",
+          "chars": 115,
+          "words": 22,
+          "sha256": "4f001c78b3a6aab848448829835a1fdb556f1071b46c5f33906973f699877937"
+        },
+        {
+          "part": "tools/scratch",
+          "chars": 390,
+          "words": 63,
+          "sha256": "c1204b3311149c446572460dc7d115481fb19bb56ef46c589377e153420eb77f"
+        },
+        {
+          "part": "Task",
+          "chars": 154,
+          "words": 14,
+          "sha256": "43702aabd981f0963f6b5976f3cf3360b16340acfc4b886c6f8199890cf9131f"
+        },
+        {
+          "part": "Scoring",
+          "chars": 853,
+          "words": 144,
+          "sha256": "5b9eef7682af06b1681ca9ea8f1de08e74e36f0f8c4509fd1759e4c91f49442a"
+        },
+        {
+          "part": "Pinned environment",
+          "chars": 445,
+          "words": 36,
+          "sha256": "7f299bfa305bd6fdcfb4d359550c9c96cfc7f0a28c44684a9831bad71f6f6a32"
+        },
+        {
+          "part": "Scope at the theorem (namespace, open, variable, universe in effect before the statement)",
+          "chars": 132,
+          "words": 19,
+          "sha256": "0d960a914cb62e2a6ec45eaa61c9c435d56cb62e753fea61f769e40cf6628aad"
+        },
+        {
+          "part": "Original proof and step prices (407 tokens)",
+          "chars": 2770,
+          "words": 543,
+          "sha256": "ba3a19ebc1f77b04c8e3083ca8de58084b5f5f73fa20c380e9e1d427e22e0e2e"
+        },
+        {
+          "part": "Original proof heartbeats by line",
+          "chars": 1061,
+          "words": 252,
+          "sha256": "cd57851df456a2d505a9201e8c934851febc635c3f169e19e427bca656caedca"
+        },
+        {
+          "part": "Goals before original steps",
+          "chars": 1616,
+          "words": 411,
+          "sha256": "7e2718f10428fdc4671a12e40dae669b23e6a7e5067b68c8fda22269c4d1063d"
+        },
+        {
+          "part": "Imported declarations (ranked)",
+          "chars": 7027,
+          "words": 1398,
+          "sha256": "1ca4a43e451f96031e00c420a8e7be0b4ab42f604e8e0d5a30ef00c1fdb95d02"
+        },
+        {
+          "part": "Definitions of project types and predicates in the statement",
+          "chars": 831,
+          "words": 168,
+          "sha256": "2fa401b96186345253cb0004ed27c3861019fa91a1cd1146f6bb54054cc0f7bb"
+        },
+        {
+          "part": "Source-named declarations",
+          "chars": 1283,
+          "words": 197,
+          "sha256": "d577b49121f0322f88285a17e1ddc9e751f7c642639fda3f68d2dc1a22fb014d"
+        },
+        {
+          "part": "Local variables",
+          "chars": 2548,
+          "words": 487,
+          "sha256": "0bd0a82bcbc76011dba676e5988e1dd243862a4b5f203bffeb5caa893c64e2b3"
+        },
+        {
+          "part": "Earlier declarations from this file (ranked)",
+          "chars": 683,
+          "words": 139,
+          "sha256": "9ea3aad1b1a1c7435b871f969e065b3264f4fd674128c1f87d93c39f6ae9fbcc"
+        }
+      ],
+      "caches": [
+        {
+          "path": "runs/cache/context/Cslib.SKI.parallelReduction_diamond-3aa9d4416c18-fd6682153eeb.json",
+          "sha256": "366cb6aa4ccf671ecd19251e41e7cc5d138639446ab03486a37a513eaa89f9e4"
+        },
+        {
+          "path": "runs/cache/profile/Cslib.SKI.parallelReduction_diamond-3aa9d4416c18-8bde78c8869f.json",
+          "sha256": "f17a1541e95d4f8dc4bbac4073f073e845da9f36060d8a5f6aaec1ed18553001"
+        }
+      ]
+    },
+    {
+      "theorem": "Core.InitsUpdatesComm",
+      "review": "02-core.md",
+      "structured": "02-core.json",
+      "task_packet": "02-core.packet.txt",
+      "task_chars": 34608,
+      "task_bytes": 36362,
+      "task_sha256": "8753dbec5f17803aaba14180ae2f810d5a982002a0f9eaddfd0d4f0836b58a70",
+      "review_bytes": 41897,
+      "review_sha256": "44e45a7f82f130ed56e8fd6528a2d59bb83f7536811d42b2ddc6774b574f0f95",
+      "parts": [
+        {
+          "part": "system prompt",
+          "chars": 103,
+          "words": 18,
+          "sha256": "ade365ef7cce73aa32a182510621f9e697857f44aba7d3f9a748da333e08d96e"
+        },
+        {
+          "part": "skill",
+          "chars": 1655,
+          "words": 279,
+          "sha256": "8f332a1b1b368a0a4588f25b8df1b1568689bb8f76c6e187c2ba0afd3e62f326"
+        },
+        {
+          "part": "tools/compile",
+          "chars": 1016,
+          "words": 166,
+          "sha256": "334c7dd490697edf6f9aeb2cfff4c4bb2f76617d72fa8a922c4c7c07274fa517"
+        },
+        {
+          "part": "tools/goal",
+          "chars": 428,
+          "words": 73,
+          "sha256": "a9645ca1dc1126d9e7a69723b6c0ccb5cdd5b8eb5a691d4b8bbe26e636fff599"
+        },
+        {
+          "part": "tools/search",
+          "chars": 313,
+          "words": 43,
+          "sha256": "fadb190cc5aa8cd755489caee8336f9ae55ac2acb3762e2d0a6b30d8e8b28a25"
+        },
+        {
+          "part": "tools/read",
+          "chars": 472,
+          "words": 70,
+          "sha256": "4b9a0b5ce2e3248e6c06b02f5e1ba47808cb88d33a1f378921a67ed6a23f9090"
+        },
+        {
+          "part": "tools/finish",
+          "chars": 115,
+          "words": 22,
+          "sha256": "4f001c78b3a6aab848448829835a1fdb556f1071b46c5f33906973f699877937"
+        },
+        {
+          "part": "tools/scratch",
+          "chars": 390,
+          "words": 63,
+          "sha256": "c1204b3311149c446572460dc7d115481fb19bb56ef46c589377e153420eb77f"
+        },
+        {
+          "part": "Task",
+          "chars": 363,
+          "words": 63,
+          "sha256": "c569033b9cbd058e7deeb9aae1695eafd2242a63d4b9bfdc5af95e9f83795704"
+        },
+        {
+          "part": "Scoring",
+          "chars": 855,
+          "words": 144,
+          "sha256": "745f66fdaa3c47025a957f8f4e31ce6772a7fe2b4552b72ec9dd43978ba1d05a"
+        },
+        {
+          "part": "Pinned environment",
+          "chars": 890,
+          "words": 64,
+          "sha256": "0342eb548c10053be55c1bb4d794be9942c6559cdc68e36cb91e752e1e39ed04"
+        },
+        {
+          "part": "Scope at the theorem (namespace, open, variable, universe in effect before the statement)",
+          "chars": 120,
+          "words": 17,
+          "sha256": "7284ebcd70f8325296caa508761bc2627c419c4f3cdd429d15cb04a3e38b6691"
+        },
+        {
+          "part": "Original proof and step prices (224 tokens)",
+          "chars": 3008,
+          "words": 477,
+          "sha256": "813093e93fd27229afd4948268a4b026eb054f926043fcb5f03f11b4e4ac8a6f"
+        },
+        {
+          "part": "Original proof heartbeats by line",
+          "chars": 867,
+          "words": 194,
+          "sha256": "cdfbd613b3f8c9d1565966d23cd924d70df61fb095af2fc3fa7895b3a0dac211"
+        },
+        {
+          "part": "Goals before original steps",
+          "chars": 3358,
+          "words": 663,
+          "sha256": "4150286353c9249819301a0b530e737a68213aca1e1f1a77e6f2550e3d82e0cc"
+        },
+        {
+          "part": "Imported declarations (ranked)",
+          "chars": 6715,
+          "words": 1125,
+          "sha256": "4d1efd2d50d4cd3bc2f6e35346d4de4c13b395a0a6b0f05132731fd1145a7dea"
+        },
+        {
+          "part": "Definitions of project types and predicates in the statement",
+          "chars": 1678,
+          "words": 283,
+          "sha256": "dbe635c48ce9e43262484fc1667a11246a732404d1b9f6bef0cf219cbb231e1d"
+        },
+        {
+          "part": "Source-named declarations",
+          "chars": 2835,
+          "words": 354,
+          "sha256": "4c8a920edf530ffeb9a74696133ad9d2c9b267ada91a0b56da9777fd51cf451f"
+        },
+        {
+          "part": "Local variables",
+          "chars": 2049,
+          "words": 347,
+          "sha256": "6a7b818bb16d1fa5471010e49574118e0c01a290591ed3fffb8c8d5e8c5a746f"
+        },
+        {
+          "part": "Earlier declarations from this file (ranked)",
+          "chars": 11847,
+          "words": 1914,
+          "sha256": "dd11a048f78e9ba4e0e81701c99e681f112ac40c8d8f04a3ab535132f59c13c2"
+        }
+      ],
+      "caches": [
+        {
+          "path": "runs/cache/context/Core.InitsUpdatesComm-384e22374e08-9d2e3fb8d259.json",
+          "sha256": "62f1e9252e4ca743adc71a29216e458032676592ba9ea6267080512088c3563c"
+        },
+        {
+          "path": "runs/cache/profile/Core.InitsUpdatesComm-384e22374e08-5aa25395b845.json",
+          "sha256": "d81e4d673656f0d6fcef5b086b7026376195f32c7dc2a8f572b848b44dd4b4ab"
+        }
+      ]
+    },
+    {
+      "theorem": "Binius.BinaryBasefold.fiberwise_dist_lt_imp_dist_lt_unique_decoding_radius",
+      "review": "03-fiberwise.md",
+      "structured": "03-fiberwise.json",
+      "task_packet": "03-fiberwise.packet.txt",
+      "task_chars": 39972,
+      "task_bytes": 42302,
+      "task_sha256": "1fcfd5a67f603d6799f325cc2f09420cbfb4d5d8bd8a4baec498ffcc462644cb",
+      "review_bytes": 47821,
+      "review_sha256": "ff7320a4c0e6e5bfb612d08b9d09473536b35b99cd4905df456c357a2492569a",
+      "parts": [
+        {
+          "part": "system prompt",
+          "chars": 103,
+          "words": 18,
+          "sha256": "ade365ef7cce73aa32a182510621f9e697857f44aba7d3f9a748da333e08d96e"
+        },
+        {
+          "part": "skill",
+          "chars": 1655,
+          "words": 279,
+          "sha256": "8f332a1b1b368a0a4588f25b8df1b1568689bb8f76c6e187c2ba0afd3e62f326"
+        },
+        {
+          "part": "tools/compile",
+          "chars": 1016,
+          "words": 166,
+          "sha256": "334c7dd490697edf6f9aeb2cfff4c4bb2f76617d72fa8a922c4c7c07274fa517"
+        },
+        {
+          "part": "tools/goal",
+          "chars": 428,
+          "words": 73,
+          "sha256": "a9645ca1dc1126d9e7a69723b6c0ccb5cdd5b8eb5a691d4b8bbe26e636fff599"
+        },
+        {
+          "part": "tools/search",
+          "chars": 313,
+          "words": 43,
+          "sha256": "fadb190cc5aa8cd755489caee8336f9ae55ac2acb3762e2d0a6b30d8e8b28a25"
+        },
+        {
+          "part": "tools/read",
+          "chars": 472,
+          "words": 70,
+          "sha256": "4b9a0b5ce2e3248e6c06b02f5e1ba47808cb88d33a1f378921a67ed6a23f9090"
+        },
+        {
+          "part": "tools/finish",
+          "chars": 115,
+          "words": 22,
+          "sha256": "4f001c78b3a6aab848448829835a1fdb556f1071b46c5f33906973f699877937"
+        },
+        {
+          "part": "tools/scratch",
+          "chars": 390,
+          "words": 63,
+          "sha256": "c1204b3311149c446572460dc7d115481fb19bb56ef46c589377e153420eb77f"
+        },
+        {
+          "part": "Task",
+          "chars": 569,
+          "words": 69,
+          "sha256": "a2418d564131a923d4356600af38c4607b0a60aa603b224f4b8ea04ab2b11587"
+        },
+        {
+          "part": "Scoring",
+          "chars": 856,
+          "words": 144,
+          "sha256": "c43657ce277d73396f3ec8da6c4cc177d7f92fb50d335b608bf3c8ae28d06158"
+        },
+        {
+          "part": "Pinned environment",
+          "chars": 846,
+          "words": 51,
+          "sha256": "ea807d2d91b920605bbd783bd1630280a79225bd351f8e3a82a52b44ac663622"
+        },
+        {
+          "part": "Scope at the theorem (namespace, open, variable, universe in effect before the statement)",
+          "chars": 818,
+          "words": 126,
+          "sha256": "81954983e7d9191d1307dec040bbd17d0d8039a8420aa4b85725170550ff2aeb"
+        },
+        {
+          "part": "Original proof and step prices (1463 tokens)",
+          "chars": 13607,
+          "words": 2264,
+          "sha256": "5e9e8a5738af76e763c7920ab8dc97d568226d98ace99c3ce13f6deec94d00a7"
+        },
+        {
+          "part": "Original proof heartbeats by line",
+          "chars": 1357,
+          "words": 273,
+          "sha256": "f3fc4595781e535fdd7513f7747cbffabb95df8837e0202b7a10a96ae2e9d459"
+        },
+        {
+          "part": "Goals before original steps",
+          "chars": 227,
+          "words": 28,
+          "sha256": "68453d483fc7b2124c0b403dbbe1d2110670f85ab2f64fd147f1f5d69fba25c6"
+        },
+        {
+          "part": "Imported declarations (ranked)",
+          "chars": 6670,
+          "words": 1221,
+          "sha256": "e7fff14c6650363543aecb49f6dcc7fd5c5fe54985115f3fb50de81512994258"
+        },
+        {
+          "part": "Definitions of project types and predicates in the statement",
+          "chars": 5876,
+          "words": 893,
+          "sha256": "287f85cd09f7f3bca9ec69bbd0a83a4f282785138a6412f945d964c768233b8d"
+        },
+        {
+          "part": "Source-named declarations",
+          "chars": 7117,
+          "words": 767,
+          "sha256": "ca9ed00f1a1d4ded61ae27b7d87211d2b41637e0199bcb483c3ecf472c596a53"
+        },
+        {
+          "part": "Elaborated proof dependencies",
+          "chars": 1381,
+          "words": 222,
+          "sha256": "708a7a600084e2770a48c46395de1fc497790a2dae84c6bf550bdb906f4a4140"
+        },
+        {
+          "part": "Local variables",
+          "chars": 625,
+          "words": 90,
+          "sha256": "46be31650c58d17ef61a68a3bdd12679991bb0110be68c5dd7f49f65c95dce12"
+        }
+      ],
+      "caches": [
+        {
+          "path": "runs/cache/context/Binius.BinaryBasefold.fiberwise_dist_lt_imp_dist_lt_unique_decoding_radius-c1712f6c496d-a952af1a0751.json",
+          "sha256": "4f1219949ba8fed2e85e60d2a06fe99269aa335e55669dc47d86c26453b3419f"
+        },
+        {
+          "path": "runs/cache/profile/Binius.BinaryBasefold.fiberwise_dist_lt_imp_dist_lt_unique_decoding_radius-c1712f6c496d-b85d09ed9a6e.json",
+          "sha256": "52dc89d9cfe6419990a1646e0a2a12668d829e7ef1818677c851def010c8b598"
+        }
+      ]
+    }
+  ]
+}

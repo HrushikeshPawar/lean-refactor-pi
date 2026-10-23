@@ -62,7 +62,7 @@ class ParseTests(unittest.TestCase):
             ],
         }
         self.assertIn("decl:A.foo", "\n".join(context._used_section(inventory)))
-        self.assertIn("decl:A.helper", "\n".join(context._dependency_section(inventory)))
+        self.assertIn("decl:A.helper", "\n".join(context._used_section(inventory)))
 
     def test_records_are_grouped_and_lines_mapped_past_the_instrumentation(self):
         output = "\n".join(
@@ -159,7 +159,8 @@ class ParseTests(unittest.TestCase):
         parsed = context.parse_context(output, 0, 1, None)
         self.assertEqual(parsed["source"][0]["origin"], "unknown")
         text = "\n".join(context._used_section(parsed))
-        self.assertIn("A.foo [theorem] S:- P:- U:4", text)
+        self.assertIn("decl:A.foo", text)
+        self.assertIn("unknown-role proof lines 4", text)
 
     def test_dependency_tags_split_helpers_from_glue_and_counts_agree(self):
         def dep(name, tag, module="Other"):
@@ -260,6 +261,215 @@ class ParseTests(unittest.TestCase):
                 "ARENA_CTX " + json.dumps({"kind": "goal", "line": 1, "endLine": 1, "text": ""}), 0, 1
             )["complete"]
         )
+
+    def test_v8_context_retains_target_facts(self):
+        """One fixture packet keeps the conclusion, the ninth statement predicate, and truthful coordinates."""
+        from arena.engine import problem
+
+        base = problem(NAME)
+        proof = "theorem t (h : Nat := by omega) : Close := by\n  exact a\n  exact b\n  exact c\n"
+        row = {
+            **base,
+            "file_path": "",
+            "header": "public import Public.Mod\nprivate import Secret.Mod\n",
+            "statement": "theorem t (h : Nat := by omega) : Close",
+            "src": proof,
+            "proof_length": 4,
+        }
+        conclusion = "⊢ hammingClose target"
+        raw = "\n".join(
+            [
+                "ARENA_CTX "
+                + json.dumps(
+                    {
+                        "kind": "goal",
+                        "line": 101,
+                        "endLine": 101,
+                        "text": "h : "
+                        + ("H " * 500)
+                        + "\n"
+                        + conclusion
+                        + "\n\ncase other\nh : "
+                        + ("H " * 500)
+                        + "\n⊢ otherCase",
+                    }
+                ),
+                "ARENA_CTX "
+                + json.dumps(
+                    {
+                        "kind": "source",
+                        "line": 12,
+                        "column": 4,
+                        "name": "Ext.pred",
+                        "decl": "def",
+                        "module": "Other.File",
+                        "tag": "helper",
+                        "sig": "Ext.pred : Prop",
+                    }
+                ),
+                "ARENA_CTX " + json.dumps({"kind": "end"}),
+            ]
+        )
+        parsed = context.parse_context(raw, shift=0, start_line=100, proof_boundary=(2, 0))
+        external = parsed["source"][0]
+        self.assertEqual(external["origin"], "external")
+        self.assertEqual(external["source_line"], 12)
+        self.assertNotIn("proof_line", external)
+        parsed["complete"] = True
+        parsed["target"] = [{"consts": ["Proj.hammingClose"], "core_consts": [], "concl_head": "Close"}]
+        parsed["type"] = [
+            {
+                "name": f"Aux.gen{i}",
+                "decl": "def",
+                "sig": f"Aux.gen{i} : Unit",
+                "value": "()",
+                "role": "auxiliary",
+            }
+            for i in range(8)
+        ] + [
+            {
+                "name": f"Proj.pred{i}",
+                "decl": "def",
+                "sig": f"Proj.pred{i} : Prop",
+                "value": "true",
+                "role": "statement",
+            }
+            for i in range(8)
+        ] + [
+            {
+                "name": "Proj.hammingClose",
+                "decl": "def",
+                "sig": "Proj.hammingClose : Prop",
+                "value": "true",
+                "role": "statement",
+            }
+        ]
+        parsed["earlier"] = [
+            {
+                "name": "Proj.reuseLemma",
+                "decl": "theorem",
+                "line": 90,
+                "sig": "Proj.reuseLemma : Close",
+                "consts": ["Proj.hammingClose"],
+                "core_consts": [],
+                "concl_head": "Proj.hammingClose",
+                "lhs_head": "",
+                "rhs_head": "",
+                "rel": "",
+                "uses": [],
+            }
+        ]
+        parsed["local"] = [
+            {
+                "name": f"noise{i}",
+                "type": "Unit " * 40,
+                "scope": "theorem proof context",
+                "proof_line": 2,
+            }
+            for i in range(220)
+        ]
+        profile = {"ok": True, "measured_total": 1, "profiled_total": 1, "unattributed": 0, "line_profile": []}
+        with (
+            patch.object(context, "problem", lambda _name: row),
+            patch.object(context, "cached_context", return_value=parsed),
+            patch.object(context, "reference_profile", return_value=profile),
+        ):
+            packet = context.render_packet(NAME, cache_only=True)
+        self.assertIn(conclusion, packet)
+        self.assertIn("⊢ otherCase", packet)
+        self.assertIn("case other", packet)
+        self.assertIn("decl:Proj.hammingClose", packet)
+        self.assertIn("public import Public.Mod", packet)
+        self.assertNotIn("private import", packet)
+        self.assertIn("original file lines 12", packet)
+        self.assertNotRegex(packet, r"S:-\d+")
+        self.assertIn("decl:Proj.reuseLemma", packet)
+        self.assertNotIn("goal:s1", packet)
+        self.assertIn("goal(node=<original proof node>, line=<proof line>)", packet)
+        self.assertIn("1 captured of 3", packet)
+        self.assertIn("Extraction complete", packet)
+        self.assertLess(packet.count("(unavailable)"), 2)
+        self.assertLess(packet.count("noise"), 220)
+        coverage = context.context_coverage(parsed, proof)
+        self.assertTrue(parsed["complete"])
+        self.assertEqual(coverage["goals_captured"], 1)
+        self.assertEqual(coverage["goals_expected"], 3)
+        self.assertGreater(coverage["display_clipped"], 0)
+
+        with self.subTest("complete scoped multiline conclusions"):
+            goal = "case first\nh : Shared\n⊢ firstTarget\n  continuation one\ncase second\nh : Shared\n⊢ secondTarget\n  continuation two"
+            shown, clipped = context._show_goal(goal, 10)
+            self.assertTrue(clipped)
+            for fragment in ("case first", "case second", "firstTarget\n  continuation one", "secondTarget\n  continuation two"):
+                self.assertIn(fragment, shown)
+            single, _ = context._show_goal("h : Shared\n⊢ result", 100)
+            self.assertEqual(single.count("h : Shared"), 1)
+
+        with self.subTest("coverage includes steps beyond display cap and rejects empty states"):
+            long_proof = "theorem long : True := by\n" + "  exact trivial\n" * 45
+            steps = context.split_steps(long_proof)
+            inventory = {"complete": True, "goal": [
+                {"proof_line": step.first_line, "text": "⊢ True"} for step in steps
+            ]}
+            inventory["goal"][0]["text"] = ""
+            coverage = context.context_coverage(inventory, long_proof)
+            self.assertEqual(coverage["goals_expected"], 45)
+            self.assertEqual(coverage["goals_captured"], 44)
+            self.assertEqual(coverage["goals_omitted"], 1)
+            self.assertEqual(coverage["goals_displayed"], context.LIMITS["goals"])
+            self.assertEqual(coverage["goal_display_omitted"], 44 - context.LIMITS["goals"])
+            body = context._goal_section(inventory, long_proof)
+            title = context.template("packet/sections.titles.goals").strip()
+            fitted = context._fit_sections([(title, body)], len(context._join_sections([(title, body)])) - 25)
+            fitted_text = context._join_sections(fitted)
+            self.assertIn("44 captured of 45", fitted_text)
+            self.assertIn("Packet fitting omitted", fitted_text)
+            self.assertLess(len(fitted[0][1]), len(body))
+
+        with self.subTest("restart fitting removes whole multiline goal entries"):
+            inventory = {"complete": True, "goal": [
+                {"proof_line": step.first_line,
+                 "text": f"⊢ target{index}\n  continuation{index}"}
+                for index, step in enumerate(context.split_steps(long_proof))
+            ]}
+            body = context._goal_section(inventory, long_proof)
+            content = title + "\n" + "\n".join(body)
+            for cut in (1, 25, 70, 120, 150):
+                fitted = campaign._kickoff_within([(title, content)], len(content) - cut)
+                for index in range(context.LIMITS["goals"]):
+                    if f"⊢ target{index}\n" in fitted:
+                        self.assertIn(f"⊢ target{index}\n  continuation{index}", fitted)
+                self.assertIn("45 captured of 45", fitted)
+                self.assertIn("Packet fitting omitted", fitted)
+
+        with self.subTest("wrapper offsets preserve external lines and reject wrapper syntax"):
+            records = "\n".join("ARENA_CTX " + json.dumps({
+                "kind": "source", "name": name, "line": line, "column": 0, "decl": "def",
+                "module": "this file", "tag": "helper",
+            }) for name, line in (("earlier", 12), ("wrapper", 30), ("target", 122)))
+            mapped = context.parse_context(records, 100, 20, (2, 0), insertion_line=18)
+            earlier, wrapper, target = mapped["source"]
+            self.assertEqual(earlier["source_line"], 12)
+            self.assertEqual(earlier["origin"], "external")
+            self.assertEqual(wrapper["origin"], "unknown")
+            self.assertNotIn("source_line", wrapper)
+            self.assertNotIn("proof_line", wrapper)
+            self.assertEqual(target["proof_line"], 3)
+            self.assertEqual(target["origin"], "proof")
+            rendered = "\n".join(context._used_section(mapped))
+            self.assertIn("decl:wrapper [def] this file signature unavailable", rendered)
+            self.assertIn("original file lines 12", rendered)
+
+        with self.subTest("strict implicit binder default precedes actual proof"):
+            strict = "theorem t ⦃h : Nat := by omega⦄ : True := by trivial"
+            self.assertEqual(context._proof_boundary(strict, 1), (1, strict.rindex(":=")))
+
+        with self.subTest("legacy type cache does not silently drop the ninth target"):
+            legacy = {"type": [{key: value for key, value in item.items() if key != "role"}
+                               for item in parsed["type"]]}
+            types = "\n".join(context._types_section(legacy))
+            self.assertIn("decl:Proj.hammingClose", types)
+            self.assertIn("Unknown statement roles: 17", types)
 
 
 class RankingTests(unittest.TestCase):
@@ -450,10 +660,10 @@ class LibrarySectionTests(unittest.TestCase):
         self.assertEqual(_proof_length(head + " := fun x => x.1 -- note"), 4)  # `=>` once, comment removed
 
 
-class LocalSheddingTests(unittest.TestCase):
+class PacketSheddingTests(unittest.TestCase):
     GOALS = context.template("packet/sections.titles.goals").strip()
 
-    def parts(self, locals_=76, goals=12, library=30):
+    def parts(self, goals=12, library=30):
         return [
             ("Head", ["keep head"]),
             ("Reference proof", ["ref " + "r" * 100] * 3),
@@ -461,7 +671,6 @@ class LocalSheddingTests(unittest.TestCase):
             ("Elaborated proof dependencies", ["dep " + "d" * 100] * 3),
             ("Environment", ["env " + "e" * 100] * 3),
             (self.GOALS, [f"goal {i} " + "g" * 200 for i in range(goals)]),
-            (context.LOCAL_TITLE, ["Hdr local names"] + [f"loc{i} : " + "l" * 200 for i in range(locals_)]),
             (context.LIBRARY_TITLE, [f"lib{i} " + "b" * 200 for i in range(library)]),
         ]
 
@@ -471,27 +680,14 @@ class LocalSheddingTests(unittest.TestCase):
     def test_under_budget_packet_is_untouched(self):
         parts = self.parts()
         text = context._fit(parts, 10**7)
-        self.assertEqual(self.count(text, "loc"), 76)
         self.assertEqual(self.count(text, "lib"), 30)
         self.assertEqual(self.count(text, "goal "), 12)
 
-    def test_all_locals_are_shed_before_any_library_line(self):
+    def test_remaining_goals_shed_after_library(self):
         parts = self.parts(goals=context.GOALS_FLOOR)
-        keep = [p for p in parts if p[0] != context.LOCAL_TITLE]
-        limit = len(context._fit(keep, 10**7))
-        text = context._fit(parts, limit)
-        self.assertEqual(self.count(text, "loc"), 0)
-        self.assertEqual(self.count(text, "lib"), 30)
-        self.assertEqual(self.count(text, "goal "), context.GOALS_FLOOR)
-        for required in ("keep head", "ref ", "used ", "dep ", "env "):
-            self.assertIn(required, text)
-
-    def test_remaining_goals_shed_after_locals_and_library(self):
-        parts = self.parts(goals=context.GOALS_FLOOR)
-        keep = [p for p in parts if p[0] not in (context.LIBRARY_TITLE, context.LOCAL_TITLE)]
+        keep = [p for p in parts if p[0] != context.LIBRARY_TITLE]
         text = context._fit(parts, len(context._fit(keep, 10**7)) - 600)
         self.assertEqual(self.count(text, "lib"), 0)
-        self.assertEqual(self.count(text, "loc"), 0)
         self.assertLess(self.count(text, "goal "), context.GOALS_FLOOR)
         self.assertGreaterEqual(self.count(text, "goal "), 1)
 
@@ -536,23 +732,32 @@ class TruncationTests(unittest.TestCase):
         self.assertNotIn("entry 39 ", first)
 
 
-@slow
-@LEAN
-class FixturePacketTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.text = context.render_packet(NAME)
+def _live_packet(test):
+    def wrapped(self):
+        if type(self).text is None:
+            type(self).text = context.render_packet(NAME)
+        return test(self)
 
+    wrapped.__name__ = test.__name__
+    return slow(LEAN(wrapped))
+
+
+class FixturePacketTests(unittest.TestCase):
+    text = None
+
+    @_live_packet
     def test_statement_types_are_defined_with_constructors(self):
         self.assertIn("Core.UpdateStates.update_some", self.text)
         self.assertIn("Core.InitStates.init_some", self.text)
         self.assertIn("Imperative.SemanticStore", self.text)
 
+    @_live_packet
     def test_earlier_lemmas_and_used_constants_include_namespaced_and_library_names(self):
         self.assertIn("Core.InitStatesSomeMonotone", self.text)
         self.assertIn("List.unzip_zip", self.text)
         self.assertIn("Core.updatedStatesInit [theorem]", self.text)
 
+    @_live_packet
     def test_relevant_lemmas_are_ranked_ahead_of_nearby_unrelated_ones(self):
         ranked = [e["item"]["name"] for e in context.score_earlier(context.lean_context(NAME))]
         for name in ("Core.updatedStatesUpdate", "Core.updatedStatesDefMonotone", "Core.updatedStatesComm"):
@@ -560,12 +765,14 @@ class FixturePacketTests(unittest.TestCase):
             self.assertLess(ranked.index(name), 12, name)
         self.assertIn(context.EARLIER_TITLE, self.text)
 
+    @_live_packet
     def test_pinned_constant_index_keeps_elaborated_constructor_queryable(self):
         indexed = context.constant_index(
             context.lean_context(NAME), name="Exists.intro", kind="constructor", origin="elaborated-proof"
         )
         self.assertEqual(len(indexed), 1)
 
+    @_live_packet
     def test_cached_constant_ranges_match_one_based_source_coordinates(self):
         indexed = context.constant_index(context.lean_context(NAME), name="Core.updatedStates")
         self.assertEqual(len(indexed), 1)
@@ -573,6 +780,7 @@ class FixturePacketTests(unittest.TestCase):
         source = campaign.source_range(NAME, "decl:Core.updatedStates")
         self.assertEqual((entry["start_line"], entry["end_line"]), (source["line"], source["end_line"]))
 
+    @_live_packet
     def test_tags_classify_generated_instance_core_and_project_constants(self):
         tags = {item["name"]: item["tag"] for item in context.lean_context(NAME)["constant"]}
         self.assertTrue(all(tag == "generated" for name, tag in tags.items() if "_simp_" in name))
@@ -580,14 +788,17 @@ class FixturePacketTests(unittest.TestCase):
         self.assertEqual(tags.get("Core.updatedStatesInit"), "helper")
         self.assertNotIn("of_eq_true\n", self.text)
 
+    @_live_packet
     def test_pins_and_imports_are_stated_once(self):
         self.assertEqual(self.text.count("Available imports"), 1)
         self.assertEqual(self.text.count("Lean toolchain and source revisions"), 1)
 
+    @_live_packet
     def test_source_occurrences_can_appear_in_both_statement_and_proof(self):
         items = [item for item in context.lean_context(NAME)["source"] if item["name"] == "Core.updatedStates"]
         self.assertEqual({item["origin"] for item in items}, {"statement", "proof"})
 
+    @_live_packet
     def test_goal_steps_prices_and_exchange_rates_are_present(self):
         from arena.engine import problem, versions
         from arena.scoring import exchange_rates
@@ -600,11 +811,107 @@ class FixturePacketTests(unittest.TestCase):
         self.assertIn(str(rates["points_per_100_heartbeats"]), self.text)
         self.assertIn(str(rates["points_per_lost_version"]), self.text)
 
+    @_live_packet
     def test_packet_is_deterministic_bounded_and_strategy_free(self):
         self.assertEqual(self.text, context.render_packet(NAME))
         self.assertLessEqual(len(self.text), context.MAX_PACKET_CHARS + 2)
         for phrase in DENYLIST:
             self.assertNotIn(phrase, self.text, phrase)
+
+    def test_v8_packet_nested_hotspot_and_retrieval(self):
+        import json
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from arena.engine import problem
+        from arena.steps import split_steps
+
+        ski = "Cslib.SKI.parallelReduction_diamond"
+        fixture = json.loads(
+            (Path(__file__).parent / "fixtures" / "agent_text" / "ski-context.json").read_text()
+        )
+        try:
+            profile = context.reference_profile(ski, cache_only=True)
+        except ValueError:
+            profile = {}
+        if not profile:
+            profile = json.loads(
+                (Path(__file__).parent / "fixtures" / "agent_text" / "ski-profile.json").read_text()
+            )
+        with patch.object(context, "cached_context", return_value=fixture), patch.object(
+            context, "reference_profile", return_value=profile
+        ):
+            packet = context.render_packet(ski, cache_only=True)
+        nested = max(
+            (entry for entry in profile["entries"] if int(entry.get("depth") or 0) > 0 and entry.get("hb")),
+            key=lambda entry: int(entry["hb"]),
+        )
+        parent = next(
+            step
+            for step in split_steps(problem(ski)["src"])
+            if step.first_line <= nested["proof_line"] <= step.last_line
+        )
+        self.assertIn(f"parent {parent.id} lines {parent.first_line}-{parent.last_line}", packet)
+        from arena.evidence import _range, cost_evidence, render_cost_detail, source_span
+
+        self.assertIn(f"range {_range(nested)}", packet)
+        self.assertIn("Proof total (not a step)", packet)
+        self.assertNotIn("| total |", packet)
+        self.assertNotIn("pts_if_gone", packet)
+        self.assertNotIn("self_hb |", packet)
+        self.assertIn("not tied to any line", packet)
+        self.assertNotIn("tokens missing", packet)
+        self.assertNotIn("Self hb at range", packet)
+        self.assertIn("Full detail: read(node=n1, view=tree) proof=reference", packet)
+        self.assertIn("Not a splice target", packet)
+        self.assertIn("Inclusive costs are not summed", packet)
+        self.assertNotRegex(packet, r"source revision [0-9a-f]")
+        self.assertIn("whole-structure theorem", packet)
+        self.assertIn(str(profile["measured_total"]), packet)
+
+        proof = "  first | exact trivial | simp"
+        span = {
+            "proof_line": 1, "end_proof_line": 1, "column": 10, "end_column": 23,
+            "depth": 1, "hb": 5, "self_hb": 0, "text": "exact trivial",
+        }
+        evidence = cost_evidence(
+            proof, {"entries": [span] * 31, "version": "fixture-pin", "mode": "fixture"},
+            proof_id="p-exact", total_tokens=6,
+            published_score=None, versions=None, local_hb=5, node_label="n8",
+        )
+        self.assertEqual(source_span(proof.splitlines(), span), "exact trivial")
+        self.assertEqual(evidence["hotspots"][0]["tokens"], "2")
+        self.assertEqual(evidence["measurement"], {
+            "proof_id": "p-exact", "version": "fixture-pin", "mode": "fixture",
+        })
+        self.assertEqual(evidence["hotspots"][0]["range"], "1:10-1:23")
+        self.assertIn("tokens 2 self_hb 0 incl_hb 5", "\n".join(render_cost_detail(evidence)))
+        self.assertEqual(evidence["retrieval"], "read(node=n8, view=tree) proof=p-exact")
+        self.assertEqual(evidence["next_retrieval"], "read(node=n8, view=tree:2) proof=p-exact")
+        self.assertEqual(cost_evidence(
+            proof, None, proof_id="p", total_tokens=6, published_score=None,
+            versions=None, local_hb=5,
+        )["summary"]["local_hb"], "5")
+        from types import SimpleNamespace
+
+        from arena import tools
+
+        price = {
+            "rows": [], "total": {"tokens": 6, "heartbeats": 5},
+            "text": campaign.render_price_table(
+                {"rows": [], "total": {"tokens": 6, "heartbeats": 5}},
+                proof, {"entries": [span]}, "p-exact", "n8",
+            ),
+        }
+        with (
+            patch.object(tools, "_node", return_value=SimpleNamespace(id="n8", origin="reference")),
+            patch.object(tools, "_nodes", return_value=([], SimpleNamespace(nodes=[]))),
+            patch.object(campaign, "price_table", return_value=price),
+            patch.object(tools.reply, "attach_context", side_effect=lambda _run, result, **_kw: result),
+        ):
+            read = tools.read_tool(ski, "fixture", {"node": "n8", "view": "prices"})
+        self.assertEqual(read["items"][0]["lines"], price["text"].splitlines())
+        self.assertIn("proof p-exact", "\n".join(read["items"][0]["lines"]))
 
 
 @slow
@@ -729,8 +1036,7 @@ class ProfileSectionTests(unittest.TestCase):
     def test_lines_total_and_remainder_are_reported_with_own_name_references(self):
         body = context._profile_section(self.PROF, self.SRC, "A.foo")
         text = "\n".join(body)
-        self.assertIn("line 3 · 80 self hb · 5 tokens", text)
-        self.assertNotIn("line 4 ·", text)  # zero-cost lines are not listed
+        self.assertNotIn("self hb", text)  # self costs live in the detail view
         self.assertIn("Measured 300", text)
         self.assertIn("85 are attributed", text)
         self.assertIn("215 (71.7%)", text)
@@ -738,7 +1044,7 @@ class ProfileSectionTests(unittest.TestCase):
 
     def test_no_own_name_reference_means_no_reference_line(self):
         body = context._profile_section(self.PROF, "theorem foo : P := by\n  exact bar", "A.foo")
-        self.assertEqual(len(body), 3)
+        self.assertEqual(len(body), 1)
         self.assertNotIn("refers to its own", "\n".join(body))
 
     def test_missing_profile_gives_no_section(self):

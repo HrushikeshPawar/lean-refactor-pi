@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypedDict
 
+from arena.run_control import committed_operation_ids
 from arena.traces import expand_journal, post_hook_bytes
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -252,7 +253,7 @@ def _packet_body(run: Run, turn: int) -> str:
         return ""
     from arena.context import render_packet
 
-    return render_packet(theorem, cache_only=True)
+    return render_packet(theorem, cache_only=True, model=run.config.get("model"))
 
 
 def _nodes_body(run: Run, turn: int) -> str:
@@ -260,7 +261,9 @@ def _nodes_body(run: Run, turn: int) -> str:
 
     item = _turn(run, turn)
     history = _history_before(run, item)
-    graph = Graph.from_history(history, _proof_reader(run.directory))
+    graph = Graph.from_history(
+        history, _proof_reader(run.directory), committed_operations=committed_operation_ids(run.directory)
+    )
     ids = {node.proof_id: node.id for node in graph.nodes}
     evaluated = {event.get("candidate_id") for event in history if event.get("kind") == "evaluation"}
     lines = []
@@ -311,13 +314,20 @@ def _published_reference(theorem: object) -> tuple[int, int] | None:
         return None
 
 
+# The v7 finish tool description as the model saw it. Pi no longer offers finish; replay keeps showing it for old runs.
+_V7_FINISH_DESCRIPTION = (  # not-model-facing
+    "End the run. Returns the archive and the points left per axis. "
+    "Offered when at most {pct}% of the spend limit remains."
+)
+
+
 def _tools_body(run: Run, turn: int) -> str:
     from arena import text
 
-    names = ["compile", "goal", "search", "read"]
+    lines = [f"{name}: {text.render(f'tools/{name}.description')}" for name in ("compile", "goal", "search", "read")]
     if _finish_open(run, _turn(run, turn)):
-        names.append("finish")
-    return "\n".join(f"{name}: {text.render(f'tools/{name}.description')}" for name in names)
+        lines.append(f"finish: {_V7_FINISH_DESCRIPTION.format(pct=text.numbers()['finish_remaining_pct'])}")
+    return "\n".join(lines)
 
 
 def _safe(title: str, build: Callable[[Run, int], str]) -> Callable[[Run, int], tuple[str, str]]:

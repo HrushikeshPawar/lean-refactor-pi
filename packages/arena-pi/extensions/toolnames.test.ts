@@ -3,7 +3,7 @@ import test from "node:test";
 import { nearestToolName, normalizeToolArguments, requireToolArguments } from "./toolnames.ts";
 import { render } from "./text.ts";
 
-const registered = ["compile", "finish", "goal", "read", "search"];
+const registered = ["compile", "goal", "read", "search"];
 
 test("suggests the nearest name from the five registered tools", () => {
   assert.equal(nearestToolName("compil", registered), "compile");
@@ -26,5 +26,6 @@ test("null and empty argument calls render the empty or malformed error with val
   assert.match(missing, /arrived empty or malformed/);
   assert.match(missing, /drafts, splice, fill, merge, base, from, note, check/);
   assert.throws(() => requireToolArguments(null, missing), new RegExp(missing));
+  assert.deepEqual(requireToolArguments(null, missing, true), {});  // all-optional tools such as jobs
   assert.deepEqual(normalizeToolArguments({}, { properties: {} }), {});
 });

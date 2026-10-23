@@ -18,6 +18,7 @@ from pathlib import Path
 
 from arena.engine import (
     ROOT,
+    LeanInconclusive,
     candidate_file,
     is_standalone,
     measure_version,
@@ -57,7 +58,6 @@ LIMITS = {
         "library",
         "library_budget",
         "library_chars",
-        "local_type_chars",
     )
 }
 DEPENDENCIES_TITLE = template("packet/sections.required.dependencies").strip()
@@ -82,7 +82,14 @@ def _lean_name(name: str) -> str:
     return result
 
 
-def parse_context(output: str, shift: int, start_line: int, proof_boundary: tuple[int, int] | None = None) -> dict:
+def parse_context(
+    output: str,
+    shift: int,
+    start_line: int,
+    proof_boundary: tuple[int, int] | None = None,
+    *,
+    insertion_line: int | None = None,
+) -> dict:
     """Group the wrapper's JSON records. `shift` is the instrumentation's line count."""
     groups: dict[str, list[dict]] = {
         "goal": [],
@@ -99,6 +106,7 @@ def parse_context(output: str, shift: int, start_line: int, proof_boundary: tupl
         "library_scan": [],
     }
     complete = False
+    insertion_line = start_line if insertion_line is None else insertion_line
     for raw in _RECORD.findall(output):
         record = json.loads(raw)
         kind = record["kind"]
@@ -106,14 +114,36 @@ def parse_context(output: str, shift: int, start_line: int, proof_boundary: tupl
             complete = True
         elif kind in groups:
             groups[kind].append(record)
+    def place(item: dict, *, end: bool = False) -> str:
+        """`inside` the target span, or `external` with the original file line. Never a negative target-relative line."""
+        if insertion_line <= item["line"] < insertion_line + shift:
+            item["origin"] = "unknown"
+            item.pop("proof_line", None)
+            item.pop("source_line", None)
+            return "unknown"
+        file_line = item["line"] - (shift if item["line"] >= insertion_line + shift else 0)
+        relative = file_line - start_line + 1
+        if relative < 1:
+            item["source_line"] = file_line
+            item.pop("proof_line", None)
+            return "external"
+        item["proof_line"] = relative
+        if end and not insertion_line <= item["endLine"] < insertion_line + shift:
+            end_line = item["endLine"] - (shift if item["endLine"] >= insertion_line + shift else 0)
+            item["end_proof_line"] = end_line - start_line + 1
+        return "inside"
+
     for item in groups["goal"]:
-        item["proof_line"] = item["line"] - shift - start_line + 1
-        item["end_proof_line"] = item["endLine"] - shift - start_line + 1
+        place(item, end=True)
     for item in groups["used"]:
-        item["proof_line"] = item["line"] - shift - start_line + 1
+        place(item)
     for item in groups["source"]:
-        item["proof_line"] = item["line"] - shift - start_line + 1
-        if proof_boundary is None:
+        where = place(item)
+        if where == "external":
+            item["origin"] = "external"
+        elif where == "unknown":
+            item["origin"] = "unknown"
+        elif proof_boundary is None:
             item.setdefault("origin", "unknown")  # no top-level `:=` (e.g. equation-compiler proofs): do not guess
         else:
             item["origin"] = "proof" if (item["proof_line"], item.get("column", 0)) >= proof_boundary else "statement"
@@ -122,7 +152,8 @@ def parse_context(output: str, shift: int, start_line: int, proof_boundary: tupl
     for item in groups["constant"]:
         item["kind"] = item.pop("decl", "generated/other")
     for item in groups["local"]:
-        item["proof_line"] = item["line"] - shift - start_line + 1
+        if place(item) == "external":
+            item["origin"] = "external"
     return {"complete": complete and not groups["failure"], **groups}
 
 
@@ -174,10 +205,10 @@ def _proof_boundary(source: str, start_line: int) -> tuple[int, int] | None:
             i = len(source) if end < 0 else end + 1
         elif source[i] == '"':
             in_string, i = True, i + 1
-        elif source[i] in "([{":
+        elif source[i] in "([{⦃":
             depth += 1
             i += 1
-        elif source[i] in ")]}":
+        elif source[i] in ")]}⦄":
             depth = max(0, depth - 1)
             i += 1
         elif depth == 0 and source.startswith(":=", i):
@@ -202,11 +233,22 @@ def lean_context(name: str) -> dict:
     inserted = source.replace("@@ROOTS@@", roots).replace("@@TARGET@@", _lean_name(name))
     built = candidate_file(row, row["src"], version, commit)
     text = built["text"][: built["head"]] + inserted + built["text"][built["head"] :]
-    ran = run_lean(row, built["path"], text, timeout=CONTEXT_TIMEOUT, prefix_end=built["head"])
+    try:
+        ran = run_lean(
+            row, built["path"], text, timeout=CONTEXT_TIMEOUT, prefix_end=built["head"], request_class="opportunistic"
+        )
+    except LeanInconclusive as error:
+        return {"error": render_text("messages/errors.lean_admission", cause=error.cause, admission=error.admission)}
     if ran is None:
         return {"error": render_text("messages/errors.lean_context_timeout")}
     _returncode, output = ran
-    parsed = parse_context(output, inserted.count("\n"), built["start_line"], _proof_boundary(row["src"], 1))
+    parsed = parse_context(
+        output,
+        inserted.count("\n"),
+        built["start_line"],
+        _proof_boundary(row["src"], 1),
+        insertion_line=built["text"][: built["head"]].count("\n") + 1,
+    )
     if not parsed["complete"]:
         reason = (
             parsed["failure"][0].get("message")
@@ -332,9 +374,25 @@ def scope_lines(source: str) -> list[str]:
     return [_clip(line, LIMITS["scope_chars"]) for line in body][: LIMITS["scope"]]
 
 
+def _type_items(context: dict) -> tuple[list[dict], list[dict]]:
+    """Statement predicates first. The count limit applies only after those are kept."""
+    items = list(context.get("type", []))
+    if not any("role" in item for item in items):
+        # Older caches did not record roles: do not mistake inventory order for relevance.
+        return items, []
+    statement = [item for item in items if item.get("role") == "statement"]
+    auxiliary = [item for item in items if item.get("role") != "statement"]
+    if len(statement) >= LIMITS["types"]:
+        return statement, auxiliary
+    room = LIMITS["types"] - len(statement)
+    return statement + auxiliary[:room], auxiliary[room:]
+
+
 def _types_section(context: dict) -> list[str]:
+    chosen, omitted = _type_items(context)
     lines = []
-    for item in context.get("type", [])[: LIMITS["types"]]:
+    catalog = _catalog_names(context)
+    for item in chosen:
         if item["decl"] in ("inductive", "structure"):
             body = "\n".join(f"  | {_clip(c, LIMITS['type_chars'])}" for c in item["ctors"])
             lines.append(
@@ -342,7 +400,7 @@ def _types_section(context: dict) -> list[str]:
                     "packet/sections.fixed.type_construct",
                     name=item["name"],
                     kind=item["decl"],
-                    signature=_clip(_readable(item["sig"]), LIMITS["type_chars"]),
+                    signature="" if item["name"] in catalog else _clip(_readable(item["sig"]), LIMITS["type_chars"]),
                     body=_readable(body),
                 )
             )
@@ -351,36 +409,34 @@ def _types_section(context: dict) -> list[str]:
                 render_text(
                     "packet/sections.fixed.type_definition",
                     name=item["name"],
-                    signature=_clip(item["sig"], LIMITS["type_chars"]),
+                    kind=item["decl"],
+                    signature="" if item["name"] in catalog else _clip(item["sig"], LIMITS["type_chars"]),
                     value=_clip(item.get("value", ""), LIMITS["type_chars"]),
                 )
             )
+    if chosen or omitted:
+        lines.append(
+            render_text(
+                "packet/sections.fixed.type_coverage",
+                shown=len(chosen),
+                omitted=len(omitted),
+                unknown=sum("role" not in item for item in context.get("type", [])),
+            )
+        )
     return lines
 
 
 def _profile_section(prof: dict, src: str, name: str) -> list[str]:
-    """Per-line self heartbeats of the reference proof, the unattributed remainder, and own-name references."""
-    lines = prof.get("line_profile") or []
+    """Measured attribution coverage and own-name references; self costs stay in detail."""
     measured, attributed, remainder = prof.get("measured_total"), prof.get("profiled_total"), prof.get("unattributed")
-    if not lines or measured is None or attributed is None or remainder is None:
+    if measured is None or attributed is None or remainder is None:
         return []
-    top = sorted((x for x in lines if x["self_hb"] > 0), key=lambda x: -x["self_hb"])[: LIMITS["profile_lines"]]
-    body = [
-        render_text(
-            "packet/sections.fixed.profile_line",
-            line=x["proof_line"],
-            self_hb=x["self_hb"],
-            tokens=x["tokens"],
-            text=_clip(x["text"].strip(), 70),
-        )
-        for x in sorted(top, key=lambda x: x["proof_line"])
-    ]
+    body = []
     body.append(
         render_text(
             "packet/sections.fixed.profile_total",
             measured=measured,
             attributed=attributed,
-            shown=len(top),
             remainder=remainder,
             share=round(100 * remainder / measured, 1) if measured else 0,
         )
@@ -393,20 +449,131 @@ def _profile_section(prof: dict, src: str, name: str) -> list[str]:
     return body
 
 
-def _goal_section(context: dict, proof: str) -> list[str]:
-    lines = []
-    goals = {item["proof_line"]: item for item in context.get("goal", [])}
-    for step in split_steps(proof)[: LIMITS["goals"]]:
+def _goal_blocks(text: str) -> list[tuple[str, list[str], str]]:
+    """Keep each case's complete conclusion, including its indented continuation."""
+    blocks: list[tuple[str, list[str], str]] = []
+    case = ""
+    hypotheses: list[str] = []
+    conclusion: list[str] = []
+
+    def finish() -> None:
+        if conclusion:
+            blocks.append((case, list(hypotheses), "\n".join(conclusion)))
+
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("case ") and "⊢" not in line:
+            finish()
+            case, hypotheses, conclusion = line, [], []
+        elif "⊢" in line:
+            if conclusion:
+                # Unlabelled multiple goals are separated by a new turnstile.
+                finish()
+                case, hypotheses, conclusion = "", [], []
+            before, _, after = line.partition("⊢")
+            if before.strip():
+                hypotheses.append(before.strip())
+            conclusion = ["⊢ " + after.strip()]
+        elif conclusion:
+            if raw[:1].isspace():
+                conclusion.append(raw)
+            else:
+                # A new unlabelled local context follows the previous goal.
+                finish()
+                case, hypotheses, conclusion = "", [line], []
+        else:
+            hypotheses.append(line)
+    finish()
+    return blocks
+
+
+def _show_goal(text: str, limit: int) -> tuple[str, bool]:
+    """Keep every scoped conclusion; the display budget may clip hypotheses only."""
+    raw = text.strip()
+    blocks = _goal_blocks(raw)
+    if not blocks:
+        return (_clip(raw, limit), len(raw) > limit)
+    shared = (
+        [line for line in blocks[0][1] if all(line in hypotheses for _, hypotheses, _ in blocks)]
+        if len(blocks) > 1 else []
+    )
+    parts = [render_text("packet/sections.fixed.goal_shared", text=" ; ".join(shared))] if shared else []
+    for case, hypotheses, conclusion in blocks:
+        label = f"{case}: " if case else ""
+        own = [line for line in hypotheses if line not in shared]
+        local = ("; ".join(own) + " ") if own else ""
+        parts.append(f"{label}{local}{conclusion}")
+    shown = " | ".join(parts)
+    if len(shown) <= limit:
+        return shown, False
+    conclusions = " | ".join(
+        f"{case}: {conclusion}" if case else conclusion for case, _hypotheses, conclusion in blocks
+    )
+    prefix = parts[0] if shared else ""
+    room = limit - len(conclusions) - 3
+    if prefix and room > 1:
+        return f"{prefix[:room - 1].rstrip()}… | {conclusions}", True
+    return conclusions, True
+
+
+def _goal_facts(context: dict, proof: str) -> tuple[list, list[tuple | None], int]:
+    """One pass: rendered goal text per step, and how many displays were clipped."""
+    steps = split_steps(proof)
+    goals = {item["proof_line"]: item for item in context.get("goal", []) if "proof_line" in item}
+    rendered: list[tuple | None] = []
+    clipped = 0
+    captured = 0
+    for step in steps:
         item = goals.get(step.first_line)
-        lines.append(
-            render_text(
-                "packet/sections.fixed.goal",
-                step=step.id,
-                text=_clip(item["text"], LIMITS["goal_chars"])
-                if item
-                else template("packet/sections.fixed.goal_unavailable").strip(),
-            )
+        if not item or not item.get("text", "").strip():
+            rendered.append(None)
+            continue
+        text, was_clipped = _show_goal(item.get("text", ""), LIMITS["goal_chars"])
+        captured += 1
+        clipped += int(was_clipped and captured <= LIMITS["goals"])
+        rendered.append((step, text))
+    return steps, rendered, clipped
+
+
+def context_coverage(context: dict, proof: str, *, facts: tuple | None = None) -> dict:
+    """Usable context coverage. Separate from extraction `complete`."""
+    steps, rendered, clipped = facts if facts is not None else _goal_facts(context, proof)
+    captured = sum(item is not None for item in rendered)
+    _shown, omitted_types = _type_items(context)
+    return {
+        "extraction_complete": bool(context.get("complete")),
+        "goals_captured": captured,
+        "goals_expected": len(steps),
+        "goals_omitted": len(steps) - captured,
+        "display_clipped": clipped,
+        "goals_displayed": min(captured, LIMITS["goals"]),
+        "goal_display_omitted": max(0, captured - LIMITS["goals"]),
+        "definitions_omitted": len(omitted_types),
+    }
+
+
+def _goal_section(context: dict, proof: str, *, facts: tuple | None = None) -> list[str]:
+    steps, rendered, clipped = facts if facts is not None else _goal_facts(context, proof)
+    captured = sum(item is not None for item in rendered)
+    available = [item for item in rendered if item is not None]
+    shown = available[: LIMITS["goals"]]
+    lines = [
+        render_text("packet/sections.fixed.goal", step=step.id, line=step.first_line, text=text) for step, text in shown
+    ]
+    lines.append(
+        render_text(
+            "packet/sections.fixed.goal_coverage",
+            captured=captured,
+            expected=len(steps),
+            omitted=len(steps) - captured,
+            extraction="complete" if context.get("complete") else "incomplete",
+            clipped=clipped,
+            displayed=len(shown),
+            display_omitted=len(available) - len(shown),
         )
+    )
     return lines
 
 
@@ -442,49 +609,44 @@ def _preview(items: list[dict], root: str) -> list[dict]:
     ]
 
 
-def _used_section(context: dict) -> list[str]:
+def _catalog_names(context: dict) -> set[str]:
+    helpers, _counts, _named = _extra_dependencies(context)
+    return {item["name"] for item in context.get("source", [])} | {item["name"] for item in helpers}
+
+
+def _used_section(context: dict, *, signatures: bool = True) -> list[str]:
     occurrences: dict[str, list[dict]] = {}
     for item in context.get("source", []):
         occurrences.setdefault(item["name"], []).append(item)
-    ordered = sorted(occurrences.items())
+    helpers, _counts, _named = _extra_dependencies(context)
+    for item in helpers:
+        occurrences.setdefault(item["name"], [item])
     lines = [template("packet/sections.fixed.used_intro").strip()]
-    for name, items in ordered:
-        statement = ",".join(str(i["proof_line"]) for i in items if i.get("origin") == "statement")
-        proof = ",".join(str(i["proof_line"]) for i in items if i.get("origin") == "proof")
-        unknown = ",".join(str(i["proof_line"]) for i in items if i.get("origin") == "unknown")
-        lines.append(
-            render_text(
-                "packet/sections.fixed.used_line",
-                name=name,
-                kind=items[0]["decl"],
-                statement=statement or "-",
-                proof=proof or "-",
-                unknown=f" U:{unknown}" if unknown else "",
-            )
-        )
-    preview = _preview([items[0] for _, items in ordered], context.get("root", ""))
-    lines.extend(
-        [
-            "",
-            render_text(
-                "packet/sections.fixed.used_preview",
-                shown=sum(bool(i.get("sig")) for i in preview),
-                distinct=len(ordered),
-                unavailable=sum(not bool(items[0].get("sig")) for _, items in ordered),
-            ),
-        ]
-    )
-    lines.extend(
-        render_text(
-            "packet/sections.fixed.signature",
-            name=i["name"],
-            kind=i["decl"],
-            module=i["module"],
-            signature=_clip(_readable(_one_line(i["sig"])), LIMITS["used_chars"]),
-        )
-        for i in preview
-        if i.get("sig")
-    )
+    unavailable = 0
+    for name, items in sorted(occurrences.items()):
+        item = next((item for item in items if item.get("sig")), items[0])
+        role = item.get("decl") or item.get("tag") or "declaration"
+        locations = []
+        for origin in ("statement", "proof", "unknown"):
+            places = sorted({i["proof_line"] for i in items
+                             if i.get("proof_line") is not None and i.get("origin", "unknown") == origin})
+            if places:
+                locations.append(render_text(f"packet/sections.fixed.catalog_{origin}",
+                                             lines=", ".join(map(str, places))))
+        external = sorted({i["source_line"] for i in items if i.get("source_line") is not None})
+        if external:
+            locations.append(render_text("packet/sections.fixed.catalog_external", lines=", ".join(map(str, external)),
+                                             module=item.get("module") or template("packet/sections.fixed.catalog_location_missing").strip()))
+        where = "; ".join(locations) or item.get("module") or template("packet/sections.fixed.catalog_location_missing").strip()
+        unavailable += not bool(item.get("sig"))
+        signature = ("" if not signatures else
+                     _clip(_readable(_one_line(item["sig"])), LIMITS["used_chars"]) if item.get("sig") else
+                     template("packet/sections.fixed.catalog_signature_missing").strip())
+        lines.append(render_text("packet/sections.fixed.catalog_line", name=name, role=role, where=where, signature=signature))
+    lines.append(render_text("packet/sections.fixed.used_preview", shown=len(occurrences) - unavailable if signatures else 0,
+                             distinct=len(occurrences), unavailable=unavailable))
+    if not signatures:
+        lines.append(render_text("packet/sections.fixed.catalog_signatures_omitted", count=len(occurrences) - unavailable))
     return lines
 
 
@@ -493,7 +655,6 @@ def _dependency_section(context: dict) -> list[str]:
     if not helpers:
         return []
     lines = [template("packet/sections.fixed.dependency_intro").strip()]
-    lines.extend(render_text("packet/sections.fixed.dependency_name", name=i["name"]) for i in helpers)
     lines += [
         "",
         render_text(
@@ -511,37 +672,6 @@ def _dependency_section(context: dict) -> list[str]:
             unavailable=sum(not bool(i.get("sig")) for i in helpers),
         ),
     ]
-    lines.extend(
-        render_text(
-            "packet/sections.fixed.signature",
-            name=i["name"],
-            kind=i["decl"],
-            module=i["module"],
-            signature=_clip(_readable(_one_line(i["sig"])), LIMITS["used_chars"]),
-        )
-        for i in preview
-        if i.get("sig")
-    )
-    return lines
-
-
-def _local_section(context: dict) -> list[str]:
-    scopes: dict[tuple[str, str, str], set[int]] = {}
-    for item in context.get("local", []):
-        scopes.setdefault((item["name"], item["type"], item["scope"]), set()).add(item["proof_line"])
-    if not scopes:
-        return []
-    lines = [template("packet/sections.fixed.local_intro").strip()]
-    lines.extend(
-        render_text(
-            "packet/sections.fixed.local_line",
-            name=name,
-            type=_clip(_one_line(ty), LIMITS["local_type_chars"]),
-            scope=scope,
-            lines=",".join(map(str, sorted(locations))),
-        )
-        for (name, ty, scope), locations in sorted(scopes.items())
-    )
     return lines
 
 
@@ -551,7 +681,10 @@ def _imports(row: dict) -> list[str]:
     else:
         built = candidate_file(row, row["src"], *measure_version(row))
         source = built["text"][: built["head"]]
-    return [match.group(0).strip() for match in re.finditer(r"(?m)^\s*import\s+[^\n]+", source)]
+    return [
+        match.group(0).strip()
+        for match in re.finditer(r"(?m)^[ \t]*(?:public[ \t]+)?import\s+[^\n]+", source)  # log: regex # not-model-facing
+    ]
 
 
 def packet_manifest(parts: list[tuple[str, list[str]]], inventory: dict) -> dict:
@@ -706,6 +839,7 @@ def score_earlier(context: dict) -> list[dict]:
 def _earlier_section(context: dict) -> list[str]:
     """Ranked lemma lines under the character budget; zero-relevance (distance-only) entries fill at most 5 slots."""
     lines, used, filler = [], 0, 0
+    catalog = _catalog_names(context)
     for entry in score_earlier(context):
         item = entry["item"]
         if not entry["relevance"]:
@@ -719,7 +853,7 @@ def _earlier_section(context: dict) -> list[str]:
             name=item["name"],
             kind=item["decl"],
             reason=tag,
-            signature=_clip(_readable(_one_line(item["sig"])), LIMITS["earlier_chars"]),
+            signature="" if item["name"] in catalog else _clip(_readable(_one_line(item["sig"])), LIMITS["earlier_chars"]),
         )
         if used + len(line) > LIMITS["earlier_budget"] or len(lines) >= LIMITS["earlier"]:
             break
@@ -728,7 +862,6 @@ def _earlier_section(context: dict) -> list[str]:
     return lines
 
 
-LOCAL_TITLE = template("packet/sections.titles.locals").strip()
 GOALS_FLOOR = int(numbers()["packet_goal_floor"])
 LIBRARY_TITLE = template("packet/sections.titles.library").strip()
 
@@ -765,14 +898,24 @@ def _fit_sections(parts: list[tuple[str, list[str]]], limit: int) -> list[tuple[
     """Shed entries from the end of the lowest-priority sections."""
     sections = [(title, list(body)) for title, body in parts]
 
-    # Earlier declarations, excess goals, all locals, library entries, then remaining goals.
+    # Shed low-value bulk before useful earlier lemmas. Goals keep a floor, then a last line.
     goals = template("packet/sections.titles.goals").strip()
-    stages = [(EARLIER_TITLE, 0), (goals, GOALS_FLOOR), (LOCAL_TITLE, 0), (LIBRARY_TITLE, 0), (goals, 1)]
+    stages = [(LIBRARY_TITLE, 0), (goals, GOALS_FLOOR), (EARLIER_TITLE, 0), (goals, 1)]
+    coverage_prefix = template("packet/sections.fixed.goal_coverage").split("{")[0]
+    footer = next((body[-1] for title, body in sections if title == goals and body
+                   and body[-1].startswith(coverage_prefix)), None)
+    goal_omissions = 0
     while len(_join_sections(sections)) > limit:
         for title, floor in stages:
             target = next((body for t, body in sections if t.startswith(title)), None)
-            if target and len(target) > floor:
-                target.pop()
+            has_footer = title == goals and footer is not None
+            if target and len(target) - int(has_footer) > floor:
+                target.pop(-2 if has_footer else -1)
+                if has_footer:
+                    goal_omissions += 1
+                    target[-1] = footer + " " + render_text(
+                        "packet/sections.fixed.goal_fit_omissions", count=goal_omissions
+                    )
                 break
         else:
             break
@@ -785,29 +928,32 @@ def _fit(parts: list[tuple[str, list[str]]], limit: int) -> str:
     return _join_sections(_fit_sections(parts, limit))
 
 
-def _reference_price_table(table: dict) -> list[str]:
-    """The step table (one renderer with the read view's prices) and its column legend; the rates are in Scoring."""
+def _reference_price_table(table: dict, proof: str, profile: dict | None) -> list[str]:
+    """Shared structural overview, nested hotspot, and full-detail pointer."""
     from arena.campaign import render_price_table
 
-    return [*render_price_table(table).splitlines(), *template("packet/price-table.legend").strip().splitlines()]
+    return render_price_table(table, proof, profile, proof_id="reference").splitlines()
 
 
-def packet_sections(name: str, *, cache_only: bool = False) -> list[tuple[str, str]]:
-    row = problem(name)
-    targets = versions(row)
-    context = cached_context(name) if cache_only else lean_context(name)
-    if cache_only and not context:
-        raise ValueError(f"Cached context is unavailable for {name}")  # not-model-facing: CLI cache refusal.
-    context["root"] = "" if is_standalone(row) else row["file_path"].split("/")[0]
-    prof = reference_profile(name, cache_only=cache_only)
-    if cache_only and not prof:
-        raise ValueError(f"Cached reference profile is unavailable for {name}")  # not-model-facing: CLI cache refusal.
-    pins = "; ".join(
-        render_text("packet/sections.fixed.pin", version=version, commit=commit) for version, commit in targets
-    )
-    rates = exchange_rates(name, len(targets))
-    task = render_text("packet/task", name=name, statement=row["statement"]).strip().splitlines()
-    scoring = (
+def _team_section(model: str | None) -> list[str]:
+    """The orchestrator's team paragraph. Worker count, model and the output-price ratio are computed here."""
+    if model is None:
+        return []
+    from arena.models import _SESSION_CONCURRENCY, load
+    from arena.pi_rpc import WORKER_MODEL
+
+    prices = load()["models"]
+    # One simple rule: how many times cheaper a worker's output token is than the orchestrator's.
+    ratio = round(prices[model]["price"]["output"] / prices[WORKER_MODEL]["price"]["output"])
+    cost = render_text("packet/team-cost", ratio=ratio) if ratio > 1 else ""
+    return render_text(
+        "packet/team", workers=_SESSION_CONCURRENCY[WORKER_MODEL], worker_model=WORKER_MODEL, cost=cost
+    ).strip().splitlines()
+
+
+def _scoring_lines(rates: dict) -> list[str]:
+    """The scoring contract, shared by every actor's startup packet."""
+    return (
         render_text(
             "packet/scoring",
             points_per_token=rates["points_per_token"],
@@ -821,25 +967,12 @@ def packet_sections(name: str, *, cache_only: bool = False) -> list[tuple[str, s
         .strip()
         .splitlines()
     )
-    table = step_table(
-        row["src"],
-        prof,
-        price_rates(*scoring_reference(name), len(targets)),
-        row["proof_length"],
-        prof.get("measured_total"),
-        f"{len(targets)}/{len(targets)}",
-    )
-    table["total"]["proxy"] = REFERENCE_SCORE
-    price_lines = _reference_price_table(table)
-    note = (
-        ""
-        if not context.get("error")
-        else render_text("packet/sections.fixed.context_missing", error=_clip(context["error"], 160))
-    )
-    titles = {
-        key: template(f"packet/sections.titles.{key}").strip()
-        for key in ("pinned", "types", "scope", "goals", "source", "dependencies")
-    }
+
+
+def _pinned_part(row: dict, targets: list) -> tuple[str, list[str]]:
+    """Source, required toolchains and imports, shared by every actor's startup packet."""
+    pins = "; ".join(render_text("packet/sections.fixed.pin", version=version) for version, _commit in targets)
+    pins = f"{len(targets)} required ({pins})"
     source_line = (
         render_text("packet/sections.fixed.standalone_source", source=row["source"])
         if is_standalone(row)
@@ -851,43 +984,87 @@ def packet_sections(name: str, *, cache_only: bool = False) -> list[tuple[str, s
             end=row["end_line"],
         )
     )
+    return (
+        template("packet/sections.titles.pinned").strip(),
+        [
+            source_line,
+            render_text("packet/sections.fixed.pins", pins=pins),
+            render_text(
+                "packet/sections.fixed.imports",
+                imports=", ".join(_imports(row)) or template("packet/sections.fixed.none").strip(),
+            ),
+        ],
+    )
+
+
+def packet_sections(name: str, *, cache_only: bool = False, model: str | None = None) -> list[tuple[str, str]]:
+    row = problem(name)
+    targets = versions(row)
+    context = cached_context(name) if cache_only else lean_context(name)
+    if cache_only and not context:
+        raise ValueError(f"Cached context is unavailable for {name}")  # not-model-facing: CLI cache refusal.
+    context["root"] = "" if is_standalone(row) else row["file_path"].split("/")[0]
+    prof = reference_profile(name, cache_only=cache_only)
+    if cache_only and not prof:
+        raise ValueError(f"Cached reference profile is unavailable for {name}")  # not-model-facing: CLI cache refusal.
+    rates = exchange_rates(name, len(targets))
+    task = render_text("packet/task", name=name, statement=row["statement"]).strip().splitlines()
+    scoring = _scoring_lines(rates)
+    table = step_table(
+        row["src"],
+        prof,
+        price_rates(*scoring_reference(name), len(targets)),
+        row["proof_length"],
+        prof.get("measured_total"),
+        f"{len(targets)}/{len(targets)}",
+    )
+    table["total"]["proxy"] = REFERENCE_SCORE
+    price_lines = _reference_price_table(table, row["src"], prof)
+    note = (
+        ""
+        if not context.get("error")
+        else render_text("packet/sections.fixed.context_missing", error=_clip(context["error"], 160))
+    )
+    titles = {
+        key: template(f"packet/sections.titles.{key}").strip()
+        for key in ("types", "scope", "goals", "source", "dependencies")
+    }
+    goal_facts = _goal_facts(context, row["src"])
     parts: list[tuple[str, list[str]]] = [
         ("", task),
         ("", scoring),
-        (
-            titles["pinned"],
-            [
-                source_line,
-                render_text("packet/sections.fixed.pins", pins=pins),
-                render_text(
-                    "packet/sections.fixed.imports",
-                    imports=", ".join(_imports(row)) or template("packet/sections.fixed.none").strip(),
-                ),
-            ],
-        ),
+        _pinned_part(row, targets),
         (titles["scope"], _scope_section(row)),
         (
             render_text("packet/sections.titles.reference", count=row["proof_length"]),
-            [f"```lean\n{row['src']}\n```", *price_lines],
+            [f"```lean\n{row['src']}\n```", template("packet/sections.fixed.numbered_source").strip(), *price_lines],
         ),
         (template("packet/sections.titles.profile").strip(), _profile_section(prof, row["src"], name)),
-        (titles["goals"], _goal_section(context, row["src"])),
+        ("", template("packet/search").strip().splitlines()),
+        (template("packet/sections.titles.team").strip(), _team_section(model)),
+        (titles["goals"], _goal_section(context, row["src"], facts=goal_facts)),
         (LIBRARY_TITLE, _library_section(context)),
         (titles["types"], _types_section(context)),
         (titles["source"], _used_section(context)),
         (titles["dependencies"], _dependency_section(context)),
-        (LOCAL_TITLE, _local_section(context)),
         (EARLIER_TITLE, _earlier_section(context)),
     ]
     if note:
         parts.append(("", [note]))
     manifest = packet_manifest(parts, context)
+    manifest["coverage"] = context_coverage(context, row["src"], facts=goal_facts)
     result = certify_manifest(manifest)
     if not result["certified"]:
         raise ValueError(
             render_text("packet/sections.fixed.packet_not_certifiable", reasons="; ".join(result["reasons"]))
         )
-    fitted = _fit_sections(parts, MAX_PACKET_CHARS)
+    try:
+        fitted = _fit_sections(parts, MAX_PACKET_CHARS)
+    except ValueError:
+        # Keep every declaration and source coordinate when signature previews cannot fit.
+        compact = [(title, _used_section(context, signatures=False) if title == titles["source"] else body)
+                   for title, body in parts]
+        fitted = _fit_sections(compact, MAX_PACKET_CHARS)
     return [
         (
             title or ("Task" if index == 0 else "Scoring" if index == 1 else "Notice"),
@@ -897,5 +1074,75 @@ def packet_sections(name: str, *, cache_only: bool = False) -> list[tuple[str, s
     ]
 
 
-def render_packet(name: str, *, cache_only: bool = False) -> str:
-    return "\n\n".join(content for _title, content in packet_sections(name, cache_only=cache_only)) + "\n"
+def render_packet(name: str, *, cache_only: bool = False, model: str | None = None) -> str:
+    sections = packet_sections(name, cache_only=cache_only, model=model)
+    return "\n\n".join(content for _title, content in sections) + "\n"
+
+
+def _anchor_lines(anchor: dict, node, *, island: bool = False) -> list[str]:
+    """Anchor description, then the recorded goal states it covers, from the saved node."""
+    if island:
+        return [render_text("packet/sections.fixed.anchor_island", node=node.id,
+                            count=len(node.proof_text.splitlines()))]
+    if "hole" in anchor:
+        hole = next((item for item in node.holes if f"{node.id}.h{item['index']}" == anchor["hole"]), None)
+        head = render_text("packet/sections.fixed.anchor_hole", node=node.id, hole=anchor["hole"],
+                           line=anchor["source"]["line"])
+        goal = (hole or {}).get("goal")
+        text = _show_goal(goal, LIMITS["goal_chars"])[0] if goal else ""
+        return [head, *([render_text("packet/sections.fixed.worker_hole_goal", hole=anchor["hole"], text=text)]
+                        if text else [])]
+    if "steps" not in anchor:
+        return [render_text("packet/sections.fixed.anchor_proof", node=node.id,
+                            count=len(node.proof_text.splitlines()))]
+    start, end = anchor["steps"]
+    chosen = node.steps[start - 1 : end]
+    head = render_text("packet/sections.fixed.anchor_steps", node=node.id, start=start, end=end,
+                       first=chosen[0].first_line, last=chosen[-1].last_line)
+    recorded = [(step, _show_goal(step.before, LIMITS["goal_chars"])[0]) for step in chosen if step.before]
+    lines = [
+        render_text("packet/sections.fixed.goal", step=step.id, line=step.first_line, text=text)
+        for step, text in recorded[: LIMITS["goals"]]
+    ]
+    if len(recorded) > LIMITS["goals"]:
+        lines.append(render_text("packet/sections.fixed.worker_goal_omitted", count=len(recorded) - LIMITS["goals"]))
+    return [head, *lines]
+
+
+_ISLAND_PACKETS = {None: "packet/island", "tokens": "packet/island_tokens", "heartbeats": "packet/island_heartbeats"}
+
+
+def worker_packet(name: str, *, task: str, anchor: dict, node, families: list[str] | None = None,
+                  objective: str | None = None, trim: bool = False) -> str:
+    """First prompt of a delegated worker: the shared startup contract plus its anchor. No Sol-only sections.
+
+    `node` is the graph node the anchor resolved to, so the proof text and goals are the saved ones.
+    `families` (island jobs only) are the existing proof families, one `island_family` entry each; `objective`
+    picks the axis packet. `trim` (trim jobs) gets the trim packet instead, with no island title.
+    """
+    island = families is not None
+    row = problem(name)
+    targets = versions(row)
+    rates = exchange_rates(name, len(targets))
+    numbered = [
+        render_text("replies/tools.source_line", line=number, text=line)
+        for number, line in enumerate(node.proof_text.splitlines(), 1)
+    ]
+    anchored = _anchor_lines(anchor, node, island=island)
+    parts: list[tuple[str, list[str]]] = [
+        ("", render_text("packet/task", name=name, statement=row["statement"]).strip().splitlines()),
+        ("", _scoring_lines(rates)),
+        _pinned_part(row, targets),
+        (template("packet/sections.titles.scope").strip(), _scope_section(row)),
+        (template("packet/sections.titles.worker").strip(), template("packet/worker").strip().splitlines()),
+        *([(template("packet/sections.titles.island").strip(),
+            render_text(_ISLAND_PACKETS[objective], families="\n".join(families or [])).strip().splitlines())]
+          if island else []),
+        *([("", template("packet/trim").strip().splitlines())] if trim else []),
+        ("", template("packet/search").strip().splitlines()),
+        (render_text("packet/sections.titles.anchored", node=node.id), numbered),
+        ("", anchored[:1]),
+        (template("packet/sections.titles.worker_goals").strip(), anchored[1:]),
+        (template("packet/sections.titles.hypothesis").strip(), task.strip().splitlines()),
+    ]
+    return _join_sections(parts) + "\n"

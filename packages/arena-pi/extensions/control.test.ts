@@ -1,44 +1,22 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { stopDecision, type StopInput } from "./control.ts";
+import { MAX_UNKNOWN_USAGE_STREAK, stopDecision, type StopInput } from "./control.ts";
 
-const base: StopInput = { limitHit: false, finishTurn: false, providerUnreachable: false, errorLoop: false,
-  continuations: 0, noWorkTurns: 0, plateau: 0, stallUsd: 0, limitUsd: 0.5, remainingFraction: 1,
-  noWorkThisTurn: false, finishAllowed: false, doneTurn: false };
+const open: StopInput = { limitHit: false, providerUnreachable: false, errorLoop: false, usageLimit: false };
 
-test("no work before the final tenth moves focus and does not stop", () => {
-  assert.deepEqual(stopDecision({ ...base, continuations: 2, noWorkTurns: 1, noWorkThisTurn: true }), { stop: null, moveFocus: true, restart: false, island: false });
+test("a text-only turn, plateau, no-work turns and many continuations do not stop below the limit", () => {
+  assert.equal(stopDecision(open), null);
 });
 
-test("no run of no-work turns ends the run before the final tenth (D42)", () => {
-  assert.deepEqual(stopDecision({ ...base, continuations: 40, noWorkTurns: 40, noWorkThisTurn: true }), { stop: null, moveFocus: false, restart: true, island: false });
-  assert.equal(stopDecision({ ...base, continuations: 12, noWorkTurns: 1, noWorkThisTurn: true }).stop, null);
+test("the actual-cost limit and provider, usage and error failures each stop with their own reason", () => {
+  assert.equal(stopDecision({ ...open, limitHit: true, usageLimit: true, providerUnreachable: true, errorLoop: true }), "limit_reached");
+  assert.equal(stopDecision({ ...open, usageLimit: true, providerUnreachable: true, errorLoop: true }), "usage_limit");
+  assert.equal(stopDecision({ ...open, providerUnreachable: true, errorLoop: true }), "provider_unreachable");
+  assert.equal(stopDecision({ ...open, errorLoop: true }), "error_loop");
 });
 
-test("inside the final tenth the old stops apply and no focus move is requested", () => {
-  const late = { ...base, finishAllowed: true };
-  assert.deepEqual(stopDecision({ ...late, noWorkTurns: 2, noWorkThisTurn: true }), { stop: "no_work_fallback", moveFocus: false, restart: false, island: false });
-  assert.equal(stopDecision({ ...late, continuations: 12 }).stop, "continuation_limit");
-});
-
-test("plateau stops only inside the final tenth and restarts before it", () => {
-  assert.equal(stopDecision({ ...base, continuations: 6, plateau: 5 }).stop, null);
-  assert.deepEqual(stopDecision({ ...base, continuations: 8, plateau: 6, stallUsd: 0.06 }), { stop: null, moveFocus: false, restart: true, island: false });
-  assert.equal(stopDecision({ ...base, continuations: 8, plateau: 6, stallUsd: 0 }).restart, false);
-  assert.equal(stopDecision({ ...base, continuations: 6, plateau: 5, finishAllowed: true }).stop, "plateau");
-});
-
-test("real failures and the spend limit stop at any spend", () => {
-  assert.equal(stopDecision({ ...base, limitHit: true }).stop, "limit_reached");
-  assert.equal(stopDecision({ ...base, errorLoop: true }).stop, "error_loop");
-  assert.equal(stopDecision({ ...base, providerUnreachable: true }).stop, "provider_unreachable");
-  assert.equal(stopDecision({ ...base, usageLimit: true }).stop, "usage_limit");
-});
-
-test("a turn ending in text opens a new island before the final tenth and finishes inside it", () => {
-  assert.deepEqual(stopDecision({ ...base, doneTurn: true, noWorkThisTurn: true, noWorkTurns: 1 }),
-    { stop: null, moveFocus: false, restart: true, island: true });
-  assert.equal(stopDecision({ ...base, doneTurn: true, finishTurn: true, finishAllowed: true }).stop, "finished");
-  // Under a fifth of the limit left, no island opens.
-  assert.equal(stopDecision({ ...base, doneTurn: true, remainingFraction: 0.15 }).island, false);
+test("a short streak of unknown-usage settles stops as accounting_unknown, below the cost limit", () => {
+  assert.equal(stopDecision({ ...open, unknownUsageStreak: MAX_UNKNOWN_USAGE_STREAK - 1 }), null);
+  assert.equal(stopDecision({ ...open, unknownUsageStreak: MAX_UNKNOWN_USAGE_STREAK }), "accounting_unknown");
+  assert.equal(stopDecision({ ...open, unknownUsageStreak: MAX_UNKNOWN_USAGE_STREAK, limitHit: true }), "limit_reached");
 });

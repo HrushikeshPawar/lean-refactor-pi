@@ -91,14 +91,14 @@ class FallbackTests(unittest.TestCase):
     def setUp(self):
         self.row = {"name": "T", "file_path": "A/B.lean"}
 
-    def run_lean(self, reply, **env):
+    def run_lean(self, reply, request_class="full_check", **env):
         with (
             patch.dict(os.environ, {lean_session.ENV: "/nonexistent.sock", **env}, clear=False),
             patch.object(lean_session, "request", return_value=reply),
             patch.object(engine, "_fingerprint", return_value={"code": "x"}),
             patch.object(engine, "_run_cold", return_value=(0, "cold output")),
         ):
-            return engine.run_lean(self.row, Path("/p"), "text"), last_lean_run()
+            return engine.run_lean(self.row, Path("/p"), "text", request_class=request_class), last_lean_run()
 
     def test_unconfigured_runs_are_cold_without_a_reason(self):
         with patch.dict(os.environ, {}, clear=False), patch.object(engine, "_run_cold", return_value=(0, "x")):
@@ -112,11 +112,23 @@ class FallbackTests(unittest.TestCase):
             "session unreachable: FileNotFoundError",
             "stale session: toolchain changed",
             "Lean server crashed",
-            "no room for a Lean worker: memory (2.0 GB available)",
         ):
             result, info = self.run_lean({"ok": False, "reason": reason})
             self.assertEqual(result, (0, "cold output"))
             self.assertEqual((info["path"], info["reason"]), ("cold-fallback", reason))
+
+    def test_a_denied_or_queued_admission_is_inconclusive_and_never_cold(self):
+        for admission in ("denied", "queued"):
+            reply = {"ok": False, "reason": "no room", "outcome": "inconclusive", "cause": "resource",
+                     "admission": admission}
+            with (
+                patch.object(engine, "_run_cold", side_effect=AssertionError("ran cold")),
+                self.assertRaises(engine.LeanInconclusive) as caught,
+            ):
+                self.run_lean(reply)
+            self.assertEqual((caught.exception.cause, caught.exception.admission), ("resource", admission))
+        with self.assertRaises(engine.LeanInconclusive):
+            self.run_lean({}, request_class="ds_experiment")
 
     def test_a_session_timeout_is_a_timeout(self):
         result, info = self.run_lean({"ok": True, "timeout": True})
@@ -601,26 +613,26 @@ class CoreSessionTests(SessionHarness, unittest.TestCase):
         status = lean_session.request({"op": "status"}, 5, self.socket)
         self.assertGreaterEqual(len(status["servers"][0]["workers"]), 2)
 
-    @unittest.skipIf((lean_session._available_gb() or 0) < 12, "not enough free memory to grow the session")
-    def test_remaining_documents_warm_up_in_the_background_so_a_batch_is_incremental(self):
+    def test_concurrent_documents_are_allocated_on_demand(self):
         from concurrent.futures import ThreadPoolExecutor
 
         statement = self.row["statement"]
-        compile_version(self.row, statement + " := by\n  sorry", self.version, self.commit, probe=True)
+        first = compile_version(self.row, statement + " := by\n  sorry", self.version, self.commit, probe=True)
+        self.assertEqual(first["lean"]["path"], "session")
+        self.assertTrue(first["lean"]["new_worker"])
 
         def workers() -> int:
             return len(status_of(self.socket, 5)["servers"][0]["workers"])
 
-        self.assertTrue(
-            wait_until(lambda: workers() >= lean_session.PRIMARY_MAX_WORKERS, 120),
-            "the session did not open its remaining documents",
-        )
-        proofs = [statement + f" := by\n  intros\n  sorry\n  -- batch {n}" for n in range(4)]
+        self.assertEqual(workers(), 1)
+        proofs = [statement + f" := by\n  intros\n  sorry\n  -- demand {n}" for n in range(3)]
         with ThreadPoolExecutor(4) as pool:
             results = list(
                 pool.map(lambda p: compile_version(self.row, p, self.version, self.commit, probe=True), proofs)
             )
-        self.assertFalse(any(r["lean"]["new_worker"] for r in results), [r["lean"] for r in results])
+        self.assertTrue(all(r["lean"]["path"] == "session" for r in results), [r["lean"] for r in results])
+        self.assertTrue(any(r["lean"]["new_worker"] for r in results), [r["lean"] for r in results])
+        self.assertGreaterEqual(workers(), 2)
 
     def test_a_changed_pin_or_toolchain_is_stale_and_runs_cold(self):
         project = engine.workspace(self.row, self.version, self.commit)

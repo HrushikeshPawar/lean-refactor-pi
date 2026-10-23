@@ -113,13 +113,28 @@ elab "arena_context " cmd:command : command => do
               (fun c => c.toString == "Tactic" || c.toString == "Meta")) then "tactic"
     else if root == "Init" || root == "Lean" then "core"
     else "helper"
-  -- top-level tactics of the declaration's `by` block
+  -- Select the outer declaration's value before inspecting terms. `bracketedBinder`
+  -- is a parser category, while its syntax nodes have concrete binder kinds; skipping
+  -- that category would still walk into a default value such as `(h : Nat := by ...)`.
+  -- Breadth-first selection reaches the target value before any local declaration in
+  -- its signature or proof, including declarations introduced by nested tactic terms.
+  let rec findDeclValue : Nat → Array Lean.Syntax → Option Lean.Syntax
+    | 0, _ => none
+    | fuel + 1, nodes =>
+      match nodes.find? (fun s => s.getKind == ``Lean.Parser.Command.declValSimple ||
+          s.getKind == ``Lean.Parser.Command.declValEqns) with
+      | some value =>
+        if value.getKind == ``Lean.Parser.Command.declValSimple then some (value.getArg 1)
+        else some value
+      | none => findDeclValue fuel (nodes.flatMap (fun s => s.getArgs))
+  -- Top-level tactics of the declaration's proof `by`, not a `by` in its signature.
   let rec findBy : Nat → Lean.Syntax → Option Lean.Syntax
     | 0, _ => none
-    | fuel + 1, s => if s.getKind == ``Lean.Parser.Term.byTactic then some s
-                     else s.getArgs.findSome? (findBy fuel)
+    | fuel + 1, s =>
+      if s.getKind == ``Lean.Parser.Term.byTactic then some s
+      else s.getArgs.findSome? (findBy fuel)
   let mut topLevel : Array (String.Pos.Raw × String.Pos.Raw) := #[]
-  match findBy 200 cmd.raw with
+  match (findDeclValue 200 #[cmd.raw]).bind (findBy 200) with
   | some b =>
     let seq := b.getArg 1
     let items := ((seq.getArg 0).getArg 0).getArgs
@@ -187,27 +202,29 @@ elab "arena_context " cmd:command : command => do
   for tree in (← get).infoState.trees.toList.drop before do
     visit 3000 none tree
   let env ← getEnv
-  -- definitions of project types appearing in the statement
-  let newDecls := env.constants.map₂.toList.filter (fun (n, _) => !envBefore.contains n && !n.isInternal)
+  -- definitions of project types in the target theorem's type, before auxiliary declarations
   let mut stmtNames : Array Lean.Name := #[]
-  for (n, ci) in newDecls do
-    match ci with
-    | .thmInfo _ =>
-      for u in ci.type.getUsedConstants do
-        unless stmtNames.contains u do stmtNames := stmtNames.push u
-    | _ => pure ()
+  match env.find? targetName with
+  | some ci =>
+    for u in ci.type.getUsedConstants do
+      unless stmtNames.contains u do stmtNames := stmtNames.push u
+  | none => pure ()
   for n in stmtNames do
-    if isProjectLocal n envBefore && !envBefore.isProjectionFn n then
+    -- Target-type constants, including projections and theorems. Auxiliary declarations are not scanned.
+    if isProjectLocal n envBefore then
       match envBefore.find? n with
       | some (.inductInfo v) =>
         let mut ctors : Array Json := #[]
         for c in v.ctors do ctors := ctors.push (Json.str (clip (← sigOf c) 400))
         emit [("kind", "type"), ("name", n.toString), ("decl", if isStructure envBefore n then "structure" else "inductive"),
-              ("sig", clip (← sigOf n) 400), ("ctors", Json.arr ctors)]
+              ("role", "statement"), ("sig", clip (← sigOf n) 400), ("ctors", Json.arr ctors)]
       | some (.defnInfo v) =>
         let body ← liftTermElabM (do pure (toString (← ppExpr v.value)))
-        emit [("kind", "type"), ("name", n.toString), ("decl", "def"),
+        emit [("kind", "type"), ("name", n.toString), ("decl", "def"), ("role", "statement"),
               ("sig", clip (← sigOf n) 400), ("value", clip body 600)]
+      | some (.thmInfo _) =>
+        emit [("kind", "type"), ("name", n.toString), ("decl", "theorem"), ("role", "statement"),
+              ("sig", clip (← sigOf n) 400), ("value", "")]
       | _ => pure ()
   -- Every resolvable identifier occurrence in the declaration's source.
   for (n, line, column) in (← sourceRefs.get) do

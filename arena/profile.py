@@ -386,7 +386,9 @@ def _instrumented(
     built = candidate_file(row, proof, version, commit)
     inserted = preamble(depth)
     text = built["text"][: built["head"]] + inserted + built["text"][built["head"] :]
-    ran = run_lean(row, built["path"], text, prefix_end=built["head"], lane=lane)
+    ran = run_lean(
+        row, built["path"], text, prefix_end=built["head"], lane=lane, request_class="opportunistic"
+    )
     if ran is None:
         raise ValueError(agent_text.render("messages/errors.profile_timeout"))
     returncode, output = ran
@@ -420,14 +422,18 @@ def profile(name: str, proof: str, measured: int | None = None, lane: str = "mod
         except ValueError as error:
             failures.append(str(error))
     if result is None:
-        reference = compile_version(row, proof, version, commit, measure=True, lane=lane)
+        reference = compile_version(
+            row, proof, version, commit, measure=True, lane=lane, request_class="opportunistic"
+        )
         if not reference["passed"]:
             headlines = reference.get("error_headlines") or [reference.get("error", "compile failed")]
             raise ValueError(agent_text.render("messages/errors.profile_proof_compile", headline=headlines[0]))
         raise ValueError(agent_text.render("messages/errors.profile_instrumentation_failed", detail=failures[-1]))
     records, instrumented, built, _ = result
     if measured is None:
-        measure = compile_version(row, proof, version, commit, measure=True, lane=lane)
+        measure = compile_version(
+            row, proof, version, commit, measure=True, lane=lane, request_class="opportunistic"
+        )
         measured = measure.get("heartbeats")
     whole_tokens = _proof_length(proof, row.get("statement"))
     token_lines = _line_token_counts(proof, whole_tokens)
@@ -469,7 +475,7 @@ def heartbeat_floor(name: str) -> dict:
     known = json.loads(cache.read_text()) if cache.exists() else {}
     if key not in known:
         stub = row["statement"] + " := by\n  sorry"
-        outcome = compile_version(row, stub, version, commit, measure=True)
+        outcome = compile_version(row, stub, version, commit, measure=True, request_class="opportunistic")
         known[key] = {
             "heartbeats": outcome.get("heartbeats"),
             "version": version,

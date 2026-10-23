@@ -174,6 +174,47 @@ def session_spend(directory: Path) -> dict | None:
     return {"usd": usd, "compaction_usd": compaction_usd, "compactions": compactions}
 
 
+def counted_settles(cost_events: list[dict]) -> tuple[list[dict], bool]:
+    """One row per request. Unknown usage is incomplete, not a zero charge."""
+    seen: set[tuple[str, str]] = set()
+    kept: list[dict] = []
+    unknown = False
+    for event in cost_events:
+        if event.get("kind") != "settle":
+            continue
+        if event.get("usage_known") is False:
+            unknown = True
+            continue
+        # A settle row's own id names the request it charges; request_id is stamped from the
+        # extension's current request and can repeat across distinct charges, so it is not a key.
+        if event.get("id"):
+            key = (str(event["id"]), str(event.get("session_entry_id") or ""))
+            if key in seen:
+                continue
+            seen.add(key)
+        kept.append(event)
+    return kept, unknown
+
+
+def unknown_settlements(directory: Path, cost_events: list[dict], shared: bool) -> int:
+    """Settlements whose cost was never known and never reconciled to an amount. Spend leaves them out."""
+    if shared:
+        rows = [row for row in _jsonl(directory / "control.jsonl") if row.get("kind") == "settlement"]
+        resolved = {row.get("reconciles") for row in rows if row.get("reconciles") and row.get("state") == "known"}
+        return len({
+            row.get("settlement_id") for row in rows
+            if not row.get("reconciles") and row.get("state") == "unknown" and row.get("settlement_id") not in resolved
+        })
+    settles = [event for event in cost_events if event.get("kind") == "settle"]
+    resolved = {str(event["id"]) for event in settles if event.get("usage_known") is not False and event.get("id")}
+    unknown = {
+        str(event.get("id") or f"row-{index}")
+        for index, event in enumerate(settles)
+        if event.get("usage_known") is False and str(event.get("id") or "") not in resolved
+    }
+    return len(unknown)
+
+
 def ledger_spend(cost_events: list[dict], session_usd: float | None = None) -> dict:
     """The run's spend: the sum of the cost ledger's settle rows, each one call's actual cost.
 
@@ -181,12 +222,11 @@ def ledger_spend(cost_events: list[dict], session_usd: float | None = None) -> d
     cannot lower it, and `gap_usd` exposes the difference."""
     settled = compaction_settled = 0.0
     compaction_settles = 0
-    for event in cost_events:
-        if event.get("kind") == "settle" and event.get("usage_known") is not False:
-            settled += float(event.get("usd") or 0.0)
-            if event.get("source") in COMPACTION_SOURCES:
-                compaction_settled += float(event.get("usd") or 0.0)
-                compaction_settles += 1
+    for event in counted_settles(cost_events)[0]:
+        settled += float(event.get("usd") or 0.0)
+        if event.get("source") in COMPACTION_SOURCES:
+            compaction_settled += float(event.get("usd") or 0.0)
+            compaction_settles += 1
     gap = max(0.0, session_usd - settled) if session_usd is not None else 0.0
     gap = gap if gap > 1e-9 else 0.0
     return {
@@ -201,6 +241,25 @@ def ledger_spend(cost_events: list[dict], session_usd: float | None = None) -> d
 
 def cost_report_from_ledger(directory: Path) -> dict:
     """Reconstruct the cost report from the durable journal when Pi could not write it."""
+    if (directory / "control.jsonl").is_file():
+        from arena.run_control import read_state, run_threshold
+
+        state = read_state(directory)
+        config = _read_json(directory / "run-config.json")
+        return {
+            "theorem": config.get("theorem"),
+            "model": config.get("model"),
+            "spent_usd": state["total"],
+            "limit_usd": str(run_threshold(directory)),
+            "accounting": state["accounting"],
+            "accounting_failures": state["accounting_failures"],
+            "unknown_requests": state["unknown_requests"],
+            "by_actor": state["by_actor"],
+            "by_job": state["by_job"],
+            "stopped": state["stopped"],
+            "stop_reason": state["stop_reason"],
+            "projection_of": "control.jsonl",
+        }
     session = session_spend(directory)
     spend = ledger_spend(_jsonl(directory / "cost-ledger.jsonl"), session["usd"] if session else None)
     config = _read_json(directory / "run-config.json")
@@ -409,13 +468,31 @@ def _progress(ledger: list[dict]) -> dict:
     return {"best": best, "best_verified_candidate": best_verified_candidate, "timeline": timeline}
 
 
+def _worker_tool_errors(directory: Path) -> Counter:
+    """Failed tool results in the worker sessions, judged by the same rule as the orchestrator's."""
+    errors: Counter = Counter()
+    for file in sorted((directory / "sessions").glob("*/*.jsonl")):
+        for row in _jsonl(file):
+            message = row.get("message") or {}
+            if row.get("type") != "message" or message.get("role") != "toolResult":
+                continue
+            if not _result_ok({"isError": message.get("isError"), "result": {"content": message.get("content") or []}}):
+                errors[message.get("toolName") or "unknown"] += 1
+    return errors
+
+
 def build_summary(directory: Path) -> dict:
     ledger = _jsonl(directory / "ledger.jsonl")
     events = read_events(directory / "events.jsonl")
     cost_events = _jsonl(directory / "cost-ledger.jsonl")
     trace = trace_rows(directory / "trace-journal.jsonl")
     config = _read_json(directory / "run-config.json")
-    report = _read_json(directory / "cost.json") or cost_report_from_ledger(directory)
+    shared_accounting = (directory / "control.jsonl").is_file()
+    report = (
+        cost_report_from_ledger(directory)
+        if shared_accounting
+        else (_read_json(directory / "cost.json") or cost_report_from_ledger(directory))
+    )
     submission_result = _json(directory / "submission.json")
     settles = [e for e in cost_events if e.get("kind") == "settle"]
     turns = _turns(events, settles)
@@ -423,10 +500,15 @@ def build_summary(directory: Path) -> dict:
     retries = sum(event.get("retry_of") is not None for event in request_events)
     session = session_spend(directory)
     recon = ledger_spend(cost_events, session["usd"] if session else None)
-    # The one spend figure: never below the cost report, the ledger's settles or Pi's session total.
-    spent = max(float(report.get("spent_usd") or 0.0), recon["spent_usd"])
+    reported_spend = float(report.get("spent_usd") or 0.0)
+    spent = reported_spend if shared_accounting else max(reported_spend, recon["spent_usd"])
+    if shared_accounting:
+        recon["authority"] = "control.jsonl"
     recon["cost_report_usd"] = report.get("spent_usd")
-    cap = report.get("limit_usd") or configured_cap(config) or report.get("soft_cap_usd") or report.get("hard_cap_usd")
+    cap_value = (
+        report.get("limit_usd") or configured_cap(config) or report.get("soft_cap_usd") or report.get("hard_cap_usd")
+    )
+    cap = float(cap_value) if cap_value is not None else None
     remaining = max(0.0, float(cap or 0.0) - spent)
     by_kind: dict[str, dict] = {}
     for turn in turns:
@@ -449,6 +531,7 @@ def build_summary(directory: Path) -> dict:
     uncached, recent_uncached = sum(t["input"] for t in turns), sum(t["input"] for t in recent)
     alarms = [e for e in cost_events if e.get("kind") == "cache_alarm"]
     calls, errors = Counter(), Counter()
+    worker_errors = _worker_tool_errors(directory)
     result_ok = {str(e.get("toolCallId")): _result_ok(e) for e in events if e.get("type") == "tool_execution_end"}
     for event in events:
         message = event.get("message") or {}
@@ -491,7 +574,9 @@ def build_summary(directory: Path) -> dict:
     stopped = stop_reason_of(directory, controls)
     route_rows = route_table(ledger)
     drains = [e for e in ledger if e.get("kind") == "closing_drain"]
+    golfs = [e for e in ledger if e.get("kind") == "golf"]
     return {
+        "golf": {k: v for k, v in golfs[-1].items() if k not in ("kind", "ts")} if golfs else None,
         "closing_drain": {k: v for k, v in drains[-1].items() if k not in ("kind", "ts")} if drains else None,
         "run_id": directory.name,
         "theorem": config.get("theorem") or report.get("theorem"),
@@ -512,13 +597,14 @@ def build_summary(directory: Path) -> dict:
             "spent_after_best_usd": round(sum(float(event["usd"]) for event in later_settles), 6),
             "by_turn_type": by_kind,
             "reconciliation": recon,
+            "unknown_settlements": unknown_settlements(directory, cost_events, shared_accounting),
             "bookkeeping_and_rejected_pct": round(
                 100 * sum(by_kind.get(k, {"usd": 0})["usd"] for k in ("bookkeeping", "rejected")) / spent, 1
             )
             if spent
             else 0.0,
             "usd_per_evaluation": round(spent / len(evaluations), 6) if evaluations else None,
-            "report_source": report.get("written_by", "pi_session_shutdown"),
+            "report_source": report.get("projection_of") or report.get("written_by", "pi_session_shutdown"),
         },
         # reuse_pct is the cache hit rate (cache_read / (input + cache_read + cache_write)); the key
         # name is kept for stored summaries and the viewer.
@@ -542,6 +628,8 @@ def build_summary(directory: Path) -> dict:
             "results": sum(event.get("type") == "tool_execution_end" for event in events),
             "errors": dict(errors),
             "error_total": sum(errors.values()),
+            "worker_errors": dict(worker_errors),
+            "worker_error_total": sum(worker_errors.values()),
             **_compile_counters(events),
         },
         "routes": route_rows,
@@ -657,7 +745,8 @@ def render_text(summary: dict) -> str:
                     f"cost ${cost['spent_usd']:.4f} of ${cost['limit_usd']} limit "  # log: operator run summary
                     f"(remaining ${cost['remaining_usd']:.4f}; overshoot ${cost['overshoot_usd']:.4f}) over "
                     f"{cost['requests']} requests / {summary['tools']['results']} tool results "
-                    f"({cost['retries']} retries); {kinds}; bookkeeping+rejected {cost['bookkeeping_and_rejected_pct']}%"
+                    f"({cost['retries']} retries); {kinds}; bookkeeping+rejected {cost['bookkeeping_and_rejected_pct']}%; "
+                    f"unknown-cost settlements {cost.get('unknown_settlements', 0)}"
                 ),
                 *(
                     [
@@ -678,7 +767,8 @@ def render_text(summary: dict) -> str:
                 "routes tried: " + routes_detail_text(summary.get("routes") or []),
                 route_depth_text(summary.get("route_progress")),
                 "harness merge check: " + merge_text(summary.get("merge_report") or []),
-                f"tool errors {summary['tools']['error_total']}: {summary['tools']['errors']}",
+                f"tool errors {summary['tools']['error_total']} (orchestrator) / {summary['tools'].get('worker_error_total', 0)} (workers): "
+                f"{summary['tools']['errors']} / {summary['tools'].get('worker_errors', {})}",  # log: operator run summary
                 f"submission: {(summary.get('submission') or {}).get('candidate') or 'none'}",
             ]
         )
