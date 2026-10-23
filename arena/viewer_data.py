@@ -19,6 +19,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from arena import orchestration, plans
 from arena.routes import progress as route_progress
 from arena.routes import route_table
 from arena.run_control import committed_operation_ids
@@ -616,8 +617,24 @@ def run_dashboard(run_id: str, directory: Path) -> dict:
         "controls": control_events(directory, start),
         "runtime_events": [e for e in ledger if e.get("kind") in ("phase", "job")][-100:],
         "lean": lean_mix(ledger, directory),
+        "plan": plan_view(directory),
+        "merges": orchestration.merge_jobs(directory),
+        "merge_ready": orchestration.merge_ready(directory),
         "packet": packet_text,
     }
+
+
+def plan_view(directory: Path) -> dict:
+    """The current orchestrator plan (version, run best it was saved against, steps, warnings) and one compact
+    history line per version. Empty values when the run never saved a plan."""
+    rows = plans.plan_rows(directory)
+    counts = [{status: sum(1 for step in row.get("steps", []) if step.get("status") == status)
+               for status in plans.STATUSES} for row in rows]
+    history = [{"version": row.get("version"), "best": row.get("best"), "counts": count}
+               for row, count in zip(rows, counts)]
+    current = rows[-1] if rows else {}
+    return {"version": current.get("version"), "best": current.get("best"), "steps": current.get("steps", []),
+            "warnings": current.get("warnings", []), "history": history}
 
 
 # ---------------------------------------------------------------------------------------------

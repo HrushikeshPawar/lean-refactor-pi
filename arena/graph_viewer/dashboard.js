@@ -263,6 +263,33 @@
     place('c-lean', `${compile}${versions}${data.submission ? `<div class="line1 small muted">Submission ${esc(data.submission.candidate)}: proxy ${esc(data.submission.proxy)}, ${esc(data.submission.tokens)} tok / ${esc(data.submission.heartbeats)} hb, ${esc(data.submission.verified_by)}</div>` : ''}`);
   }
 
+  /* Plan: the orchestrator's latest saved plan; ids are shown as saved (nN), not relabelled. */
+  const PLAN_KIND = {done: 'good', failed: 'bad', running: 'mid'};
+  const MERGE_END = {compile_cap: 'stopped at the compile cap', not_beating: 'stopped: not beating its base',
+    stale: 'stopped: no recent improvement', cancelled: 'cancelled', run_stopped: 'run stopped'};
+  function planCard() {
+    const plan = data.plan || {}, steps = plan.steps || [], warnings = plan.warnings || [];
+    if (plan.version == null) { $('h-plan').textContent = ''; return place('c-plan', '<p class="muted">No plan saved.</p>'); }
+    const best = plan.best ? esc(plan.best) : 'the original proof';
+    $('h-plan').innerHTML = `v${esc(plan.version)} · saved against ${best}`;
+    const rows = steps.map(s => `<tr><td>${esc(s.kind)}</td><td>${esc(s.target)}</td><td>${esc(s.expect)}</td><td>${badge(s.status, PLAN_KIND[s.status] || '')}</td>
+      <td class="small">${esc([s.note, s.cards && `cards ${s.cards}`].filter(Boolean).join(' · '))}</td></tr>`).join('');
+    const history = (plan.history || []).map(h => `v${esc(h.version)} · best ${esc(h.best ?? 'original')} · ${h.counts.open} open / ${h.counts.running} running / ${h.counts.done} done / ${h.counts.failed} failed`);
+    place('c-plan', `<div class="scroll"><table><thead><tr><th>kind</th><th>target</th><th>expect</th><th>status</th><th>note</th></tr></thead><tbody>${rows}</tbody></table></div>
+      ${warnings.map(w => `<div class="warn">${esc(w)}</div>`).join('')}
+      <div class="small muted plan-history">${history.join('<br>')}</div>`);
+  }
+
+  /* Merge jobs: one row per merge job; ready nodes are the ones a merge job could combine now. */
+  function mergeCard() {
+    const jobs = data.merges || [], ready = data.merge_ready || [];
+    $('h-merge').textContent = jobs.length ? `${jobs.length} job${jobs.length === 1 ? '' : 's'}` : '';
+    const rows = jobs.map(m => `<tr><td>${esc(m.label || m.job_id)}</td><td>${(m.nodes || []).map(esc).join(', ')}</td><td>${badge(m.state || '—', m.end ? '' : 'mid')}</td>
+      <td>${m.end ? esc(MERGE_END[m.end] || m.end) : 'open'}</td></tr>`).join('');
+    place('c-merge', `${jobs.length ? `<div class="scroll"><table><thead><tr><th>job</th><th>nodes (base first)</th><th>state</th><th>end</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<p class="muted">No merge jobs</p>'}
+      ${ready.length ? `<p class="small">Ready to merge: ${ready.map(esc).join(', ')}</p>` : ''}`);
+  }
+
   function lfCard() {
     if (!lf) return place('c-lf', '<p class="muted">Loading Langfuse…</p>');
     if (!lf.available) return place('c-lf', `<div class="warn">Langfuse unavailable: ${esc(lf.error || 'unknown error')}. <button id="lf-retry">Retry</button></div>`), ($('lf-retry').onclick = () => loadLangfuse(true));
@@ -367,7 +394,7 @@
 
   function render() {
     if (!data) return;
-    for (const fn of [header, kpis, widgets, toolsTimeline, routesCard, leanCard, lfCard, folds, renderPanel, renderModal]) safely(fn);
+    for (const fn of [header, kpis, widgets, toolsTimeline, routesCard, leanCard, planCard, mergeCard, lfCard, folds, renderPanel, renderModal]) safely(fn);
   }
 
   async function loadLangfuse(refresh = false) {

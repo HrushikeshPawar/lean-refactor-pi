@@ -339,6 +339,52 @@ class DataTests(unittest.TestCase):
         (directory / "summary.json").write_text(json.dumps({"stop_reason": "finished"}))
         self.assertTrue(run_dashboard("r3", directory)["finished"])
 
+    def test_dashboard_carries_the_plan_and_merge_jobs(self):
+        directory = make_run(self.root, "r4")
+        rows = [
+            {"type": "plan", "version": 1, "best": "n87", "steps": [
+                {"target": "whole proof", "kind": "shape", "expect": "-60 tokens", "status": "done"},
+                {"target": "n87", "kind": "merge", "expect": "-15 tokens", "status": "running"},
+                {"target": "n74", "kind": "heartbeats", "expect": "-40 hb", "status": "failed"}],
+             "warnings": ["Step n74 failed with no note"]},
+            {"type": "plan", "version": 2, "best": "n90", "steps": [
+                {"target": "n90", "kind": "merge", "expect": "-5 tokens", "status": "open"}], "warnings": []},
+            {"type": "delegation", "job_id": "job-m1", "scope": "merge", "activation_id": "a1", "task": "merge n87 n90",
+             "worker_session_id": "s1", "actor_id": "w1", "tools": [], "anchor": {"nodes": ["n87", "n90"]},
+             "state": "launching"},
+            {"type": "island_turn", "job_id": "job-m1", "scope": "merge", "stop": "not_beating"},
+        ]
+        with (directory / "ledger.jsonl").open("a") as handle:
+            handle.write("".join(json.dumps(row) + "\n" for row in rows))
+        board = run_dashboard("r4", directory)
+        self.assertEqual(board["plan"]["version"], 2)
+        self.assertEqual(board["plan"]["best"], "n90")
+        self.assertEqual([step["kind"] for step in board["plan"]["steps"]], ["merge"])
+        self.assertEqual(board["plan"]["warnings"], [])
+        self.assertEqual(
+            board["plan"]["history"],
+            [
+                {"version": 1, "best": "n87", "counts": {"open": 0, "running": 1, "done": 1, "failed": 1}},
+                {"version": 2, "best": "n90", "counts": {"open": 1, "running": 0, "done": 0, "failed": 0}},
+            ],
+        )
+        self.assertEqual(
+            [(job["job_id"], job["nodes"], job["end"]) for job in board["merges"]],
+            [("job-m1", ["n87", "n90"], "not_beating")],
+        )
+        self.assertEqual(board["merge_ready"], [])
+
+    def test_empty_run_gives_empty_plan_and_merges(self):
+        directory = self.root / "runs" / "pi-budget" / "empty"
+        directory.mkdir(parents=True)
+        board = run_dashboard("empty", directory)
+        self.assertEqual(board["plan"]["version"], None)
+        self.assertEqual(board["plan"]["steps"], [])
+        self.assertEqual(board["plan"]["warnings"], [])
+        self.assertEqual(board["plan"]["history"], [])
+        self.assertEqual(board["merges"], [])
+        self.assertEqual(board["merge_ready"], [])
+
 
 OBSERVATIONS = [
     {

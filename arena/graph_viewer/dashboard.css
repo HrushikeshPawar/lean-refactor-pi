@@ -73,6 +73,8 @@ details{border:1px solid var(--line);border-radius:8px;background:var(--panel);p
 .tabs button{border-radius:8px 8px 0 0;border-bottom:0;white-space:nowrap;padding:5px 14px}
 .tabs button[aria-selected=true]{background:var(--panel);border-color:var(--blue);box-shadow:inset 0 2px 0 var(--blue)}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.planrow{margin-top:12px}.planrow .card{min-width:0}.planrow .warn{margin-top:6px}.plan-history{margin-top:8px;line-height:1.6}
+.planrow .card .scroll{max-height:260px}
 .card+.card,.card+.grid2,.grid2+.card{margin-top:12px}.dash>.card+.card,.col>.card+.card{margin-top:0}
 .sw.box{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px}
 .cp0{--k:var(--p-read)}.cp1{--k:var(--p-input)}.cp2{--k:var(--p-write)}.cp3{--k:var(--p-output)}.korig{--k:var(--muted)}
