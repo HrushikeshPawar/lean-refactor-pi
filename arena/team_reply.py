@@ -54,17 +54,51 @@ def render(action: str, result: dict, directory: Path) -> str:
         return _render("delegate_started", job=job(result.get("job_id")), state=state,
                        scope=result.get("scope", "?"), anchor=_anchor(result.get("anchor")))
     if action == "card":
-        return _render("card_saved", version=result.get("version"))
+        saved = _render("card_saved", version=result.get("version"))
+        return f"{saved} {_render('card_floor')}" if result.get("floor") else saved
     if action == "cancel":
         return _render("cancel_done", job=job(result.get("job_id")), state=result.get("state", "?"))
     if action == "jobs":
         return _jobs(result, directory, job)
     if action == "await_results":
-        return _await(result, directory, job)
+        return "\n".join([_await(result, directory, job), *open_requests(directory)])
     raise ValueError(f"no team reply for {action}")
 
 
+def open_requests(directory: Path) -> list[str]:
+    """Worker asks and floor claims the orchestrator has not acted on (see orchestration.open_requests), or []."""
+    from arena import reply
+
+    requests = orchestration.open_requests(directory)
+    if not requests:
+        return []
+    lines = [_render("open_requests_head")]
+    for item in requests:
+        if item["ask"]:
+            lines.append(_render("open_ask", job=item["job"], version=item["version"],
+                                 ask=" ".join(item["ask"].split())))
+        if item["floor"]:
+            lines.append(_render("open_floor", job=item["job"], version=item["version"]))
+    floor = next((item for item in requests if item["floor"]), None)
+    if floor is not None:
+        status = orchestration.island_status(directory, floor["job_id"]) or {}
+        route = status.get("route")
+        nodes = [node for node in orchestration.proof_nodes(directory).values()
+                 if node.status == "closed" and node.route is not None and node.route != route and node.score is not None]
+        families = reply._plateau_families(nodes, route)
+        axes = reply._plateau_axes(nodes)
+        candidates = " ".join(["; ".join(families), *([axes] if axes else [])]).strip()
+        options = _render("floor_options", route=route or "its shape", candidates=candidates) if candidates \
+            else _render("floor_none")
+        lines.append(_render("floor_push", options=options))
+    return lines
+
+
 def _jobs(result: dict, directory: Path, job) -> str:
+    return "\n".join([_jobs_body(result, directory, job), *open_requests(directory)])
+
+
+def _jobs_body(result: dict, directory: Path, job) -> str:
     found = result.get("jobs") or []
     if not found:
         return _render("jobs_none")

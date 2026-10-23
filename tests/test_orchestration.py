@@ -2395,7 +2395,7 @@ class SteerAndNoteTests(unittest.TestCase):
 
 def _closed_node(node_id, route, score, job_id=None, proof="theorem t : True := by\n  intro h\n  simp\n  exact h"):
     return SimpleNamespace(id=node_id, proof_id=f"p-{node_id}", status="closed", route=route, score=score,
-                           verified=True, origin="model", proof_text=proof,
+                           verified=True, origin="model", proof_text=proof, versions={"v1": True},
                            attempts=[{"job_id": job_id}] if job_id else [])
 
 

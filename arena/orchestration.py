@@ -22,7 +22,16 @@ from pathlib import Path
 from arena import run_control, text
 from arena.campaign import _append, events
 from arena.models import _SESSION_CONCURRENCY
-from arena.pi_rpc import WORKER_MODEL, WORKER_TOOLS, FrameReader, cancel_lines, prompt_line, steer_line, worker_launch
+from arena.pi_rpc import (
+    CARDS_TOOL,
+    WORKER_MODEL,
+    WORKER_TOOLS,
+    FrameReader,
+    cancel_lines,
+    prompt_line,
+    steer_line,
+    worker_launch,
+)
 from arena.run_control import OperationRejected
 
 _MODEL_SLOTS = _SESSION_CONCURRENCY[WORKER_MODEL]
@@ -51,6 +60,11 @@ def is_golf(directory: Path) -> bool:
 
 def is_cards(directory: Path) -> bool:
     return bool(_run_config(directory).get("cards"))
+
+
+def worker_tools(directory: Path) -> list[str]:
+    """The tools a worker of this run has: the base set, plus `patterns` in a run started with --cards."""
+    return [*WORKER_TOOLS, *([CARDS_TOOL] if is_cards(directory) else [])]
 _readers: dict[str, threading.Thread] = {}
 _owned: dict[str, object] = {}
 _live: dict[str, dict] = {}
@@ -688,7 +702,7 @@ def _receipt_body(directory: Path, delegation: dict, applied: dict, spend: dict)
         "state": snapshot["state"],
         "scope": delegation["scope"],
         "anchor": delegation["anchor"],
-        "tools": list(WORKER_TOOLS),
+        "tools": worker_tools(directory),
         "hypothesis": delegation.get("hypothesis", delegation["task"]),
         "evidence_refs": applied.get("evidence_refs") or [],
         "next_cursor": applied.get("event_seq") or [],
@@ -1329,7 +1343,7 @@ def delegate(
         "scope": scope,
         "anchor": resolved,
         "objective": objective,
-        "tools": list(WORKER_TOOLS),
+        "tools": worker_tools(directory),
         "state": "queued",
         "resumed": False,
     }
@@ -1754,8 +1768,9 @@ def save_card(
     merged = {name: value for name, value in merged.items() if value}
     before = (previous or {}).get("fields", {})
     changed = [name for name in fields if merged.get(name, "") != before.get(name, "")]
+    floor = bool(job_id) and is_cards(directory) and card_claims_floor(merged)
     if not changed:
-        return {"ok": True, "version": (previous or {}).get("version", 0)}
+        return {"ok": True, "version": (previous or {}).get("version", 0), "floor": floor}
     version = (previous or {}).get("version", 0) + 1
     label = (text.render("replies/team.author_sol") if actor_id == "sol" and not job_id
              else job_labels(directory).get(job_id) or worker_job_labels(directory).get(actor_id) or actor_id)
@@ -1768,7 +1783,57 @@ def save_card(
         lambda ctx: [ctx.append_ledger(row)],
     )
     _wake()
-    return {**applied, "version": version}
+    return {**applied, "version": version, "floor": floor}
+
+
+# A card "claims a floor" when focus, best, held or ideas say the current shape cannot go lower. Detection is a
+# plain phrase match, not a judgment; a negation within 15 characters before the phrase ("not the floor") cancels it.
+_FLOOR_FIELDS = ("focus", "best", "held", "ideas")
+_FLOOR_CLAIM = re.compile(
+    r"\b(?:floor|final|converged|plateau(?:ed)?|no further (?:gain|gains|improvement|reduction)"
+    r"|nothing (?:left|more) to (?:gain|cut|lower)|cannot be (?:lowered|improved|reduced)|at (?:its|the) minimum)\b",
+    re.I,
+)
+
+
+_NEGATION = re.compile(r"\b(?:not|no|never)\b|n't", re.I)
+
+
+def card_claims_floor(fields: dict) -> bool:
+    for name in _FLOOR_FIELDS:
+        value = str(fields.get(name) or "")
+        for match in _FLOOR_CLAIM.finditer(value):
+            if not _NEGATION.search(value[max(0, match.start() - 15):match.start()]):
+                return True
+    return False
+
+
+def open_requests(directory: Path) -> list[dict]:
+    """Worker cards of a golf run the orchestrator has not yet acted on: an `asks` field, or a floor claim.
+
+    Each is `{job, version, ask, floor}`. A request is handled once a new job was delegated after the card was
+    saved, or the orchestrator's own latest card (saved after it) names the job in `held` or `failed` (a decline)."""
+    if not is_golf(directory):
+        return []
+    labels = job_labels(directory)
+    started = [row["ts"] for row in _delegations(directory)
+               if row.get("job_id") and _job_rows(directory, row["job_id"])[0] is row]
+    mine = current_cards(directory).get("sol")
+    found = []
+    for row in current_cards(directory).values():
+        label = labels.get(row.get("job_id"))
+        fields = row["fields"]
+        ask, floor = fields.get("asks"), is_cards(directory) and card_claims_floor(fields)
+        if not label or not (ask or floor):
+            continue
+        saved = float(row.get("ts", 0.0))
+        declined = mine is not None and float(mine.get("ts", 0.0)) > saved and any(
+            label in str(mine["fields"].get(name) or "") for name in ("held", "failed"))
+        if declined or any(ts > saved for ts in started):
+            continue
+        found.append({"job": label, "version": row["version"], "ask": ask, "floor": floor,
+                      "job_id": row["job_id"]})
+    return found
 
 
 def node_author_job(node) -> str | None:
@@ -1841,13 +1906,15 @@ def island_status(directory: Path, job_id: str) -> dict | None:
     `score` and `node` are the best of those nodes, `closed` their count. `route` is the route of that best node,
     or of its first closed node when none scored. None when the job has no closed node of its own yet.
     An axis island (objective tokens or heartbeats) takes its best as the node with the fewest of that measure,
-    ignoring score, and also returns `tokens` and `heartbeats` of that node."""
+    ignoring score, but only among nodes that compile on every toolchain version (the main best's rule), and also returns `tokens` and `heartbeats` of that node."""
     own = [node for node in proof_nodes(directory).values() if _closed(node) and node_author_job(node) == job_id]
     if not own:
         return None
     objective = _job_original(directory, job_id).get("objective")
     if objective is not None:
-        measured = [node for node in own if getattr(node, objective) is not None]
+        total = len((events(directory) or [{}])[0].get("versions") or [1])
+        measured = [node for node in own if getattr(node, objective) is not None
+                    and len(node.versions) >= total and all(node.versions.values())]
         top = min(measured, key=lambda node: getattr(node, objective)) if measured else None
         return {"route": (top or own[0]).route, "node": top.id if top else None,
                 "score": top.score if top else None, "closed": len(own),
@@ -1947,6 +2014,9 @@ def island_turn(directory: Path, job_id: str, activation_id: str) -> dict:
     if objective is not None and top is not None and top.route != previous_route:
         message += "\n" + text.render("replies/team.island_new_structure", node=top.id,
                                        tokens=top.tokens, heartbeats=top.heartbeats)
+    card = next((row for row in current_cards(directory).values() if row.get("job_id") == job_id), None)
+    if card is not None and is_cards(directory) and card_claims_floor(card["fields"]):
+        message += "\n" + text.render("replies/team.card_floor")
     return {"ok": True, "continue": True, "text": message}
 
 
