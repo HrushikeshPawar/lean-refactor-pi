@@ -659,6 +659,16 @@ export default async function arenaExtension(pi: ExtensionAPI) {
       discoveries.add(signature);
       appendCost({ kind: "discovery", signature, tool: event.toolName });
     }
+    // Sol's new plan and merge notices ride in the tool's details, never in its text. They reach the model as one
+    // hidden message, queued behind this turn's tool results, the same way the memory message is sent.
+    const notices = payload?.notices as { kinds?: string[]; lines?: string[] } | undefined;
+    if (notices?.lines?.length) {
+      const content = notices.lines.join("\n");
+      try {
+        appendCost({ kind: "notice", kinds: notices.kinds ?? [], chars: content.length });
+        pi.sendMessage({ customType: "arena-notice", content, display: false }, { triggerTurn: false });
+      } catch (error) { console.error(`[arena-notice] not sent: ${error}`); }
+    }
     // Taken before the early return so a result outside an open attempt does not leave its footer behind.
     const footer = footers.get(event.toolCallId);
     footers.delete(event.toolCallId);

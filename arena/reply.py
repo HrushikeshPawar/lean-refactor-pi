@@ -209,6 +209,7 @@ def reset_delivered(run_id: str) -> None:
     bucket = _bucket(state, actor)
     bucket.pop("map_hash", None)
     bucket.pop("map_key", None)
+    bucket.pop("notices", None)
     state["goals"] = {}
     state["diagnostics"] = {}
     if actor == "sol":

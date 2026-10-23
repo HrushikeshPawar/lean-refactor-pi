@@ -79,6 +79,8 @@ plateau_minutes: 10
 card_stale_minutes: 5
 # The orchestrator's plan holds at most this many steps (see arena/plans.py).
 plan_max_steps: 12
+# A missing plan is said again after this many sol tool calls (see team_reply.notices).
+notice_repeat_calls: 10
 # A merge job ends after this many closed nodes of its own, or when its last merge_stale_compiles closed nodes all
 # failed to beat the run best as it stood when each was saved.
 merge_max_compiles: 8

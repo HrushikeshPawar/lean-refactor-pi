@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from arena import orchestration, plans, text
+from arena import campaign, orchestration, plans, text
 
 
 def _render(key: str, **values) -> str:
@@ -65,17 +65,75 @@ def render(action: str, result: dict, directory: Path) -> str:
     if action == "plan":
         return "\n".join([_render("plan_saved", version=result.get("version")), *result.get("warnings", [])])
     if action == "await_results":
-        return "\n".join([_await(result, directory, job), *open_requests(directory), *nudges(directory)])
+        return "\n".join([_await(result, directory, job), *open_requests(directory)])
     raise ValueError(f"no team reply for {action}")
 
 
-def nudges(directory: Path) -> list[str]:
-    """The plan block and its nudges, then the merge hint. Appended after await_results and jobs replies only."""
-    lines = plans.lines(directory)
+def _take(sent: dict, kind: str, fingerprint: object, calls: int, repeat: int) -> bool:
+    """True when this notice is new for sol: its fingerprint changed, or a missing plan is due its repeat.
+    Records the send in `sent` (kind to fingerprint and the sol call count at the send)."""
+    last = sent.get(kind)
+    if last is not None and last["fp"] == fingerprint and not (kind == "plan_missing" and calls - last["call"] >= repeat):
+        return False
+    sent[kind] = {"fp": fingerprint, "call": calls}
+    return True
+
+
+def notices(directory: Path, bucket: dict, action: str | None) -> tuple[list[str], list[str]]:
+    """The plan and merge notices new for sol since its last tool call, as (kinds, lines).
+
+    A plan that is missing is said once after the first delegate, then again every `notice_repeat_calls` sol tool
+    calls while it stays missing. The plan block (open and running steps) comes only with a stale plan."""
+    if action == "delegate":
+        bucket["delegates"] = bucket.get("delegates", 0) + 1
+    sent = bucket.setdefault("notices", {})
+    calls = bucket.get("calls", 0)
+    repeat = text.numbers()["notice_repeat_calls"]
+    kinds: list[str] = []
+    lines: list[str] = []
+    best = orchestration.run_best(directory)
+    plan = plans.current_plan(directory)
+    if plan is None:
+        if bucket.get("delegates") and _take(sent, "plan_missing", "missing", calls, repeat):
+            kinds.append("plan_missing")
+            lines.append(_render("plan_missing"))
+    else:
+        live = plans.live(plan)
+        if best is not None and plan.get("best") != best.id and _take(sent, "plan_stale", [plan["version"], best.id], calls, repeat):
+            kinds.append("plan_stale")
+            lines.append(_render("plan_stale", node=best.id,
+                                 was=plan.get("best") or text.render("replies/team.plan_original")))
+            if live:
+                lines.append(_render("plan_head", version=plan["version"]))
+                lines += [_render("plan_step", target=step["target"], kind=step["kind"], expect=step["expect"])
+                          for step in live]
+        if not live and _take(sent, "plan_empty", plan["version"], calls, repeat):
+            kinds.append("plan_empty")
+            lines.append(_render("plan_empty", node=best.id if best is not None else text.render("replies/team.plan_original")))
     ready = orchestration.merge_ready(directory)
-    if ready:
+    if not ready:
+        sent.pop("merge_ready", None)
+    elif _take(sent, "merge_ready", sorted(ready), calls, repeat):
+        kinds.append("merge_ready")
         lines.append(_render("merge_ready", nodes=", ".join(ready), count=_jobs_count(directory, ready)))
-    return lines
+    return kinds, lines
+
+
+def sol_notices(run_id: str, action: str, result: dict) -> dict:
+    """Add sol's new notices to a tool reply as `notices` in its details; the text the model reads is unchanged.
+    Each of sol's tool calls counts toward the repeat of a missing plan. Workers get no field."""
+    from arena import reply
+
+    if reply.current_actor() != "sol" or not isinstance(result, dict):
+        return result
+    with reply._delivery_lock(run_id):
+        state = reply._load(run_id)
+        bucket = reply._bucket(state, "sol")
+        bucket["calls"] = bucket.get("calls", 0) + 1
+        kinds, lines = notices(campaign.run_dir(run_id), bucket, action)
+        reply._write_actor(run_id, "sol", bucket, state)
+    result["notices"] = {"kinds": kinds, "lines": lines}
+    return result
 
 
 def _jobs_count(directory: Path, nodes: list[str]) -> int:
@@ -117,7 +175,7 @@ def open_requests(directory: Path) -> list[str]:
 
 
 def _jobs(result: dict, directory: Path, job) -> str:
-    return "\n".join([_jobs_body(result, directory, job), *open_requests(directory), *nudges(directory)])
+    return "\n".join([_jobs_body(result, directory, job), *open_requests(directory)])
 
 
 def _jobs_body(result: dict, directory: Path, job) -> str:

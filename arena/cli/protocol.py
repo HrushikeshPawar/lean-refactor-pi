@@ -52,7 +52,19 @@ ACTIONS = (
 )
 
 
+# Tool calls the model makes. Each carries sol's new notices in its details (team_reply.sol_notices); their text does not.
+NOTICE_ACTIONS = ("compile", "goal", "search", "read", "scratch", "patterns", "await_results", "delegate", "jobs",
+                  "cancel", "card", "plan")
+
+
 def run(args: SimpleNamespace) -> dict:
+    result = _run(args)
+    if args.action in NOTICE_ACTIONS:
+        return team_reply.sol_notices(args.run_id, args.action, result)
+    return result
+
+
+def _run(args: SimpleNamespace) -> dict:
     if args.action == "reset_delivered":
         # Compaction calls this with no request: it only forgets what was delivered.
         tool_reply.reset_delivered(args.run_id)

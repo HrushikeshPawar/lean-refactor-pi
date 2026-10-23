@@ -1,7 +1,7 @@
 """The orchestrator's plan: each save is a versioned `plan` ledger row that replaces the whole plan.
 
-Validation is strict on shape and on the two standing steps. The lines below are what the orchestrator reads after its
-jobs, delegate and await_results replies; the worker packets never carry the plan, so the packet stays fixed for a session.
+Validation is strict on shape and on the two standing steps. The orchestrator reads the plan through hidden notices
+(see team_reply.notices); the worker packets never carry the plan, so the packet stays fixed for a session.
 """
 
 from __future__ import annotations
@@ -99,21 +99,6 @@ def save_plan(directory: Path, *, operation_id: str, run_id: str, actor_id: str,
     return {**applied, "version": version, "warnings": warnings}
 
 
-def lines(directory: Path) -> list[str]:
-    """The plan block (open and running steps) and the nudges that follow it, for await_results and jobs replies."""
-    plan = current_plan(directory)
-    if plan is None:
-        return [text.render("replies/team.plan_missing")]
-    best = orchestration.run_best(directory)
-    live = [step for step in plan["steps"] if step["status"] in _LIVE]
-    out = []
-    if live:
-        out.append(text.render("replies/team.plan_head", version=plan["version"]))
-        out += [text.render("replies/team.plan_step", target=step["target"], kind=step["kind"], expect=step["expect"])
-                for step in live]
-    shown_best = best.id if best is not None else text.render("replies/team.plan_original")
-    if best is not None and plan.get("best") != best.id:
-        out.append(text.render("replies/team.plan_stale", node=best.id, was=plan.get("best") or shown_best))
-    if not live:
-        out.append(text.render("replies/team.plan_empty", node=shown_best))
-    return out
+def live(plan: dict) -> list[dict]:
+    """The plan's open and running steps."""
+    return [step for step in plan["steps"] if step["status"] in _LIVE]

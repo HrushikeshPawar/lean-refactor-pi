@@ -1,11 +1,12 @@
 """Orchestrator plan, merge jobs, the worker compile nudge and packet stability (smoke tests per feature)."""
 
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from arena import context, orchestration, patterns, plans, reply, text
+from arena import context, orchestration, patterns, plans, reply, team_reply, text
 from tests.test_text import ROWS, _fixture
 
 SHAPE = {"target": "whole proof", "kind": "shape", "expect": "-5 tokens, estimated", "status": "open"}
@@ -26,19 +27,75 @@ class PlanTests(unittest.TestCase):
         self.assertIsNone(plans._problem([SHAPE, MERGE, TOKENS], None))
         self.assertEqual(plans._problem([{**TOKENS, "kind": "bogus"}], None), ("plan_steps", {}))
 
-    def test_plan_lines_say_missing_then_show_open_steps_and_stale_best(self):
-        best = node("n5", 70.0)
-        with patch.object(plans.orchestration, "run_best", return_value=best), \
-                patch.object(plans, "current_plan", return_value=None):
-            self.assertEqual(plans.lines(Path("run")), [text.render("replies/team.plan_missing")])
-        plan = {"version": 2, "best": "n4", "steps": [TOKENS]}
-        with patch.object(plans.orchestration, "run_best", return_value=best), \
-                patch.object(plans, "current_plan", return_value=plan):
-            lines = plans.lines(Path("run"))
-        self.assertEqual(lines[0], "## Plan v2")
-        self.assertEqual(lines[1], "- n2 lines 8-20 · tokens · -20 tokens, measured")
-        self.assertIn(text.render("replies/team.plan_stale", node="n5", was="n4"), lines)
 
+class NoticeTests(unittest.TestCase):
+    def notice(self, bucket, *, plan, best, ready=(), action=None):
+        """sol's notices for one tool call, with the run's plan, best and merge set patched."""
+        with patch.object(plans, "current_plan", return_value=plan), \
+                patch.object(orchestration, "run_best", return_value=best), \
+                patch.object(orchestration, "merge_ready", return_value=list(ready)), \
+                patch.object(team_reply, "_jobs_count", return_value=2):
+            bucket["calls"] = bucket.get("calls", 0) + 1
+            return team_reply.notices(Path("run"), bucket, action)
+
+    def test_missing_plan_is_said_once_after_a_delegate_then_again_every_ten_calls(self):
+        bucket = {}
+        self.assertEqual(self.notice(bucket, plan=None, best=None), ([], []))
+        self.assertEqual(self.notice(bucket, plan=None, best=None, action="delegate"),
+                         (["plan_missing"], [text.render("replies/team.plan_missing")]))
+        for _ in range(9):
+            self.assertEqual(self.notice(bucket, plan=None, best=None), ([], []))
+        self.assertEqual(self.notice(bucket, plan=None, best=None)[0], ["plan_missing"])
+
+    def test_stale_plan_saved_before_any_best_says_the_original_proof_and_shows_open_steps(self):
+        plan = {"version": 2, "best": None, "steps": [TOKENS]}
+        kinds, lines = self.notice({}, plan=plan, best=node("n5", 70.0))
+        self.assertEqual(kinds, ["plan_stale"])
+        self.assertEqual(lines[0], text.render("replies/team.plan_stale", node="n5",
+                                               was=text.render("replies/team.plan_original")))
+        self.assertEqual(lines[1:], ["## Plan v2", "- n2 lines 8-20 · tokens · -20 tokens, measured"])
+
+    def test_same_state_is_not_said_twice_but_a_new_best_or_a_changed_merge_set_is_said_again(self):
+        bucket = {}
+        plan = {"version": 3, "best": "n4", "steps": [TOKENS]}
+        self.assertEqual(self.notice(bucket, plan=plan, best=node("n5", 70.0), ready=["n2", "n3"])[0],
+                         ["plan_stale", "merge_ready"])
+        self.assertEqual(self.notice(bucket, plan=plan, best=node("n5", 70.0), ready=["n2", "n3"]), ([], []))
+        self.assertEqual(self.notice(bucket, plan=plan, best=node("n6", 71.0), ready=["n2", "n3"])[0], ["plan_stale"])
+        self.assertEqual(self.notice(bucket, plan=plan, best=node("n6", 71.0), ready=["n2", "n3", "n4"])[0],
+                         ["merge_ready"])
+
+    def test_a_plan_with_no_open_step_is_said_once_per_version(self):
+        plan = {"version": 1, "best": "n5", "steps": [{**TOKENS, "status": "done"}]}
+        bucket = {}
+        self.assertEqual(self.notice(bucket, plan=plan, best=node("n5", 70.0))[0], ["plan_empty"])
+        self.assertEqual(self.notice(bucket, plan=plan, best=node("n5", 70.0)), ([], []))
+
+    def test_await_and_jobs_replies_carry_no_plan_or_merge_lines(self):
+        plan = {"version": 2, "best": "n4", "steps": [TOKENS]}
+        with patch.object(plans, "current_plan", return_value=plan), \
+                patch.object(orchestration, "run_best", return_value=node("n5", 70.0)), \
+                patch.object(orchestration, "merge_ready", return_value=["n2", "n3"]), \
+                patch.object(team_reply, "open_requests", return_value=[]):
+            awaited = team_reply.render("await_results", {"events": [], "jobs": []}, Path("run"))
+            listed = team_reply.render("jobs", {"jobs": []}, Path("run"))
+        for shown in (awaited, listed):
+            self.assertNotIn("Plan v", shown)
+            self.assertNotIn("Merge ready", shown)
+            self.assertNotIn("this plan was saved against", shown)
+
+    def test_only_sol_gets_the_notices_field_and_the_text_is_left_alone(self):
+        with patch.object(reply, "current_actor", return_value="job-actor"):
+            self.assertNotIn("notices", team_reply.sol_notices("run", "delegate", {"ok": True, "text": "t"}))
+        with patch.object(reply, "current_actor", return_value="sol"), \
+                patch.object(reply, "_delivery_lock", return_value=nullcontext()), \
+                patch.object(reply, "_load", return_value={}), patch.object(reply, "_write_actor") as write, \
+                patch.object(team_reply, "notices", return_value=(["merge_ready"], ["Merge ready: n2, n3."])), \
+                patch.object(team_reply.campaign, "run_dir", return_value=Path("run")):
+            result = team_reply.sol_notices("run", "delegate", {"ok": True, "text": "t"})
+        self.assertEqual(result, {"ok": True, "text": "t",
+                                  "notices": {"kinds": ["merge_ready"], "lines": ["Merge ready: n2, n3."]}})
+        write.assert_called_once()
 
 class MergeTests(unittest.TestCase):
     def setUp(self):
