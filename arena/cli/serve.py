@@ -297,8 +297,8 @@ def graph_payload(run_id: str) -> dict:
 
 
 def run_models(directory: Path) -> dict:
-    """The model behind the orchestrator role (run-config `model`) and behind workers, which every run
-    launches with `pi_rpc.worker_launch`'s default model."""
+    """The model behind the orchestrator role (run-config `model`) and behind workers (run-config `worker_model`,
+    else `pi_rpc.worker_launch`'s default model)."""
     from arena.pi_rpc import worker_launch
 
     worker = inspect.signature(worker_launch).parameters["model"].default
@@ -306,7 +306,7 @@ def run_models(directory: Path) -> dict:
         config = json.loads((directory / "run-config.json").read_text())
     except (OSError, json.JSONDecodeError):
         return {"orchestrator": None, "worker": worker}
-    return {"orchestrator": config.get("model"), "worker": worker}
+    return {"orchestrator": config.get("model"), "worker": config.get("worker_model") or worker}
 
 
 def target_to_beat(theorem: str | None, runs_root: Path) -> dict | None:

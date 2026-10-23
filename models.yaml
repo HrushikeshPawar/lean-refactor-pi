@@ -25,6 +25,12 @@ providers:
     base_url: https://api.primalabs.ai/v1
     api: openai-completions
     api_key_env: PL_API_KEY
+  # OpenRouter with each model pinned to one endpoint via compat.open_router_routing (Pi sends it as the request's
+  # `provider` field; Pi detects OpenRouter from the base URL).
+  openrouter-pin:
+    base_url: https://openrouter.ai/api/v1
+    api: openai-completions
+    api_key_env: OPENROUTER_API_KEY
 
 # Campaign presets: run_campaign.py --preset <name>. Explicit flags override them.
 presets:
@@ -78,6 +84,39 @@ models:
     request_output_tokens: 32000
     compaction:
       at_tokens: 200000
+      keep_recent_tokens: 40000
+
+  deepseek-v4.1-flash-or:      # DeepSeek V4.1 Flash (1017 snapshot) on OpenRouter, pinned to DeepSeek's own endpoint
+    provider: openrouter-pin
+    id: deepseek/deepseek-v4.1-flash-1017
+    name: DeepSeek V4.1 Flash 1017 (DeepSeek via OpenRouter)
+    reasoning: true
+    # DeepSeek endpoint prices (OpenRouter list 2026-10-23), the same as opencode-go; no cache-write charge.
+    # The endpoint may train on inputs: it needs the account's paid-training privacy setting on.
+    price: {input: 0.15, output: 0.60, cache_read: 0.003, cache_write: 0}
+    context_window: 1048576
+    max_tokens: 393216         # the DeepSeek endpoint's max completion
+    request_output_tokens: 64000
+    compat: {open_router_routing: {only: [deepseek]}}
+    compaction:
+      # As deepseek-v4.1-flash: cache read is $0.003/M, so compact as late as the window allows.
+      at_tokens: 850000
+      keep_recent_tokens: 40000
+
+  glm-5.3-flash:               # GLM-5.3-Flash on OpenRouter, pinned to the Z.AI endpoint (fp8)
+    provider: openrouter-pin
+    id: z-ai/glm-5.3-flash
+    name: GLM-5.3-Flash (Z.AI via OpenRouter)
+    reasoning: true
+    # Z.AI endpoint prices (OpenRouter list 2026-10-23); no cache-write charge.
+    price: {input: 0.15, output: 0.50, cache_read: 0.03, cache_write: 0}
+    context_window: 1048576
+    max_tokens: 131072         # the Z.AI endpoint's max completion
+    request_output_tokens: 64000
+    compat: {open_router_routing: {only: [z-ai]}}
+    compaction:
+      # Cache read is $0.03/M, 5x cheaper than uncached input, so compact late, as for DeepSeek.
+      at_tokens: 850000
       keep_recent_tokens: 40000
 
   mimo-v2.6-pro:               # OpenAI chat completions on primalabs; probed 2026-10-10 (plan §9a)

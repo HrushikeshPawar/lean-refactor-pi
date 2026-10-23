@@ -935,16 +935,17 @@ def _reference_price_table(table: dict, proof: str, profile: dict | None) -> lis
     return render_price_table(table, proof, profile, proof_id="reference").splitlines()
 
 
-def _team_section(model: str | None, golf: dict | None = None) -> list[str]:
+def _team_section(model: str | None, golf: dict | None = None, worker: str | None = None) -> list[str]:
     """The orchestrator's team paragraph. Worker count, model and the output-price ratio are computed here.
 
-    `golf` ({"workers", "worker_model"}) swaps in the polishing-session paragraph for a run that starts from a best proof."""
+    `golf` ({"workers", "worker_model"}) swaps in the polishing-session paragraph for a run that starts from a best proof.
+    `worker` is the run's worker model (default WORKER_MODEL); the worker count is the default pool either way."""
     if model is None:
         return []
     from arena.models import _SESSION_CONCURRENCY, load
     from arena.pi_rpc import WORKER_MODEL
 
-    worker_model = golf["worker_model"] if golf else WORKER_MODEL
+    worker_model = golf["worker_model"] if golf else (worker or WORKER_MODEL)
     workers = golf["workers"] if golf else _SESSION_CONCURRENCY[WORKER_MODEL]
     prices = load()["models"]
     # One simple rule: how many times cheaper a worker's output token is than the orchestrator's.
@@ -1007,7 +1008,7 @@ def _pinned_part(row: dict, targets: list) -> tuple[str, list[str]]:
 
 
 def packet_sections(
-    name: str, *, cache_only: bool = False, model: str | None = None, golf: dict | None = None
+    name: str, *, cache_only: bool = False, model: str | None = None, golf: dict | None = None, worker: str | None = None
 ) -> list[tuple[str, str]]:
     row = problem(name)
     targets = versions(row)
@@ -1052,7 +1053,7 @@ def packet_sections(
         ),
         (template("packet/sections.titles.profile").strip(), _profile_section(prof, row["src"], name)),
         ("", template("packet/search").strip().splitlines()),
-        (template("packet/sections.titles.team").strip(), _team_section(model, golf)),
+        (template("packet/sections.titles.team").strip(), _team_section(model, golf, worker)),
         (titles["goals"], _goal_section(context, row["src"], facts=goal_facts)),
         (LIBRARY_TITLE, _library_section(context)),
         (titles["types"], _types_section(context)),
@@ -1085,8 +1086,10 @@ def packet_sections(
     ]
 
 
-def render_packet(name: str, *, cache_only: bool = False, model: str | None = None, golf: dict | None = None) -> str:
-    sections = packet_sections(name, cache_only=cache_only, model=model, golf=golf)
+def render_packet(
+    name: str, *, cache_only: bool = False, model: str | None = None, golf: dict | None = None, worker: str | None = None
+) -> str:
+    sections = packet_sections(name, cache_only=cache_only, model=model, golf=golf, worker=worker)
     return "\n\n".join(content for _title, content in sections) + "\n"
 
 

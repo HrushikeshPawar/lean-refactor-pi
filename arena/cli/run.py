@@ -30,6 +30,7 @@ from arena.campaign import _runtime_event, autocheck, init, packet, run_dir, sub
 from arena.cli import live, run_report
 from arena.coordinator import Coordinator
 from arena.engine import ROOT
+from arena.pi_rpc import WORKER_MODEL
 from arena.provenance import code_version
 from arena.run_control import run_threshold
 from arena.seed import check_seed, prior_work, read_seed_proof, start_from_proof
@@ -499,7 +500,7 @@ class RunOptions:
     golf: Annotated[bool, Parameter(negative="")] = False
     # Strategy cards: the `patterns` tool for every actor and cards in each worker's first packet. Off by default.
     cards: Annotated[bool, Parameter(negative="")] = False
-    worker_model: str | None = None  # golf only; default deepseek-v4.1-flash
+    worker_model: str | None = None  # the run's worker model, any models.yaml model; default deepseek-v4.1-flash
     workers: int | None = None  # golf only; default 2, at most 3
     dry_run: bool = False
     plain: bool = False
@@ -591,16 +592,15 @@ def run(options: RunOptions) -> int:
             file=sys.stderr,
         )
         return 2
+    if args.worker_model is not None and args.worker_model not in MODELS:
+        print(f"error: unknown worker model {args.worker_model!r}; choose from {', '.join(MODELS)}", file=sys.stderr)
+        return 2
+    if args.workers is not None and not args.golf:
+        print("error: --workers need --golf", file=sys.stderr)
+        return 2
     golf_team = None
-    if args.golf or args.worker_model is not None or args.workers is not None:
-        if args.resume_run:
-            if not args.golf and (args.worker_model is not None or args.workers is not None):
-                print("error: --worker-model and --workers need --golf", file=sys.stderr)
-                return 2
-        elif not args.golf:
-            print("error: --worker-model and --workers need --golf", file=sys.stderr)
-            return 2
-        elif args.seed_proof is None:
+    if args.golf:
+        if not args.resume_run and args.seed_proof is None:
             print("error: --golf needs --seed-proof: it starts from a best proof", file=sys.stderr)
             return 2
         golf_team = _golf_team(args.worker_model, args.workers)
@@ -645,6 +645,9 @@ def run(options: RunOptions) -> int:
         ):
             print("error: resume thinking level or skill differs from the original run", file=sys.stderr)
             return 2
+        if args.worker_model is not None and args.worker_model != (config.get("worker_model") or WORKER_MODEL):
+            print("error: resume worker model differs from the original run", file=sys.stderr)
+            return 2
         saved = {key: config.get(key) for key in ("golf", "worker_model", "workers")}
         if golf_team is not None and (not saved["golf"] or golf_team != {k: saved[k] for k in golf_team}):
             print("error: resume golf settings differ from the original run", file=sys.stderr)
@@ -658,7 +661,7 @@ def run(options: RunOptions) -> int:
         prompt = (
             text.render("messages/run.preflight")
             if args.preflight
-            else packet(args.theorem, args.model, golf=golf_team)
+            else packet(args.theorem, args.model, golf=golf_team, worker=args.worker_model)
             + ("\n" + text.render("packet/cards-team") + "\n" if args.cards else "")
             + ("\nAdditional instructions:\n" + extra + "\n" if extra else "")
         )
@@ -735,6 +738,7 @@ def run(options: RunOptions) -> int:
                     "thinking": args.thinking,
                     "seed_run": None if args.seed_run is None else str(args.seed_run),
                     "seed_proof": None if args.seed_proof is None else str(args.seed_proof),
+                    **({"worker_model": args.worker_model} if args.worker_model is not None else {}),
                     **({"golf": True, **golf_team} if golf_team else {}),
                     **({"cards": True} if args.cards else {}),
                     "merge_worker": args.merge_worker,

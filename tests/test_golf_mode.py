@@ -42,10 +42,9 @@ class GolfFlagTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("--seed-proof", err)
 
-    def test_team_flags_need_golf(self):
-        for flags in ({"workers": 2}, {"worker_model": SOL}):
-            code, err = _dry_run(self.seed, **flags)
-            self.assertEqual((code, "need --golf" in err), (2, True), flags)
+    def test_workers_need_golf(self):
+        code, err = _dry_run(self.seed, workers=2)
+        self.assertEqual((code, "need --golf" in err), (2, True))
 
     def test_workers_are_one_to_three_and_the_model_is_known(self):
         for flags in ({"workers": 0}, {"workers": 4}, {"worker_model": "no-such-model"}):
