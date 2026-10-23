@@ -69,6 +69,17 @@ models:
       at_tokens: 200000
       keep_recent_tokens: 40000
 
+  gpt-6-luna:                  # OpenAI Responses API via Pi's built-in openai provider (ChatGPT/Codex OAuth login)
+    provider: openai
+    # Pi catalog list prices (openai provider); counted at list price like Sol. Prompts above 272K cost 2x.
+    price: {input: 0.1, output: 0.5, cache_read: 0.01, cache_write: 0.125}
+    context_window: 272000
+    max_tokens: 128000
+    request_output_tokens: 32000
+    compaction:
+      at_tokens: 200000
+      keep_recent_tokens: 40000
+
   mimo-v2.6-pro:               # OpenAI chat completions on primalabs; probed 2026-10-10 (plan §9a)
     provider: primalabs
     id: primalabs-ai/MiMo-V2.6-Pro
