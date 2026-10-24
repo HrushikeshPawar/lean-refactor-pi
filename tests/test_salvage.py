@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -293,6 +295,30 @@ class SalvageCampaignTests(FakeRunCase):
         outcome, kinds = self.autocheck_kinds(closing=False)
         self.assertEqual(outcome["checked"], ["#2"])
         self.assertEqual(kinds[:2], ["full", "salvage"])
+
+    def test_background_drain_exits_once_the_model_phase_has_ended(self):
+        with (
+            patch.object(campaign.lean_health, "tripped", return_value=False),
+            patch.object(campaign, "problem", return_value={"name": "T", "statement": "theorem t : True"}),
+        ):
+            self.evaluate("theorem t : True := by\n  a")
+            campaign._runtime_event(
+                self.directory, {"kind": "phase", "phase": "model", "phase_id": "m", "status": "end"}
+            )
+            self.assertEqual(campaign.autocheck("T", "logic")["checked"], [])
+            self.assertEqual(campaign.autocheck("T", "logic", 5, closing=True)["checked"], ["#2"])
+
+    def test_closing_drain_waits_for_the_background_checker_instead_of_skipping(self):
+        with (
+            patch.object(campaign.lean_health, "tripped", return_value=False),
+            patch.object(campaign, "problem", return_value={"name": "T", "statement": "theorem t : True"}),
+        ):
+            self.evaluate("theorem t : True := by\n  a")
+            with (self.directory / "autocheck.lock").open("a") as held:
+                fcntl.flock(held, fcntl.LOCK_EX)
+                threading.Timer(0.5, lambda: fcntl.flock(held, fcntl.LOCK_UN)).start()
+                outcome = campaign.autocheck("T", "logic", 10, closing=True)
+        self.assertEqual((outcome.get("running_elsewhere"), outcome["checked"]), (None, ["#2"]))
 
     def test_interrupted_job_is_requeued_and_unavailable_is_terminal_without_notice(self):
         with (

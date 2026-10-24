@@ -1038,6 +1038,23 @@ def _ensure_threshold_stop(directory: Path, rows: list[dict]) -> list[dict]:
     return rows
 
 
+def stop_run(directory: Path, reason: str) -> None:
+    """Record an operator or health stop as a durable run_stop, the same row the spend threshold writes."""
+    with control_lock(directory):
+        if any(row.get("kind") == "run_stop" for row in _control_rows(directory)):
+            return
+        _append_control(
+            directory,
+            {"schema_version": SCHEMA_VERSION, "kind": "run_stop", "event_id": uuid.uuid4().hex, "reason": reason},
+        )
+        _projection(directory, _apply_coverage(_control_rows(directory)), True, reason)
+    _notify_waiters()
+
+
+def stopped(directory: Path) -> bool:
+    return any(row.get("kind") == "run_stop" for row in _control_rows(directory))
+
+
 def _ensure_accounting_failures(directory: Path, rows: list[dict]) -> list[dict]:
     recorded = {row.get("settlement_id") for row in rows if row.get("kind") == "accounting_failure"}
     changed = False

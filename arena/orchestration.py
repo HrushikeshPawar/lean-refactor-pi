@@ -983,6 +983,17 @@ def observe_exit(directory: Path, activation_id: str, *, expected_transport=None
     return True
 
 
+def end_open_jobs(directory: Path) -> None:
+    """After a run stop, end every job still open as cancelled (run_stopped) and shut its child down."""
+    with run_control.control_lock(directory):
+        open_jobs = [row for row in _delegations(directory)
+                     if _activation_view(directory, row)["state"] not in _terminal_states]
+        for delegation in open_jobs:
+            _append_state(directory, delegation, "cancelled", occupies_slot=False, reason="run_stopped")
+    for delegation in open_jobs:
+        _stop_activation(directory, delegation)
+
+
 def _stop_activation(directory: Path, delegation: dict, *, expected_transport=None, expected_generation=None) -> None:
     activation_id = delegation["activation_id"]
     with _io_lock(activation_id):

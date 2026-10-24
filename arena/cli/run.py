@@ -24,7 +24,7 @@ from typing import Annotated, TypedDict
 from cyclopts import Parameter
 from rich.console import Console
 
-from arena import campaign, lean_health, lean_session, text
+from arena import campaign, lean_health, lean_session, orchestration, run_control, text
 from arena import models as model_config
 from arena.campaign import _runtime_event, autocheck, init, packet, run_dir, submission, write_state
 from arena.cli import live, run_report
@@ -1019,6 +1019,18 @@ def run(options: RunOptions) -> int:
             kill_group(process, signal.SIGKILL)
             exit_code = process.wait()
         stderr_reader.join(timeout=5)
+        # Every stop path leaves one durable run_stop row, and the stop ends the jobs still open (the budget stop
+        # wrote its own row already).
+        stop_reason = (
+            PEAK_STOP_REASON if state["peak"]
+            else lean_health.STOP_REASON if state["tripped"] or lean_health.tripped(directory)
+            else "operator_stop" if state["signal"] is not None
+            else None
+        )
+        if stop_reason is not None:
+            run_control.stop_run(directory, stop_reason)
+        if run_control.stopped(directory):
+            orchestration.end_open_jobs(directory)
     _runtime_event(
         directory,
         {"kind": "phase", "phase": "model", "phase_id": model_phase_id, "status": "end", "exit_code": exit_code},

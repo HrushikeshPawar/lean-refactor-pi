@@ -4068,6 +4068,14 @@ def _run_step_goals(name: str, run_id: str, proof_id: str) -> None:
     write_state(run_id)
 
 
+def _model_over(directory: Path, history: list[dict]) -> bool:
+    """The run has stopped, or its model phase has ended (a resumed segment opens a new one)."""
+    from arena.run_control import stopped
+
+    last = next((e for e in reversed(history) if e.get("kind") == "phase" and e.get("phase") == "model"), None)
+    return stopped(directory) or (last is not None and last.get("status") == "end")
+
+
 def _autocheck_impl(
     name: str,
     run_id: str,
@@ -4097,8 +4105,9 @@ def _autocheck_impl(
                 fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
             except BlockingIOError:
-                # An in-call wait (kinds given) takes its turn after the background job; the background loop does not.
-                if kinds is None or max_seconds is None or time.monotonic() - started >= max_seconds:
+                # An in-call wait (kinds given) and the closing drain take their turn after the background job; the
+                # background loop does not.
+                if (kinds is None and not closing) or max_seconds is None or time.monotonic() - started >= max_seconds:
                     return {"ok": True, "checked": [], "running_elsewhere": True}
                 time.sleep(0.2)
         phase_started = time.monotonic()
@@ -4116,6 +4125,8 @@ def _autocheck_impl(
             if lean_health.tripped(directory):
                 break  # Lean is unhealthy: background checks pause with the model's work
             history = events(directory)
+            if not closing and _model_over(directory, history):
+                break  # the model has ended: the closing drain does the full checks, the rest only serves the model
             projection = Graph.from_history(
                 history, _proof_reader(directory), committed_operations=committed_operation_ids(directory)
             )

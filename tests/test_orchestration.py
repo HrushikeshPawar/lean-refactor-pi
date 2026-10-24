@@ -2772,6 +2772,25 @@ class MergeSlotTests(unittest.TestCase):
                 self.assertEqual(ends[merge["job_id"]], "run_stopped")
 
 
+    def test_a_run_stop_ends_every_open_job_as_cancelled_run_stopped(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:  # held children stay open
+            directory = Path(tmp)
+            _seed_parent(directory)
+            for index in range(5):
+                orchestration.delegate(
+                    directory, operation_id=f"op-{index}", run_id="run-1", actor_id="sol", session_id="sol-session",
+                    task=f"hypothesis {index}", scope="proof", anchor={"node": "n1"},
+                    open_child=lambda _launch: _HeldChild(),
+                )
+            run_control.stop_run(directory, "operator_stop")
+            orchestration.end_open_jobs(directory)
+            ended = orchestration.jobs(directory)["jobs"]
+            self.assertEqual(len(ended), 5)
+            self.assertEqual({job["state"] for job in ended}, {"cancelled"})
+            self.assertTrue(all(row["reason"] == "run_stopped" for row in orchestration._history(directory)
+                                if row.get("type") == "assignment_state" and row["state"] == "cancelled"))
+
+
 class TokenIslandAnchorTests(unittest.TestCase):
     def test_token_island_starts_from_the_run_best_and_other_islands_from_the_original(self):
         with tempfile.TemporaryDirectory() as tmp:
