@@ -6,6 +6,7 @@ Validation is strict on shape and on the two standing steps. The orchestrator re
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from arena import orchestration, run_control, text
@@ -42,7 +43,42 @@ def _normal(step: dict) -> dict | None:
     return stored
 
 
-def _problem(steps: list, previous: dict | None) -> tuple[str, dict] | None:
+def saved_best(directory: Path, plan: dict | None) -> tuple[str | None, float | None]:
+    """The route and score of the run best when `plan` was saved: from the row, else from the node it names."""
+    if plan is None:
+        return None, None
+    if "best_route" in plan:
+        return plan["best_route"], plan.get("best_score")
+    node = next((item for item in orchestration.proof_nodes(directory).values() if item.id == plan.get("best")), None)
+    return (None, None) if node is None else (node.route, node.score)
+
+
+def stale(directory: Path, plan: dict, best) -> bool:
+    """True when the run best's route differs from the one the plan was saved against, or its score rose by
+    `plan_stale_points` or more since."""
+    route, score = saved_best(directory, plan)
+    return best.route != route or (best.score or 0.0) >= (score or 0.0) + text.numbers()["plan_stale_points"]
+
+
+def _shape_route(directory: Path, steps: list[dict], previous: dict | None) -> tuple[str, dict] | None:
+    """A shape step newly marked done must name a node (nN) on a route other than the run best's route when the
+    previous plan version was saved; (reply key, values) for the first that does not."""
+    route = saved_best(directory, previous)[0]
+    if previous is None:
+        best = orchestration.run_best(directory)
+        route = None if best is None else best.route
+    kept = {step["target"] for step in (previous or {}).get("steps", []) if step["status"] == "done"}
+    nodes = {node.id: node for node in orchestration.proof_nodes(directory).values()}
+    for step in steps:
+        if step["kind"] != "shape" or step["status"] != "done" or step["target"] in kept:
+            continue
+        named = [nodes[ref] for ref in re.findall(r"\bn\d+\b", f"{step['target']} {step['expect']}") if ref in nodes]
+        if not any(node.route is not None and node.route != route for node in named):
+            return ("plan_shape_route", {"step": step["target"], "route": route or text.render("replies/team.plan_original")})
+    return None
+
+
+def _problem(directory: Path, steps: list, previous: dict | None) -> tuple[str, dict] | None:
     """(reply key, values) for a plan that must not be saved, else None."""
     if not isinstance(steps, list) or not steps:
         return ("plan_steps", {})
@@ -58,7 +94,7 @@ def _problem(steps: list, previous: dict | None) -> tuple[str, dict] | None:
             tried = any(step["kind"] == kind and step["status"] in ("done", "failed") for step in earlier)
             if not kept and not tried:
                 return ("plan_required", {"kind": kind})
-    return None
+    return _shape_route(directory, stored, previous)
 
 
 def _warnings(steps: list[dict]) -> list[str]:
@@ -75,7 +111,7 @@ def save_plan(directory: Path, *, operation_id: str, run_id: str, actor_id: str,
         return orchestration._reject(operation_id, "actor", hint="replies/team.plan_actor")
     with run_control.control_lock(directory):
         previous = current_plan(directory)
-        problem = _problem(steps, previous)
+        problem = _problem(directory, steps, previous)
         if problem is not None:
             key, values = problem
             return {"ok": False, "category": "invalid_input", "reason": key, "operation_id": operation_id,
@@ -85,7 +121,8 @@ def save_plan(directory: Path, *, operation_id: str, run_id: str, actor_id: str,
         version = (previous or {}).get("version", 0) + 1
         warnings = _warnings(stored)
         row = {"type": "plan", "actor_id": actor_id, "version": version, "best": None if best is None else best.id,
-               "steps": stored, "warnings": warnings}
+               "best_route": None if best is None else best.route,
+               "best_score": None if best is None else best.score, "steps": stored, "warnings": warnings}
         try:
             applied = run_control._apply_locked(
                 directory,

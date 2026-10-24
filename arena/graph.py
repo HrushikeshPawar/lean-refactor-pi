@@ -657,14 +657,14 @@ def changed_lines(old: str, new: str) -> int:
     )
 
 
-def effort_table(graph: Graph, step_tables: dict[str, dict]) -> list[dict]:
-    """Project attempts and gains onto each step of the best scored node."""
+def effort_table(graph: Graph, step_tables: dict[str, dict], focus: Node | None = None) -> list[dict]:
+    """Project attempts and gains onto each step of the best scored node, or of `focus` when given."""
     from arena.prices import snippet_tokens
 
     scored = [node for node in graph.nodes if node.score is not None]
     if not scored:
         return []
-    best = max(scored, key=lambda node: node.score)
+    best = focus or max(scored, key=lambda node: node.score)
     best_rows = step_tables.get(best.proof_id, {}).get("rows", [])
     if not best_rows:
         return []

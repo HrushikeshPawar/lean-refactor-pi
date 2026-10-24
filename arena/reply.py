@@ -460,7 +460,7 @@ def _effort_lines(data: dict, compact: bool = False) -> list[str]:
     rows = sorted(data.get("effort", []), key=lambda item: (-(item.get("at_stake") or 0), -(item.get("tokens") or 0)))
     if not rows:
         return []
-    best = data.get("best") or {}
+    best = data.get("focus") or data.get("best") or {}
     lines = [
         text.render("replies/tools.map_steps_head", node=shown(best.get("node"))),
         *([] if compact else [text.render("replies/tools.map_steps_legend")]),
@@ -527,7 +527,7 @@ def cell(value: object, limit: int = LINE_TEXT_CHARS) -> str:
 def _line_cost_lines(data: dict, compact: bool = False) -> list[str]:
     """The best node's costliest tactic lines and its longest lines that run nothing of their own."""
     costs = data.get("line_costs") or {}
-    node = shown((data.get("best") or {}).get("node"))
+    node = shown((data.get("focus") or data.get("best") or {}).get("node"))
     lines: list[str] = []
     if costs.get("tactic"):
         lines.append(text.render("replies/tools.map_tactic_lines_head", node=node))
@@ -657,8 +657,8 @@ def _map_lines(data: dict, compact: bool = False) -> list[str]:
 
 
 def _map_key(data: dict) -> list:
-    """What makes a map worth showing again: the best node."""
-    return [(data.get("best") or {}).get("node")]
+    """What makes a map worth showing again: the best node, and an island's own best node."""
+    return [(data.get("best") or {}).get("node"), *([data["focus"]["node"]] if data.get("focus") else [])]
 
 
 def _commit_delivery(run_id: str, actor: str, fresh: list[dict]) -> dict:
@@ -749,10 +749,38 @@ def _idle_note(run_id: str, actor: str, bucket: dict) -> list[str]:
     return [note + " " + text.render("replies/team.idle_fill")]
 
 
+def _island_job(run_id: str, actor: str) -> str | None:
+    """The job id when `actor` is an island worker, else None."""
+    from arena import orchestration
+
+    try:
+        directory = campaign.run_dir(run_id)
+        label = orchestration.worker_job_labels(directory).get(actor)
+        job = label and orchestration.resolve_job(directory, label)
+        return job if job and orchestration._job_original(directory, job).get("scope") == "island" else None
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def _island_focus(run_id: str, actor: str) -> str | None:
+    """An island worker's own best node id (see orchestration.island_status), shown in its map in place of the run best."""
+    from arena import orchestration
+
+    job = _island_job(run_id, actor)
+    if job is None:
+        return None
+    try:
+        status = orchestration.island_status(campaign.run_dir(run_id), job)
+    except (OSError, ValueError, KeyError):
+        return None
+    return status and status["node"]
+
+
 def _best_note(run_id: str, actor: str, bucket: dict, changed: bool) -> list[str]:
     """Say once, per actor, when the run's best verified node changed since this actor last saw it.
 
-    Nothing is said to the node's own author, or on first sight when the best is still the original proof."""
+    Nothing is said to the node's own author, or on first sight when the best is still the original proof.
+    An island worker is told only when the best's route differs from the route of the best it was last told of."""
     if "best_seen" in bucket and not changed:
         return []
     from arena import orchestration
@@ -765,10 +793,17 @@ def _best_note(run_id: str, actor: str, bucket: dict, changed: bool) -> list[str
         seen = bucket.get("best_seen")
         known = seen is not None and best.score <= seen["score"] + 1e-9
         first_sight = seen is None and best.origin == "reference"
-        bucket["best_seen"] = {"node": best.id, "score": max(best.score, seen["score"] if seen else best.score)}
+        bucket["best_seen"] = {"node": best.id, "score": max(best.score, seen["score"] if seen else best.score),
+                               "route": seen.get("route") if seen else None}
         author = node_authors(run_id).get(best.id)
         if known or first_sight or author is None:
+            if first_sight:
+                bucket["best_seen"]["route"] = best.route
             return []
+        if _island_job(run_id, actor) is not None:
+            if best.route == bucket["best_seen"]["route"]:
+                return []
+        bucket["best_seen"]["route"] = best.route
         return [text.render("replies/team.steer_best", node=best.id, score=round(best.score, 2), author=author)]
     except (OSError, ValueError, KeyError):
         return []
@@ -863,6 +898,21 @@ def _card_stale_note(run_id: str, actor: str, bucket: dict) -> list[str]:
         return _card_nudge(bucket, stale)
     except (OSError, ValueError, KeyError, TypeError):
         return []
+
+
+def _open_ask_note(run_id: str, actor: str) -> list[str]:
+    """A worker carries the orchestrator's newest unanswered message to its job on every turn (see orchestration.open_ask)."""
+    from arena import orchestration
+
+    if actor == "sol":
+        return []
+    try:
+        directory = campaign.run_dir(run_id)
+        label = orchestration.worker_job_labels(directory).get(actor)
+        ask = label and orchestration.open_ask(directory, orchestration.resolve_job(directory, label))
+    except (OSError, ValueError, KeyError):
+        return []
+    return [text.render("replies/team.open_ask_line", task=ask)] if ask else []
 
 
 def _compile_nudge(actor: str, bucket: dict, action: str | None) -> list[str]:
@@ -1030,12 +1080,18 @@ def _card_lines(run_id: str, actor: str, bucket: dict) -> list[str]:
             if owner != actor and row["version"] > seen.get(owner, 0)
         ]
         lines = []
+        history = orchestration.card_rows(directory) if fresh else []
         for row in fresh:
+            before = seen.get(row["actor_id"], 0)
+            # A receiver that saw an earlier version gets only the fields changed since; the first sight shows all.
+            changed = {name for item in history if item["actor_id"] == row["actor_id"] and item["version"] > before
+                       for name in item["changed"]} if before else None
             seen[row["actor_id"]] = row["version"]
+            names = [name for name in orchestration.CARD_FIELDS if row["fields"].get(name)
+                     and (changed is None or name in changed)]
             lines.append(text.render("replies/team.card_head", label=row["label"], version=row["version"],
-                                     changed=", ".join(row["changed"])))
-            lines += [text.render("replies/team.card_field", name=name, value=row["fields"][name])
-                      for name in orchestration.CARD_FIELDS if row["fields"].get(name)]
+                                     changed=", ".join(row["changed"] if changed is None else [n for n in orchestration.CARD_FIELDS if n in changed])))
+            lines += [text.render("replies/team.card_field", name=name, value=row["fields"][name]) for name in names]
             if actor == "sol" and (compared := orchestration.card_comparison(directory, row)):
                 lines.append(compared)
         return [text.render("replies/tools.section_cards"), *lines] if lines else []
@@ -1083,7 +1139,7 @@ def attach_context(
     map_head = text.render("replies/tools.section_map")
     map_part = _section(earlier, map_head)
     if include_map or force_map:
-        data = campaign.map_view(run_id)
+        data = campaign.map_view(run_id, _island_focus(run_id, actor))
         if holes is not None:
             data["open"] = holes
         key = _map_key(data)
@@ -1108,6 +1164,7 @@ def attach_context(
         "plateau": _plateau_note(run_id, actor, bucket),
         "card_stale": _card_stale_note(run_id, actor, bucket),
         "compile_nudge": _compile_nudge(actor, bucket, action),
+        "open_ask": _open_ask_note(run_id, actor),
     }
     for lines in notes.values():
         facts += lines

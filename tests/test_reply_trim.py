@@ -40,7 +40,7 @@ def _attach(monkeypatch, best):
     monkeypatch.setattr(reply, "current_actor", lambda: "sol")
     monkeypatch.setattr(campaign, "state", lambda _r: {"updates": []})
     data = {"best": {"node": best, "score": 1.0, "tokens": 5, "heartbeats": 6}, "archive": [], "recent": [{"node": "n9"}]}
-    monkeypatch.setattr(campaign, "map_view", lambda _r: data)
+    monkeypatch.setattr(campaign, "map_view", lambda _r, _focus=None: data)
     return state, lambda: reply.attach_context("run", {}, include_map=True)
 
 
@@ -56,7 +56,7 @@ def test_compile_reply_carries_the_map_only_for_a_new_best(monkeypatch):
     assert _map(first) and text.render("replies/tools.map_shapes").split("\n")[0] not in "\n".join(_map(first))
     assert "Latest nodes" not in "\n".join(_map(first))
     assert not _map(call())
-    monkeypatch.setattr(campaign, "map_view", lambda _r: {"best": {"node": "n4"}, "archive": [], "recent": []})
+    monkeypatch.setattr(campaign, "map_view", lambda _r, _focus=None: {"best": {"node": "n4"}, "archive": [], "recent": []})
     assert _map(call())
 
 

@@ -50,7 +50,8 @@ budget:
   # 920: keep every slot busy, refill ended islands, no best is final, combine axis extremes (r14 stall analysis).
   # 1040: the plan paragraph (ordered steps, one reshape and one merge step, re-plan after each best) and merge jobs.
   # 1080: a merge job's extra slot and the measured-or-estimated wording of the plan paragraph.
-  packet_words: 1080
+  # 1110: the token island is judged within a heartbeat ceiling and harvested through a heartbeat island.
+  packet_words: 1110
   # 215: the worker packet explains the card (what to write, what arrives in replies).
   # 240: read a definition's source before using it instead of reconstructing it (GLM trace analysis 2026-10-23).
   worker_words: 240
@@ -90,3 +91,15 @@ merge_stale_compiles: 4
 merge_diff_lines: 120
 # A worker is told to test its drafts with compile after this many tool calls without a compile.
 compile_nudge_calls: 4
+# A token island's best counts only proofs whose heartbeats are at most this multiple of the run best's.
+token_island_heartbeat_ceiling: 2
+# The orchestrator's plan is stale when the run best's score rose by at least this many points since it was saved
+# (or its route changed).
+plan_stale_points: 3
+# An open orchestrator ask shows at most this many characters of its text in the jobs view.
+open_ask_chars: 80
+# A worker node is announced as shorter (token_short) only when it saves at least this many tokens on the run best:
+# smaller savings are the trim job's own variants.
+token_short_min_saved: 10
+# The token_short notice names this many of the shorter node's costliest steps.
+token_short_steps: 3

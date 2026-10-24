@@ -1154,7 +1154,9 @@ def worker_packet(name: str, *, task: str, anchor: dict, node, families: list[st
         (template("packet/sections.titles.scope").strip(), _scope_section(row)),
         (template("packet/sections.titles.worker").strip(), template("packet/worker").strip().splitlines()),
         *([(template("packet/sections.titles.island").strip(),
-            render_text(_ISLAND_PACKETS[objective], families="\n".join(families or [])).strip().splitlines())]
+            render_text(_ISLAND_PACKETS[objective], families="\n".join(families or []),
+                        **({"ceiling": numbers()["token_island_heartbeat_ceiling"]} if objective == "tokens" else {}))
+            .strip().splitlines())]
           if island else []),
         *([("", template("packet/trim").strip().splitlines())] if trim else []),
         *([("", template("packet/golf-worker").strip().splitlines())] if golf else []),

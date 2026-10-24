@@ -1906,15 +1906,45 @@ def open_requests(directory: Path) -> list[dict]:
     return found
 
 
+def open_ask(directory: Path, job_id: str) -> str | None:
+    """The orchestrator's newest message to a running job that its card has not answered, as one line of text.
+    A card version saved after the message, with `held` or `failed` changed, answers it; a newer message replaces it."""
+    ask = None
+    for row in _history(directory):
+        if row.get("job_id") != job_id:
+            continue
+        if row.get("type") == "job_message" and row.get("disposition") == "sent":
+            ask = " ".join(str(row.get("text", "")).split()) or None
+        elif row.get("type") == "card" and ask is not None and {"held", "failed"} & set(row.get("changed") or []):
+            ask = None
+    return ask
+
+
 def node_author_job(node) -> str | None:
     """The job whose attempt first saved the node; None for the orchestrator or when unknown."""
     return node.attempts[0].get("job_id") if node.attempts else None
 
 
+def _best_of(nodes) -> object:
+    scored = [node for node in nodes if node.verified and node.score is not None]
+    return max(scored, key=lambda node: node.score) if scored else None
+
+
 def run_best(directory: Path):
     """The run's best verified scored node, or None."""
-    scored = [node for node in proof_nodes(directory).values() if node.verified and node.score is not None]
-    return max(scored, key=lambda node: node.score) if scored else None
+    return _best_of(proof_nodes(directory).values())
+
+
+def heartbeat_limit(top) -> float | None:
+    """The most heartbeats a token island's proof may spend and still count: `token_island_heartbeat_ceiling` times
+    the run best's. None when the run has no best or the best has no measured heartbeats."""
+    if top is None or top.heartbeats is None:
+        return None
+    return text.numbers()["token_island_heartbeat_ceiling"] * top.heartbeats
+
+
+def within_limit(node, limit: float | None) -> bool:
+    return limit is None or (node.heartbeats is not None and node.heartbeats <= limit)
 
 
 def best_author(directory: Path, node) -> str:
@@ -1930,9 +1960,10 @@ def card_comparison(directory: Path, row: dict) -> str | None:
         return None
     top = run_best(directory)
     objective = _job_original(directory, row["job_id"]).get("objective")
+    limit = heartbeat_limit(top) if objective == "tokens" else None
     own = [node for node in proof_nodes(directory).values()
            if node.score is not None and node_author_job(node) == row["job_id"]
-           and (objective is None or getattr(node, objective) is not None)]
+           and (objective is None or getattr(node, objective) is not None) and within_limit(node, limit)]
     if top is None or not own:
         return None
     mine = min(own, key=lambda node: getattr(node, objective)) if objective else max(own, key=lambda node: node.score)
@@ -1976,8 +2007,10 @@ def island_status(directory: Path, job_id: str) -> dict | None:
     `score` and `node` are the best of those nodes, `closed` their count. `route` is the route of that best node,
     or of its first closed node when none scored. None when the job has no closed node of its own yet.
     An axis island (objective tokens or heartbeats) takes its best as the node with the fewest of that measure,
-    ignoring score, but only among nodes that compile on every toolchain version (the main best's rule), and also returns `tokens` and `heartbeats` of that node."""
-    own = [node for node in proof_nodes(directory).values() if _closed(node) and node_author_job(node) == job_id]
+    ignoring score, but only among nodes that compile on every toolchain version (the main best's rule), and also returns `tokens` and `heartbeats` of that node.
+    A token island's nodes count only within the heartbeat ceiling (see heartbeat_limit)."""
+    everything = proof_nodes(directory)
+    own = [node for node in everything.values() if _closed(node) and node_author_job(node) == job_id]
     if not own:
         return None
     objective = _job_original(directory, job_id).get("objective")
@@ -1985,6 +2018,9 @@ def island_status(directory: Path, job_id: str) -> dict | None:
         total = len((events(directory) or [{}])[0].get("versions") or [1])
         measured = [node for node in own if getattr(node, objective) is not None
                     and len(node.versions) >= total and all(node.versions.values())]
+        if objective == "tokens":
+            limit = heartbeat_limit(_best_of(everything.values()))
+            measured = [node for node in measured if within_limit(node, limit)]
         top = min(measured, key=lambda node: getattr(node, objective)) if measured else None
         return {"route": (top or own[0]).route, "node": top.id if top else None,
                 "score": top.score if top else None, "closed": len(own),
@@ -2228,6 +2264,30 @@ def merge_ready(directory: Path) -> list[str]:
     if len(newest) < 2:
         return []
     return [node.id for node in sorted(newest.values(), key=lambda node: saved[node.proof_id])]
+
+
+def token_short(directory: Path) -> list[dict]:
+    """Worker nodes that compile (the primary version is enough), have at least `token_short_min_saved` fewer tokens
+    than the run best and heartbeats
+    within the token island's ceiling, with no running heartbeat island anchored on them. Each is
+    `{node, proof_id, saved, best, tokens, heartbeats}`, shortest first."""
+    nodes = proof_nodes(directory)
+    top = _best_of(nodes.values())
+    if top is None or top.tokens is None:
+        return []
+    limit = heartbeat_limit(top)
+    anchored = set()
+    for job in {row["job_id"] for row in _delegations(directory) if row.get("job_id")}:
+        rows = _job_rows(directory, job)
+        if rows[0].get("objective") == "heartbeats" and (_job_snapshot(directory, job) or {}).get("state") in _live_states:
+            anchored.add((rows[-1].get("anchor") or {}).get("node"))
+    found = [node for node in nodes.values()
+             if _closed(node) and node_author_job(node) is not None and node.tokens is not None
+             and top.tokens - node.tokens >= text.numbers()["token_short_min_saved"]
+             and within_limit(node, limit) and node.id not in anchored]
+    return [{"node": node.id, "proof_id": node.proof_id, "saved": top.tokens - node.tokens, "best": top.tokens,
+             "tokens": node.tokens, "heartbeats": node.heartbeats}
+            for node in sorted(found, key=lambda node: node.tokens)]
 
 
 def _job_end_reason(directory: Path, job_id: str) -> str | None:

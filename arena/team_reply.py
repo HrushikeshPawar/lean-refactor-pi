@@ -99,7 +99,7 @@ def notices(directory: Path, bucket: dict, action: str | None) -> tuple[list[str
             lines.append(_render("plan_missing"))
     else:
         live = plans.live(plan)
-        if best is not None and plan.get("best") != best.id and _take(sent, "plan_stale", [plan["version"], best.id], calls, repeat):
+        if best is not None and plans.stale(directory, plan, best) and _take(sent, "plan_stale", [plan["version"], best.id], calls, repeat):
             kinds.append("plan_stale")
             lines.append(_render("plan_stale", node=best.id,
                                  was=plan.get("best") or text.render("replies/team.plan_original")))
@@ -116,7 +116,26 @@ def notices(directory: Path, bucket: dict, action: str | None) -> tuple[list[str
     elif _take(sent, "merge_ready", sorted(ready), calls, repeat):
         kinds.append("merge_ready")
         lines.append(_render("merge_ready", nodes=", ".join(ready), count=_jobs_count(directory, ready)))
+    for item in orchestration.token_short(directory):
+        if _take(sent, f"token_short:{item['node']}", True, calls, repeat):
+            if "token_short" not in kinds:
+                kinds.append("token_short")
+            lines.append(_render("token_short", node=item["node"], saved=item["saved"], best=item["best"],
+                                 tokens=item["tokens"], heartbeats=item["heartbeats"],
+                                 steps=_costly_steps(directory, item["proof_id"])))
     return kinds, lines
+
+
+def _costly_steps(directory: Path, proof_id: str) -> str:
+    """The node's costliest steps with their tokens and heartbeats, by points at stake."""
+    from arena import campaign, reply
+
+    try:
+        rows = campaign.step_costs(directory, proof_id)[: text.numbers()["token_short_steps"]]
+    except (OSError, ValueError, KeyError):
+        rows = []
+    return ", ".join(_render("token_short_step", step=row["step"], tokens=reply.shown(row["tokens"]),
+                             heartbeats=reply.shown(row["heartbeats"])) for row in rows)
 
 
 def sol_notices(run_id: str, action: str, result: dict) -> dict:
@@ -192,6 +211,9 @@ def _jobs(result: dict, directory: Path, job) -> str:
             lines.append(_render("job_line", job=job(item["job_id"]), state=item.get("state", "?"),
                                  scope=item.get("scope", "?"), anchor=_anchor(item.get("anchor")), nodes=listed))
         lines.append(_render("job_task", task=" ".join(str(item.get("task", "")).split())))
+        ask = orchestration.open_ask(directory, item["job_id"]) if item.get("state") in orchestration._live_states else None
+        if ask:
+            lines.append(_render("job_open_ask", ask=ask[: text.numbers()["open_ask_chars"]]))
         card = cards.get(item["job_id"])
         shown = [f"{name}: {' '.join(card['fields'][name].split())}" for name in ("focus", "best")
                  if card and card["fields"].get(name)]

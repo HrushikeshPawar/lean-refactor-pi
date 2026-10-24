@@ -2931,14 +2931,15 @@ def price_table(name: str, run_id: str, reference: str | None = None) -> dict:
     }
 
 
-def map_view(run_id: str) -> dict:
+def map_view(run_id: str, focus: str | None = None) -> dict:
     """Return the hidden JSON map without rendering it into model-facing prose."""
     directory = run_dir(run_id)
-    return map_view_from(events(directory), directory)
+    return map_view_from(events(directory), directory, focus)
 
 
-def map_view_from(history: list[dict], directory: Path) -> dict:
-    """The map for `history`, reading stored proofs from `directory`. Cached data only, never Lean."""
+def map_view_from(history: list[dict], directory: Path, focus: str | None = None) -> dict:
+    """The map for `history`, reading stored proofs from `directory`. Cached data only, never Lean.
+    `focus` (a node id) puts that node's steps and line costs where the run best's would be (an island's own best)."""
     graph = Graph.from_history(
         history, _proof_reader(directory), committed_operations=committed_operation_ids(directory)
     )
@@ -2953,15 +2954,42 @@ def map_view_from(history: list[dict], directory: Path) -> dict:
     price_rates = rates(reference_tokens, reference_heartbeats, total_versions)
     profiles = _cached_profiles(name, history)
     tables = {node.proof_id: _table_for_node(name, node, profiles, price_rates, total_versions) for node in graph.nodes}
-    view = graph_map_view(graph, effort_table(graph, tables), (reference_tokens, reference_heartbeats))
+    chosen = next((node for node in graph.nodes if node.id == focus), None)
+    view = graph_map_view(graph, effort_table(graph, tables, chosen), (reference_tokens, reference_heartbeats))
     scored = [node for node in graph.nodes if node.score is not None]
+    if chosen is not None:
+        view["focus"] = {"node": chosen.id}
     if scored:
-        best = max(scored, key=lambda node: node.score)
+        best = chosen or max(scored, key=lambda node: node.score)
         view["line_costs"] = {
             **_line_costs(best.proof_text, profiles.get(best.proof_id)),
             "repeated": repeated_text(best.proof_text, price_rates["points_per_token"]),
         }
     return view
+
+
+def step_costs(directory: Path, proof_id: str) -> list[dict]:
+    """A saved node's steps, costliest first: `{step, tokens, heartbeats, points}`. Cached data only, never Lean;
+    heartbeats and points are None for a step with no profile."""
+    history = events(directory)
+    graph = Graph.from_history(
+        history, _proof_reader(directory), committed_operations=committed_operation_ids(directory)
+    )
+    node = next((item for item in graph.nodes if item.proof_id == proof_id), None)
+    if node is None:
+        return []
+    from arena.scoring import reference as scoring_reference
+
+    name = history[0]["theorem"]
+    total_versions = len(history[0].get("versions") or [1])
+    try:
+        price_rates = rates(*scoring_reference(name), total_versions)
+    except ValueError:
+        return []
+    table = _table_for_node(name, node, _cached_profiles(name, history), price_rates, total_versions)
+    rows = [{"step": row["id"], "tokens": row["tokens"], "heartbeats": row["incl_hb"], "points": row["pts_if_gone"]}
+            for row in table["rows"]]
+    return sorted(rows, key=lambda row: (-(row["points"] or 0), -(row["tokens"] or 0)))
 
 
 # Rows in each of the best node's two line lists.

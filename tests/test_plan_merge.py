@@ -22,10 +22,21 @@ def node(node_id: str, score: float, job: str | None = None, verified: bool = Tr
 
 class PlanTests(unittest.TestCase):
     def test_open_steps_need_a_shape_and_a_merge_step(self):
-        self.assertEqual(plans._problem([TOKENS], None), ("plan_required", {"kind": "shape"}))
-        self.assertEqual(plans._problem([SHAPE, TOKENS], None), ("plan_required", {"kind": "merge"}))
-        self.assertIsNone(plans._problem([SHAPE, MERGE, TOKENS], None))
-        self.assertEqual(plans._problem([{**TOKENS, "kind": "bogus"}], None), ("plan_steps", {}))
+        self.assertEqual(plans._problem(Path("run"), [TOKENS], None), ("plan_required", {"kind": "shape"}))
+        self.assertEqual(plans._problem(Path("run"), [SHAPE, TOKENS], None), ("plan_required", {"kind": "merge"}))
+        self.assertIsNone(plans._problem(Path("run"), [SHAPE, MERGE, TOKENS], None))
+        self.assertEqual(plans._problem(Path("run"), [{**TOKENS, "kind": "bogus"}], None), ("plan_steps", {}))
+
+
+    def test_a_shape_step_is_done_only_with_a_node_on_a_new_route(self):
+        previous = {"version": 1, "best": "n2", "best_route": "r1", "best_score": 70.0, "steps": [SHAPE, MERGE]}
+        nodes = {"p2": SimpleNamespace(id="n2", route="r1"), "p7": SimpleNamespace(id="n7", route="r4")}
+        done = {**SHAPE, "status": "done"}
+        with patch.object(orchestration, "proof_nodes", return_value=nodes):
+            same = plans._problem(Path("run"), [{**done, "expect": "n2 gained 1"}, MERGE], previous)
+            new = plans._problem(Path("run"), [{**done, "expect": "n7 gained 3"}, MERGE], previous)
+        self.assertEqual(same, ("plan_shape_route", {"step": "whole proof", "route": "r1"}))
+        self.assertIsNone(new)
 
 
 class NoticeTests(unittest.TestCase):
@@ -66,10 +77,28 @@ class NoticeTests(unittest.TestCase):
                          ["merge_ready"])
 
     def test_a_plan_with_no_open_step_is_said_once_per_version(self):
-        plan = {"version": 1, "best": "n5", "steps": [{**TOKENS, "status": "done"}]}
+        plan = {"version": 1, "best": "n5", "best_route": "r1", "best_score": 70.0, "steps": [{**TOKENS, "status": "done"}]}
         bucket = {}
         self.assertEqual(self.notice(bucket, plan=plan, best=node("n5", 70.0))[0], ["plan_empty"])
         self.assertEqual(self.notice(bucket, plan=plan, best=node("n5", 70.0)), ([], []))
+
+    def test_a_plan_is_stale_on_a_new_route_or_a_rise_of_plan_stale_points_only(self):
+        plan = {"version": 1, "best": "n4", "best_route": "r1", "best_score": 70.0, "steps": [TOKENS]}
+        self.assertFalse(plans.stale(Path("run"), plan, node("n5", 72.0)))
+        self.assertTrue(plans.stale(Path("run"), plan, node("n5", 73.0)))
+        self.assertTrue(plans.stale(Path("run"), plan, SimpleNamespace(route="r2", score=70.5)))
+
+    def test_a_shorter_worker_node_is_said_once_per_node(self):
+        short = {"node": "n9", "proof_id": "p9", "saved": 12, "best": 100, "tokens": 88, "heartbeats": 40}
+        bucket = {}
+        plan = {"version": 1, "best": "n5", "best_route": "r1", "best_score": 70.0, "steps": [TOKENS]}
+        with patch.object(orchestration, "token_short", return_value=[short]), \
+                patch.object(team_reply, "_costly_steps", return_value="s3 (30 tokens, 9 HB)"):
+            first = self.notice(bucket, plan=plan, best=node("n5", 70.0))
+            again = self.notice(bucket, plan=plan, best=node("n5", 70.0))
+        self.assertEqual(first[0], ["token_short"])
+        self.assertIn("n9 is 12 tokens shorter than the run best 100 (88 tokens, 40 HB). Its costliest steps: s3", first[1][0])
+        self.assertEqual(again, ([], []))
 
     def test_await_and_jobs_replies_carry_no_plan_or_merge_lines(self):
         plan = {"version": 2, "best": "n4", "steps": [TOKENS]}

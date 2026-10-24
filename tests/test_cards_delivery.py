@@ -61,6 +61,37 @@ class CardDeliveryTests(unittest.TestCase):
             self.assertEqual(len(results), 4)
             self.assertEqual(sum(1 for lines in results if lines), 1)
 
+    def test_a_receiver_that_saw_a_card_gets_only_the_fields_changed_since(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _seed_parent(directory)
+            _save(directory, "worker-b", "c1", focus="peer focus", ideas="first idea")
+            bucket: dict = {}
+            with patch.object(campaign, "run_dir", return_value=directory):
+                first = "\n".join(proof_reply._card_lines("run-1", "worker-a", bucket))
+                _save(directory, "worker-b", "c2", ideas="second idea")
+                _save(directory, "worker-b", "c3", best="n9 80")
+                later = "\n".join(proof_reply._card_lines("run-1", "worker-a", bucket))
+            self.assertIn("peer focus", first)
+            self.assertIn("second idea", later)
+            self.assertIn("n9 80", later)
+            self.assertNotIn("peer focus", later)
+
+    def test_an_orchestrator_message_stays_open_on_the_worker_until_a_card_changes_held_or_failed(self):
+        rows = [{"type": "job_message", "job_id": "j1", "text": "try the n7 shape", "disposition": "sent"}]
+        with tempfile.TemporaryDirectory() as tmp, patch.object(orchestration, "_history", side_effect=lambda _d: list(rows)), \
+                patch.object(campaign, "run_dir", return_value=Path(tmp)), \
+                patch.object(orchestration, "worker_job_labels", return_value={"worker-a": "job1"}), \
+                patch.object(orchestration, "resolve_job", return_value="j1"):
+            self.assertEqual(orchestration.open_ask(Path(tmp), "j1"), "try the n7 shape")
+            self.assertEqual(proof_reply._open_ask_note("run-1", "worker-a"),
+                             ["Orchestrator asked: try the n7 shape Record its compiled result on your card (held or failed, with the node id)."])
+            rows.append({"type": "card", "job_id": "j1", "changed": ["focus"]})
+            self.assertIsNotNone(orchestration.open_ask(Path(tmp), "j1"))
+            rows.append({"type": "card", "job_id": "j1", "changed": ["held"]})
+            self.assertIsNone(orchestration.open_ask(Path(tmp), "j1"))
+            self.assertEqual(proof_reply._open_ask_note("run-1", "worker-a"), [])
+
     def test_a_worker_sees_the_orchestrators_and_peers_cards_but_not_its_own(self):
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)

@@ -2376,7 +2376,7 @@ class SteerAndNoteTests(unittest.TestCase):
             best = {"score": 75.5}
 
             def run_best(_directory):
-                return SimpleNamespace(id="n154", score=best["score"], origin="model")
+                return SimpleNamespace(id="n154", score=best["score"], origin="model", route="r1")
 
             bucket = {}
             with patch.object(campaign, "run_dir", return_value=directory), \
@@ -2496,6 +2496,36 @@ class IslandTests(unittest.TestCase):
                 self.assertEqual(orchestration.island_status(directory, job_id),
                                  {"route": "r1", "node": "n58", "score": 71.0, "closed": 2})
 
+    def test_a_token_islands_best_counts_only_proofs_within_the_heartbeat_ceiling(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _seed_parent(directory)
+            started, child = self._island(directory, objective="tokens")
+            job_id = started["job_id"]
+            top = _closed_node("n3", "r1", 90.0)
+            slow = _closed_node("n57", "r4", 70.0, job_id)
+            fast = _closed_node("n58", "r1", 60.0, job_id)
+            top.tokens, top.heartbeats = 800, 100
+            slow.tokens, slow.heartbeats = 300, 250
+            fast.tokens, fast.heartbeats = 500, 200
+            with patch.object(orchestration, "proof_nodes", lambda _d: {"p0": top, "p1": slow, "p2": fast}):
+                self.assertEqual(orchestration.island_status(directory, job_id)["node"], "n58")
+
+    def test_an_island_hears_of_a_new_run_best_only_on_a_new_route(self):
+        from arena import campaign
+
+        best = SimpleNamespace(id="n9", score=80.0, origin="model", route="r1")
+        with tempfile.TemporaryDirectory() as tmp, patch.object(campaign, "run_dir", return_value=Path(tmp)), \
+                patch.object(orchestration, "run_best", lambda _d: best), \
+                patch.object(proof_reply, "_island_job", lambda _r, _a: "j1"), \
+                patch.object(proof_reply, "node_authors", lambda _run: {"n9": "job2", "n10": "job2", "n11": "job2"}):
+            bucket = {}
+            self.assertEqual(len(proof_reply._best_note("run-1", "w", bucket, True)), 1)
+            best.id, best.score = "n10", 81.0
+            self.assertEqual(proof_reply._best_note("run-1", "w", bucket, True), [])
+            best.id, best.score, best.route = "n11", 82.0, "r2"
+            self.assertEqual(len(proof_reply._best_note("run-1", "w", bucket, True)), 1)
+
     def test_island_status_is_rendered_in_jobs_and_await(self):
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
@@ -2526,11 +2556,11 @@ class IslandTests(unittest.TestCase):
             self.assertEqual(child.launch["env"].get("ARENA_ISLAND"), "1")
             heavy = _closed_node("n57", "r4", 68.0, job_id)
             light = _closed_node("n58", "r1", 40.0, job_id)
-            heavy.tokens, light.tokens, heavy.heartbeats, light.heartbeats = 900, 600, 100, 300
+            heavy.tokens, light.tokens, heavy.heartbeats, light.heartbeats = 900, 600, 100, 200
             with patch.object(orchestration, "proof_nodes", lambda _d: {"p1": heavy, "p2": light}):
                 self.assertEqual(orchestration.island_status(directory, job_id),
                                  {"route": "r1", "node": "n58", "score": 40.0, "closed": 2,
-                                  "tokens": 600, "heartbeats": 300})
+                                  "tokens": 600, "heartbeats": 200})
 
             def turn(tokens, score, activation=started["activation_id"]):
                 node = _closed_node("n57", "r4", score, job_id)
