@@ -51,10 +51,12 @@ budget:
   # 1040: the plan paragraph (ordered steps, one reshape and one merge step, re-plan after each best) and merge jobs.
   # 1080: a merge job's extra slot and the measured-or-estimated wording of the plan paragraph.
   # 1110: the token island is judged within a heartbeat ceiling and harvested through a heartbeat island.
-  packet_words: 1110
+  # 1150: short card fields (only what is new or still true) and independent tool calls in one turn.
+  packet_words: 1150
   # 215: the worker packet explains the card (what to write, what arrives in replies).
   # 240: read a definition's source before using it instead of reconstructing it (GLM trace analysis 2026-10-23).
-  worker_words: 240
+  # 260: short card fields, only what is new or still true.
+  worker_words: 260
   reply_words: 60
   # Continuation nudges are sent only after a turn with no tool call, a few times a run.
   nudge_words: 60
@@ -79,6 +81,10 @@ plateau_points: 1.0
 plateau_minutes: 10
 # A worker is reminded to update its card about its new best nodes at most once per this many minutes.
 card_stale_minutes: 5
+# A card field is at most this many characters; longer is rejected (earlier versions keep the history).
+card_field_chars: 500
+# A search map is sent again only when its step table changed: a step added or dropped, or a step's points at stake moved by this much.
+map_resend_points: 1
 # The orchestrator's plan holds at most this many steps (see arena/plans.py).
 plan_max_steps: 12
 # A missing plan is said again after this many sol tool calls (see team_reply.notices).

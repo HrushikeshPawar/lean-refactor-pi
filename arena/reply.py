@@ -656,9 +656,26 @@ def _map_lines(data: dict, compact: bool = False) -> list[str]:
     return lines
 
 
-def _map_key(data: dict) -> list:
-    """What makes a map worth showing again: the best node, and an island's own best node."""
-    return [(data.get("best") or {}).get("node"), *([data["focus"]["node"]] if data.get("focus") else [])]
+def _map_key(data: dict) -> dict:
+    """What a map shows that is worth a second send: the step table (each shown step's points at stake, keyed by
+    step id). With no table the map has only its best node, so that node is the key."""
+    rows = sorted(data.get("effort", []), key=lambda item: (-(item.get("at_stake") or 0), -(item.get("tokens") or 0)))
+    if rows:
+        return {"steps": {str(item.get("step")): float(item.get("at_stake") or 0) for item in rows[:EFFORT_SHOWN]}}
+    return {"node": (data.get("focus") or data.get("best") or {}).get("node")}
+
+
+def _map_changed(old, new: dict) -> bool:
+    """A map is worth sending again when its step table has other steps, or a step's points at stake moved by at
+    least `map_resend_points`. A new best or focus node with the same table (a score or line-cost wobble) is not."""
+    if not isinstance(old, dict) or old.keys() != new.keys():
+        return True
+    if "node" in new:
+        return old["node"] != new["node"]
+    if old["steps"].keys() != new["steps"].keys():
+        return True
+    return any(abs(new["steps"][step] - old["steps"][step]) >= text.numbers()["map_resend_points"]
+               for step in new["steps"])
 
 
 def _commit_delivery(run_id: str, actor: str, fresh: list[dict]) -> dict:
@@ -1071,6 +1088,12 @@ def _plateau_note(run_id: str, actor: str, bucket: dict) -> list[str]:
         return []
 
 
+def _new_sentences(before: str, after: str) -> str:
+    """The sentences of `after` that `before` lacks. A sentence ends at a period followed by space, or at a newline."""
+    known = {sentence.strip() for sentence in re.split(r"(?<=\.)\s+|\n+", before)}
+    return " ".join(sentence.strip() for sentence in re.split(r"(?<=\.)\s+|\n+", after) if sentence.strip() not in known)
+
+
 def _card_lines(run_id: str, actor: str, bucket: dict) -> list[str]:
     """Cards this actor has not seen at their current version: every card but its own."""
     from arena import orchestration
@@ -1090,11 +1113,19 @@ def _card_lines(run_id: str, actor: str, bucket: dict) -> list[str]:
             changed = {name for item in history if item["actor_id"] == row["actor_id"] and item["version"] > before
                        for name in item["changed"]} if before else None
             seen[row["actor_id"]] = row["version"]
-            names = [name for name in orchestration.CARD_FIELDS if row["fields"].get(name)
-                     and (changed is None or name in changed)]
+            # The version this receiver last saw: a changed field then shows only the sentences new since it.
+            earlier = next((item["fields"] for item in history
+                            if item["actor_id"] == row["actor_id"] and item["version"] == before), {})
+            shown = {}
+            for name in orchestration.CARD_FIELDS:
+                if not row["fields"].get(name) or (changed is not None and name not in changed):
+                    continue
+                value = row["fields"][name] if changed is None else _new_sentences(earlier.get(name, ""), row["fields"][name])
+                if value:
+                    shown[name] = value
             lines.append(text.render("replies/team.card_head", label=row["label"], version=row["version"],
                                      changed=", ".join(row["changed"] if changed is None else [n for n in orchestration.CARD_FIELDS if n in changed])))
-            lines += [text.render("replies/team.card_field", name=name, value=row["fields"][name]) for name in names]
+            lines += [text.render("replies/team.card_field", name=name, value=value) for name, value in shown.items()]
             if actor == "sol" and (compared := orchestration.card_comparison(directory, row)):
                 lines.append(compared)
         return [text.render("replies/tools.section_cards"), *lines] if lines else []
@@ -1147,10 +1178,12 @@ def attach_context(
             data["open"] = holes
         key = _map_key(data)
         # A compile reply carries the map only for a first or new best; `read` with view "map" shows all of it.
-        if force_map or "map_hash" not in bucket or key != bucket.get("map_key"):
+        if force_map or "map_hash" not in bucket or _map_changed(bucket.get("map_key"), key):
             lines = _map_lines(data, compact=not force_map)
             map_part = [map_head, *lines] if lines else []
-        bucket["map_hash"], bucket["map_key"] = "shown", key
+            # The key moves only when a map is sent, so small wobbles cannot add up unnoticed.
+            bucket["map_key"] = key
+        bucket["map_hash"] = "shown"
     # Node ids the model has been shown; an update never names a node outside them.
     seen = set(bucket.get("seen_nodes", [])) | _node_ids(result, extra=map_part)
     authors = node_authors(run_id) if fresh else {}

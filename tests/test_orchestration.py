@@ -2308,7 +2308,7 @@ class SteerAndNoteTests(unittest.TestCase):
             _seed_parent(directory)
             started, _child = self._active_job(directory, "op-card-start")
             job = started["job_id"]
-            first = self._save(directory, "worker-actor", job, "c1", focus="s4 route", failed="grind loops " + "x" * 900)
+            first = self._save(directory, "worker-actor", job, "c1", focus="s4 route", failed="grind loops " + "x" * 200)
             second = self._save(directory, "worker-actor", job, "c2", focus="", held="n7 closes s1")
             self.assertEqual((first["version"], second["version"]), (1, 2))
             row = orchestration.current_cards(directory)["worker-actor"]

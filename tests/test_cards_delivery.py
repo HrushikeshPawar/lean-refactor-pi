@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from arena import campaign, orchestration
+from arena import campaign, orchestration, text
 from arena import reply as proof_reply
 
 _PROOF = "theorem demo : True ∧ True := by\n  trivial\n  trivial\n"
@@ -76,6 +76,39 @@ class CardDeliveryTests(unittest.TestCase):
             self.assertIn("second idea", later)
             self.assertIn("n9 80", later)
             self.assertNotIn("peer focus", later)
+
+    def test_a_changed_field_shows_only_its_new_sentences_and_a_long_field_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _seed_parent(directory)
+            _save(directory, "worker-b", "c1", ideas="Try the split. Merge the cases.")
+            bucket: dict = {}
+            with patch.object(campaign, "run_dir", return_value=directory):
+                proof_reply._card_lines("run-1", "worker-a", bucket)
+                _save(directory, "worker-b", "c2", ideas="Try the split. Merge the cases. Fold the last step.")
+                later = "\n".join(proof_reply._card_lines("run-1", "worker-a", bucket))
+                _save(directory, "worker-b", "c3", ideas="Try the split. Merge the cases. Fold the last step.", best="n2")
+                only_best = "\n".join(proof_reply._card_lines("run-1", "worker-a", bucket))
+            self.assertIn("ideas: Fold the last step.", later)
+            self.assertNotIn("Try the split", later)
+            self.assertNotIn("ideas:", only_best)
+            self.assertIn("best: n2", only_best)
+            limit = text.numbers()["card_field_chars"]
+            long = _save(directory, "worker-b", "c4", focus="x" * (limit + 1))
+            self.assertFalse(long["ok"])
+            self.assertIn(f"{limit + 1} characters", long["hint"])
+            self.assertEqual(orchestration.current_cards(directory)["worker-b"]["version"], 3)
+
+    def test_a_map_is_sent_again_only_when_its_step_table_moves(self):
+        def key(*steps, node="n1"):
+            return proof_reply._map_key({"best": {"node": node}, "effort": [
+                {"step": step, "at_stake": points, "tokens": 5} for step, points in steps]})
+
+        first = key(("s1", 3.0), ("s2", 1.0))
+        self.assertFalse(proof_reply._map_changed(first, key(("s1", 3.4), ("s2", 1.0), node="n7")))
+        self.assertTrue(proof_reply._map_changed(first, key(("s1", 4.2), ("s2", 1.0))))
+        self.assertTrue(proof_reply._map_changed(first, key(("s1", 3.0), ("s3", 1.0))))
+        self.assertTrue(proof_reply._map_changed(None, first))
 
     def test_an_orchestrator_message_stays_open_on_the_worker_until_a_card_changes_held_or_failed(self):
         rows = [{"type": "job_message", "job_id": "j1", "text": "try the n7 shape", "disposition": "sent"}]

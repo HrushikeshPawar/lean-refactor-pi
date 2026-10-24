@@ -1789,6 +1789,11 @@ def save_card(
     """Merge sent fields into the actor's card (empty clears one) and append the new version as a ledger row."""
     if not operation_id or not run_id or not actor_id or not session_id or not fields:
         return _reject(operation_id, "identity")
+    limit = text.numbers()["card_field_chars"]
+    for name, value in fields.items():
+        if len(value) > limit:
+            return {**_reject(operation_id, "field_chars"),
+                    "hint": text.render("replies/team.card_field_long", field=name, chars=len(value), limit=limit)}
     previous = current_cards(directory).get(actor_id)
     merged = {**(previous or {}).get("fields", {}), **fields}
     merged = {name: value for name, value in merged.items() if value}

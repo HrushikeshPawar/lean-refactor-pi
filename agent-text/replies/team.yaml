@@ -64,6 +64,7 @@ open_unmeasured: "  {job}: its card names {names} as the blocker, and no compile
 floor_options: "Candidates outside {route}: {candidates}"
 floor_none: "No other shape has a closed proof yet: start a family job on a structure no worker has tried."
 card_empty: "Send at least one of focus, best, held, failed, ideas, asks."
+card_field_long: "{field} is {chars} characters; keep each field under {limit}. Earlier versions keep what you wrote before, so write only what is new or still true."
 card_head: "{label} card v{version} (changed: {changed})"
 card_field: "  {name}: {value}"
 card_compare: "  {label}'s best {mine}; run best {top}. read with view diff and against compares them."

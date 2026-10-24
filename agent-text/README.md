@@ -239,10 +239,10 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `packet/sections.titles.worker` | 1 | Initial theorem packet | once per run |
 | `packet/sections.titles.worker_goals` | 6 | Initial theorem packet | once per run |
 | `packet/task` | 10 | Initial theorem packet | once per run |
-| `packet/team` | 707 | Initial theorem packet | once per run |
+| `packet/team` | 757 | Initial theorem packet | once per run |
 | `packet/team-cost` | 10 | Initial theorem packet | once per run |
 | `packet/trim` | 86 | Initial theorem packet | once per run |
-| `packet/worker` | 172 | Initial theorem packet | once per run |
+| `packet/worker` | 190 | Initial theorem packet | once per run |
 | `replies/await_results.cursor` | 13 | Tool replies | when the matching tool result occurs |
 | `replies/await_results.identity` | 7 | Tool replies | when the matching tool result occurs |
 | `replies/await_results.job_ids` | 17 | Tool replies | when the matching tool result occurs |
@@ -325,6 +325,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/team.card_compare_node` | 7 | Tool replies | when the matching tool result occurs |
 | `replies/team.card_empty` | 11 | Tool replies | when the matching tool result occurs |
 | `replies/team.card_field` | 2 | Tool replies | when the matching tool result occurs |
+| `replies/team.card_field_long` | 25 | Tool replies | when the matching tool result occurs |
 | `replies/team.card_floor` | 59 | Tool replies | when the matching tool result occurs |
 | `replies/team.card_head` | 5 | Tool replies | when the matching tool result occurs |
 | `replies/team.card_saved` | 3 | Tool replies | when the matching tool result occurs |
@@ -573,7 +574,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `tools/await_results.params.job_ids` | 15 | Model tool definitions | every request |
 | `tools/cancel.description` | 13 | Model tool definitions | every request |
 | `tools/cancel.params.job_id` | 6 | Model tool definitions | every request |
-| `tools/card.description` | 33 | Model tool definitions | every request |
+| `tools/card.description` | 59 | Model tool definitions | every request |
 | `tools/card.params.asks` | 6 | Model tool definitions | every request |
 | `tools/card.params.best` | 8 | Model tool definitions | every request |
 | `tools/card.params.failed` | 8 | Model tool definitions | every request |
