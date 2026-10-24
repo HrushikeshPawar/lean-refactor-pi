@@ -912,7 +912,10 @@ def _open_ask_note(run_id: str, actor: str) -> list[str]:
         ask = label and orchestration.open_ask(directory, orchestration.resolve_job(directory, label))
     except (OSError, ValueError, KeyError):
         return []
-    return [text.render("replies/team.open_ask_line", task=ask)] if ask else []
+    if not ask:
+        return []
+    limit = text.numbers()["open_ask_line_chars"]  # the full message already reached the worker once
+    return [text.render("replies/team.open_ask_line", task=ask if len(ask) <= limit else ask[:limit].rstrip() + "…")]
 
 
 def _compile_nudge(actor: str, bucket: dict, action: str | None) -> list[str]:

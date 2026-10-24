@@ -96,6 +96,8 @@ token_island_heartbeat_ceiling: 2
 # The orchestrator's plan is stale when the run best's score rose by at least this many points since it was saved
 # (or its route changed).
 plan_stale_points: 3
+# A worker's per-turn reminder of an open orchestrator message shows at most this many characters of it.
+open_ask_line_chars: 200
 # An open orchestrator ask shows at most this many characters of its text in the jobs view.
 open_ask_chars: 80
 # A worker node is announced as shorter (token_short) only when it saves at least this many tokens on the run best:

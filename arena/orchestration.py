@@ -311,6 +311,9 @@ def _can_admit_directly(directory: Path, scope: str | None) -> bool:
 
 
 def _append_state(directory: Path, delegation: dict, state: str, **extra) -> None:
+    # After the run stops, the stop aborts every live worker: that ends the job, it is not a failure.
+    if state == "failed" and any(row.get("kind") == "run_stop" for row in run_control._control_rows(directory)):
+        state, extra = "cancelled", {**extra, "reason": "run_stopped"}
     live = _live.get(delegation["activation_id"])
     if state in _terminal_states and live and live.get("report"):
         extra["report"] = live.pop("report")
@@ -496,9 +499,6 @@ def _record_state(directory: Path, delegation: dict, state: str, *, expected_tra
             return
         if snapshot["state"] == "cancelling" and state != "cancelled":
             return
-        # After the run stops, the stop aborts every live worker: that ends the job, it is not a failure.
-        if state == "failed" and any(row.get("kind") == "run_stop" for row in run_control._control_rows(directory)):
-            state, extra = "cancelled", {**extra, "reason": "run_stopped"}
         _append_state(directory, delegation, state, **extra)
         live = _live.get(delegation["activation_id"])
         if live is not None:
@@ -2267,7 +2267,7 @@ def merge_ready(directory: Path) -> list[str]:
 
 
 def token_short(directory: Path) -> list[dict]:
-    """Worker nodes that compile (the primary version is enough), have at least `token_short_min_saved` fewer tokens
+    """Token island nodes that compile (the primary version is enough), have at least `token_short_min_saved` fewer tokens
     than the run best and heartbeats
     within the token island's ceiling, with no running heartbeat island anchored on them. Each is
     `{node, proof_id, saved, best, tokens, heartbeats}`, shortest first."""
@@ -2277,12 +2277,15 @@ def token_short(directory: Path) -> list[dict]:
         return []
     limit = heartbeat_limit(top)
     anchored = set()
+    token_jobs = set()
     for job in {row["job_id"] for row in _delegations(directory) if row.get("job_id")}:
         rows = _job_rows(directory, job)
+        if rows[0].get("objective") == "tokens":
+            token_jobs.add(job)
         if rows[0].get("objective") == "heartbeats" and (_job_snapshot(directory, job) or {}).get("state") in _live_states:
             anchored.add((rows[-1].get("anchor") or {}).get("node"))
     found = [node for node in nodes.values()
-             if _closed(node) and node_author_job(node) is not None and node.tokens is not None
+             if _closed(node) and node_author_job(node) in token_jobs and node.tokens is not None
              and top.tokens - node.tokens >= text.numbers()["token_short_min_saved"]
              and within_limit(node, limit) and node.id not in anchored]
     return [{"node": node.id, "proof_id": node.proof_id, "saved": top.tokens - node.tokens, "best": top.tokens,
