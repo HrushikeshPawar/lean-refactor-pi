@@ -417,6 +417,38 @@ def _cut(items: list[tuple], state: dict) -> list[str]:
     return lines + ([_render("more", count=len(items) - len(shown))] if len(shown) < len(items) else [])
 
 
+def stall(rows: list[dict], job: str) -> dict | None:
+    """The job's trailing run of settled attempts that all changed one step with no win or kept row, once it holds
+    `stall_same_step` of them: {key, step, count, dead, node, proof}; `key` is fixed for the streak's life."""
+    streak: list[dict] = []
+    for row in reversed([r for r in rows if r["job"] == job and not r["harness"] and r["settled"] and r["pstep"]]):
+        if row["status"] in ("win", "kept") or (streak and row["pstep"] != streak[0]["pstep"]):
+            break
+        streak.append(row)
+    if len(streak) < text.numbers()["stall_same_step"]:
+        return None
+    newest, oldest = streak[0], streak[-1]
+    return {"key": f"s:{job}:{oldest['id']}", "step": newest["pstep"], "count": len(streak), "node": newest["parent"],
+            "proof": newest["from"][0], "dead": sum(row["status"] == "dead" for row in streak)}
+
+
+def _next_steps(found: dict, costs) -> str:
+    """The costliest other steps of the stalled job's base node, as `stall_step` items; "" when no price is known."""
+    try:
+        priced = costs(found["proof"]) if costs else []
+    except (OSError, ValueError, KeyError):
+        priced = []
+    others = [row for row in priced if row["step"] != found["step"]][: text.numbers()["stall_next_steps"]]
+    return ", ".join(_render("stall_step", step=row["step"], tokens=row["tokens"] if row["tokens"] is not None else "-",
+                             heartbeats=row["heartbeats"] if row["heartbeats"] is not None else "-") for row in others)
+
+
+def stall_line(found: dict, costs) -> str:
+    steps = _next_steps(found, costs)
+    return _line(_render("stall", count=found["count"], step=found["step"], node=found["node"], dead=found["dead"]),
+                 _render("stall_next", node=found["node"], steps=steps) if steps else "")
+
+
 def _reached(rows: list[dict], state: dict) -> int:
     """The newest row id number up to which every row is settled."""
     reached = 0
@@ -427,11 +459,13 @@ def _reached(rows: list[dict], state: dict) -> int:
     return reached
 
 
-def push(rows: list[dict], role: str, job: str | None, state: dict) -> list[str]:
+def push(rows: list[dict], role: str, job: str | None, state: dict, costs=None) -> list[str]:
     """Lines for one actor's next turn, and its cursor moved past them (`state` is the actor's delivery bucket entry).
 
     Trim and merge get the row behind each new run best; islands get other actors' significant wins as technique
-    lines; everyone, the authors of the failures included, gets dead ends. A change reaches an actor once."""
+    lines; everyone, the authors of the failures included, gets dead ends. A worker whose last attempts all changed one
+    step without a gain gets one stall line per streak (see stall; `costs(proof_id)` prices the base node's steps).
+    A change reaches an actor once."""
     first = "cursor" not in state
     sent = set(state.get("sent", []))
     if first:  # a new actor's packet already names the run best
@@ -455,6 +489,9 @@ def push(rows: list[dict], role: str, job: str | None, state: dict) -> list[str]
                 and not any(other["sig"] == sig and other["status"] == "dead" for other in rows):
             objective = role if role in ("tokens", "heartbeats") else None
             items.append((2, _gain(row, objective), f"t:{sig}", technique_line(row)))
+    found = stall(rows, job) if job else None
+    if found and found["key"] not in sent:
+        items.append((-1, found["count"], found["key"], stall_line(found, costs)))
     # Several wins of one change in the same turn: keep the best one.
     kept: dict[str, tuple] = {}
     for item in items:
@@ -489,7 +526,7 @@ def _island_status(rows: list[dict], job: str, role: str) -> tuple[dict | None, 
     return best, stale
 
 
-def digest(rows: list[dict], jobs: dict[str, dict], state: dict) -> list[str]:
+def digest(rows: list[dict], jobs: dict[str, dict], state: dict, costs=None) -> list[str]:
     """The orchestrator's lines since its previous turn: kept changes, dead ends, one status line per active job."""
     limit = text.numbers()["idea_digest_lines"]
     sent = set(state.get("sent", []))
@@ -528,19 +565,28 @@ def digest(rows: list[dict], jobs: dict[str, dict], state: dict) -> list[str]:
             shown = _render(f"island_best_{axis}", node=best["node"], value=value)
         lines.append(_line(_render("island", job=job["label"], role=_render(f"role_{job['role']}"), best=shown),
                            _render("island_stale", count=stale)))
+    told = set(state.get("stalled", []))
+    for job in jobs.values():
+        found = stall(rows, job["label"]) if job["role"] != "sol" else None
+        if found and found["key"] not in told:
+            told.add(found["key"])
+            steps = _next_steps(found, costs)
+            lines.append(_line(_render("stall_sol", job=job["label"], count=found["count"], step=found["step"],
+                                       node=found["node"]), _render("stall_sol_next", steps=steps) if steps else ""))
+    state["stalled"] = sorted(told)
     state["sent"] = sorted({*sent, *(f"k:{row['id']}" for row in kept), *(key for key, _ in dead)})
     state["cursor"] = max(cursor, _reached(rows, state))
     return lines
 
 
-def lines_from(rows: list[dict], jobs: dict[str, dict], actor: str, bucket: dict) -> tuple[str, list[str]]:
+def lines_from(rows: list[dict], jobs: dict[str, dict], actor: str, bucket: dict, costs=None) -> tuple[str, list[str]]:
     """(role, lines): an actor's attempt log lines for this turn (see push and digest), its cursor kept in `bucket`."""
     state = bucket.setdefault("ideas", {})
     if actor == "sol":
-        return "sol", digest(rows, jobs, state)
+        return "sol", digest(rows, jobs, state, costs)
     job = next((item for item in jobs.values() if item["actor"] == actor), None)
     role = job["role"] if job else "sol"
-    return role, push(rows, role, job["label"] if job else None, state)
+    return role, push(rows, role, job["label"] if job else None, state, costs)
 
 
 def lines_for(directory: Path, actor: str, bucket: dict) -> tuple[str, list[str]]:
@@ -550,7 +596,7 @@ def lines_for(directory: Path, actor: str, bucket: dict) -> tuple[str, list[str]
         jobs = job_table(published_history(directory, campaign.events(directory)))
     except (OSError, ValueError, KeyError, TypeError, AttributeError, IndexError):  # the log never breaks a tool call
         return "sol", []
-    return lines_from(rows, jobs, actor, bucket)
+    return lines_from(rows, jobs, actor, bucket, lambda proof_id: campaign.step_costs(directory, proof_id))
 
 
 # --- the ideas tool -----------------------------------------------------------------------------------------------

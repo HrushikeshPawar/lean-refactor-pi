@@ -42,6 +42,7 @@ class Coordinator:
         self._socket = None
         self._temporary = None
         self._thread = None
+        self._merger = None
 
     @property
     def generation(self) -> str:
@@ -71,6 +72,8 @@ class Coordinator:
             temporary.replace(endpoint)
             self._thread = threading.Thread(target=self._accept, daemon=True)
             self._thread.start()
+            self._merger = threading.Thread(target=self._start_merges, daemon=True)
+            self._merger.start()
             return self
         except BaseException:
             self.close()
@@ -90,6 +93,14 @@ class Coordinator:
                     return
                 self._clients[connection] = (cancelled, thread)
                 thread.start()
+
+    def _start_merges(self) -> None:
+        """The harness starts the merge job itself when its nodes are ready (orchestration.start_merge)."""
+        while not self._closed.wait(text.numbers()["merge_auto_poll_seconds"]):
+            try:
+                orchestration.start_merge(self.directory, self._open_child)
+            except Exception:  # noqa: BLE001 - a failed check must not end the loop; the next poll tries again
+                pass
 
     def _serve(self, connection: socket.socket, cancelled: threading.Event) -> None:
         monitor = None
@@ -163,6 +174,8 @@ class Coordinator:
             thread.join(timeout=1)
         if self._thread is not None:
             self._thread.join(timeout=1)
+        if self._merger is not None:
+            self._merger.join(timeout=1)
         endpoint = self.directory / "coordinator.json"
         try:
             if json.loads(endpoint.read_text()).get("generation") == self._generation:

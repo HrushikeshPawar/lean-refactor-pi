@@ -55,7 +55,8 @@ budget:
   # 1150: short card fields (only what is new or still true) and independent tool calls in one turn.
   # 1160: the plan paragraph gives way to the idea log paragraph (what the harness shares, citing log ids, compact writing).
   # 1170: compact writing joins items with hyphens and writes changes as saved or added.
-  packet_words: 1170
+  # 1220: guide a job the digest reports as stalled before the orchestrator's own next compile; the harness starts the merge job.
+  packet_words: 1220
   # 215: the worker packet explains the card (what to write, what arrives in replies).
   # 240: read a definition's source before using it instead of reconstructing it (GLM trace analysis 2026-10-23).
   # 260: short card fields, only what is new or still true.
@@ -122,3 +123,13 @@ idea_digest_lines: 4
 # The ideas tool lists at most this many changes, each with at most this many attempt ids.
 idea_query_rows: 8
 idea_query_ids: 4
+# A worker job whose last this many settled attempts all changed the same step with no gain is sent one line naming
+# the step and the costliest other steps of its base node; the orchestrator's digest says it once too.
+stall_same_step: 5
+# That line names this many of the base node's costliest other steps.
+stall_next_steps: 2
+# The harness starts the merge job itself (arena/orchestration.py start_merge) when two jobs have new closed nodes and the
+# merge slot is free. It checks this often (seconds).
+merge_auto_poll_seconds: 15
+# After a merge job has ended, another starts only when at least this many closed nodes were saved since by other jobs.
+merge_auto_new_nodes: 3

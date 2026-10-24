@@ -16,12 +16,11 @@ def node(node_id: str, score: float, job: str | None = None, verified: bool = Tr
 
 
 class NoticeTests(unittest.TestCase):
-    def notice(self, bucket, *, best, ready=(), action=None, digest=()):
-        """sol's notices for one tool call, with the run's best, merge set and attempt log digest patched."""
+    def notice(self, bucket, *, best, merges=(), action=None, digest=()):
+        """sol's notices for one tool call, with the run's best, merge jobs and attempt log digest patched."""
         with patch.object(orchestration, "run_best", return_value=best), \
-                patch.object(orchestration, "merge_ready", return_value=list(ready)), \
-                patch.object(ideas, "lines_for", return_value=("sol", list(digest))), \
-                patch.object(team_reply, "_jobs_count", return_value=2):
+                patch.object(orchestration, "merge_jobs", return_value=list(merges)), \
+                patch.object(ideas, "lines_for", return_value=("sol", list(digest))):
             bucket["calls"] = bucket.get("calls", 0) + 1
             return team_reply.notices(Path("run"), bucket, action)
 
@@ -30,11 +29,14 @@ class NoticeTests(unittest.TestCase):
         for _ in range(12):
             self.assertEqual(self.notice(bucket, best=node("n5", 70.0), action="delegate"), ([], []))
 
-    def test_same_merge_set_is_not_said_twice_but_a_changed_one_is(self):
+    def test_a_harness_started_merge_job_is_said_once_and_a_sol_started_one_never(self):
         bucket = {}
-        self.assertEqual(self.notice(bucket, best=node("n5", 70.0), ready=["n2", "n3"])[0], ["merge_ready"])
-        self.assertEqual(self.notice(bucket, best=node("n5", 70.0), ready=["n2", "n3"]), ([], []))
-        self.assertEqual(self.notice(bucket, best=node("n6", 71.0), ready=["n2", "n3", "n4"])[0], ["merge_ready"])
+        harness = {"job_id": "j9", "label": "job9", "nodes": ["n5", "n2", "n3"], "creator": "harness"}
+        own = {"job_id": "j8", "label": "job8", "nodes": ["n5", "n2"], "creator": None}
+        first = self.notice(bucket, best=node("n5", 70.0), merges=[harness, own])
+        self.assertEqual(first, (["merge_started"], [
+            "Merge job job9 started by the harness on n5, n2, n3; message or cancel it as needed."]))
+        self.assertEqual(self.notice(bucket, best=node("n5", 70.0), merges=[harness, own]), ([], []))
 
     def test_the_attempt_log_digest_comes_first_under_its_own_kind(self):
         kinds, lines = self.notice({}, best=None, digest=["Kept i3 (n9)"])
@@ -53,7 +55,7 @@ class NoticeTests(unittest.TestCase):
 
     def test_await_and_jobs_replies_carry_no_merge_lines(self):
         with patch.object(orchestration, "run_best", return_value=node("n5", 70.0)), \
-                patch.object(orchestration, "merge_ready", return_value=["n2", "n3"]), \
+                patch.object(orchestration, "merge_jobs", return_value=[]), \
                 patch.object(team_reply, "open_requests", return_value=[]):
             awaited = team_reply.render("await_results", {"events": [], "jobs": []}, Path("run"))
             listed = team_reply.render("jobs", {"jobs": []}, Path("run"))
@@ -66,11 +68,12 @@ class NoticeTests(unittest.TestCase):
         with patch.object(reply, "current_actor", return_value="sol"), \
                 patch.object(reply, "_delivery_lock", return_value=nullcontext()), \
                 patch.object(reply, "_load", return_value={}), patch.object(reply, "_write_actor") as write, \
-                patch.object(team_reply, "notices", return_value=(["merge_ready"], ["Merge ready: n2, n3."])), \
+                patch.object(team_reply, "notices", return_value=(["merge_started"], ["Merge job job2 started by the harness on n2, n3; message or cancel it as needed."])), \
                 patch.object(team_reply.campaign, "run_dir", return_value=Path("run")):
             result = team_reply.sol_notices("run", "delegate", {"ok": True, "text": "t"})
         self.assertEqual(result, {"ok": True, "text": "t",
-                                  "context": {"sections": [["", "Merge ready: n2, n3."]], "kinds": ["merge_ready"]}})
+                                  "context": {"sections": [["", "Merge job job2 started by the harness on n2, n3; message or cancel it as needed."]],
+                                              "kinds": ["merge_started"]}})
         write.assert_called_once()
 
 class MergeTests(unittest.TestCase):
@@ -102,6 +105,47 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(orchestration.merge_defaults(Path("run")), ["n2", "n3", "n4"])
         self.assertEqual(orchestration._merge_anchor(Path("run"), {"nodes": ["n4"]}), "merge")
 
+    def auto(self, *, merges=(), states=(), best="n2", state="completed"):
+        """_merge_auto_nodes with earlier merge jobs ({job: start ts}) and their state rows patched."""
+        first = {job: {"scope": "merge", "ts": ts} for job, ts in merges}
+        first.update({"j1": {"scope": "island", "ts": 0.5}, "j2": {"scope": "island", "ts": 0.6}})
+        live = {job: {"state": state} for job, _ in merges}
+        with patch.object(orchestration, "_first_delegations", return_value=first), \
+                patch.object(orchestration, "_job_snapshot", side_effect=lambda d, job: live.get(job)), \
+                patch.object(orchestration, "_states", return_value=list(states)), \
+                patch.object(orchestration, "events", return_value=[{"ts": 0.1}]), \
+                patch.object(orchestration, "run_best", return_value=self.nodes[best]):
+            return orchestration._merge_auto_nodes(Path("run"))
+
+    def test_the_harness_picks_the_merge_nodes_with_the_run_best_first_and_waits_after_a_merge_ends(self):
+        self.assertEqual(self.auto(), ["n2", "n3", "n4"])
+        ended = [{"job_id": "m1", "state": "completed", "ts": 5.0}]
+        self.assertEqual(self.auto(merges=[("m1", 4.5)], states=ended), [])  # nothing new since it ended
+        for name in ("n8", "n9"):
+            self.nodes[name] = node(name, 64.0, job="j2")
+            self.times[name] = float(len(self.times) + 4)
+        self.assertEqual(self.auto(merges=[("m1", 4.5)], states=ended), [])  # two new nodes, one job
+        self.nodes["n10"] = node("n10", 66.0, job="j1")
+        self.times["n10"] = 20.0
+        self.assertEqual(self.auto(merges=[("m1", 4.5)], states=ended), ["n2", "n9", "n10"])
+        self.assertEqual(self.auto(merges=[("m1", 4.5)], state="active"), [])  # running merge job: no restart
+
+    def test_start_merge_delegates_a_merge_job_owned_by_sol_and_created_by_the_harness(self):
+        with patch.object(orchestration, "_run_status", return_value="running"), \
+                patch.object(orchestration, "_merge_auto_nodes", return_value=["n2", "n4"]), \
+                patch.object(orchestration, "_slot_open", return_value=True), \
+                patch.object(orchestration, "_first_delegations", return_value={}), \
+                patch.object(orchestration, "delegate", return_value={"ok": True}) as delegate:
+            self.assertEqual(orchestration.start_merge(Path("run"), "opener"), {"ok": True})
+            kwargs = delegate.call_args.kwargs
+            self.assertEqual((kwargs["scope"], kwargs["anchor"], kwargs["creator"], kwargs["actor_id"]),
+                             ("merge", {"nodes": ["n2", "n4"]}, "harness", "sol"))
+            self.assertIn("n2, n4", kwargs["task"])
+            delegate.reset_mock()
+            with patch.object(orchestration, "_slot_open", return_value=False):
+                self.assertIsNone(orchestration.start_merge(Path("run"), "opener"))
+            delegate.assert_not_called()
+
     def test_merge_ends_when_its_last_saves_do_not_beat_the_best_at_save_time(self):
         with patch.object(orchestration, "_saved_times", side_effect=lambda directory: {**self.times, "n4": 4.0}):
             self.assertIsNone(orchestration._merge_end(Path("run"), "j1"))  # n2 and n3 are not the last four
@@ -131,6 +175,14 @@ class NudgeTests(unittest.TestCase):
 
 
 class PacketTests(unittest.TestCase):
+    def test_the_orchestrator_guides_a_stalled_job_before_its_own_compile_and_the_harness_starts_merge_jobs(self):
+        packet = text.template("packet/team")
+        self.assertIn("when your digest reports a job stalled", packet)
+        self.assertIn("before your next compile of your own", packet)
+        self.assertIn("guide the same way whenever you have no structure of your own to try", packet)
+        self.assertIn("the harness starts it itself on those nodes", packet)
+        self.assertNotIn("Delegate a merge job", packet)
+
     def test_orchestrator_packet_is_byte_identical_and_carries_no_plan_paragraph(self):
         cached, measured = _fixture("ski")
         with patch.object(context, "cached_context", return_value=cached), \

@@ -239,7 +239,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `packet/sections.titles.worker` | 1 | Initial theorem packet | once per run |
 | `packet/sections.titles.worker_goals` | 6 | Initial theorem packet | once per run |
 | `packet/task` | 10 | Initial theorem packet | once per run |
-| `packet/team` | 777 | Initial theorem packet | once per run |
+| `packet/team` | 824 | Initial theorem packet | once per run |
 | `packet/team-cost` | 10 | Initial theorem packet | once per run |
 | `packet/trim` | 82 | Initial theorem packet | once per run |
 | `packet/worker` | 221 | Initial theorem packet | once per run |
@@ -308,6 +308,11 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/ideas.role_step` | 2 | Tool replies | when the matching tool result occurs |
 | `replies/ideas.role_tokens` | 2 | Tool replies | when the matching tool result occurs |
 | `replies/ideas.role_trim` | 1 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.stall` | 16 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.stall_next` | 13 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.stall_sol` | 10 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.stall_sol_next` | 3 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.stall_step` | 5 | Tool replies | when the matching tool result occurs |
 | `replies/ideas.status_dead` | 2 | Tool replies | when the matching tool result occurs |
 | `replies/ideas.status_failed` | 1 | Tool replies | when the matching tool result occurs |
 | `replies/ideas.status_kept` | 1 | Tool replies | when the matching tool result occurs |
@@ -399,8 +404,9 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/team.job_task` | 2 | Tool replies | when the matching tool result occurs |
 | `replies/team.jobs_head` | 9 | Tool replies | when the matching tool result occurs |
 | `replies/team.jobs_none` | 6 | Tool replies | when the matching tool result occurs |
+| `replies/team.merge_auto_task` | 26 | Tool replies | when the matching tool result occurs |
 | `replies/team.merge_continue` | 24 | Tool replies | when the matching tool result occurs |
-| `replies/team.merge_ready` | 19 | Tool replies | when the matching tool result occurs |
+| `replies/team.merge_started` | 15 | Tool replies | when the matching tool result occurs |
 | `replies/team.node_scored` | 3 | Tool replies | when the matching tool result occurs |
 | `replies/team.node_unscored` | 5 | Tool replies | when the matching tool result occurs |
 | `replies/team.nodes_none` | 4 | Tool replies | when the matching tool result occurs |

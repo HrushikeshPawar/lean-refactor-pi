@@ -1321,8 +1321,10 @@ def delegate(
     anchor: object = None,
     job_id: str | None = None,
     objective: str | None = None,
+    creator: str | None = None,
 ) -> dict:
-    """Accept one hypothesis, or resume its saved session, and return before the worker settles."""
+    """Accept one hypothesis, or resume its saved session, and return before the worker settles. `creator` names the
+    harness when it started the job itself; the orchestrator still owns the job (messages, cancel)."""
     if not operation_id or not run_id or not actor_id or not session_id or not isinstance(task, str) or not task:
         return _reject(operation_id, "identity", hint="replies/delegate.identity")
     if objective is not None and (job_id or scope != "island" or objective not in _OBJECTIVES):
@@ -1384,6 +1386,8 @@ def delegate(
         "state": "queued",
         "resumed": False,
     }
+    if creator:
+        delegation["creator"] = creator
     if objective is not None:
         best_now = run_best(directory)
         delegation["best_route"] = None if best_now is None else best_now.route
@@ -2282,6 +2286,70 @@ def merge_ready(directory: Path) -> list[str]:
     return [node.id for node in sorted(newest.values(), key=lambda node: saved[node.proof_id])]
 
 
+def _lineage(nodes: dict, node) -> set[str]:
+    """Proof ids of `node` and every ancestor named by the edges that built it."""
+    found: set[str] = set()
+    pending = [node.proof_id]
+    while pending:
+        proof_id = pending.pop()
+        if proof_id not in found:
+            found.add(proof_id)
+            held = nodes.get(proof_id)
+            pending += (getattr(held, "edge", None) or {}).get("from") or []
+    return found
+
+
+def _merge_auto_nodes(directory: Path) -> list[str]:
+    """The nodes the harness starts a merge job on, run best first, or []. No merge job is queued or running; the run
+    best has company: closed nodes saved since the last merge job ended (or since the run began) by non-merge jobs, outside
+    the run best's own lineage, from a job other than the best's author. After an earlier merge job at least
+    `merge_auto_new_nodes` such nodes are needed, so a merge job that ended without a gain is not restarted."""
+    first = _first_delegations(directory)
+    merges = {job for job, row in first.items() if row.get("scope") == "merge"}
+    if any((_job_snapshot(directory, job) or {}).get("state") in _live_states for job in merges):
+        return []
+    best = run_best(directory)
+    if best is None:
+        return []
+    events_ = events(directory)
+    since = float((events_[0] if events_ else {}).get("ts", 0.0))
+    ended = [float(row.get("ts", 0.0)) for row in _states(directory)
+             if row.get("job_id") in merges and row.get("state") in _terminal_states]
+    if merges:
+        since = max([since, *ended, *(float(first[job].get("ts", 0.0)) for job in merges)])
+    saved = _saved_times(directory)
+    nodes = proof_nodes(directory)
+    lineage = _lineage(nodes, best)
+    fresh = [node for node in nodes.values()
+             if _closed(node) and node_author_job(node) not in merges and node_author_job(node) is not None
+             and saved.get(node.proof_id, 0.0) > since and node.proof_id not in lineage]
+    if not fresh or (merges and len(fresh) < text.numbers()["merge_auto_new_nodes"]) \
+            or all(node_author_job(node) == node_author_job(best) for node in fresh):
+        return []
+    newest: dict[str, object] = {}
+    for node in fresh:
+        held = newest.get(node_author_job(node))
+        if held is None or saved[node.proof_id] > saved[held.proof_id]:
+            newest[node_author_job(node)] = node
+    return [best.id, *(node.id for node in sorted(newest.values(), key=lambda node: saved[node.proof_id]))]
+
+
+def start_merge(directory: Path, open_child) -> dict | None:
+    """Start the merge job itself when its nodes are ready and the merge slot is free (see _merge_auto_nodes); the
+    orchestrator owns the job like one it delegated. The receipt, or None when nothing starts."""
+    if _run_status(directory) != "running":
+        return None
+    ids = _merge_auto_nodes(directory)
+    if len(ids) < 2 or not _slot_open(directory, "merge"):
+        return None
+    count = sum(1 for row in _first_delegations(directory).values() if row.get("scope") == "merge")
+    return delegate(
+        directory, operation_id=f"harness-merge-{count + 1}", run_id=directory.name, actor_id="sol",
+        session_id=directory.name, task=text.render("replies/team.merge_auto_task", nodes=", ".join(ids)),
+        open_child=open_child, scope="merge", anchor={"nodes": ids}, creator="harness",
+    )
+
+
 def token_short(directory: Path) -> list[dict]:
     """Token island nodes that compile (the primary version is enough), have at least `token_short_min_saved` fewer tokens
     than the run best and heartbeats
@@ -2335,6 +2403,7 @@ def merge_jobs(directory: Path) -> list[dict]:
         if row.get("type") == "island_turn" and row.get("stop"):
             ends[row["job_id"]] = row["stop"]
     return [{"job_id": job, "label": labels.get(job), "nodes": (row.get("anchor") or {}).get("nodes", []),
+             "creator": row.get("creator"),
              "state": (_job_snapshot(directory, job) or {}).get("state"),
              "end": ends.get(job) or _job_end_reason(directory, job)}
             for job, row in _first_delegations(directory).items() if row.get("scope") == "merge"]

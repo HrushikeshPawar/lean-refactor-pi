@@ -78,7 +78,7 @@ def _take(sent: dict, kind: str, fingerprint: object, calls: int) -> bool:
 
 
 def notices(directory: Path, bucket: dict, action: str | None) -> tuple[list[str], list[str]]:
-    """The merge, shorter-node and attempt log notices new for sol since its last tool call, as (kinds, lines).
+    """The merge-started, shorter-node and attempt log notices new for sol since its last tool call, as (kinds, lines).
 
     The attempt log digest (see ideas.digest) is the delta since sol's previous digest, so each change is said once."""
     sent = bucket.setdefault("notices", {})
@@ -89,12 +89,10 @@ def notices(directory: Path, bucket: dict, action: str | None) -> tuple[list[str
     if digest:
         kinds.append("ideas")
         lines += digest
-    ready = orchestration.merge_ready(directory)
-    if not ready:
-        sent.pop("merge_ready", None)
-    elif _take(sent, "merge_ready", sorted(ready), calls):
-        kinds.append("merge_ready")
-        lines.append(_render("merge_ready", nodes=", ".join(ready), count=_jobs_count(directory, ready)))
+    for item in orchestration.merge_jobs(directory):
+        if item["creator"] == "harness" and _take(sent, f"merge_started:{item['job_id']}", True, calls):
+            kinds.append("merge_started")
+            lines.append(_render("merge_started", job=item["label"], nodes=", ".join(item["nodes"])))
     for item in orchestration.token_short(directory):
         if _take(sent, f"token_short:{item['node']}", True, calls):
             if "token_short" not in kinds:
@@ -131,12 +129,6 @@ def sol_notices(run_id: str, action: str, result: dict) -> dict:
         kinds, lines = notices(campaign.run_dir(run_id), bucket, action)
         reply._write_actor(run_id, "sol", bucket, state)
     return reply.add_context(result, [["", *lines]], kinds) if lines else result
-
-
-def _jobs_count(directory: Path, nodes: list[str]) -> int:
-    """How many distinct jobs saved the named nodes."""
-    by_id = {node.id: node for node in orchestration.proof_nodes(directory).values()}
-    return len({orchestration.node_author_job(by_id[node_id]) for node_id in nodes if node_id in by_id})
 
 
 def open_requests(directory: Path) -> list[str]:

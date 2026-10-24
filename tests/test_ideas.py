@@ -131,6 +131,54 @@ class PushTests(unittest.TestCase):
         self.assertEqual(len(ideas.push([{**pending, "settled": True, "win": True, "status": "win"}], "tokens", "job1", state)), 1)
 
 
+class StallTests(unittest.TestCase):
+    def streak(self, count: int, first: int = 1, **fields) -> list[dict]:
+        return [row(n, win=False, status="failed", d_tokens=None, step_hb=None, d_hb=None, **{"from": ["p1"], **fields})
+                for n in range(first, first + count)]
+
+    @staticmethod
+    def costs(proof_id: str) -> list[dict]:
+        return [{"step": "s1", "tokens": 90, "heartbeats": 900}, {"step": "s7", "tokens": 40, "heartbeats": 300},
+                {"step": "s9", "tokens": 30, "heartbeats": None}, {"step": "s2", "tokens": 5, "heartbeats": 1}]
+
+    def test_five_attempts_on_one_step_push_one_line_naming_the_next_costliest_steps_once_per_streak(self):
+        limit = text.numbers()["stall_same_step"]
+        state: dict = {}
+        self.assertEqual(ideas.push(self.streak(limit - 1), "heartbeats", "job1", state, self.costs), [])
+        rows = self.streak(limit)
+        lines = ideas.push(rows, "heartbeats", "job1", state, self.costs)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("Stalled: 5 attempts on step s1 of n1 without a gain, 0 of them dead ends", lines[0])
+        self.assertIn("costliest other steps of n1 are s7 (40 tok, 300 HB), s9 (30 tok, - HB)", lines[0])
+        self.assertNotIn("s2", lines[0])
+        self.assertEqual(ideas.push(self.streak(limit + 1), "heartbeats", "job1", state, self.costs), [])
+        won = [*self.streak(limit + 1), row(limit + 2)]  # a win ends the streak; a new one is a new line
+        self.assertEqual(ideas.push(won, "heartbeats", "job1", state, self.costs), [])
+        again = [*won, *self.streak(limit, first=20, pstep="s3")]
+        self.assertEqual(len(ideas.push(again, "heartbeats", "job1", state, self.costs)), 1)
+
+    def test_another_step_or_a_win_or_other_jobs_rows_do_not_count_and_the_cap_still_holds(self):
+        limit = text.numbers()["stall_same_step"]
+        mixed = self.streak(limit)
+        mixed[2]["pstep"] = "s4"
+        self.assertEqual(ideas.push(mixed, "tokens", "job1", {}, self.costs), [])
+        self.assertEqual(ideas.push(self.streak(limit), "tokens", "job2", {}, self.costs), [])
+        busy = [*self.streak(limit), *(row(40 + n, job="job2", new_best=True, best_ts=float(n), sig=None) for n in range(3)),
+                *(row(50 + n, job="job3", sig=f"w{n}", step_hb=-300, d_hb=-300) for n in range(4))]
+        lines = ideas.push(busy, "tokens", "job1", {"cursor": 0, "since": 0.0}, self.costs)
+        self.assertLessEqual(len(lines), text.numbers()["idea_push_lines"])
+        self.assertTrue(lines[0].startswith("Stalled"))
+
+    def test_sol_reads_one_action_line_per_stalled_job_once(self):
+        jobs = {"j1": {"label": "job1", "role": "heartbeats", "actor": "a1", "scope": "island", "objective": "heartbeats"}}
+        rows = self.streak(text.numbers()["stall_same_step"])
+        state: dict = {}
+        lines = ideas.digest(rows, jobs, state, self.costs)
+        self.assertIn("job1: 5 attempts on s1 of n1 without a gain; next costliest s7 (40 tok, 300 HB), s9 (30 tok, - HB)",
+                      lines)
+        self.assertNotIn("job1: 5 attempts", " ".join(ideas.digest(rows, jobs, state, self.costs)))
+
+
 class ToolTests(unittest.TestCase):
     def test_query_groups_one_step_by_change_with_counts_status_and_ids(self):
         rows = [row(1, anchors=["hx"], sig="a"), row(2, anchors=["hx"], sig="a", win=False, status="failed", d_tokens=None,
