@@ -1603,6 +1603,7 @@ def _summaries(history: list[dict]) -> list[dict]:
                 "n": len(rows) + 1,
                 "origin": item.get("origin", "model"),
                 "parents": item.get("parents", []),
+                "job": item.get("job_id"),
                 "evaluations": [],
             }
         elif item.get("kind") == "evaluation" and item["candidate_id"] in rows:
@@ -3491,7 +3492,31 @@ def _autocheck_jobs(rows: list[dict], closing: bool = False) -> list[dict]:
     bar = best_verified["score"] if best_verified else None
     if bar is not None:
         jobs = [row for row in jobs if row["score"] is None or row["score"] >= bar]
+    if not closing:
+        chosen = {row["id"] for row in jobs}
+        jobs += [row for row in _worker_records(rows) if row["id"] not in chosen]
     return sorted(jobs, key=lambda r: (r["score"] if r["score"] is not None else float("-inf"), r["n"]), reverse=True)
+
+
+def _worker_records(rows: list[dict]) -> list[dict]:
+    """Each worker job's unchecked record on each measure (fewest tokens, fewest heartbeats, top score) that beats
+    the job's own best verified node on that measure: an island's best counts as closed only once every version
+    compiles it, even when it does not beat the run best. Not in the closing drain: such a node cannot be the
+    submission."""
+    picked: dict[str, dict] = {}
+    for job in {row["job"] for row in rows if row.get("job")}:
+        mine = [row for row in rows if row.get("job") == job]
+        unchecked = _unchecked(mine)
+        verified = [row for row in mine if row["verified"]]
+        for key, sign in (("tokens", 1), ("heartbeats", 1), ("score", -1)):
+            pool = [row for row in unchecked if row[key] is not None]
+            if not pool:
+                continue
+            record = min(pool, key=lambda row: (sign * row[key], row["n"]))
+            held = [sign * row[key] for row in verified if row[key] is not None]
+            if not held or sign * record[key] < min(held):
+                picked[record["id"]] = record
+    return list(picked.values())
 
 
 def _submitted_full_jobs(directory: Path, history: list[dict], rows: list[dict], closing: bool) -> list[dict]:

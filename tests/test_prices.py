@@ -339,3 +339,24 @@ class CampaignPriceTests(FakeRunCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WorkerRecordCheckTests(unittest.TestCase):
+    @staticmethod
+    def row(n, job, tokens, heartbeats, score, verified=False):
+        return {"id": f"c{n}", "n": n, "origin": "model", "job": job, "tokens": tokens, "heartbeats": heartbeats,
+                "score": score, "verified": verified, "status": "full" if verified else "primary",
+                "evaluations": [{"mode": "full" if verified else "fast"}]}
+
+    def test_an_island_record_below_the_run_best_still_gets_the_all_version_check(self):
+        rows = [
+            self.row(1, "trim", 133, 342, 80.86, verified=True),
+            self.row(2, "tokens", 88, 14767, -263.1),     # the token island's fewest tokens
+            self.row(3, "tokens", 150, 400, 75.0),        # the token island's top score
+            self.row(4, "beats", 153, 320, 79.76),        # the heartbeat island's fewest heartbeats
+            self.row(5, "beats", 150, 346, 79.3, verified=True),
+            self.row(6, "beats", 160, 350, 78.0),         # beats nothing its job verified
+        ]
+        self.assertEqual({row["id"] for row in campaign._autocheck_jobs(rows)}, {"c2", "c3", "c4"})
+        # The closing drain checks only what can still be the submission.
+        self.assertEqual(campaign._autocheck_jobs(rows, closing=True), [])

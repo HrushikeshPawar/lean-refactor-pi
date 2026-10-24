@@ -2735,6 +2735,11 @@ class MergeSlotTests(unittest.TestCase):
                                                         "kind": "run_stop", "event_id": "stop", "reason": "test"})
                 ends = {row["job_id"]: row["end"] for row in orchestration.merge_jobs(directory)}
                 self.assertEqual(ends[third["job_id"]], "run_stopped")
+                # A running job the stop aborts (its provider request ends in an error) ends as run_stopped too.
+                running = next(row for row in orchestration._delegations(directory) if row["job_id"] == merge["job_id"])
+                orchestration._record_state(directory, running, "failed", reason="This operation was aborted")
+                ends = {row["job_id"]: row["end"] for row in orchestration.merge_jobs(directory)}
+                self.assertEqual(ends[merge["job_id"]], "run_stopped")
 
 
 class TokenIslandAnchorTests(unittest.TestCase):

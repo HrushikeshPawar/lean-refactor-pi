@@ -496,6 +496,9 @@ def _record_state(directory: Path, delegation: dict, state: str, *, expected_tra
             return
         if snapshot["state"] == "cancelling" and state != "cancelled":
             return
+        # After the run stops, the stop aborts every live worker: that ends the job, it is not a failure.
+        if state == "failed" and any(row.get("kind") == "run_stop" for row in run_control._control_rows(directory)):
+            state, extra = "cancelled", {**extra, "reason": "run_stopped"}
         _append_state(directory, delegation, state, **extra)
         live = _live.get(delegation["activation_id"])
         if live is not None:
