@@ -1,39 +1,102 @@
 {
   "roles": {
-    "worker": ["compile", "goal", "search", "read", "scratch", "card", "ideas"],
-    "sol": ["compile", "goal", "search", "read", "scratch", "card", "ideas", "delegate", "jobs", "await_results", "cancel"]
+    "worker": [
+      "compile",
+      "goal",
+      "search",
+      "read",
+      "scratch",
+      "card",
+      "ideas"
+    ],
+    "sol": [
+      "compile",
+      "goal",
+      "search",
+      "read",
+      "scratch",
+      "card",
+      "ideas",
+      "delegate",
+      "jobs",
+      "await_results",
+      "cancel"
+    ]
   },
   "tools": {
     "compile": {
       "handler": true,
-      "exclusive": ["drafts", "splice", "fill", "merge"],
+      "exclusive": [
+        "drafts",
+        "splice",
+        "fill",
+        "merge"
+      ],
       "requireOne": true,
       "properties": {
-        "drafts": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItemsFrom": "compile_max_drafts", "description": "drafts"},
+        "drafts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "maxItemsFrom": "compile_max_drafts",
+          "description": "drafts"
+        },
         "splice": {
           "type": "object",
           "description": "splice",
           "properties": {
-            "base": {"type": "string", "description": "splice_base", "default": "focus"},
-            "steps": {"type": "string", "required": true, "description": "splice_steps"},
-            "text": {"type": "string", "required": true, "description": "splice_text"}
+            "base": {
+              "type": "string",
+              "description": "splice_base",
+              "default": "focus"
+            },
+            "steps": {
+              "type": "string",
+              "required": true,
+              "description": "splice_steps"
+            },
+            "text": {
+              "type": "string",
+              "required": true,
+              "description": "splice_text"
+            }
           }
         },
-        "steps": {"type": "string", "description": "splice_steps"},
-        "text": {"type": "string", "description": "splice_text"},
+        "steps": {
+          "type": "string",
+          "description": "splice_steps"
+        },
+        "text": {
+          "type": "string",
+          "description": "splice_text"
+        },
         "fill": {
           "type": "object",
           "description": "fill",
           "properties": {
-            "hole": {"type": "string", "required": true, "description": "fill_hole"},
-            "text": {"type": "string", "required": true, "description": "fill_text"}
+            "hole": {
+              "type": "string",
+              "required": true,
+              "description": "fill_hole"
+            },
+            "text": {
+              "type": "string",
+              "required": true,
+              "description": "fill_text"
+            }
           }
         },
         "merge": {
           "type": "object",
           "description": "merge",
           "properties": {
-            "base": {"type": "string", "description": "merge_base", "default": "focus"},
+            "base": {
+              "type": "string",
+              "description": "merge_base",
+              "default": "focus"
+            },
             "take": {
               "type": "array",
               "required": true,
@@ -41,139 +104,370 @@
               "items": {
                 "type": "object",
                 "properties": {
-                  "from": {"type": "string", "required": true, "description": "merge_from"},
-                  "step": {"type": "string", "required": true, "description": "merge_step"}
+                  "from": {
+                    "type": "string",
+                    "required": true,
+                    "description": "merge_from"
+                  },
+                  "step": {
+                    "type": "string",
+                    "required": true,
+                    "description": "merge_step"
+                  }
                 }
               }
             }
           }
         },
-        "base": {"type": "string", "description": "base"},
-        "node": {"type": "string", "description": "node"},
-        "from": {"type": "string", "description": "from"},
-        "move": {"type": "string", "description": "move"},
-        "when": {"type": "string", "description": "when"},
-        "check": {"type": "string", "enum": ["tokens", "lean"], "description": "check", "default": "lean"}
+        "base": {
+          "type": "string",
+          "description": "base"
+        },
+        "node": {
+          "type": "string",
+          "description": "node"
+        },
+        "from": {
+          "type": "string",
+          "description": "from"
+        },
+        "move": {
+          "type": "string",
+          "description": "move"
+        },
+        "when": {
+          "type": "string",
+          "description": "when"
+        },
+        "check": {
+          "type": "string",
+          "enum": [
+            "tokens",
+            "lean"
+          ],
+          "description": "check",
+          "default": "lean"
+        }
       }
     },
     "goal": {
       "handler": true,
       "properties": {
-        "node": {"type": "string", "description": "node"},
-        "hole": {"type": "string", "description": "hole"},
-        "line": {"type": "number", "description": "line"},
-        "try": {"type": "array", "items": {"type": "string"}, "maxItemsFrom": "goal_try_max", "description": "try"}
+        "node": {
+          "type": "string",
+          "description": "node"
+        },
+        "hole": {
+          "type": "string",
+          "description": "hole"
+        },
+        "line": {
+          "type": "number",
+          "description": "line"
+        },
+        "try": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItemsFrom": "goal_try_max",
+          "description": "try"
+        }
       }
     },
     "search": {
       "handler": true,
       "properties": {
-        "queries": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "queries"},
-        "kind": {"type": "string", "enum": ["name", "type", "text"], "description": "kind"},
-        "after": {"type": "string", "description": "after"}
+        "queries": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "description": "queries"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "name",
+            "type",
+            "text"
+          ],
+          "description": "kind"
+        },
+        "after": {
+          "type": "string",
+          "description": "after"
+        }
       }
     },
     "read": {
       "handler": true,
       "properties": {
-        "experiment": {"type": "string", "description": "experiment"},
-        "ref": {"type": "string", "description": "ref"},
-        "handle": {"type": "string", "description": "handle"},
-        "node": {"type": "string", "description": "node"},
-        "hole": {"type": "string", "description": "hole"},
+        "experiment": {
+          "type": "string",
+          "description": "experiment"
+        },
+        "ref": {
+          "type": "string",
+          "description": "ref"
+        },
+        "handle": {
+          "type": "string",
+          "description": "handle"
+        },
+        "node": {
+          "type": "string",
+          "description": "node"
+        },
+        "hole": {
+          "type": "string",
+          "description": "hole"
+        },
         "view": {
           "type": "string",
-          "enum": ["source", "prices", "diff", "outline", "tree", "map"],
+          "enum": [
+            "source",
+            "prices",
+            "diff",
+            "outline",
+            "tree",
+            "map"
+          ],
           "pattern": "^tree:[1-9][0-9]*$",
           "description": "view"
         },
-        "against": {"type": "string", "description": "against"},
-        "step": {"type": "string", "description": "step"}
+        "against": {
+          "type": "string",
+          "description": "against"
+        },
+        "step": {
+          "type": "string",
+          "description": "step"
+        }
       }
     },
     "scratch": {
       "handler": true,
-      "exclusive": ["code", "replacement"],
+      "exclusive": [
+        "code",
+        "replacement"
+      ],
       "requireOne": true,
       "properties": {
-        "code": {"type": "string", "description": "code", "maxLengthFrom": "scratch_max_chars"},
-        "replacement": {"type": "string", "description": "replacement", "maxLengthFrom": "scratch_max_chars"},
+        "code": {
+          "type": "string",
+          "description": "code",
+          "maxLengthFrom": "scratch_max_chars"
+        },
+        "replacement": {
+          "type": "string",
+          "description": "replacement",
+          "maxLengthFrom": "scratch_max_chars"
+        },
         "at": {
           "type": "object",
           "description": "at",
           "properties": {
-            "node": {"type": "string", "required": true},
-            "steps": {"type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2},
-            "hole": {"type": "string", "description": "at_hole"}
+            "node": {
+              "type": "string",
+              "required": true
+            },
+            "steps": {
+              "type": "array",
+              "items": {
+                "type": "integer"
+              },
+              "minItems": 2,
+              "maxItems": 2
+            },
+            "hole": {
+              "type": "string",
+              "description": "at_hole"
+            }
           },
-          "exclusive": ["steps", "hole"],
+          "exclusive": [
+            "steps",
+            "hole"
+          ],
           "requireOne": true
         },
-        "helpers": {"type": "array", "items": {"type": "string"}, "description": "helpers"},
-        "note": {"type": "string", "description": "note"}
+        "helpers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "helpers"
+        },
+        "note": {
+          "type": "string",
+          "description": "note"
+        }
       }
     },
     "delegate": {
       "handler": true,
       "properties": {
-        "task": {"type": "string", "required": true, "description": "task"},
-        "scope": {"type": "string", "enum": ["proof", "step", "island", "trim", "merge"], "description": "scope"},
-        "objective": {"type": "string", "enum": ["tokens", "heartbeats"], "description": "objective"},
-        "job_id": {"type": "string", "description": "job_id"},
+        "task": {
+          "type": "string",
+          "required": true,
+          "description": "task"
+        },
+        "expect": {
+          "type": "string",
+          "description": "expect"
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "proof",
+            "step",
+            "island",
+            "trim",
+            "merge"
+          ],
+          "description": "scope"
+        },
+        "objective": {
+          "type": "string",
+          "enum": [
+            "tokens",
+            "heartbeats"
+          ],
+          "description": "objective"
+        },
+        "job_id": {
+          "type": "string",
+          "description": "job_id"
+        },
         "at": {
           "type": "object",
           "description": "at",
           "properties": {
-            "node": {"type": "string", "description": "at_node"},
-            "steps": {"type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2, "description": "at_steps"},
-            "hole": {"type": "string", "description": "at_hole"},
-            "nodes": {"type": "array", "items": {"type": "string"}, "description": "at_nodes"}
+            "node": {
+              "type": "string",
+              "description": "at_node"
+            },
+            "steps": {
+              "type": "array",
+              "items": {
+                "type": "integer"
+              },
+              "minItems": 2,
+              "maxItems": 2,
+              "description": "at_steps"
+            },
+            "hole": {
+              "type": "string",
+              "description": "at_hole"
+            },
+            "nodes": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "at_nodes"
+            }
           },
-          "exclusive": ["steps", "hole"]
+          "exclusive": [
+            "steps",
+            "hole"
+          ]
         }
       }
     },
     "jobs": {
       "handler": true,
       "properties": {
-        "job_ids": {"type": "array", "items": {"type": "string"}, "description": "job_ids"}
+        "job_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "job_ids"
+        }
       }
     },
     "await_results": {
       "handler": true,
       "properties": {
-        "cursor": {"type": "string", "description": "cursor"},
-        "job_ids": {"type": "array", "items": {"type": "string"}, "description": "job_ids"}
+        "cursor": {
+          "type": "string",
+          "description": "cursor"
+        },
+        "job_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "job_ids"
+        }
       }
     },
     "cancel": {
       "handler": true,
       "properties": {
-        "job_id": {"type": "string", "required": true, "description": "job_id"}
+        "job_id": {
+          "type": "string",
+          "required": true,
+          "description": "job_id"
+        }
       }
     },
     "card": {
       "handler": true,
       "properties": {
-        "focus": {"type": "string", "description": "focus"},
-        "asks": {"type": "string", "description": "asks"}
+        "focus": {
+          "type": "string",
+          "description": "focus"
+        },
+        "asks": {
+          "type": "string",
+          "description": "asks"
+        }
       }
     },
     "patterns": {
       "handler": true,
       "properties": {
-        "node": {"type": "string", "description": "node"},
-        "step": {"type": "string", "description": "step"},
-        "text": {"type": "string", "description": "text"},
-        "position": {"type": "string", "enum": ["opening", "middle", "closing"], "description": "position"}
+        "node": {
+          "type": "string",
+          "description": "node"
+        },
+        "step": {
+          "type": "string",
+          "description": "step"
+        },
+        "text": {
+          "type": "string",
+          "description": "text"
+        },
+        "position": {
+          "type": "string",
+          "enum": [
+            "opening",
+            "middle",
+            "closing"
+          ],
+          "description": "position"
+        }
       }
     },
     "ideas": {
       "handler": true,
       "properties": {
-        "node": {"type": "string", "description": "node"},
-        "step": {"type": "string", "description": "step"},
-        "tactic": {"type": "string", "description": "tactic"}
+        "node": {
+          "type": "string",
+          "description": "node"
+        },
+        "step": {
+          "type": "string",
+          "description": "step"
+        },
+        "tactic": {
+          "type": "string",
+          "description": "tactic"
+        }
       }
     }
   }

@@ -205,6 +205,7 @@ class Coordinator:
             anchor=request.get("at"),
             job_id=request.get("job_id"),
             objective=request.get("objective"),
+            expect=request.get("expect"),
         )
 
     def _cancel(self, request: dict) -> dict:
@@ -247,6 +248,8 @@ def _rejected_delegate(request: dict) -> dict | None:
     task = request.get("task")
     if not isinstance(task, str) or not task:
         return _delegate_invalid("task", operation_id)
+    if request.get("expect") is not None and not isinstance(request["expect"], str):
+        return _delegate_invalid("expect", operation_id)
     job_id = request.get("job_id")
     scope = request.get("scope")
     anchor = request.get("at")

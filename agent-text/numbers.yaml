@@ -56,7 +56,8 @@ budget:
   # 1160: the plan paragraph gives way to the idea log paragraph (what the harness shares, citing log ids, compact writing).
   # 1170: compact writing joins items with hyphens and writes changes as saved or added.
   # 1220: guide a job the digest reports as stalled before the orchestrator's own next compile; the harness starts the merge job.
-  packet_words: 1220
+  # 1330: missions are stated as hypotheses with an expected effect; the digest reports hypothesis outcomes and the board of costly steps.
+  packet_words: 1330
   # 215: the worker packet explains the card (what to write, what arrives in replies).
   # 240: read a definition's source before using it instead of reconstructing it (GLM trace analysis 2026-10-23).
   # 260: short card fields, only what is new or still true.
@@ -118,8 +119,21 @@ idea_win_heartbeats: 100
 idea_dead_failures: 3
 # At most this many attempt log lines reach an actor in one turn, the "+N more" line included.
 idea_push_lines: 3
-# The orchestrator's digest shows at most this many kept lines and this many dead end lines per turn.
+# The orchestrator's digest shows at most this many dead end lines per turn.
 idea_digest_lines: 4
+# It also shows at most this many hypothesis lines per turn (one per hypothesis whose measurements changed).
+hyp_digest_lines: 3
+# A hypothesis (a delegation or a message to a running job) shows its task cut to this many characters; the
+# orchestrator's expected effect is cut to hyp_expect_chars.
+hyp_text_chars: 32
+hyp_expect_chars: 60
+# A hypothesis with this many settled attempts and no gain is refuted.
+hyp_refuted_tries: 3
+# The board (ideas with nothing sent) lists this many of the run best's costliest steps.
+board_steps: 8
+# The digest names up to board_digest_steps untried steps among the board_digest_rank costliest, when the first changes.
+board_digest_rank: 3
+board_digest_steps: 2
 # The ideas tool lists at most this many changes, each with at most this many attempt ids.
 idea_query_rows: 8
 idea_query_ids: 4

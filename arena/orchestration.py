@@ -1173,7 +1173,7 @@ def _steer(directory: Path, activation_id: str, command_id: str, message: str) -
         _write_prompt(transport, steer_line(command_id, message))
 
 
-def _steer_job(directory: Path, current: dict, arguments: dict, operation_id: str, task: str) -> dict:
+def _steer_job(directory: Path, current: dict, arguments: dict, operation_id: str, task: str, expect: str = "") -> dict:
     """The orchestrator's message to a running job. Caller holds the control lock."""
     activation_id = current["activation_id"]
 
@@ -1181,7 +1181,7 @@ def _steer_job(directory: Path, current: dict, arguments: dict, operation_id: st
         message = text.render("replies/team.steer_task", task=task)
         _steer(directory, activation_id, f"{operation_id}:steer", message)
         writer.append_ledger({"type": "job_message", "job_id": current["job_id"], "text": task,
-                              "disposition": "sent"})
+                              "disposition": "sent", **({"expect": expect} if expect else {})})
         return []
 
     try:
@@ -1213,6 +1213,7 @@ def _follow_up(
     anchor: object,
     job_id: str,
     open_child,
+    expect: str = "",
 ) -> dict:
     activation_id = uuid.uuid4().hex
 
@@ -1249,7 +1250,7 @@ def _follow_up(
                 return {"ok": True, "operation_id": operation_id, "job_id": job_id, "state": current["state"],
                         "messaged": True, "reused": True}
             if existing is None and current["state"] == "active":
-                return _steer_job(directory, current, arguments, operation_id, task)
+                return _steer_job(directory, current, arguments, operation_id, task, expect)
             if existing is None and (current["state"] in _active_states | {"cancelling"}):
                 return _reject(operation_id, "active", "busy", "replies/delegate.active")
             delegation = {
@@ -1263,6 +1264,7 @@ def _follow_up(
                 "worker_actor_id": source["worker_actor_id"],
                 "task": task,
                 "hypothesis": source.get("hypothesis", source["task"]),
+                **({"expect": expect} if expect else {}),
                 "scope": source["scope"],
                 "anchor": source["anchor"],
                 "objective": source.get("objective"),
@@ -1322,13 +1324,16 @@ def delegate(
     job_id: str | None = None,
     objective: str | None = None,
     creator: str | None = None,
+    expect: str | None = None,
 ) -> dict:
     """Accept one hypothesis, or resume its saved session, and return before the worker settles. `creator` names the
-    harness when it started the job itself; the orchestrator still owns the job (messages, cancel)."""
+    harness when it started the job itself; the orchestrator still owns the job (messages, cancel). `expect` is the
+    effect the orchestrator expects, kept with the hypothesis the idea log records (see ideas.job_table)."""
     if not operation_id or not run_id or not actor_id or not session_id or not isinstance(task, str) or not task:
         return _reject(operation_id, "identity", hint="replies/delegate.identity")
     if objective is not None and (job_id or scope != "island" or objective not in _OBJECTIVES):
         return _reject(operation_id, "objective", hint="replies/delegate.objective")
+    expect = " ".join(expect.split())[: text.numbers()["hyp_expect_chars"]] if isinstance(expect, str) else ""
     if job_id:
         return _follow_up(
             directory,
@@ -1341,6 +1346,7 @@ def delegate(
             anchor=anchor,
             job_id=job_id,
             open_child=open_child,
+            expect=expect,
         )
     if scope == "trim" and anchor is not None:
         return _reject(operation_id, "anchor", hint="replies/delegate.anchor_trim")
@@ -1379,6 +1385,7 @@ def delegate(
         "worker_actor_id": worker_actor_id,
         "task": task,
         "hypothesis": task,
+        **({"expect": expect} if expect else {}),
         "scope": scope,
         "anchor": resolved,
         "objective": objective,

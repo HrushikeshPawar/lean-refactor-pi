@@ -193,7 +193,8 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(ideas.query(rows, None, "omega"), [])
 
     def test_the_tool_needs_a_step_or_a_tactic_and_is_bounded(self):
-        self.assertFalse(ideas.ideas_tool("logic", {})["ok"])
+        with patch.object(ideas, "board_tool", return_value={"ok": True, "text": "board"}):
+            self.assertEqual(ideas.ideas_tool("logic", {})["text"], "board")
         self.assertFalse(ideas.ideas_tool("logic", {"node": "n1"})["ok"])
         many = [row(n, anchors=["hx"], sig=f"s{n}") for n in range(1, 20)]
         lines = ideas.query(many, "hx", None)
@@ -214,31 +215,120 @@ class ToolTests(unittest.TestCase):
         self.assertTrue(reply["text"].startswith("Tried on n9 s1:"))
 
 
+HYP = {"id": "H1", "ts": 0.0, "operation_id": "op1", "task": "bilinear ext", "expect": "s1 -100 HB"}
+
+
+def hyp_jobs(*hyps: dict) -> dict:
+    return {"j1": {"label": "job1", "role": "tokens", "actor": "a1", "scope": "island", "objective": "tokens",
+                   "hyps": list(hyps or [HYP])}}
+
+
 class DigestTests(unittest.TestCase):
-    def test_sol_reads_only_what_is_new_grouped_as_kept_dead_and_one_line_per_active_job(self):
-        jobs = {"j1": {"label": "job1", "role": "tokens", "actor": "a1", "scope": "island", "objective": "tokens"}}
-        kept = row(1, status="kept", kept=True)
+    def test_sol_reads_only_what_is_new_grouped_as_hypotheses_dead_and_one_line_per_active_job(self):
+        jobs = hyp_jobs()
+        kept = row(1, status="kept", kept=True, hyp="H1")
         dead = row(2, sig="d", win=False, closed=False, status="dead", outcome="unsolved goals", dead_trigger=True)
         state: dict = {}
         lines = ideas.digest([kept, dead], jobs, state)
-        self.assertTrue(lines[0].startswith("Kept i1 (n1)"))
+        self.assertEqual(lines[0], "H1 job1 (bilinear ext, expect s1 -100 HB): 1 try, best -6 tok, -150 HB on s1, "
+                                   "in best: yes - confirmed")
         self.assertTrue(lines[1].startswith("Dead end at step s1 of n1"))
         self.assertTrue(lines[2].startswith("job1 (token island): best n1 100 tok"))
         self.assertEqual(ideas.digest([kept, dead], jobs, state), [])
-        fresh = row(3, status="kept", kept=True, tokens=90)
+        fresh = row(3, status="kept", kept=True, tokens=90, hyp="H1", d_tokens=-300)
         again = ideas.digest([kept, dead, fresh], jobs, state)
-        self.assertEqual([line.split(" ")[0] for line in again], ["Kept", "job1"])
+        self.assertEqual([line.split(" ")[0] for line in again], ["H1", "job1"])
+        self.assertIn("2 tries, best -300 tok", again[0])
         self.assertIn("best n3 90 tok", again[1])
 
     def test_the_digest_is_bounded_and_the_notices_carry_it_first(self):
-        rows = [row(n, status="kept", kept=True) for n in range(1, 9)]
-        lines = ideas.digest(rows, {}, {})
-        self.assertEqual(len(lines), text.numbers()["idea_digest_lines"] + 1)
-        self.assertTrue(lines[-1].startswith("+4 more"))
-        with patch.object(ideas, "lines_for", return_value=("sol", ["Kept i1 (n1)"])), \
+        hyps = [{**HYP, "id": f"H{n}"} for n in range(1, 9)]
+        rows = [row(n, status="kept", kept=True, hyp=f"H{n}") for n in range(1, 9)]
+        lines = ideas.digest(rows, hyp_jobs(*hyps), {})
+        self.assertEqual(len(lines), text.numbers()["hyp_digest_lines"] + 2)  # the "+N more" line and the job line
+        self.assertTrue(lines[text.numbers()["hyp_digest_lines"]].startswith("+5 more"))
+        with patch.object(ideas, "lines_for", return_value=("sol", ["H1 job1 (x)"])), \
                 patch.object(team_reply.orchestration, "merge_ready", return_value=[]), \
                 patch.object(team_reply.orchestration, "token_short", return_value=[]):
-            self.assertEqual(team_reply.notices(Path("run"), {}, None), (["ideas"], ["Kept i1 (n1)"]))
+            self.assertEqual(team_reply.notices(Path("run"), {}, None), (["ideas"], ["H1 job1 (x)"]))
+
+
+class HypothesisTests(CascadeCase):
+    def test_each_delegation_and_message_is_numbered_and_the_harness_started_job_has_none(self):
+        history = [
+            {"type": "delegation", "job_id": "a", "scope": "proof", "task": "first", "expect": "s2 -1000 HB", "ts": 1.0,
+             "operation_id": "o1"},
+            {"type": "delegation", "job_id": "m", "scope": "merge", "creator": "harness", "task": "auto", "ts": 2.0},
+            {"type": "job_message", "job_id": "a", "text": "again", "disposition": "sent", "ts": 3.0, "operation_id": "o2"},
+            {"type": "job_message", "job_id": "a", "text": "unsent", "disposition": "queued", "ts": 4.0},
+            {"type": "delegation", "job_id": "b", "scope": "island", "task": "second", "ts": 5.0, "operation_id": "o3"},
+            {"type": "job_message", "job_id": "m", "text": "tell merge", "disposition": "sent", "ts": 6.0},
+        ]
+        jobs = ideas.job_table(history)
+        self.assertEqual([(h["id"], h["task"], h["expect"]) for h in jobs["a"]["hyps"]],
+                         [("H1", "first", "s2 -1000 HB"), ("H2", "again", "")])
+        self.assertEqual([h["id"] for h in jobs["b"]["hyps"]], ["H3"])
+        self.assertEqual([h["id"] for h in jobs["m"]["hyps"]], ["H4"])
+        self.assertEqual(ideas.hypothesis_id(history, "o3"), "H3")
+        self.assertIsNone(ideas.hypothesis_id(history, "nope"))
+
+    def test_expected_gain_reads_figures_with_units_only(self):
+        self.assertEqual(ideas.expected("s2 -1000 HB"), {"heartbeats": 1000})
+        self.assertEqual(ideas.expected("n160-352-tok-369-HB"), {"tokens": 352, "heartbeats": 369})
+        self.assertEqual(ideas.expected("s2 shorter"), {})
+
+    def test_verdicts_are_computed_from_the_measurements(self):
+        limit = text.numbers()["hyp_refuted_tries"]
+        fail = {"win": False, "closed": False, "status": "failed", "d_tokens": None, "d_hb": None, "step_hb": None}
+        jobs = hyp_jobs(HYP, {**HYP, "id": "H2", "expect": ""}, {**HYP, "id": "H3"}, {**HYP, "id": "H4"},
+                        {**HYP, "id": "H5", "expect": "s1 -9000 HB"})
+        rows = [row(1, hyp="H1"),                                     # met -100 HB
+                *(row(10 + n, hyp="H2", **fail) for n in range(limit)),  # no gain, enough tries
+                row(20, hyp="H3", **fail),                            # one failed try
+                row(30, hyp="H5", status="kept", kept=True)]          # a gain short of -9000 HB
+        verdicts = {item["id"]: item["verdict"] for item in ideas.outcomes(rows, jobs)}
+        self.assertEqual(verdicts, {"H1": "confirmed", "H2": "refuted", "H3": "open", "H5": "partly"})
+        self.assertNotIn("H4", verdicts)  # no attempt yet: nothing to say
+
+    def test_rows_link_to_the_hypothesis_their_job_held_when_they_were_saved(self):
+        with patch.dict("os.environ", {"ARENA_JOB_ID": "jx"}):
+            tools.compile_tool("T", "logic", {"drafts": ["by\n  simp\n  ring\n  exact foo"], "move": "base"})
+            tools.compile_tool("T", "logic", {"drafts": ["by\n  simp only\n  ring\n  exact foo"], "from": "n2"})
+        history = campaign.events(self.directory)
+        stamp = next(e["ts"] for e in history if e.get("kind") == "edge")
+
+        def linked(*times: float) -> list:
+            hyps = [{**HYP, "id": f"H{n}", "ts": ts} for n, ts in enumerate(times, 1)]
+            jobs = {"jx": {"label": "job1", "role": "tokens", "objective": "tokens", "actor": "a", "hyps": hyps}}
+            rows = ideas.build_rows(history, campaign._proof_reader(self.directory), committed_operation_ids(self.directory), jobs)
+            return [r["hyp"] for r in rows]
+
+        self.assertEqual(linked(stamp - 5, stamp + 5), ["H1"])  # the second was sent after the attempt
+        self.assertEqual(linked(stamp - 5, stamp - 1), ["H2"])
+        self.assertEqual(linked(stamp + 5), [None])
+
+    def test_the_board_ranks_steps_by_cost_and_marks_the_untried(self):
+        node = SimpleNamespace(id="n9", steps=[SimpleNamespace(id="s1", hash="hx"), SimpleNamespace(id="s2", hash="hy")])
+        priced = [{"step": "s2", "tokens": 90, "heartbeats": 1466, "points": 3.0},
+                  {"step": "s1", "tokens": 30, "heartbeats": None, "points": 1.0}]
+        fail = {"win": False, "closed": False, "status": "failed", "d_tokens": None, "d_hb": None, "step_hb": None}
+        rows = [row(1, anchors=["hx"], hyp="H1", sig="a"), row(2, anchors=["hx"], hyp="H1", sig="b", **fail)]
+        entries = ideas.board(rows, hyp_jobs(), node, priced)
+        self.assertEqual([(e["step"], e["tries"], e["open"]) for e in entries], [("s2", 0, []), ("s1", 2, [])])
+        lines = ideas.board_lines(entries, node)
+        self.assertEqual(lines[1], "s2 90 tok 1466 HB - untried")
+        self.assertEqual(lines[2], "s1 30 tok - HB - 2 tries, best -6 tok, -150 HB on s1")
+        state: dict = {}
+        self.assertEqual(ideas.untried_line(entries, node, state), ["Untried in n9: s2 1466 HB"])
+        self.assertEqual(ideas.untried_line(entries, node, state), [])  # said once while the set is the same
+
+    def test_the_digest_adds_the_untried_line_when_the_log_changed(self):
+        node = SimpleNamespace(id="n9", proof_id="p9", steps=[SimpleNamespace(id="s2", hash="hy")])
+        costs = lambda proof: [{"step": "s2", "tokens": 90, "heartbeats": 1466, "points": 3.0}]  # noqa: E731
+        state: dict = {}
+        first = ideas.digest([row(1)], {}, state, costs, lambda: node)
+        self.assertEqual(first, ["Untried in n9: s2 1466 HB"])
+        self.assertEqual(ideas.digest([row(1)], {}, state, costs, lambda: node), [])
 
 
 class PlanRemovalTests(unittest.TestCase):

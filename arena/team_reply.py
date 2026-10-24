@@ -48,13 +48,16 @@ def render(action: str, result: dict, directory: Path) -> str:
     if action == "delegate":
         state = result.get("state", "?")
         if result.get("messaged") and not result.get("reused"):
-            return _render("delegate_messaged", job=job(result.get("job_id")))
-        if result.get("reused"):
-            return _render("delegate_reused", job=job(result.get("job_id")), state=state)
-        if result.get("resumed"):
-            return _render("delegate_resumed", job=job(result.get("job_id")), state=state)
-        return _render("delegate_started", job=job(result.get("job_id")), state=state,
-                       scope=result.get("scope", "?"), anchor=_anchor(result.get("anchor")))
+            line = _render("delegate_messaged", job=job(result.get("job_id")))
+        elif result.get("reused"):
+            line = _render("delegate_reused", job=job(result.get("job_id")), state=state)
+        elif result.get("resumed"):
+            line = _render("delegate_resumed", job=job(result.get("job_id")), state=state)
+        else:
+            line = _render("delegate_started", job=job(result.get("job_id")), state=state,
+                           scope=result.get("scope", "?"), anchor=_anchor(result.get("anchor")))
+        hyp = ideas.hypothesis_id(orchestration._history(directory), result.get("operation_id"))
+        return f"{line} {text.render('replies/ideas.hyp_noted', id=hyp)}" if hyp else line
     if action == "card":
         saved = _render("card_saved", version=result.get("version"))
         return f"{saved} {orchestration.card_floor_text(result.get('unmeasured') or [])}" if result.get("floor") else saved

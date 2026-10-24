@@ -7,8 +7,11 @@ actor's `move` and `when`. Its status is computed again whenever the run changes
 run best), win (better than its parent on the actor's objective), failed, or dead (the same change failed
 `idea_dead_failures` times and never won).
 
-Actors read the log three ways, all delta-only per actor: `push` (lines in the per-turn context), `digest` (the
-orchestrator's grouped summary) and the `ideas` tool (`query`). Wording lives in agent-text/replies/ideas.yaml.
+Every delegation and every message to a running job is a hypothesis (H1, H2, ...; the task and the optional `expect`),
+and each row links to the hypothesis its job held when the row was saved. Actors read the log three ways, all
+delta-only per actor: `push` (lines in the per-turn context), `digest` (the orchestrator's one line per hypothesis whose
+measurements changed, its dead ends and job status, and the untried costly steps) and the `ideas` tool (`query`, or
+the `board` of the run best's steps when called with nothing). Wording lives in agent-text/replies/ideas.yaml.
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ import difflib
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 from contextlib import contextmanager
@@ -59,17 +63,35 @@ def _signed(value: int) -> str:
 
 
 def job_table(published: list[dict]) -> dict[str, dict]:
-    """Job id to {label, scope, objective, actor, role}, labelled `jobN` in delegation order (as orchestration does)."""
+    """Job id to {label, scope, objective, actor, role, hyps}, labelled `jobN` in delegation order (as orchestration
+    does). `hyps` are the job's hypotheses in order, numbered H1, H2... across the run: each delegation and each message
+    sent to a running job that the orchestrator wrote (a job the harness started has none until it is messaged)."""
     jobs: dict[str, dict] = {}
+    count = 0
+    limit = text.numbers()["hyp_text_chars"]
     for row in published:
-        if row.get("type") != "delegation" or not row.get("job_id"):
+        if row.get("type") not in ("delegation", "job_message") or not row.get("job_id"):
+            continue
+        if row["type"] == "job_message" and (row["job_id"] not in jobs or row.get("disposition") != "sent"):
             continue
         job = jobs.setdefault(row["job_id"], {
             "label": f"job{len(jobs) + 1}", "scope": row.get("scope"), "objective": row.get("objective"),
-            "actor": row.get("worker_actor_id"),
+            "actor": row.get("worker_actor_id"), "hyps": [],
         })
         job["role"] = job["objective"] or ("family" if job["scope"] == "island" else job["scope"])
+        if row.get("creator") == "harness":
+            continue
+        count += 1
+        task = " ".join(str(row.get("task") or row.get("text") or "").split())
+        job["hyps"].append({"id": f"H{count}", "ts": row.get("ts", 0.0), "operation_id": row.get("operation_id"),
+                            "task": task[:limit], "expect": row.get("expect") or ""})
     return jobs
+
+
+def hypothesis_id(published: list[dict], operation_id: str | None) -> str | None:
+    """The H id the harness gave the delegation or message made by this operation, or None."""
+    return next((hyp["id"] for job in job_table(published).values() for hyp in job["hyps"]
+                 if operation_id and hyp["operation_id"] == operation_id), None)
 
 
 def _first_error(result: dict | None) -> str:
@@ -208,6 +230,8 @@ def build_rows(history: list[dict], read_text, committed, jobs: dict[str, dict])
                 parent, change = closest, other
         attempt = child.attempts[0] if child.attempts else {}
         job = jobs.get(attempt.get("job_id")) or {}
+        # The hypothesis the job held when the attempt was saved: its newest one sent before that moment.
+        held = [hyp["id"] for hyp in job.get("hyps") or [] if hyp["ts"] <= edge["ts"]]
         before, after = _heads(change["old"]), _heads(change["new"])
         removed, added = sorted(before - after), sorted(after - before)
         harness = edge.get("type") == "salvaged_from" or child.origin != "model"
@@ -224,6 +248,7 @@ def build_rows(history: list[dict], read_text, committed, jobs: dict[str, dict])
         d_hb = child.heartbeats - parent.heartbeats if closed and child.heartbeats and parent.heartbeats else None
         row = {
             "id": f"i{len(rows) + 1}", "ts": edge["ts"], "actor": attempt.get("actor_id"), "job": job.get("label"),
+            "hyp": held[-1] if held else None,
             "role": job.get("role") or "sol", "node": child.id, "parent": parent.id,
             "steps": [s.id for s in (change["new"] or change["old"])],
             "pstep": (change["old"] or change["new"] or [None])[0].id if (change["old"] or change["new"]) else None,
@@ -310,7 +335,7 @@ def _marker(history: list[dict]) -> list[int]:
     """What changes the rows: counts of the events they read."""
     kinds = ("edge", "probe", "candidate", "evaluation", "profile")
     counts = [sum(1 for event in history if event.get("kind") == kind) for kind in kinds]
-    return [*counts, sum(1 for event in history if event.get("type") == "delegation")]
+    return [*counts, sum(1 for event in history if event.get("type") in ("delegation", "job_message"))]
 
 
 def sync(directory: Path) -> list[dict]:
@@ -509,6 +534,112 @@ def push(rows: list[dict], role: str, job: str | None, state: dict, costs=None) 
     return lines
 
 
+_EXPECT = re.compile(r"(\d[\d,]*)[\s-]*(tok|tokens|hb|heartbeats)\b", re.I)  # log: matches a number with its unit
+
+
+def expected(expect: str) -> dict[str, int]:
+    """The gain a hypothesis expects, as {tokens, heartbeats} magnitudes; a figure with no unit is not read."""
+    found: dict[str, int] = {}
+    for number, unit in _EXPECT.findall(expect or ""):
+        found.setdefault("tokens" if unit.lower().startswith("tok") else "heartbeats", int(number.replace(",", "")))
+    return found
+
+
+def outcomes(rows: list[dict], jobs: dict[str, dict]) -> list[dict]:
+    """One measured outcome per hypothesis that has settled attempts, in hypothesis order: {hyp, job, task, expect,
+    tries, best (the closed row that saved the most, or None), kept, verdict}. The verdict compares the measurements
+    with `expect`: confirmed (a row met it; with no figure expected, a row that saved tokens or heartbeats is in the
+    run best), partly (a gain, a win or a place in the run best, short of that), refuted (`hyp_refuted_tries` attempts
+    and none of those), open."""
+    linked: dict[str, list[dict]] = {}
+    for row in rows:
+        if row.get("hyp") and not row["harness"] and row["settled"]:
+            linked.setdefault(row["hyp"], []).append(row)
+    refuted = text.numbers()["hyp_refuted_tries"]
+    found = []
+    for job in jobs.values():
+        for hyp in job.get("hyps") or []:
+            group = linked.get(hyp["id"])
+            if not group:
+                continue
+            gains = [row for row in group if row["closed"] and _gain(row) > 0]
+            best = max(gains, key=_gain, default=None)
+            kept = any(row["status"] == "kept" for row in group)
+            goal = expected(hyp["expect"])
+            met = any(row["closed"] and any(_gain(row, axis) >= size for axis, size in goal.items()) for row in group)
+            win = kept or any(row["status"] == "win" for row in group)
+            verdict = "confirmed" if (met if goal else kept and best is not None) else "partly" if best or win else \
+                "refuted" if len(group) >= refuted else "open"
+            found.append({**hyp, "job": job["label"], "tries": len(group), "best": best, "kept": kept, "verdict": verdict})
+    return found
+
+
+def _best_text(row: dict | None) -> str:
+    """A best row's gain and where it was made (a whole-proof heartbeat figure names no step)."""
+    if row is None:
+        return _render("hyp_no_gain")
+    if row["step_hb"] is None and row["d_hb"] is not None:
+        return _render("hyp_best_proof", effect=_effect(row))
+    return _render("hyp_best", effect=_effect(row), step=row["pstep"])
+
+
+def hypothesis_line(item: dict) -> str:
+    task = _render("hyp_task", task=item["task"], expect=_render("hyp_expect", expect=item["expect"]) if item["expect"] else "")
+    return _render("hyp_line", id=item["id"], job=item["job"], task=task,
+                   tries=_render("hyp_tries" if item["tries"] > 1 else "hyp_try", count=item["tries"]),
+                   best=_best_text(item["best"]),
+                   kept=_render("hyp_kept_yes" if item["kept"] else "hyp_kept_no"),
+                   verdict=_render(f"verdict_{item['verdict']}"))
+
+
+def board(rows: list[dict], jobs: dict[str, dict], node, priced: list[dict]) -> list[dict]:
+    """The run best's costliest steps (`priced` is campaign.step_costs of it), each with its attempts so far (every
+    attempt on that step text, in any node), the best gain, its open hypotheses and its dead ends. `tries` 0 is untried."""
+    hashes = {step.id: step.hash for step in node.steps}
+    open_ids = {item["id"] for item in outcomes(rows, jobs) if item["verdict"] == "open"}
+    entries = []
+    for cost in priced[: text.numbers()["board_steps"]]:
+        tried = [row for row in rows if not row["harness"] and hashes.get(cost["step"]) in row["anchors"]]
+        gains = [row for row in tried if row["closed"] and _gain(row) > 0]
+        entries.append({**cost, "hash": hashes.get(cost["step"]), "tries": len(tried),
+                        "best": max(gains, key=_gain, default=None),
+                        "open": sorted({row["hyp"] for row in tried if row["hyp"] in open_ids}, key=lambda h: int(h[1:])),
+                        "dead": len({row["sig"] for row in tried if row["status"] == "dead"})})
+    return entries
+
+
+def board_lines(entries: list[dict], node) -> list[str]:
+    lines = [_render("board_head", node=node.id)]
+    for entry in entries:
+        if entry["tries"]:
+            state = _render("board_tried", count=entry["tries"], best=_best_text(entry["best"]))
+            state += (_render("board_open", ids=" ".join(entry["open"])) if entry["open"] else "") \
+                + (_render("board_dead", count=entry["dead"]) if entry["dead"] else "")
+        else:
+            state = _render("board_untried")
+        lines.append(_render("board_row", step=entry["step"], tokens=_shown(entry["tokens"]),
+                             heartbeats=_shown(entry["heartbeats"]), state=state))
+    return lines
+
+
+def _shown(value) -> str:
+    return "-" if value is None else str(value)
+
+
+def untried_line(entries: list[dict], node, state: dict) -> list[str]:
+    """One line naming the costliest steps nobody has tried, when the first of them was not said before (a step text is named once)."""
+    numbers = text.numbers()
+    names = [entry for entry in entries[: numbers["board_digest_rank"]] if not entry["tries"]][: numbers["board_digest_steps"]]
+    told = set(state.get("untried", []))
+    state["untried"] = sorted({*told, *(entry["hash"] for entry in names)})
+    if not names or names[0]["hash"] in told:
+        return []
+    steps = ", ".join(_render("board_untried_step", step=entry["step"],
+                              cost=_render("effect_hb", value=entry["heartbeats"]) if entry["heartbeats"] is not None
+                              else _render("effect_tok", value=_shown(entry["tokens"]))) for entry in names)
+    return [_render("board_untried_line", node=node.id, steps=steps)]
+
+
 def _island_status(rows: list[dict], job: str, role: str) -> tuple[dict | None, int]:
     """The job's best closed row on its objective and the number of its rows since the last one that improved it."""
     def measure(row: dict) -> float | None:
@@ -526,24 +657,31 @@ def _island_status(rows: list[dict], job: str, role: str) -> tuple[dict | None, 
     return best, stale
 
 
-def digest(rows: list[dict], jobs: dict[str, dict], state: dict, costs=None) -> list[str]:
-    """The orchestrator's lines since its previous turn: kept changes, dead ends, one status line per active job."""
+def digest(rows: list[dict], jobs: dict[str, dict], state: dict, costs=None, best_of=None) -> list[str]:
+    """The orchestrator's lines since its previous turn: one per hypothesis whose measurements changed, dead ends, one
+    status line per active job, and the costly steps nobody has tried (`best_of()` is the run best node)."""
     limit = text.numbers()["idea_digest_lines"]
     sent = set(state.get("sent", []))
     cursor = state.get("cursor", 0)
     fresh = [row for row in rows if int(row["id"][1:]) > cursor and not row["harness"]]
-    kept = sorted((row for row in rows if row["status"] == "kept" and not row["harness"] and f"k:{row['id']}" not in sent),
-                  key=lambda row: -_gain(row))
     dead = []
     for row in fresh:
         if row["dead_trigger"] and f"d:{row['sig']}" not in sent and row["settled"]:
             dead.append((f"d:{row['sig']}", dead_line(rows, row["sig"])))
-    lines = [_line(_render("kept_head", id=row["id"], node=row["node"]),
-                   ": ".join(part for part in (_render("where", step=row["pstep"], node=row["parent"]) if row["pstep"] else "",
-                                               _change(row)) if part), _effect(row), row["move"])
-             for row in kept[:limit]]
-    if len(kept) > limit:
-        lines.append(_render("more", count=len(kept) - limit))
+    # A hypothesis is said again only when its best gain doubled, its place in the run best or its verdict changed.
+    seen = state.setdefault("hyps", {})
+    changed = []
+    for item in outcomes(rows, jobs):
+        mark = [int(math.log2(_gain(item["best"]) + 1)) if item["best"] else None, item["kept"], item["verdict"]]
+        if seen.get(item["id"], [None, False, "open"]) != mark:
+            changed.append((item, mark))
+    changed.sort(key=lambda pair: -(_gain(pair[0]["best"]) if pair[0]["best"] else 0))
+    top = changed[: text.numbers()["hyp_digest_lines"]]
+    for item, mark in top:
+        seen[item["id"]] = mark
+    lines = [hypothesis_line(item) for item, _ in top]
+    if len(top) < len(changed):
+        lines.append(_render("more", count=len(changed) - len(top)))
     lines += [line for _, line in dead[:limit]]
     if len(dead) > limit:
         lines.append(_render("more", count=len(dead) - limit))
@@ -574,16 +712,27 @@ def digest(rows: list[dict], jobs: dict[str, dict], state: dict, costs=None) -> 
             lines.append(_line(_render("stall_sol", job=job["label"], count=found["count"], step=found["step"],
                                        node=found["node"]), _render("stall_sol_next", steps=steps) if steps else ""))
     state["stalled"] = sorted(told)
-    state["sent"] = sorted({*sent, *(f"k:{row['id']}" for row in kept), *(key for key, _ in dead)})
+    state["sent"] = sorted({*sent, *(key for key, _ in dead)})
     state["cursor"] = max(cursor, _reached(rows, state))
+    # The board costs a graph build: only when the log changed.
+    stamp = [len(rows), sum(1 for row in rows if row["verified"])]
+    if best_of is not None and costs is not None and state.get("board_at") != stamp:
+        state["board_at"] = stamp
+        try:
+            node = best_of()
+            if node is not None:
+                lines += untried_line(board(rows, jobs, node, costs(node.proof_id)), node, state)
+        except (OSError, ValueError, KeyError):
+            pass
     return lines
 
 
-def lines_from(rows: list[dict], jobs: dict[str, dict], actor: str, bucket: dict, costs=None) -> tuple[str, list[str]]:
+def lines_from(rows: list[dict], jobs: dict[str, dict], actor: str, bucket: dict, costs=None,
+               best=None) -> tuple[str, list[str]]:
     """(role, lines): an actor's attempt log lines for this turn (see push and digest), its cursor kept in `bucket`."""
     state = bucket.setdefault("ideas", {})
     if actor == "sol":
-        return "sol", digest(rows, jobs, state, costs)
+        return "sol", digest(rows, jobs, state, costs, best)
     job = next((item for item in jobs.values() if item["actor"] == actor), None)
     role = job["role"] if job else "sol"
     return role, push(rows, role, job["label"] if job else None, state, costs)
@@ -596,7 +745,10 @@ def lines_for(directory: Path, actor: str, bucket: dict) -> tuple[str, list[str]
         jobs = job_table(published_history(directory, campaign.events(directory)))
     except (OSError, ValueError, KeyError, TypeError, AttributeError, IndexError):  # the log never breaks a tool call
         return "sol", []
-    return lines_from(rows, jobs, actor, bucket, lambda proof_id: campaign.step_costs(directory, proof_id))
+    from arena import orchestration
+
+    return lines_from(rows, jobs, actor, bucket, lambda proof_id: campaign.step_costs(directory, proof_id),
+                      lambda: orchestration.run_best(directory))
 
 
 # --- the ideas tool -----------------------------------------------------------------------------------------------
@@ -639,6 +791,8 @@ def ideas_tool(run_id: str, request: dict) -> dict:
     from arena import tools
 
     step, tactic, node_ref = request.get("step"), request.get("tactic"), request.get("node")
+    if not request:
+        return board_tool(run_id)
     if set(request) - {"node", "step", "tactic"} or not (step or tactic) \
             or not all(isinstance(value, str) or value is None for value in (step, tactic, node_ref)):
         return {"ok": False, "category": "invalid_input", "text": _render("query_bad")}
@@ -655,3 +809,16 @@ def ideas_tool(run_id: str, request: dict) -> dict:
     if not lines:
         return {"ok": True, "text": _render("query_none")}
     return {"ok": True, "text": "\n".join([_render("query_head", target=target or tactic), *lines])}
+
+
+def board_tool(run_id: str) -> dict:
+    """The `ideas` tool with nothing sent: the run best's costliest steps and what was tried on each."""
+    from arena import orchestration
+
+    directory = campaign.run_dir(run_id)
+    node = orchestration.run_best(directory)
+    if node is None:
+        return {"ok": True, "text": _render("board_none")}
+    entries = board(sync(directory), job_table(published_history(directory, campaign.events(directory))), node,
+                    campaign.step_costs(directory, node.proof_id))
+    return {"ok": True, "text": "\n".join(board_lines(entries, node))}

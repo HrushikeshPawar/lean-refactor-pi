@@ -1,0 +1,78 @@
+RUN v9-sol-wick-03: 3373 events, 22.3 min; idea rows 172 (31 harness); Sol turns replayed 52
+jobs [('job1', 'heartbeats', 8), ('job2', 'family', 5), ('job3', 'tokens', 5), ('job4', 'trim', 4), ('job5', 'merge', 2), ('job6', 'merge', 4)]
+
+=== 1. HYPOTHESES AND ROW LINKS ===
+hypotheses created: 28 (delegations 4, messages 24); none carries `expect` (old run): True
+rows: 172; non-harness 141; linked 124; unlinked 17 (job of unlinked: {'None': 17}); harness rows (never linked) 31
+rows per hypothesis: min 1, median 4, max 23; hypotheses with no settled row: 4
+
+=== 2. VERDICT DISTRIBUTION (end of run; old tasks carry no figure, so confirmed means a row in the run best) ===
+{'partly': 10, 'refuted': 4, 'open': 1, 'confirmed': 9}  of 24 hypotheses with attempts
+by role: {'family': {'partly': 3}, 'heartbeats': {'partly': 5, 'refuted': 2, 'open': 1}, 'merge': {'confirmed': 3, 'refuted': 2, 'partly': 1}, 'tokens': {'confirmed': 4}, 'trim': {'partly': 1, 'confirmed': 2}}
+
+=== 3. SAMPLE DIGEST LINES (new digest, at Sol turns) ===
+- turn 6 (min 2.5): H4 job4 (Tighten original and newest best proof, ): 1 try, no tok or HB gain, in best: yes - partly
+- turn 11 (min 4.0): H4 job4 (Tighten original and newest best proof, ): 4 tries, no tok or HB gain, in best: no - partly
+- turn 17 (min 6.5): H5 job3 (I built challenger n2: free algebra fact): 3 tries, best -3 tok, -46 HB on s11, in best: no - partly
+- turn 19 (min 7.5): H9 job5 (Do not merge old span proof into n18. Ex): 4 tries, best -17 tok, -15 HB over the whole proof on s7, in best: yes - confirmed
+- turn 23 (min 9.3): H11 job5 (Harvest s11 from n48 (merged simp lists)): 3 tries, no tok or HB gain, in best: no - refuted
+- turn 27 (min 11.1): H11 job5 (Harvest s11 from n48 (merged simp lists)): 7 tries, no tok or HB gain, in best: yes - partly
+- turn 31 (min 12.7): H10 job4 (Idea on n18: hbase can be hs [] (by simp): 12 tries, best +7 tok, -558 HB on s14, in best: yes - confirmed
+- turn 34 (min 14.3): H10 job4 (Idea on n18: hbase can be hs [] (by simp): 14 tries, best +7 tok, -863 HB over the whole proof on s21, in best: yes - confirmed
+- turn 36 (min 15.3): H19 job1 (New inline-sort family n114-447-tok-1620): 1 try, best +8 tok, -551 HB over the whole proof on s11, in best: no - partly
+- turn 42 (min 17.9): H19 job1 (New inline-sort family n114-447-tok-1620): 4 tries, best -36 tok, -461 HB on s2, in best: no - partly
+
+non-hypothesis digest lines in the run: 79; kinds {'job1': 10, 'job4': 17, 'Untried': 19, 'job5': 6, 'job3': 11, 'job2': 11, 'job1:': 1, 'job6': 3, 'job6:': 1}
+- turn 6 (min 2.5): Untried in n4: s4 29540 HB, s1 405 HB
+- turn 11 (min 4.0): Untried in n18: s2 7153 HB, s11 2348 HB
+- turn 13 (min 4.9): Untried in n18: s17 1261 HB, s7 144 HB
+- turn 14 (min 5.1): Untried in n25: s11 92 tok, s17 69 tok
+
+=== 4. BOARD OUTPUT (ideas with no arguments) ===
+-- Sol turn 13, minute 4.9
+Steps of the run best n18, costliest first:
+s2 205 tok 7153 HB - 1 tries, no tok or HB gain, open H9
+s11 105 tok 2348 HB - 1 tries, best -13 tok, -254 HB over the whole proof on s11
+s17 69 tok 1261 HB - untried
+s7 66 tok 144 HB - untried
+s13 7 tok 1190 HB - 1 tries, no tok or HB gain
+s6 40 tok 28 HB - untried
+s8 36 tok 87 HB - untried
+s5 36 tok 26 HB - untried
+-- Sol turn 26, minute 10.4
+Steps of the run best n74, costliest first:
+s2 160 tok 7075 HB - untried
+s11 89 tok 1950 HB - untried
+s16 48 tok 1348 HB - 1 tries, no tok or HB gain
+s7 49 tok 129 HB - untried
+s12 9 tok 1208 HB - 1 tries, no tok or HB gain
+s6 40 tok 28 HB - 1 tries, no tok or HB gain
+s5 36 tok 26 HB - 1 tries, no tok or HB gain
+s8 32 tok 97 HB - untried
+-- Sol turn 39, minute 16.6
+Steps of the run best n129, costliest first:
+s2 180 tok 4138 HB - 4 tries, best -3 tok, -14 HB on s2, open H17
+s21 52 tok 1425 HB - untried
+s7 29 tok 1447 HB - 3 tries, no tok or HB gain
+s10 13 tok 1440 HB - 2 tries, no tok or HB gain
+s16 20 tok 394 HB - untried
+s4 22 tok 258 HB - untried
+s5 22 tok 259 HB - untried
+s17 5 tok 714 HB - untried
+-- Sol turn 52, minute 21.7
+Steps of the run best n172, costliest first:
+s2 151 tok 4349 HB - untried
+s21 47 tok 1380 HB - 1 tries, no tok or HB gain
+s7 29 tok 1446 HB - 4 tries, best -3 tok, -77 HB on s7
+s10 13 tok 1439 HB - 2 tries, no tok or HB gain
+s16 20 tok 397 HB - untried
+s4 22 tok 259 HB - untried
+s5 22 tok 259 HB - untried
+s17 5 tok 713 HB - untried
+
+=== 5. DIGEST SIZE PER SOL TURN (characters) ===
+turns 52; old: total 7968, mean 153, max 742, turns with lines 33
+      new: total 8780, mean 169, max 623, turns with lines 33
+new digest chars by kind: {'hyp': 3948, 'island': 3884, 'untried': 743, 'stall': 205} lines {'hyp': 34, 'island': 58, 'untried': 19, 'stall': 2}
+old digest chars by kind: {'kept': 3817, 'island': 3884, 'stall': 205, 'more': 62} lines {'kept': 31, 'island': 58, 'stall': 2, 'more': 1}
+new mean <= old mean: False; max hypothesis lines in a turn 0

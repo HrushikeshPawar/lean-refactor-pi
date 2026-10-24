@@ -14,7 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from arena import orchestration, pi_rpc, run_control, team_reply, text
+from arena import coordinator, orchestration, pi_rpc, run_control, team_reply, text
 from arena import reply as proof_reply
 from arena.steps import split_steps
 from tests.graph_support import FakeRunCase
@@ -2297,6 +2297,21 @@ class SteerAndNoteTests(unittest.TestCase):
             rows = [row for row in orchestration._history(directory) if row.get("type") == "job_message"]
             self.assertEqual([(row["job_id"], row["text"]) for row in rows], [(started["job_id"], "new best is n9")])
             self.assertIn("will read this after its current step", team_reply.render("delegate", reply, directory))
+
+    def test_expect_is_kept_with_the_message_and_the_reply_names_the_hypothesis(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _seed_parent(directory)
+            started, _child = self._active_job(directory, "op-expect-start")
+            reply = orchestration.delegate(
+                directory, operation_id="op-expect", run_id="run-1", actor_id="sol", session_id="sol-session",
+                task="try s2 again", job_id=started["job_id"], open_child=lambda _launch: None,
+                expect="s2  -1000 HB " + "x" * 100)
+            rows = [row for row in orchestration._history(directory) if row.get("type") == "job_message"]
+            self.assertEqual(rows[0]["expect"], ("s2 -1000 HB " + "x" * 100)[: text.numbers()["hyp_expect_chars"]])
+            self.assertIn("Recorded as H2.", team_reply.render("delegate", reply, directory))
+            self.assertIn("Recorded as H1.", team_reply.render("delegate", started, directory))
+            self.assertEqual(coordinator._rejected_delegate({"task": "t", "job_id": "j", "expect": 5})["reason"], "expect")
 
     def _save(self, directory, actor, job_id, op, **fields):
         return orchestration.save_card(directory, operation_id=op, job_id=job_id, run_id="run-1", actor_id=actor,
