@@ -81,6 +81,11 @@ def run_results(root: Path = RUNS, names: set[str] | list[str] | None = None) ->
             theorem = summary["theorem"]
             if names is not None and theorem not in names:
                 continue
+            # A run that started from an earlier proof is not a from-scratch result, so it never replaces a row.
+            config_path = path.parent / "run-config.json"
+            config = json.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
+            if config.get("seed_proof") or config.get("seed_run"):
+                continue
             found.setdefault(theorem, []).append(
                 {
                     "run_id": path.parent.name,

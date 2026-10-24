@@ -50,6 +50,14 @@ class SubmissionTests(unittest.TestCase):
         self.assertEqual(found["a"][0]["proof"], "proof-r1")
         self.assertEqual(sub.run_results(self.runs, ["b"]).keys(), {"b"})
 
+    def test_run_results_skips_runs_started_from_an_earlier_proof(self):
+        write_run(self.runs, "r8", "a", 99.0)
+        (self.runs / "r8" / "run-config.json").write_text(json.dumps({"seed_proof": "seeds/a.lean"}))
+        write_run(self.runs, "r9", "b", 99.0)
+        (self.runs / "r9" / "run-config.json").write_text(json.dumps({"seed_run": "runs/r3"}))
+        found = sub.run_results(self.runs)
+        self.assertEqual({k: [r["run_id"] for r in v] for k, v in found.items()}, {"a": ["r1", "r2"], "b": ["r3"]})
+
     def test_choose_takes_higher_and_keeps_baseline_on_ties(self):
         base = sub.load_baseline(self.base)
         chosen = sub.choose(base, sub.run_results(self.runs))
