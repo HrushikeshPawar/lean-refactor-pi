@@ -2306,39 +2306,124 @@ def _lineage(nodes: dict, node) -> set[str]:
     return found
 
 
+def _merged_nodes(first: dict[str, dict], merges: set[str]) -> set[str]:
+    """Node ids named by any earlier merge job."""
+    return {node for job in merges for node in ((first[job].get("anchor") or {}).get("nodes") or [])}
+
+
+def _record_gap(node, other, objective: str | None) -> float:
+    """How far `node` is ahead of `other` on the objective's measure, in the unit its margin is set in: tokens,
+    percent of `other`'s heartbeats, or score points. Negative or 0 when it is not ahead; 0 when unmeasured."""
+    if objective == "tokens":
+        return other.tokens - node.tokens if node.tokens is not None and other.tokens is not None else 0
+    if objective == "heartbeats":
+        if node.heartbeats is None or not other.heartbeats:
+            return 0
+        return 100.0 * (other.heartbeats - node.heartbeats) / other.heartbeats
+    return node.score - other.score if node.score is not None and other.score is not None else 0
+
+
+def _margin(objective: str | None) -> float | None:
+    """The lead on its own measure that makes an axis island's record clear (numbers file); None for other jobs."""
+    return {"tokens": text.numbers()["merge_record_tokens"],
+            "heartbeats": text.numbers()["merge_record_hb_pct"]}.get(objective)
+
+
+def merge_records(directory: Path) -> list[dict]:
+    """Each non-merge job's record node, outside the run best's lineage and not a copy of its text: a token island's fewest-token node within the
+    heartbeat ceiling, a heartbeat island's fewest-heartbeat node, any other job's top-score node other than the run
+    best. An axis island's record counts only when it beats the run best on its measure. Closed and compiled on every
+    version preferred (a job's unverified closed nodes are used only when it has no verified one). Each is
+    `{node, job, objective, gap, margin}`: `gap` is the lead over the run best in the margin's unit (see _margin) and
+    `margin` whether that lead is clear. Oldest saved first."""
+    best = run_best(directory)
+    if best is None:
+        return []
+    merges = {job for job, row in _first_delegations(directory).items() if row.get("scope") == "merge"}
+    saved = _saved_times(directory)
+    nodes = proof_nodes(directory)
+    lineage = _lineage(nodes, best)
+    ceiling = heartbeat_limit(best)
+    jobs: dict[str, list] = {}
+    for node in nodes.values():
+        job = node_author_job(node)
+        if job is not None and job not in merges and _closed(node) and node.proof_id not in lineage \
+                and node.proof_id != best.proof_id and node.proof_text.split() != best.proof_text.split():
+            jobs.setdefault(job, []).append(node)
+    found = []
+    for job, own in jobs.items():
+        objective = _job_original(directory, job).get("objective")
+        pool = [node for node in own if node.verified] or own
+        if objective == "tokens":
+            pool = [node for node in pool if node.tokens is not None and within_limit(node, ceiling)]
+        elif objective == "heartbeats":
+            pool = [node for node in pool if node.heartbeats is not None]
+        else:
+            pool = [node for node in pool if node.score is not None]
+        if not pool:
+            continue
+        pick = (min(pool, key=lambda node: (getattr(node, objective), -(node.score or 0.0)))
+                if objective in _OBJECTIVES else max(pool, key=lambda node: node.score))
+        gap = _record_gap(pick, best, objective)
+        if objective in _OBJECTIVES and gap <= 0:
+            continue
+        need = _margin(objective)
+        found.append({"node": pick, "job": job, "objective": objective, "gap": gap,
+                      "margin": need is not None and gap >= need})
+    return sorted(found, key=lambda item: saved.get(item["node"].proof_id, 0.0))
+
+
 def _merge_auto_nodes(directory: Path) -> list[str]:
-    """The nodes the harness starts a merge job on, run best first, or []. No merge job is queued or running; the run
-    best has company: closed nodes saved since the last merge job ended (or since the run began) by non-merge jobs, outside
-    the run best's own lineage, from a job other than the best's author. After an earlier merge job at least
-    `merge_auto_new_nodes` such nodes are needed, so a merge job that ended without a gain is not restarted."""
+    """The nodes the harness starts a merge job on, run best first, or []. No merge job is queued or running. The nodes
+    are the run best and the jobs' record nodes (see merge_records). A record is new when no earlier merge job used its
+    node and, when one used an earlier node of the same job, it leads that node by the margin as well. The first merge
+    job needs a record from a job other than the best's author; a new record that leads the run best by a clear
+    margin starts a merge job at once; otherwise `merge_auto_new_nodes` new records are needed after an earlier merge
+    job, so a merge job that ended without a gain is not restarted."""
     first = _first_delegations(directory)
     merges = {job for job, row in first.items() if row.get("scope") == "merge"}
     if any((_job_snapshot(directory, job) or {}).get("state") in _live_states for job in merges):
         return []
     best = run_best(directory)
-    if best is None:
+    records = merge_records(directory)
+    if best is None or not records:
         return []
-    events_ = events(directory)
-    since = float((events_[0] if events_ else {}).get("ts", 0.0))
-    ended = [float(row.get("ts", 0.0)) for row in _states(directory)
-             if row.get("job_id") in merges and row.get("state") in _terminal_states]
-    if merges:
-        since = max([since, *ended, *(float(first[job].get("ts", 0.0)) for job in merges)])
-    saved = _saved_times(directory)
-    nodes = proof_nodes(directory)
-    lineage = _lineage(nodes, best)
-    fresh = [node for node in nodes.values()
-             if _closed(node) and node_author_job(node) not in merges and node_author_job(node) is not None
-             and saved.get(node.proof_id, 0.0) > since and node.proof_id not in lineage]
-    if not fresh or (merges and len(fresh) < text.numbers()["merge_auto_new_nodes"]) \
-            or all(node_author_job(node) == node_author_job(best) for node in fresh):
+    used = _merged_nodes(first, merges)
+    by_id = {node.id: node for node in proof_nodes(directory).values()}
+
+    def new(item) -> bool:
+        if item["node"].id in used:
+            return False
+        for node_id in used:
+            earlier = by_id.get(node_id)
+            if earlier is None or node_author_job(earlier) != item["job"]:
+                continue
+            need = _margin(item["objective"])
+            lead = _record_gap(item["node"], earlier, item["objective"])
+            if (lead < need) if need is not None else (lead <= 1e-9):
+                return False
+        return True
+
+    fresh = [item for item in records if new(item)]
+    if not fresh:
         return []
-    newest: dict[str, object] = {}
-    for node in fresh:
-        held = newest.get(node_author_job(node))
-        if held is None or saved[node.proof_id] > saved[held.proof_id]:
-            newest[node_author_job(node)] = node
-    return [best.id, *(node.id for node in sorted(newest.values(), key=lambda node: saved[node.proof_id]))]
+    clear = any(item["margin"] for item in fresh)
+    others = any(item["job"] != node_author_job(best) for item in fresh)
+    if not (clear or (len(fresh) >= text.numbers()["merge_auto_new_nodes"] if merges else others)):
+        return []
+    return [best.id, *(item["node"].id for item in records)]
+
+
+def _merge_auto_task(directory: Path, ids: list[str]) -> str:
+    """The merge worker's task: the fixed text, the nodes with their prices, and the per-step price comparison."""
+    from arena import merge_recipe
+
+    task = text.render("replies/team.merge_auto_task", nodes=", ".join(ids))
+    try:
+        extra = merge_recipe.lines(directory, ids)
+    except (OSError, ValueError, KeyError):
+        extra = []
+    return "\n".join([task, *extra])
 
 
 def start_merge(directory: Path, open_child) -> dict | None:
@@ -2352,7 +2437,7 @@ def start_merge(directory: Path, open_child) -> dict | None:
     count = sum(1 for row in _first_delegations(directory).values() if row.get("scope") == "merge")
     return delegate(
         directory, operation_id=f"harness-merge-{count + 1}", run_id=directory.name, actor_id="sol",
-        session_id=directory.name, task=text.render("replies/team.merge_auto_task", nodes=", ".join(ids)),
+        session_id=directory.name, task=_merge_auto_task(directory, ids),
         open_child=open_child, scope="merge", anchor={"nodes": ids}, creator="harness",
     )
 

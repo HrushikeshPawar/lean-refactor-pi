@@ -145,5 +145,18 @@ stall_next_steps: 2
 # The harness starts the merge job itself (arena/orchestration.py start_merge) when two jobs have new closed nodes and the
 # merge slot is free. It checks this often (seconds).
 merge_auto_poll_seconds: 15
-# After a merge job has ended, another starts only when at least this many closed nodes were saved since by other jobs.
+# After a merge job has ended, another starts only when at least this many new record nodes exist (see merge_record_tokens
+# below for the exception: one clear record).
 merge_auto_new_nodes: 3
+# A job's record node (a token island's fewest tokens, a heartbeat island's fewest heartbeats) that leads the run best on
+# that measure by at least this much is enough to start a merge job when the merge slot is free (arena/orchestration.py
+# _merge_auto_nodes). A later record of the same job must lead the node already merged by the same margin to count as new.
+merge_record_tokens: 5
+# The heartbeat lead is a percent of the run best's heartbeats.
+merge_record_hb_pct: 3
+# The merge task lists, for each record node set against the run best, at most this many steps with a real price difference.
+merge_recipe_steps: 6
+# A step counts as a real difference when its tokens differ by at least this many, or its heartbeats by at least this
+# percent of the run best's heartbeats.
+merge_recipe_min_tokens: 2
+merge_recipe_min_hb_pct: 0.5

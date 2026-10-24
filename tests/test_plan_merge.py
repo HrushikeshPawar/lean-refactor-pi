@@ -6,13 +6,15 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from arena import context, ideas, orchestration, patterns, reply, team_reply, text
+from arena import context, ideas, merge_recipe, orchestration, patterns, reply, team_reply, text
+from arena.steps import Step
 from tests.test_text import ROWS, _fixture
 
-def node(node_id: str, score: float, job: str | None = None, verified: bool = True) -> SimpleNamespace:
+def node(node_id: str, score: float, job: str | None = None, verified: bool = True, tokens: int = 100,
+         heartbeats: int = 50, steps: list | None = None) -> SimpleNamespace:
     return SimpleNamespace(id=node_id, proof_id=node_id, score=score, verified=verified, status="closed", route="r1",
-                           attempts=[{"job_id": job}] if job else [], tokens=100, heartbeats=50, origin="candidate",
-                           proof_text="by\n  simp", steps=[])
+                           attempts=[{"job_id": job}] if job else [], tokens=tokens, heartbeats=heartbeats,
+                           origin="candidate", proof_text=f"by\n  simp {node_id}", steps=steps or [])
 
 
 class NoticeTests(unittest.TestCase):
@@ -105,30 +107,67 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(orchestration.merge_defaults(Path("run")), ["n2", "n3", "n4"])
         self.assertEqual(orchestration._merge_anchor(Path("run"), {"nodes": ["n4"]}), "merge")
 
-    def auto(self, *, merges=(), states=(), best="n2", state="completed"):
-        """_merge_auto_nodes with earlier merge jobs ({job: start ts}) and their state rows patched."""
-        first = {job: {"scope": "merge", "ts": ts} for job, ts in merges}
-        first.update({"j1": {"scope": "island", "ts": 0.5}, "j2": {"scope": "island", "ts": 0.6}})
-        live = {job: {"state": state} for job, _ in merges}
+    objectives: dict = {}
+
+    def auto(self, *, merges=(), states=(), best="n2", state="completed", jobs=("j1", "j2")):
+        """_merge_auto_nodes with earlier merge jobs ({job: start ts, nodes}) and their state rows patched."""
+        first = {job: {"scope": "merge", "ts": ts, "anchor": {"nodes": list(nodes)}} for job, ts, nodes in merges}
+        first.update({job: {"scope": "island", "ts": 0.5} for job in jobs})
+        live = {job: {"state": state} for job, *_ in merges}
         with patch.object(orchestration, "_first_delegations", return_value=first), \
                 patch.object(orchestration, "_job_snapshot", side_effect=lambda d, job: live.get(job)), \
                 patch.object(orchestration, "_states", return_value=list(states)), \
                 patch.object(orchestration, "events", return_value=[{"ts": 0.1}]), \
+                patch.object(orchestration, "_job_original", side_effect=lambda d, job: {"objective": self.objectives.get(job)}), \
                 patch.object(orchestration, "run_best", return_value=self.nodes[best]):
             return orchestration._merge_auto_nodes(Path("run"))
 
-    def test_the_harness_picks_the_merge_nodes_with_the_run_best_first_and_waits_after_a_merge_ends(self):
-        self.assertEqual(self.auto(), ["n2", "n3", "n4"])
+    def add(self, name, score, job, **kwargs):
+        self.nodes[name] = node(name, score, job=job, **kwargs)
+        self.times[name] = float(len(self.times) + 1)
+
+    def test_the_harness_picks_each_jobs_record_with_the_run_best_first_and_waits_for_new_records_after_a_merge(self):
+        self.assertEqual(self.auto(), ["n2", "n3", "n4"])  # first merge: j1's and j2's top-score nodes
+        done = [("m1", 4.5, ["n2", "n3", "n4"])]
         ended = [{"job_id": "m1", "state": "completed", "ts": 5.0}]
-        self.assertEqual(self.auto(merges=[("m1", 4.5)], states=ended), [])  # nothing new since it ended
-        for name in ("n8", "n9"):
-            self.nodes[name] = node(name, 64.0, job="j2")
-            self.times[name] = float(len(self.times) + 4)
-        self.assertEqual(self.auto(merges=[("m1", 4.5)], states=ended), [])  # two new nodes, one job
-        self.nodes["n10"] = node("n10", 66.0, job="j1")
-        self.times["n10"] = 20.0
-        self.assertEqual(self.auto(merges=[("m1", 4.5)], states=ended), ["n2", "n9", "n10"])
-        self.assertEqual(self.auto(merges=[("m1", 4.5)], state="active"), [])  # running merge job: no restart
+        self.assertEqual(self.auto(merges=done, states=ended), [])  # nothing new since it ended
+        self.add("n8", 64.0, "j2")  # lower than j2's merged n4: no new record
+        self.assertEqual(self.auto(merges=done, states=ended), [])
+        self.assertEqual(self.auto(merges=done, state="active"), [])  # running merge job: no restart
+        for number, job in enumerate(("j3", "j4")):  # new records, below the clear margin: two of three needed
+            self.add(f"n2{number}", 50.0 + number, job)
+            self.assertEqual(self.auto(merges=done, states=ended, jobs=("j1", "j2", "j3", "j4")), [])
+        self.add("n22", 52.0, "j5")
+        self.assertEqual(self.auto(merges=done, states=ended, jobs=("j1", "j2", "j3", "j4", "j5")),
+                         ["n2", "n3", "n4", "n20", "n21", "n22"])
+
+    def test_a_clear_record_on_an_axis_starts_a_merge_alone_and_an_ordinary_one_does_not(self):
+        self.objectives = {"j2": "tokens", "j3": "heartbeats"}
+        del self.nodes["n4"], self.nodes["n3"]
+        self.nodes["n2"].tokens, self.nodes["n2"].heartbeats = 360, 5000
+        done = [("m1", 4.5, ["n2", "n3"])]
+        ended = [{"job_id": "m1", "state": "completed", "ts": 5.0}]
+        jobs = ("j1", "j2", "j3")
+        self.add("n20", 60.0, "j2", tokens=357, heartbeats=5100)  # 3 tokens ahead: not clear
+        self.assertEqual(self.auto(merges=done, states=ended, jobs=jobs), [])
+        self.add("n21", 60.0, "j2", tokens=355, heartbeats=5400)  # 5 tokens ahead: clear
+        self.assertEqual(self.auto(merges=done, states=ended, jobs=jobs), ["n2", "n21"])
+        self.add("n22", 58.0, "j3", tokens=420, heartbeats=4950)  # 1 percent fewer heartbeats: not clear
+        self.assertEqual(self.auto(merges=done, states=ended, jobs=jobs), ["n2", "n21", "n22"])  # n21 is clear
+        done = [("m1", 4.5, ["n2", "n21"])]
+        self.assertEqual(self.auto(merges=done, states=ended, jobs=jobs), [])  # n21 is merged; n22 is not clear
+        self.add("n23", 58.0, "j3", tokens=424, heartbeats=4710)  # 5.8 percent fewer
+        self.assertEqual(self.auto(merges=done, states=ended, jobs=jobs), ["n2", "n21", "n23"])
+        done = [("m1", 4.5, ["n2", "n21"]), ("m2", 6.5, ["n2", "n21", "n23"])]
+        self.add("n24", 58.0, "j3", tokens=424, heartbeats=4650)  # 1.3 percent past the merged n23: not new
+        self.assertEqual(self.auto(merges=done, states=ended + [{"job_id": "m2", "state": "completed", "ts": 7.0}],
+                                   jobs=jobs), [])
+        self.nodes["n26"] = node("n26", 58.0, "j3", tokens=300, heartbeats=4000)  # a copy of the run best text is no record
+        self.nodes["n26"].proof_text = self.nodes["n2"].proof_text
+        self.times["n26"] = 30.0
+        self.assertEqual(self.auto(merges=done, states=ended, jobs=jobs), [])
+        self.add("n25", 40.0, "j3", tokens=300, heartbeats=9000)  # fewer tokens, but j3 is a heartbeat island
+        self.assertEqual(self.auto(merges=done, states=ended, jobs=jobs), [])
 
     def test_start_merge_delegates_a_merge_job_owned_by_sol_and_created_by_the_harness(self):
         with patch.object(orchestration, "_run_status", return_value="running"), \
@@ -153,6 +192,52 @@ class MergeTests(unittest.TestCase):
             self.nodes[name] = node(name, score, job="j1")
             self.times[name] = float(len(self.times) + 1)
         self.assertEqual(orchestration._merge_end(Path("run"), "j1"), "not_beating")
+
+
+class RecipeTests(unittest.TestCase):
+    @staticmethod
+    def steps(*pairs):
+        return [Step(id=f"s{i}", first_line=i, last_line=i, text=t, hash=h, indent=0) for i, (t, h) in enumerate(pairs, 1)]
+
+    def render(self, nodes, prices):
+        table = {item.proof_id: [{"step": k, "tokens": v[0], "heartbeats": v[1], "points": 0} for k, v in prices[item.id].items()]
+                 for item in nodes}
+        with patch.object(orchestration, "proof_nodes", return_value={item.proof_id: item for item in nodes}), \
+                patch.object(orchestration, "job_labels", return_value={"j1": "job1", "j2": "job2"}), \
+                patch.object(merge_recipe.campaign, "step_costs", side_effect=lambda d, proof_id: table[proof_id]):
+            return merge_recipe.lines(Path("run"), [item.id for item in nodes])
+
+    def test_the_task_lists_each_node_and_only_steps_with_a_real_price_difference_with_the_cheaper_node(self):
+        base = node("b", 80.0, "j1", tokens=360, heartbeats=5000,
+                    steps=self.steps(("a", "h1"), ("b", "h2"), ("c", "h3"), ("d", "h4")))
+        short = node("t", 79.0, "j2", tokens=355, heartbeats=5500,
+                     steps=self.steps(("a", "h1"), ("b'", "h2x"), ("c", "h3"), ("d", "h4")))
+        prices = {"b": {"s1": (10, 100), "s2": (40, 900), "s3": (30, 500), "s4": (20, 100)},
+                  "t": {"s1": (10, 100), "s2": (30, 1500), "s3": (30, 500), "s4": (20, 100)}}
+        got = self.render([base, short], prices)
+        self.assertEqual(got[0], "Prices of the chosen nodes:")
+        self.assertIn("b (run best, base): score 80.0, 360 tokens, 5000 HB, from job1", got[1])
+        self.assertIn("t: score 79.0, 355 tokens, 5500 HB, from job2", got[2])
+        self.assertEqual(len(got), 5)  # head + one differing step (s2); the equal steps are not listed
+        self.assertIn("s2 in b (40 tokens, 900 HB) against s2 in t (30 tokens, 1500 HB): t is cheaper by 10 tokens, b is cheaper by 600 HB", got[4])
+
+    def test_a_node_without_step_prices_is_said_so_instead_of_reading_as_no_difference(self):
+        base = node("b", 80.0, "j1", steps=self.steps(("a", "h1")))
+        other = node("t", 79.0, "j2", steps=self.steps(("a", "h1")))
+        got = self.render([base, other], {"b": {"s1": (10, 100)}, "t": {}})
+        self.assertIn("The steps of t have no price yet", got[-1])
+
+    def test_one_node_cheaper_on_both_axes_is_said_once(self):
+        self.assertEqual(merge_recipe._verdict("b", "t", (40, 30), (900, 800)), "t is cheaper by 10 tokens and 100 HB")
+        self.assertEqual(merge_recipe._verdict("b", "t", (40, 40), (900, None)), "same price")
+
+    def test_nodes_with_no_common_step_are_compared_overall_with_the_cheaper_nodes_steps(self):
+        base = node("b", 80.0, "j1", tokens=360, heartbeats=5000, steps=self.steps(("a", "h1")))
+        other = node("t", 79.0, "j2", tokens=340, heartbeats=5500, steps=self.steps(("z", "h9")))
+        got = self.render([base, other], {"b": {"s1": (360, 5000)}, "t": {"s1": (340, 5500)}})
+        self.assertIn("No step of t matches a step of the run best b", got[-1])
+        self.assertIn("t is cheaper by 20 tokens, b is cheaper by 500 HB", got[-1])
+        self.assertIn("The costliest steps of t: s1 (340 tokens, 5500 HB)", got[-1])
 
 
 class NudgeTests(unittest.TestCase):
