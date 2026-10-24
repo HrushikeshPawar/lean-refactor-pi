@@ -156,10 +156,6 @@
       "handler": true,
       "properties": {
         "focus": {"type": "string", "description": "focus"},
-        "best": {"type": "string", "description": "best"},
-        "held": {"type": "string", "description": "held"},
-        "failed": {"type": "string", "description": "failed"},
-        "ideas": {"type": "string", "description": "ideas"},
         "asks": {"type": "string", "description": "asks"}
       }
     },

@@ -1,8 +1,4 @@
-description: "Update your own card: the one current note the other actors read. Send only the fields that changed; an empty string clears a field. Write conclusions with evidence (node ids, scores), not logs. Keep each field short and write only what is new or still true: earlier versions keep the history, and readers see only the sentences that changed."
+description: "Update your own card: the one current note the other actors read, with two fields, focus and asks. Send only the field that changed; an empty string clears a field. Results and ideas are not written here: the harness records every attempt with its measured effect in the attempt log. Keep each field short and write only what is new or still true: earlier versions keep the history, and readers see only the sentences that changed."
 params:
-  focus: "What you are working on: your family, your hypothesis, or the trunk."
-  best: "Your best node and what makes it good."
-  held: "What worked, with node ids."
-  failed: "What failed and why, so nobody repeats it."
-  ideas: "Ideas worth trying elsewhere: a step, case split or closing another proof could use."
-  asks: "What you need from the others."
+  focus: "What you are working on now and why: your family, your hypothesis, or the trunk."
+  asks: "What you need from the orchestrator or the others."

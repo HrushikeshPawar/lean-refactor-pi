@@ -194,7 +194,7 @@ def _jobs(result: dict, directory: Path, job) -> str:
         if ask:
             lines.append(_render("job_open_ask", ask=ask[: text.numbers()["open_ask_chars"]]))
         card = cards.get(item["job_id"])
-        shown = [f"{name}: {' '.join(card['fields'][name].split())}" for name in ("focus", "best")
+        shown = [f"{name}: {' '.join(card['fields'][name].split())}" for name in ("focus", "asks")
                  if card and card["fields"].get(name)]
         if shown:
             lines.append(_render("job_card", fields=" | ".join(shown)))

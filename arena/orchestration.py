@@ -1780,7 +1780,7 @@ def note_verification(
     return applied
 
 
-CARD_FIELDS = ("focus", "best", "held", "failed", "ideas", "asks")
+CARD_FIELDS = ("focus", "asks")
 
 
 def card_rows(directory: Path) -> list[dict]:
@@ -1807,7 +1807,7 @@ def save_card(
                     "hint": text.render("replies/team.card_field_long", field=name, chars=len(value), limit=limit)}
     previous = current_cards(directory).get(actor_id)
     merged = {**(previous or {}).get("fields", {}), **fields}
-    merged = {name: value for name, value in merged.items() if value}
+    merged = {name: value for name, value in merged.items() if value and name in CARD_FIELDS}
     before = (previous or {}).get("fields", {})
     changed = [name for name in fields if merged.get(name, "") != before.get(name, "")]
     floor = bool(job_id) and is_cards(directory) and card_claims_floor(merged)
@@ -1829,9 +1829,9 @@ def save_card(
     return {**applied, "version": version, "floor": floor, "unmeasured": unmeasured}
 
 
-# A card "claims a floor" when focus, best, held or ideas say the current shape cannot go lower. Detection is a
+# A card "claims a floor" when its focus says the current shape cannot go lower. Detection is a
 # plain phrase match, not a judgment; a negation within 15 characters before the phrase ("not the floor") cancels it.
-_FLOOR_FIELDS = ("focus", "best", "held", "ideas")
+_FLOOR_FIELDS = ("focus",)
 _FLOOR_CLAIM = re.compile(
     r"\b(?:floor|final|converged|plateau(?:ed)?|no further (?:gain|gains|improvement|reduction)"
     r"|nothing (?:left|more) to (?:gain|cut|lower)|cannot be (?:lowered|improved|reduced)|at (?:its|the) minimum"
@@ -1898,7 +1898,7 @@ def open_requests(directory: Path) -> list[dict]:
     """Worker cards of a golf run the orchestrator has not yet acted on: an `asks` field, or a floor claim.
 
     Each is `{job, version, ask, floor}`. A request is handled once a new job was delegated after the card was
-    saved, or the orchestrator's own latest card (saved after it) names the job in `held` or `failed` (a decline)."""
+    saved, or the orchestrator's own latest card (saved after it) names the job in `focus` (a decline)."""
     if not is_golf(directory):
         return []
     labels = job_labels(directory)
@@ -1914,7 +1914,7 @@ def open_requests(directory: Path) -> list[dict]:
             continue
         saved = float(row.get("ts", 0.0))
         declined = mine is not None and float(mine.get("ts", 0.0)) > saved and any(
-            label in str(mine["fields"].get(name) or "") for name in ("held", "failed"))
+            label in str(mine["fields"].get("focus") or ""))
         if declined or any(ts > saved for ts in started):
             continue
         found.append({"job": label, "version": row["version"], "ask": ask, "floor": floor,
@@ -1924,14 +1924,14 @@ def open_requests(directory: Path) -> list[dict]:
 
 def open_ask(directory: Path, job_id: str) -> str | None:
     """The orchestrator's newest message to a running job that its card has not answered, as one line of text.
-    A card version saved after the message, with `held` or `failed` changed, answers it; a newer message replaces it."""
+    A card version saved after the message, with a field changed, answers it; a newer message replaces it."""
     ask = None
     for row in _history(directory):
         if row.get("job_id") != job_id:
             continue
         if row.get("type") == "job_message" and row.get("disposition") == "sent":
             ask = " ".join(str(row.get("text", "")).split()) or None
-        elif row.get("type") == "card" and ask is not None and {"held", "failed"} & set(row.get("changed") or []):
+        elif row.get("type") == "card" and ask is not None and row.get("changed"):
             ask = None
     return ask
 
@@ -2204,7 +2204,7 @@ def _merge_anchor(directory: Path, anchor: object) -> dict | str:
 
 def _merge_lines(directory: Path, anchor: dict) -> list[str]:
     """The merge packet's node list: the base (run best) first, then each chosen node with its measures, its owner's
-    held and failed card fields, and its diff against the base (the read view diff)."""
+    focus and asks card fields, and its diff against the base (the read view diff)."""
     from arena import reply
     from arena.tools import diff_lines
 
@@ -2224,9 +2224,9 @@ def _merge_lines(directory: Path, anchor: dict) -> list[str]:
             tokens=reply.shown(node.tokens), heartbeats=reply.shown(node.heartbeats), owner=owner_label,
         ))
         fields = cards.get(owner) or {}
-        held = [f"{name}: {' '.join(fields[name].split())}" for name in ("held", "failed") if fields.get(name)]
-        if held:
-            lines.append(text.render("packet/sections.fixed.merge_card", owner=owner_label, fields=" | ".join(held)))
+        shown = [f"{name}: {' '.join(fields[name].split())}" for name in CARD_FIELDS if fields.get(name)]
+        if shown:
+            lines.append(text.render("packet/sections.fixed.merge_card", owner=owner_label, fields=" | ".join(shown)))
         if node.id != base.id:
             lines.append(text.render("packet/sections.fixed.merge_diff", base=base.id))
             lines += diff_lines(base, node)[:limit]

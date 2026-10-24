@@ -29,15 +29,15 @@ class GolfFixTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
 
     def test_floor_claim_reply_and_receipt_tools(self):
-        self.assertTrue(orchestration.card_claims_floor({"best": "63 is the floor"}))
-        self.assertFalse(orchestration.card_claims_floor({"best": "not the floor yet"}))
+        self.assertTrue(orchestration.card_claims_floor({"focus": "63 is the floor"}))
+        self.assertFalse(orchestration.card_claims_floor({"focus": "not the floor yet"}))
         self.assertIn("patterns", orchestration.worker_tools(self.directory))
         self.assertIn("`patterns`", team_reply.render("card", {"ok": True, "version": 2, "floor": True}, self.directory))
         self.assertNotIn("patterns", team_reply.render("card", {"ok": True, "version": 2}, self.directory))
 
     def test_asks_and_floor_push_stay_until_a_job_starts(self):
         nodes = {"p1": _node("n1", "a", 90.0, 100, 50), "p2": _node("n2", "b", 88.0, 90, 70)}
-        cards = {"w": _card("j1", 3, 10.0, asks="try the b shape", best="heartbeat floor confirmed")}
+        cards = {"w": _card("j1", 3, 10.0, asks="try the b shape", focus="heartbeat floor confirmed")}
         delegations = [{"job_id": "j1", "ts": 1.0}]
         with patch.object(orchestration, "current_cards", lambda d: cards), \
                 patch.object(orchestration, "_delegations", lambda d: delegations), \
@@ -68,8 +68,8 @@ class GolfFixTests(unittest.TestCase):
     def test_floor_claim_naming_an_uncompiled_construct_is_flagged_unmeasured(self):
         (self.directory / "proofs").mkdir()
         (self.directory / "proofs" / "p.lean").write_text("theorem t : True := by exact List.length_pos_iff.mpr h")
-        claim = {"best": "`List.of_mem_zip` costs ≥14 tokens, so 63 is the floor; `length_pos_iff` is fine"}
-        self.assertTrue(orchestration.card_claims_floor({"best": "this direction cannot work"}))
+        claim = {"focus": "`List.of_mem_zip` costs ≥14 tokens, so 63 is the floor; `length_pos_iff` is fine"}
+        self.assertTrue(orchestration.card_claims_floor({"focus": "this direction cannot work"}))
         self.assertEqual(orchestration.unmeasured_constructs(self.directory, claim), ["List.of_mem_zip"])
         self.assertIn("`List.of_mem_zip`", team_reply.render(
             "card", {"ok": True, "version": 2, "floor": True, "unmeasured": ["List.of_mem_zip"]}, self.directory))

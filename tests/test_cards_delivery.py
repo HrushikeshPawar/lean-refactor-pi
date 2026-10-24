@@ -1,4 +1,4 @@
-"""Smoke tests: card delivery is once per version and race-free, workers see peers' cards, stale-card nudges, plateau."""
+"""Smoke tests: card delivery is once per version and race-free, workers see peers' cards, plateau."""
 
 import json
 import os
@@ -65,39 +65,60 @@ class CardDeliveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
             _seed_parent(directory)
-            _save(directory, "worker-b", "c1", focus="peer focus", ideas="first idea")
+            _save(directory, "worker-b", "c1", focus="peer focus", asks="first ask")
             bucket: dict = {}
             with patch.object(campaign, "run_dir", return_value=directory):
                 first = "\n".join(proof_reply._card_lines("run-1", "worker-a", bucket))
-                _save(directory, "worker-b", "c2", ideas="second idea")
-                _save(directory, "worker-b", "c3", best="n9 80")
+                _save(directory, "worker-b", "c2", asks="second ask")
+                _save(directory, "worker-b", "c3", focus="n9 shape")
                 later = "\n".join(proof_reply._card_lines("run-1", "worker-a", bucket))
             self.assertIn("peer focus", first)
-            self.assertIn("second idea", later)
-            self.assertIn("n9 80", later)
+            self.assertIn("second ask", later)
+            self.assertIn("n9 shape", later)
             self.assertNotIn("peer focus", later)
 
     def test_a_changed_field_shows_only_its_new_sentences_and_a_long_field_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
             _seed_parent(directory)
-            _save(directory, "worker-b", "c1", ideas="Try the split. Merge the cases.")
+            _save(directory, "worker-b", "c1", asks="Try the split. Merge the cases.")
             bucket: dict = {}
             with patch.object(campaign, "run_dir", return_value=directory):
                 proof_reply._card_lines("run-1", "worker-a", bucket)
-                _save(directory, "worker-b", "c2", ideas="Try the split. Merge the cases. Fold the last step.")
+                _save(directory, "worker-b", "c2", asks="Try the split. Merge the cases. Fold the last step.")
                 later = "\n".join(proof_reply._card_lines("run-1", "worker-a", bucket))
-                _save(directory, "worker-b", "c3", ideas="Try the split. Merge the cases. Fold the last step.", best="n2")
-                only_best = "\n".join(proof_reply._card_lines("run-1", "worker-a", bucket))
-            self.assertIn("ideas: Fold the last step.", later)
+                _save(directory, "worker-b", "c3", asks="Try the split. Merge the cases. Fold the last step.", focus="n2")
+                only_focus = "\n".join(proof_reply._card_lines("run-1", "worker-a", bucket))
+            self.assertIn("asks: Fold the last step.", later)
             self.assertNotIn("Try the split", later)
-            self.assertNotIn("ideas:", only_best)
-            self.assertIn("best: n2", only_best)
+            self.assertNotIn("asks:", only_focus)
+            self.assertIn("focus: n2", only_focus)
             limit = text.numbers()["card_field_chars"]
             long = _save(directory, "worker-b", "c4", focus="x" * (limit + 1))
             self.assertFalse(long["ok"])
             self.assertIn(f"{limit + 1} characters", long["hint"])
             self.assertEqual(orchestration.current_cards(directory)["worker-b"]["version"], 3)
+
+    def test_a_card_with_only_focus_and_asks_reaches_another_actor_and_an_old_row_still_loads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _seed_parent(directory)
+            old = {"type": "card", "actor_id": "worker-c", "job_id": None, "label": "job3", "version": 1,
+                   "fields": {"focus": "old focus", "best": "n1", "held": "h", "failed": "f", "ideas": "i"},
+                   "changed": ["focus", "best", "held", "failed", "ideas"]}
+            with (directory / "ledger.jsonl").open("a") as ledger:
+                ledger.write(json.dumps(old) + "\n")
+            saved = _save(directory, "worker-b", "c1", focus="new focus", asks="need a split", best="ignored")
+            self.assertTrue(saved["ok"])
+            self.assertEqual(orchestration.current_cards(directory)["worker-b"]["fields"],
+                             {"focus": "new focus", "asks": "need a split"})
+            with patch.object(campaign, "run_dir", return_value=directory):
+                shown = "\n".join(proof_reply._card_lines("run-1", "worker-a", {}))
+            self.assertIn("focus: new focus", shown)
+            self.assertIn("asks: need a split", shown)
+            self.assertIn("focus: old focus", shown)
+            for removed in ("best:", "held:", "failed:", "ideas:"):
+                self.assertNotIn(removed, shown)
 
     def test_a_map_is_sent_again_only_when_its_step_table_moves(self):
         def key(*steps, node="n1"):
@@ -110,7 +131,7 @@ class CardDeliveryTests(unittest.TestCase):
         self.assertTrue(proof_reply._map_changed(first, key(("s1", 3.0), ("s3", 1.0))))
         self.assertTrue(proof_reply._map_changed(None, first))
 
-    def test_an_orchestrator_message_stays_open_on_the_worker_until_a_card_changes_held_or_failed(self):
+    def test_an_orchestrator_message_stays_open_on_the_worker_until_a_card_changes(self):
         rows = [{"type": "job_message", "job_id": "j1", "text": "try the n7 shape", "disposition": "sent"}]
         with tempfile.TemporaryDirectory() as tmp, patch.object(orchestration, "_history", side_effect=lambda _d: list(rows)), \
                 patch.object(campaign, "run_dir", return_value=Path(tmp)), \
@@ -118,10 +139,10 @@ class CardDeliveryTests(unittest.TestCase):
                 patch.object(orchestration, "resolve_job", return_value="j1"):
             self.assertEqual(orchestration.open_ask(Path(tmp), "j1"), "try the n7 shape")
             self.assertEqual(proof_reply._open_ask_note("run-1", "worker-a"),
-                             ["Orchestrator asked: try the n7 shape Record its compiled result on your card (held or failed, with the node id)."])
-            rows.append({"type": "card", "job_id": "j1", "changed": ["focus"]})
+                             ["Orchestrator asked: try the n7 shape"])
+            rows.append({"type": "card", "job_id": "j1", "changed": []})
             self.assertIsNotNone(orchestration.open_ask(Path(tmp), "j1"))
-            rows.append({"type": "card", "job_id": "j1", "changed": ["held"]})
+            rows.append({"type": "card", "job_id": "j1", "changed": ["focus"]})
             self.assertIsNone(orchestration.open_ask(Path(tmp), "j1"))
             self.assertEqual(proof_reply._open_ask_note("run-1", "worker-a"), [])
 
@@ -129,7 +150,7 @@ class CardDeliveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
             _seed_parent(directory)
-            _save(directory, "sol", "c1", ideas="try the n7 shape")
+            _save(directory, "sol", "c1", asks="try the n7 shape")
             _save(directory, "worker-a", "c2", focus="own focus")
             _save(directory, "worker-b", "c3", focus="peer focus")
             with patch.object(campaign, "run_dir", return_value=directory):
@@ -140,53 +161,6 @@ class CardDeliveryTests(unittest.TestCase):
             self.assertIn("peer focus", text_lines)
             self.assertNotIn("worker-a card", text_lines)
             self.assertNotIn("own focus", text_lines)
-
-    def test_a_worker_is_told_once_when_its_best_node_is_newer_than_its_card(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp)
-            _seed_parent(directory)
-            _save(directory, "worker-a", "c1", focus="s4 route")
-            node = _node("n83", "s4", 80.0, job_id="job-a")
-            # The node was saved after the card, so it is a new best for this worker.
-            times = {node.proof_id: time.time() + 3600}
-            bucket: dict = {}
-            with patch.object(campaign, "run_dir", return_value=directory), \
-                    patch.object(orchestration, "worker_job_labels", return_value={"worker-a": "job1"}), \
-                    patch.object(orchestration, "resolve_job", return_value="job-a"), \
-                    patch.object(orchestration, "proof_nodes", return_value={node.proof_id: node}), \
-                    patch.object(proof_reply, "_first_saved_times", return_value=times):
-                first = proof_reply._card_stale_note("run-1", "worker-a", bucket)
-                again = proof_reply._card_stale_note("run-1", "worker-a", bucket)
-            self.assertEqual(first, ["Your card predates your nodes n83; update it with what they showed."])
-            self.assertEqual(again, [])
-
-    def test_a_worker_is_reminded_at_most_once_per_five_minutes_and_names_deferred_nodes_later(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp)
-            _seed_parent(directory)
-            _save(directory, "worker-a", "c1", focus="s4 route")
-            first_node = _node("n83", "s4", 80.0, job_id="job-a")
-            second_node = _node("n84", "s4", 90.0, job_id="job-a")
-            second_node.proof_id = "p-n84"
-            nodes = {first_node.proof_id: first_node}
-            times = {"p-n83": time.time() + 3600, "p-n84": time.time() + 7200}
-            clock = {"now": 1_000_000.0}
-            bucket: dict = {}
-            with patch.object(campaign, "run_dir", return_value=directory), \
-                    patch.object(orchestration, "worker_job_labels", return_value={"worker-a": "job1"}), \
-                    patch.object(orchestration, "resolve_job", return_value="job-a"), \
-                    patch.object(orchestration, "proof_nodes", return_value=nodes), \
-                    patch.object(proof_reply, "_first_saved_times", return_value=times), \
-                    patch.object(proof_reply.time, "time", side_effect=lambda: clock["now"]):
-                first = proof_reply._card_stale_note("run-1", "worker-a", bucket)
-                nodes[second_node.proof_id] = second_node
-                clock["now"] += 60
-                within = proof_reply._card_stale_note("run-1", "worker-a", bucket)
-                clock["now"] += 241
-                later = proof_reply._card_stale_note("run-1", "worker-a", bucket)
-            self.assertEqual(first, ["Your card predates your nodes n83; update it with what they showed."])
-            self.assertEqual(within, [])
-            self.assertEqual(later, ["Your card predates your nodes n84; update it with what they showed."])
 
     def test_the_orchestrator_hears_of_a_plateau_once_with_the_other_families(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -231,49 +205,6 @@ class CardDeliveryTests(unittest.TestCase):
         line = proof_reply._plateau_costly(history, node)
         self.assertEqual(line, "Costliest steps of n1: s2 1 tok 200 HB; s3 1 tok 90 HB; s1 1 tok 10 HB.")
         self.assertIsNone(proof_reply._plateau_costly([{"kind": "candidate", "theorem": "demo"}], node))
-
-    def test_the_orchestrator_is_reminded_once_when_the_run_best_is_newer_than_its_card(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp)
-            _seed_parent(directory)
-            _save(directory, "sol", "c1", ideas="try the n7 shape")
-            best = _node("n9", "s4", 90.0)
-            bucket: dict = {}
-            with patch.object(campaign, "run_dir", return_value=directory), \
-                    patch.object(orchestration, "run_best", return_value=best), \
-                    patch.object(proof_reply, "_first_saved_times", return_value={best.proof_id: time.time() + 3600}):
-                first = proof_reply._card_stale_note("run-1", "sol", bucket)
-                again = proof_reply._card_stale_note("run-1", "sol", bucket)
-            with patch.object(campaign, "run_dir", return_value=directory), \
-                    patch.object(orchestration, "run_best", return_value=best), \
-                    patch.object(proof_reply, "_first_saved_times", return_value={best.proof_id: 1.0}):
-                older = proof_reply._card_stale_note("run-1", "sol", {})
-            self.assertEqual(first, ["Your card predates your nodes n9; update it with what they showed."])
-            self.assertEqual(again, [])
-            self.assertEqual(older, [])
-
-    def test_an_axis_island_is_named_its_three_most_recent_fewest_token_nodes(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp)
-            _seed_parent(directory)
-            _save(directory, "worker-a", "c1", focus="shorten the proof")
-            # Token counts fall at n1, n2, n4, n5; n3 and n6 do not lower the island's best.
-            specs = [("n1", 900, 80.0), ("n2", 500, 60.0), ("n3", 700, 95.0), ("n4", 400, 10.0),
-                     ("n5", 300, 20.0), ("n6", 350, 99.0)]
-            nodes = {}
-            times = {}
-            for index, (node_id, tokens, score) in enumerate(specs):
-                node = _node(node_id, "s4", score, job_id="job-a", tokens=tokens)
-                nodes[node.proof_id] = node
-                times[node.proof_id] = time.time() + 3600 + index
-            with patch.object(campaign, "run_dir", return_value=directory), \
-                    patch.object(orchestration, "worker_job_labels", return_value={"worker-a": "job1"}), \
-                    patch.object(orchestration, "resolve_job", return_value="job-a"), \
-                    patch.object(orchestration, "_job_original", return_value={"objective": "tokens"}), \
-                    patch.object(orchestration, "proof_nodes", return_value=nodes), \
-                    patch.object(proof_reply, "_first_saved_times", return_value=times):
-                lines = proof_reply._card_stale_note("run-1", "worker-a", {})
-            self.assertEqual(lines, ["Your card predates your nodes n2, n4, n5; update it with what they showed."])
 
 
 if __name__ == "__main__":

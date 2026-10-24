@@ -2308,13 +2308,13 @@ class SteerAndNoteTests(unittest.TestCase):
             _seed_parent(directory)
             started, _child = self._active_job(directory, "op-card-start")
             job = started["job_id"]
-            first = self._save(directory, "worker-actor", job, "c1", focus="s4 route", failed="grind loops " + "x" * 200)
-            second = self._save(directory, "worker-actor", job, "c2", focus="", held="n7 closes s1")
+            first = self._save(directory, "worker-actor", job, "c1", focus="s4 route", asks="grind loops " + "x" * 200)
+            second = self._save(directory, "worker-actor", job, "c2", focus="", asks="n7 closes s1")
             self.assertEqual((first["version"], second["version"]), (1, 2))
             row = orchestration.current_cards(directory)["worker-actor"]
-            self.assertEqual(row["fields"].keys(), {"failed", "held"})
+            self.assertEqual(row["fields"].keys(), {"asks"})
             self.assertEqual((row["job_id"], row["label"], row["version"], row["changed"]),
-                             (job, "job1", 2, ["focus", "held"]))
+                             (job, "job1", 2, ["focus", "asks"]))
             sol = self._save(directory, "sol", None, "c3", focus="trunk")
             self.assertEqual(orchestration.current_cards(directory)["sol"]["label"], "orchestrator")
             self.assertIsNone(orchestration.current_cards(directory)["sol"]["job_id"])
@@ -2322,8 +2322,8 @@ class SteerAndNoteTests(unittest.TestCase):
             reply = orchestration.await_results(directory, actor_id="sol")
             self.assertEqual(reply["wake_reason"], "card")
             self.assertIn("job1 updated its card (v", team_reply.render("await_results", reply, directory))
-            self._save(directory, "worker-actor", job, "c4", focus="s4 route", best="n7 at 70")
-            self.assertIn("  card: focus: s4 route | best: n7 at 70",
+            self._save(directory, "worker-actor", job, "c4", focus="s4 route", asks="n7 at 70")
+            self.assertIn("  card: focus: s4 route | asks: n7 at 70",
                           team_reply.render("jobs", orchestration.jobs(directory), directory))
 
     def test_card_from_another_job_wakes_an_await_filtered_to_other_jobs(self):
@@ -2350,23 +2350,23 @@ class SteerAndNoteTests(unittest.TestCase):
             directory = Path(tmp)
             _seed_parent(directory)
             started, _child = self._active_job(directory, "op-card-push")
-            self._save(directory, "worker-actor", started["job_id"], "c1", focus="s4 route", best="n7")
-            self._save(directory, "sol", None, "c2", ideas="try the n7 shape elsewhere")
+            self._save(directory, "worker-actor", started["job_id"], "c1", focus="s4 route", asks="n7")
+            self._save(directory, "sol", None, "c2", asks="try the n7 shape elsewhere")
             sol_bucket, worker_bucket = {}, {}
             with patch.object(campaign, "run_dir", return_value=directory):
                 shown = proof_reply._card_lines("run-1", "sol", sol_bucket)
                 self.assertEqual(shown[0], "## Cards")
-                self.assertIn("job1 card v1 (changed: focus, best)", shown)
+                self.assertIn("job1 card v1 (changed: focus, asks)", shown)
                 self.assertIn("  focus: s4 route", shown)
                 self.assertFalse(any("orchestrator card" in line for line in shown))
                 self.assertEqual(proof_reply._card_lines("run-1", "sol", sol_bucket), [])
                 seen = proof_reply._card_lines("run-1", "worker-actor", worker_bucket)
-                self.assertIn("orchestrator card v1 (changed: ideas)", seen)
+                self.assertIn("orchestrator card v1 (changed: asks)", seen)
                 self.assertFalse(any("job1 card" in line for line in seen))
                 self.assertEqual(proof_reply._card_lines("run-1", "worker-actor", worker_bucket), [])
-                self._save(directory, "worker-actor", started["job_id"], "c3", best="n9")
+                self._save(directory, "worker-actor", started["job_id"], "c3", asks="n9")
                 again = proof_reply._card_lines("run-1", "sol", sol_bucket)
-                self.assertIn("job1 card v2 (changed: best)", again)
+                self.assertIn("job1 card v2 (changed: asks)", again)
 
     def test_run_best_fact_is_said_once_per_actor_and_never_to_its_author(self):
         from arena import campaign

@@ -166,7 +166,7 @@ class TextRendererTests(unittest.TestCase):
         }
         self.assertTrue(required <= set(terms))
         denied = re.compile(r"\b(?:" + "|".join(map(re.escape, terms)) + r")\b", re.I)
-        # The team packet uses "idea" in its plain sense: workers' cards carry ideas Sol harvests or seeds.
+        # The team packet names the idea log by that word.
         card_texts = {"packet/team"}
         for key in text.keys():  # noqa: SIM118
             if key in card_texts:
