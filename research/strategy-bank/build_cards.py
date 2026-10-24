@@ -421,6 +421,34 @@ card("helper-must-pay","Keep an auxiliary fact only if it removes more than it a
  at={"opening": "A helper at the start pays only if most later steps use it.",
      "middle": "Count the uses after the helper; two short uses rarely repay a long statement.",
      "closing": "A helper used only by the closing step can nearly always be inlined."})
+card("split-chained-combinators","Split a <;> chain into all_goals lines",
+ "A line chains tactics with <;> (t <;> s <;> u) so that each stage runs on every goal the stage before produced.",
+ "Write each stage on its own line and put all_goals in front of the later stages: t, then all_goals s, then all_goals u. The tactics are the same; each stage is elaborated once over the goal list, and a failing stage is easy to find. Compile it: the result is the same only when t left the goals that s should run on.",
+ "example (a b : ℕ) (h : a < b) : (a ≤ b ∧ a ≠ b) ∧ (a < b + 1 ∧ b ≠ 0) := by\n  refine ⟨?_, ?_⟩ <;> refine ⟨?_, ?_⟩ <;> omega",
+ "example (a b : ℕ) (h : a < b) : (a ≤ b ∧ a ≠ b) ∧ (a < b + 1 ∧ b ≠ 0) := by\n  refine ⟨?_, ?_⟩\n  all_goals refine ⟨?_, ?_⟩\n  all_goals omega",
+ tags=["<;>","all_goals"], source="public:general-practice",
+ notes="Goal scheduling form seen to win in earlier runs; no mined move class, so no measured effect. all_goals stops at the first goal that fails, <;> does the same; use any_goals when some goals may fail.")
+card("two-pass-closing","Close in two passes: any_goals assumption first, then split what is left",
+ "A <;> line tries first | assumption | (a split followed by assumption) on every goal, so each goal pays for the failed alternatives before the one that closes it.",
+ "Run any_goals assumption to close every goal a hypothesis already proves, then all_goals with the splitting tactic on the remaining goals, then all_goals assumption. Cheap closers run first and the failing alternatives disappear.",
+ "example (a b c : ℕ) (h : a ≤ b) (h2 : b ≤ c) : a ≤ b ∧ (b ≤ c ∧ a ≤ c) := by\n  refine ⟨?_, ?_⟩ <;> first | exact h | (refine ⟨?_, ?_⟩ <;> omega)",
+ "example (a b c : ℕ) (h : a ≤ b) (h2 : b ≤ c) : a ≤ b ∧ (b ≤ c ∧ a ≤ c) := by\n  refine ⟨?_, ?_⟩\n  any_goals exact h\n  all_goals refine ⟨?_, ?_⟩\n  all_goals omega",
+ tags=["any_goals","all_goals","first","assumption"], source="public:general-practice",
+ notes="Goal scheduling form seen to win in earlier runs; no mined move class, so no measured effect. any_goals fails when no goal succeeds, so drop it when nothing can close in the first pass.")
+card("choose-then-subst","Destructure an existence fact with choose and subst instead of obtain with rfl",
+ "obtain ⟨x, hx, rfl⟩ := f _ _ ‹_› (or with explicit arguments) both destructures an existential and substitutes the equation it carries.",
+ "Write choose x hx h using f .. and then subst h on its own line. The same variables and facts result, but the substitution is a separate step, which can be cheaper to elaborate and lets you leave h in place when substitution is not needed.",
+ "example (f : ∀ a : ℕ, 0 < a → ∃ x, x < a ∧ a = x + 1) (n : ℕ) (hn : 0 < n)\n    (p : ℕ → Prop) (hp : ∀ x, p (x + 1)) : p n := by\n  obtain ⟨x, hx, rfl⟩ := f n hn\n  exact hp x",
+ "example (f : ∀ a : ℕ, 0 < a → ∃ x, x < a ∧ a = x + 1) (n : ℕ) (hn : 0 < n)\n    (p : ℕ → Prop) (hp : ∀ x, p (x + 1)) : p n := by\n  choose x hx h using f n hn\n  subst h\n  exact hp x",
+ tags=["obtain","choose","subst","rfl"], source="public:general-practice",
+ notes="Seen to win in earlier runs; no mined move class, so no measured effect. choose names the witness and facts in the order of the existential; check the names against the facts you use later.")
+card("witness-fixing-goal-first","Close the goal that fixes a metavariable witness before the others",
+ "A step spells out a witness or argument (apply f (m := w), refine with a named hole) only so that later assumption or exact calls unify.",
+ "Leave the witness open and order the goals: close the one whose proof determines the witness first (swap or rotate_left to bring it forward, or exact it), then assumption on the others finds the instantiated statement. Drop the spelled witness.",
+ "example (a b c : ℕ) (hx : a ≤ c) (h1 : a ≤ b) (h2 : b ≤ c) : a ≤ c := by\n  apply Nat.le_trans (m := b)\n  all_goals assumption",
+ "example (a b c : ℕ) (hx : a ≤ c) (h1 : a ≤ b) (h2 : b ≤ c) : a ≤ c := by\n  apply Nat.le_trans\n  rotate_left\n  · exact h2\n  · assumption",
+ tags=["apply","assumption","rotate_left"], source="public:general-practice",
+ notes="Goal scheduling form seen to win in earlier runs; no mined move class, so no measured effect. Goal order after apply can change between releases; check it, or name the goal with case.")
 GOAL = {"simp-to-simp-only": ["List.length", "List.append"], "simp-only-to-simp": ["List.length"],
         "grind-to-explicit": ["List.length"], "trim-simp-args": ["List.length", "List.append"],
         "swap-to-library-lemma": ["List.append", "∈"],
@@ -429,6 +457,7 @@ GOAL = {"simp-to-simp-only": ["List.length", "List.append"], "simp-only-to-simp"
 
 import sys
 sys.path.insert(0, str(D))
+import replaces
 VER = json.load(open(D / "verify.json")) if (D / "verify.json").exists() else {}
 def sign(down, up, n):
     if n < 3: return "unknown"
@@ -460,8 +489,9 @@ for c in C:
     c["version_notes"] = c.pop("notes") or "Stable across 4.25-4.33 as far as known."
     pool.append(c)
 for i, c in enumerate(pool, 1):
+    c["replaces"] = replaces.REPLACES.get(c["id"]) or replaces.derive(c["before"], c["after"])
     c["id"] = f"S{i:02d}-{c['id']}"
-order = ["id","title","tags","goal_tags","at","when","how","before","after","effect","verified","version_notes","move_class","source"]
+order = ["id","title","tags","goal_tags","replaces","at","when","how","before","after","effect","verified","version_notes","move_class","source"]
 for c in pool: c["verified"] = {f"v{tc}": v[c["id"]] for tc, v in VER.items() if c["id"] in v}
 pool = [{k:c[k] for k in order} for c in pool]
 def emit(v, ind=0):

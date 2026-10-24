@@ -10,6 +10,11 @@
     "anonymous-constructor"
    ],
    "goal_tags": [],
+   "replaces": [
+    "(?m)\\b(?:obtain|rcases)\\b[^\\n:]*:=\\s*[\\w']+\\s*$",
+    "(?m)\\brcases\\s+[\\w']+\\s+with\\b",
+    "\\bcases\\s+[\\w']+\\s+with\\b"
+   ],
    "at": {},
    "when": "A hypothesis of type A ∧ B, A ↔ B or ∃ is destructured, and each component is used once.",
    "how": "Use h.1 / h.2 / h.mp / h.mpr / h.left directly where the component is needed. For ∃, keep one obtain only if the witness is used several times.",
@@ -43,6 +48,9 @@
     "rcases"
    ],
    "goal_tags": [],
+   "replaces": [
+    "(?m)^\\s*intro\\b[^\\n]*\\n\\s*(?:obtain|rcases)\\b"
+   ],
    "at": {},
    "when": "Goal starts with intro followed by rcases/obtain on the introduced hypothesis.",
    "how": "Use rintro with the pattern. rintro ⟨a, rfl⟩ also substitutes equalities on the spot.",
@@ -76,6 +84,9 @@
     "by"
    ],
    "goal_tags": [],
+   "replaces": [
+    "(?m)^\\s*have\\s+[\\w']+\\s*:"
+   ],
    "at": {},
    "when": "have h : T := by tac, then exactly one later use as an argument.",
    "how": "Pass (by tac) in the argument position; the expected type is then known, so T is not written.",
@@ -109,6 +120,9 @@
     "show"
    ],
    "goal_tags": [],
+   "replaces": [
+    "(?s)\\bhave\\s+[\\w']+\\s*:.*?\\n\\s*rw\\s*\\["
+   ],
    "at": {},
    "when": "have h : a = b := by tac; rw [h] with no other use of h.",
    "how": "rw [show a = b by tac] (or from term). The statement can often be partly elided: show _ = b.",
@@ -141,6 +155,9 @@
     "omega"
    ],
    "goal_tags": [],
+   "replaces": [
+    "(?ms)^\\s*have\\b.*?^\\s*have\\b"
+   ],
    "at": {},
    "when": "Several consecutive have lines each feed only the next one or the final close.",
    "how": "Fold them into the final call: pass them as terms, give them to simp/omega/linarith as arguments, or let a closer find them from context.",
@@ -174,6 +191,9 @@
     "generalize"
    ],
    "goal_tags": [],
+   "replaces": [
+    "(?m)^\\s*(?:set|let|letI|generalize)\\b"
+   ],
    "at": {},
    "when": "A local abbreviation is introduced to shorten text, but is used fewer than about three times.",
    "how": "Substitute the definition back, or delete the abbreviation if the closing tactic does not need it. Names count as one token, so an abbreviation only pays when it replaces a long expression used often.",
@@ -209,6 +229,9 @@
     "List.length",
     "List.append"
    ],
+   "replaces": [
+    "\\bsimp(?![\\w?!'])(?!\\s+only)"
+   ],
    "at": {},
    "when": "A non-terminal simp or simp [..] is expensive (the profiler shows it) and runs on a big context.",
    "how": "Run simp? once, paste the simp only list. The list adds tokens but removes simp's search. Use when heartbeat weight dominates.",
@@ -242,6 +265,9 @@
    "goal_tags": [
     "List.length"
    ],
+   "replaces": [
+    "\\bsimp\\s+only\\s*\\[[^\\]]{40,}\\]"
+   ],
    "at": {},
    "when": "simp only [long list] where bare simp closes the goal; the list costs many tokens.",
    "how": "Try plain simp (or simp with one or two lemmas). Keep it only if heartbeats do not rise by more than the token gain is worth.",
@@ -273,6 +299,10 @@
     "grind"
    ],
    "goal_tags": [],
+   "replaces": [
+    "<;>\\s*(?:omega|simp_all|simp|linarith|aesop)\\b",
+    "(?m)^\\s*(?:constructor|split)\\s*$"
+   ],
    "at": {},
    "when": "Goal after intros is first-order with equalities, linear arithmetic, or constructor injectivity; the manual proof is several lines.",
    "how": "Try grind, then grind only [lemmas] from grind? to bound cost. Tokens fall, but grind can cost much more search than the steps it replaces; check the profile before and after.",
@@ -307,6 +337,9 @@
    "goal_tags": [
     "List.length"
    ],
+   "replaces": [
+    "\\bgrind\\b"
+   ],
    "at": {},
    "when": "grind closes a goal but costs many heartbeats or fails on another toolchain.",
    "how": "Read grind? output; use grind only [..] or replace with omega/simp_all/exact of the lemma it used.",
@@ -339,6 +372,10 @@
     "arith"
    ],
    "goal_tags": [],
+   "replaces": [
+    "\\b(?:le_trans|lt_of_lt_of_le|lt_of_le_of_lt|Nat\\.succ_le_of_lt|Nat\\.le_of_lt_succ|add_lt_add|add_le_add)\\b",
+    "\\bcalc\\b"
+   ],
    "at": {},
    "when": "A chain of le_trans / add_lt_add / Nat.* lemma steps or calc over linear arithmetic with +, -, *const, /const, %const, min, max.",
    "how": "One omega. If context is large, clear unrelated hypotheses first, since omega reads all of them.",
@@ -372,6 +409,9 @@
     "positivity"
    ],
    "goal_tags": [],
+   "replaces": [
+    "\\b(?:nlinarith|linarith)\\b"
+   ],
    "at": {},
    "when": "linarith or nlinarith on a goal that is linear over ℕ/ℤ, or a positivity/monotonicity claim.",
    "how": "Use omega for linear integer goals; positivity for 0 < / 0 ≤ of products, sums, powers; gcongr for monotone shapes.",
@@ -404,6 +444,9 @@
     "heartbeats"
    ],
    "goal_tags": [],
+   "replaces": [
+    "\\baesop\\b"
+   ],
    "at": {},
    "when": "aesop closes a goal but is slow or its search is opaque.",
    "how": "Use aesop? and paste the Try this script, then shorten with simp_all or exact.",
@@ -435,6 +478,9 @@
     "rw"
    ],
    "goal_tags": [],
+   "replaces": [
+    "(?s)\\brw\\s*\\[[^\\]]*\\]\\s*(?:\\n\\s*|;\\s*)rw\\s*\\["
+   ],
    "at": {},
    "when": "Several rw lines in a row on the same goal or hypothesis.",
    "how": "One rw [a, b, c]. Add at h ⊢ to hit several locations at once.",
@@ -468,6 +514,10 @@
     "binders"
    ],
    "goal_tags": [],
+   "replaces": [
+    "(?s)\\brw\\s*\\[\\s*([\\w.']+)[^\\]]*\\].*?\\brw\\s*\\[\\s*\\1\\b",
+    "\\b(?:nth_rewrite|nth_rw|conv)\\b"
+   ],
    "at": {},
    "when": "A rw chain repeats one rewrite across many occurrences, or needs conv / nth_rewrite.",
    "how": "simp only [lemma] rewrites all instances and goes under binders.",
@@ -500,6 +550,9 @@
     "transport"
    ],
    "goal_tags": [],
+   "replaces": [
+    "\\brw\\s*\\[[^\\]]*\\](?:\\s*\\n\\s*|\\s*;\\s*)exact\\b"
+   ],
    "at": {},
    "when": "rw [h]; exact t where the rewrite only changes the goal's type.",
    "how": "h ▸ t, or (h ▸ t : T). Test the motive; if it fails, use rwa [h].",
@@ -532,6 +585,10 @@
     "simpa"
    ],
    "goal_tags": [],
+   "replaces": [
+    "\\b(?:rw|simp)\\b[^\\n]*\\bat\\s+([\\w']+)[^\\n]*(?:\\n\\s*|;\\s*)exact\\s+\\1\\b",
+    "\\brw\\s*\\[[^\\]]*\\](?:\\s*\\n\\s*|\\s*;\\s*)assumption\\b"
+   ],
    "at": {},
    "when": "rw/simp at h followed by exact h, or rw then assumption.",
    "how": "rwa [..] at h, or simpa [..] using h.",
@@ -564,6 +621,9 @@
     "fun"
    ],
    "goal_tags": [],
+   "replaces": [
+    "(?m)^\\s*intro\\b[^\\n]*\\n\\s*exact\\b"
+   ],
    "at": {},
    "when": "Goal is ∀ / → and the proof is intro x y followed by one exact.",
    "how": "Write fun x y => term, or fun ⟨a, b⟩ => .. for patterns.",
@@ -596,6 +656,10 @@
     "anonymous-constructor"
    ],
    "goal_tags": [],
+   "replaces": [
+    "(?m)^\\s*constructor\\s*$",
+    "\\brefine\\s*⟨[^\\n]*\\?_"
+   ],
    "at": {},
    "when": "Goal is a structure, ∧, ↔ or ∃ and every field has a one-line proof.",
    "how": "⟨a, b⟩ in term mode; (by tac) per field if needed. For ↔ use ⟨fun h => .., fun h => ..⟩.",
@@ -630,6 +694,9 @@
     "exacts"
    ],
    "goal_tags": [],
+   "replaces": [
+    "(?ms)^\\s*[·•].*?^\\s*[·•]"
+   ],
    "at": {},
    "when": "Several sibling goals are closed by the same tactic or by one-line exacts.",
    "how": "t <;> s runs s on every goal from t; exacts [a, b]; all_goals s for leftover goals.",
@@ -662,6 +729,9 @@
     "exacts"
    ],
    "goal_tags": [],
+   "replaces": [
+    "(?ms)^\\s*[·•]\\s*exact\\b.*?^\\s*[·•]\\s*exact\\b"
+   ],
    "at": {},
    "when": "Bullet blocks with a single short tactic each.",
    "how": "exacts [..], or a flat sequence of exact with focusing handled by the tactic (case _ or no focus) when only one goal remains each time.",
@@ -695,6 +765,9 @@
     "unification"
    ],
    "goal_tags": [],
+   "replaces": [
+    "\\(\\s*[\\w']+\\s*:=\\s*[^)]+\\)"
+   ],
    "at": {},
    "when": "A lemma application spells arguments the unifier can infer from hypotheses or the goal.",
    "how": "Use _ for them, or drop (x := ..) named args. Keep the ones the unifier cannot solve (compile to check).",
@@ -727,6 +800,11 @@
     "binder"
    ],
    "goal_tags": [],
+   "replaces": [
+    "\\bfun\\s*\\(\\s*[\\w']+\\s*:",
+    "\\(\\s*[\\w']+\\s*:\\s*[^()]+\\)\\s*(?:=>|↦)",
+    "\\(\\s*\\d+\\s*:\\s*\\S+\\)"
+   ],
    "at": {},
    "when": "(x : T) casts, (f : A → B) annotations, binder types in fun/∀ that follow from the expected type.",
    "how": "Delete, recompile. Keep numerals ascribed only when elaboration becomes ambiguous (ℕ vs ℤ vs ℝ).",
@@ -759,6 +837,9 @@
     "change"
    ],
    "goal_tags": [],
+   "replaces": [
+    "(?m)^\\s*(?:show|change)\\b"
+   ],
    "at": {},
    "when": "show T or change T followed by tactics that work on the original goal form.",
    "how": "Delete. Keep when the later tactic depends on the unfolded form; then prefer a term ascription (h : T).",
@@ -792,6 +873,11 @@
     "rfl"
    ],
    "goal_tags": [],
+   "replaces": [
+    "\\bexact\\s*\\(\\s*by\\b",
+    "\\bby\\s+exact\\b",
+    ":=\\s*by\\s+(?:rfl|exact)\\b"
+   ],
    "at": {},
    "when": "exact (by tac), by exact t, by rfl, `by simpa using h` where h already has the type.",
    "how": "Write tac directly, or the bare term t / rfl / h.",
@@ -824,6 +910,10 @@
     "apply"
    ],
    "goal_tags": [],
+   "replaces": [
+    "\\bexact\\b[^\\n]*\\(by\\b[^\\n]*\\(by\\b",
+    "(?m)^\\s*apply\\b[^\\n]*\\n\\s*apply\\b"
+   ],
    "at": {},
    "when": "exact f a b (by tac1) (by tac2) or apply f followed by a goal-by-goal rewrite.",
    "how": "refine f a b ?_ ?_ <;> tac, or refine f (?_ : T) when the type of a middle step needs naming once.",
@@ -856,6 +946,9 @@
     "exact"
    ],
    "goal_tags": [],
+   "replaces": [
+    "(?m)^\\s*apply\\b[^\\n]*(?:\\n\\s*[·•]?\\s*|;\\s*)(?:exact|assumption)\\b"
+   ],
    "at": {},
    "when": "apply followed by one exact (or assumption).",
    "how": "exact f h (or exact f ‹_›).",
@@ -890,6 +983,11 @@
     "rcases"
    ],
    "goal_tags": [],
+   "replaces": [
+    "(?m)^\\s*\\|\\s*[\\w.]+[^\\n]*=>\\s*$",
+    "(?ms)\\bcases\\b.*\\bcases\\b",
+    "\\b(?:cases|induction)\\s+[\\w']+"
+   ],
    "at": {},
    "when": "Nested cases / induction / bullets, each case short.",
    "how": "match n with | 0 => .. | k + 1 => .. ; rcases n with _ | _ | n ; or induction n <;> simp_all for uniform cases.",
@@ -921,6 +1019,9 @@
     "induction"
    ],
    "goal_tags": [],
+   "replaces": [
+    "\\binduction\\b"
+   ],
    "at": {},
    "when": "induction/cases whose branches are all closed by the same decision procedure.",
    "how": "Delete induction, call the closer on the whole goal; or use a library recursion principle.",
@@ -954,6 +1055,10 @@
     "contrapose"
    ],
    "goal_tags": [],
+   "replaces": [
+    "\\bby_contra\\b(?!!)[^\\n]*(?:\\n\\s*|;\\s*)push_neg",
+    "\\bpush_neg\\b"
+   ],
    "at": {},
    "when": "by_contra h; push_neg at h, or by_contra then simp at h.",
    "how": "by_contra! h (and contrapose! for contrapositive).",
@@ -986,6 +1091,9 @@
     "trans"
    ],
    "goal_tags": [],
+   "replaces": [
+    "\\bcalc\\b"
+   ],
    "at": {},
    "when": "calc with two or three steps, or steps that are each closed by a one-line lemma.",
    "how": "Use .trans / le_trans / lt_of_lt_of_le chains, or one omega/nlinarith/positivity for the whole inequality. Heartbeats can fall because calc rechecks every _ line.",
@@ -1018,6 +1126,9 @@
     "ring"
    ],
    "goal_tags": [],
+   "replaces": [
+    "(?s)\\bcalc\\b.*\\n\\s*_\\s*[=≤<≥>].*\\n\\s*_\\s*[=≤<≥>]"
+   ],
    "at": {},
    "when": "Two adjacent calc steps use the same relation and the first is by rfl/simp/ring.",
    "how": "Merge them into one step whose proof is one tactic (ring, omega, simp).",
@@ -1050,6 +1161,10 @@
     "decide"
    ],
    "goal_tags": [],
+   "replaces": [
+    "\\bsimp\\s+arith\\b",
+    "(?ms)^\\s*[·•]\\s*(?:rfl|norm_num|decide)\\b.*?^\\s*[·•]\\s*(?:rfl|norm_num|decide)\\b"
+   ],
    "at": {},
    "when": "Goals about literals, small bounded Finset/Fin/Nat facts, divisibility of numerals.",
    "how": "norm_num [defs] in one call; decide for tiny decidable props; omega for linear.",
@@ -1082,6 +1197,11 @@
     "norm_cast"
    ],
    "goal_tags": [],
+   "replaces": [
+    "\\bNat\\.cast_\\w+",
+    "\\bInt\\.(?:ofNat|natCast|cast)_\\w+",
+    "\\bInt\\.coe_nat\\w*"
+   ],
    "at": {},
    "when": "Goal mixes ↑n casts and chains of Nat.cast_add / Int.natCast_* rewrites.",
    "how": "exact_mod_cast h; push_cast; norm_cast at h ⊢.",
@@ -1115,6 +1235,11 @@
     "gcongr"
    ],
    "goal_tags": [],
+   "replaces": [
+    "\\bcongrArg\\b",
+    "\\bcongrFun\\b",
+    "\\bcongr\\b(?!!)"
+   ],
    "at": {},
    "when": "Goal differs from a known fact only in a subterm.",
    "how": "convert h using 2 leaves just the differing subgoals; congr! and gcongr for function applications and monotone shapes.",
@@ -1147,6 +1272,10 @@
     "use"
    ],
    "goal_tags": [],
+   "replaces": [
+    "\\brefine\\s*⟨[^\\n]*\\?_",
+    "\\bexists\\b"
+   ],
    "at": {},
    "when": "refine ⟨w, ?_⟩ then a closing tactic, or exists w.",
    "how": "use w closes trivial residual goals automatically (rfl, trivial).",
@@ -1179,6 +1308,10 @@
     "funext"
    ],
    "goal_tags": [],
+   "replaces": [
+    "\\b(?:ext|funext)\\b",
+    "\\b(?:Subtype|Fin)\\.ext\\b"
+   ],
    "at": {},
    "when": "ext x followed by rfl/simp, or Subtype.ext/Fin.ext before simp.",
    "how": "Delete the ext and call simp/rfl on the equation, or use funext _ <;> exact.",
@@ -1213,6 +1346,9 @@
     "List.length",
     "List.append"
    ],
+   "replaces": [
+    "\\bsimp(?:_all)?\\s*(?:only\\s*)?\\[[^\\]]*,[^\\]]*,[^\\]]*\\]"
+   ],
    "at": {},
    "when": "simp [a, b, c, d] where some lemmas are already simp lemmas or unused.",
    "how": "Remove one lemma at a time and recompile (a linter flags unused simp args). Fewer tokens, usually fewer heartbeats.",
@@ -1245,6 +1381,9 @@
     "simp [*]"
    ],
    "goal_tags": [],
+   "replaces": [
+    "(?ms)^\\s*[·•]\\s*(?:simp|rw)\\b.*?^\\s*[·•]\\s*(?:simp|rw)\\b"
+   ],
    "at": {},
    "when": "Many residual goals each closed by a short simp or assumption.",
    "how": "all_goals simp [*] once at the end, or simp_all.",
@@ -1277,6 +1416,9 @@
     "gcongr"
    ],
    "goal_tags": [],
+   "replaces": [
+    "\\b(?:sq_nonneg|mul_pos|add_pos|pow_pos|mul_nonneg|add_nonneg|pow_le_pow_left|mul_le_mul)\\b"
+   ],
    "at": {},
    "when": "0 < e, 0 ≤ e, or f x ≤ f y with the same outer shape.",
    "how": "positivity; gcongr (then side goals ?_ are usually assumptions).",
@@ -1309,6 +1451,10 @@
     "eta"
    ],
    "goal_tags": [],
+   "replaces": [
+    "\\bfun\\s+([\\w']+)\\s*(?:=>|↦)\\s*[\\w.]+\\s+\\1\\b",
+    "\\bfun\\s+[\\w']+\\s*(?:=>|↦)\\s*[\\w']+\\s*[+\\-*]"
+   ],
    "at": {},
    "when": "fun x => f x, fun x => x + 1, fun x => g (h x).",
    "how": "f, (· + 1), g ∘ h.",
@@ -1341,6 +1487,9 @@
     "<|"
    ],
    "goal_tags": [],
+   "replaces": [
+    "\\([^()\\n]*\\([^()\\n]*\\([^()\\n]*\\)[^()\\n]*\\)[^()\\n]*\\)"
+   ],
    "at": {},
    "when": "Nested applications ending in a long argument; each paren pair costs 2 tokens.",
    "how": "f <| g <| x, or x |> f. Do not mix with dot-notation chains.",
@@ -1376,6 +1525,10 @@
     "List.append",
     "∈"
    ],
+   "replaces": [
+    "\\bsimp\\b[^\\n]*\\[[^\\]]*\\bmem_\\w+",
+    "\\bFinset\\.card_\\w+"
+   ],
    "at": {},
    "when": "Several steps recompute a fact (monotonicity, membership, cardinality, sum) that has a named lemma.",
    "how": "Search with exact? / apply? / rw? on the sub-goal, or grep the lemma namespace; use the lemma directly. Prefer short, stable names.",
@@ -1408,6 +1561,12 @@
     "linter"
    ],
    "goal_tags": [],
+   "replaces": [
+    "\\bskip\\b",
+    "(?m)^\\s*clear\\b",
+    "\\btry\\s+\\w+",
+    "\\bhave\\s+_\\b"
+   ],
    "at": {},
    "when": "A step is unused (have never referenced, tactic after goals are closed, simp that made no progress, redundant clear or intro).",
    "how": "Delete it and recompile; use unused-variable and unusedTactic linters, or bisect the steps.",
@@ -1440,6 +1599,10 @@
     "compat"
    ],
    "goal_tags": [],
+   "replaces": [
+    "\\bgrind\\b",
+    "\\bnlinarith\\b"
+   ],
    "at": {},
    "when": "A proof that is fragile across Lean 4.25-4.33 (grind, simp lists, renamed lemmas).",
    "how": "first | omega | simp | grind, cheapest first (failed branches still cost heartbeats).",
@@ -1473,6 +1636,10 @@
     "heartbeats"
    ],
    "goal_tags": [],
+   "replaces": [
+    "\\bsimp_all\\b[^\\n]*<;>",
+    "<;>\\s*omega\\b"
+   ],
    "at": {},
    "when": "omega or simp_all is slow because the context is large.",
    "how": "clear h1 h2 .. or use simp only [h]; omega only reads relevant facts when the context is small.",
@@ -1506,6 +1673,12 @@
     "defeq"
    ],
    "goal_tags": [],
+   "replaces": [
+    "\\bexact\\s+rfl\\b",
+    "(?m)^\\s*rfl\\s*$",
+    "\\bby\\s+rfl\\b",
+    "\\bunfold\\b"
+   ],
    "at": {},
    "when": "rfl or exact is slow because defeq checking unfolds definitions.",
    "how": "with_reducible rfl / with_reducible exact h; if it fails, the unfolding was needed.",
@@ -1540,6 +1713,9 @@
    "goal_tags": [
     "Finset.range"
    ],
+   "replaces": [
+    "\\bdecide\\b"
+   ],
    "at": {},
    "when": "decide on Nat/Finset/Fin goals blows up the kernel.",
    "how": "Use norm_num / simp with simprocs, or reduce to a smaller range before decide.",
@@ -1572,6 +1748,10 @@
     "compat"
    ],
    "goal_tags": [],
+   "replaces": [
+    "(?m)^\\s*open\\b",
+    "\\bopen\\s+\\w+\\s+in\\b"
+   ],
    "at": {},
    "when": "A proof opens a namespace or relies on short ambiguous names.",
    "how": "Use Nat.lt_irrefl rather than lt_irrefl guessed from open; 4.33 made some Nat.* lemmas protected.",
@@ -1604,6 +1784,10 @@
     "compat"
    ],
    "goal_tags": [],
+   "replaces": [
+    "\\brename_i\\b",
+    "✝"
+   ],
    "at": {},
    "when": "rename_i, a✝ names, case tags after induction or cases.",
    "how": "Use rcases/obtain with explicit patterns or ‹T› / assumption.",
@@ -1635,6 +1819,9 @@
     "assumption"
    ],
    "goal_tags": [],
+   "replaces": [
+    "(?m)\\bexact\\s+h[\\w']*\\s*$"
+   ],
    "at": {},
    "when": "A named hypothesis is used once and its name was introduced only for that.",
    "how": "‹T› or assumption; naming in intro becomes _.",
@@ -1666,6 +1853,9 @@
     "dot-notation"
    ],
    "goal_tags": [],
+   "replaces": [
+    "\\b(?:Or\\.inl|Or\\.inr|Exists\\.intro|Eq\\.refl|Eq\\.symm|Eq\\.trans|And\\.intro|Iff\\.intro)\\b"
+   ],
    "at": {},
    "when": "Expected type is known and constructor names are namespaced.",
    "how": ".inl .inr .intro .refl .symm .trans instead of Or.inl, Exists.intro, Eq.refl.",
@@ -1698,6 +1888,11 @@
     "Exists.imp"
    ],
    "goal_tags": [],
+   "replaces": [
+    "(?m)^\\s*\\|\\s*in[lr]\\b",
+    "\\brcases\\b[^\\n]*\\bwith\\b\\s*\\(?[\\w']+\\)?\\s*\\|",
+    "\\bOr\\.elim\\b"
+   ],
    "at": {},
    "when": "Goal maps a disjunction/conjunction/existential to another with a per-case function.",
    "how": "Or.imp, And.imp, Exists.imp, Or.elim, Iff.trans, Function.comp.",
@@ -1729,6 +1924,9 @@
     "induction"
    ],
    "goal_tags": [],
+   "replaces": [
+    "\\binduction\\b"
+   ],
    "at": {},
    "when": "Induction starts at a base other than 0, or over a well-founded order, or needs strong hypotheses.",
    "how": "Nat.le_induction, Nat.strong_induction_on, Nat.twoStepInduction, List.rec-style via induction ... generalizing.",
@@ -1761,6 +1959,9 @@
     "show"
    ],
    "goal_tags": [],
+   "replaces": [
+    "(?s)\\bhave\\s+[\\w']+\\s*:[^\\n]*=[^\\n]*\\n\\s*rw\\s*\\[\\s*[\\w']+\\s*\\]"
+   ],
    "at": {},
    "when": "A rewrite needs a one-off equation proved by a short tactic.",
    "how": "rw [show _ = _ by tac] or rw [h (by omega)].",
@@ -1793,6 +1994,11 @@
     "by_cases"
    ],
    "goal_tags": [],
+   "replaces": [
+    "\\bif_pos\\b",
+    "\\bif_neg\\b",
+    "\\bby_cases\\b"
+   ],
    "at": {},
    "when": "by_cases c followed by rw [if_pos]/[if_neg] in each branch.",
    "how": "split_ifs <;> omega, or simp [h] with the decision in context.",
@@ -1825,6 +2031,10 @@
     "Nat"
    ],
    "goal_tags": [],
+   "replaces": [
+    "(?ms)\\bcases\\b.*\\bcases\\b.*\\bcases\\b",
+    "\\|\\s*(?:Nat\\.)?succ\\b"
+   ],
    "at": {},
    "when": "Nested cases on n for 0, 1, 2, n+3.",
    "how": "rcases n with _ | _ | _ | n, then all_goals omega / simp, or match with | 0 | 1 => .. .",
@@ -1861,6 +2071,9 @@
     "Finset.range",
     "∑"
    ],
+   "replaces": [
+    "\\bFinset\\.(?:sum|prod)_\\w+"
+   ],
    "at": {},
    "when": "A Finset sum identity is proved by induction on the index set.",
    "how": "simp [Finset.sum_range_succ] for small concrete ranges; Finset.sum_comm / Finset.sum_congr / Finset.sum_le_sum for structure.",
@@ -1893,6 +2106,9 @@
     "continuity"
    ],
    "goal_tags": [],
+   "replaces": [
+    "\\b(?:continuous_\\w+|Continuous\\w*\\.\\w+|measurable_\\w+|Measurable\\w*\\.\\w+|differentiable_\\w+)"
+   ],
    "at": {},
    "when": "Continuity / measurability / differentiability / monotonicity side goals proved by lemma threading.",
    "how": "fun_prop, continuity, measurability, positivity, bound.",
@@ -1924,6 +2140,9 @@
     "simpa"
    ],
    "goal_tags": [],
+   "replaces": [
+    "\\bsimp\\b[^\\n]*\\bat\\s+([\\w']+)[^\\n]*(?:\\n\\s*|;\\s*)exact\\s+\\1\\b"
+   ],
    "at": {},
    "when": "have h := ..; simp at h; exact h",
    "how": "simpa using term.",
@@ -1956,6 +2175,9 @@
     "location"
    ],
    "goal_tags": [],
+   "replaces": [
+    "(?m)^\\s*(simp|norm_num|rw)\\b[^\\n]*\\bat\\s+[\\w']+\\s*$\\n\\s*\\1\\b[^\\n]*\\bat\\b"
+   ],
    "at": {},
    "when": "The same simp/rw/norm_num is applied to several hypotheses in turn.",
    "how": "simp at h1 h2 ⊢, rw [e] at *, norm_num at h ⊢.",
@@ -1987,6 +2209,11 @@
     "subst"
    ],
    "goal_tags": [],
+   "replaces": [
+    "\\brw\\s*\\[\\s*←?\\s*h[\\w']*\\s*\\]",
+    "\\bobtain\\b[^\\n]*\\brfl\\b",
+    "\\brcases\\b[^\\n]*\\brfl\\b"
+   ],
    "at": {},
    "when": "An equation x = e is used only to rewrite everywhere.",
    "how": "subst or rintro rfl; then every later mention disappears.",
@@ -2021,6 +2248,11 @@
    "goal_tags": [
     "List.length"
    ],
+   "replaces": [
+    "\\bunfold\\b",
+    "\\bdsimp\\b",
+    "(?m)^\\s*simp\\s*$"
+   ],
    "at": {},
    "when": "Goal is a unfolding of a definition or a computation on literals.",
    "how": "rfl, or exact of the term; cheaper than simp/unfold.",
@@ -2053,6 +2285,9 @@
     "ladder"
    ],
    "goal_tags": [],
+   "replaces": [
+    "\\b(?:grind|aesop|nlinarith)\\b"
+   ],
    "at": {},
    "when": "Any slow step; use the profiler to locate it.",
    "how": "Try in order: exact/rfl, rw, simp only, omega, simp, norm_num, nlinarith, aesop, grind. Use the cheapest that closes it.",
@@ -2084,6 +2319,10 @@
     "symm"
    ],
    "goal_tags": [],
+   "replaces": [
+    "\\brw\\s*\\[\\s*←",
+    "\\bexact\\b[^\\n]*\\.symm\\b"
+   ],
    "at": {},
    "when": "rw [← h] then exact, or exact h.symm after rewriting.",
    "how": "Pass h.symm to the term that needs it.",
@@ -2116,6 +2355,9 @@
     "fin_cases"
    ],
    "goal_tags": [],
+   "replaces": [
+    "(?ms)\\bcases\\b.*\\bcases\\b"
+   ],
    "at": {},
    "when": "A bounded variable is split by repeated cases.",
    "how": "interval_cases x <;> simp_all, fin_cases i <;> simp, or decide.",
@@ -2149,6 +2391,9 @@
     "omega"
    ],
    "goal_tags": [],
+   "replaces": [
+    "(?m)^\\s*(?:constructor|apply|refine)\\b[^\\n]*\\n(?:\\s*[·•][^\\n]*\\n?){2,}"
+   ],
    "at": {},
    "when": "The final 2-4 lines of a proof all do arithmetic or logic simplification of the same shape.",
    "how": "Delete from the bottom up, replace by omega / simp_all / grind / tauto and recompile; stop at the first failure.",
@@ -2181,6 +2426,9 @@
     "generalizing"
    ],
    "goal_tags": [],
+   "replaces": [
+    "\\binduction\\b(?![^\\n]*\\bgeneralizing\\b)"
+   ],
    "at": {},
    "when": "An induction fails or needs an extra have in each step.",
    "how": "induction n generalizing m, so the hypothesis covers all m; delete side lemmas.",
@@ -2212,6 +2460,9 @@
     "hoist"
    ],
    "goal_tags": [],
+   "replaces": [
+    "(?ms)^\\s*[·•]\\s*(\\w+[^\\n;]{3,}?)\\s*[;\\n].*^\\s*[·•]\\s*\\1\\b"
+   ],
    "at": {},
    "when": "Each case branch starts with the same rw/simp.",
    "how": "Run the shared tactic before the split (or t <;> s), so it appears once.",
@@ -2247,6 +2498,10 @@
     "List.head",
     "∈"
    ],
+   "replaces": [
+    "\\bobtain\\b[^\\n]*:=\\s*[\\w.]+[^\\n]*\\n\\s*(?:exact|refine|use)\\b[^\\n]*⟨",
+    "\\brefine\\s*⟨[^\\n]*\\?_"
+   ],
    "at": {},
    "when": "refine ⟨_, ?_⟩ followed by providing the witness from a lemma statement.",
    "how": "exact lemma_name args (anonymous ∃ is a structure) or obtain from the lemma and pass on.",
@@ -2279,6 +2534,9 @@
     "bullets"
    ],
    "goal_tags": [],
+   "replaces": [
+    "(?ms)^\\s*have\\s+[\\w']+\\s*:.*^\\s*[·•]"
+   ],
    "at": {
     "opening": "A helper stated at the start feeds every later step, so removing it changes the most; re-close the first dependents first.",
     "middle": "Check which later steps name the helper before deleting it; each of them needs its own close.",
@@ -2315,6 +2573,10 @@
     "exact?"
    ],
    "goal_tags": [],
+   "replaces": [
+    "(?m)^\\s*have\\s+[\\w']+\\s*:\\s*(?:0\\s*<|[\\w.()]+\\s*≠)",
+    "\\bexact\\?"
+   ],
    "at": {
     "opening": "A premise established at the start is usually shared with later steps; drop it only if nothing else uses it.",
     "middle": "Search for the sibling by the goal's constants before adding a step that proves the premise.",
@@ -2351,6 +2613,10 @@
     "set"
    ],
    "goal_tags": [],
+   "replaces": [
+    "(?m)^\\s*have\\s+[\\w']+\\s*:[^\\n]*:=\\s*by\\s*$",
+    "(?m)^\\s*set\\b"
+   ],
    "at": {
     "opening": "A helper at the start pays only if most later steps use it.",
     "middle": "Count the uses after the helper; two short uses rarely repay a long statement.",
@@ -2376,6 +2642,154 @@
     "v4.25.0": "pass"
    },
    "version_notes": "Stable across 4.25-4.33 as far as known.",
+   "move_class": "",
+   "source": "public:general-practice"
+  },
+  {
+   "id": "S74-split-chained-combinators",
+   "title": "Split a <;> chain into all_goals lines",
+   "tags": [
+    "<;>",
+    "all_goals"
+   ],
+   "goal_tags": [],
+   "replaces": [
+    "<;>[^\\n]*<;>"
+   ],
+   "at": {},
+   "when": "A line chains tactics with <;> (t <;> s <;> u) so that each stage runs on every goal the stage before produced.",
+   "how": "Write each stage on its own line and put all_goals in front of the later stages: t, then all_goals s, then all_goals u. The tactics are the same; each stage is elaborated once over the goal list, and a failing stage is easy to find. Compile it: the result is the same only when t left the goals that s should run on.",
+   "before": "example (a b : ℕ) (h : a < b) : (a ≤ b ∧ a ≠ b) ∧ (a < b + 1 ∧ b ≠ 0) := by\n  refine ⟨?_, ?_⟩ <;> refine ⟨?_, ?_⟩ <;> omega",
+   "after": "example (a b : ℕ) (h : a < b) : (a ≤ b ∧ a ≠ b) ∧ (a < b + 1 ∧ b ≠ 0) := by\n  refine ⟨?_, ?_⟩\n  all_goals refine ⟨?_, ?_⟩\n  all_goals omega",
+   "effect": {
+    "tokens": "unknown",
+    "heartbeats": {
+     "opening": "unknown",
+     "middle": "unknown",
+     "closing": "unknown"
+    },
+    "confidence": "low",
+    "note": "Too little mined evidence; measure with the profiler."
+   },
+   "verified": {
+    "v4.27.0": "pass",
+    "v4.26.0": "pass",
+    "v4.25.0": "pass"
+   },
+   "version_notes": "Goal scheduling form seen to win in earlier runs; no mined move class, so no measured effect. all_goals stops at the first goal that fails, <;> does the same; use any_goals when some goals may fail.",
+   "move_class": "",
+   "source": "public:general-practice"
+  },
+  {
+   "id": "S75-two-pass-closing",
+   "title": "Close in two passes: any_goals assumption first, then split what is left",
+   "tags": [
+    "any_goals",
+    "all_goals",
+    "first",
+    "assumption"
+   ],
+   "goal_tags": [],
+   "replaces": [
+    "\\bfirst\\s*\\|[^\\n]*\\b(?:assumption|exact)\\b|<;>\\s*(?:try\\s+)?assumption"
+   ],
+   "at": {},
+   "when": "A <;> line tries first | assumption | (a split followed by assumption) on every goal, so each goal pays for the failed alternatives before the one that closes it.",
+   "how": "Run any_goals assumption to close every goal a hypothesis already proves, then all_goals with the splitting tactic on the remaining goals, then all_goals assumption. Cheap closers run first and the failing alternatives disappear.",
+   "before": "example (a b c : ℕ) (h : a ≤ b) (h2 : b ≤ c) : a ≤ b ∧ (b ≤ c ∧ a ≤ c) := by\n  refine ⟨?_, ?_⟩ <;> first | exact h | (refine ⟨?_, ?_⟩ <;> omega)",
+   "after": "example (a b c : ℕ) (h : a ≤ b) (h2 : b ≤ c) : a ≤ b ∧ (b ≤ c ∧ a ≤ c) := by\n  refine ⟨?_, ?_⟩\n  any_goals exact h\n  all_goals refine ⟨?_, ?_⟩\n  all_goals omega",
+   "effect": {
+    "tokens": "unknown",
+    "heartbeats": {
+     "opening": "unknown",
+     "middle": "unknown",
+     "closing": "unknown"
+    },
+    "confidence": "low",
+    "note": "Too little mined evidence; measure with the profiler."
+   },
+   "verified": {
+    "v4.27.0": "pass",
+    "v4.26.0": "pass",
+    "v4.25.0": "pass"
+   },
+   "version_notes": "Goal scheduling form seen to win in earlier runs; no mined move class, so no measured effect. any_goals fails when no goal succeeds, so drop it when nothing can close in the first pass.",
+   "move_class": "",
+   "source": "public:general-practice"
+  },
+  {
+   "id": "S76-choose-then-subst",
+   "title": "Destructure an existence fact with choose and subst instead of obtain with rfl",
+   "tags": [
+    "obtain",
+    "choose",
+    "subst",
+    "rfl"
+   ],
+   "goal_tags": [],
+   "replaces": [
+    "\\bobtain\\s*⟨[^\\n]*\\brfl\\b[^\\n]*⟩\\s*:=",
+    "\\brcases\\b[^\\n]*\\brfl\\b"
+   ],
+   "at": {},
+   "when": "obtain ⟨x, hx, rfl⟩ := f _ _ ‹_› (or with explicit arguments) both destructures an existential and substitutes the equation it carries.",
+   "how": "Write choose x hx h using f .. and then subst h on its own line. The same variables and facts result, but the substitution is a separate step, which can be cheaper to elaborate and lets you leave h in place when substitution is not needed.",
+   "before": "example (f : ∀ a : ℕ, 0 < a → ∃ x, x < a ∧ a = x + 1) (n : ℕ) (hn : 0 < n)\n    (p : ℕ → Prop) (hp : ∀ x, p (x + 1)) : p n := by\n  obtain ⟨x, hx, rfl⟩ := f n hn\n  exact hp x",
+   "after": "example (f : ∀ a : ℕ, 0 < a → ∃ x, x < a ∧ a = x + 1) (n : ℕ) (hn : 0 < n)\n    (p : ℕ → Prop) (hp : ∀ x, p (x + 1)) : p n := by\n  choose x hx h using f n hn\n  subst h\n  exact hp x",
+   "effect": {
+    "tokens": "unknown",
+    "heartbeats": {
+     "opening": "unknown",
+     "middle": "unknown",
+     "closing": "unknown"
+    },
+    "confidence": "low",
+    "note": "Too little mined evidence; measure with the profiler."
+   },
+   "verified": {
+    "v4.27.0": "pass",
+    "v4.26.0": "pass",
+    "v4.25.0": "pass"
+   },
+   "version_notes": "Seen to win in earlier runs; no mined move class, so no measured effect. choose names the witness and facts in the order of the existential; check the names against the facts you use later.",
+   "move_class": "",
+   "source": "public:general-practice"
+  },
+  {
+   "id": "S77-witness-fixing-goal-first",
+   "title": "Close the goal that fixes a metavariable witness before the others",
+   "tags": [
+    "apply",
+    "assumption",
+    "rotate_left"
+   ],
+   "goal_tags": [],
+   "replaces": [
+    "\\b(?:apply|refine|exact)\\b[^\\n]*\\(\\s*[\\w']+\\s*:=",
+    "\\brefine\\b[^\\n]*\\?[A-Za-z]\\w*",
+    "\\bapply\\b[^\\n]*(?:\\n\\s*[·•]|<;>)"
+   ],
+   "at": {},
+   "when": "A step spells out a witness or argument (apply f (m := w), refine with a named hole) only so that later assumption or exact calls unify.",
+   "how": "Leave the witness open and order the goals: close the one whose proof determines the witness first (swap or rotate_left to bring it forward, or exact it), then assumption on the others finds the instantiated statement. Drop the spelled witness.",
+   "before": "example (a b c : ℕ) (hx : a ≤ c) (h1 : a ≤ b) (h2 : b ≤ c) : a ≤ c := by\n  apply Nat.le_trans (m := b)\n  all_goals assumption",
+   "after": "example (a b c : ℕ) (hx : a ≤ c) (h1 : a ≤ b) (h2 : b ≤ c) : a ≤ c := by\n  apply Nat.le_trans\n  rotate_left\n  · exact h2\n  · assumption",
+   "effect": {
+    "tokens": "unknown",
+    "heartbeats": {
+     "opening": "unknown",
+     "middle": "unknown",
+     "closing": "unknown"
+    },
+    "confidence": "low",
+    "note": "Too little mined evidence; measure with the profiler."
+   },
+   "verified": {
+    "v4.27.0": "pass",
+    "v4.26.0": "pass",
+    "v4.25.0": "pass"
+   },
+   "version_notes": "Goal scheduling form seen to win in earlier runs; no mined move class, so no measured effect. Goal order after apply can change between releases; check it, or name the goal with case.",
    "move_class": "",
    "source": "public:general-practice"
   }

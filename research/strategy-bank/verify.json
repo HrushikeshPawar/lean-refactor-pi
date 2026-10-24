@@ -72,7 +72,11 @@
   "S70-exists-intro-from-lemma": "pass",
   "S71-drop-helper-reclose-dependents": "pass",
   "S72-sibling-fact-without-premise": "pass",
-  "S73-helper-must-pay": "pass"
+  "S73-helper-must-pay": "pass",
+  "S74-split-chained-combinators": "pass",
+  "S75-two-pass-closing": "pass",
+  "S76-choose-then-subst": "pass",
+  "S77-witness-fixing-goal-first": "pass"
  },
  "4.26.0": {
   "S01-obtain-to-projection": "pass",
@@ -147,7 +151,11 @@
   "S70-exists-intro-from-lemma": "pass",
   "S71-drop-helper-reclose-dependents": "pass",
   "S72-sibling-fact-without-premise": "pass",
-  "S73-helper-must-pay": "pass"
+  "S73-helper-must-pay": "pass",
+  "S74-split-chained-combinators": "pass",
+  "S75-two-pass-closing": "pass",
+  "S76-choose-then-subst": "pass",
+  "S77-witness-fixing-goal-first": "pass"
  },
  "4.25.0": {
   "S01-obtain-to-projection": "pass",
@@ -222,6 +230,10 @@
   "S70-exists-intro-from-lemma": "pass",
   "S71-drop-helper-reclose-dependents": "pass",
   "S72-sibling-fact-without-premise": "pass",
-  "S73-helper-must-pay": "pass"
+  "S73-helper-must-pay": "pass",
+  "S74-split-chained-combinators": "pass",
+  "S75-two-pass-closing": "pass",
+  "S76-choose-then-subst": "pass",
+  "S77-witness-fixing-goal-first": "pass"
  }
 }

@@ -41,7 +41,7 @@ ID = re.compile(r"[A-Za-z_Ͱ-Ͽᴀ-ᶿ][\w'!?₀-₟ᵢ-ᵪ]*(?:\.[A-Za-z_][\w'!
 LEAN_WORDS = set("""theorem lemma def example by exact apply intro intros rintro rcases obtain cases induction match with fun have show from at using
  simp simpa simp_all rw rwa nth_rewrite omega linarith nlinarith positivity gcongr norm_num norm_cast push_cast exact_mod_cast decide rfl trivial aesop grind
  constructor refine use exists ext funext congr convert calc split_ifs by_cases by_contra push_neg contrapose subst clear set let generalize specialize
- all_goals any_goals first try repeat iterate fin_cases interval_cases tauto ring ring_nf field_simp unfold change dsimp rename_i exacts assumption left right
+ all_goals any_goals first try repeat choose rotate_left swap letI haveI iterate fin_cases interval_cases tauto ring ring_nf field_simp unfold change dsimp rename_i exacts assumption left right
  open namespace section variable universe import end in only if then else do return where instance structure class inductive abbrev private protected noncomputable
  sorry True False And Or Not Iff Eq Ne Exists Prop Type Sort Nat Int Real Rat Fin List Array Finset Set Multiset Option Bool String Unit Prod Sum Sigma Subtype
  Function id fst snd inl inr intro elim mp mpr symm trans refl left right some none cons nil succ zero length map filter sum prod card range max min abs
@@ -102,7 +102,7 @@ hits = sorted({cn[k:k + K] for k in range(0, len(cn) - K + 1) if cn[k:k + K] in 
 print("benchmark rows:", len(rows), "| identifier pool:", len(bench_ids), "| texts:", len(texts))
 print("FLAGGED identifiers:", flagged_ids)
 print("Soft (generic-shaped snake_case, review):", flagged_soft)
-print("FLAGGED 25-char substrings:", len(hits), hits[:10])
+print("FLAGGED 25-char substrings:", len(hits), hits[:10] if "--all" not in sys.argv else hits)
 if "--allowlist" in sys.argv:
     print("allowlist prefixes:", GENERIC_PREFIX.pattern); print("allowlist words:", sorted(LEAN_WORDS))
 sys.exit(1 if (flagged_ids or hits) else 0)
