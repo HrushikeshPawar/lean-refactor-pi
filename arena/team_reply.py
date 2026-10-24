@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from arena import campaign, orchestration, plans, text
+from arena import campaign, ideas, orchestration, text
 
 
 def _render(key: str, **values) -> str:
@@ -62,62 +62,41 @@ def render(action: str, result: dict, directory: Path) -> str:
         return _render("cancel_done", job=job(result.get("job_id")), state=result.get("state", "?"))
     if action == "jobs":
         return _jobs(result, directory, job)
-    if action == "plan":
-        return "\n".join([_render("plan_saved", version=result.get("version")), *result.get("warnings", [])])
     if action == "await_results":
         return _await(result, directory, job)
     raise ValueError(f"no team reply for {action}")
 
 
-def _take(sent: dict, kind: str, fingerprint: object, calls: int, repeat: int) -> bool:
-    """True when this notice is new for sol: its fingerprint changed, or a missing plan is due its repeat.
-    Records the send in `sent` (kind to fingerprint and the sol call count at the send)."""
+def _take(sent: dict, kind: str, fingerprint: object, calls: int) -> bool:
+    """True when this notice is new for sol: its fingerprint changed. Records the send in `sent` (kind to
+    fingerprint and the sol call count at the send)."""
     last = sent.get(kind)
-    if last is not None and last["fp"] == fingerprint and not (kind == "plan_missing" and calls - last["call"] >= repeat):
+    if last is not None and last["fp"] == fingerprint:
         return False
     sent[kind] = {"fp": fingerprint, "call": calls}
     return True
 
 
 def notices(directory: Path, bucket: dict, action: str | None) -> tuple[list[str], list[str]]:
-    """The plan and merge notices new for sol since its last tool call, as (kinds, lines).
+    """The merge, shorter-node and attempt log notices new for sol since its last tool call, as (kinds, lines).
 
-    A plan that is missing is said once after the first delegate, then again every `notice_repeat_calls` sol tool
-    calls while it stays missing. The plan block (open and running steps) comes only with a stale plan."""
-    if action == "delegate":
-        bucket["delegates"] = bucket.get("delegates", 0) + 1
+    The attempt log digest (see ideas.digest) is the delta since sol's previous digest, so each change is said once."""
     sent = bucket.setdefault("notices", {})
     calls = bucket.get("calls", 0)
-    repeat = text.numbers()["notice_repeat_calls"]
     kinds: list[str] = []
     lines: list[str] = []
-    best = orchestration.run_best(directory)
-    plan = plans.current_plan(directory)
-    if plan is None:
-        if bucket.get("delegates") and _take(sent, "plan_missing", "missing", calls, repeat):
-            kinds.append("plan_missing")
-            lines.append(_render("plan_missing"))
-    else:
-        live = plans.live(plan)
-        if best is not None and plans.stale(directory, plan, best) and _take(sent, "plan_stale", [plan["version"], best.id], calls, repeat):
-            kinds.append("plan_stale")
-            lines.append(_render("plan_stale", node=best.id,
-                                 was=plan.get("best") or text.render("replies/team.plan_original")))
-            if live:
-                lines.append(_render("plan_head", version=plan["version"]))
-                lines += [_render("plan_step", target=step["target"], kind=step["kind"], expect=step["expect"])
-                          for step in live]
-        if not live and _take(sent, "plan_empty", plan["version"], calls, repeat):
-            kinds.append("plan_empty")
-            lines.append(_render("plan_empty", node=best.id if best is not None else text.render("replies/team.plan_original")))
+    digest = ideas.lines_for(directory, "sol", bucket)[1]
+    if digest:
+        kinds.append("ideas")
+        lines += digest
     ready = orchestration.merge_ready(directory)
     if not ready:
         sent.pop("merge_ready", None)
-    elif _take(sent, "merge_ready", sorted(ready), calls, repeat):
+    elif _take(sent, "merge_ready", sorted(ready), calls):
         kinds.append("merge_ready")
         lines.append(_render("merge_ready", nodes=", ".join(ready), count=_jobs_count(directory, ready)))
     for item in orchestration.token_short(directory):
-        if _take(sent, f"token_short:{item['node']}", True, calls, repeat):
+        if _take(sent, f"token_short:{item['node']}", True, calls):
             if "token_short" not in kinds:
                 kinds.append("token_short")
             lines.append(_render("token_short", node=item["node"], saved=item["saved"], best=item["best"],
@@ -139,8 +118,8 @@ def _costly_steps(directory: Path, proof_id: str) -> str:
 
 
 def sol_notices(run_id: str, action: str, result: dict) -> dict:
-    """Add sol's new notices to a tool reply's `context`; the text the model reads is unchanged. Each of sol's tool
-    calls counts toward the repeat of a missing plan. Workers get no notices."""
+    """Add sol's new notices to a tool reply's `context`; the text the model reads is unchanged. Workers get no
+    notices."""
     from arena import reply
 
     if reply.current_actor() != "sol" or not isinstance(result, dict):

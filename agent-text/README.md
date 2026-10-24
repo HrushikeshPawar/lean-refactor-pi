@@ -141,7 +141,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `packet/island` | 109 | Initial theorem packet | once per run |
 | `packet/island_heartbeats` | 137 | Initial theorem packet | once per run |
 | `packet/island_tokens` | 246 | Initial theorem packet | once per run |
-| `packet/merge` | 77 | Initial theorem packet | once per run |
+| `packet/merge` | 84 | Initial theorem packet | once per run |
 | `packet/price-table` | 12 | Prices action replies | when the table is requested |
 | `packet/price-table.clipped` | 2 | Prices action replies | when the table is requested |
 | `packet/price-table.coordinates` | 19 | Prices action replies | when the table is requested |
@@ -239,10 +239,10 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `packet/sections.titles.worker` | 1 | Initial theorem packet | once per run |
 | `packet/sections.titles.worker_goals` | 6 | Initial theorem packet | once per run |
 | `packet/task` | 10 | Initial theorem packet | once per run |
-| `packet/team` | 757 | Initial theorem packet | once per run |
+| `packet/team` | 777 | Initial theorem packet | once per run |
 | `packet/team-cost` | 10 | Initial theorem packet | once per run |
-| `packet/trim` | 86 | Initial theorem packet | once per run |
-| `packet/worker` | 190 | Initial theorem packet | once per run |
+| `packet/trim` | 94 | Initial theorem packet | once per run |
+| `packet/worker` | 218 | Initial theorem packet | once per run |
 | `replies/await_results.cursor` | 13 | Tool replies | when the matching tool result occurs |
 | `replies/await_results.identity` | 7 | Tool replies | when the matching tool result occurs |
 | `replies/await_results.job_ids` | 17 | Tool replies | when the matching tool result occurs |
@@ -275,6 +275,47 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/delegate.scope` | 19 | Tool replies | when the matching tool result occurs |
 | `replies/delegate.steps` | 14 | Tool replies | when the matching tool result occurs |
 | `replies/delegate.task` | 7 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.best_head` | 6 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.change` | 3 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.change_tactics` | 4 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.dead_head` | 4 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.effect_hb` | 2 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.effect_hb_proof` | 6 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.effect_tok` | 2 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.error` | 3 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.fails` | 6 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.harness_assembly` | 3 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.harness_other` | 6 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.harness_salvage` | 9 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.island` | 4 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.island_best_heartbeats` | 3 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.island_best_score` | 2 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.island_best_tokens` | 3 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.island_none` | 4 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.island_stale` | 6 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.kept_head` | 3 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.more` | 13 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.query_bad` | 18 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.query_head` | 3 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.query_none` | 6 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.query_row` | 12 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.query_unknown` | 5 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.role_family` | 2 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.role_heartbeats` | 2 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.role_merge` | 1 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.role_proof` | 2 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.role_sol` | 1 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.role_step` | 2 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.role_tokens` | 2 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.role_trim` | 1 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.status_dead` | 2 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.status_failed` | 1 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.status_kept` | 1 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.status_pending` | 1 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.status_win` | 1 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.technique_head` | 4 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.when` | 3 | Tool replies | when the matching tool result occurs |
+| `replies/ideas.where` | 4 | Tool replies | when the matching tool result occurs |
 | `replies/jobs.job_ids` | 15 | Tool replies | when the matching tool result occurs |
 | `replies/jobs.unknown_input` | 10 | Tool replies | when the matching tool result occurs |
 | `replies/merge.entry` | 5 | Tool replies | when the matching tool result occurs |
@@ -369,19 +410,6 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `replies/team.open_floor` | 10 | Tool replies | when the matching tool result occurs |
 | `replies/team.open_requests_head` | 25 | Tool replies | when the matching tool result occurs |
 | `replies/team.open_unmeasured` | 33 | Tool replies | when the matching tool result occurs |
-| `replies/team.plan_actor` | 6 | Tool replies | when the matching tool result occurs |
-| `replies/team.plan_count` | 12 | Tool replies | when the matching tool result occurs |
-| `replies/team.plan_empty` | 22 | Tool replies | when the matching tool result occurs |
-| `replies/team.plan_failed_note` | 14 | Tool replies | when the matching tool result occurs |
-| `replies/team.plan_head` | 3 | Tool replies | when the matching tool result occurs |
-| `replies/team.plan_missing` | 28 | Tool replies | when the matching tool result occurs |
-| `replies/team.plan_original` | 3 | Tool replies | when the matching tool result occurs |
-| `replies/team.plan_required` | 23 | Tool replies | when the matching tool result occurs |
-| `replies/team.plan_saved` | 3 | Tool replies | when the matching tool result occurs |
-| `replies/team.plan_shape_route` | 36 | Tool replies | when the matching tool result occurs |
-| `replies/team.plan_stale` | 27 | Tool replies | when the matching tool result occurs |
-| `replies/team.plan_step` | 6 | Tool replies | when the matching tool result occurs |
-| `replies/team.plan_steps` | 14 | Tool replies | when the matching tool result occurs |
 | `replies/team.reject` | 3 | Tool replies | when the matching tool result occurs |
 | `replies/team.reject_bare` | 3 | Tool replies | when the matching tool result occurs |
 | `replies/team.role_family` | 2 | Tool replies | when the matching tool result occurs |
@@ -581,7 +609,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `tools/card.params.focus` | 12 | Model tool definitions | every request |
 | `tools/card.params.held` | 5 | Model tool definitions | every request |
 | `tools/card.params.ideas` | 14 | Model tool definitions | every request |
-| `tools/compile.description` | 29 | Model tool definitions | every request |
+| `tools/compile.description` | 45 | Model tool definitions | every request |
 | `tools/compile.params.base` | 13 | Model tool definitions | every request |
 | `tools/compile.params.check` | 11 | Model tool definitions | every request |
 | `tools/compile.params.drafts` | 16 | Model tool definitions | every request |
@@ -594,12 +622,13 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `tools/compile.params.merge_from` | 5 | Model tool definitions | every request |
 | `tools/compile.params.merge_step` | 5 | Model tool definitions | every request |
 | `tools/compile.params.merge_take` | 6 | Model tool definitions | every request |
+| `tools/compile.params.move` | 23 | Model tool definitions | every request |
 | `tools/compile.params.node` | 3 | Model tool definitions | every request |
-| `tools/compile.params.note` | 5 | Model tool definitions | every request |
 | `tools/compile.params.splice` | 8 | Model tool definitions | every request |
 | `tools/compile.params.splice_base` | 8 | Model tool definitions | every request |
 | `tools/compile.params.splice_steps` | 6 | Model tool definitions | every request |
 | `tools/compile.params.splice_text` | 6 | Model tool definitions | every request |
+| `tools/compile.params.when` | 23 | Model tool definitions | every request |
 | `tools/delegate.description` | 46 | Model tool definitions | every request |
 | `tools/delegate.params.at` | 24 | Model tool definitions | every request |
 | `tools/delegate.params.at_hole` | 12 | Model tool definitions | every request |
@@ -609,12 +638,16 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `tools/delegate.params.job_id` | 15 | Model tool definitions | every request |
 | `tools/delegate.params.objective` | 29 | Model tool definitions | every request |
 | `tools/delegate.params.scope` | 142 | Model tool definitions | every request |
-| `tools/delegate.params.task` | 23 | Model tool definitions | every request |
+| `tools/delegate.params.task` | 52 | Model tool definitions | every request |
 | `tools/goal.description` | 41 | Model tool definitions | every request |
 | `tools/goal.params.hole` | 6 | Model tool definitions | every request |
 | `tools/goal.params.line` | 9 | Model tool definitions | every request |
 | `tools/goal.params.node` | 11 | Model tool definitions | every request |
 | `tools/goal.params.try` | 10 | Model tool definitions | every request |
+| `tools/ideas.description` | 89 | Model tool definitions | every request |
+| `tools/ideas.params.node` | 8 | Model tool definitions | every request |
+| `tools/ideas.params.step` | 9 | Model tool definitions | every request |
+| `tools/ideas.params.tactic` | 15 | Model tool definitions | every request |
 | `tools/jobs.description` | 15 | Model tool definitions | every request |
 | `tools/jobs.params.job_ids` | 9 | Model tool definitions | every request |
 | `tools/patterns.description` | 111 | Model tool definitions | every request |
@@ -622,14 +655,6 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `tools/patterns.params.position` | 17 | Model tool definitions | every request |
 | `tools/patterns.params.step` | 9 | Model tool definitions | every request |
 | `tools/patterns.params.text` | 10 | Model tool definitions | every request |
-| `tools/plan.description` | 56 | Model tool definitions | every request |
-| `tools/plan.params.cards` | 7 | Model tool definitions | every request |
-| `tools/plan.params.expect` | 24 | Model tool definitions | every request |
-| `tools/plan.params.kind` | 26 | Model tool definitions | every request |
-| `tools/plan.params.note` | 9 | Model tool definitions | every request |
-| `tools/plan.params.status` | 5 | Model tool definitions | every request |
-| `tools/plan.params.steps` | 29 | Model tool definitions | every request |
-| `tools/plan.params.target` | 14 | Model tool definitions | every request |
 | `tools/read.description` | 17 | Model tool definitions | every request |
 | `tools/read.params.against` | 6 | Model tool definitions | every request |
 | `tools/read.params.experiment` | 23 | Model tool definitions | every request |

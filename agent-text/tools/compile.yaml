@@ -1,4 +1,4 @@
-description: "Compile up to {compile_max_drafts} proof drafts, or apply one graph edit: splice, fill or merge. Returns for each node its id, outcome, errors, open holes with goals, and price."
+description: "Compile up to {compile_max_drafts} proof drafts, or apply one graph edit: splice, fill or merge. Returns for each node its id, outcome, errors, open holes with goals, and price. State the move and when of every call: the harness logs them for the other actors."
 params:
   drafts: "Up to {compile_max_drafts} plain strings, each the whole theorem, `by` plus tactics, or tactic lines alone."
   splice: "Replace a range of steps in one node."
@@ -16,5 +16,6 @@ params:
   base: "Node the drafts are filed under; default base of a splice or merge."
   node: "Alias of base."
   from: "Parent node recorded with the result."
-  note: "Optional: what this tries, why."
+  move: "What this change does, in general words, at most {idea_field_chars} characters, no node ids. Written for an actor who cannot see your proof."
+  when: "The goal shape or condition that makes the change apply, at most {idea_field_chars} characters. Written for an actor who cannot see your proof."
   check: "Valid values: tokens (count tokens only, no Lean) or lean (compile)."

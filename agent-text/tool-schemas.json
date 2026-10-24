@@ -1,7 +1,7 @@
 {
   "roles": {
-    "worker": ["compile", "goal", "search", "read", "scratch", "card"],
-    "sol": ["compile", "goal", "search", "read", "scratch", "card", "delegate", "jobs", "await_results", "cancel", "plan"]
+    "worker": ["compile", "goal", "search", "read", "scratch", "card", "ideas"],
+    "sol": ["compile", "goal", "search", "read", "scratch", "card", "ideas", "delegate", "jobs", "await_results", "cancel"]
   },
   "tools": {
     "compile": {
@@ -51,7 +51,8 @@
         "base": {"type": "string", "description": "base"},
         "node": {"type": "string", "description": "node"},
         "from": {"type": "string", "description": "from"},
-        "note": {"type": "string", "description": "note"},
+        "move": {"type": "string", "description": "move"},
+        "when": {"type": "string", "description": "when"},
         "check": {"type": "string", "enum": ["tokens", "lean"], "description": "check", "default": "lean"}
       }
     },
@@ -171,39 +172,13 @@
         "position": {"type": "string", "enum": ["opening", "middle", "closing"], "description": "position"}
       }
     },
-    "plan": {
+    "ideas": {
       "handler": true,
       "properties": {
-        "steps": {
-          "type": "array",
-          "required": true,
-          "minItems": 1,
-          "maxItemsFrom": "plan_max_steps",
-          "description": "steps",
-          "items": {
-            "type": "object",
-            "properties": {
-              "target": {"type": "string", "required": true, "description": "target"},
-              "kind": {
-                "type": "string",
-                "required": true,
-                "enum": ["shape", "step", "trim", "merge", "heartbeats", "tokens"],
-                "description": "kind"
-              },
-              "expect": {"type": "string", "required": true, "description": "expect"},
-              "cards": {"type": "string", "description": "cards"},
-              "status": {
-                "type": "string",
-                "required": true,
-                "enum": ["open", "running", "done", "failed"],
-                "description": "status"
-              },
-              "note": {"type": "string", "description": "note"}
-            }
-          }
-        }
+        "node": {"type": "string", "description": "node"},
+        "step": {"type": "string", "description": "step"},
+        "tactic": {"type": "string", "description": "tactic"}
       }
     }
   }
 }
-

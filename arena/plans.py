@@ -1,141 +1,18 @@
-"""The orchestrator's plan: each save is a versioned `plan` ledger row that replaces the whole plan.
+"""The orchestrator's plan, read-only.
 
-Validation is strict on shape and on the two standing steps. The orchestrator reads the plan through hidden notices
-(see team_reply.notices); the worker packets never carry the plan, so the packet stays fixed for a session.
+Runs before the idea log (arena/ideas.py) saved the orchestrator's plan as versioned `plan` ledger rows. The `plan`
+tool and its stale notices are gone; the viewer still reads those rows so old runs stay readable.
 """
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
-from arena import orchestration, run_control, text
+from arena import orchestration
 
-KINDS = ("shape", "step", "trim", "merge", "heartbeats", "tokens")
 STATUSES = ("open", "running", "done", "failed")
-_LIVE = ("open", "running")
-_STANDING = ("shape", "merge")
-_FIELDS = ("target", "kind", "expect", "cards", "status", "note")
 
 
 def plan_rows(directory: Path) -> list[dict]:
     """Every saved plan version, oldest first. Row: {type, version, actor_id, best, steps, warnings}."""
     return [row for row in orchestration._history(directory) if row.get("type") == "plan"]
-
-
-def current_plan(directory: Path) -> dict | None:
-    rows = plan_rows(directory)
-    return rows[-1] if rows else None
-
-
-def _normal(step: dict) -> dict | None:
-    """The stored form of one step, or None when a required field is missing or not a string."""
-    if not isinstance(step, dict) or set(step) - set(_FIELDS):
-        return None
-    if not all(isinstance(step.get(name), str) and step[name].strip() for name in ("target", "expect")):
-        return None
-    if step.get("kind") not in KINDS or step.get("status") not in STATUSES:
-        return None
-    stored = {name: " ".join(str(step[name]).split()) for name in ("target", "kind", "expect", "status")}
-    for name in ("cards", "note"):
-        if step.get(name):
-            stored[name] = " ".join(str(step[name]).split())
-    return stored
-
-
-def saved_best(directory: Path, plan: dict | None) -> tuple[str | None, float | None]:
-    """The route and score of the run best when `plan` was saved: from the row, else from the node it names."""
-    if plan is None:
-        return None, None
-    if "best_route" in plan:
-        return plan["best_route"], plan.get("best_score")
-    node = next((item for item in orchestration.proof_nodes(directory).values() if item.id == plan.get("best")), None)
-    return (None, None) if node is None else (node.route, node.score)
-
-
-def stale(directory: Path, plan: dict, best) -> bool:
-    """True when the run best's route differs from the one the plan was saved against, or its score rose by
-    `plan_stale_points` or more since."""
-    route, score = saved_best(directory, plan)
-    return best.route != route or (best.score or 0.0) >= (score or 0.0) + text.numbers()["plan_stale_points"]
-
-
-def _shape_route(directory: Path, steps: list[dict], previous: dict | None) -> tuple[str, dict] | None:
-    """A shape step newly marked done must name a node (nN) on a route other than the run best's route when the
-    previous plan version was saved; (reply key, values) for the first that does not."""
-    route = saved_best(directory, previous)[0]
-    if previous is None:
-        best = orchestration.run_best(directory)
-        route = None if best is None else best.route
-    kept = {step["target"] for step in (previous or {}).get("steps", []) if step["status"] == "done"}
-    nodes = {node.id: node for node in orchestration.proof_nodes(directory).values()}
-    for step in steps:
-        if step["kind"] != "shape" or step["status"] != "done" or step["target"] in kept:
-            continue
-        named = [nodes[ref] for ref in re.findall(r"\bn\d+\b", f"{step['target']} {step['expect']}") if ref in nodes]
-        if not any(node.route is not None and node.route != route for node in named):
-            return ("plan_shape_route", {"step": step["target"], "route": route or text.render("replies/team.plan_original")})
-    return None
-
-
-def _problem(directory: Path, steps: list, previous: dict | None) -> tuple[str, dict] | None:
-    """(reply key, values) for a plan that must not be saved, else None."""
-    if not isinstance(steps, list) or not steps:
-        return ("plan_steps", {})
-    if len(steps) > text.numbers()["plan_max_steps"]:
-        return ("plan_count", {})
-    if not all(_normal(step) for step in steps):
-        return ("plan_steps", {})
-    stored = [_normal(step) for step in steps]
-    if any(step["status"] in _LIVE for step in stored):
-        earlier = (previous or {}).get("steps", [])
-        for kind in _STANDING:
-            kept = any(step["kind"] == kind for step in stored)
-            tried = any(step["kind"] == kind and step["status"] in ("done", "failed") for step in earlier)
-            if not kept and not tried:
-                return ("plan_required", {"kind": kind})
-    return _shape_route(directory, stored, previous)
-
-
-def _warnings(steps: list[dict]) -> list[str]:
-    """Plan facts the orchestrator should fix, shown beside the saved version."""
-    return [text.render("replies/team.plan_failed_note", step=step["target"])
-            for step in steps if step["status"] == "failed" and not step.get("note")]
-
-
-def save_plan(directory: Path, *, operation_id: str, run_id: str, actor_id: str, session_id: str, steps: list) -> dict:
-    """Validate and commit the whole plan as the next version, or refuse it with a hint."""
-    if not operation_id or not run_id or not actor_id or not session_id:
-        return orchestration._reject(operation_id, "identity")
-    if actor_id != "sol":
-        return orchestration._reject(operation_id, "actor", hint="replies/team.plan_actor")
-    with run_control.control_lock(directory):
-        previous = current_plan(directory)
-        problem = _problem(directory, steps, previous)
-        if problem is not None:
-            key, values = problem
-            return {"ok": False, "category": "invalid_input", "reason": key, "operation_id": operation_id,
-                    "hint": text.render(f"replies/team.{key}", **values)}
-        stored = [_normal(step) for step in steps]
-        best = orchestration.run_best(directory)
-        version = (previous or {}).get("version", 0) + 1
-        warnings = _warnings(stored)
-        row = {"type": "plan", "actor_id": actor_id, "version": version, "best": None if best is None else best.id,
-               "best_route": None if best is None else best.route,
-               "best_score": None if best is None else best.score, "steps": stored, "warnings": warnings}
-        try:
-            applied = run_control._apply_locked(
-                directory,
-                {"operation_id": operation_id, "kind": "plan", "arguments": {"steps": steps}, "run_id": run_id,
-                 "actor_id": actor_id, "session_id": session_id},
-                lambda ctx: [ctx.append_ledger(row)],
-            )
-        except run_control.OperationRejected as error:
-            return orchestration._reject(operation_id, error.category)
-    orchestration._wake()
-    return {**applied, "version": version, "warnings": warnings}
-
-
-def live(plan: dict) -> list[dict]:
-    """The plan's open and running steps."""
-    return [step for step in plan["steps"] if step["status"] in _LIVE]

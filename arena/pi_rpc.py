@@ -7,7 +7,7 @@ from codecs import getincrementaldecoder
 from pathlib import Path
 
 WORKER_MODEL = "deepseek-v4.1-flash"
-WORKER_TOOLS = ("compile", "goal", "search", "read", "scratch", "card")
+WORKER_TOOLS = ("compile", "goal", "search", "read", "scratch", "card", "ideas")
 CARDS_TOOL = "patterns"  # added to the worker tools only in a run started with --cards
 
 

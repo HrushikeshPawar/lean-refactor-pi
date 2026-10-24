@@ -592,7 +592,7 @@ class V8WorkerSmokeTests(unittest.TestCase):
             launch = opened["launch"]
             self.assertEqual(launch["model"], "deepseek-v4.1-flash")
             self.assertEqual(launch["provider"], "opencode-go")
-            self.assertEqual(launch["tools"], ["compile", "goal", "search", "read", "scratch", "card"])
+            self.assertEqual(launch["tools"], ["compile", "goal", "search", "read", "scratch", "card", "ideas"])
             self.assertEqual(launch["argv"][launch["argv"].index("--mode") + 1], "rpc")
             self.assertIn("--no-builtin-tools", launch["argv"])
             extension = Path(launch["argv"][launch["argv"].index("--extension") + 1])
@@ -601,7 +601,7 @@ class V8WorkerSmokeTests(unittest.TestCase):
             self.assertIn("--no-extensions", launch["argv"])
             self.assertEqual(
                 launch["argv"][launch["argv"].index("--tools") + 1],
-                "compile,goal,search,read,scratch,card",
+                "compile,goal,search,read,scratch,card,ideas",
             )
             self.assertTrue(launch["session_dir"].endswith(receipt["session_id"]))
             self.assertEqual(launch["env"]["ARENA_RUN_ID"], "run-1")
@@ -618,7 +618,7 @@ class V8WorkerSmokeTests(unittest.TestCase):
             prompt = json.loads(child.written)
             self.assertNotIn("tools", prompt)
             self.assertIn(receipt["anchor"]["proof_sha256"], prompt["message"])
-            self.assertEqual(receipt["tools"], ["compile", "goal", "search", "read", "scratch", "card"])
+            self.assertEqual(receipt["tools"], ["compile", "goal", "search", "read", "scratch", "card", "ideas"])
             self.assertNotEqual(receipt["job_id"], receipt["activation_id"])
             self.assertTrue(orchestration.awaits_settlement(directory, receipt["activation_id"]))
             again = orchestration.delegate(directory, **call)

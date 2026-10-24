@@ -1,4 +1,4 @@
-"""Orchestrator plan, merge jobs, the worker compile nudge and packet stability (smoke tests per feature)."""
+"""Orchestrator notices (no plan tool), merge jobs, the worker compile nudge and packet stability (smoke tests per feature)."""
 
 import unittest
 from contextlib import nullcontext
@@ -6,13 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from arena import context, orchestration, patterns, plans, reply, team_reply, text
+from arena import context, ideas, orchestration, patterns, reply, team_reply, text
 from tests.test_text import ROWS, _fixture
-
-SHAPE = {"target": "whole proof", "kind": "shape", "expect": "-5 tokens, estimated", "status": "open"}
-MERGE = {"target": "n3, n9", "kind": "merge", "expect": "-8 tokens, measured", "status": "open"}
-TOKENS = {"target": "n2 lines 8-20", "kind": "tokens", "expect": "-20 tokens, measured", "status": "open"}
-
 
 def node(node_id: str, score: float, job: str | None = None, verified: bool = True) -> SimpleNamespace:
     return SimpleNamespace(id=node_id, proof_id=node_id, score=score, verified=verified, status="closed", route="r1",
@@ -20,98 +15,50 @@ def node(node_id: str, score: float, job: str | None = None, verified: bool = Tr
                            proof_text="by\n  simp", steps=[])
 
 
-class PlanTests(unittest.TestCase):
-    def test_open_steps_need_a_shape_and_a_merge_step(self):
-        self.assertEqual(plans._problem(Path("run"), [TOKENS], None), ("plan_required", {"kind": "shape"}))
-        self.assertEqual(plans._problem(Path("run"), [SHAPE, TOKENS], None), ("plan_required", {"kind": "merge"}))
-        self.assertIsNone(plans._problem(Path("run"), [SHAPE, MERGE, TOKENS], None))
-        self.assertEqual(plans._problem(Path("run"), [{**TOKENS, "kind": "bogus"}], None), ("plan_steps", {}))
-
-
-    def test_a_shape_step_is_done_only_with_a_node_on_a_new_route(self):
-        previous = {"version": 1, "best": "n2", "best_route": "r1", "best_score": 70.0, "steps": [SHAPE, MERGE]}
-        nodes = {"p2": SimpleNamespace(id="n2", route="r1"), "p7": SimpleNamespace(id="n7", route="r4")}
-        done = {**SHAPE, "status": "done"}
-        with patch.object(orchestration, "proof_nodes", return_value=nodes):
-            same = plans._problem(Path("run"), [{**done, "expect": "n2 gained 1"}, MERGE], previous)
-            new = plans._problem(Path("run"), [{**done, "expect": "n7 gained 3"}, MERGE], previous)
-        self.assertEqual(same, ("plan_shape_route", {"step": "whole proof", "route": "r1"}))
-        self.assertIsNone(new)
-
-
 class NoticeTests(unittest.TestCase):
-    def notice(self, bucket, *, plan, best, ready=(), action=None):
-        """sol's notices for one tool call, with the run's plan, best and merge set patched."""
-        with patch.object(plans, "current_plan", return_value=plan), \
-                patch.object(orchestration, "run_best", return_value=best), \
+    def notice(self, bucket, *, best, ready=(), action=None, digest=()):
+        """sol's notices for one tool call, with the run's best, merge set and attempt log digest patched."""
+        with patch.object(orchestration, "run_best", return_value=best), \
                 patch.object(orchestration, "merge_ready", return_value=list(ready)), \
+                patch.object(ideas, "lines_for", return_value=("sol", list(digest))), \
                 patch.object(team_reply, "_jobs_count", return_value=2):
             bucket["calls"] = bucket.get("calls", 0) + 1
             return team_reply.notices(Path("run"), bucket, action)
 
-    def test_missing_plan_is_said_once_after_a_delegate_then_again_every_ten_calls(self):
+    def test_no_plan_notice_is_ever_said_even_after_delegates(self):
         bucket = {}
-        self.assertEqual(self.notice(bucket, plan=None, best=None), ([], []))
-        self.assertEqual(self.notice(bucket, plan=None, best=None, action="delegate"),
-                         (["plan_missing"], [text.render("replies/team.plan_missing")]))
-        for _ in range(9):
-            self.assertEqual(self.notice(bucket, plan=None, best=None), ([], []))
-        self.assertEqual(self.notice(bucket, plan=None, best=None)[0], ["plan_missing"])
+        for _ in range(12):
+            self.assertEqual(self.notice(bucket, best=node("n5", 70.0), action="delegate"), ([], []))
 
-    def test_stale_plan_saved_before_any_best_says_the_original_proof_and_shows_open_steps(self):
-        plan = {"version": 2, "best": None, "steps": [TOKENS]}
-        kinds, lines = self.notice({}, plan=plan, best=node("n5", 70.0))
-        self.assertEqual(kinds, ["plan_stale"])
-        self.assertEqual(lines[0], text.render("replies/team.plan_stale", node="n5",
-                                               was=text.render("replies/team.plan_original")))
-        self.assertEqual(lines[1:], ["## Plan v2", "- n2 lines 8-20 · tokens · -20 tokens, measured"])
-
-    def test_same_state_is_not_said_twice_but_a_new_best_or_a_changed_merge_set_is_said_again(self):
+    def test_same_merge_set_is_not_said_twice_but_a_changed_one_is(self):
         bucket = {}
-        plan = {"version": 3, "best": "n4", "steps": [TOKENS]}
-        self.assertEqual(self.notice(bucket, plan=plan, best=node("n5", 70.0), ready=["n2", "n3"])[0],
-                         ["plan_stale", "merge_ready"])
-        self.assertEqual(self.notice(bucket, plan=plan, best=node("n5", 70.0), ready=["n2", "n3"]), ([], []))
-        self.assertEqual(self.notice(bucket, plan=plan, best=node("n6", 71.0), ready=["n2", "n3"])[0], ["plan_stale"])
-        self.assertEqual(self.notice(bucket, plan=plan, best=node("n6", 71.0), ready=["n2", "n3", "n4"])[0],
-                         ["merge_ready"])
+        self.assertEqual(self.notice(bucket, best=node("n5", 70.0), ready=["n2", "n3"])[0], ["merge_ready"])
+        self.assertEqual(self.notice(bucket, best=node("n5", 70.0), ready=["n2", "n3"]), ([], []))
+        self.assertEqual(self.notice(bucket, best=node("n6", 71.0), ready=["n2", "n3", "n4"])[0], ["merge_ready"])
 
-    def test_a_plan_with_no_open_step_is_said_once_per_version(self):
-        plan = {"version": 1, "best": "n5", "best_route": "r1", "best_score": 70.0, "steps": [{**TOKENS, "status": "done"}]}
-        bucket = {}
-        self.assertEqual(self.notice(bucket, plan=plan, best=node("n5", 70.0))[0], ["plan_empty"])
-        self.assertEqual(self.notice(bucket, plan=plan, best=node("n5", 70.0)), ([], []))
-
-    def test_a_plan_is_stale_on_a_new_route_or_a_rise_of_plan_stale_points_only(self):
-        plan = {"version": 1, "best": "n4", "best_route": "r1", "best_score": 70.0, "steps": [TOKENS]}
-        self.assertFalse(plans.stale(Path("run"), plan, node("n5", 72.0)))
-        self.assertTrue(plans.stale(Path("run"), plan, node("n5", 73.0)))
-        self.assertTrue(plans.stale(Path("run"), plan, SimpleNamespace(route="r2", score=70.5)))
+    def test_the_attempt_log_digest_comes_first_under_its_own_kind(self):
+        kinds, lines = self.notice({}, best=None, digest=["Kept i3 (n9)"])
+        self.assertEqual((kinds, lines), (["ideas"], ["Kept i3 (n9)"]))
 
     def test_a_shorter_worker_node_is_said_once_per_node(self):
         short = {"node": "n9", "proof_id": "p9", "saved": 12, "best": 100, "tokens": 88, "heartbeats": 40}
         bucket = {}
-        plan = {"version": 1, "best": "n5", "best_route": "r1", "best_score": 70.0, "steps": [TOKENS]}
         with patch.object(orchestration, "token_short", return_value=[short]), \
                 patch.object(team_reply, "_costly_steps", return_value="s3 (30 tokens, 9 HB)"):
-            first = self.notice(bucket, plan=plan, best=node("n5", 70.0))
-            again = self.notice(bucket, plan=plan, best=node("n5", 70.0))
+            first = self.notice(bucket, best=node("n5", 70.0))
+            again = self.notice(bucket, best=node("n5", 70.0))
         self.assertEqual(first[0], ["token_short"])
         self.assertIn("n9 is 12 tokens shorter than the run best 100 (88 tokens, 40 HB). Its costliest steps: s3", first[1][0])
         self.assertEqual(again, ([], []))
 
-    def test_await_and_jobs_replies_carry_no_plan_or_merge_lines(self):
-        plan = {"version": 2, "best": "n4", "steps": [TOKENS]}
-        with patch.object(plans, "current_plan", return_value=plan), \
-                patch.object(orchestration, "run_best", return_value=node("n5", 70.0)), \
+    def test_await_and_jobs_replies_carry_no_merge_lines(self):
+        with patch.object(orchestration, "run_best", return_value=node("n5", 70.0)), \
                 patch.object(orchestration, "merge_ready", return_value=["n2", "n3"]), \
                 patch.object(team_reply, "open_requests", return_value=[]):
             awaited = team_reply.render("await_results", {"events": [], "jobs": []}, Path("run"))
             listed = team_reply.render("jobs", {"jobs": []}, Path("run"))
         for shown in (awaited, listed):
-            self.assertNotIn("Plan v", shown)
             self.assertNotIn("Merge ready", shown)
-            self.assertNotIn("this plan was saved against", shown)
 
     def test_only_sol_gets_the_notices_in_its_context_and_the_text_is_left_alone(self):
         with patch.object(reply, "current_actor", return_value="job-actor"):
@@ -184,7 +131,7 @@ class NudgeTests(unittest.TestCase):
 
 
 class PacketTests(unittest.TestCase):
-    def test_orchestrator_packet_is_byte_identical_and_carries_no_plan(self):
+    def test_orchestrator_packet_is_byte_identical_and_carries_no_plan_paragraph(self):
         cached, measured = _fixture("ski")
         with patch.object(context, "cached_context", return_value=cached), \
                 patch.object(context, "reference_profile", return_value=measured):
@@ -192,7 +139,8 @@ class PacketTests(unittest.TestCase):
             second = context.render_packet(ROWS["ski"], cache_only=True, model="gpt-6.1-sol")
         self.assertEqual(first, second)
         self.assertNotIn("Plan v", first)
-        self.assertIn("save a plan with `plan`", first)
+        self.assertNotIn("save a plan", first)
+        self.assertIn("keeps an idea log of every attempt", first)
 
 
 if __name__ == "__main__":

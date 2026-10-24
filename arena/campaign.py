@@ -88,6 +88,7 @@ _OPERATION_RECEIPTS: ContextVar[list[dict] | None] = ContextVar("arena_operation
 _SALVAGE_DIRECTORY: ContextVar[Path | None] = ContextVar("arena_salvage_directory", default=None)
 _SUBMISSION_ADMISSIONS: ContextVar[dict | None] = ContextVar("arena_submission_admissions", default=None)
 _SELECT_COMPILED: ContextVar[bool] = ContextVar("arena_select_compiled", default=False)
+_IDEA_WHEN: ContextVar[str] = ContextVar("arena_idea_when", default="")  # the compile call's `when`, filed with its nodes
 
 
 @contextmanager
@@ -1921,6 +1922,7 @@ def record_evaluation(
                 "parents": lineage,
                 "hypothesis": hypothesis,
                 "hypothesis_ref": hypothesis_ref,
+                **({"when": _IDEA_WHEN.get()} if _IDEA_WHEN.get() else {}),
                 "origin": origin,
                 "merge": merge,
                 "source_versions": versions(row),
@@ -2377,6 +2379,7 @@ def probe(
                 "parent": parent_id,
                 "named_parent": None if named_parent is _NAMED_PARENT_UNSET else named_parent,
                 "note": note,
+                **({"when": _IDEA_WHEN.get()} if _IDEA_WHEN.get() else {}),
                 "result": result,
             },
         )

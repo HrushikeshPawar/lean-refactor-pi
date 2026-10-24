@@ -12,7 +12,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from arena import campaign, text
+from arena import campaign, ideas, text
 
 DELIVERY_FILE = "tool-delivery.json"
 DELIVERY_LOCK = "tool-delivery.{actor}.lock"
@@ -1194,9 +1194,12 @@ def attach_context(
     ]
     updates_head = text.render("replies/tools.section_updates")
     facts += _section(earlier, updates_head)[1:]
+    # Trim and merge read each new best as an attempt log line (what changed, its effect), not as a bare node id.
+    role, logged = ("sol", []) if actor == "sol" else ideas.lines_for(campaign.run_dir(run_id), actor, bucket)
     notes = {
         "idle": _idle_note(run_id, actor, bucket),
-        "best": _best_note(run_id, actor, bucket, bool(fresh)),
+        "best": [] if role in ("trim", "merge") else _best_note(run_id, actor, bucket, bool(fresh)),
+        "ideas": logged,
         "plateau": _plateau_note(run_id, actor, bucket),
         "card_stale": _card_stale_note(run_id, actor, bucket),
         "compile_nudge": _compile_nudge(actor, bucket, action),

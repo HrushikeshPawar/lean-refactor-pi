@@ -21,6 +21,7 @@ LINT_PYTHON = (
     "arena/campaign.py",
     "arena/summary.py",
     "arena/team_reply.py",
+    "arena/ideas.py",
 )
 LINT_TYPESCRIPT = ("arena.ts", "rules.ts", "trim.ts", "reply.ts", "spend.ts")
 LOG_CALLS = {"logging", "logger", "log", "LOG"}
@@ -196,13 +197,14 @@ class TextRendererTests(unittest.TestCase):
         self.assertEqual(result["theorem"], "Core.InitsUpdatesComm")
         self.assertEqual([part["part"] for part in parts[:3]], ["system prompt", "skill", "tools/compile"])
         self.assertEqual(
-            [part["part"] for part in parts[3:12]],
+            [part["part"] for part in parts[3:13]],
             [
                 "tools/goal",
                 "tools/search",
                 "tools/read",
                 "tools/scratch",
                 "tools/card",
+                "tools/ideas",
                 "tools/delegate",
                 "tools/jobs",
                 "tools/await_results",
@@ -342,9 +344,9 @@ class TextRendererTests(unittest.TestCase):
 
         sol = [tool["name"] for tool in registered_tools("sol")]
         worker = [tool["name"] for tool in registered_tools("worker")]
-        self.assertEqual(worker, ["compile", "goal", "search", "read", "scratch", "card"])
+        self.assertEqual(worker, ["compile", "goal", "search", "read", "scratch", "card", "ideas"])
         self.assertEqual(
-            sol, ["compile", "goal", "search", "read", "scratch", "card", "delegate", "jobs", "await_results", "cancel", "plan"]
+            sol, ["compile", "goal", "search", "read", "scratch", "card", "ideas", "delegate", "jobs", "await_results", "cancel"]
         )
         live = dict(render_tool_sections(registered_tools("sol")))
         self.assertIn("fill: object, optional", live["compile"])
@@ -386,7 +388,7 @@ class TextRendererTests(unittest.TestCase):
         parts = json.loads(output.getvalue())["parts"]
         self.assertEqual(
             [part["part"] for part in parts if part["part"].startswith("tools/")],
-            ["tools/compile", "tools/goal", "tools/search", "tools/read", "tools/scratch", "tools/card"],
+            ["tools/compile", "tools/goal", "tools/search", "tools/read", "tools/scratch", "tools/card", "tools/ideas"],
         )
         compile = next(part["text"] for part in parts if part["part"] == "tools/compile")
         self.assertIn("  hole: string, required", compile)

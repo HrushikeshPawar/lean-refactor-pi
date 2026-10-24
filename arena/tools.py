@@ -92,7 +92,7 @@ def _focus_ref(run_id: str) -> str:
 
 def _empty_error(tool: str) -> dict:
     valid = {
-        "compile": ["drafts", "splice", "fill", "merge", "steps", "text", "base", "from", "note", "check"],
+        "compile": ["drafts", "splice", "fill", "merge", "steps", "text", "base", "from", "move", "when", "note", "check"],
         "goal": ["node", "hole", "line", "try"],
         "search": ["queries", "kind", "after"],
         "read": ["handle", "node", "hole", "experiment", "ref", "view", "against", "step"],
@@ -105,7 +105,7 @@ def _is_empty(request: object, tool: str) -> bool:
     if not isinstance(request, dict):
         return True
     keys = {
-        "compile": ("drafts", "splice", "fill", "merge", "base", "from", "note", "check"),
+        "compile": ("drafts", "splice", "fill", "merge", "base", "from", "move", "when", "note", "check"),
         "goal": ("node", "hole", "line", "try"),
         "search": ("queries", "kind", "after"),
         "read": ("handle", "node", "hole", "experiment", "ref", "view", "against", "step"),
@@ -778,13 +778,22 @@ def _flat_splice(request: object) -> object:
     return {**rest, "splice": splice}
 
 
+def _idea_field(value: object) -> str:
+    """A move or when field: one line, cut to `idea_field_chars`; "" when absent."""
+    return " ".join(value.split())[: text.numbers()["idea_field_chars"]] if isinstance(value, str) else ""
+
+
 def compile_tool(theorem: str, run_id: str, request: dict) -> dict:
-    with campaign.compile_authorization():
-        return _compile_tool(theorem, run_id, request)
+    token = campaign._IDEA_WHEN.set(_idea_field(request.get("when")) if isinstance(request, dict) else "")
+    try:
+        with campaign.compile_authorization():
+            return _compile_tool(theorem, run_id, request)
+    finally:
+        campaign._IDEA_WHEN.reset(token)
 
 
 def _compile_tool(theorem: str, run_id: str, request: dict) -> dict:
-    valid = ["drafts", "splice", "fill", "merge", "base", "node", "from", "note", "check"]
+    valid = ["drafts", "splice", "fill", "merge", "base", "node", "from", "move", "when", "note", "check"]
     shown = [*valid[:4], "steps", "text", *valid[4:]]
     if isinstance(request, dict) and "node" in request:
         # `node` is an alias of `base`; both given and different is a conflict.
@@ -871,7 +880,7 @@ def _compile_tool(theorem: str, run_id: str, request: dict) -> dict:
                     theorem,
                     run_id,
                     good_drafts,
-                    note=request.get("note"),
+                    note=_idea_field(request.get("move") or request.get("note")) or None,
                     named_parent=request.get("from"),
                 )
             finally:
@@ -953,7 +962,7 @@ def _compile_tool(theorem: str, run_id: str, request: dict) -> dict:
                     theorem,
                     run_id,
                     operation,
-                    note=request.get("note"),
+                    note=_idea_field(request.get("move") or request.get("note")) or None,
                     named_parent=request.get("from"),
                 )
                 evidence_by_ref[ref] = result

@@ -14,7 +14,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
-from arena import coordinator, orchestration, patterns, plans, team_reply, text
+from arena import coordinator, ideas, orchestration, patterns, team_reply, text
 from arena import reply as tool_reply
 from arena import tools as v7_tools
 from arena.campaign import (
@@ -48,13 +48,13 @@ ACTIONS = (
     "card",
     "patterns",
     "island_turn",
-    "plan",
+    "ideas",
 )
 
 
 # Tool calls the model makes. Each may carry sol's new notices in its `context` (team_reply.sol_notices), not its text.
-NOTICE_ACTIONS = ("compile", "goal", "search", "read", "scratch", "patterns", "await_results", "delegate", "jobs",
-                  "cancel", "card", "plan")
+NOTICE_ACTIONS = ("compile", "goal", "search", "read", "scratch", "patterns", "ideas", "await_results", "delegate",
+                  "jobs", "cancel", "card")
 
 
 def run(args: SimpleNamespace) -> dict:
@@ -121,8 +121,13 @@ def _run(args: SimpleNamespace) -> dict:
         return patterns.patterns_tool(args.theorem, args.run_id, request)
     if args.action == "card":
         return _with_text("card", _card(args), args.run_id)
-    if args.action == "plan":
-        return _with_text("plan", _plan(args), args.run_id)
+    if args.action == "ideas":
+        if args.request_file is None:
+            raise ValueError("request-file is required")
+        request = json.loads(args.request_file.read_text())
+        if not isinstance(request, dict):
+            raise ValueError("request-file must contain an object")
+        return ideas.ideas_tool(args.run_id, request)
     if args.action == "island_turn":
         # A worker's turn ended: the island extension asks whether to continue. The job comes from the environment.
         job_id, activation_id = os.environ.get("ARENA_JOB_ID"), os.environ.get("ARENA_ACTIVATION_ID")
@@ -204,17 +209,6 @@ def _card(args: SimpleNamespace) -> dict:
         run_dir(args.run_id), operation_id=os.environ.get("ARENA_TOOL_CALL_ID") or uuid.uuid4().hex,
         job_id=os.environ.get("ARENA_JOB_ID") if actor != "sol" else None, run_id=args.run_id, actor_id=actor,
         session_id=os.environ.get("ARENA_SESSION_ID") or args.run_id, fields=fields,
-    )
-
-
-def _plan(args: SimpleNamespace) -> dict:
-    """The orchestrator's plan save. Identity comes from the harness environment, never from the request."""
-    request = json.loads(args.request_file.read_text()) if args.request_file is not None else {}
-    steps = request.get("steps") if isinstance(request, dict) else None
-    return plans.save_plan(
-        run_dir(args.run_id), operation_id=os.environ.get("ARENA_TOOL_CALL_ID") or uuid.uuid4().hex,
-        run_id=args.run_id, actor_id=_harness_actor(),
-        session_id=os.environ.get("ARENA_SESSION_ID") or args.run_id, steps=steps,
     )
 
 

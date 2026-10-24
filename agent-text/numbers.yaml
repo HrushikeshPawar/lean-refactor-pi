@@ -45,18 +45,22 @@ memory_library_lines: 15
 memory_read_entries: 30
 memory_recovery_entries: 8
 budget:
-  static_words: 860
+  # 920: the compile tool takes move and when (each says it is written for an actor who cannot see the proof).
+  static_words: 920
   # 870: the team paragraph adds Sol's default stance (keep hill climbing) and a per-role guide (r12b analysis).
   # 920: keep every slot busy, refill ended islands, no best is final, combine axis extremes (r14 stall analysis).
   # 1040: the plan paragraph (ordered steps, one reshape and one merge step, re-plan after each best) and merge jobs.
   # 1080: a merge job's extra slot and the measured-or-estimated wording of the plan paragraph.
   # 1110: the token island is judged within a heartbeat ceiling and harvested through a heartbeat island.
   # 1150: short card fields (only what is new or still true) and independent tool calls in one turn.
-  packet_words: 1150
+  # 1160: the plan paragraph gives way to the idea log paragraph (what the harness shares, citing log ids, compact writing).
+  # 1170: compact writing joins items with hyphens and writes changes as saved or added.
+  packet_words: 1170
   # 215: the worker packet explains the card (what to write, what arrives in replies).
   # 240: read a definition's source before using it instead of reconstructing it (GLM trace analysis 2026-10-23).
   # 260: short card fields, only what is new or still true.
-  worker_words: 260
+  # 290: the worker packet names the ideas tool and the attempt log the harness shares (idea log).
+  worker_words: 290
   reply_words: 60
   # Continuation nudges are sent only after a turn with no tool call, a few times a run.
   nudge_words: 60
@@ -85,10 +89,6 @@ card_stale_minutes: 5
 card_field_chars: 500
 # A search map is sent again only when its step table changed: a step added or dropped, or a step's points at stake moved by this much.
 map_resend_points: 1
-# The orchestrator's plan holds at most this many steps (see arena/plans.py).
-plan_max_steps: 12
-# A missing plan is said again after this many sol tool calls (see team_reply.notices).
-notice_repeat_calls: 10
 # A merge job ends after this many closed nodes of its own, or when its last merge_stale_compiles closed nodes all
 # failed to beat the run best as it stood when each was saved.
 merge_max_compiles: 8
@@ -99,9 +99,6 @@ merge_diff_lines: 120
 compile_nudge_calls: 4
 # A token island's best counts only proofs whose heartbeats are at most this multiple of the run best's.
 token_island_heartbeat_ceiling: 2
-# The orchestrator's plan is stale when the run best's score rose by at least this many points since it was saved
-# (or its route changed).
-plan_stale_points: 3
 # A worker's per-turn reminder of an open orchestrator message shows at most this many characters of it.
 open_ask_line_chars: 200
 # An open orchestrator ask shows at most this many characters of its text in the jobs view.
@@ -111,3 +108,19 @@ open_ask_chars: 80
 token_short_min_saved: 10
 # The token_short notice names this many of the shorter node's costliest steps.
 token_short_steps: 3
+# The attempt log (arena/ideas.py): a move or when field is cut to this many characters.
+idea_field_chars: 80
+# A changed step's before and after snippet is shown only when both sides are at most this many characters.
+idea_snippet_chars: 48
+# An island is sent another actor's win when it saves at least this many tokens or this many heartbeats.
+idea_win_tokens: 5
+idea_win_heartbeats: 100
+# A change that failed this many times with no win is a dead end.
+idea_dead_failures: 3
+# At most this many attempt log lines reach an actor in one turn, the "+N more" line included.
+idea_push_lines: 3
+# The orchestrator's digest shows at most this many kept lines and this many dead end lines per turn.
+idea_digest_lines: 4
+# The ideas tool lists at most this many changes, each with at most this many attempt ids.
+idea_query_rows: 8
+idea_query_ids: 4
