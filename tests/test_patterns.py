@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from arena import context, orchestration, patterns, pi_rpc
+from arena import context, orchestration, patterns, pi_rpc, text
 from arena.steps import split_steps
 from tests.test_text import ROWS
 
@@ -110,6 +110,32 @@ class GoalAwareTests(unittest.TestCase):
             self.assertEqual(set(cards[ident]["verified"].values()), {"pass"})
             self.assertEqual(set(cards[ident]["at"]), set(patterns.POSITIONS))
         self.assertIn("At the closing of this proof", patterns.render_card(cards["S73-helper-must-pay"], "closing"))
+
+    def test_a_card_is_found_by_the_code_it_replaces(self):
+        # The step has none of the substitution card's tags, only the form its move rewrites.
+        step = "obtain ⟨u, hu, rfl⟩ := f _ _ ‹_›\nexact g u"
+        ids = [card["id"] for card in patterns.rank(step, 3)]
+        self.assertIn("S62-subst-rfl", ids)
+        self.assertIn("S76-choose-then-subst", ids)
+        # A card whose after-form is in the step is still offered while the form it replaces remains.
+        both = patterns.rank("subst h\nobtain ⟨u, rfl⟩ := f", 99)
+        self.assertIn("S62-subst-rfl", [card["id"] for card in both])
+        self.assertNotIn("S62-subst-rfl", [card["id"] for card in patterns.rank("subst h\nexact g", 99)])
+
+    def test_every_card_lists_what_it_replaces_and_the_scheduling_cards_are_in_the_bank(self):
+        cards = {card["id"]: card for card in patterns.load_cards()}
+        self.assertTrue(all(card["replaces"] for card in cards.values()))
+        for ident in ("S74-split-chained-combinators", "S75-two-pass-closing", "S76-choose-then-subst",
+                      "S77-witness-fixing-goal-first"):
+            self.assertEqual(set(cards[ident]["verified"].values()), {"pass"})
+        chain = "refine ⟨?_, ?_⟩ <;> refine ⟨?_, ?_⟩ <;> omega"
+        self.assertIn("S74-split-chained-combinators", [card["id"] for card in patterns.rank(chain, 3)])
+
+    def test_the_floor_notice_offers_patterns_instead_of_demanding_it(self):
+        notice = text.render("replies/team.card_floor")
+        self.assertIn("`patterns` on your costliest step", notice)
+        self.assertIn("may show a form to try", notice)
+        self.assertNotIn("Call `patterns`", notice)
 
 
 class GatingTests(unittest.TestCase):

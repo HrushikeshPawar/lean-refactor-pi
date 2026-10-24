@@ -617,7 +617,7 @@ The budget table counts whitespace-separated words in each raw template. Regener
 | `tools/goal.params.try` | 10 | Model tool definitions | every request |
 | `tools/jobs.description` | 15 | Model tool definitions | every request |
 | `tools/jobs.params.job_ids` | 9 | Model tool definitions | every request |
-| `tools/patterns.description` | 100 | Model tool definitions | every request |
+| `tools/patterns.description` | 111 | Model tool definitions | every request |
 | `tools/patterns.params.node` | 5 | Model tool definitions | every request |
 | `tools/patterns.params.position` | 17 | Model tool definitions | every request |
 | `tools/patterns.params.step` | 9 | Model tool definitions | every request |

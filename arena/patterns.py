@@ -2,13 +2,18 @@
 
 The cards are data (research/strategy-bank/cards.json); every model-facing sentence comes from agent-text.
 
-Ranking: score = tactic tags shared with the step + GOAL_WEIGHT per goal tag found in the goal text (the saved
-step's goal before and after when `{node, step}` is sent, else the snippet itself). Cards may carry `goal_tags`:
-constants such as `List.zip` (also matched as `.zip`) or symbols such as `∈`. Ties go to higher confidence.
+Ranking: a card is scored by what its move replaces. `replaces` holds regexes for the code the move rewrites (for
+example `obtain ... rfl` for the substitution card, `<;>` for the goal-scheduling cards); the number of a card's patterns
+that occur in the step text is its primary score. The old signal is secondary and breaks ties: tactic tags shared with
+the step, plus GOAL_WEIGHT per goal tag found in the goal text (the saved step's goal before and after when
+`{node, step}` is sent, else the snippet itself). Cards may carry `goal_tags`: constants such as `List.zip` (also
+matched as `.zip`) or symbols such as `∈`. Then an axis island's favoured direction, then confidence. A card appears
+when it has a replaces hit or a secondary score.
 
-Already-applied rule: a card is dropped when its `after` introduces tactic tags (tags in `after` but not in
-`before`) and the step already has all of them, or when it removes tags (in `before` but not in `after`), none
-of them is in the step, and no goal tag matched (what it replaces is not there).
+Already-applied rule: a card whose replaces pattern matches is never dropped, because the code it rewrites is still
+there. Otherwise a card is dropped when its `after` introduces tactic tags (tags in `after` but not in `before`) and
+the step already has all of them, or when it removes tags (in `before` but not in `after`), none of them is in the
+step, and no goal tag matched (what it replaces is not there).
 
 Memory: the tool remembers per run dir and actor which card ids it returned (`patterns-seen/<actor>.json`) and
 shows only unseen ones; with none left it says so.
@@ -105,8 +110,19 @@ def _moves(card_id: str) -> tuple[frozenset, frozenset]:
     return frozenset(after - before), frozenset(before - after)
 
 
+@lru_cache(maxsize=None)
+def _replaces(card_id: str) -> tuple[re.Pattern, ...]:
+    card = next(item for item in load_cards() if item["id"] == card_id)
+    return tuple(re.compile(pattern) for pattern in card.get("replaces", ()))
+
+
+def replace_hits(card: dict, step_text: str) -> int:
+    """How many of the card's `replaces` patterns occur in the step text."""
+    return sum(1 for pattern in _replaces(card["id"]) if pattern.search(step_text))
+
+
 def already_applied(card: dict, found: set[str], hits: int = 0) -> bool:
-    """The step already makes the card's move (see the module docstring)."""
+    """The step already makes the card's move (see the module docstring); `hits` counts goal-tag matches."""
     introduced, removed = _moves(card["id"])
     if introduced and introduced <= found:
         return True
@@ -124,8 +140,8 @@ def _favoured(card: dict, objective: str | None, where: str) -> bool:
 
 def rank(step_text: str, limit: int = 5, goal: str = "", seen: frozenset | set = frozenset(),
          objective: str | None = None, where: str = "middle") -> list[dict]:
-    """Relevant cards, best first: tactic overlap plus GOAL_WEIGHT per goal tag, then, for an axis island, the cards
-    that lower its measure, then confidence, then bank order.
+    """Relevant cards, best first: `replaces` hits, then tactic overlap plus GOAL_WEIGHT per goal tag, then, for an
+    axis island, the cards that lower its measure, then confidence, then bank order.
 
     Cards the step already applies are dropped; ids in `seen` are left out."""
     found = features(step_text)
@@ -133,12 +149,13 @@ def rank(step_text: str, limit: int = 5, goal: str = "", seen: frozenset | set =
     scored = []
     for card in load_cards():
         hits = goal_hits(card, goal_text)
+        replaced = replace_hits(card, step_text)
         score = len(found & set(card["tags"])) + GOAL_WEIGHT * hits
-        if score and card["id"] not in seen and not already_applied(card, found, hits):
-            scored.append((score, card))
-    scored.sort(key=lambda pair: (-pair[0], not _favoured(pair[1], objective, where),
-                                  -_CONFIDENCE.get(pair[1]["effect"]["confidence"], 0)))
-    return [card for _score, card in scored[:limit]]
+        if (replaced or score) and card["id"] not in seen and (replaced or not already_applied(card, found, hits)):
+            scored.append((replaced, score, card))
+    scored.sort(key=lambda row: (-row[0], -row[1], not _favoured(row[2], objective, where),
+                                 -_CONFIDENCE.get(row[2]["effect"]["confidence"], 0)))
+    return [card for _replaced, _score, card in scored[:limit]]
 
 
 def render_card(card: dict, where: str) -> str:
